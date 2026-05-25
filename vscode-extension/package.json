@@ -1,0 +1,58 @@
+{
+  "name": "vectr",
+  "displayName": "Vectr — Semantic Codebase Search",
+  "description": "Zero-config local codebase indexer. Auto-starts when you open a workspace and serves code context to Claude Code, Cursor, and any MCP-compatible AI assistant.",
+  "version": "1.0.0",
+  "publisher": "swapnanilsaha",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["AI", "Other"],
+  "keywords": ["ai", "codebase", "search", "mcp", "rag", "semantic", "embeddings"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vectr.showStatus",
+        "title": "Vectr: Show Indexing Status"
+      },
+      {
+        "command": "vectr.reindex",
+        "title": "Vectr: Re-index Workspace"
+      },
+      {
+        "command": "vectr.stop",
+        "title": "Vectr: Stop Daemon"
+      }
+    ],
+    "configuration": {
+      "title": "Vectr",
+      "properties": {
+        "vectr.port": {
+          "type": "number",
+          "default": 8765,
+          "description": "Port for the Vectr MCP server"
+        },
+        "vectr.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the Vectr daemon when a workspace is opened"
+        },
+        "vectr.embedModel": {
+          "type": "string",
+          "default": "jinaai/jina-embeddings-v2-base-code",
+          "description": "Embedding model to use. Default is local (no API key). Set to voyage-code-2 or openai/text-embedding-3-small for cloud models."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

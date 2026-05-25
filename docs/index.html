@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vectr — Semantic Codebase Indexer | llm-tools by Swapnanil Saha</title>
+  <meta name="description" content="Zero-config codebase indexer with layered memory. AST-aware search, symbol graph, working notes, and context eviction via MCP — for Claude Code, Cursor, and Copilot.">
+  <link rel="canonical" href="https://swapnanilsaha.com/tools/vectr/">
+  <meta property="og:title" content="Vectr — Semantic Codebase Indexer">
+  <meta property="og:description" content="Zero-config local indexer that maps your codebase, finds symbols, remembers what your AI assistant learned, and tells it what to forget — automatically, via MCP.">
+  <meta property="og:url" content="https://swapnanilsaha.com/tools/vectr/">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Crimson+Pro:ital,wght@0,300;0,400;0,600;1,300;1,400&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    :root {
+      --bg: #080a0e; --bg2: #0d1017; --surface: #111520;
+      --border: #1e2535; --border2: #252d40;
+      --gold: #c9a84c; --gold-dim: #8a6f2e;
+      --cyan: #00c9b1; --cyan-dim: #007a6b; --red: #e05252;
+      --text: #dde2ee; --text-dim: #7a8399; --text-muted: #3d4560;
+      --mono: 'JetBrains Mono', monospace;
+      --display: 'Bebas Neue', sans-serif;
+      --serif: 'Crimson Pro', serif;
+    }
+    body { background: var(--bg); color: var(--text); font-family: var(--serif); font-size: 18px; line-height: 1.6; overflow-x: hidden; cursor: crosshair; }
+    body::before { content: ''; position: fixed; inset: 0; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E"); pointer-events: none; z-index: 999; opacity: 0.4; }
+    body::after { content: ''; position: fixed; inset: 0; background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px); pointer-events: none; z-index: 998; }
+    .cursor-glow { position: fixed; width: 280px; height: 280px; border-radius: 50%; background: radial-gradient(circle, rgba(201,168,76,0.05) 0%, transparent 70%); pointer-events: none; z-index: 997; transform: translate(-50%, -50%); }
+    nav { position: sticky; top: 0; z-index: 100; background: rgba(8,10,14,0.88); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-bottom: 1px solid var(--border); padding: 18px 48px; display: flex; justify-content: space-between; align-items: center; }
+    .nav-brand { font-family: var(--mono); font-size: 12px; letter-spacing: 3px; color: var(--gold); text-decoration: none; text-transform: uppercase; }
+    .nav-links { display: flex; gap: 36px; align-items: center; }
+    .nav-links a { font-family: var(--mono); font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--text-dim); text-decoration: none; transition: color 0.2s; }
+    .nav-links a:hover { color: var(--text); }
+    .container { max-width: 1200px; margin: 0 auto; padding: 0 48px; }
+    section { padding: 100px 0; }
+    .section-tag { font-family: var(--mono); font-size: 10px; letter-spacing: 4px; text-transform: uppercase; color: var(--cyan); display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+    .section-tag::before { content: ''; width: 22px; height: 1px; background: var(--cyan); display: block; }
+    .section-header { margin-bottom: 56px; }
+    .section-title { font-family: var(--display); font-size: clamp(38px, 5vw, 54px); letter-spacing: 1px; color: var(--text); line-height: 1; }
+    .section-sub { font-family: var(--serif); font-size: 17px; color: var(--text-dim); margin-top: 14px; font-style: italic; max-width: 520px; }
+    .hero { min-height: calc(100vh - 57px); display: flex; align-items: center; }
+    .hero-inner { display: grid; grid-template-columns: 1fr 1fr; gap: 72px; align-items: center; width: 100%; }
+    .tool-badge { font-family: var(--mono); font-size: 10px; letter-spacing: 4px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 28px; display: flex; align-items: center; gap: 12px; }
+    .tool-badge::before { content: ''; width: 22px; height: 1px; background: var(--text-muted); display: block; }
+    .hero-title { font-family: var(--display); font-size: clamp(72px, 10vw, 136px); line-height: 0.9; letter-spacing: 1px; color: var(--text); margin-bottom: 28px; }
+    .hero-title .accent { color: var(--gold); }
+    .hero-desc { font-family: var(--serif); font-size: 19px; font-style: italic; color: var(--text-dim); margin-bottom: 40px; line-height: 1.55; }
+    .hero-actions { display: flex; gap: 14px; flex-wrap: wrap; }
+    .btn-primary { font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--bg); background: var(--gold); padding: 13px 26px; text-decoration: none; border: 1px solid var(--gold); transition: all 0.2s; display: inline-block; }
+    .btn-primary:hover { background: transparent; color: var(--gold); }
+    .btn-secondary { font-family: var(--mono); font-size: 11px; font-weight: 400; letter-spacing: 2px; text-transform: uppercase; color: var(--text-dim); text-decoration: none; border: 1px solid var(--border2); padding: 13px 26px; transition: all 0.2s; display: inline-block; }
+    .btn-secondary:hover { border-color: var(--text-dim); color: var(--text); }
+    pre { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 20px 24px; font-family: var(--mono); font-size: 12.5px; line-height: 1.7; overflow-x: auto; color: #c9d1d9; }
+    pre .kw { color: #ff7b72; } pre .fn { color: #d2a8ff; } pre .str { color: #a5d6ff; } pre .cmt { color: #8b949e; font-style: italic; }
+    .card { background: var(--surface); border: 1px solid var(--border); padding: 28px 26px; transition: border-color 0.2s; }
+    .card:hover { border-color: var(--border2); }
+    .tag { font-family: var(--mono); font-size: 10px; letter-spacing: 1px; color: var(--text-muted); border: 1px solid var(--border); padding: 4px 10px; display: inline-block; }
+    .tag-cyan { border-color: var(--cyan-dim); color: var(--cyan); }
+    .tag-gold { border-color: var(--gold-dim); color: var(--gold); }
+    .problem-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 72px; align-items: start; }
+    .problem-quote { font-family: var(--serif); font-size: 19px; font-style: italic; color: var(--text-dim); line-height: 1.7; border-left: 2px solid var(--cyan-dim); padding-left: 28px; }
+    .problem-solution h3 { font-family: var(--display); font-size: 28px; color: var(--gold); margin-bottom: 18px; letter-spacing: 1px; }
+    .problem-solution p { color: var(--text-dim); font-size: 17px; line-height: 1.7; margin-bottom: 16px; }
+    .arch-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+    .arch-step { background: var(--surface); border: 1px solid var(--border); padding: 28px 24px; }
+    .arch-num { font-family: var(--mono); font-size: 36px; font-weight: 700; color: var(--gold-dim); margin-bottom: 14px; }
+    .arch-title { font-family: var(--display); font-size: 22px; letter-spacing: 1px; color: var(--text); margin-bottom: 10px; }
+    .arch-desc { font-family: var(--serif); font-size: 15px; color: var(--text-dim); line-height: 1.6; }
+    .layer-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-bottom: 56px; }
+    .layer-card { background: var(--surface); border: 1px solid var(--border); padding: 28px 24px; border-top: 2px solid var(--gold-dim); }
+    .layer-label { font-family: var(--mono); font-size: 10px; letter-spacing: 3px; text-transform: uppercase; color: var(--gold); margin-bottom: 10px; }
+    .layer-name { font-family: var(--display); font-size: 26px; letter-spacing: 1px; color: var(--text); margin-bottom: 10px; }
+    .layer-desc { font-family: var(--serif); font-size: 15px; color: var(--text-dim); line-height: 1.6; }
+    .layer-tools { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 6px; }
+    .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+    .feature-card { background: var(--surface); border: 1px solid var(--border); padding: 28px 26px; transition: border-top-color 0.2s; border-top: 2px solid transparent; }
+    .feature-card:hover { border-top-color: var(--gold); }
+    .feature-title { font-family: var(--serif); font-size: 18px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
+    .feature-desc { font-family: var(--serif); font-size: 15px; color: var(--text-dim); line-height: 1.65; font-weight: 300; }
+    .example-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: start; }
+    .example-label { font-family: var(--mono); font-size: 10px; letter-spacing: 3px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 14px; }
+    .suite-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+    .suite-card { background: var(--surface); border: 1px solid var(--border); padding: 22px 20px; text-decoration: none; transition: border-color 0.2s; display: block; }
+    .suite-card:hover { border-color: var(--border2); }
+    .suite-card-name { font-family: var(--mono); font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: var(--gold); margin-bottom: 8px; }
+    .suite-card-desc { font-family: var(--serif); font-size: 14px; color: var(--text-dim); line-height: 1.5; }
+    .reveal { opacity: 0; transform: translateY(28px); transition: opacity 0.65s ease, transform 0.65s ease; }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+    footer { border-top: 1px solid var(--border); padding: 26px 48px; display: flex; justify-content: space-between; align-items: center; }
+    .footer-left, .footer-right { font-family: var(--mono); font-size: 10px; color: var(--text-muted); letter-spacing: 1px; }
+    .footer-right span { color: var(--gold); }
+    @media (max-width: 768px) {
+      nav { padding: 16px 24px; } .nav-links { display: none; }
+      .hero-inner, .problem-grid, .example-grid { grid-template-columns: 1fr; }
+      .arch-grid { grid-template-columns: 1fr 1fr; }
+      .layer-grid, .features-grid { grid-template-columns: 1fr; }
+      .suite-grid { grid-template-columns: 1fr 1fr; }
+      pre { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      footer { flex-direction: column; gap: 10px; text-align: center; padding: 20px 24px; }
+    }
+  </style>
+</head>
+<body>
+<div class="cursor-glow" id="cursorGlow"></div>
+
+<nav>
+  <a href="https://swapnanilsaha.com" class="nav-brand">SS / tools</a>
+  <div class="nav-links">
+    <a href="https://swapnanilsaha.com">Portfolio</a>
+    <a href="https://swapnanilsaha.com/blog/">Blog</a>
+    <a href="https://github.com/swapnanil" target="_blank">GitHub</a>
+  </div>
+</nav>
+
+<!-- ─── Hero ─── -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-inner">
+      <div>
+        <div class="tool-badge">Code Intelligence</div>
+        <h1 class="hero-title">VEC<span class="accent">TR</span></h1>
+        <p class="hero-desc">Your AI coding assistant starts every session with amnesia. Vectr gives it a structural map, a symbol lookup, and working memory that persists across sessions — via MCP, automatically, the moment you open a workspace.</p>
+        <div class="hero-actions">
+          <a href="https://github.com/swapnanil/vectr" class="btn-primary" target="_blank">View on GitHub</a>
+          <a href="https://swapnanilsaha.com/tools/" class="btn-secondary">All Tools</a>
+        </div>
+      </div>
+      <div>
+        <pre><span class="cmt"># No config. No API key. Just run.</span>
+<span class="kw">pip</span> install git+https://github.com/swapnanil/vectr
+<span class="kw">cd</span> /path/to/your/project
+<span class="fn">vectr</span> start
+
+<span class="cmt"># Vectr indexes your codebase, builds a symbol graph,</span>
+<span class="cmt"># and writes MCP config for Cursor and Claude Code.</span>
+<span class="cmt"># Ten tools now available — no extra steps.</span>
+
+<span class="cmt">✓ Passport built — 247 tokens, structural map ready</span>
+<span class="cmt">✓ Indexed 847 files → 14,523 chunks (9m 12s)</span>
+<span class="cmt">✓ Symbol graph: 6,841 symbols, 22,104 edges</span>
+<span class="cmt">✓ MCP ready at http://localhost:8765/mcp</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Problem ─── -->
+<section style="background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+  <div class="container">
+    <div class="section-tag">Problem</div>
+    <div class="problem-grid reveal">
+      <div>
+        <p class="problem-quote">On a codebase with 40,000 files, the AI runs <code style="font-family:var(--mono);font-size:13px;color:var(--cyan)">rg -l "authenticate"</code>, gets 200 results, then reads 8 complete files to find the 40-line function it needed. That's 12,000 tokens gone — on a single query. And the next session, it starts over from zero.</p>
+      </div>
+      <div class="problem-solution">
+        <h3>Retrieve, Locate, Remember</h3>
+        <p>Vectr replaces the grep-then-read loop with three knowledge layers. A structural map gives the AI a 300-token overview of the entire codebase at session start. A symbol graph answers "where is X defined?" without reading any code. A content index returns the exact function body when needed.</p>
+        <p>And when the session ends, the AI offloads its working notes to Vectr. Next morning, one call brings it back to exactly where it left off — key files, edge cases found, what's still missing. The context window clears. The knowledge doesn't.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Architecture ─── -->
+<section>
+  <div class="container">
+    <div class="section-header reveal">
+      <div class="section-tag">Architecture</div>
+      <h2 class="section-title">Three Layers of Knowledge</h2>
+      <p class="section-sub">Humans don't memorise codebases — they recall intelligently. Vectr applies the same principle to LLMs.</p>
+    </div>
+
+    <div class="layer-grid reveal">
+      <div class="layer-card">
+        <div class="layer-label">Layer 1</div>
+        <div class="layer-name">Codebase Map</div>
+        <div class="layer-desc">One LLM call at startup builds a 300-token plain-English passport: module purposes, tech stack, entry points, domain vocabulary, and architectural patterns. Every session starts with a complete structural picture — no file reading required.</div>
+        <div class="layer-tools">
+          <span class="tag tag-cyan">vectr_map</span>
+        </div>
+      </div>
+      <div class="layer-card">
+        <div class="layer-label">Layer 2</div>
+        <div class="layer-name">Symbol Graph</div>
+        <div class="layer-desc">tree-sitter extracts every function, class, and method into a persistent call graph. The AI asks "where is EvaluateSegments defined?" and gets <code style="font-family:var(--mono);font-size:11px">targeting/segment/evaluator.go:45</code> — no code content, no tokens wasted.</div>
+        <div class="layer-tools">
+          <span class="tag tag-cyan">vectr_locate</span>
+          <span class="tag tag-cyan">vectr_trace</span>
+        </div>
+      </div>
+      <div class="layer-card">
+        <div class="layer-label">Layer 3</div>
+        <div class="layer-name">Content Search</div>
+        <div class="layer-desc">AST-aware chunks embedded with BAAI/bge-base-en-v1.5 (local, no API key). Adaptive hybrid search: vector + BM25 weights tuned per codebase fingerprint. Returns exact function bodies with file paths and line numbers.</div>
+        <div class="layer-tools">
+          <span class="tag tag-cyan">vectr_search</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-header reveal" style="margin-top:56px; margin-bottom: 32px;">
+      <h2 class="section-title">How It's Built</h2>
+    </div>
+    <div class="arch-grid">
+      <div class="arch-step reveal">
+        <div class="arch-num">01</div>
+        <div class="arch-title">Map</div>
+        <div class="arch-desc">At startup, one LLM call walks the directory structure and README to produce the codebase passport. Stored permanently, refreshed only when structure changes significantly. Cost: ~$0.005, once.</div>
+      </div>
+      <div class="arch-step reveal">
+        <div class="arch-num">02</div>
+        <div class="arch-title">Parse</div>
+        <div class="arch-desc">tree-sitter reads every file and extracts functions, classes, and methods — both as embeddable chunks and as a call graph with caller/callee relationships. Unsupported languages fall back to 200-line windows.</div>
+      </div>
+      <div class="arch-step reveal">
+        <div class="arch-num">03</div>
+        <div class="arch-title">Embed</div>
+        <div class="arch-desc">Each chunk is embedded with BAAI/bge-base-en-v1.5. Runs locally — no API key needed, downloaded once (~270MB) and cached. A file watcher re-embeds only changed files on save. Set <code style="font-family:var(--mono);font-size:11px">VECTR_EMBED_MODEL=voyage-code-2</code> for code-optimised embeddings.</div>
+      </div>
+      <div class="arch-step reveal">
+        <div class="arch-num">04</div>
+        <div class="arch-title">Serve</div>
+        <div class="arch-desc">Ten MCP tools at <code style="font-family:var(--mono);font-size:11px">localhost:8765/mcp</code>. Map, locate, search, remember, recall, evict, snapshot. Any MCP-compatible tool — Cursor, Claude Code, Windsurf — connects with two lines of JSON config.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Features ─── -->
+<section style="background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+  <div class="container">
+    <div class="section-header reveal">
+      <div class="section-tag">Features</div>
+      <h2 class="section-title">What Makes It Different</h2>
+    </div>
+    <div class="features-grid">
+      <div class="feature-card reveal">
+        <div class="feature-title">Session memory that persists</div>
+        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr_remember</code> offloads a working note — key files, edge cases found, what's still missing — to a SQLite store. <code style="font-family:var(--mono);font-size:12px">vectr_recall</code> retrieves it next session. The AI picks up exactly where it left off without re-reading code.</div>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-title">Bidirectional context protocol</div>
+        <div class="feature-desc">The AI tells Vectr to remember things. Vectr tells the AI what it can forget. <code style="font-family:var(--mono);font-size:12px">vectr_evict_hint</code> lists every retrieved chunk with its estimated token cost and a &lt;50ms recall guarantee. The context window stays usable, not full.</div>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-title">Symbol graph, not just search</div>
+        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr_locate</code> finds where a function is defined — file, line, kind — without returning any code content. <code style="font-family:var(--mono);font-size:12px">vectr_trace</code> follows the call graph: who calls this, what does this call. Navigate before you read.</div>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-title">300-token codebase passport</div>
+        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr_map</code> returns a plain-English structural overview: module purposes, tech stack, entry points, domain vocabulary. One call at session start means the AI already knows where everything lives before asking a single question.</div>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-title">AST-aware chunking + hybrid search</div>
+        <div class="feature-desc">tree-sitter splits code at function and class boundaries — never mid-logic. Adaptive hybrid search (vector + BM25, weights tuned per codebase) finds <em>verify_jwt_token</em> when you ask about JWT validation, and surfaces exact symbol names for precise lookups.</div>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-title">Zero-config, zero cloud</div>
+        <div class="feature-desc">Run <code style="font-family:var(--mono);font-size:12px">vectr start</code>. Vectr detects your git root, indexes the workspace, and writes MCP config for Cursor and Claude Code. The embedding model runs locally. No API key required for search — only for the one-time passport build.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Quickstart ─── -->
+<section>
+  <div class="container">
+    <div class="section-header reveal">
+      <div class="section-tag">Quickstart</div>
+      <h2 class="section-title">Up in Under 15 Minutes</h2>
+      <p class="section-sub">First run downloads the embedding model (~270MB). Subsequent startups take seconds.</p>
+    </div>
+    <div class="reveal">
+      <pre><span class="cmt"># Install</span>
+<span class="kw">pip</span> install git+https://github.com/swapnanil/vectr
+
+<span class="cmt"># Start (indexes workspace, builds symbol graph, writes MCP config)</span>
+<span class="kw">cd</span> /path/to/your/project
+<span class="fn">vectr</span> start
+
+<span class="cmt"># Search from the terminal</span>
+<span class="fn">vectr</span> search <span class="str">"JWT token validation"</span>
+<span class="fn">vectr</span> search <span class="str">"database connection pool"</span> --language typescript --n 5
+
+<span class="cmt"># Or via Docker (for servers)</span>
+<span class="kw">VECTR_TARGET_PATH</span>=. docker-compose up api   <span class="cmt"># no .env required</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Example ─── -->
+<section style="background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+  <div class="container">
+    <div class="section-header reveal">
+      <div class="section-tag">Example</div>
+      <h2 class="section-title">A Session With Memory</h2>
+      <p class="section-sub">What an AI assistant's session looks like with Vectr — from cold start to end-of-day handoff.</p>
+    </div>
+    <div class="example-grid reveal">
+      <div>
+        <div class="example-label">Morning — session start (3 calls, ~5 seconds)</div>
+        <pre><span class="cmt"># 1. Structural overview — free, ~247 tokens</span>
+<span class="fn">vectr_map</span>()
+<span class="str">→ "Go DSP ad server. targeting/ (audience matching),
+   bidder/ (bid logic), tracker/ events.
+   Entry: bidder/pipeline.go:RunBidPipeline"</span>
+
+<span class="cmt"># 2. Recall yesterday's notes</span>
+<span class="fn">vectr_recall</span>(<span class="str">"segment targeting"</span>)
+<span class="str">→ "[HIGH] Entry: EvaluateSegments() in
+   targeting/segment/evaluator.go. Missing tests
+   for nil visitor_id case."</span>
+
+<span class="cmt"># 3. Find the symbol — no code read yet</span>
+<span class="fn">vectr_locate</span>(<span class="str">"EvaluateSegments"</span>)
+<span class="str">→ [function] EvaluateSegments
+   targeting/segment/evaluator.go:45</span></pre>
+      </div>
+      <div>
+        <div class="example-label">End of day — context handoff</div>
+        <pre><span class="cmt"># After implementing, before closing</span>
+<span class="fn">vectr_remember</span>(
+  <span class="str">"Segment targeting done. EvaluateSegments in
+   evaluator.go:45. Added nil guard at line 61.
+   Still need: integration test for multi-segment
+   visitor with expired segments."</span>,
+  tags=[<span class="str">"segment-targeting"</span>, <span class="str">"wip"</span>],
+  priority=<span class="str">"high"</span>
+)
+<span class="str">→ "Stored note #4. You can safely drop
+   related code chunks from context."</span>
+
+<span class="cmt"># Save full session state</span>
+<span class="fn">vectr_snapshot</span>(<span class="str">"segment-targeting-wip"</span>)
+<span class="str">→ "Snapshot saved: a3f9c2b1"</span>
+
+<span class="cmt"># Vectr tells the AI what to drop</span>
+<span class="fn">vectr_evict_hint</span>()
+<span class="str">→ "Vectr has 6 chunks (~3,840 tokens) indexed.
+   You can safely drop these from context:
+   targeting/segment/evaluator.go [lines 40-110]
+   bidder/auction.go [lines 88-134]
+   Recall latency: &lt;50ms. Nothing will be lost."</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Suite ─── -->
+<section>
+  <div class="container">
+    <div class="section-header reveal">
+      <div class="section-tag">Suite</div>
+      <h2 class="section-title">Other Tools</h2>
+    </div>
+    <div class="suite-grid">
+      <a href="https://swapnanil.github.io/meeting-to-action/" class="suite-card reveal" target="_blank">
+        <div class="suite-card-name">meeting-to-action</div>
+        <div class="suite-card-desc">Extracts decisions, action items, and cross-meeting commitments from any transcript format.</div>
+      </a>
+      <a href="https://swapnanil.github.io/dpdp-copilot/" class="suite-card reveal" target="_blank">
+        <div class="suite-card-name">dpdp-copilot</div>
+        <div class="suite-card-desc">Manages India DPDP Act data principal requests with automated 30-day SLA tracking.</div>
+      </a>
+      <a href="https://swapnanil.github.io/rag-readiness/" class="suite-card reveal" target="_blank">
+        <div class="suite-card-name">rag-readiness</div>
+        <div class="suite-card-desc">Evaluates whether a document corpus is ready for RAG and what architecture fits best.</div>
+      </a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-left">© 2026 Swapnanil Saha · swapnanilsaha.com</div>
+  <div class="footer-right">Part of the <span>llm-tools</span> suite</div>
+</footer>
+
+<script>
+  const glow = document.getElementById('cursorGlow');
+  document.addEventListener('mousemove', e => { glow.style.left = e.clientX + 'px'; glow.style.top = e.clientY + 'px'; });
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach((en, i) => { if (en.isIntersecting) { setTimeout(() => en.target.classList.add('visible'), i * 75); obs.unobserve(en.target); } });
+  }, { threshold: 0.1 });
+  document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
+</script>
+</body>
+</html>

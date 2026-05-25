@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+*.coveragerc
+
+# Type checkers / linters
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Vector DB / model cache
+.chroma/
+chroma/
+*.sqlite
+*.sqlite3
+*.db
+~/.cache/vectr/
+
+# Benchmark outputs (large JSON/txt artefacts — keep the folder structure)
+benchmarks/*/poc_results_*.json
+benchmarks/*/answer_*.txt
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Distribution
+*.tar.gz
+*.zip

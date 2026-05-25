@@ -1,0 +1,35 @@
+version: "3.9"
+services:
+  api:
+    build: .
+    ports:
+      - "8765:8765"
+    environment:
+      - VECTR_WORKSPACE=/workspace
+      - VECTR_PORT=8765
+      # Embedding model — local by default, no API key needed
+      - VECTR_EMBED_MODEL=${VECTR_EMBED_MODEL:-jinaai/jina-embeddings-v2-base-code}
+      # LLM keys only needed for optional summary feature
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-6}
+    volumes:
+      - ${VECTR_TARGET_PATH:-./workspace}:/workspace:ro  # set VECTR_TARGET_PATH=. to index current dir
+      - vectr_cache:/root/.cache/vectr  # persist model + DB across restarts
+
+  cli:
+    build: .
+    environment:
+      - VECTR_WORKSPACE=/workspace
+      - VECTR_EMBED_MODEL=${VECTR_EMBED_MODEL:-jinaai/jina-embeddings-v2-base-code}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - ${VECTR_TARGET_PATH:-./workspace}:/workspace:ro
+      - vectr_cache:/root/.cache/vectr
+      - ./examples:/app/examples
+      - ./results:/app/results
+    entrypoint: ["python", "main.py"]
+
+volumes:
+  vectr_cache:

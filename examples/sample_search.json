@@ -1,0 +1,87 @@
+{
+  "description": "Sample MCP tool calls showing real-world Vectr queries",
+  "examples": [
+    {
+      "scenario": "Find where authentication tokens are validated",
+      "mcp_request": {
+        "name": "vectr_search",
+        "arguments": {
+          "query": "how are JWT tokens validated",
+          "n_results": 5
+        }
+      },
+      "expected_response": {
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "Found 5 results for 'how are JWT tokens validated' (18ms, 14523 chunks searched)\n\n────────────────────────────────────────────────────────────\n[1] src/auth/middleware.py  lines 42-67  score 0.941\n    symbol: verify_jwt_token  language: python\n\ndef verify_jwt_token(token: str) -> dict:\n    try:\n        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[\"HS256\"])\n        return payload\n    except jwt.ExpiredSignatureError:\n        raise AuthenticationError(\"Token has expired\")\n    except jwt.InvalidTokenError as e:\n        raise AuthenticationError(f\"Invalid token: {e}\")\n\n────────────────────────────────────────────────────────────\n[2] src/auth/utils.py  lines 18-31  score 0.871\n    symbol: decode_bearer_header  language: python\n\ndef decode_bearer_header(authorization: str) -> str:\n    if not authorization.startswith(\"Bearer \"):\n        raise ValueError(\"Authorization header must start with Bearer\")\n    return authorization[7:]"
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "Find database connection setup (TypeScript project)",
+      "mcp_request": {
+        "name": "vectr_search",
+        "arguments": {
+          "query": "database connection pool initialisation",
+          "n_results": 3,
+          "language": "typescript"
+        }
+      }
+    },
+    {
+      "scenario": "Find error handling patterns in Go",
+      "mcp_request": {
+        "name": "vectr_search",
+        "arguments": {
+          "query": "http error response handler middleware",
+          "n_results": 5,
+          "language": "go"
+        }
+      }
+    },
+    {
+      "scenario": "Check indexing status",
+      "mcp_request": {
+        "name": "vectr_status",
+        "arguments": {}
+      },
+      "expected_response": {
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "Vectr status\n  Indexed files : 847\n  Total chunks  : 14523\n  Last indexed  : 2026-05-24T09:12:00Z\n  Embed model   : jinaai/jina-embeddings-v2-base-code\n  Workspace     : /Users/dev/my-saas-project"
+          }
+        ]
+      }
+    }
+  ],
+  "rest_api_examples": [
+    {
+      "endpoint": "POST /v1/search",
+      "request": {
+        "query": "how are JWT tokens validated",
+        "n_results": 5
+      },
+      "response": {
+        "results": [
+          {
+            "file": "src/auth/middleware.py",
+            "lines": "42-67",
+            "symbol": "verify_jwt_token",
+            "language": "python",
+            "score": 0.941,
+            "content": "def verify_jwt_token(token: str) -> dict:\n    ..."
+          }
+        ],
+        "query_time_ms": 18,
+        "chunks_searched": 14523,
+        "processing_ms": 22,
+        "model": "claude-sonnet-4-6"
+      }
+    }
+  ]
+}

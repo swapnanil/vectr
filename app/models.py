@@ -1,0 +1,197 @@
+"""Pydantic v2 request and response models."""
+from __future__ import annotations
+
+from pydantic import BaseModel, Field, field_validator
+
+
+# ---------------------------------------------------------------------------
+# Shared
+# ---------------------------------------------------------------------------
+
+class TokenUsage(BaseModel):
+    input: int
+    output: int
+
+
+# ---------------------------------------------------------------------------
+# Requests
+# ---------------------------------------------------------------------------
+
+class IndexRequest(BaseModel):
+    path: str = Field(default=".", description="Absolute or relative path to index")
+    force: bool = Field(default=False, description="Force full re-index even if already indexed")
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, description="Natural language or code query")
+    n_results: int = Field(default=10, ge=1, le=50, description="Number of results to return")
+    language: str | None = Field(
+        default=None,
+        description="Filter to a specific language: python, javascript, typescript, go, rust, java",
+    )
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        allowed = {"python", "javascript", "typescript", "go", "rust", "java"}
+        if v.lower() not in allowed:
+            raise ValueError(f"language must be one of {sorted(allowed)}")
+        return v.lower()
+
+
+# ---------------------------------------------------------------------------
+# Responses
+# ---------------------------------------------------------------------------
+
+class CodeChunkResult(BaseModel):
+    file: str
+    lines: str
+    symbol: str
+    language: str
+    score: float
+    content: str
+
+
+class SearchResponse(BaseModel):
+    results: list[CodeChunkResult]
+    query_time_ms: int
+    chunks_searched: int
+    processing_ms: int
+    model: str
+    tokens_used: TokenUsage | None = None
+
+
+class IndexResponse(BaseModel):
+    indexed_files: int
+    total_chunks: int
+    processing_ms: int
+    model: str
+    tokens_used: TokenUsage | None = None
+
+
+class StatusResponse(BaseModel):
+    indexed_files: int
+    total_chunks: int
+    last_indexed: str
+    embed_model: str
+    workspace_root: str
+    symbol_count: int = 0
+    processing_ms: int
+    model: str
+    tokens_used: TokenUsage | None = None
+    # Adaptive retrieval strategy (populated after first index)
+    semantic_weight: float | None = None
+    bm25_weight: float | None = None
+    graph_first: bool | None = None
+    recommended_embed_model: str | None = None
+    strategy_rationale: str | None = None
+
+
+class HealthResponse(BaseModel):
+    status: str
+    model: str
+    embed_model: str
+
+
+# ---------------------------------------------------------------------------
+# Codebase passport
+# ---------------------------------------------------------------------------
+
+class MapSaveRequest(BaseModel):
+    summary: str = Field(..., min_length=1, description="AI-written plain-English codebase summary")
+
+
+class MapSaveResponse(BaseModel):
+    message: str
+    processing_ms: int
+
+
+# ---------------------------------------------------------------------------
+# Memory / working context
+# ---------------------------------------------------------------------------
+
+class RememberRequest(BaseModel):
+    content: str = Field(..., min_length=1, description="Working note to store")
+    tags: list[str] | None = Field(default=None, description="Topic tags")
+    priority: str = Field(default="medium", description="high | medium | low")
+    session_id: str | None = Field(default=None)
+
+    @field_validator("priority")
+    @classmethod
+    def validate_priority(cls, v: str) -> str:
+        if v not in ("high", "medium", "low"):
+            raise ValueError("priority must be high, medium, or low")
+        return v
+
+
+class RememberResponse(BaseModel):
+    note_id: int
+    message: str
+    processing_ms: int
+
+
+class RecallRequest(BaseModel):
+    query: str | None = Field(default=None)
+    tags: list[str] | None = Field(default=None)
+    priority: str | None = Field(default=None)
+    limit: int = Field(default=10, ge=1, le=100)
+
+
+class RecallResponse(BaseModel):
+    notes: str
+    processing_ms: int
+
+
+class SnapshotRequest(BaseModel):
+    label: str = Field(..., min_length=1)
+    session_id: str | None = Field(default=None)
+
+
+class SnapshotResponse(BaseModel):
+    snapshot_id: str
+    label: str
+    processing_ms: int
+
+
+# ---------------------------------------------------------------------------
+# Symbol graph
+# ---------------------------------------------------------------------------
+
+class LocateRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class SymbolResult(BaseModel):
+    name: str
+    kind: str
+    file_path: str
+    start_line: int
+    end_line: int
+    snippet: str = ""   # first ~12 lines of symbol body — AI reads this directly
+
+
+class LocateResponse(BaseModel):
+    results: list[SymbolResult]
+    formatted: str
+    processing_ms: int
+
+
+class TraceRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    direction: str = Field(default="both")
+    limit: int = Field(default=20, ge=1, le=100)
+
+    @field_validator("direction")
+    @classmethod
+    def validate_direction(cls, v: str) -> str:
+        if v not in ("callers", "callees", "both"):
+            raise ValueError("direction must be callers, callees, or both")
+        return v
+
+
+class TraceResponse(BaseModel):
+    formatted: str
+    processing_ms: int

@@ -1,0 +1,365 @@
+"""Business logic: owns the indexer, searcher, watcher, and memory layer lifecycle."""
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_DB_DIR_ENV = "VECTR_DB_DIR"
+
+
+def _default_db_dir(workspace_root: str) -> str:
+    """Store DB files in ~/.cache/vectr/<workspace-hash>/"""
+    import hashlib
+    slug = hashlib.md5(workspace_root.encode()).hexdigest()[:12]
+    db_dir = Path.home() / ".cache" / "vectr" / slug
+    db_dir.mkdir(parents=True, exist_ok=True)
+    return str(db_dir)
+
+
+class VectrService:
+    """Singleton-style service. Create once at startup; shared via FastAPI app state."""
+
+    def __init__(self, workspace_root: str, port: int = 8765) -> None:
+        from agent.indexer import CodeIndexer
+        from agent.searcher import CodeSearcher
+        from agent.watcher import CodeWatcher
+        from agent.cartographer import PassportStore
+        from agent.working_context_store import WorkingContextStore
+        from agent.symbol_graph import SymbolGraph
+        from agent.eviction_advisor import EvictionAdvisor
+        from integrations.vscode_bridge import configure_all
+        from integrations.workspace_detect import find_workspace_root
+
+        self._workspace_root = find_workspace_root(workspace_root)
+        self._port = port
+        self._embed_model = os.getenv("VECTR_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
+
+        db_dir = os.getenv(_DB_DIR_ENV) or _default_db_dir(self._workspace_root)
+        self._db_dir = db_dir
+
+        logger.info("Initialising Vectr for workspace: %s (db: %s)", self._workspace_root, db_dir)
+
+        # L3 — content retrieval (existing)
+        self._indexer = CodeIndexer(self._workspace_root, embed_model=self._embed_model)
+        self._searcher = CodeSearcher(self._indexer)
+        self._watcher = CodeWatcher(self._indexer, searcher_refresh_fn=self._searcher.refresh_bm25)
+
+        # L1 — codebase passport (AI-written, stored by vectr_map_save)
+        self._passport_store = PassportStore(db_dir)
+
+        # L2 — symbol graph
+        self._symbol_graph = SymbolGraph(db_dir)
+
+        # Memory layer
+        self._context_store = WorkingContextStore(db_dir)
+
+        # Session eviction advisor
+        self._eviction_advisor = EvictionAdvisor(
+            eviction_threshold_tokens=int(os.getenv("VECTR_EVICT_THRESHOLD", "4000"))
+        )
+
+        self._indexing = False
+        self._index_thread: threading.Thread | None = None
+
+        # Adaptive strategy — computed after first index, defaults until then
+        from agent.strategy_selector import RetrievalStrategy
+        self._strategy: RetrievalStrategy | None = None
+
+        configure_all(self._workspace_root, port)
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def start_background_index(self) -> None:
+        """Kick off workspace indexing in a background thread."""
+        if self._indexing:
+            return
+        self._indexing = True
+        self._index_thread = threading.Thread(target=self._do_index, daemon=True)
+        self._index_thread.start()
+        self._watcher.start()
+
+    def _do_index(self) -> None:
+        try:
+            logger.info("Starting workspace index...")
+            files, chunks = self._indexer.index_workspace()
+            self._searcher.refresh_bm25()
+            logger.info("Indexed %d files → %d chunks", files, chunks)
+
+            self._build_symbol_graph()
+            self._refresh_strategy()
+
+        except Exception:
+            logger.exception("Indexing failed")
+        finally:
+            self._indexing = False
+
+    def _refresh_strategy(self) -> None:
+        try:
+            from agent.strategy_selector import fingerprint, select_strategy
+            fp = fingerprint(self._workspace_root, self._indexer.indexed_file_paths)
+            self._strategy = select_strategy(fp)
+            logger.info(
+                "Retrieval strategy: sem=%.2f bm25=%.2f graph_first=%s — %s",
+                self._strategy.semantic_weight,
+                self._strategy.bm25_weight,
+                self._strategy.graph_first,
+                self._strategy.rationale,
+            )
+        except Exception:
+            logger.exception("Strategy selection failed (non-fatal)")
+
+    def _build_symbol_graph(self) -> None:
+        """Rebuild the symbol graph from the files the indexer already walked."""
+        try:
+            # Reuse the indexer's file list — avoids a second expensive walk and
+            # guarantees the symbol graph covers exactly the same files as the
+            # vector index (same filters, same exclusions).
+            file_paths = self._indexer.indexed_file_paths
+            stats = self._symbol_graph.build_for_workspace(self._workspace_root, file_paths)
+            logger.info(
+                "Symbol graph: %d symbols, %d edges across %d files",
+                stats["symbols"], stats["edges"], stats["files"],
+            )
+        except Exception:
+            logger.exception("Symbol graph build failed (non-fatal)")
+
+    def save_map(self, summary: str) -> None:
+        """
+        Persist an AI-written codebase passport.
+        Called via vectr_map_save — the AI editor has synthesised the summary
+        after reading the raw metadata returned by vectr_map on first call.
+        """
+        self._passport_store.save_summary(summary, self._workspace_root)
+        logger.info("Passport saved by AI editor (%d chars)", len(summary))
+
+    def shutdown(self) -> None:
+        self._watcher.stop()
+
+    # ------------------------------------------------------------------
+    # L3 — search and index operations
+    # ------------------------------------------------------------------
+
+    def index(self, path: str, force: bool = False) -> tuple[int, int, int]:
+        """Index a path. Returns (files_indexed, total_chunks, elapsed_ms)."""
+        t0 = time.monotonic()
+        target = Path(path).resolve()
+        if target.is_file():
+            self._indexer.index_file(str(target))
+            self._searcher.refresh_bm25()
+            self._symbol_graph.index_file(self._workspace_root, str(target))
+            files, chunks = 1, self._indexer.total_chunks
+        else:
+            files, chunks = self._indexer.index_workspace()
+            self._searcher.refresh_bm25()
+            self._build_symbol_graph()
+            self._refresh_strategy()
+        elapsed = int((time.monotonic() - t0) * 1000)
+        return files, chunks, elapsed
+
+    def search(
+        self, query: str, n_results: int = 10, language: str | None = None
+    ) -> tuple[list, int]:
+        """Returns (SearchResult list, query_time_ms). Also records for eviction tracking."""
+        sem_w = self._strategy.semantic_weight if self._strategy else 0.70
+        results, query_ms = self._searcher.search(
+            query, n_results=n_results, language=language, semantic_weight=sem_w
+        )
+        self._eviction_advisor.record_results(results)
+        return results, query_ms
+
+    def route_query(self, query: str):
+        """Classify a query and return a RoutingDecision."""
+        from agent.query_router import route
+        base_sem = self._strategy.semantic_weight if self._strategy else 0.70
+        return route(query, base_semantic_weight=base_sem)
+
+    def search_routed(
+        self, query: str, n_results: int = 10, language: str | None = None
+    ) -> tuple[list, int, object, list, list]:
+        """
+        Returns (results, query_ms, routing_decision, augmented_symbols, trace_results).
+        Uses QueryRouter to classify the query and blend in L2 results when appropriate.
+        """
+        decision = self.route_query(query)
+
+        results, query_ms = self._searcher.search(
+            query, n_results=n_results, language=language,
+            semantic_weight=decision.semantic_weight,
+        )
+        self._eviction_advisor.record_results(results)
+
+        aug_symbols: list = []
+        aug_trace: list = []
+
+        if decision.also_run_symbol_lookup:
+            import re as _re
+            _STOPWORDS = {
+                "where", "what", "which", "find", "show", "locate", "define",
+                "defined", "implement", "implemented", "used", "using", "with",
+                "the", "this", "that", "from", "into", "does", "call", "calls",
+                "have", "look", "like", "how", "when", "about", "does",
+            }
+            # Collect candidate terms: CamelCase identifiers, snake_case, and
+            # plain words ≥4 chars that aren't stopwords — try each until we get hits
+            terms: list[str] = []
+            for m in _re.finditer(r'\b([A-Z][a-zA-Z0-9]{2,}|[a-z_][a-z_0-9]{3,})\b', query):
+                t = m.group(1)
+                if t.lower() not in _STOPWORDS:
+                    terms.append(t)
+            # also try individual meaningful words as a fallback
+            for w in query.split():
+                w = w.strip("?.,!").lower()
+                if len(w) >= 4 and w not in _STOPWORDS and w not in [t.lower() for t in terms]:
+                    terms.append(w)
+
+            aug_symbols = []
+            for term in terms:
+                candidates = self._symbol_graph.locate(self._workspace_root, term, limit=5)
+                if candidates:
+                    aug_symbols = candidates
+                    break
+            # snippets are already populated by locate() — no LLM call needed
+
+            if decision.also_run_trace and aug_symbols:
+                trace_result = self._symbol_graph.trace(
+                    self._workspace_root, aug_symbols[0].name, direction="callers", limit=10
+                )
+                aug_trace = trace_result.get("callers", [])
+
+        return results, query_ms, decision, aug_symbols, aug_trace
+
+    def status(self) -> dict:
+        last_ts = self._indexer.last_indexed_ts
+        last_str = (
+            datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if last_ts
+            else "never"
+        )
+        strategy_info = {}
+        if self._strategy:
+            strategy_info = {
+                "semantic_weight": self._strategy.semantic_weight,
+                "bm25_weight": self._strategy.bm25_weight,
+                "graph_first": self._strategy.graph_first,
+                "recommended_embed_model": self._strategy.recommended_embed_model,
+                "strategy_rationale": self._strategy.rationale,
+            }
+        return {
+            "indexed_files": self._indexer.indexed_file_count,
+            "total_chunks": self._indexer.total_chunks,
+            "last_indexed": last_str,
+            "embed_model": self._embed_model,
+            "workspace_root": self._workspace_root,
+            "symbol_count": self._symbol_graph.symbol_count(self._workspace_root),
+            **strategy_info,
+        }
+
+    @property
+    def total_chunks(self) -> int:
+        return self._indexer.total_chunks
+
+    # ------------------------------------------------------------------
+    # L1 — codebase passport
+    # ------------------------------------------------------------------
+
+    def get_map(self) -> str:
+        """
+        Return codebase passport for AI consumption.
+        If cached: instant ~300-token summary.
+        If not: raw structural metadata + instruction to call vectr_map_save.
+        """
+        return self._passport_store.format_for_llm(self._workspace_root)
+
+    # ------------------------------------------------------------------
+    # L2 — symbol graph
+    # ------------------------------------------------------------------
+
+    def locate(self, name: str, limit: int = 10) -> list:
+        return self._symbol_graph.locate(self._workspace_root, name, limit)
+
+    def locate_with_snippets(self, name: str, limit: int = 10) -> list:
+        """Locate symbols and return each with a short code snippet. No LLM call."""
+        return self._symbol_graph.locate(self._workspace_root, name, limit)
+
+    def trace(self, name: str, direction: str = "both", limit: int = 20) -> dict:
+        return self._symbol_graph.trace(self._workspace_root, name, direction, limit)  # type: ignore[arg-type]
+
+    def trace_with_snippets(self, name: str, direction: str = "both", limit: int = 20) -> dict:
+        """Trace call graph. Caller/callee names are returned as-is; AI can locate() them for snippets."""
+        return self._symbol_graph.trace(self._workspace_root, name, direction, limit)  # type: ignore[arg-type]
+
+    def format_locate(self, symbols: list, name: str) -> str:
+        return self._symbol_graph.format_locate_for_llm(symbols, name)
+
+    def format_trace(self, trace_result: dict, name: str) -> str:
+        return self._symbol_graph.format_trace_for_llm(trace_result, name)
+
+    # ------------------------------------------------------------------
+    # Memory — working context store
+    # ------------------------------------------------------------------
+
+    def remember(
+        self,
+        content: str,
+        tags: list[str] | None = None,
+        priority: str = "medium",
+        session_id: str | None = None,
+    ) -> int:
+        return self._context_store.remember(
+            workspace=self._workspace_root,
+            content=content,
+            tags=tags,
+            priority=priority,
+            session_id=session_id,
+        )
+
+    def recall(
+        self,
+        query: str | None = None,
+        tags: list[str] | None = None,
+        priority: str | None = None,
+        limit: int = 10,
+    ) -> str:
+        notes = self._context_store.recall(
+            workspace=self._workspace_root,
+            query=query,
+            tags=tags,
+            priority=priority,
+            limit=limit,
+        )
+        return self._context_store.format_notes_for_llm(notes)
+
+    def forget_note(self, note_id: int) -> bool:
+        return self._context_store.forget(self._workspace_root, note_id)
+
+    def snapshot_session(self, label: str, session_id: str | None = None) -> str:
+        return self._context_store.snapshot(
+            workspace=self._workspace_root,
+            label=label,
+            retrieved_chunks=self._eviction_advisor.as_chunk_dicts(),
+            session_id=session_id,
+        )
+
+    def list_snapshots(self) -> list[dict]:
+        return self._context_store.list_snapshots(self._workspace_root)
+
+    def restore_snapshot(self, snapshot_id: str) -> dict | None:
+        return self._context_store.restore_snapshot(snapshot_id)
+
+    # ------------------------------------------------------------------
+    # Eviction advisor
+    # ------------------------------------------------------------------
+
+    def eviction_hint(self) -> str:
+        return self._eviction_advisor.eviction_hint()
+
+    def should_evict(self) -> bool:
+        return self._eviction_advisor.should_evict()
