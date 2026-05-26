@@ -7,11 +7,16 @@ deterministic dummy embedder. No model download required; tests run in <1 s.
 """
 from __future__ import annotations
 
+import os
 import textwrap
 import tempfile
 from pathlib import Path
 from typing import Generator
 from unittest.mock import MagicMock, patch
+
+# Disable cross-encoder reranker before any searcher import so tests never
+# trigger a model download.
+os.environ["VECTR_RERANKER_MODEL"] = ""
 
 import numpy as np
 import pytest
@@ -23,8 +28,8 @@ from fastapi.testclient import TestClient
 # ---------------------------------------------------------------------------
 
 class _DummyEmbedProvider:
-    """Deterministic 384-dim embedder for unit tests. Matches bge-base-en-v1.5 dim."""
-    DIM = 384
+    """Deterministic 768-dim embedder for unit tests. Matches nomic-embed-code dim."""
+    DIM = 768
 
     def encode(self, texts: list[str]) -> np.ndarray:
         out = []
@@ -60,6 +65,64 @@ def searcher(indexer):
     """CodeSearcher wrapping a mocked-embedder CodeIndexer."""
     from agent.searcher import CodeSearcher
     return CodeSearcher(indexer)
+
+
+# ---------------------------------------------------------------------------
+# Real-service fixture — full pipeline with dummy embedder
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def real_service_client(tmp_path_factory):
+    """
+    FastAPI TestClient backed by a REAL VectrService with dummy embedder.
+
+    Unlike `client` (which mocks the entire service), this exercises the full
+    pipeline: HTTP → routes → VectrService → CodeIndexer → ChromaDB →
+    CodeSearcher (BM25 + vector) → memory store.
+
+    The embed provider is the deterministic dummy so no model download is
+    needed, but everything else is production code.
+
+    Important: the lifespan handler in api.py creates its own VectrService on
+    TestClient entry and sets app.state.service.  We prevent that from clobbering
+    our pre-built svc by patching VectrService in app.service so the lifespan
+    call returns *our* svc instead of creating a fresh one pointed at the repo.
+    """
+    tmp = tmp_path_factory.mktemp("real_svc")
+
+    with patch("agent.indexer.get_embed_provider", return_value=_DummyEmbedProvider()), \
+         patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp), "VECTR_EMBED_MODEL": "dummy"}):
+        from app.service import VectrService
+        from api import app
+
+        svc = VectrService(workspace_root=str(tmp))
+
+        with patch("app.service.VectrService", return_value=svc), \
+             TestClient(app, raise_server_exceptions=True) as c:
+            yield c, svc, str(tmp)
+
+
+# ---------------------------------------------------------------------------
+# Integration fixture — real nomic-embed-code model
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def integration_indexer(tmp_path_factory):
+    """
+    CodeIndexer with the production Snowflake/snowflake-arctic-embed-m-v1.5 model.
+
+    Downloads once (~440 MB), then cached at ~/.cache/vectr/models.
+    Used only by @pytest.mark.integration tests.  Run with: pytest -m integration
+    """
+    import os as _os
+    tmp = tmp_path_factory.mktemp("integration")
+    model = _os.getenv("VECTR_EMBED_MODEL", "Snowflake/snowflake-arctic-embed-m-v1.5")
+    from agent.indexer import CodeIndexer
+    return CodeIndexer(
+        workspace_root=str(tmp),
+        embed_model=model,
+        db_path=str(tmp / "chroma"),
+    )
 
 
 # ---------------------------------------------------------------------------

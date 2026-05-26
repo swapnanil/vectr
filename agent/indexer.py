@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 import chromadb
 import numpy as np
@@ -59,15 +64,17 @@ class EmbedProvider(Protocol):
 
 
 class LocalEmbedProvider:
-    """Uses sentence-transformers with BAAI/bge-base-en-v1.5 (no API key)."""
+    """Uses sentence-transformers (no API key). Default: Snowflake/snowflake-arctic-embed-m-v1.5."""
 
-    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5") -> None:
+    def __init__(self, model_name: str = "Snowflake/snowflake-arctic-embed-m-v1.5") -> None:
         from sentence_transformers import SentenceTransformer
         cache_dir = Path.home() / ".cache" / "vectr" / "models"
         cache_dir.mkdir(parents=True, exist_ok=True)
         self._model = SentenceTransformer(
             model_name,
             cache_folder=str(cache_dir),
+            trust_remote_code=True,
+            device="cpu",
         )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -151,6 +158,12 @@ def _get_parser(language: str):
         return None
 
 
+_MAX_CHUNK_LINES = 150   # hard cap — prevents single huge chunks diluting embeddings
+_CLASS_HEADER_LINES = 40  # lines kept for class-level chunk (sig + docstring + attrs)
+
+# Node types that represent class declarations (handled specially — emit header + recurse)
+_CLASS_NODE_TYPES = {"class_definition", "class_declaration"}
+
 # Node types that represent top-level code units worth indexing per language
 _CHUNK_NODE_TYPES: dict[str, set[str]] = {
     "python": {"function_definition", "class_definition"},
@@ -178,6 +191,22 @@ def _extract_symbol_name(node, language: str, code_bytes: bytes) -> str:
     return ""
 
 
+def _get_leading_comments(lines: list[str], start_line: int) -> str:
+    """Return the comment/decorator block immediately preceding start_line (1-indexed)."""
+    collected: list[str] = []
+    i = start_line - 2  # 0-indexed line just above the node
+    while i >= 0:
+        stripped = lines[i].strip()
+        if stripped.startswith(("#", "//", "*", "/**", "@")):
+            collected.insert(0, lines[i])
+            i -= 1
+        elif not stripped:
+            i -= 1  # skip blank separator lines
+        else:
+            break
+    return "\n".join(collected)
+
+
 def _collect_chunks_ast(
     node,
     code_bytes: bytes,
@@ -186,12 +215,30 @@ def _collect_chunks_ast(
     file_path: str,
     target_types: set[str],
     results: list[CodeChunk],
+    class_context: str = "",
 ) -> None:
     if node.type in target_types:
         start = node.start_point[0]  # 0-indexed
         end = node.end_point[0]
-        content = code_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+        raw = code_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
         symbol = _extract_symbol_name(node, language, code_bytes)
+
+        # Prepend leading comments/decorators (stripped from AST node but semantically important)
+        leading = _get_leading_comments(lines, start + 1)
+
+        # Prepend class context so method chunks are self-contained for the embedder
+        context_prefix = f"# class: {class_context}\n" if class_context else ""
+
+        parts = [p for p in [leading, context_prefix + raw] if p]
+        content = "\n".join(parts)
+
+        # Cap very long chunks — class bodies can be thousands of lines
+        is_class = node.type in _CLASS_NODE_TYPES
+        cap = _CLASS_HEADER_LINES if is_class else _MAX_CHUNK_LINES
+        content_lines = content.splitlines()
+        if len(content_lines) > cap:
+            content = "\n".join(content_lines[:cap])
+
         chunk_id = f"{file_path}:{start + 1}-{end + 1}"
         results.append(CodeChunk(
             chunk_id=chunk_id,
@@ -203,10 +250,17 @@ def _collect_chunks_ast(
             end_line=end + 1,
             symbol_name=symbol,
         ))
-        return  # don't recurse into nested definitions — they'll be redundant
+
+        if is_class:
+            # Also recurse into the class body so methods get their own chunks with context
+            for child in node.children:
+                _collect_chunks_ast(child, code_bytes, lines, language, file_path,
+                                    target_types, results, class_context=symbol)
+        return  # don't recurse further for non-class nodes (avoids duplicate nested defs)
 
     for child in node.children:
-        _collect_chunks_ast(child, code_bytes, lines, language, file_path, target_types, results)
+        _collect_chunks_ast(child, code_bytes, lines, language, file_path,
+                            target_types, results, class_context=class_context)
 
 
 def _fallback_window_chunks(lines: list[str], file_path: str, language: str) -> list[CodeChunk]:
@@ -268,14 +322,17 @@ def chunk_file(file_path: str) -> list[CodeChunk]:
 # Indexer: manages ChromaDB collection
 # ---------------------------------------------------------------------------
 
-_BATCH_SIZE = 64  # embed and upsert in batches to avoid memory spikes
+_FILE_BATCH_SIZE = 64     # used by index_file() — single-file watcher path
+_EMBED_BATCH_SIZE = 256   # texts per model.encode() call — larger = better BLAS utilisation
+_UPSERT_BATCH_SIZE = 100  # rows per ChromaDB upsert — SQLite variable limit is 999; 6 fields×100=600
+_CHUNK_WORKERS = min(8, os.cpu_count() or 4)  # parallel chunking workers
 
 
 class CodeIndexer:
     def __init__(
         self,
         workspace_root: str,
-        embed_model: str = "BAAI/bge-base-en-v1.5",
+        embed_model: str = "Snowflake/snowflake-arctic-embed-m-v1.5",
         db_path: str | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
@@ -288,7 +345,12 @@ class CodeIndexer:
         self._client = chromadb.PersistentClient(path=str(db_dir))
         self._collection = self._client.get_or_create_collection(
             name="code_chunks",
-            metadata={"hnsw:space": "cosine"},
+            metadata={
+                "hnsw:space": "cosine",
+                "hnsw:construction_ef": 200,  # default 100 — denser graph, better recall
+                "hnsw:search_ef": 100,         # default 10 — wider beam search at query time
+                "hnsw:M": 32,                  # default 16 — more neighbours per node
+            },
         )
         self._last_indexed: float = 0.0
         self._indexed_files: set[str] = set()
@@ -301,21 +363,130 @@ class CodeIndexer:
     # ------------------------------------------------------------------
 
     def index_workspace(self, gitignore_patterns: list[str] | None = None) -> tuple[int, int]:
-        """Walk workspace, index all supported files. Returns (files_indexed, chunks_total)."""
+        """Walk workspace, index all supported files. Returns (files_indexed, chunks_total).
+
+        Three-phase pipeline:
+          1. Parallel chunking   — ThreadPoolExecutor, tree-sitter releases GIL
+          2. Global batch embed  — 256-chunk batches across all files (vs 64 per-file)
+          3. Incremental skip    — files unchanged since last index are skipped via mtime cache
+        """
         from integrations.workspace_detect import should_index_file, get_gitignore_patterns
 
         patterns = gitignore_patterns or get_gitignore_patterns(str(self.workspace_root))
-        files: list[Path] = []
+
+        # Collect candidate files
+        all_files: list[Path] = []
         for dirpath, dirnames, filenames in os.walk(self.workspace_root):
-            # prune excluded dirs in-place
             dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS and not d.startswith(".")]
             for fname in filenames:
                 fpath = Path(dirpath) / fname
                 if should_index_file(str(fpath), patterns):
-                    files.append(fpath)
+                    all_files.append(fpath)
 
-        for f in files:
-            self.index_file(str(f))
+        # Incremental: split into files to index vs unchanged files to skip
+        mtime_cache = self._load_mtime_cache()
+        to_index: list[tuple[Path, float]] = []
+        for f in all_files:
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            cached = mtime_cache.get(str(f))
+            if cached is None or cached != mtime:
+                to_index.append((f, mtime))
+            else:
+                self._indexed_files.add(str(f))  # already indexed — track in memory
+
+        if not to_index:
+            logger.info("All %d files up to date — nothing to re-index", len(all_files))
+            self._last_indexed = time.time()
+            return len(self._indexed_files), self._collection.count()
+
+        logger.info(
+            "Indexing %d/%d files (%d unchanged, skipped)...",
+            len(to_index), len(all_files), len(all_files) - len(to_index),
+        )
+
+        # Phase 1: parallel chunking
+        all_chunks: list[CodeChunk] = []
+        new_mtimes: dict[str, float] = {}
+
+        def _safe_chunk(item: tuple[Path, float]) -> tuple[list[CodeChunk], str, float]:
+            fpath, mtime = item
+            try:
+                return chunk_file(str(fpath)), str(fpath), mtime
+            except Exception:
+                return [], str(fpath), mtime
+
+        with ThreadPoolExecutor(max_workers=_CHUNK_WORKERS) as pool:
+            futures = {pool.submit(_safe_chunk, item): item for item in to_index}
+            done = 0
+            for fut in as_completed(futures):
+                chunks, fpath_str, mtime = fut.result()
+                seen: set[str] = set()
+                for c in chunks:
+                    if c.chunk_id not in seen:
+                        seen.add(c.chunk_id)
+                        all_chunks.append(c)
+                self._indexed_files.add(fpath_str)
+                new_mtimes[fpath_str] = mtime
+                done += 1
+                if done % 50 == 0 or done == len(to_index):
+                    logger.info("  chunked %d/%d files (%d chunks so far)...",
+                                done, len(to_index), len(all_chunks))
+
+        if not all_chunks:
+            self._last_indexed = time.time()
+            return len(self._indexed_files), self._collection.count()
+
+        # Phase 2: delete stale chunks for re-indexed files (no-op for brand-new files)
+        for fpath_str in new_mtimes:
+            if fpath_str in mtime_cache:  # previously indexed → delete old chunks
+                try:
+                    existing = self._collection.get(where={"file_path": fpath_str})
+                    if existing["ids"]:
+                        self._collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
+
+        # Phase 3: global batched embed + upsert
+        # Embed in large batches (256) for BLAS efficiency, upsert in smaller batches (100)
+        # to stay within SQLite's 999-variable limit (6 metadata fields × 100 rows = 600).
+        ids = [c.chunk_id for c in all_chunks]
+        documents = [c.content for c in all_chunks]
+        metadatas = [
+            {
+                "file_path": c.file_path,
+                "language": c.language,
+                "node_type": c.node_type,
+                "start_line": c.start_line,
+                "end_line": c.end_line,
+                "symbol_name": c.symbol_name,
+            }
+            for c in all_chunks
+        ]
+
+        total = len(ids)
+        all_embeddings: list[list[float]] = []
+        for i in range(0, total, _EMBED_BATCH_SIZE):
+            batch_docs = documents[i: i + _EMBED_BATCH_SIZE]
+            all_embeddings.extend(self._embed_provider.embed(batch_docs))
+            if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
+                logger.info("  embedded %d/%d chunks...", i, total)
+
+        for i in range(0, total, _UPSERT_BATCH_SIZE):
+            self._collection.upsert(
+                ids=ids[i: i + _UPSERT_BATCH_SIZE],
+                documents=documents[i: i + _UPSERT_BATCH_SIZE],
+                metadatas=metadatas[i: i + _UPSERT_BATCH_SIZE],
+                embeddings=all_embeddings[i: i + _UPSERT_BATCH_SIZE],
+            )
+
+        logger.info("Indexed %d chunks from %d files", total, len(to_index))
+
+        # Persist mtime cache
+        mtime_cache.update(new_mtimes)
+        self._save_mtime_cache(mtime_cache)
 
         self._last_indexed = time.time()
         return len(self._indexed_files), self._collection.count()
@@ -325,6 +496,16 @@ class CodeIndexer:
         chunks = chunk_file(file_path)
         if not chunks:
             return 0
+
+        # Deduplicate by chunk_id (AST nodes on the same line range can collide in
+        # minified files like jquery.min.js where many nodes share line 2-2)
+        seen_ids: set[str] = set()
+        deduped: list = []
+        for c in chunks:
+            if c.chunk_id not in seen_ids:
+                seen_ids.add(c.chunk_id)
+                deduped.append(c)
+        chunks = deduped
 
         # Remove old chunks for this file before re-indexing
         self.delete_file(file_path)
@@ -345,19 +526,19 @@ class CodeIndexer:
 
         # Embed in batches
         all_embeddings: list[list[float]] = []
-        for i in range(0, len(documents), _BATCH_SIZE):
-            batch = documents[i: i + _BATCH_SIZE]
+        for i in range(0, len(documents), _FILE_BATCH_SIZE):
+            batch = documents[i: i + _FILE_BATCH_SIZE]
             all_embeddings.extend(self._embed_provider.embed(batch))
         assert len(all_embeddings) == len(ids), (
             f"Embed provider returned {len(all_embeddings)} embeddings for {len(ids)} chunks"
         )
 
-        for i in range(0, len(ids), _BATCH_SIZE):
+        for i in range(0, len(ids), _FILE_BATCH_SIZE):
             self._collection.upsert(
-                ids=ids[i: i + _BATCH_SIZE],
-                documents=documents[i: i + _BATCH_SIZE],
-                metadatas=metadatas[i: i + _BATCH_SIZE],
-                embeddings=all_embeddings[i: i + _BATCH_SIZE],
+                ids=ids[i: i + _FILE_BATCH_SIZE],
+                documents=documents[i: i + _FILE_BATCH_SIZE],
+                metadatas=metadatas[i: i + _FILE_BATCH_SIZE],
+                embeddings=all_embeddings[i: i + _FILE_BATCH_SIZE],
             )
 
         self._indexed_files.add(file_path)
@@ -371,6 +552,29 @@ class CodeIndexer:
                 self._collection.delete(ids=existing["ids"])
             self._indexed_files.discard(file_path)
         except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # mtime cache — tracks file modification times for incremental indexing
+    # ------------------------------------------------------------------
+
+    def _mtime_cache_path(self) -> Path:
+        db_dir = Path.home() / ".cache" / "vectr" / "db" / self._workspace_hash()
+        return db_dir / "index_cache.json"
+
+    def _load_mtime_cache(self) -> dict[str, float]:
+        path = self._mtime_cache_path()
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_mtime_cache(self, cache: dict[str, float]) -> None:
+        path = self._mtime_cache_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(cache), encoding="utf-8")
+        except OSError:
             pass
 
     # ------------------------------------------------------------------
@@ -399,9 +603,31 @@ class CodeIndexer:
         return self._embed_provider.embed([text])[0]
 
     def get_all_documents(self) -> tuple[list[str], list[str], list[dict]]:
-        """Return (ids, documents, metadatas) for all stored chunks — used by BM25 index."""
-        result = self._collection.get(include=["documents", "metadatas"])
-        return result["ids"], result["documents"], result["metadatas"]
+        """Return (ids, documents, metadatas) for all stored chunks — used by BM25 index.
+
+        Paginates in batches of 500 to avoid ChromaDB's SQLite variable limit (~999).
+        """
+        _PAGE = 500
+        all_ids: list[str] = []
+        all_docs: list[str] = []
+        all_meta: list[dict] = []
+        offset = 0
+        while True:
+            page = self._collection.get(
+                include=["documents", "metadatas"],
+                limit=_PAGE,
+                offset=offset,
+            )
+            batch_ids = page["ids"]
+            if not batch_ids:
+                break
+            all_ids.extend(batch_ids)
+            all_docs.extend(page["documents"])
+            all_meta.extend(page["metadatas"])
+            offset += len(batch_ids)
+            if len(batch_ids) < _PAGE:
+                break
+        return all_ids, all_docs, all_meta
 
     def query_vector(
         self,

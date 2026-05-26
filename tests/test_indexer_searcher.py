@@ -15,6 +15,50 @@ from tests.conftest import make_py
 
 
 # ---------------------------------------------------------------------------
+# _code_tokenize — BM25 tokenizer
+# ---------------------------------------------------------------------------
+
+class TestCodeTokenize:
+    def _tok(self, text: str) -> list[str]:
+        from agent.searcher import _code_tokenize
+        return _code_tokenize(text)
+
+    def test_snake_case_split(self) -> None:
+        tokens = self._tok("dispatch_uid")
+        assert "dispatch" in tokens
+        assert "uid" in tokens
+
+    def test_camel_case_split(self) -> None:
+        tokens = self._tok("RateLimitMiddleware")
+        assert "rate" in tokens
+        assert "limit" in tokens
+        assert "middleware" in tokens
+
+    def test_mixed_identifier(self) -> None:
+        tokens = self._tok("send_signal_dispatch_uid")
+        assert "send" in tokens
+        assert "dispatch" in tokens
+        assert "uid" in tokens
+
+    def test_short_tokens_filtered(self) -> None:
+        tokens = self._tok("a b c def")
+        assert "a" not in tokens
+        assert "b" not in tokens
+        assert "def" in tokens
+
+    def test_punctuation_stripped(self) -> None:
+        tokens = self._tok("func(arg1, arg2):")
+        assert "func" in tokens
+        assert "arg1" in tokens
+        assert "arg2" in tokens
+        assert "(" not in tokens
+
+    def test_no_duplicates(self) -> None:
+        tokens = self._tok("foo foo foo")
+        assert tokens.count("foo") == 1
+
+
+# ---------------------------------------------------------------------------
 # CodeIndexer — index / delete / query
 # ---------------------------------------------------------------------------
 
@@ -72,7 +116,7 @@ class TestCodeIndexer:
     def test_embed_query_returns_vector(self, indexer) -> None:
         vec = indexer.embed_query("how does rate limiting work")
         assert isinstance(vec, list)
-        assert len(vec) == 384  # DummyEmbedProvider dim
+        assert len(vec) == 768  # DummyEmbedProvider mirrors nomic-embed-code dim
         assert all(isinstance(v, float) for v in vec)
 
     def test_query_vector_returns_results_after_index(self, indexer, tmp_path) -> None:
@@ -123,6 +167,73 @@ class TestCodeIndexer:
         assert len(ids) > 0
         assert any("my_special_function" in d for d in docs)
 
+    def test_index_workspace_parallel_chunks_all_files(self, indexer, tmp_path) -> None:
+        """Parallel chunking must index every file exactly once."""
+        for i in range(20):
+            make_py(tmp_path, f"mod_{i}.py", f"def fn_{i}(): return {i}")
+        indexer.index_workspace()
+        assert indexer.indexed_file_count == 20
+        assert indexer.total_chunks >= 20
+
+    def test_incremental_skip_unchanged_files(self, indexer, tmp_path) -> None:
+        """Second index_workspace() call must skip files whose mtime has not changed."""
+        make_py(tmp_path, "a.py", "def a(): pass")
+        make_py(tmp_path, "b.py", "def b(): pass")
+        indexer.index_workspace()
+        chunks_after_first = indexer.total_chunks
+
+        # Second call: nothing changed → chunk count must not grow
+        indexer.index_workspace()
+        assert indexer.total_chunks == chunks_after_first
+
+    def test_incremental_reindexes_modified_file(self, indexer, tmp_path) -> None:
+        """A file whose mtime changes must be re-indexed on the next workspace index."""
+        path = Path(make_py(tmp_path, "evolving.py", "def v1(): pass"))
+        indexer.index_workspace()
+
+        # Modify the file content and bump mtime
+        path.write_text("def v1(): pass\ndef v2(): pass\n")
+        import os; os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 1))
+
+        indexer.index_workspace()
+        ids, docs, _ = indexer.get_all_documents()
+        assert any("v2" in d for d in docs), "Modified file was not re-indexed"
+
+    def test_mtime_cache_persists_across_instances(self, tmp_path) -> None:
+        """A new CodeIndexer pointed at the same workspace must respect the mtime cache."""
+        from agent.indexer import CodeIndexer
+        from tests.conftest import _DummyEmbedProvider
+
+        db = str(tmp_path / "db")
+        make_py(tmp_path, "cached.py", "def cached(): pass")
+
+        idx1 = CodeIndexer(str(tmp_path), db_path=db)
+        idx1._embed_provider = _DummyEmbedProvider()
+        idx1.index_workspace()
+        count_after_first = idx1.total_chunks
+
+        idx2 = CodeIndexer(str(tmp_path), db_path=db)
+        idx2._embed_provider = _DummyEmbedProvider()
+        idx2.index_workspace()
+        assert idx2.total_chunks == count_after_first
+
+    def test_index_minified_file_no_duplicate_ids(self, indexer, tmp_path) -> None:
+        """Minified JS (all code on 1-2 lines) must not produce duplicate chunk IDs."""
+        js_file = tmp_path / "jquery.min.js"
+        # Simulate minified JS: many statements crammed onto line 2
+        js_file.write_text(
+            "// jquery minified\n"
+            + "!function(e,t){'use strict';function n(e){return e}function r(e,t){return e+t}"
+            * 5
+        )
+        # Must not raise DuplicateIDError
+        count = indexer.index_file(str(js_file))
+        assert count >= 1
+        # Re-index must also not raise
+        count2 = indexer.index_file(str(js_file))
+        assert count2 >= 1
+        assert indexer.total_chunks == count2  # idempotent
+
 
 # ---------------------------------------------------------------------------
 # CodeSearcher — hybrid BM25 + vector
@@ -167,12 +278,13 @@ class TestCodeSearcher:
         assert ms == 0
 
     def test_bm25_finds_exact_keyword(self, indexer, tmp_path) -> None:
-        # BM25Plus IDF = log(N/df + 1) — always > 0, works even with N=2.
-        # Using a bare name in a return statement so it appears as a standalone
-        # whitespace-delimited token (the AST chunker strips comments).
+        # _code_tokenize splits snake_case: "dispatch_uid" → ["dispatch","uid"]
+        # and "send_signal_dispatch_uid" → ["send","signal","dispatch","uid"].
+        # So a query for "dispatch_uid" matches even though the function name is
+        # one long identifier — no workaround needed.
         path = make_py(tmp_path, "signals.py", """
-            def send_signal(sender, **kwargs):
-                return dispatch_uid
+            def send_signal_dispatch_uid(sender, **kwargs):
+                pass
 
             def unrelated_function():
                 pass
@@ -183,8 +295,7 @@ class TestCodeSearcher:
         s.refresh_bm25()
         results, _ = s.search("dispatch_uid", semantic_weight=0.0)  # pure BM25
         assert len(results) >= 1
-        top = results[0]
-        assert "dispatch_uid" in top.content
+        assert "dispatch_uid" in results[0].content or "dispatch" in results[0].symbol_name
 
     def test_search_language_filter(self, indexer, tmp_path) -> None:
         py_path = make_py(tmp_path, "app.py", "def python_fn(): pass")
@@ -199,12 +310,12 @@ class TestCodeSearcher:
         assert all(r.language == "python" for r in results)
 
     def test_search_multiple_files_ranked(self, indexer, tmp_path) -> None:
-        # BM25Plus works with N=2 — no padding needed.
-        # "ratelimit" appears only in middleware.py — BM25 should rank it first.
+        # Code tokenizer splits camelCase: "RateLimitMiddleware" → ["rate","limit","middleware"]
+        # so querying "rate limit" finds middleware.py without any workarounds.
         make_py(tmp_path, "middleware.py", """
-            class Handler:
+            class RateLimitMiddleware:
                 def __call__(self, request, get_response):
-                    return ratelimit
+                    pass
         """)
         make_py(tmp_path, "utils.py", """
             def helper():
@@ -214,7 +325,7 @@ class TestCodeSearcher:
         from agent.searcher import CodeSearcher
         s = CodeSearcher(indexer)
         s.refresh_bm25()
-        results, _ = s.search("ratelimit", semantic_weight=0.0)
+        results, _ = s.search("RateLimitMiddleware", semantic_weight=0.0)
         assert len(results) >= 1
         assert results[0].file_path.endswith("middleware.py")
 

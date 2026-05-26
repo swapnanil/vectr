@@ -217,6 +217,14 @@ async def snapshot(body: SnapshotRequest, request: Request) -> SnapshotResponse:
     )
 
 
+@router.post("/v1/memory/clear")
+async def memory_clear(request: Request) -> dict:
+    """Delete all working-memory notes and snapshots for the current workspace."""
+    svc = _service(request)
+    deleted = svc.forget_all()
+    return {"deleted": deleted}
+
+
 @router.get("/v1/evict-hint")
 async def evict_hint(request: Request) -> dict:
     svc = _service(request)

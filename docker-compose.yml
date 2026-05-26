@@ -8,7 +8,7 @@ services:
       - VECTR_WORKSPACE=/workspace
       - VECTR_PORT=8765
       # Embedding model — local by default, no API key needed
-      - VECTR_EMBED_MODEL=${VECTR_EMBED_MODEL:-jinaai/jina-embeddings-v2-base-code}
+      - VECTR_EMBED_MODEL=${VECTR_EMBED_MODEL:-Snowflake/snowflake-arctic-embed-m-v1.5}
       # LLM keys only needed for optional summary feature
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -21,7 +21,7 @@ services:
     build: .
     environment:
       - VECTR_WORKSPACE=/workspace
-      - VECTR_EMBED_MODEL=${VECTR_EMBED_MODEL:-jinaai/jina-embeddings-v2-base-code}
+      - VECTR_EMBED_MODEL=${VECTR_EMBED_MODEL:-Snowflake/snowflake-arctic-embed-m-v1.5}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     volumes:

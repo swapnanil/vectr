@@ -194,7 +194,7 @@
       <div class="layer-card">
         <div class="layer-label">Layer 3</div>
         <div class="layer-name">Content Search</div>
-        <div class="layer-desc">AST-aware chunks embedded with BAAI/bge-base-en-v1.5 (local, no API key). Adaptive hybrid search: vector + BM25 weights tuned per codebase fingerprint. Returns exact function bodies with file paths and line numbers.</div>
+        <div class="layer-desc">AST-aware chunks embedded with Snowflake/snowflake-arctic-embed-m-v1.5 (local, no API key). Adaptive hybrid search: vector + BM25 weights tuned per codebase fingerprint. Returns exact function bodies with file paths and line numbers.</div>
         <div class="layer-tools">
           <span class="tag tag-cyan">vectr_search</span>
         </div>
@@ -218,7 +218,7 @@
       <div class="arch-step reveal">
         <div class="arch-num">03</div>
         <div class="arch-title">Embed</div>
-        <div class="arch-desc">Each chunk is embedded with BAAI/bge-base-en-v1.5. Runs locally — no API key needed, downloaded once (~270MB) and cached. A file watcher re-embeds only changed files on save. Set <code style="font-family:var(--mono);font-size:11px">VECTR_EMBED_MODEL=voyage-code-2</code> for code-optimised embeddings.</div>
+        <div class="arch-desc">Each chunk is embedded with Snowflake/snowflake-arctic-embed-m-v1.5. Runs locally — no API key needed, downloaded once (~440MB) and cached. A file watcher re-embeds only changed files on save. Override with <code style="font-family:var(--mono);font-size:11px">VECTR_EMBED_MODEL=&lt;hf-model-id&gt;</code> for any sentence-transformers compatible model.</div>
       </div>
       <div class="arch-step reveal">
         <div class="arch-num">04</div>
@@ -271,22 +271,36 @@
     <div class="section-header reveal">
       <div class="section-tag">Quickstart</div>
       <h2 class="section-title">Up in Under 15 Minutes</h2>
-      <p class="section-sub">First run downloads the embedding model (~270MB). Subsequent startups take seconds.</p>
+      <p class="section-sub">First run downloads the embedding model (~440MB). Subsequent startups take seconds.</p>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:32px;">
+      <div class="arch-step reveal" style="border-top:2px solid var(--gold);">
+        <div class="arch-title" style="margin-bottom:12px;">Option A — pip (recommended)</div>
+        <div class="arch-desc" style="margin-bottom:0;">Individual developers. Runs the embedding model locally. No API key required.</div>
+      </div>
+      <div class="arch-step reveal" style="border-top:2px solid var(--cyan-dim);">
+        <div class="arch-title" style="margin-bottom:12px;">Option B — Docker</div>
+        <div class="arch-desc" style="margin-bottom:0;">Servers and CI pipelines. No Python environment needed — <code style="font-family:var(--mono);font-size:11px">docker-compose up api</code> and you're indexing.</div>
+      </div>
     </div>
     <div class="reveal">
-      <pre><span class="cmt"># Install</span>
+      <pre><span class="cmt"># Option A — pip install</span>
 <span class="kw">pip</span> install git+https://github.com/swapnanil/vectr
-
-<span class="cmt"># Start (indexes workspace, builds symbol graph, writes MCP config)</span>
 <span class="kw">cd</span> /path/to/your/project
 <span class="fn">vectr</span> start
 
-<span class="cmt"># Search from the terminal</span>
-<span class="fn">vectr</span> search <span class="str">"JWT token validation"</span>
-<span class="fn">vectr</span> search <span class="str">"database connection pool"</span> --language typescript --n 5
+<span class="cmt"># Option B — Docker</span>
+<span class="kw">git</span> clone https://github.com/swapnanil/vectr
+<span class="fn">docker-compose</span> up api
 
-<span class="cmt"># Or via Docker (for servers)</span>
-<span class="kw">VECTR_TARGET_PATH</span>=. docker-compose up api   <span class="cmt"># no .env required</span></pre>
+<span class="cmt"># Either way: stop and restart on a different workspace</span>
+<span class="fn">vectr</span> restart --path /path/to/other/project
+
+<span class="cmt"># Write CLAUDE.md + .mcp.json without starting the server</span>
+<span class="fn">vectr</span> init
+
+<span class="cmt"># Search from the terminal</span>
+<span class="fn">vectr</span> search <span class="str">"JWT token validation"</span></pre>
     </div>
   </div>
 </section>
@@ -309,7 +323,7 @@
    Entry: bidder/pipeline.go:RunBidPipeline"</span>
 
 <span class="cmt"># 2. Recall yesterday's notes</span>
-<span class="fn">vectr_recall</span>(<span class="str">"segment targeting"</span>)
+<span class="fn">vectr_recall</span>()
 <span class="str">→ "[HIGH] Entry: EvaluateSegments() in
    targeting/segment/evaluator.go. Missing tests
    for nil visitor_id case."</span>
@@ -345,6 +359,89 @@
    bidder/auction.go [lines 88-134]
    Recall latency: &lt;50ms. Nothing will be lost."</span></pre>
       </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Benchmarks ─── -->
+<section style="background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+  <div class="container">
+    <div class="section-header reveal">
+      <div class="section-tag">Benchmarks</div>
+      <h2 class="section-title">Measured on Real Codebases</h2>
+      <p class="section-sub">Two-phase benchmark: Phase 1 explores and stores notes; Phase 2 opens cold, calls <code style="font-family:var(--mono);font-size:13px">vectr_recall()</code>, and implements. Vanilla Phase 2 re-reads from scratch.</p>
+    </div>
+    <div class="arch-grid">
+      <div class="arch-step reveal">
+        <div class="arch-num" style="font-size:22px;color:var(--gold)">Django</div>
+        <div class="arch-title">Familiar codebase</div>
+        <div class="arch-desc">Mixed results. Complex ORM internals: −24% tokens, −60% cost. Well-known APIs where the model already has training coverage: no benefit. Vectr helps in proportion to how much re-discovery work Phase 2 would otherwise do.</div>
+      </div>
+      <div class="arch-step reveal">
+        <div class="arch-num" style="font-size:22px;color:var(--gold)">Camel</div>
+        <div class="arch-title">5,856-file enterprise Java</div>
+        <div class="arch-desc">−40% Phase 2 input tokens, −58% Phase 2 cost across 3 tasks. On <code style="font-family:var(--mono);font-size:11px">custom_component</code>, vanilla produced 0 bytes after 51 tool calls. Vectr produced a complete 5-file implementation. On <code style="font-family:var(--mono);font-size:11px">route_policy</code>: both working, but vectr was 3× cheaper and 2.4× faster.</div>
+      </div>
+      <div class="arch-step reveal">
+        <div class="arch-num" style="font-size:22px;color:var(--gold-dim)">Why</div>
+        <div class="arch-title">The mechanism</div>
+        <div class="arch-desc"><code style="font-family:var(--mono);font-size:11px">vectr_recall()</code> at Phase 2 start returns structured notes in ~200 tokens — replacing hundreds of re-discovery tool calls. The AI picks up exactly where it left off. No files re-read. No symbols re-grepped.</div>
+      </div>
+      <div class="arch-step reveal">
+        <div class="arch-num" style="font-size:22px;color:var(--gold-dim)">When</div>
+        <div class="arch-title">When it matters most</div>
+        <div class="arch-desc">Vectr helps in proportion to re-discovery cost: large unfamiliar codebases, cross-session continuation tasks, and implementation work that follows a research phase. Single-session tasks on well-known codebases see minimal benefit.</div>
+      </div>
+    </div>
+
+    <!-- Per-task data table -->
+    <div class="reveal" style="overflow-x:auto;margin-top:40px;">
+      <table style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px;color:var(--text-dim);">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border);text-align:left;">
+            <th style="padding:8px 12px;color:var(--text);font-weight:600;">Task</th>
+            <th style="padding:8px 12px;color:var(--text);font-weight:600;">Vanilla P2</th>
+            <th style="padding:8px 12px;color:var(--cyan);font-weight:600;">Vectr P2</th>
+            <th style="padding:8px 12px;color:var(--gold);font-weight:600;">Cost Δ</th>
+            <th style="padding:8px 12px;color:var(--gold);font-weight:600;">Tools Δ</th>
+            <th style="padding:8px 12px;color:var(--text);font-weight:600;">Output</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+            <td style="padding:8px 12px;color:var(--text);">custom_component</td>
+            <td style="padding:8px 12px;">$0.56 · 134s · 51 tools</td>
+            <td style="padding:8px 12px;color:var(--cyan);">$0.36 · 195s · 11 tools</td>
+            <td style="padding:8px 12px;color:var(--gold);">−35%</td>
+            <td style="padding:8px 12px;color:var(--gold);">−78%</td>
+            <td style="padding:8px 12px;"><span style="color:var(--red);">0 bytes (failure)</span> vs <span style="color:var(--cyan);">9,398 bytes (5 files)</span></td>
+          </tr>
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+            <td style="padding:8px 12px;color:var(--text);">route_policy</td>
+            <td style="padding:8px 12px;">$1.15 · 430s · 59 tools</td>
+            <td style="padding:8px 12px;color:var(--cyan);">$0.35 · 177s · 16 tools</td>
+            <td style="padding:8px 12px;color:var(--gold);">−70%</td>
+            <td style="padding:8px 12px;color:var(--gold);">−73%</td>
+            <td style="padding:8px 12px;">both 280-line impl</td>
+          </tr>
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+            <td style="padding:8px 12px;color:var(--text);">type_converter</td>
+            <td style="padding:8px 12px;">$0.48 · 187s · 25 tools</td>
+            <td style="padding:8px 12px;color:var(--cyan);">$0.20 · 86s · 11 tools</td>
+            <td style="padding:8px 12px;color:var(--gold);">−57%</td>
+            <td style="padding:8px 12px;color:var(--gold);">−56%</td>
+            <td style="padding:8px 12px;">both working</td>
+          </tr>
+          <tr style="border-top:2px solid var(--border);font-weight:600;">
+            <td style="padding:10px 12px;color:var(--gold);">Totals (Camel)</td>
+            <td style="padding:10px 12px;color:var(--gold);">$2.19 · 751s · 135 tools</td>
+            <td style="padding:10px 12px;color:var(--gold);">$0.92 · 458s · 38 tools</td>
+            <td style="padding:10px 12px;color:var(--gold);">−58%</td>
+            <td style="padding:10px 12px;color:var(--gold);">−72%</td>
+            <td style="padding:10px 12px;color:var(--gold);">−40% input tokens</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </div>
 </section>

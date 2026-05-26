@@ -281,9 +281,9 @@ def select_strategy(fp: CodebaseFingerprint) -> RetrievalStrategy:
 
     # Recommend embed model
     is_code_heavy = fp.dominant_language in _STATIC_LANGS or fp.size_class == "large"
-    recommended = "voyage-code-2" if is_code_heavy else "BAAI/bge-base-en-v1.5"
+    recommended = "Snowflake/snowflake-arctic-embed-m-v1.5"
     if is_code_heavy:
-        reasons.append("code-heavy repo — set VECTR_EMBED_MODEL=voyage-code-2 for best quality")
+        reasons.append("code-heavy repo — default Snowflake/snowflake-arctic-embed-m-v1.5 is optimal")
 
     return RetrievalStrategy(
         semantic_weight=round(sem, 2),

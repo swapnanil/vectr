@@ -1,0 +1,236 @@
+{
+  "tasks": {
+    "custom_field": {
+      "vanilla": {
+        "phase1": {
+          "input_tokens": 25491,
+          "output_tokens": 2515,
+          "total_tokens": 28006,
+          "turns": 2,
+          "tool_calls": 28,
+          "wall_time_s": 249.2,
+          "cost_usd": 0.38478055
+        },
+        "phase2": {
+          "input_tokens": 39267,
+          "output_tokens": 404,
+          "total_tokens": 39671,
+          "turns": 4,
+          "tool_calls": 38,
+          "wall_time_s": 516.8,
+          "cost_usd": 0.5539803
+        },
+        "total_tokens": 67677,
+        "total_cost_usd": 0.93876085
+      },
+      "vectr": {
+        "phase1": {
+          "input_tokens": 55014,
+          "output_tokens": 194,
+          "total_tokens": 55208,
+          "turns": 31,
+          "tool_calls": 35,
+          "vectr_tool_calls": 9,
+          "vectr_tool_breakdown": {
+            "vectr_map": 1,
+            "vectr_locate": 1,
+            "vectr_search": 4,
+            "vectr_status": 1,
+            "vectr_recall": 1,
+            "vectr_remember": 1
+          },
+          "wall_time_s": 641.8,
+          "cost_usd": 0.57974805
+        },
+        "phase2": {
+          "input_tokens": 29696,
+          "output_tokens": 417,
+          "total_tokens": 30113,
+          "turns": 18,
+          "tool_calls": 17,
+          "vectr_tool_calls": 0,
+          "vectr_tool_breakdown": {},
+          "wall_time_s": 207.1,
+          "cost_usd": 0.22274045
+        },
+        "total_tokens": 85321,
+        "total_cost_usd": 0.8024884999999999
+      },
+      "phase2_savings": {
+        "input_tokens_pct": 24.4,
+        "tool_calls_pct": 55.3,
+        "wall_time_pct": 59.9,
+        "cost_pct": 59.8
+      },
+      "all_phases_savings": {
+        "total_tokens_pct": -26.1,
+        "total_cost_pct": 14.5
+      }
+    },
+    "rate_limit_middleware": {
+      "vanilla": {
+        "phase1": {
+          "input_tokens": 54136,
+          "output_tokens": 2827,
+          "total_tokens": 56963,
+          "turns": 33,
+          "tool_calls": 32,
+          "wall_time_s": 168.1,
+          "cost_usd": 0.50923985
+        },
+        "phase2": {
+          "input_tokens": 34441,
+          "output_tokens": 449,
+          "total_tokens": 34890,
+          "turns": 12,
+          "tool_calls": 11,
+          "wall_time_s": 171.4,
+          "cost_usd": 0.30874019999999996
+        },
+        "total_tokens": 91853,
+        "total_cost_usd": 0.8179800500000001
+      },
+      "vectr": {
+        "phase1": {
+          "input_tokens": 56501,
+          "output_tokens": 1024,
+          "total_tokens": 57525,
+          "turns": 28,
+          "tool_calls": 27,
+          "vectr_tool_calls": 26,
+          "vectr_tool_breakdown": {
+            "vectr_map": 1,
+            "vectr_search": 14,
+            "vectr_locate": 3,
+            "vectr_remember": 7,
+            "vectr_snapshot": 1
+          },
+          "wall_time_s": 151.4,
+          "cost_usd": 0.4079484
+        },
+        "phase2": {
+          "input_tokens": 33437,
+          "output_tokens": 366,
+          "total_tokens": 33803,
+          "turns": 8,
+          "tool_calls": 7,
+          "vectr_tool_calls": 2,
+          "vectr_tool_breakdown": {
+            "vectr_recall": 1,
+            "vectr_map": 1
+          },
+          "wall_time_s": 188.8,
+          "cost_usd": 0.3082807000000001
+        },
+        "total_tokens": 91328,
+        "total_cost_usd": 0.7162291000000001
+      },
+      "phase2_savings": {
+        "input_tokens_pct": 2.9,
+        "tool_calls_pct": 36.4,
+        "wall_time_pct": -10.1,
+        "cost_pct": 0.1
+      },
+      "all_phases_savings": {
+        "total_tokens_pct": 0.6,
+        "total_cost_pct": 12.4
+      }
+    },
+    "async_signals": {
+      "vanilla": {
+        "phase1": {
+          "input_tokens": 36418,
+          "output_tokens": 3144,
+          "total_tokens": 39562,
+          "turns": 18,
+          "tool_calls": 17,
+          "wall_time_s": 110.1,
+          "cost_usd": 0.27542895
+        },
+        "phase2": {
+          "input_tokens": 25164,
+          "output_tokens": 724,
+          "total_tokens": 25888,
+          "turns": 4,
+          "tool_calls": 3,
+          "wall_time_s": 36.8,
+          "cost_usd": 0.09542824999999999
+        },
+        "total_tokens": 65450,
+        "total_cost_usd": 0.3708572
+      },
+      "vectr": {
+        "phase1": {
+          "input_tokens": 82590,
+          "output_tokens": 1359,
+          "total_tokens": 83949,
+          "turns": 33,
+          "tool_calls": 32,
+          "vectr_tool_calls": 29,
+          "vectr_tool_breakdown": {
+            "vectr_map": 1,
+            "vectr_locate": 5,
+            "vectr_search": 10,
+            "vectr_trace": 1,
+            "vectr_remember": 11,
+            "vectr_snapshot": 1
+          },
+          "wall_time_s": 213.5,
+          "cost_usd": 0.82357935
+        },
+        "phase2": {
+          "input_tokens": 29134,
+          "output_tokens": 2334,
+          "total_tokens": 31468,
+          "turns": 5,
+          "tool_calls": 4,
+          "vectr_tool_calls": 2,
+          "vectr_tool_breakdown": {
+            "vectr_recall": 1,
+            "vectr_map": 1
+          },
+          "wall_time_s": 63.9,
+          "cost_usd": 0.13238665
+        },
+        "total_tokens": 115417,
+        "total_cost_usd": 0.9559660000000001
+      },
+      "phase2_savings": {
+        "input_tokens_pct": -15.8,
+        "tool_calls_pct": -33.3,
+        "wall_time_pct": -73.6,
+        "cost_pct": -38.7
+      },
+      "all_phases_savings": {
+        "total_tokens_pct": -76.3,
+        "total_cost_pct": -157.8
+      }
+    }
+  },
+  "grand_total": {
+    "vanilla": {
+      "total_tokens": 224980,
+      "total_cost_usd": 2.1276
+    },
+    "vectr": {
+      "total_tokens": 292066,
+      "total_cost_usd": 2.4747
+    },
+    "savings": {
+      "total_tokens_pct": -29.8,
+      "total_cost_pct": -16.3
+    }
+  },
+  "metadata": {
+    "run_date": "2026-05-26",
+    "codebase": "django/django (depth=1 clone, ~3020 files, ~39k chunks)",
+    "embed_model": "Snowflake/snowflake-arctic-embed-m-v1.5",
+    "claude_model": "claude-sonnet-4-6",
+    "indexing_time_min": 21,
+    "source_files": {
+      "custom_field": "poc_results_20260526_114414.json",
+      "rate_limit_middleware": "poc_results_20260526_124350.json",
+      "async_signals": "poc_results_20260526_125519.json"
+    }
+  }
+}

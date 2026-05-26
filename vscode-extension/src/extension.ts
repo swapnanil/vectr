@@ -49,7 +49,7 @@ async function startDaemon(context: vscode.ExtensionContext): Promise<void> {
 
     const cfg = vscode.workspace.getConfiguration('vectr');
     const port = cfg.get<number>('port', 8765);
-    const embedModel = cfg.get<string>('embedModel', 'jinaai/jina-embeddings-v2-base-code');
+    const embedModel = cfg.get<string>('embedModel', 'Snowflake/snowflake-arctic-embed-m-v1.5');
 
     // Check if daemon is already running
     const runningPort = readRunningPort();

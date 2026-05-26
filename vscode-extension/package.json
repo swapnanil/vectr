@@ -39,8 +39,8 @@
         },
         "vectr.embedModel": {
           "type": "string",
-          "default": "jinaai/jina-embeddings-v2-base-code",
-          "description": "Embedding model to use. Default is local (no API key). Set to voyage-code-2 or openai/text-embedding-3-small for cloud models."
+          "default": "Snowflake/snowflake-arctic-embed-m-v1.5",
+          "description": "Embedding model to use (any sentence-transformers model). Default runs locally, no API key required. Override with any HuggingFace model ID via VECTR_EMBED_MODEL env var."
         }
       }
     }

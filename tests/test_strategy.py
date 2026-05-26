@@ -76,7 +76,7 @@ class TestRetrievalStrategy:
             RetrievalStrategy(
                 semantic_weight=0.6, bm25_weight=0.6,
                 graph_first=False,
-                recommended_embed_model="BAAI/bge-base-en-v1.5",
+                recommended_embed_model="Snowflake/snowflake-arctic-embed-m-v1.5",
                 rationale="bad",
             )
 
@@ -84,7 +84,7 @@ class TestRetrievalStrategy:
         s = RetrievalStrategy(
             semantic_weight=0.70, bm25_weight=0.30,
             graph_first=False,
-            recommended_embed_model="BAAI/bge-base-en-v1.5",
+            recommended_embed_model="Snowflake/snowflake-arctic-embed-m-v1.5",
             rationale="ok",
         )
         assert abs(s.semantic_weight + s.bm25_weight - 1.0) < 1e-6
@@ -160,18 +160,15 @@ class TestSelectStrategy:
         # but dominant_language=python + no monorepo/grpc/legacy → should be False
         assert s.graph_first is False
 
-    def test_code_heavy_recommends_voyage(self) -> None:
-        for lang in ("go", "java", "rust"):
+    def test_all_codebases_recommend_default_model(self) -> None:
+        for lang in ("go", "java", "rust", "python", None):
             s = select_strategy(_fp(dominant_language=lang))
-            assert "voyage" in s.recommended_embed_model.lower(), f"Expected voyage for {lang}"
+            assert "snowflake-arctic-embed" in s.recommended_embed_model.lower(), \
+                f"Expected snowflake model for lang={lang}, got {s.recommended_embed_model}"
 
-    def test_python_recommends_bge(self) -> None:
-        s = select_strategy(_fp(dominant_language="python", size_class="small"))
-        assert "bge" in s.recommended_embed_model.lower()
-
-    def test_large_codebase_recommends_voyage(self) -> None:
+    def test_large_codebase_recommends_default_model(self) -> None:
         s = select_strategy(_fp(size_class="large", dominant_language=None))
-        assert "voyage" in s.recommended_embed_model.lower()
+        assert "snowflake-arctic-embed" in s.recommended_embed_model.lower()
 
     def test_rationale_non_empty(self) -> None:
         s = select_strategy(_fp())

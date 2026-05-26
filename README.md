@@ -21,7 +21,7 @@ cd /path/to/your/project
 vectr start
 ```
 
-No `.env` required. Vectr downloads the embedding model once (~550MB), indexes your codebase, and writes MCP config for Cursor and Claude Code automatically.
+No `.env` required. Vectr downloads the embedding model once (~440MB), indexes your codebase, and writes MCP config for Cursor and Claude Code automatically.
 
 > **First use:** After `vectr start` completes, restart Claude Code or Cursor once so they pick up the new MCP configuration. You won't need to do this again for the same workspace.
 
@@ -30,8 +30,9 @@ No `.env` required. Vectr downloads the embedding model once (~550MB), indexes y
 ```bash
 git clone https://github.com/swapnanil/vectr
 cd vectr
-# VECTR_TARGET_PATH points to the directory you want to index
-VECTR_TARGET_PATH=/path/to/your/project docker-compose up api
+docker-compose up api
+# Then from within or alongside the container:
+# vectr start --path /path/to/your/project
 ```
 
 No `.env` required — local embedding is the default, no API key needed.
@@ -63,6 +64,12 @@ No `.env` required — local embedding is the default, no API key needed.
 ```bash
 # Start daemon and index current directory
 vectr start --path .
+
+# Stop running daemon and start fresh with a new workspace
+vectr restart --path /path/to/other/project
+
+# Write CLAUDE.md + .mcp.json + .claude/settings.json without starting the server
+vectr init --path /path/to/project
 
 # Index a specific directory
 vectr index --path /path/to/project
@@ -119,10 +126,39 @@ AI assistants get file path, line numbers, function name, and the exact code —
 ## How it works
 
 1. **AST-aware chunking** — `tree-sitter` parses each file and splits at function/class boundaries. No chunk ever breaks mid-logic.
-2. **High-quality embeddings** — `BAAI/bge-base-en-v1.5` bridges concept-to-code vocabulary (e.g. "JWT validation" → `verify_jwt_token`). Exact symbol names are covered by BM25.
+2. **High-quality embeddings** — `Snowflake/snowflake-arctic-embed-m-v1.5` bridges concept-to-code vocabulary (e.g. "JWT validation" → `verify_jwt_token`). Exact symbol names are covered by BM25.
 3. **Hybrid search** — vector similarity (semantic) + BM25 (keyword) combined. Symbol names and exact strings still surface.
-4. **Incremental watching** — `watchdog` re-indexes only changed files on save. The index stays fresh without full re-runs.
+4. **Cross-session memory** — `vectr_remember` stores structured notes (key files, edge cases, what's still missing) to a persistent SQLite store. `vectr_recall` at the start of a new session replaces re-exploration entirely.
 5. **MCP protocol** — any MCP-compatible tool can query Vectr without custom plugins.
+
+## Benchmarks
+
+Two-phase benchmark: Phase 1 (Research) stores notes with `vectr_remember`; Phase 2 (Implementation) opens cold, calls `vectr_recall()`, and implements. Vanilla Phase 2 re-reads from scratch.
+
+**Run 1 — Django (familiar codebase, 3,020 files):**
+
+| Task | P2 token savings | P2 cost savings |
+|---|---:|---:|
+| `custom_field` (deep ORM internals) | −24% | −60% |
+| `rate_limit_middleware` | −3% | ~0% |
+| `async_signals` (well-known API) | +16% | worse |
+
+Finding: vectr helps where re-discovery is hard. On APIs the model already knows from training, P1 overhead exceeds savings.
+
+**Run 2 — Apache Camel (enterprise Java, 5,856 files, unfamiliar internals):**
+
+| Task | Vanilla P2 | Vectr P2 | P2 cost savings |
+|---|---|---|---:|
+| `custom_component` | $0.56, **0 bytes produced** | $0.36, 9,398 bytes (5 files) | −35% |
+| `route_policy` | $1.15, 430s, 59 tools | $0.35, 177s, 16 tools | −70% |
+| `type_converter` | $0.48, 187s | $0.20, 86s | −57% |
+| **Totals** | **$2.19, 135 P2 tools** | **$0.92, 38 P2 tools** | **−58%** |
+
+Grand total P2 savings: **−40% input tokens · −58% cost · −72% tool calls · −39% wall time.**
+
+The mechanism: `vectr_recall()` returns structured notes in ~200 tokens, replacing hundreds of re-discovery tool calls. On `custom_component`, vanilla spent all 51 P2 tool calls re-exploring and produced nothing; vectr used 1 recall + 5 writes.
+
+Full results: [`benchmarks/`](benchmarks/)
 
 ## Supported languages
 
@@ -133,30 +169,14 @@ Python · JavaScript · TypeScript · Go · Rust · Java
 
 | Mode | Cost |
 |---|---|
-| Local embedding (default) | **$0.00** — one-time ~270MB model download, cached at `~/.cache/vectr/` |
+| Local embedding (default) | **$0.00** — one-time ~440MB model download, cached at `~/.cache/vectr/` |
 | Re-index 10k files (first run) | ~10 minutes on CPU |
 | Incremental re-index per changed file | ~0.5 seconds |
-| Cloud (voyage-code-2) | ~$0.24 to index 10k files; fractions of a cent per query |
 | Optional LLM summaries (claude-sonnet-4-6) | ~$0.003/file — 1,000 files ≈ $3 one-time |
-
-## VS Code extension
-
-**Prerequisites**: Node.js 18+ (for building only — not needed for the Python daemon itself)
-
-Build the extension to get automatic daemon startup on workspace open:
-
-```bash
-cd vscode-extension
-npm install
-npm run compile
-# Then install in VS Code: Extensions → "Install from VSIX"
-```
-
-The extension shows indexing status in the status bar and auto-starts the daemon when you open any workspace that has Vectr installed.
 
 ## Built with
 
-Python 3.14 · FastAPI · sentence-transformers · ChromaDB · tree-sitter · watchdog · Anthropic SDK / OpenAI SDK · Docker
+Python 3.14 · FastAPI · sentence-transformers · tree-sitter · Anthropic SDK · Docker
 
 ## Author
 

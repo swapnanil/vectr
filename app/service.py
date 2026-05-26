@@ -38,7 +38,7 @@ class VectrService:
 
         self._workspace_root = find_workspace_root(workspace_root)
         self._port = port
-        self._embed_model = os.getenv("VECTR_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
+        self._embed_model = os.getenv("VECTR_EMBED_MODEL", "Snowflake/snowflake-arctic-embed-m-v1.5")
 
         db_dir = os.getenv(_DB_DIR_ENV) or _default_db_dir(self._workspace_root)
         self._db_dir = db_dir
@@ -46,7 +46,12 @@ class VectrService:
         logger.info("Initialising Vectr for workspace: %s (db: %s)", self._workspace_root, db_dir)
 
         # L3 — content retrieval (existing)
-        self._indexer = CodeIndexer(self._workspace_root, embed_model=self._embed_model)
+        # db_path scopes ChromaDB under the same configured db_dir as all other stores
+        self._indexer = CodeIndexer(
+            self._workspace_root,
+            embed_model=self._embed_model,
+            db_path=str(Path(db_dir) / "chroma"),
+        )
         self._searcher = CodeSearcher(self._indexer)
         self._watcher = CodeWatcher(self._indexer, searcher_refresh_fn=self._searcher.refresh_bm25)
 
@@ -66,6 +71,7 @@ class VectrService:
 
         self._indexing = False
         self._index_thread: threading.Thread | None = None
+        self._index_lock = threading.Lock()
 
         # Adaptive strategy — computed after first index, defaults until then
         from agent.strategy_selector import RetrievalStrategy
@@ -87,19 +93,20 @@ class VectrService:
         self._watcher.start()
 
     def _do_index(self) -> None:
-        try:
-            logger.info("Starting workspace index...")
-            files, chunks = self._indexer.index_workspace()
-            self._searcher.refresh_bm25()
-            logger.info("Indexed %d files → %d chunks", files, chunks)
+        with self._index_lock:
+            try:
+                logger.info("Starting workspace index...")
+                files, chunks = self._indexer.index_workspace()
+                self._searcher.refresh_bm25()
+                logger.info("Indexed %d files → %d chunks", files, chunks)
 
-            self._build_symbol_graph()
-            self._refresh_strategy()
+                self._build_symbol_graph()
+                self._refresh_strategy()
 
-        except Exception:
-            logger.exception("Indexing failed")
-        finally:
-            self._indexing = False
+            except Exception:
+                logger.exception("Indexing failed")
+            finally:
+                self._indexing = False
 
     def _refresh_strategy(self) -> None:
         try:
@@ -149,20 +156,21 @@ class VectrService:
 
     def index(self, path: str, force: bool = False) -> tuple[int, int, int]:
         """Index a path. Returns (files_indexed, total_chunks, elapsed_ms)."""
-        t0 = time.monotonic()
-        target = Path(path).resolve()
-        if target.is_file():
-            self._indexer.index_file(str(target))
-            self._searcher.refresh_bm25()
-            self._symbol_graph.index_file(self._workspace_root, str(target))
-            files, chunks = 1, self._indexer.total_chunks
-        else:
-            files, chunks = self._indexer.index_workspace()
-            self._searcher.refresh_bm25()
-            self._build_symbol_graph()
-            self._refresh_strategy()
-        elapsed = int((time.monotonic() - t0) * 1000)
-        return files, chunks, elapsed
+        with self._index_lock:
+            t0 = time.monotonic()
+            target = Path(path).resolve()
+            if target.is_file():
+                self._indexer.index_file(str(target))
+                self._searcher.refresh_bm25()
+                self._symbol_graph.index_file(self._workspace_root, str(target))
+                files, chunks = 1, self._indexer.total_chunks
+            else:
+                files, chunks = self._indexer.index_workspace()
+                self._searcher.refresh_bm25()
+                self._build_symbol_graph()
+                self._refresh_strategy()
+            elapsed = int((time.monotonic() - t0) * 1000)
+            return files, chunks, elapsed
 
     def search(
         self, query: str, n_results: int = 10, language: str | None = None
@@ -339,6 +347,9 @@ class VectrService:
 
     def forget_note(self, note_id: int) -> bool:
         return self._context_store.forget(self._workspace_root, note_id)
+
+    def forget_all(self) -> int:
+        return self._context_store.forget_all(self._workspace_root)
 
     def snapshot_session(self, label: str, session_id: str | None = None) -> str:
         return self._context_store.snapshot(
