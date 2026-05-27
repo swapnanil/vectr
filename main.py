@@ -5,16 +5,25 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+from agent.instance_registry import (
+    InstanceRegistry,
+    _is_pid_alive,
+    workspace_hash,
+)
+
 load_dotenv()
 
-PID_FILE = Path.home() / ".vectr" / "vectr.pid"
-PORT_FILE = Path.home() / ".vectr" / "vectr.port"
+# Legacy single-instance files — removed on first registry write, kept here only
+# so migration can clean them up.
+_LEGACY_PID_FILE = Path.home() / ".vectr" / "vectr.pid"
+_LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 
 _CLAUDE_MD = """\
 # Vectr tools — available alongside Read and Bash
@@ -22,46 +31,60 @@ _CLAUDE_MD = """\
 This workspace is indexed by vectr. Use vectr tools when they'd be faster than reading
 files directly.
 
-## Exploration tools — use when you don't already know where to look
+## Which exploration tool to use
 
-| Situation | Tool |
-|---|---|
-| Don't know which file contains a class/function | `vectr_locate("ClassName")` |
-| Looking for code by concept or behaviour | `vectr_search("what you're looking for")` |
-| Want to see what calls or is called by a symbol | `vectr_trace("function_name")` |
-| First contact with an unfamiliar codebase | `vectr_map()` for structural overview |
+| You know... | You need... | Use |
+|---|---|---|
+| A concept or behaviour (not a name) | Any code related to it | `vectr_search("description")` |
+| A symbol name, not its file | Where it's defined | `vectr_locate("SymbolName")` |
+| A symbol name | Who calls it / what it calls | `vectr_trace("symbol_name")` |
+| Nothing about the codebase yet | Architectural overview | `vectr_map()` |
 
-If you already know the file or symbol, Read is fine — no need to use vectr.
+If you already know the file path, use Read directly — no need for vectr.
 
 ## Memory tools — always use for cross-session continuity
 
 The next session starts cold and won't have your current context:
 
-- `vectr_remember(content, tags=["tag"], priority="high"|"normal")` — store each key
-  finding immediately: file paths, signatures, call patterns, gotchas
-- `vectr_snapshot("label")` — seal all notes at the end of a research session
-- `vectr_recall()` — retrieve all stored notes at the start of an implementation session
+- Session START: `vectr_recall()` — retrieve notes from previous sessions before reading any files
+- During session: `vectr_remember(content, tags=["tag"], priority="high"|"medium"|"low")` — store
+  each key finding so you can drop the related code chunks from context
+- Session END: `vectr_snapshot("label")` — seal all notes as a named checkpoint
 """
 
 _MCP_JSON = """\
-{
-  "mcpServers": {
-    "vectr": {
+{{
+  "mcpServers": {{
+    "vectr": {{
       "type": "http",
-      "url": "http://localhost:8765/mcp"
-    }
-  }
-}
+      "url": "http://localhost:{port}/mcp"
+    }}
+  }}
+}}
 """
 
+# Cursor omits the "type" key (it infers HTTP from the url scheme)
+_CURSOR_MCP_JSON = """\
+{{
+  "mcpServers": {{
+    "vectr": {{
+      "url": "http://localhost:{port}/mcp"
+    }}
+  }}
+}}
+"""
 
-def _get_running_port() -> int | None:
-    if PORT_FILE.exists():
-        try:
-            return int(PORT_FILE.read_text().strip())
-        except ValueError:
-            return None
-    return None
+# VSCode 1.99+ / GitHub Copilot Agent Mode uses "servers" (not "mcpServers")
+_VSCODE_MCP_JSON = """\
+{{
+  "servers": {{
+    "vectr": {{
+      "type": "http",
+      "url": "http://localhost:{port}/mcp"
+    }}
+  }}
+}}
+"""
 
 
 def _api_base(port: int) -> str:
@@ -84,24 +107,39 @@ def _stop_server(pid: int, timeout_s: int = 8) -> bool:
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
-        return True  # already gone
+        return True
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         time.sleep(0.3)
         try:
-            os.kill(pid, 0)  # probe
+            os.kill(pid, 0)
         except ProcessLookupError:
             return True
     try:
         os.kill(pid, signal.SIGKILL)
         time.sleep(0.5)
     except ProcessLookupError:
-        pass
-    return True
+        return True
+    try:
+        os.kill(pid, 0)
+        return False  # still alive after SIGKILL — caller should log and continue
+    except ProcessLookupError:
+        return True
+
+
+def _write_or_update(path: Path, content: str, label: str) -> None:
+    """Write file if missing; overwrite if content changed (port update)."""
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        print(f"  Created {path}", file=sys.stderr)
+    elif path.read_text(encoding="utf-8") != content:
+        path.write_text(content, encoding="utf-8")
+        print(f"  Updated {path} ({label})", file=sys.stderr)
 
 
 def _write_workspace_config(workspace: str, port: int) -> None:
-    """Write CLAUDE.md and .mcp.json into the workspace root."""
+    """Write per-IDE MCP config files and CLAUDE.md into the workspace root."""
     root = Path(workspace)
 
     claude_md = root / "CLAUDE.md"
@@ -109,11 +147,9 @@ def _write_workspace_config(workspace: str, port: int) -> None:
         claude_md.write_text(_CLAUDE_MD)
         print(f"  Created {claude_md}", file=sys.stderr)
 
-    mcp_json = root / ".mcp.json"
-    if not mcp_json.exists():
-        content = _MCP_JSON.replace("8765", str(port))
-        mcp_json.write_text(content)
-        print(f"  Created {mcp_json}", file=sys.stderr)
+    _write_or_update(root / ".mcp.json", _MCP_JSON.format(port=port), f"port {port}")
+    _write_or_update(root / ".cursor" / "mcp.json", _CURSOR_MCP_JSON.format(port=port), f"port {port}")
+    _write_or_update(root / ".vscode" / "mcp.json", _VSCODE_MCP_JSON.format(port=port), f"port {port}")
 
     settings = root / ".claude" / "settings.json"
     if not settings.exists():
@@ -122,29 +158,42 @@ def _write_workspace_config(workspace: str, port: int) -> None:
         print(f"  Created {settings}", file=sys.stderr)
 
 
-def _do_start(workspace: str, port: int) -> None:
-    import subprocess
+def _migrate_legacy_files() -> None:
+    """Remove old single-instance PID/port files if they exist."""
+    _LEGACY_PID_FILE.unlink(missing_ok=True)
+    _LEGACY_PORT_FILE.unlink(missing_ok=True)
 
-    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PORT_FILE.write_text(str(port))
+
+def _do_start(workspace: str, port: int, ws_hash: str) -> None:
+    log_dir = Path.home() / ".vectr" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{ws_hash}.log"
 
     env = {**os.environ, "VECTR_WORKSPACE": workspace, "VECTR_PORT": str(port)}
     vectr_dir = Path(__file__).resolve().parent
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", str(port)],
-        env=env,
-        cwd=str(vectr_dir),
-    )
-    if proc.pid is not None:
-        PID_FILE.write_text(str(proc.pid))
+    with open(log_path, "a") as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "api:app", "--host", "127.0.0.1", "--port", str(port)],
+            env=env,
+            cwd=str(vectr_dir),
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+        )
+
+    _migrate_legacy_files()
+    InstanceRegistry().register(ws_hash, workspace, port, proc.pid)
     print(f"Vectr started (PID {proc.pid}) on port {port}", file=sys.stderr)
     print(f"Workspace : {workspace}", file=sys.stderr)
     print(f"MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
+    print(f"Logs      : {log_path}", file=sys.stderr)
+    print(f"Check indexing progress: vectr status --path {workspace}", file=sys.stderr)
 
-    try:
-        proc.wait()
-    except KeyboardInterrupt:
-        proc.terminate()
+
+def _get_port_for_workspace(workspace: str, fallback: int) -> int:
+    entry = InstanceRegistry().get(workspace_hash(workspace))
+    return entry["port"] if entry is not None else fallback
 
 
 # ---------------------------------------------------------------------------
@@ -152,46 +201,40 @@ def _do_start(workspace: str, port: int) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_start(args: argparse.Namespace) -> None:
-    port = args.port
     workspace = str(Path(args.path).resolve())
+    ws_hash = workspace_hash(workspace)
+    preferred_port = args.port
 
-    alive, running_ws = _is_server_alive(port)
-    if alive:
-        if running_ws == workspace:
-            print(
-                f"Vectr is already running on port {port} with this workspace.",
-                file=sys.stderr,
-            )
-            print(f"  Workspace : {running_ws}", file=sys.stderr)
-            print(f"  MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
-            return
-        else:
-            print(
-                f"Error: Vectr is already running on port {port} with a different workspace:",
-                file=sys.stderr,
-            )
-            print(f"  Running   : {running_ws}", file=sys.stderr)
-            print(f"  Requested : {workspace}", file=sys.stderr)
-            print(
-                f"\nTo switch workspaces, run:  vectr restart --path {workspace}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    registry = InstanceRegistry()
+    registry.prune_dead()
 
+    entry = registry.get(ws_hash)
+    if entry is not None and _is_pid_alive(entry["pid"]):
+        port = entry["port"]
+        print("Vectr is already running for this workspace.", file=sys.stderr)
+        print(f"  Workspace : {workspace}", file=sys.stderr)
+        print(f"  Port      : {port}", file=sys.stderr)
+        print(f"  MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
+        return
+
+    port = registry.find_free_port(ws_hash, preferred_port)
     _write_workspace_config(workspace, port)
-    _do_start(workspace, port)
+    _do_start(workspace, port, ws_hash)
 
 
 def cmd_index(args: argparse.Namespace) -> None:
     import httpx
 
-    port = _get_running_port() or args.port
-    path = str(Path(args.path).resolve())
+    workspace = str(Path(args.path).resolve())
+    port = _get_port_for_workspace(workspace, args.port)
     try:
-        resp = httpx.post(f"{_api_base(port)}/v1/index", json={"path": path, "force": args.force}, timeout=600)
+        resp = httpx.post(
+            f"{_api_base(port)}/v1/index",
+            json={"path": workspace, "force": args.force},
+            timeout=600,
+        )
         resp.raise_for_status()
-        data = resp.json()
-        print(json.dumps(data, indent=2))
+        print(json.dumps(resp.json(), indent=2))
     except httpx.ConnectError:
         print(f"Error: Vectr is not running on port {port}. Run: vectr start", file=sys.stderr)
         sys.exit(1)
@@ -200,7 +243,8 @@ def cmd_index(args: argparse.Namespace) -> None:
 def cmd_search(args: argparse.Namespace) -> None:
     import httpx
 
-    port = _get_running_port() or args.port
+    workspace = str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())
+    port = _get_port_for_workspace(workspace, args.port)
     payload: dict = {"query": args.query, "n_results": args.n}
     if args.language:
         payload["language"] = args.language
@@ -227,7 +271,32 @@ def cmd_search(args: argparse.Namespace) -> None:
 def cmd_status(args: argparse.Namespace) -> None:
     import httpx
 
-    port = _get_running_port() or args.port
+    registry = InstanceRegistry()
+
+    if getattr(args, "all", False):
+        registry.prune_dead()
+        instances = registry.list_all()
+        if not instances:
+            print("No running Vectr instances.")
+            return
+        for entry in instances.values():
+            port = entry["port"]
+            print(f"\nWorkspace : {entry['workspace']}")
+            print(f"Port      : {port}")
+            print(f"PID       : {entry['pid']}")
+            print(f"Started   : {entry.get('started_at', 'unknown')}")
+            try:
+                resp = httpx.get(f"{_api_base(port)}/v1/status", timeout=2)
+                resp.raise_for_status()
+                d = resp.json()
+                print(f"Files     : {d['indexed_files']}")
+                print(f"Chunks    : {d['total_chunks']}")
+            except Exception:
+                print("  (server not responding)")
+        return
+
+    workspace = str(Path(args.path).resolve())
+    port = _get_port_for_workspace(workspace, args.port)
     try:
         resp = httpx.get(f"{_api_base(port)}/v1/status", timeout=10)
         resp.raise_for_status()
@@ -243,45 +312,72 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 def cmd_stop(args: argparse.Namespace) -> None:
-    if not PID_FILE.exists():
-        print("No Vectr PID file found — is it running?", file=sys.stderr)
+    registry = InstanceRegistry()
+
+    if getattr(args, "all", False):
+        instances = registry.list_all()
+        if not instances:
+            print("No running Vectr instances.", file=sys.stderr)
+            return
+        for ws_hash, entry in list(instances.items()):
+            pid = entry["pid"]
+            print(f"Stopping {entry['workspace']} (PID {pid})...", file=sys.stderr)
+            _stop_server(pid)
+            registry.unregister(ws_hash)
+            print(f"  Stopped PID {pid}")
         return
-    pid = int(PID_FILE.read_text().strip())
-    gone = _stop_server(pid)
-    PID_FILE.unlink(missing_ok=True)
-    PORT_FILE.unlink(missing_ok=True)
-    if gone:
-        print(f"Vectr stopped (PID {pid})")
-    else:
-        print(f"Warning: could not confirm PID {pid} stopped.", file=sys.stderr)
+
+    workspace = str(Path(args.path).resolve())
+    ws_hash = workspace_hash(workspace)
+    registry.prune_dead()
+    entry = registry.get(ws_hash)
+    if entry is None:
+        print(f"No registered instance for workspace: {workspace}", file=sys.stderr)
+        return
+    pid = entry["pid"]
+    _stop_server(pid)
+    registry.unregister(ws_hash)
+    print(f"Vectr stopped (PID {pid})")
 
 
 def cmd_restart(args: argparse.Namespace) -> None:
-    port = args.port
     workspace = str(Path(args.path).resolve())
+    ws_hash = workspace_hash(workspace)
+    preferred_port = args.port
 
-    if PID_FILE.exists():
-        pid = int(PID_FILE.read_text().strip())
+    registry = InstanceRegistry()
+    entry = registry.get(ws_hash)
+    if entry is not None:
+        pid = entry["pid"]
         print(f"Stopping PID {pid}...", file=sys.stderr)
         _stop_server(pid)
-        PID_FILE.unlink(missing_ok=True)
-        PORT_FILE.unlink(missing_ok=True)
-    else:
-        alive, _ = _is_server_alive(port)
-        if alive:
-            print(
-                f"Warning: server running on port {port} but no PID file found. "
-                "Cannot stop it cleanly — kill manually if needed.",
-                file=sys.stderr,
-            )
+        registry.unregister(ws_hash)
 
+    port = registry.find_free_port(ws_hash, preferred_port)
     _write_workspace_config(workspace, port)
-    _do_start(workspace, port)
+    _do_start(workspace, port, ws_hash)
+
+
+def cmd_forget(args: argparse.Namespace) -> None:
+    import httpx
+
+    workspace = str(Path(args.path).resolve())
+    port = _get_port_for_workspace(workspace, args.port)
+    try:
+        resp = httpx.post(f"{_api_base(port)}/v1/memory/clear", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        print(f"Deleted {data['deleted']} working-memory notes for {workspace}")
+    except httpx.ConnectError:
+        print(f"Error: Vectr is not running on port {port}. Run: vectr start", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    port = _get_running_port() or args.port
     workspace = str(Path(args.path).resolve())
+    entry = InstanceRegistry().get(workspace_hash(workspace))
+    port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", "8765"))
+
     _write_workspace_config(workspace, port)
     print(f"Workspace configured: {workspace}", file=sys.stderr)
     print(f"  Run 'vectr start --path {workspace}' to index and start the server.", file=sys.stderr)
@@ -293,42 +389,45 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="vectr", description="Zero-config semantic codebase indexer")
-    parser.add_argument("--port", type=int, default=int(os.getenv("VECTR_PORT", "8765")))
     sub = parser.add_subparsers(dest="command")
 
     _default_path = os.getenv("VECTR_WORKSPACE", ".")
+    _default_port = int(os.getenv("VECTR_PORT", "8765"))
 
     p_start = sub.add_parser("start", help="Start the Vectr daemon and index the workspace")
-    p_start.add_argument(
-        "--path", default=_default_path,
-        help="Workspace root to index (default: $VECTR_WORKSPACE or .)",
-    )
-    p_start.add_argument("--port", type=int, default=int(os.getenv("VECTR_PORT", "8765")))
+    p_start.add_argument("--path", default=_default_path)
+    p_start.add_argument("--port", type=int, default=_default_port)
 
-    p_restart = sub.add_parser("restart", help="Stop the running daemon and start with a new workspace")
-    p_restart.add_argument(
-        "--path", default=_default_path,
-        help="Workspace root to index (default: $VECTR_WORKSPACE or .)",
-    )
-    p_restart.add_argument("--port", type=int, default=int(os.getenv("VECTR_PORT", "8765")))
+    p_stop = sub.add_parser("stop", help="Stop the daemon for a workspace")
+    p_stop.add_argument("--path", default=_default_path)
+    p_stop.add_argument("--all", action="store_true", help="Stop all running instances")
+
+    p_restart = sub.add_parser("restart", help="Stop and restart the daemon for a workspace")
+    p_restart.add_argument("--path", default=_default_path)
+    p_restart.add_argument("--port", type=int, default=_default_port)
+
+    p_forget = sub.add_parser("forget", help="Delete all working-memory notes for a workspace")
+    p_forget.add_argument("--path", default=_default_path)
+    p_forget.add_argument("--port", type=int, default=_default_port)
 
     p_init = sub.add_parser("init", help="Write CLAUDE.md and .mcp.json to a workspace (no server)")
-    p_init.add_argument(
-        "--path", default=_default_path,
-        help="Workspace root (default: $VECTR_WORKSPACE or .)",
-    )
+    p_init.add_argument("--path", default=_default_path)
 
     p_index = sub.add_parser("index", help="(Re)index a directory or file")
-    p_index.add_argument("--path", default=".", help="Path to index")
+    p_index.add_argument("--path", default=_default_path)
+    p_index.add_argument("--port", type=int, default=_default_port)
     p_index.add_argument("--force", action="store_true", help="Force full re-index")
 
     p_search = sub.add_parser("search", help="Semantic search")
     p_search.add_argument("query", help="Search query")
-    p_search.add_argument("--n", type=int, default=10, help="Number of results (default: 10)")
+    p_search.add_argument("--n", type=int, default=10)
     p_search.add_argument("--language", help="Filter by language")
+    p_search.add_argument("--port", type=int, default=_default_port)
 
-    sub.add_parser("status", help="Show indexing status")
-    sub.add_parser("stop", help="Stop the running daemon")
+    p_status = sub.add_parser("status", help="Show status for a workspace")
+    p_status.add_argument("--path", default=_default_path)
+    p_status.add_argument("--port", type=int, default=_default_port)
+    p_status.add_argument("--all", action="store_true", help="List all running instances")
 
     args = parser.parse_args()
     dispatch = {
@@ -339,6 +438,7 @@ def main() -> None:
         "search":  cmd_search,
         "status":  cmd_status,
         "stop":    cmd_stop,
+        "forget":  cmd_forget,
     }
     if args.command in dispatch:
         dispatch[args.command](args)

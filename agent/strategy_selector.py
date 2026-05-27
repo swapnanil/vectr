@@ -93,8 +93,11 @@ def _detect_frameworks(workspace_root: str) -> list[str]:
             except OSError:
                 pass
 
-    # Check for .proto files anywhere in workspace
-    has_proto = any(root.rglob("*.proto"))
+    _SKIP_DIRS = {".venv", "node_modules", "__pycache__", ".git", "vendor"}
+    has_proto = any(
+        f for f in root.rglob("*.proto")
+        if not any(part in _SKIP_DIRS for part in f.parts)
+    )
 
     for framework, signals in _FRAMEWORK_SIGNALS.items():
         if framework == "grpc":

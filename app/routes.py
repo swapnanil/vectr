@@ -84,7 +84,7 @@ async def search(body: SearchRequest, request: Request) -> SearchResponse:
             CodeChunkResult(
                 file=r.file_path,
                 lines=r.lines,
-                symbol=r.symbol_name,
+                symbol=r.symbol_name or None,
                 language=r.language,
                 score=r.score,
                 content=r.content,

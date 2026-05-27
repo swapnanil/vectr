@@ -12,13 +12,15 @@ MCP_SERVER_INFO = {
 }
 
 MCP_TOOLS = [
-    # ---- L3: content retrieval (original) ----
+    # ---- L3: content retrieval ----
     {
         "name": "vectr_search",
         "description": (
-            "Semantically search the indexed codebase and return the most relevant code chunks. "
-            "Use this instead of grep/ripgrep when you need to find code by meaning, not exact text. "
-            "Returns function/class bodies with file paths and line numbers."
+            "Use when you know WHAT you're looking for but not WHERE it is or WHAT it's called. "
+            "Hybrid semantic + BM25 search — finds code by concept, behaviour, or description. "
+            "Returns function/class bodies with file paths and line numbers. "
+            "NOT when you already know the symbol name — use vectr_locate instead. "
+            "NOT when you want call relationships — use vectr_trace instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -43,29 +45,34 @@ MCP_TOOLS = [
     },
     {
         "name": "vectr_status",
-        "description": "Get the current indexing status of the Vectr daemon.",
+        "description": (
+            "Show server health, indexed file count, chunk count, and embedding model. "
+            "Use when vectr_search returns nothing and you suspect indexing is still running. "
+            "NOT needed during normal exploration — only for debugging the vectr setup."
+        ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     # ---- L1: codebase map ----
     {
         "name": "vectr_map",
         "description": (
-            "Return the codebase passport. "
+            "Use at the start of a session on an UNFAMILIAR codebase to get a structural overview "
+            "without reading any files. "
             "If a passport has been saved: returns a compact (~300 token) plain-English summary instantly. "
             "If not yet saved: returns raw structural metadata (dir tree, languages, frameworks) "
             "and instructs you to call vectr_map_save with your synthesised summary. "
-            "Call this FIRST in every session to orient yourself without reading any files."
+            "NOT needed if you already know the codebase structure."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "vectr_map_save",
         "description": (
-            "Save your synthesised codebase summary as the passport. "
-            "Call this after vectr_map returns raw metadata (first session on a new codebase). "
-            "Write a concise plain-English summary covering: what the codebase does, tech stack, "
-            "key modules and their purpose, entry points, domain terms. "
-            "Aim for ~200-350 tokens. All future vectr_map calls return this instantly."
+            "Save your synthesised codebase summary as the permanent passport. "
+            "Call this ONLY after vectr_map returned raw metadata — i.e. on your first visit to a codebase. "
+            "NOT when vectr_map already returned a saved summary (passport already exists). "
+            "Write a concise plain-English summary: what the codebase does, tech stack, "
+            "key modules, entry points, domain terms. Aim for ~200-350 tokens."
         ),
         "inputSchema": {
             "type": "object",
@@ -82,9 +89,11 @@ MCP_TOOLS = [
     {
         "name": "vectr_locate",
         "description": (
-            "Find where a symbol (function, class, method) is defined, without returning code content. "
-            "Returns file path + line number + kind. Use before vectr_search to narrow your target. "
-            "Example: vectr_locate('EvaluateSegments') → 'targeting/segment/evaluator.go:45'"
+            "Use when you know the SYMBOL NAME but not which file it's in. "
+            "Returns file path + line number + kind for every matching definition. "
+            "NOT when you're searching by concept or behaviour — use vectr_search instead. "
+            "NOT when you want call relationships — use vectr_trace instead. "
+            "Example: vectr_locate('EvaluateSegments') → 'targeting/evaluator.go:45'"
         ),
         "inputSchema": {
             "type": "object",
@@ -105,8 +114,10 @@ MCP_TOOLS = [
     {
         "name": "vectr_trace",
         "description": (
-            "Trace the call graph for a symbol: who calls it, what it calls. "
-            "Use to understand dependencies before modifying a function. "
+            "Use when you know the SYMBOL NAME and need to understand its callers or callees "
+            "before modifying it. Traverses the call graph in both directions. "
+            "NOT when you don't know the symbol name yet — use vectr_search or vectr_locate first. "
+            "NOT when you just want the definition location — use vectr_locate instead. "
             "Example: vectr_trace('EvaluateSegments') → 'Called by: RequestBid() in bidder/auction.go'"
         ),
         "inputSchema": {
@@ -135,9 +146,11 @@ MCP_TOOLS = [
     {
         "name": "vectr_remember",
         "description": (
-            "Offload a working note to Vectr's persistent memory. "
-            "Use this to record what you've learned about a task so you can drop the code chunks from your context. "
-            "Notes survive IDE restarts and are recalled next session with vectr_recall."
+            "Store a working note so you can drop the related code chunks from context without losing the information. "
+            "Use whenever you've learned something worth keeping: a file path, a call pattern, a gotcha, "
+            "progress on a task. Notes survive IDE restarts. "
+            "Store the note BEFORE dropping the related code from context. "
+            "Retrieve with vectr_recall at the start of the next session."
         ),
         "inputSchema": {
             "type": "object",
@@ -164,9 +177,10 @@ MCP_TOOLS = [
     {
         "name": "vectr_recall",
         "description": (
-            "Retrieve working notes from a previous session. "
-            "Call this at the start of a session to pick up where you left off. "
-            "Optionally filter by query text or tags."
+            "ALWAYS call this at the start of an implementation session — before reading any files. "
+            "Returns your stored notes from previous sessions in ~200 tokens, replacing a full re-exploration. "
+            "Optionally filter by query text, tags, or priority. "
+            "If no notes exist, returns an empty result (safe to call unconditionally at session start)."
         ),
         "inputSchema": {
             "type": "object",
@@ -198,17 +212,21 @@ MCP_TOOLS = [
     {
         "name": "vectr_evict_hint",
         "description": (
-            "Ask Vectr what code chunks you can safely drop from your context window. "
-            "Vectr guarantees it can return any listed chunk in <50ms. "
-            "Call this when your context is getting large to free space without losing information."
+            "Vectr tells you which retrieved code chunks you can safely drop from your context window. "
+            "Any evicted chunk is guaranteed to be returned in <50ms on demand. "
+            "Call when your context is large to reclaim space without losing information. "
+            "This is the bidirectional half of the protocol: the AI tells vectr what to store "
+            "(vectr_remember), and vectr tells the AI what it can safely forget (vectr_evict_hint)."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "vectr_snapshot",
         "description": (
-            "Save a named snapshot of your current session: all working notes + retrieved code context. "
-            "Use before ending a session so vectr_recall can restore your exact state next time."
+            "ALWAYS call before ending a long research or exploration session. "
+            "Seals all vectr_remember() notes as a named checkpoint. "
+            "At the start of the next session, vectr_recall will return these notes automatically — "
+            "no need to restore from the snapshot_id manually."
         ),
         "inputSchema": {
             "type": "object",
@@ -230,7 +248,18 @@ MCP_TOOLS = [
         "name": "vectr_snapshot_list",
         "description": (
             "List all saved session snapshots for this workspace, newest first. "
-            "Use this to find a snapshot_id before restoring, or to review past sessions."
+            "Use at session start to find an existing checkpoint if vectr_recall returned nothing "
+            "or if you want to resume a specific named session."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "vectr_forget",
+        "description": (
+            "Delete all working-memory notes for this workspace. "
+            "Use when notes are stale after a large refactor, when you want a clean slate, "
+            "or when vectr_recall returns notes that are consistently wrong. "
+            "Snapshots are preserved — only active notes are removed. This is irreversible."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
@@ -306,15 +335,24 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
     # ---- vectr_status ----
     if tool_name == "vectr_status":
         status = service.status()
-        text = (
-            f"Vectr status\n"
-            f"  Indexed files  : {status['indexed_files']}\n"
-            f"  Total chunks   : {status['total_chunks']}\n"
-            f"  Symbols indexed: {status.get('symbol_count', 'n/a')}\n"
-            f"  Last indexed   : {status['last_indexed']}\n"
-            f"  Embed model    : {status['embed_model']}\n"
-            f"  Workspace      : {status['workspace_root']}"
-        )
+        lines = [
+            "Vectr status",
+            f"  Indexed files  : {status['indexed_files']}",
+            f"  Total chunks   : {status['total_chunks']}",
+            f"  Symbols indexed: {status.get('symbol_count', 'n/a')}",
+            f"  Last indexed   : {status['last_indexed']}",
+            f"  Embed model    : {status['embed_model']}",
+            f"  Workspace      : {status['workspace_root']}",
+        ]
+        if status.get("semantic_weight") is not None:
+            lines.append(
+                f"  Retrieval      : semantic={status['semantic_weight']:.0%}  "
+                f"bm25={status['bm25_weight']:.0%}  "
+                f"graph_first={status['graph_first']}"
+            )
+            if status.get("strategy_rationale"):
+                lines.append(f"  Strategy why   : {status['strategy_rationale']}")
+        text = "\n".join(lines)
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_map ----
@@ -416,6 +454,14 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
             lines.append("\nUse vectr_recall to retrieve the notes from any session.")
             text = "\n".join(lines)
         return {"content": [{"type": "text", "text": text}], "isError": False}
+
+    # ---- vectr_forget ----
+    if tool_name == "vectr_forget":
+        deleted = service.forget_all()
+        return {
+            "content": [{"type": "text", "text": f"Deleted {deleted} working-memory notes. Starting fresh."}],
+            "isError": False,
+        }
 
     return _mcp_error(f"Unknown tool: {tool_name}")
 

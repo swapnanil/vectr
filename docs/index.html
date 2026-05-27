@@ -133,15 +133,14 @@
 <span class="kw">pip</span> install git+https://github.com/swapnanil/vectr
 <span class="kw">cd</span> /path/to/your/project
 <span class="fn">vectr</span> start
-
-<span class="cmt"># Vectr indexes your codebase, builds a symbol graph,</span>
-<span class="cmt"># and writes MCP config for Cursor and Claude Code.</span>
-<span class="cmt"># Ten tools now available — no extra steps.</span>
-
-<span class="cmt">✓ Passport built — 247 tokens, structural map ready</span>
+<span class="cmt"># Indexes workspace + builds symbol graph in background.</span>
+<span class="cmt"># Writes MCP config for your AI code editor.</span>
+<span class="cmt"># 12 tools available — no extra steps.</span>
 <span class="cmt">✓ Indexed 847 files → 14,523 chunks (9m 12s)</span>
 <span class="cmt">✓ Symbol graph: 6,841 symbols, 22,104 edges</span>
-<span class="cmt">✓ MCP ready at http://localhost:8765/mcp</span></pre>
+<span class="cmt">✓ MCP ready at http://localhost:8765/mcp</span>
+<span class="cmt">→ Open your AI editor and ask about the codebase</span>
+<span class="cmt">  to build the structural map on first vectr_map call</span></pre>
       </div>
     </div>
   </div>
@@ -158,7 +157,7 @@
       <div class="problem-solution">
         <h3>Retrieve, Locate, Remember</h3>
         <p>Vectr replaces the grep-then-read loop with three knowledge layers. A structural map gives the AI a 300-token overview of the entire codebase at session start. A symbol graph answers "where is X defined?" without reading any code. A content index returns the exact function body when needed.</p>
-        <p>And when the session ends, the AI offloads its working notes to Vectr. Next morning, one call brings it back to exactly where it left off — key files, edge cases found, what's still missing. The context window clears. The knowledge doesn't.</p>
+        <p>And when the session ends, the AI offloads its working notes to Vectr. Next morning, one <code style="font-family:var(--mono);font-size:13px">vectr_recall()</code> brings it back to exactly where it stopped — key files, edge cases, what's still missing. The context window is empty, but the knowledge survived the gap.</p>
       </div>
     </div>
   </div>
@@ -177,7 +176,7 @@
       <div class="layer-card">
         <div class="layer-label">Layer 1</div>
         <div class="layer-name">Codebase Map</div>
-        <div class="layer-desc">One LLM call at startup builds a 300-token plain-English passport: module purposes, tech stack, entry points, domain vocabulary, and architectural patterns. Every session starts with a complete structural picture — no file reading required.</div>
+        <div class="layer-desc">The first time your AI editor calls <code style="font-family:var(--mono);font-size:11px">vectr_map</code> with no cached passport, Vectr returns raw metadata and the CLAUDE.md that <code style="font-family:var(--mono);font-size:11px">vectr init</code> wrote prompts the editor to write a 300-token structural summary and save it with <code style="font-family:var(--mono);font-size:11px">vectr_map_save</code>. After that, every session opens with the full picture — module purposes, tech stack, entry points, domain vocabulary — without reading a single file.</div>
         <div class="layer-tools">
           <span class="tag tag-cyan">vectr_map</span>
         </div>
@@ -208,7 +207,7 @@
       <div class="arch-step reveal">
         <div class="arch-num">01</div>
         <div class="arch-title">Map</div>
-        <div class="arch-desc">At startup, one LLM call walks the directory structure and README to produce the codebase passport. Stored permanently, refreshed only when structure changes significantly. Cost: ~$0.005, once.</div>
+        <div class="arch-desc">On the first <code style="font-family:var(--mono);font-size:11px">vectr_map</code> call with no saved passport, Vectr returns raw directory metadata and prompts the AI editor to write a structural summary. The editor calls <code style="font-family:var(--mono);font-size:11px">vectr_map_save</code> to store it. Vectr makes no LLM calls at any point — the AI editor uses its own API access for this one step.</div>
       </div>
       <div class="arch-step reveal">
         <div class="arch-num">02</div>
@@ -223,7 +222,7 @@
       <div class="arch-step reveal">
         <div class="arch-num">04</div>
         <div class="arch-title">Serve</div>
-        <div class="arch-desc">Ten MCP tools at <code style="font-family:var(--mono);font-size:11px">localhost:8765/mcp</code>. Map, locate, search, remember, recall, evict, snapshot. Any MCP-compatible tool — Cursor, Claude Code, Windsurf — connects with two lines of JSON config.</div>
+        <div class="arch-desc">12 MCP tools at <code style="font-family:var(--mono);font-size:11px">localhost:8765/mcp</code>. Map, locate, search, remember, recall, evict, snapshot, forget. Any MCP-compatible AI code editor connects with two lines of JSON config.</div>
       </div>
     </div>
   </div>
@@ -239,7 +238,7 @@
     <div class="features-grid">
       <div class="feature-card reveal">
         <div class="feature-title">Session memory that persists</div>
-        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr_remember</code> offloads a working note — key files, edge cases found, what's still missing — to a SQLite store. <code style="font-family:var(--mono);font-size:12px">vectr_recall</code> retrieves it next session. The AI picks up exactly where it left off without re-reading code.</div>
+        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr_remember</code> offloads a working note — key files, edge cases found, what's still missing — to a SQLite store. <code style="font-family:var(--mono);font-size:12px">vectr_recall</code> retrieves it next session. If referenced files changed since the note was written, recall automatically flags them with a <code style="font-family:var(--mono);font-size:12px">[STALE]</code> warning so the AI knows to re-verify before acting.</div>
       </div>
       <div class="feature-card reveal">
         <div class="feature-title">Bidirectional context protocol</div>
@@ -259,7 +258,7 @@
       </div>
       <div class="feature-card reveal">
         <div class="feature-title">Zero-config, zero cloud</div>
-        <div class="feature-desc">Run <code style="font-family:var(--mono);font-size:12px">vectr start</code>. Vectr detects your git root, indexes the workspace, and writes MCP config for Cursor and Claude Code. The embedding model runs locally. No API key required for search — only for the one-time passport build.</div>
+        <div class="feature-desc">Run <code style="font-family:var(--mono);font-size:12px">vectr start</code>. Vectr detects your git root, indexes the workspace, and writes config files for Claude Code, Cursor, VSCode/Copilot, and Windsurf automatically. The embedding model runs locally — no API key required anywhere. See the <a href="https://github.com/swapnanil/vectr" target="_blank" style="color:var(--cyan);text-decoration:none;">README</a> for the full list.</div>
       </div>
     </div>
   </div>
@@ -271,7 +270,7 @@
     <div class="section-header reveal">
       <div class="section-tag">Quickstart</div>
       <h2 class="section-title">Up in Under 15 Minutes</h2>
-      <p class="section-sub">First run downloads the embedding model (~440MB). Subsequent startups take seconds.</p>
+      <p class="section-sub">First run downloads the embedding model (~440MB). Restart your AI editor once after <code style="font-family:var(--mono);font-size:13px">vectr start</code> — the installed CLAUDE.md will guide it through the first-session passport setup automatically.</p>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:32px;">
       <div class="arch-step reveal" style="border-top:2px solid var(--gold);">
@@ -298,6 +297,9 @@
 
 <span class="cmt"># Write CLAUDE.md + .mcp.json without starting the server</span>
 <span class="fn">vectr</span> init
+
+<span class="cmt"># Clear working memory after a large refactor</span>
+<span class="fn">vectr</span> forget --path .
 
 <span class="cmt"># Search from the terminal</span>
 <span class="fn">vectr</span> search <span class="str">"JWT token validation"</span></pre>
@@ -385,7 +387,7 @@
       <div class="arch-step reveal">
         <div class="arch-num" style="font-size:22px;color:var(--gold-dim)">Why</div>
         <div class="arch-title">The mechanism</div>
-        <div class="arch-desc"><code style="font-family:var(--mono);font-size:11px">vectr_recall()</code> at Phase 2 start returns structured notes in ~200 tokens — replacing hundreds of re-discovery tool calls. The AI picks up exactly where it left off. No files re-read. No symbols re-grepped.</div>
+        <div class="arch-desc"><code style="font-family:var(--mono);font-size:11px">vectr_recall()</code> at Phase 2 start returns structured notes in ~200 tokens, replacing hundreds of re-discovery tool calls. The AI picks up mid-thought: no files re-read, no symbols re-grepped. On Apache Camel, this dropped Phase 2 tool calls from 135 to 38.</div>
       </div>
       <div class="arch-step reveal">
         <div class="arch-num" style="font-size:22px;color:var(--gold-dim)">When</div>
