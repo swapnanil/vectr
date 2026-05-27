@@ -350,3 +350,143 @@ class TestSnapshots:
         payload = store_b.restore_snapshot(sid)
         assert payload is not None
         assert payload["notes"][0]["content"] == "snapshot content"
+
+
+# ---------------------------------------------------------------------------
+# Staleness — _extract_file_paths and check_staleness
+# ---------------------------------------------------------------------------
+
+class TestExtractFilePaths:
+    def test_relative_path_with_slash(self):
+        from agent.working_context_store import _extract_file_paths
+        paths = _extract_file_paths("Key file: agent/indexer.py — main chunking logic")
+        assert "agent/indexer.py" in paths
+
+    def test_multi_component_path(self):
+        from agent.working_context_store import _extract_file_paths
+        paths = _extract_file_paths("Found in src/auth/middleware.py lines 42-67")
+        assert "src/auth/middleware.py" in paths
+
+    def test_absolute_path(self):
+        from agent.working_context_store import _extract_file_paths
+        paths = _extract_file_paths("Path is /Users/alice/project/main.py")
+        assert "/Users/alice/project/main.py" in paths
+
+    def test_multiple_paths_in_content(self):
+        from agent.working_context_store import _extract_file_paths
+        text = "agent/indexer.py calls agent/searcher.py via the service layer"
+        paths = _extract_file_paths(text)
+        assert "agent/indexer.py" in paths
+        assert "agent/searcher.py" in paths
+
+    def test_http_url_not_matched(self):
+        from agent.working_context_store import _extract_file_paths
+        paths = _extract_file_paths("See http://localhost:8765/mcp for details")
+        assert not any("localhost" in p for p in paths)
+
+    def test_plain_word_not_matched(self):
+        from agent.working_context_store import _extract_file_paths
+        paths = _extract_file_paths("Use sqlite3.Row for row access")
+        assert "sqlite3.Row" not in paths
+
+    def test_deduplication(self):
+        from agent.working_context_store import _extract_file_paths
+        text = "agent/indexer.py is the key file. Also see agent/indexer.py again."
+        paths = _extract_file_paths(text)
+        assert paths.count("agent/indexer.py") == 1
+
+    def test_empty_string(self):
+        from agent.working_context_store import _extract_file_paths
+        assert _extract_file_paths("") == []
+
+    def test_no_paths_in_content(self):
+        from agent.working_context_store import _extract_file_paths
+        assert _extract_file_paths("JWT validation uses a secret key and expiry check") == []
+
+
+class TestCheckStaleness:
+    def test_file_unchanged_not_stale(self, tmp_path):
+        store = _store(tmp_path)
+        # create a file, THEN write a note — file is older than note
+        f = tmp_path / "src" / "auth.py"
+        f.parent.mkdir()
+        f.write_text("code")
+        note_id = store.remember(str(tmp_path), f"Key file: src/auth.py")
+        notes = store.recall(str(tmp_path))
+        stale = store.check_staleness(notes, str(tmp_path))
+        assert note_id not in stale
+
+    def test_file_modified_after_note_is_stale(self, tmp_path):
+        store = _store(tmp_path)
+        note_id = store.remember(str(tmp_path), "Key file: src/auth.py")
+        # now create/modify the file AFTER the note was written
+        f = tmp_path / "src" / "auth.py"
+        f.parent.mkdir(exist_ok=True)
+        f.write_text("changed code")
+        notes = store.recall(str(tmp_path))
+        stale = store.check_staleness(notes, str(tmp_path))
+        assert note_id in stale
+        assert "src/auth.py" in stale[note_id]
+
+    def test_missing_file_skipped(self, tmp_path):
+        store = _store(tmp_path)
+        note_id = store.remember(str(tmp_path), "Key file: ghost/nonexistent.py")
+        notes = store.recall(str(tmp_path))
+        stale = store.check_staleness(notes, str(tmp_path))
+        assert note_id not in stale
+
+    def test_no_paths_in_note_not_stale(self, tmp_path):
+        store = _store(tmp_path)
+        note_id = store.remember(str(tmp_path), "JWT uses RS256 and 1h expiry")
+        notes = store.recall(str(tmp_path))
+        stale = store.check_staleness(notes, str(tmp_path))
+        assert note_id not in stale
+
+    def test_only_stale_notes_in_result(self, tmp_path):
+        store = _store(tmp_path)
+        # note with no file paths — clean
+        store.remember(str(tmp_path), "general architecture note")
+        # note with a file that gets modified — stale
+        note_id_stale = store.remember(str(tmp_path), "Critical: src/core.py is the entry point")
+        f = tmp_path / "src" / "core.py"
+        f.parent.mkdir(exist_ok=True)
+        f.write_text("modified")
+        notes = store.recall(str(tmp_path))
+        stale = store.check_staleness(notes, str(tmp_path))
+        assert len(stale) == 1
+        assert note_id_stale in stale
+
+
+class TestFormatNotesWithStaleness:
+    def test_stale_marker_in_output(self, tmp_path):
+        store = _store(tmp_path)
+        note_id = store.remember(str(tmp_path), "Key file: src/auth.py")
+        notes = store.recall(str(tmp_path))
+        output = store.format_notes_for_llm(notes, stale_warnings={note_id: ["src/auth.py"]})
+        assert "[STALE]" in output
+        assert "src/auth.py" in output
+        assert "WARNING" in output
+
+    def test_clean_note_has_no_stale_marker(self, tmp_path):
+        store = _store(tmp_path)
+        note_id = store.remember(str(tmp_path), "general note")
+        notes = store.recall(str(tmp_path))
+        output = store.format_notes_for_llm(notes, stale_warnings={})
+        assert "[STALE]" not in output
+        assert "WARNING" not in output
+
+    def test_header_reports_stale_count(self, tmp_path):
+        store = _store(tmp_path)
+        note_id = store.remember(str(tmp_path), "Key file: src/auth.py")
+        notes = store.recall(str(tmp_path))
+        output = store.format_notes_for_llm(notes, stale_warnings={note_id: ["src/auth.py"]})
+        assert "may be stale" in output
+
+    def test_no_stale_warnings_unchanged_output(self, tmp_path):
+        store = _store(tmp_path)
+        store.remember(str(tmp_path), "clean note")
+        notes = store.recall(str(tmp_path))
+        output_none = store.format_notes_for_llm(notes, stale_warnings=None)
+        output_empty = store.format_notes_for_llm(notes, stale_warnings={})
+        assert "STALE" not in output_none
+        assert "STALE" not in output_empty

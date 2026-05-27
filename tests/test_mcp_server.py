@@ -71,6 +71,78 @@ def _mock_service():
 
 
 # ---------------------------------------------------------------------------
+# Tool description quality — LLM decision-rule language
+# ---------------------------------------------------------------------------
+
+class TestToolDescriptions:
+    """Verify that tool descriptions contain decision-rule language, not just prose."""
+
+    def _desc(self, name: str) -> str:
+        for tool in MCP_TOOLS:
+            if tool["name"] == name:
+                return tool["description"]
+        raise KeyError(name)
+
+    def test_all_tools_have_non_empty_description(self) -> None:
+        for tool in MCP_TOOLS:
+            assert tool.get("description", "").strip(), f"{tool['name']} has empty description"
+
+    def test_search_says_not_when_name_known(self) -> None:
+        desc = self._desc("vectr_search")
+        assert "vectr_locate" in desc, "vectr_search must tell model to use vectr_locate when name is known"
+
+    def test_search_says_not_when_trace_needed(self) -> None:
+        desc = self._desc("vectr_search")
+        assert "vectr_trace" in desc, "vectr_search must tell model to use vectr_trace for call relationships"
+
+    def test_locate_says_not_when_concept_search(self) -> None:
+        desc = self._desc("vectr_locate")
+        assert "vectr_search" in desc, "vectr_locate must direct to vectr_search for concept queries"
+
+    def test_locate_says_not_when_trace_needed(self) -> None:
+        desc = self._desc("vectr_locate")
+        assert "vectr_trace" in desc, "vectr_locate must direct to vectr_trace for call relationships"
+
+    def test_trace_says_not_when_name_unknown(self) -> None:
+        desc = self._desc("vectr_trace")
+        assert "vectr_search" in desc or "vectr_locate" in desc, (
+            "vectr_trace must direct to vectr_search/vectr_locate when name is not yet known"
+        )
+
+    def test_trace_says_not_when_just_want_definition(self) -> None:
+        desc = self._desc("vectr_trace")
+        assert "vectr_locate" in desc, "vectr_trace must direct to vectr_locate for definition-only queries"
+
+    def test_recall_says_call_at_session_start(self) -> None:
+        desc = self._desc("vectr_recall").lower()
+        assert "start" in desc, "vectr_recall must instruct the model to call it at session start"
+
+    def test_snapshot_says_call_before_ending_session(self) -> None:
+        desc = self._desc("vectr_snapshot").lower()
+        assert "end" in desc or "ending" in desc or "before" in desc, (
+            "vectr_snapshot must tell the model to call it before ending a session"
+        )
+
+    def test_evict_hint_mentions_bidirectional_protocol(self) -> None:
+        desc = self._desc("vectr_evict_hint").lower()
+        assert "vectr_remember" in self._desc("vectr_evict_hint"), (
+            "vectr_evict_hint description should reference vectr_remember to explain the bidirectional protocol"
+        )
+
+    def test_map_save_says_only_when_raw_metadata(self) -> None:
+        desc = self._desc("vectr_map_save").lower()
+        assert "only" in desc or "not when" in desc or "not " in desc, (
+            "vectr_map_save must clarify it is only needed after raw metadata, not every session"
+        )
+
+    def test_status_says_not_for_normal_exploration(self) -> None:
+        desc = self._desc("vectr_status").lower()
+        assert "debug" in desc or "not needed" in desc or "not " in desc, (
+            "vectr_status must clarify it is for debugging, not normal exploration"
+        )
+
+
+# ---------------------------------------------------------------------------
 # handle_tools_list
 # ---------------------------------------------------------------------------
 
@@ -190,6 +262,26 @@ class TestVectrStatus:
         svc = _mock_service()
         result = handle_tools_call("vectr_status", {}, svc)
         assert "25" in result["content"][0]["text"]
+
+    def test_strategy_shown_when_available(self) -> None:
+        svc = _mock_service()
+        svc.status.return_value = {
+            **svc.status.return_value,
+            "semantic_weight": 0.75,
+            "bm25_weight": 0.25,
+            "graph_first": False,
+            "strategy_rationale": "large codebase — semantic weighted higher",
+        }
+        result = handle_tools_call("vectr_status", {}, svc)
+        text = result["content"][0]["text"]
+        assert "semantic=75%" in text
+        assert "bm25=25%" in text
+        assert "large codebase" in text
+
+    def test_strategy_omitted_when_not_set(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_status", {}, svc)
+        assert "semantic=" not in result["content"][0]["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +499,31 @@ class TestVectrSnapshot:
         svc = _mock_service()
         handle_tools_call("vectr_snapshot", {"label": "sess", "session_id": "s123"}, svc)
         svc.snapshot_session.assert_called_once_with(label="sess", session_id="s123")
+
+
+# ---------------------------------------------------------------------------
+# vectr_forget
+# ---------------------------------------------------------------------------
+
+class TestVectrForget:
+    def test_forget_calls_forget_all(self) -> None:
+        svc = _mock_service()
+        svc.forget_all.return_value = 5
+        result = handle_tools_call("vectr_forget", {}, svc)
+        svc.forget_all.assert_called_once()
+        assert result["isError"] is False
+        assert "5" in result["content"][0]["text"]
+
+    def test_forget_zero_notes(self) -> None:
+        svc = _mock_service()
+        svc.forget_all.return_value = 0
+        result = handle_tools_call("vectr_forget", {}, svc)
+        assert result["isError"] is False
+        assert "0" in result["content"][0]["text"]
+
+    def test_forget_in_tools_list(self) -> None:
+        names = {t["name"] for t in handle_tools_list()["tools"]}
+        assert "vectr_forget" in names
 
 
 # ---------------------------------------------------------------------------

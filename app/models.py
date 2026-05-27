@@ -8,11 +8,6 @@ from pydantic import BaseModel, Field, field_validator
 # Shared
 # ---------------------------------------------------------------------------
 
-class TokenUsage(BaseModel):
-    input: int
-    output: int
-
-
 # ---------------------------------------------------------------------------
 # Requests
 # ---------------------------------------------------------------------------
@@ -48,7 +43,7 @@ class SearchRequest(BaseModel):
 class CodeChunkResult(BaseModel):
     file: str
     lines: str
-    symbol: str
+    symbol: str | None   # None when chunk falls outside any named symbol
     language: str
     score: float
     content: str
@@ -60,7 +55,6 @@ class SearchResponse(BaseModel):
     chunks_searched: int
     processing_ms: int
     model: str
-    tokens_used: TokenUsage | None = None
 
 
 class IndexResponse(BaseModel):
@@ -68,7 +62,6 @@ class IndexResponse(BaseModel):
     total_chunks: int
     processing_ms: int
     model: str
-    tokens_used: TokenUsage | None = None
 
 
 class StatusResponse(BaseModel):
@@ -80,7 +73,6 @@ class StatusResponse(BaseModel):
     symbol_count: int = 0
     processing_ms: int
     model: str
-    tokens_used: TokenUsage | None = None
     # Adaptive retrieval strategy (populated after first index)
     semantic_weight: float | None = None
     bm25_weight: float | None = None

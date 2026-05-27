@@ -85,3 +85,68 @@ class TestConcurrentIndexing:
         svc._indexing = True
         svc.start_background_index()  # should return early, not start a thread
         svc._indexing = False
+
+
+# ---------------------------------------------------------------------------
+# Strategy integration — weights flow through to searcher.search()
+# ---------------------------------------------------------------------------
+
+class TestStrategyIntegration:
+    def _make_service(self, tmp_path, monkeypatch):
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "a.py", "def foo(): pass\n")
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+        return svc
+
+    def test_strategy_set_after_workspace_index(self, tmp_path, monkeypatch) -> None:
+        from agent.strategy_selector import RetrievalStrategy
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        assert isinstance(svc._strategy, RetrievalStrategy)
+
+    def test_search_passes_strategy_weight_to_searcher(self, tmp_path, monkeypatch) -> None:
+        from agent.strategy_selector import RetrievalStrategy
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+
+        svc._strategy = RetrievalStrategy(
+            semantic_weight=0.85,
+            bm25_weight=0.15,
+            graph_first=False,
+            recommended_embed_model="Snowflake/snowflake-arctic-embed-m-v1.5",
+            rationale="test",
+        )
+        received: dict = {}
+        _orig = svc._searcher.search
+
+        def _spy(*args, **kwargs):
+            received.update(kwargs)
+            return _orig(*args, **kwargs)
+
+        svc._searcher.search = _spy
+        svc.search("foo")
+        assert received.get("semantic_weight") == 0.85
+
+    def test_search_fallback_weight_when_strategy_none(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        svc._strategy = None
+
+        received: dict = {}
+        _orig = svc._searcher.search
+
+        def _spy(*args, **kwargs):
+            received.update(kwargs)
+            return _orig(*args, **kwargs)
+
+        svc._searcher.search = _spy
+        svc.search("foo")
+        assert received.get("semantic_weight") == 0.70

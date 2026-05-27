@@ -340,3 +340,285 @@ class TestFingerprint:
         assert fp.size_class == "large"
         assert fp.doc_coverage_ratio < 0.15
         assert fp.is_legacy is True
+
+
+# ---------------------------------------------------------------------------
+# Multi-signal scenarios — realistic codebase archetypes
+# ---------------------------------------------------------------------------
+
+class TestMultiSignalScenarios:
+    def test_large_java_grpc_legacy_monorepo(self) -> None:
+        # large: bm=0.25; gRPC: min(0.35,0.50)=0.35; legacy: min(0.50,0.55)=0.50
+        s = select_strategy(_fp(
+            size_class="large",
+            dominant_language="java",
+            has_grpc=True,
+            is_legacy=True,
+            is_monorepo=True,
+            doc_coverage_ratio=0.05,
+        ))
+        assert s.bm25_weight <= 0.55
+        assert s.graph_first is True
+        assert abs(s.semantic_weight + s.bm25_weight - 1.0) < 1e-6
+
+    def test_small_python_fastapi(self) -> None:
+        # small: bm=0.45; python nudge: sem=0.60, bm=0.40 — BM25 stays high.
+        s = select_strategy(_fp(
+            size_class="small",
+            dominant_language="python",
+            detected_frameworks=["fastapi"],
+            doc_coverage_ratio=0.2,
+        ))
+        assert s.bm25_weight >= 0.40
+        assert s.graph_first is False
+        assert abs(s.semantic_weight + s.bm25_weight - 1.0) < 1e-6
+
+    def test_medium_typescript_react(self) -> None:
+        # medium: sem=0.70; typescript nudge: sem=min(0.75,0.80)=0.75
+        s = select_strategy(_fp(
+            size_class="medium",
+            dominant_language="typescript",
+            detected_frameworks=["react"],
+        ))
+        assert s.semantic_weight >= 0.75
+        assert s.graph_first is False
+        assert abs(s.semantic_weight + s.bm25_weight - 1.0) < 1e-6
+
+    def test_large_go_monorepo(self) -> None:
+        # large + static Go + monorepo — both trigger graph_first, no weight conflict.
+        s = select_strategy(_fp(
+            size_class="large",
+            dominant_language="go",
+            is_monorepo=True,
+        ))
+        assert s.graph_first is True
+        assert s.semantic_weight >= 0.75
+        assert abs(s.semantic_weight + s.bm25_weight - 1.0) < 1e-6
+
+    def test_small_rust_cli(self) -> None:
+        # small (BM25 favoured) + Rust (static, graph_first).
+        s = select_strategy(_fp(
+            size_class="small",
+            dominant_language="rust",
+            doc_coverage_ratio=0.4,
+        ))
+        assert s.graph_first is True
+        assert s.bm25_weight >= 0.40
+        assert abs(s.semantic_weight + s.bm25_weight - 1.0) < 1e-6
+
+    def test_well_documented_python_django(self) -> None:
+        # medium: sem=0.70; python: sem=0.75; high_doc: sem=min(0.80,0.85)=0.80
+        s = select_strategy(_fp(
+            size_class="medium",
+            dominant_language="python",
+            detected_frameworks=["django"],
+            doc_coverage_ratio=0.85,
+            is_legacy=False,
+        ))
+        assert s.semantic_weight == 0.80
+        assert s.bm25_weight == 0.20
+        assert s.graph_first is False
+
+    def test_medium_java_grpc_legacy_bm25_capped(self) -> None:
+        # medium: bm=0.30; gRPC: min(0.40,0.50)=0.40; legacy: min(0.55,0.55)=0.55 — cap hit.
+        s = select_strategy(_fp(
+            size_class="medium",
+            dominant_language="java",
+            has_grpc=True,
+            is_legacy=True,
+            doc_coverage_ratio=0.05,
+        ))
+        assert s.bm25_weight == 0.55
+        assert s.semantic_weight == 0.45
+        assert s.graph_first is True
+
+    def test_large_python_high_doc_semantic_capped(self) -> None:
+        # large: sem=0.75; python: min(0.80,0.80)=0.80; high_doc: min(0.85,0.85)=0.85 — cap hit.
+        s = select_strategy(_fp(
+            size_class="large",
+            dominant_language="python",
+            doc_coverage_ratio=0.85,
+            is_legacy=False,
+        ))
+        assert s.semantic_weight == 0.85
+        assert s.bm25_weight == 0.15
+        assert s.graph_first is False
+
+
+# ---------------------------------------------------------------------------
+# Weight bound enforcement — caps are never violated
+# ---------------------------------------------------------------------------
+
+class TestWeightBounds:
+    def test_bm25_grpc_cap_0_50_hit_for_small(self) -> None:
+        # small: bm=0.45; gRPC raw boost = 0.55 → capped at 0.50.
+        s = select_strategy(_fp(size_class="small", has_grpc=True, dominant_language=None))
+        assert s.bm25_weight == 0.50
+        assert s.semantic_weight == 0.50
+
+    def test_bm25_legacy_cap_0_55_hit(self) -> None:
+        # medium+gRPC+legacy: bm=0.30→0.40→cap at 0.55.
+        s = select_strategy(_fp(
+            size_class="medium",
+            dominant_language="java",
+            has_grpc=True,
+            is_legacy=True,
+            doc_coverage_ratio=0.05,
+        ))
+        assert s.bm25_weight == 0.55
+
+    def test_bm25_never_exceeds_0_55(self) -> None:
+        combos = [
+            _fp(size_class="small", has_grpc=True, is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+            _fp(size_class="medium", has_grpc=True, is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+            _fp(size_class="large", has_grpc=True, is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+            _fp(size_class="small", is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+            _fp(size_class="medium", is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+        ]
+        for fp in combos:
+            s = select_strategy(fp)
+            assert s.bm25_weight <= 0.55, f"BM25={s.bm25_weight} > 0.55 for {fp}"
+
+    def test_semantic_dynamic_cap_0_80_hit_for_large_python(self) -> None:
+        # large: sem=0.75; python: min(0.80,0.80)=0.80 — cap hit exactly.
+        s = select_strategy(_fp(size_class="large", dominant_language="python"))
+        assert s.semantic_weight == 0.80
+        assert s.bm25_weight == 0.20
+
+    def test_semantic_doc_coverage_cap_0_85_hit(self) -> None:
+        # large+python+high_doc: 0.75→0.80→0.85 — absolute cap.
+        s = select_strategy(_fp(
+            size_class="large",
+            dominant_language="python",
+            doc_coverage_ratio=0.90,
+            is_legacy=False,
+        ))
+        assert s.semantic_weight == 0.85
+        assert s.bm25_weight == 0.15
+
+    def test_semantic_never_exceeds_0_85(self) -> None:
+        combos = [
+            _fp(size_class="large", dominant_language="python", doc_coverage_ratio=0.95),
+            _fp(size_class="large", dominant_language="javascript", doc_coverage_ratio=0.95),
+            _fp(size_class="large", dominant_language="typescript", doc_coverage_ratio=0.95),
+            _fp(size_class="medium", dominant_language="python", doc_coverage_ratio=0.95),
+        ]
+        for fp in combos:
+            s = select_strategy(fp)
+            assert s.semantic_weight <= 0.85, f"semantic={s.semantic_weight} > 0.85 for {fp}"
+
+    def test_weights_sum_to_one_comprehensive(self) -> None:
+        configs = [
+            _fp(size_class="small", dominant_language=None),
+            _fp(size_class="small", dominant_language="python"),
+            _fp(size_class="small", dominant_language="go"),
+            _fp(size_class="small", has_grpc=True),
+            _fp(size_class="small", is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+            _fp(size_class="small", has_grpc=True, is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+            _fp(size_class="medium", dominant_language=None),
+            _fp(size_class="medium", dominant_language="typescript"),
+            _fp(size_class="medium", dominant_language="go", is_monorepo=True),
+            _fp(size_class="medium", has_grpc=True),
+            _fp(size_class="medium", is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+            _fp(size_class="medium", has_grpc=True, is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+            _fp(size_class="medium", doc_coverage_ratio=0.85),
+            _fp(size_class="medium", dominant_language="python", doc_coverage_ratio=0.85),
+            _fp(size_class="large", dominant_language=None),
+            _fp(size_class="large", dominant_language="rust"),
+            _fp(size_class="large", dominant_language="python"),
+            _fp(size_class="large", dominant_language="python", doc_coverage_ratio=0.85),
+            _fp(size_class="large", dominant_language="go", is_monorepo=True),
+            _fp(size_class="large", has_grpc=True),
+            _fp(size_class="large", is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+            _fp(size_class="large", has_grpc=True, is_legacy=True, dominant_language="java", doc_coverage_ratio=0.05),
+            _fp(size_class="large", complexity_class="complex", dominant_language="go", is_monorepo=True),
+        ]
+        for fp in configs:
+            s = select_strategy(fp)
+            total = round(s.semantic_weight + s.bm25_weight, 6)
+            assert total == 1.0, f"{s.semantic_weight}+{s.bm25_weight}={total} != 1.0 for {fp}"
+
+
+# ---------------------------------------------------------------------------
+# Rationale completeness — every activated signal leaves a keyword trace
+# ---------------------------------------------------------------------------
+
+class TestRationaleKeywords:
+    def test_rationale_mentions_small(self) -> None:
+        s = select_strategy(_fp(size_class="small"))
+        assert "small" in s.rationale.lower()
+
+    def test_rationale_mentions_medium(self) -> None:
+        s = select_strategy(_fp(size_class="medium"))
+        assert "medium" in s.rationale.lower()
+
+    def test_rationale_mentions_large(self) -> None:
+        s = select_strategy(_fp(size_class="large"))
+        assert "large" in s.rationale.lower()
+
+    def test_rationale_mentions_static_language(self) -> None:
+        for lang in ("go", "java", "rust"):
+            s = select_strategy(_fp(dominant_language=lang))
+            assert lang in s.rationale.lower(), f"Expected '{lang}' in rationale"
+
+    def test_rationale_mentions_dynamic_language(self) -> None:
+        for lang in ("python", "javascript", "typescript"):
+            s = select_strategy(_fp(dominant_language=lang))
+            assert lang in s.rationale.lower(), f"Expected '{lang}' in rationale"
+
+    def test_rationale_mentions_monorepo(self) -> None:
+        s = select_strategy(_fp(is_monorepo=True))
+        assert "monorepo" in s.rationale.lower()
+
+    def test_rationale_mentions_grpc(self) -> None:
+        s = select_strategy(_fp(has_grpc=True))
+        assert "grpc" in s.rationale.lower()
+
+    def test_rationale_mentions_legacy(self) -> None:
+        s = select_strategy(_fp(is_legacy=True, dominant_language="java"))
+        assert "legacy" in s.rationale.lower()
+
+    def test_rationale_mentions_high_doc_coverage(self) -> None:
+        s = select_strategy(_fp(doc_coverage_ratio=0.85, is_legacy=False))
+        assert "documented" in s.rationale.lower() or "coverage" in s.rationale.lower()
+
+    def test_rationale_mentions_complex(self) -> None:
+        s = select_strategy(_fp(complexity_class="complex"))
+        assert "complex" in s.rationale.lower()
+
+
+# ---------------------------------------------------------------------------
+# Real workspace fingerprint — vectr repo itself (no model download needed)
+# ---------------------------------------------------------------------------
+
+class TestFingerprintRealWorkspace:
+    @classmethod
+    def _collect_py_files(cls) -> list[str]:
+        root = Path(__file__).parent.parent
+        skip = {".venv", "__pycache__", ".git", ".pytest_cache"}
+        return [
+            str(f)
+            for f in root.rglob("*.py")
+            if not any(part in skip for part in f.parts)
+        ]
+
+    def test_dominant_language_is_python(self) -> None:
+        fp = fingerprint(str(Path(__file__).parent.parent), self._collect_py_files())
+        assert fp.dominant_language == "python"
+
+    def test_fastapi_detected(self) -> None:
+        fp = fingerprint(str(Path(__file__).parent.parent), self._collect_py_files())
+        assert "fastapi" in fp.detected_frameworks
+
+    def test_not_legacy(self) -> None:
+        fp = fingerprint(str(Path(__file__).parent.parent), self._collect_py_files())
+        assert fp.is_legacy is False
+
+    def test_strategy_no_graph_first(self) -> None:
+        # Python is dynamic; no monorepo, gRPC, legacy, or complex → graph_first=False.
+        fp = fingerprint(str(Path(__file__).parent.parent), self._collect_py_files())
+        assert select_strategy(fp).graph_first is False
+
+    def test_size_class_small_or_medium(self) -> None:
+        fp = fingerprint(str(Path(__file__).parent.parent), self._collect_py_files())
+        assert fp.size_class in {"small", "medium"}

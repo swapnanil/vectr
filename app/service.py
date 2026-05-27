@@ -343,7 +343,8 @@ class VectrService:
             priority=priority,
             limit=limit,
         )
-        return self._context_store.format_notes_for_llm(notes)
+        stale = self._context_store.check_staleness(notes, self._workspace_root)
+        return self._context_store.format_notes_for_llm(notes, stale_warnings=stale)
 
     def forget_note(self, note_id: int) -> bool:
         return self._context_store.forget(self._workspace_root, note_id)

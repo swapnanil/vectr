@@ -264,7 +264,15 @@ def _collect_chunks_ast(
 
 
 def _fallback_window_chunks(lines: list[str], file_path: str, language: str) -> list[CodeChunk]:
-    """200-line windows with 50-line overlap for unsupported languages."""
+    """Sliding-window chunker for files with no tree-sitter grammar.
+
+    Window=200, overlap=50:
+    - 200 lines captures ~3-5 typical functions worth of context — large enough for
+      a coherent embedding, small enough that unrelated code doesn't dilute it.
+      (100 lines is too small for classes; 500 lines degrades embedding quality.)
+    - 50-line overlap ensures a function starting near the tail of one window is
+      fully present in the next window, so it's never split across chunk boundaries.
+    """
     window, overlap = 200, 50
     chunks: list[CodeChunk] = []
     i = 0

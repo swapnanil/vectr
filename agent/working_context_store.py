@@ -11,10 +11,31 @@ Storage: SQLite in the vectr DB dir — persists across IDE restarts and reboots
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+
+# Matches file paths in note text — relative (foo/bar.py) and absolute (/usr/local/file.py).
+# False positives that don't exist are skipped during staleness stat().
+_FILE_PATH_RE = re.compile(
+    r'(?<![:/\w])'                                         # not preceded by :, /, or word char
+    r'((?:/[a-zA-Z0-9_.][a-zA-Z0-9_.\-]*)+'              # absolute: /foo/bar/baz
+    r'|[a-zA-Z0-9_.][a-zA-Z0-9_./\-]*(?:/[a-zA-Z0-9_.][a-zA-Z0-9_.\-]*)+)'  # relative: foo/bar
+)
+
+
+def _extract_file_paths(text: str) -> list[str]:
+    """Extract plausible file paths from note text (deduplicated, order-preserving)."""
+    seen: set[str] = set()
+    result = []
+    for raw in _FILE_PATH_RE.findall(text):
+        path = raw.rstrip("/.")
+        if len(path) > 3 and path not in seen:
+            seen.add(path)
+            result.append(path)
+    return result
 
 
 @dataclass
@@ -298,6 +319,42 @@ class WorkingContextStore:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # Staleness detection
+    # ------------------------------------------------------------------
+
+    def check_staleness(
+        self,
+        notes: list[WorkingNote],
+        workspace_root: str,
+    ) -> dict[int, list[str]]:
+        """Identify notes whose referenced files have changed since the note was written.
+
+        For each note, extracts file paths from the content, stats them against
+        the workspace root, and flags any path whose mtime > note.created_at.
+
+        Returns {note_id: [stale_path, ...]} — only notes with ≥1 stale path included.
+        """
+        root = Path(workspace_root)
+        stale: dict[int, list[str]] = {}
+
+        for note in notes:
+            stale_files = []
+            for raw_path in _extract_file_paths(note.content):
+                path = Path(raw_path)
+                resolved = path if path.is_absolute() else root / path
+                try:
+                    mtime = resolved.stat().st_mtime
+                except OSError:
+                    continue  # doesn't exist or inaccessible — skip
+                if mtime > note.created_at:
+                    stale_files.append(raw_path)
+
+            if stale_files:
+                stale[note.note_id] = stale_files
+
+        return stale
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -315,16 +372,39 @@ class WorkingContextStore:
             decay_score=row["decay_score"],
         )
 
-    def format_notes_for_llm(self, notes: list[WorkingNote]) -> str:
-        """Format recalled notes into a clean LLM-readable string."""
+    def format_notes_for_llm(
+        self,
+        notes: list[WorkingNote],
+        stale_warnings: dict[int, list[str]] | None = None,
+    ) -> str:
+        """Format recalled notes into a clean LLM-readable string.
+
+        If stale_warnings is provided, notes whose referenced files have changed
+        since the note was written are flagged with a [STALE] marker and a warning
+        listing which files changed.
+        """
         if not notes:
             return "No working notes found."
-        lines = [f"# Working Notes ({len(notes)} entries)\n"]
+
+        stale_warnings = stale_warnings or {}
+        stale_count = len(stale_warnings)
+        header = f"# Working Notes ({len(notes)} entries"
+        if stale_count:
+            header += f", {stale_count} may be stale"
+        header += ")\n"
+
+        lines = [header]
         for n in notes:
             age_h = (time.time() - n.created_at) / 3600
             age_str = f"{age_h:.0f}h ago" if age_h < 48 else f"{age_h / 24:.0f}d ago"
             tag_str = f"  [{', '.join(n.tags)}]" if n.tags else ""
-            lines.append(f"[{n.note_id}] [{n.priority.upper()}]{tag_str}  ({age_str})")
+            stale_files = stale_warnings.get(n.note_id, [])
+            stale_marker = " [STALE]" if stale_files else ""
+            lines.append(f"[{n.note_id}] [{n.priority.upper()}]{tag_str}  ({age_str}){stale_marker}")
             lines.append(f"  {n.content}")
+            if stale_files:
+                changed = ", ".join(stale_files)
+                lines.append(f"  WARNING: These files changed after this note was written: {changed}")
+                lines.append(f"  WARNING: Verify this note is still accurate before relying on it.")
             lines.append("")
         return "\n".join(lines)

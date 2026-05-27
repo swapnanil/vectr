@@ -81,6 +81,170 @@ class TestChunkFile:
 
 
 # ---------------------------------------------------------------------------
+# Chunking fallback edge cases — mixed-language, window math
+# ---------------------------------------------------------------------------
+
+class TestChunkFileFallbackEdgeCases:
+    """Covers files with no tree-sitter grammar and window-size boundary behavior."""
+
+    def test_jsx_file_is_chunked_as_javascript(self, tmp_path) -> None:
+        jsx_file = tmp_path / "UserCard.jsx"
+        jsx_file.write_text(textwrap.dedent("""\
+            import React from 'react';
+
+            function UserCard({ name, email }) {
+              return (
+                <div className="card">
+                  <h2>{name}</h2>
+                  <p>{email}</p>
+                </div>
+              );
+            }
+
+            export default UserCard;
+        """))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(jsx_file))
+        assert len(chunks) >= 1
+        assert all(c.language == "javascript" for c in chunks)
+        combined = "\n".join(c.content for c in chunks)
+        assert "UserCard" in combined
+
+    def test_tsx_file_is_chunked_as_typescript(self, tmp_path) -> None:
+        tsx_file = tmp_path / "Button.tsx"
+        tsx_file.write_text(textwrap.dedent("""\
+            import React from 'react';
+
+            interface ButtonProps {
+              label: string;
+              onClick: () => void;
+            }
+
+            function Button({ label, onClick }: ButtonProps) {
+              return <button onClick={onClick}>{label}</button>;
+            }
+
+            export default Button;
+        """))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(tsx_file))
+        assert len(chunks) >= 1
+        assert all(c.language == "typescript" for c in chunks)
+        combined = "\n".join(c.content for c in chunks)
+        assert "Button" in combined
+
+    def test_html_file_uses_window_fallback(self, tmp_path) -> None:
+        html_file = tmp_path / "index.html"
+        html_file.write_text(textwrap.dedent("""\
+            <!DOCTYPE html>
+            <html>
+            <head><title>App</title></head>
+            <body>
+              <div id="root"></div>
+              <script>
+                function initApp() {
+                  const root = document.getElementById('root');
+                  root.innerHTML = '<h1>Hello</h1>';
+                }
+                initApp();
+              </script>
+            </body>
+            </html>
+        """))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(html_file))
+        assert len(chunks) >= 1
+        assert all(c.node_type == "window" for c in chunks)
+        assert all(c.language == "html" for c in chunks)
+        combined = "\n".join(c.content for c in chunks)
+        assert "initApp" in combined
+
+    def test_jinja_template_uses_window_fallback(self, tmp_path) -> None:
+        jinja_file = tmp_path / "users.jinja"
+        jinja_file.write_text(textwrap.dedent("""\
+            {% extends "base.html" %}
+            {% block content %}
+              <ul>
+              {% for user in users %}
+                <li>{{ user.name }} — {{ user.email }}</li>
+              {% endfor %}
+              </ul>
+            {% endblock %}
+        """))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(jinja_file))
+        assert len(chunks) >= 1
+        assert all(c.node_type == "window" for c in chunks)
+        combined = "\n".join(c.content for c in chunks)
+        assert "user.name" in combined
+
+    def test_python_inline_sql_preserves_sql_content(self, tmp_path) -> None:
+        py_file = tmp_path / "repo.py"
+        py_file.write_text(textwrap.dedent("""\
+            def get_active_users(db):
+                query = '''
+                    SELECT id, name, email
+                    FROM users
+                    WHERE active = TRUE
+                    ORDER BY created_at DESC
+                '''
+                return db.execute(query).fetchall()
+        """))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(py_file))
+        assert len(chunks) >= 1
+        assert all(c.language == "python" for c in chunks)
+        combined = "\n".join(c.content for c in chunks)
+        assert "SELECT" in combined
+        assert "get_active_users" in combined
+
+    def test_window_fallback_small_file_is_single_chunk(self, tmp_path) -> None:
+        short_file = tmp_path / "config.rb"
+        short_file.write_text("\n".join(f"# line {i}" for i in range(100)))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(short_file))
+        assert len(chunks) == 1
+        assert chunks[0].start_line == 1
+        assert chunks[0].end_line == 100
+
+    def test_window_fallback_overlap_math(self, tmp_path) -> None:
+        # 300-line file: window=200, overlap=50 → step=150
+        # Window 1: lines 1-200  (i=0)
+        # Window 2: lines 151-300 (i=150)
+        long_file = tmp_path / "long.rb"
+        long_file.write_text("\n".join(f"# line {i}" for i in range(300)))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(long_file))
+        assert len(chunks) == 2
+        assert chunks[0].start_line == 1
+        assert chunks[0].end_line == 200
+        assert chunks[1].start_line == 151  # overlap starts here
+        assert chunks[1].end_line == 300
+
+    def test_window_fallback_language_label_from_extension(self, tmp_path) -> None:
+        sql_file = tmp_path / "schema.sql"
+        sql_file.write_text("CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL);")
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(sql_file))
+        assert len(chunks) >= 1
+        assert all(c.language == "sql" for c in chunks)
+        assert all(c.node_type == "window" for c in chunks)
+
+    def test_python_module_level_only_uses_window_fallback(self, tmp_path) -> None:
+        py_file = tmp_path / "settings.py"
+        py_file.write_text(textwrap.dedent("""\
+            DEBUG = True
+            DATABASE_URL = "postgresql://localhost/mydb"
+            SECRET_KEY = "abc123"
+            ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+        """))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(py_file))
+        assert len(chunks) >= 1
+        assert all(c.node_type == "window" for c in chunks)
+
+
+# ---------------------------------------------------------------------------
 # workspace_detect tests
 # ---------------------------------------------------------------------------
 
