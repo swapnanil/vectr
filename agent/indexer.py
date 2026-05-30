@@ -30,6 +30,8 @@ LANG_BY_EXT: dict[str, str] = {
     ".go": "go",
     ".rs": "rust",
     ".java": "java",
+    ".c": "c",
+    ".h": "c",
 }
 
 EXCLUDED_DIRS = {

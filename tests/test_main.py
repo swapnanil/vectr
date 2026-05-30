@@ -50,7 +50,8 @@ class TestCmdStart:
 
         with patch("main.InstanceRegistry", return_value=reg), \
              patch("agent.instance_registry._is_pid_alive", return_value=True), \
-             patch("main._is_pid_alive", return_value=True):
+             patch("main._is_pid_alive", return_value=True), \
+             patch("main._write_workspace_config"):
             m.cmd_start(_make_args(path=ws, port=8765))
 
         err = capsys.readouterr().err
@@ -273,6 +274,16 @@ class TestWriteWorkspaceConfig:
     def test_claude_md_created_if_missing(self, tmp_path):
         m._write_workspace_config(str(tmp_path), 8765)
         assert (tmp_path / "CLAUDE.md").exists()
+
+    def test_claude_md_contains_conditional_recall_guidance(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "vectr_status" in content, "CLAUDE.md must reference vectr_status as the existence check before recall"
+        assert "notes_count" in content, "CLAUDE.md must mention notes_count so agent knows when to skip recall"
+        assert "vectr_recall" in content, "CLAUDE.md must mention vectr_recall"
+        assert "prior work" in content or "continuing" in content, (
+            "CLAUDE.md must frame recall as conditional on continuing prior work"
+        )
 
     def test_claude_md_not_overwritten_if_present(self, tmp_path):
         (tmp_path / "CLAUDE.md").write_text("custom")

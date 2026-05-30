@@ -54,6 +54,7 @@ def _mock_service():
         "embed_model": "Snowflake/snowflake-arctic-embed-m-v1.5",
         "workspace_root": "/repo",
         "symbol_count": 25,
+        "notes_count": 4,
     }
     svc.get_map.return_value = "# Passport\nA FastAPI service."
     svc.save_map.return_value = None
@@ -113,9 +114,31 @@ class TestToolDescriptions:
         desc = self._desc("vectr_trace")
         assert "vectr_locate" in desc, "vectr_trace must direct to vectr_locate for definition-only queries"
 
-    def test_recall_says_call_at_session_start(self) -> None:
+    def test_recall_is_conditional_on_notes_existing(self) -> None:
         desc = self._desc("vectr_recall").lower()
-        assert "start" in desc, "vectr_recall must instruct the model to call it at session start"
+        assert "vectr_status" in desc, "vectr_recall must reference vectr_status as the existence check"
+        assert "notes_count" in desc, "vectr_recall must mention notes_count so agent knows when to skip it"
+        assert "continuing prior work" in desc or "prior work" in desc, (
+            "vectr_recall must be framed as conditional on continuing prior work, not unconditional"
+        )
+        assert "do not" in desc or "not call" in desc or "skip" in desc, (
+            "vectr_recall must include a negative trigger — when NOT to call it"
+        )
+
+    def test_remember_says_not_for_obvious_facts(self) -> None:
+        desc = self._desc("vectr_remember").lower()
+        assert "not" in desc or "do not" in desc, (
+            "vectr_remember must include a negative trigger — when NOT to store a note"
+        )
+        assert "re-deriv" in desc or "obvious" in desc or "easily" in desc, (
+            "vectr_remember must warn against storing easily re-derivable facts"
+        )
+
+    def test_map_says_not_substitute_for_recall(self) -> None:
+        desc = self._desc("vectr_map").lower()
+        assert "vectr_status" in desc or "vectr_recall" in desc, (
+            "vectr_map must clarify it is not a substitute for vectr_recall / vectr_status"
+        )
 
     def test_snapshot_says_call_before_ending_session(self) -> None:
         desc = self._desc("vectr_snapshot").lower()
@@ -135,10 +158,13 @@ class TestToolDescriptions:
             "vectr_map_save must clarify it is only needed after raw metadata, not every session"
         )
 
-    def test_status_says_not_for_normal_exploration(self) -> None:
+    def test_status_surfaces_notes_count_and_recall_guidance(self) -> None:
         desc = self._desc("vectr_status").lower()
-        assert "debug" in desc or "not needed" in desc or "not " in desc, (
-            "vectr_status must clarify it is for debugging, not normal exploration"
+        assert "notes_count" in desc, (
+            "vectr_status must mention notes_count so agent can decide whether to call recall"
+        )
+        assert "vectr_recall" in desc, (
+            "vectr_status must reference vectr_recall to guide the agent's next action"
         )
 
 
@@ -282,6 +308,26 @@ class TestVectrStatus:
         svc = _mock_service()
         result = handle_tools_call("vectr_status", {}, svc)
         assert "semantic=" not in result["content"][0]["text"]
+
+    def test_notes_count_shown_in_output(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_status", {}, svc)
+        text = result["content"][0]["text"]
+        assert "4" in text, "notes_count from status() must appear in vectr_status output"
+        assert "vectr_recall" in text.lower(), (
+            "when notes_count > 0, output must hint to call vectr_recall"
+        )
+
+    def test_notes_count_zero_shows_skip_hint(self) -> None:
+        svc = _mock_service()
+        svc.status.return_value = {**svc.status.return_value, "notes_count": 0}
+        result = handle_tools_call("vectr_status", {}, svc)
+        text = result["content"][0]["text"].lower()
+        assert "skip" in text or "no prior" in text, (
+            "when notes_count == 0, output must tell agent to skip vectr_recall"
+        )
+        assert "vectr_recall" not in text.replace("skip vectr_recall", "").replace("no prior", ""), \
+            "when notes_count == 0, must not prompt agent to call recall"
 
 
 # ---------------------------------------------------------------------------

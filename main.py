@@ -28,28 +28,33 @@ _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 _CLAUDE_MD = """\
 # Vectr tools — available alongside Read and Bash
 
-This workspace is indexed by vectr. Use vectr tools when they'd be faster than reading
-files directly.
+This workspace is indexed by vectr. Use vectr tools when they'd be faster than reading files directly.
 
-## Which exploration tool to use
+## Exploration tools — use when you don't know where to look
 
-| You know... | You need... | Use |
-|---|---|---|
-| A concept or behaviour (not a name) | Any code related to it | `vectr_search("description")` |
-| A symbol name, not its file | Where it's defined | `vectr_locate("SymbolName")` |
-| A symbol name | Who calls it / what it calls | `vectr_trace("symbol_name")` |
-| Nothing about the codebase yet | Architectural overview | `vectr_map()` |
+| Situation | Tool |
+|---|---|
+| Don't know which file contains X | `vectr_search("description of X")` |
+| Know the symbol name, not the file | `vectr_locate("SymbolName")` |
+| Need callers / callees of a symbol | `vectr_trace("symbol_name")` |
+| First visit, need codebase overview | `vectr_map()` |
 
-If you already know the file path, use Read directly — no need for vectr.
+If you already know the file path, use Read directly.
 
-## Memory tools — always use for cross-session continuity
+## Memory tools — for cross-session continuity
 
-The next session starts cold and won't have your current context:
+**At session start:** call `vectr_status()` to check `notes_count`.
+- If `notes_count > 0` and you are continuing prior work → `vectr_recall(query="what you need")`
+- If `notes_count == 0` or this is a fresh task → skip recall, state what you already know and proceed
 
-- Session START: `vectr_recall()` — retrieve notes from previous sessions before reading any files
-- During session: `vectr_remember(content, tags=["tag"], priority="high"|"medium"|"low")` — store
-  each key finding so you can drop the related code chunks from context
-- Session END: `vectr_snapshot("label")` — seal all notes as a named checkpoint
+**During session:** `vectr_remember(content, tags=["tag"], priority="high"|"medium"|"low")`
+Store each non-obvious finding before dropping the related code from context.
+Do not store easily re-derivable facts.
+
+**At session end:** `vectr_snapshot("label")` — seals notes as a named checkpoint (optional for short sessions).
+
+**If no prior notes exist:** briefly state your parametric understanding of this codebase
+before starting exploration — it helps calibrate where to focus searches.
 """
 
 _MCP_JSON = """\
@@ -211,6 +216,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     entry = registry.get(ws_hash)
     if entry is not None and _is_pid_alive(entry["pid"]):
         port = entry["port"]
+        _write_workspace_config(workspace, port)
         print("Vectr is already running for this workspace.", file=sys.stderr)
         print(f"  Workspace : {workspace}", file=sys.stderr)
         print(f"  Port      : {port}", file=sys.stderr)

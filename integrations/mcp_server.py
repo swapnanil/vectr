@@ -46,9 +46,12 @@ MCP_TOOLS = [
     {
         "name": "vectr_status",
         "description": (
-            "Show server health, indexed file count, chunk count, and embedding model. "
-            "Use when vectr_search returns nothing and you suspect indexing is still running. "
-            "NOT needed during normal exploration — only for debugging the vectr setup."
+            "Returns index health (files, chunks, embed model) AND notes_count (number of notes "
+            "stored from prior sessions). "
+            "Call once at the start of any session to decide whether vectr_recall is worth calling: "
+            "if notes_count > 0 and you are continuing prior work, call vectr_recall(query=...). "
+            "If notes_count == 0, skip recall entirely. "
+            "Also useful when vectr_search returns nothing and you suspect indexing is still running."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
@@ -61,7 +64,8 @@ MCP_TOOLS = [
             "If a passport has been saved: returns a compact (~300 token) plain-English summary instantly. "
             "If not yet saved: returns raw structural metadata (dir tree, languages, frameworks) "
             "and instructs you to call vectr_map_save with your synthesised summary. "
-            "NOT needed if you already know the codebase structure."
+            "NOT needed if you already know the codebase structure. "
+            "NOT a substitute for vectr_recall — call vectr_status first to check for prior notes."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
@@ -146,11 +150,12 @@ MCP_TOOLS = [
     {
         "name": "vectr_remember",
         "description": (
-            "Store a working note so you can drop the related code chunks from context without losing the information. "
-            "Use whenever you've learned something worth keeping: a file path, a call pattern, a gotcha, "
-            "progress on a task. Notes survive IDE restarts. "
-            "Store the note BEFORE dropping the related code from context. "
-            "Retrieve with vectr_recall at the start of the next session."
+            "Store a working note that survives IDE restarts and session boundaries. "
+            "Use when you've discovered something non-obvious that would save significant re-exploration later: "
+            "a non-obvious file path, a call pattern, a gotcha, a partial stub, task progress. "
+            "Store the note BEFORE dropping the related code from context — it replaces the need to re-read. "
+            "Do NOT store obvious or easily re-derivable facts (e.g. 'the main file is main.py'). "
+            "Retrieve in future sessions with vectr_recall(query='what you need')."
         ),
         "inputSchema": {
             "type": "object",
@@ -177,17 +182,23 @@ MCP_TOOLS = [
     {
         "name": "vectr_recall",
         "description": (
-            "ALWAYS call this at the start of an implementation session — before reading any files. "
-            "Returns your stored notes from previous sessions in ~200 tokens, replacing a full re-exploration. "
-            "Optionally filter by query text, tags, or priority. "
-            "If no notes exist, returns an empty result (safe to call unconditionally at session start)."
+            "Retrieve stored notes from previous sessions. "
+            "Use when continuing prior work on this codebase AND vectr_status() confirmed notes_count > 0. "
+            "Pass a targeted query to retrieve only the notes relevant to your current task — "
+            "do NOT call with no query unless you need everything (a broad recall inflates context unnecessarily). "
+            "Do NOT call if vectr_status() returned notes_count == 0, or if this is a fresh task "
+            "with no continuity from prior sessions."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Substring to search for in note content",
+                    "description": (
+                        "Natural language query to retrieve only relevant notes "
+                        "(e.g. 'set cartesian product frozenset' returns notes about that task only). "
+                        "Omit only when you need all stored notes."
+                    ),
                     "nullable": True,
                 },
                 "tags": {
@@ -212,21 +223,24 @@ MCP_TOOLS = [
     {
         "name": "vectr_evict_hint",
         "description": (
-            "Vectr tells you which retrieved code chunks you can safely drop from your context window. "
-            "Any evicted chunk is guaranteed to be returned in <50ms on demand. "
-            "Call when your context is large to reclaim space without losing information. "
-            "This is the bidirectional half of the protocol: the AI tells vectr what to store "
-            "(vectr_remember), and vectr tells the AI what it can safely forget (vectr_evict_hint)."
+            "Vectr tells you which retrieved code chunks you can safely drop from your context window — "
+            "any evicted chunk is guaranteed to be retrievable in <50ms on demand via vectr_search. "
+            "Use when your context is large and you need to reclaim space without losing information. "
+            "This is the bidirectional half of the vectr protocol: "
+            "the AI tells vectr what to store (vectr_remember), "
+            "and vectr tells the AI what it can safely forget (vectr_evict_hint). "
+            "NOT needed on short sessions — only when context is approaching the limit."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "vectr_snapshot",
         "description": (
-            "ALWAYS call before ending a long research or exploration session. "
-            "Seals all vectr_remember() notes as a named checkpoint. "
-            "At the start of the next session, vectr_recall will return these notes automatically — "
-            "no need to restore from the snapshot_id manually."
+            "Seal all current vectr_remember() notes as a named checkpoint before ending a research session. "
+            "Use at the end of a session where you've stored multiple notes and want to group them "
+            "as a named milestone (e.g. 'research-complete', 'auth-refactor-wip'). "
+            "At the start of the next session, vectr_recall will return these notes. "
+            "NOT required if you only stored 1-2 notes — vectr_recall retrieves all notes regardless."
         ),
         "inputSchema": {
             "type": "object",
@@ -335,11 +349,18 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
     # ---- vectr_status ----
     if tool_name == "vectr_status":
         status = service.status()
+        notes_count = status.get("notes_count", 0)
+        recall_hint = (
+            f"  → call vectr_recall(query=...) to retrieve them"
+            if notes_count > 0
+            else "  → no prior notes; skip vectr_recall"
+        )
         lines = [
             "Vectr status",
             f"  Indexed files  : {status['indexed_files']}",
             f"  Total chunks   : {status['total_chunks']}",
             f"  Symbols indexed: {status.get('symbol_count', 'n/a')}",
+            f"  Prior notes    : {notes_count}{recall_hint}",
             f"  Last indexed   : {status['last_indexed']}",
             f"  Embed model    : {status['embed_model']}",
             f"  Workspace      : {status['workspace_root']}",

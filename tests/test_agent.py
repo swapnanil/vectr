@@ -436,6 +436,31 @@ class TestWorkingContextStore:
         assert removed is True
         assert store.recall("/repo") == []
 
+    def test_count_notes_returns_zero_for_empty_workspace(self, tmp_path) -> None:
+        store = self._store(tmp_path)
+        assert store.count_notes("/repo") == 0
+
+    def test_count_notes_increments_on_remember(self, tmp_path) -> None:
+        store = self._store(tmp_path)
+        store.remember("/repo", "note one")
+        assert store.count_notes("/repo") == 1
+        store.remember("/repo", "note two")
+        assert store.count_notes("/repo") == 2
+
+    def test_count_notes_decrements_on_forget(self, tmp_path) -> None:
+        store = self._store(tmp_path)
+        nid = store.remember("/repo", "to forget")
+        assert store.count_notes("/repo") == 1
+        store.forget("/repo", nid)
+        assert store.count_notes("/repo") == 0
+
+    def test_count_notes_is_workspace_scoped(self, tmp_path) -> None:
+        store = self._store(tmp_path)
+        store.remember("/repo/a", "note in a")
+        store.remember("/repo/b", "note in b")
+        assert store.count_notes("/repo/a") == 1
+        assert store.count_notes("/repo/b") == 1
+
     def test_eviction_hint_lists_chunks(self, tmp_path) -> None:
         store = self._store(tmp_path)
         chunks = [{"file": "main.py", "lines": "1-40", "symbol": "run", "content": "def run(): pass"}]

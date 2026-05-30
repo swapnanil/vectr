@@ -267,6 +267,7 @@ class VectrService:
             "embed_model": self._embed_model,
             "workspace_root": self._workspace_root,
             "symbol_count": self._symbol_graph.symbol_count(self._workspace_root),
+            "notes_count": self._context_store.count_notes(self._workspace_root),
             **strategy_info,
         }
 

@@ -99,6 +99,22 @@ class TestFullPipelineFast:
         # Status must reflect the real indexed state, not a mock
         assert any(kw in text.lower() for kw in ("indexed", "chunks", "workspace"))
 
+    def test_status_notes_count_reflects_real_notes(self, real_service_client) -> None:
+        client, svc, ws = real_service_client
+
+        # Clear any notes left by previous tests in this session
+        client.post("/v1/memory/clear", json={})
+
+        # After clear: notes_count must be 0
+        resp = client.get("/v1/status")
+        assert resp.status_code == 200
+        assert resp.json()["notes_count"] == 0, "notes_count must be 0 after memory clear"
+
+        # Store a note, then confirm notes_count increments
+        client.post("/v1/remember", json={"content": "test note for count", "priority": "high"})
+        resp = client.get("/v1/status")
+        assert resp.json()["notes_count"] == 1, "notes_count must reflect stored notes in real service"
+
     def test_mcp_remember_recall_through_real_service(self, real_service_client) -> None:
         client, svc, ws = real_service_client
 
@@ -111,6 +127,32 @@ class TestFullPipelineFast:
         recall_resp = client.post("/mcp", json=_tool_call("vectr_recall", {}))
         text = recall_resp.json()["result"]["content"][0]["text"]
         assert "RateLimiter" in text
+
+    def test_targeted_recall_filters_by_query(self, real_service_client) -> None:
+        """vectr_recall(query=...) must return notes matching the query and exclude non-matching ones."""
+        client, svc, ws = real_service_client
+
+        # Use unique tokens that won't appear in any other test's notes
+        unique_match = "XTARGETED_RECALL_MATCH_TOKEN_42X"
+        unique_nomatch = "XTARGETED_RECALL_NOMATCH_TOKEN_99X"
+
+        client.post("/mcp", json=_tool_call("vectr_remember", {
+            "content": f"Rate limiter entry point: {unique_match} — at rate_limit.py:5",
+        }))
+        client.post("/mcp", json=_tool_call("vectr_remember", {
+            "content": f"Signal dispatch loop: {unique_nomatch} — at dispatcher.py:220",
+        }))
+
+        # Query for the unique match token — should find the first note, not the second
+        resp = client.post("/mcp", json=_tool_call("vectr_recall", {"query": unique_match}))
+        assert resp.status_code == 200
+        text = resp.json()["result"]["content"][0]["text"]
+        assert unique_match in text, (
+            f"targeted recall with query='{unique_match}' must return the matching note"
+        )
+        assert unique_nomatch not in text, (
+            "targeted recall must NOT return notes that don't match the query"
+        )
 
     def test_rest_remember_recall_through_real_service(self, real_service_client) -> None:
         client, svc, ws = real_service_client

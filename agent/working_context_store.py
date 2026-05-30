@@ -191,6 +191,14 @@ class WorkingContextStore:
             ).rowcount
         return count > 0
 
+    def count_notes(self, workspace: str) -> int:
+        """Return the number of notes stored for this workspace."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM notes WHERE workspace = ?", (workspace,)
+            ).fetchone()
+        return row[0] if row else 0
+
     def forget_all(self, workspace: str) -> int:
         """Clear all notes for a workspace."""
         with self._conn() as conn:

@@ -71,6 +71,7 @@ class StatusResponse(BaseModel):
     embed_model: str
     workspace_root: str
     symbol_count: int = 0
+    notes_count: int = 0
     processing_ms: int
     model: str
     # Adaptive retrieval strategy (populated after first index)

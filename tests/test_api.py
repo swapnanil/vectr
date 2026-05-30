@@ -138,6 +138,8 @@ def test_status(client) -> None:
     assert data["indexed_files"] == 12
     assert data["total_chunks"] == 500
     assert "workspace_root" in data
+    assert "notes_count" in data, "/v1/status must include notes_count for agent recall decisions"
+    assert isinstance(data["notes_count"], int)
 
 
 # ---------------------------------------------------------------------------
