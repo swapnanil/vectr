@@ -212,3 +212,92 @@ class TestShouldIndexFile:
         f = tmp_path / "Makefile"
         f.touch()
         assert should_index_file(str(f), []) is False
+
+
+# ---------------------------------------------------------------------------
+# T19: .vectrignore support
+# ---------------------------------------------------------------------------
+
+class TestVectrignore:
+    def test_get_vectrignore_dirs_empty_when_no_file(self, tmp_path) -> None:
+        from integrations.workspace_detect import get_vectrignore_dirs
+        assert get_vectrignore_dirs(str(tmp_path)) == set()
+
+    def test_get_vectrignore_dirs_reads_entries(self, tmp_path) -> None:
+        from integrations.workspace_detect import get_vectrignore_dirs
+        (tmp_path / ".vectrignore").write_text("vendor\ngenerated\n# comment\n")
+        dirs = get_vectrignore_dirs(str(tmp_path))
+        assert dirs == {"vendor", "generated"}
+
+    def test_get_vectrignore_dirs_skips_comments(self, tmp_path) -> None:
+        from integrations.workspace_detect import get_vectrignore_dirs
+        (tmp_path / ".vectrignore").write_text("# this is a comment\nproto-gen\n")
+        assert get_vectrignore_dirs(str(tmp_path)) == {"proto-gen"}
+
+    def test_write_vectrignore_creates_file(self, tmp_path) -> None:
+        from integrations.workspace_detect import write_vectrignore, get_vectrignore_dirs
+        write_vectrignore(str(tmp_path), ["vendor", "generated"])
+        dirs = get_vectrignore_dirs(str(tmp_path))
+        assert dirs == {"vendor", "generated"}
+
+    def test_write_vectrignore_appends_without_duplicates(self, tmp_path) -> None:
+        from integrations.workspace_detect import write_vectrignore, get_vectrignore_dirs
+        write_vectrignore(str(tmp_path), ["vendor"])
+        write_vectrignore(str(tmp_path), ["vendor", "generated"])  # vendor is duplicate
+        dirs = get_vectrignore_dirs(str(tmp_path))
+        assert dirs == {"vendor", "generated"}
+        content = (tmp_path / ".vectrignore").read_text()
+        assert content.count("vendor") == 1
+
+    def test_should_index_file_excludes_vectrignore_dir(self, tmp_path) -> None:
+        from integrations.workspace_detect import should_index_file
+        vendor_dir = tmp_path / "vendor"
+        vendor_dir.mkdir()
+        f = vendor_dir / "lib.py"
+        f.touch()
+        assert should_index_file(str(f), [], extra_excluded_dirs={"vendor"}) is False
+
+    def test_should_index_file_includes_non_excluded_dir(self, tmp_path) -> None:
+        from integrations.workspace_detect import should_index_file
+        src = tmp_path / "src"
+        src.mkdir()
+        f = src / "main.py"
+        f.touch()
+        assert should_index_file(str(f), [], extra_excluded_dirs={"vendor"}) is True
+
+    def test_indexer_skips_vectrignore_dirs(self, tmp_path, monkeypatch) -> None:
+        """index_workspace() must skip directories listed in .vectrignore."""
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        from agent.indexer import CodeIndexer
+
+        # Create workspace: src/main.py (should index) + vendor/lib.py (should skip)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("def main(): pass\n")
+        (tmp_path / "vendor").mkdir()
+        (tmp_path / "vendor" / "lib.py").write_text("def vendor_fn(): pass\n")
+
+        # Write .vectrignore excluding vendor
+        (tmp_path / ".vectrignore").write_text("vendor\n")
+
+        idx = CodeIndexer(str(tmp_path), db_path=str(tmp_path / "chroma"))
+        idx._embed_provider = _DummyEmbedProvider()
+        files, chunks = idx.index_workspace()
+
+        # Only src/main.py should be indexed
+        indexed = idx.indexed_file_paths
+        assert any("main.py" in p for p in indexed)
+        assert not any("vendor" in p for p in indexed), (
+            "vendor/ must be excluded via .vectrignore"
+        )
+
+    def test_vectrignore_with_existing_gitignore(self, tmp_path) -> None:
+        from integrations.workspace_detect import get_gitignore_patterns, get_vectrignore_dirs
+        (tmp_path / ".gitignore").write_text("*.pyc\n__pycache__/\n")
+        (tmp_path / ".vectrignore").write_text("vendor\n")
+        patterns = get_gitignore_patterns(str(tmp_path))
+        dirs = get_vectrignore_dirs(str(tmp_path))
+        assert "*.pyc" in patterns
+        assert "vendor" in dirs

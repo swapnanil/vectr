@@ -380,17 +380,22 @@ class CodeIndexer:
           2. Global batch embed  — 256-chunk batches across all files (vs 64 per-file)
           3. Incremental skip    — files unchanged since last index are skipped via mtime cache
         """
-        from integrations.workspace_detect import should_index_file, get_gitignore_patterns
+        from integrations.workspace_detect import (
+            should_index_file, get_gitignore_patterns, get_vectrignore_dirs,
+        )
 
         patterns = gitignore_patterns or get_gitignore_patterns(str(self.workspace_root))
+        # T19: read user-defined exclusions from .vectrignore
+        vectrignore_dirs = get_vectrignore_dirs(str(self.workspace_root))
+        all_excluded = EXCLUDED_DIRS | vectrignore_dirs
 
         # Collect candidate files
         all_files: list[Path] = []
         for dirpath, dirnames, filenames in os.walk(self.workspace_root):
-            dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS and not d.startswith(".")]
+            dirnames[:] = [d for d in dirnames if d not in all_excluded and not d.startswith(".")]
             for fname in filenames:
                 fpath = Path(dirpath) / fname
-                if should_index_file(str(fpath), patterns):
+                if should_index_file(str(fpath), patterns, extra_excluded_dirs=vectrignore_dirs):
                     all_files.append(fpath)
 
         # Incremental: split into files to index vs unchanged files to skip

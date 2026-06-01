@@ -406,6 +406,13 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     _write_workspace_config(workspace, port)
 
+    # T19: write user-defined exclusions to .vectrignore
+    exclude_dirs: list[str] = getattr(args, "exclude", None) or []
+    if exclude_dirs:
+        from integrations.workspace_detect import write_vectrignore
+        write_vectrignore(workspace, exclude_dirs)
+        print(f"  Added to .vectrignore: {', '.join(exclude_dirs)}", file=sys.stderr)
+
     # T14: write style override if --style is specified
     if getattr(args, "style", None):
         style = args.style
@@ -454,6 +461,11 @@ def main() -> None:
 
     p_init = sub.add_parser("init", help="Write CLAUDE.md and .mcp.json to a workspace (no server)")
     p_init.add_argument("--path", default=_default_path)
+    p_init.add_argument(
+        "--exclude", action="append", metavar="DIR", dest="exclude",
+        help="T19: Append a directory name to .vectrignore (repeatable). "
+             "Example: vectr init --exclude vendor --exclude generated",
+    )
     p_init.add_argument(
         "--style",
         choices=["additive", "directed", "memory-only"],

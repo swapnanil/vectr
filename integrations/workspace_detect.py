@@ -1,4 +1,4 @@
-"""Workspace root detection and .gitignore pattern parsing."""
+"""Workspace root detection, .gitignore / .vectrignore pattern parsing."""
 from __future__ import annotations
 
 import fnmatch
@@ -25,29 +25,72 @@ def find_workspace_root(start_path: str) -> str:
     return str(p)
 
 
-def get_gitignore_patterns(workspace_root: str) -> list[str]:
-    """Read .gitignore and return a list of glob patterns."""
-    gi = Path(workspace_root) / ".gitignore"
-    if not gi.exists():
+def _read_ignore_lines(path: Path) -> list[str]:
+    """Read non-blank, non-comment lines from an ignore file."""
+    if not path.exists():
         return []
-    patterns: list[str] = []
-    for line in gi.read_text(encoding="utf-8", errors="ignore").splitlines():
+    lines = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
-            patterns.append(line)
-    return patterns
+            lines.append(line)
+    return lines
 
 
-def should_index_file(file_path: str, gitignore_patterns: list[str]) -> bool:
+def get_gitignore_patterns(workspace_root: str) -> list[str]:
+    """Read .gitignore and return a list of glob patterns."""
+    return _read_ignore_lines(Path(workspace_root) / ".gitignore")
+
+
+def get_vectrignore_dirs(workspace_root: str) -> set[str]:
+    """T19: Read .vectrignore and return a set of directory names to exclude.
+
+    .vectrignore format: one directory name per line, # comments supported.
+    Example:
+        # exclude vendor and generated code
+        vendor
+        generated
+        proto-gen
+    """
+    return set(_read_ignore_lines(Path(workspace_root) / ".vectrignore"))
+
+
+def write_vectrignore(workspace_root: str, dirs: list[str]) -> None:
+    """T19: Append directory names to .vectrignore, skipping duplicates."""
+    vectrignore = Path(workspace_root) / ".vectrignore"
+    existing: set[str] = set()
+    lines: list[str] = []
+
+    if vectrignore.exists():
+        raw = vectrignore.read_text(encoding="utf-8", errors="ignore")
+        lines = raw.splitlines()
+        existing = {l.strip() for l in lines if l.strip() and not l.strip().startswith("#")}
+
+    new_dirs = [d for d in dirs if d not in existing]
+    if not new_dirs:
+        return
+
+    if lines and lines[-1].strip():
+        lines.append("")  # blank separator before new entries
+    lines.extend(new_dirs)
+    vectrignore.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def should_index_file(
+    file_path: str,
+    gitignore_patterns: list[str],
+    extra_excluded_dirs: set[str] | None = None,
+) -> bool:
     """Return True if the file should be indexed."""
     path = Path(file_path)
 
     if path.suffix.lower() not in _SUPPORTED_EXTS:
         return False
 
-    # skip directories that are always excluded
+    excluded = _ALWAYS_SKIP | (extra_excluded_dirs or set())
+
     for part in path.parts:
-        if part in _ALWAYS_SKIP:
+        if part in excluded:
             return False
 
     # check gitignore patterns
@@ -58,7 +101,6 @@ def should_index_file(file_path: str, gitignore_patterns: list[str]) -> bool:
             return False
         if fnmatch.fnmatch(rel, pattern):
             return False
-        # directory pattern: "dist/" matches any path with dist as a component
         if pattern.endswith("/"):
             if pattern.rstrip("/") in path.parts:
                 return False
