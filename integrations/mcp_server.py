@@ -162,7 +162,13 @@ MCP_TOOLS = [
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "The working note to store (1-3 sentences: what you know, key files, what's left)",
+                    "description": (
+                        "The note to store. Store whatever you would need to avoid re-reading the file later. "
+                        "If you found a function you'll call or modify — paste its signature and body. "
+                        "If you found a pattern you'll need to replicate — paste the pattern. "
+                        "If you found a location — include the file:line AND the relevant excerpt, not just the pointer. "
+                        "Prose descriptions send the next conversation back to the file; actual code does not."
+                    ),
                 },
                 "tags": {
                     "type": "array",

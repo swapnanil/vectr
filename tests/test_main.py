@@ -285,6 +285,23 @@ class TestWriteWorkspaceConfig:
             "CLAUDE.md must frame recall as conditional on continuing prior work"
         )
 
+    def test_claude_md_encourages_code_in_notes(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "actual code block" in content or "real code" in content or "code block" in content, (
+            "CLAUDE.md must instruct agent to store code blocks, not prose descriptions"
+        )
+        assert "re-read" in content or "re-reading" in content, (
+            "CLAUDE.md must explain that code notes prevent re-reading files"
+        )
+
+    def test_claude_md_has_recall_usage_guidance(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "fill gaps" in content or "directly" in content, (
+            "CLAUDE.md must tell agent to work from recalled notes directly, use search only to fill gaps"
+        )
+
     def test_claude_md_not_overwritten_if_present(self, tmp_path):
         (tmp_path / "CLAUDE.md").write_text("custom")
         m._write_workspace_config(str(tmp_path), 8765)

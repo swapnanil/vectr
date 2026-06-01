@@ -134,6 +134,17 @@ class TestToolDescriptions:
             "vectr_remember must warn against storing easily re-derivable facts"
         )
 
+    def test_remember_content_schema_encourages_code_not_prose(self) -> None:
+        from integrations.mcp_server import MCP_TOOLS
+        tool = next(t for t in MCP_TOOLS if t["name"] == "vectr_remember")
+        content_desc = tool["inputSchema"]["properties"]["content"]["description"].lower()
+        assert "paste" in content_desc or "signature" in content_desc or "code" in content_desc, (
+            "vectr_remember content description must encourage storing actual code, not prose"
+        )
+        assert "1-3 sentences" not in content_desc, (
+            "vectr_remember content description must not constrain to 1-3 sentences"
+        )
+
     def test_map_says_not_substitute_for_recall(self) -> None:
         desc = self._desc("vectr_map").lower()
         assert "vectr_status" in desc or "vectr_recall" in desc, (

@@ -48,13 +48,19 @@ If you already know the file path, use Read directly.
 - If `notes_count == 0` or this is a fresh task → skip recall, state what you already know and proceed
 
 **During session:** `vectr_remember(content, tags=["tag"], priority="high"|"medium"|"low")`
-Store each non-obvious finding before dropping the related code from context.
-Do not store easily re-derivable facts.
+When you store a finding you expect to act on later — writing, modifying, or extending it —
+include the actual code block, not a description of it. A note with the real code means the
+next conversation can start working immediately; a note with "see file X line Y" means it has
+to re-read that file first. Prefer 3-5 focused notes (stub + key definitions + pattern template)
+over 1 broad summary.
 
 **At session end:** `vectr_snapshot("label")` — seals notes as a named checkpoint (optional for short sessions).
 
 **If no prior notes exist:** briefly state your parametric understanding of this codebase
 before starting exploration — it helps calibrate where to focus searches.
+
+**If recalled notes contain the code you need:** work from them directly.
+Use vectr_search or Read to fill gaps — not to re-discover what the notes already say.
 """
 
 _MCP_JSON = """\
