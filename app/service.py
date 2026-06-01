@@ -61,8 +61,13 @@ class VectrService:
         # L2 — symbol graph
         self._symbol_graph = SymbolGraph(db_dir)
 
-        # Memory layer
-        self._context_store = WorkingContextStore(db_dir)
+        # Memory layer — semantic recall enabled via the same embedder + ChromaDB client
+        # used by the code index, so no extra model load or second DB process.
+        self._context_store = WorkingContextStore(
+            db_dir,
+            embed_fn=self._indexer.embed_texts,
+            notes_chroma_client=self._indexer.chroma_client,
+        )
 
         # Session eviction advisor
         self._eviction_advisor = EvictionAdvisor(

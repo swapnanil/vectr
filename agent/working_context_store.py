@@ -170,11 +170,32 @@ class WorkingContextStore:
 
     Design principle: the LLM should never be afraid to forget something
     if Vectr has it. This store is the guarantee.
+
+    When embed_fn and notes_chroma_client are provided, note content is embedded
+    at remember() time and stored in a ChromaDB 'working_memory' collection.
+    recall(query=...) then uses cosine similarity to find relevant notes instead
+    of SQL LIKE substring matching. SQL LIKE is retained as a fallback.
     """
 
-    def __init__(self, db_dir: str) -> None:
+    def __init__(
+        self,
+        db_dir: str,
+        embed_fn=None,
+        notes_chroma_client=None,
+    ) -> None:
         self._db_path = Path(db_dir) / "working_context.sqlite"
         self._encryptor: _NoteEncryptor | None = _build_encryptor()
+        # Semantic recall: embed notes at write time, cosine search at recall time
+        self._embed_fn = embed_fn   # Callable[[list[str]], list[list[float]]] | None
+        self._notes_col = None
+        if embed_fn is not None and notes_chroma_client is not None:
+            try:
+                self._notes_col = notes_chroma_client.get_or_create_collection(
+                    name="working_memory",
+                    metadata={"hnsw:space": "cosine"},
+                )
+            except Exception:
+                pass  # embedding unavailable — fall back to SQL LIKE silently
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
@@ -309,6 +330,15 @@ class WorkingContextStore:
                     (workspace, author_id),
                 )
 
+        # Embed and store in the vector index so recall(query=...) can use cosine similarity.
+        # content is the plaintext (before encryption) — embeddings are over raw text.
+        if self._notes_col is not None and self._embed_fn is not None:
+            try:
+                vec = self._embed_fn([content])[0]
+                self._notes_col.upsert(ids=[str(note_id)], embeddings=[vec])
+            except Exception:
+                pass  # embedding failure never blocks the write path
+
         audit("REMEMBER", workspace=workspace, note_id=note_id, priority=priority,
               author_id=author_id, code_hash=code_hash[:8] if code_hash else "",
               tags=",".join(tags or []), chars=len(content))
@@ -325,11 +355,28 @@ class WorkingContextStore:
     ) -> list[WorkingNote]:
         """Retrieve working notes.
 
+        When query is provided and semantic search is available (embed_fn + ChromaDB
+        collection configured), uses cosine similarity to rank notes by relevance.
+        Falls back to SQL LIKE substring match when semantic search is unavailable.
+
         Superseded notes are excluded by default. Pass include_superseded=True
         to see the full history including notes marked as superseded.
-        Results ordered by author_trust_score DESC, decay_score DESC, last_accessed DESC
-        so the highest-trust contributor's notes surface first.
+        Without a query, results are ordered by author_trust_score DESC, decay_score DESC,
+        last_accessed DESC so the highest-trust contributor's notes surface first.
         """
+        # Semantic path: embed the query, find cosine-nearest notes, then fetch from SQLite.
+        if query and self._notes_col is not None and self._embed_fn is not None:
+            try:
+                notes = self._semantic_recall(
+                    workspace, query, tags, priority, limit, include_superseded
+                )
+                audit("RECALL", workspace=workspace, query=query, notes_returned=len(notes),
+                      method="semantic")
+                return notes
+            except Exception:
+                pass  # fall through to SQL LIKE
+
+        # SQL path: used when no query, or when semantic search is unavailable/errored.
         sql = "SELECT * FROM notes WHERE workspace = ?"
         params: list = [workspace]
 
@@ -365,7 +412,67 @@ class WorkingContextStore:
                     [time.time(), *ids],
                 )
 
-        audit("RECALL", workspace=workspace, query=query or "", notes_returned=len(notes))
+        audit("RECALL", workspace=workspace, query=query or "", notes_returned=len(notes),
+              method="sql")
+        return notes
+
+    def _semantic_recall(
+        self,
+        workspace: str,
+        query: str,
+        tags: list[str] | None,
+        priority: str | None,
+        limit: int,
+        include_superseded: bool,
+    ) -> list[WorkingNote]:
+        """Find the most relevant notes by cosine similarity, then fetch from SQLite."""
+        # Cap n_results at collection size to avoid ChromaDB errors on small collections
+        col_count = self._notes_col.count()
+        if col_count == 0:
+            return []
+        n_query = min(limit * 3, col_count)
+
+        q_vec = self._embed_fn([query])[0]
+        results = self._notes_col.query(query_embeddings=[q_vec], n_results=n_query)
+
+        if not results or not results["ids"] or not results["ids"][0]:
+            return []
+
+        candidate_ids = [int(id_) for id_ in results["ids"][0]]
+
+        # Fetch from SQLite by semantic candidate IDs, applying metadata filters
+        placeholders = ",".join("?" * len(candidate_ids))
+        sql = f"SELECT * FROM notes WHERE workspace = ? AND note_id IN ({placeholders})"
+        params: list = [workspace, *candidate_ids]
+
+        if not include_superseded:
+            sql += " AND valid_until IS NULL"
+
+        if priority:
+            sql += " AND priority = ?"
+            params.append(priority)
+
+        if tags:
+            tag_clauses = " OR ".join(["tags LIKE ?" for _ in tags])
+            sql += f" AND ({tag_clauses})"
+            params.extend([f'%"{t}"%' for t in tags])
+
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        # Preserve semantic rank order (ChromaDB returns by ascending distance)
+        id_to_row = {r["note_id"]: r for r in rows}
+        ordered = [id_to_row[nid] for nid in candidate_ids if nid in id_to_row][:limit]
+        notes = [self._row_to_note(r) for r in ordered]
+
+        if notes:
+            ids = [n.note_id for n in notes]
+            with self._conn() as conn:
+                conn.execute(
+                    f"UPDATE notes SET last_accessed = ? WHERE note_id IN ({','.join('?' * len(ids))})",
+                    [time.time(), *ids],
+                )
+
         return notes
 
     def forget(self, workspace: str, note_id: int) -> bool:
@@ -375,6 +482,11 @@ class WorkingContextStore:
                 "DELETE FROM notes WHERE workspace = ? AND note_id = ?",
                 (workspace, note_id),
             ).rowcount
+        if count > 0 and self._notes_col is not None:
+            try:
+                self._notes_col.delete(ids=[str(note_id)])
+            except Exception:
+                pass
         return count > 0
 
     def count_notes(self, workspace: str) -> int:
@@ -391,6 +503,13 @@ class WorkingContextStore:
             deleted = conn.execute(
                 "DELETE FROM notes WHERE workspace = ?", (workspace,)
             ).rowcount
+        if deleted > 0 and self._notes_col is not None:
+            try:
+                existing_ids = self._notes_col.get(include=[])["ids"]
+                if existing_ids:
+                    self._notes_col.delete(ids=existing_ids)
+            except Exception:
+                pass
         audit("FORGET_ALL", workspace=workspace, deleted=deleted)
         return deleted
 

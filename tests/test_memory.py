@@ -854,3 +854,116 @@ class TestP4TeamNotes:
         store.remember(ws, "new", author_id="b", code_hash=code_hash)
         notes = store.recall(ws, include_superseded=True)
         assert len(notes) == 2
+
+
+# ---------------------------------------------------------------------------
+# B9: Semantic recall — embed_fn + ChromaDB cosine similarity
+# ---------------------------------------------------------------------------
+
+def _dummy_embed(texts: list[str]) -> list[list[float]]:
+    """Hash-based deterministic embedder for tests — same input → same vector."""
+    import hashlib
+    result = []
+    for t in texts:
+        h = hashlib.md5(t.encode()).digest()
+        vec = [(b / 255.0 - 0.5) for b in (h * 48)]  # 16 * 48 = 768 dims
+        norm = sum(x * x for x in vec) ** 0.5 or 1.0
+        result.append([x / norm for x in vec])
+    return result
+
+
+def _semantic_store(tmp_path):
+    """Return a WorkingContextStore wired up with a dummy embedder + isolated ChromaDB."""
+    import chromadb
+    from agent.working_context_store import WorkingContextStore
+    # PersistentClient with tmp_path gives true per-test isolation; EphemeralClient
+    # shares in-memory state across all instances in the same process.
+    chroma_dir = str(tmp_path / "chroma")
+    client = chromadb.PersistentClient(path=chroma_dir)
+    return WorkingContextStore(str(tmp_path), embed_fn=_dummy_embed, notes_chroma_client=client)
+
+
+class TestSemanticRecall:
+    """B9 — recall(query=...) uses cosine similarity instead of SQL LIKE."""
+
+    def test_semantic_recall_returns_notes(self, tmp_path) -> None:
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        content = "handle_legacy_finalizers appends to gc.garbage when tp_del is set"
+        store.remember(ws, content)
+        # Query with the exact content — same embedding → cosine 1.0 → must be top result
+        notes = store.recall(ws, query=content)
+        assert len(notes) == 1
+        assert notes[0].content == content
+
+    def test_semantic_recall_without_query_falls_back_to_sql(self, tmp_path) -> None:
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        store.remember(ws, "gc finalizer note")
+        notes = store.recall(ws)  # no query → SQL path
+        assert len(notes) == 1
+
+    def test_no_embed_fn_uses_sql_like(self, tmp_path) -> None:
+        from agent.working_context_store import WorkingContextStore
+        store = WorkingContextStore(str(tmp_path))  # no embed_fn → SQL only
+        ws = "/repo"
+        store.remember(ws, "gc finalizer note about tp_del")
+        notes = store.recall(ws, query="tp_del")
+        assert len(notes) == 1  # SQL LIKE matches "tp_del" as substring
+
+    def test_semantic_recall_with_multiple_notes(self, tmp_path) -> None:
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        note_a = "GC finalizer tp_del legacy path gc.garbage deferral"
+        note_b = "dict pop_last dk_nentries insertion order reverse traversal"
+        store.remember(ws, note_a, tags=["gc"])
+        store.remember(ws, note_b, tags=["dict"])
+        # Querying with note_a's exact text → note_a should appear in results
+        notes = store.recall(ws, query=note_a, limit=2)
+        assert len(notes) >= 1
+        assert any(n.content == note_a for n in notes)
+
+    def test_semantic_recall_respects_limit(self, tmp_path) -> None:
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        for i in range(5):
+            store.remember(ws, f"note content {i}")
+        notes = store.recall(ws, query="note content 0", limit=2)
+        assert len(notes) <= 2
+
+    def test_semantic_recall_empty_collection_returns_empty(self, tmp_path) -> None:
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        notes = store.recall(ws, query="anything")
+        assert notes == []
+
+    def test_forget_removes_from_chroma(self, tmp_path) -> None:
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store = WorkingContextStore(str(tmp_path), embed_fn=_dummy_embed, notes_chroma_client=client)
+        ws = "/repo"
+        note_id = store.remember(ws, "gc finalizer note")
+        assert store._notes_col.count() == 1
+        store.forget(ws, note_id)
+        assert store._notes_col.count() == 0
+
+    def test_forget_all_clears_chroma(self, tmp_path) -> None:
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store = WorkingContextStore(str(tmp_path), embed_fn=_dummy_embed, notes_chroma_client=client)
+        ws = "/repo"
+        store.remember(ws, "note one")
+        store.remember(ws, "note two")
+        assert store._notes_col.count() == 2
+        store.forget_all(ws)
+        assert store._notes_col.count() == 0
+
+    def test_semantic_collection_name_is_working_memory(self, tmp_path) -> None:
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store = WorkingContextStore(str(tmp_path), embed_fn=_dummy_embed, notes_chroma_client=client)
+        col_names = [c.name for c in client.list_collections()]
+        assert "working_memory" in col_names

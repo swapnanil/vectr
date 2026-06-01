@@ -617,6 +617,15 @@ class CodeIndexer:
         """Embed a single query string. Public method for external callers."""
         return self._embed_provider.embed([text])[0]
 
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of texts using the configured embed provider."""
+        return self._embed_provider.embed(texts)
+
+    @property
+    def chroma_client(self):
+        """The underlying ChromaDB client — shared with the working memory collection."""
+        return self._client
+
     def get_all_documents(self) -> tuple[list[str], list[str], list[dict]]:
         """Return (ids, documents, metadatas) for all stored chunks — used by BM25 index.
 
