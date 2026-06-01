@@ -383,6 +383,11 @@ def handle_tools_call(
     session_id: str | None = None,
 ) -> dict:
     """Dispatch an MCP tool call. `service` is the VectrService instance."""
+    # Count every tool call — used by the tool-call-count eviction trigger
+    try:
+        service._eviction_advisor.increment_tool_call()
+    except Exception:
+        pass
 
     # ---- vectr_search ----
     if tool_name == "vectr_search":

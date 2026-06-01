@@ -270,3 +270,48 @@ class TestAsChunkDicts:
     def test_empty_session_returns_empty_list(self) -> None:
         adv = EvictionAdvisor()
         assert adv.as_chunk_dicts() == []
+
+
+# ---------------------------------------------------------------------------
+# EvictionAdvisor — tool_call_count secondary trigger
+# ---------------------------------------------------------------------------
+
+class TestToolCallCountTrigger:
+    def test_evicts_after_tool_call_threshold(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=5)
+        assert adv.should_evict() is False
+        for _ in range(5):
+            adv.increment_tool_call()
+        assert adv.should_evict() is False  # exactly at threshold, not over
+        adv.increment_tool_call()
+        assert adv.should_evict() is True   # > threshold
+
+    def test_token_threshold_still_works_independently(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=1, tool_call_threshold=1000)
+        adv.record("f.py", "1-5", "fn", "x" * 100)
+        assert adv.should_evict() is True   # token threshold fired, not tool-call
+
+    def test_clear_session_resets_tool_call_count(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=3)
+        for _ in range(5):
+            adv.increment_tool_call()
+        assert adv.should_evict() is True
+        adv.clear_session()
+        assert adv.should_evict() is False
+        assert adv._tool_call_count == 0
+
+    def test_default_tool_call_threshold_is_20(self) -> None:
+        adv = EvictionAdvisor()
+        assert adv._tool_call_threshold == 20
+
+    def test_21_tool_calls_triggers_eviction(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=20)
+        for _ in range(21):
+            adv.increment_tool_call()
+        assert adv.should_evict() is True
+
+    def test_20_tool_calls_no_eviction(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=20)
+        for _ in range(20):
+            adv.increment_tool_call()
+        assert adv.should_evict() is False  # exactly 20, not > 20

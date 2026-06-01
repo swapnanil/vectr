@@ -48,11 +48,21 @@ class EvictionAdvisor:
         hint = advisor.eviction_hint() # returns text the LLM can act on
     """
 
-    def __init__(self, eviction_threshold_tokens: int = 40_000) -> None:
-        # 40K injected tokens ≈ 60-80% real window fill when accounting for system
-        # prompt and inter-turn overhead (arXiv:2310.08560 + arXiv:2510.24699).
+    def __init__(
+        self,
+        eviction_threshold_tokens: int = 40_000,
+        tool_call_threshold: int = 20,
+    ) -> None:
+        # Fire when EITHER:
+        #   cumulative injected chars ÷ 4 > 40K  (vectr-tracked content)
+        #   tool_call_count > 20                  (total MCP calls this session)
+        # Rationale: the tool-call count catches sessions where the agent reads
+        # mostly via Read/Bash (invisible to token tracking) but is still filling
+        # its context window. arXiv:2310.08560, arXiv:2510.24699.
         self._threshold = eviction_threshold_tokens
+        self._tool_call_threshold = tool_call_threshold
         self._chunks: list[RetrievedChunk] = []
+        self._tool_call_count: int = 0
 
     def record(self, file_path: str, lines: str, symbol_name: str, content: str) -> None:
         """Record a chunk that was delivered to the LLM this session."""
@@ -77,11 +87,18 @@ class EvictionAdvisor:
                 content=r.content,
             )
 
+    def increment_tool_call(self) -> None:
+        """Increment the total MCP tool call counter for this session."""
+        self._tool_call_count += 1
+
     def total_tokens_in_session(self) -> int:
         return sum(c.estimated_tokens for c in self._chunks)
 
     def should_evict(self) -> bool:
-        return self.total_tokens_in_session() >= self._threshold
+        return (
+            self.total_tokens_in_session() >= self._threshold
+            or self._tool_call_count > self._tool_call_threshold
+        )
 
     def eviction_hint(self) -> str:
         """
@@ -119,6 +136,7 @@ class EvictionAdvisor:
     def clear_session(self) -> None:
         """Reset for a new session."""
         self._chunks.clear()
+        self._tool_call_count = 0
 
     def as_chunk_dicts(self) -> list[dict]:
         """Serialisable form for snapshot storage."""
