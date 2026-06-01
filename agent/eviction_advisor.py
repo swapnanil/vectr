@@ -9,6 +9,15 @@ can be dropped because it's guaranteed retrievable.
 The advisor tracks which chunks have been retrieved in the current session and
 estimates their token cost. When the session hits a threshold, it fires an
 eviction hint.
+
+Limitation — Read/Bash blind spot (E2):
+The advisor only tracks content delivered through vectr's own tools (vectr_search,
+vectr_locate, vectr_trace, vectr_recall). Code the agent reads via the IDE's native
+Read or Bash tools is invisible here. Token estimates are therefore a lower bound;
+eviction may fire later than ideal on sessions that mix vectr retrieval with direct
+file reading. The gap shrinks as agents adopt vectr_search as their primary navigation
+path (Problem 3). Track `vectr_evict_hint_triggered` in benchmarks (E5) to monitor
+real-world eviction uptake.
 """
 from __future__ import annotations
 
