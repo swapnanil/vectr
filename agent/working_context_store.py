@@ -207,8 +207,6 @@ class WorkingContextStore:
 
                 CREATE INDEX IF NOT EXISTS idx_notes_workspace ON notes(workspace);
                 CREATE INDEX IF NOT EXISTS idx_notes_tags ON notes(tags);
-                CREATE INDEX IF NOT EXISTS idx_notes_code_hash ON notes(code_hash);
-                CREATE INDEX IF NOT EXISTS idx_notes_valid ON notes(valid_until);
 
                 CREATE TABLE IF NOT EXISTS author_trust (
                     workspace           TEXT NOT NULL,
@@ -242,6 +240,10 @@ class WorkingContextStore:
             for col, typedef in p4_cols.items():
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE notes ADD COLUMN {col} {typedef}")
+
+            # Create indexes that depend on migrated columns — must run AFTER migration
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_code_hash ON notes(code_hash)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_valid ON notes(valid_until)")
 
     # ------------------------------------------------------------------
     # Notes — vectr_remember / vectr_recall / vectr_forget
