@@ -28,39 +28,39 @@ _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 _CLAUDE_MD = """\
 # Vectr tools — available alongside Read and Bash
 
-This workspace is indexed by vectr. Use vectr tools when they'd be faster than reading files directly.
+Vectr gives you two things: semantic search over this codebase and a working memory that persists
+across sessions. Use vectr tools in place of grep, find, and Read when you don't already know
+where to look — each tool targets a specific gap in what you can address directly.
 
-## Exploration tools — use when you don't know where to look
+## Exploration tools
 
-| Situation | Tool |
+| Tool | Purpose |
 |---|---|
-| Don't know which file contains X | `vectr_search("description of X")` |
-| Know the symbol name, not the file | `vectr_locate("SymbolName")` |
-| Need callers / callees of a symbol | `vectr_trace("symbol_name")` |
-| First visit, need codebase overview | `vectr_map()` |
+| `vectr_search("natural language description")` | Semantic search — describe what you're looking for, get the most relevant code chunks back. Replaces grep + cat loops. |
+| `vectr_locate("SymbolName")` | Symbol graph lookup — name → definition file and line. Faster than any file scan. |
+| `vectr_trace("symbol_name")` | Call graph — callers and callees of a symbol, without reading files. |
+| `vectr_map()` | Codebase overview — file tree + module summaries. Use once on a completely unknown repo. |
 
-If you already know the file path, use Read directly.
+If you already know the file path, use Read directly — don't search for what you can address directly.
 
-## Memory tools — for cross-session continuity
+## Working memory tools
 
-**At session start:** call `vectr_status()` to check `notes_count`.
-- If `notes_count > 0` and you are continuing prior work → `vectr_recall(query="what you need")`
-- If `notes_count == 0` or this is a fresh task → skip recall, state what you already know and proceed
+Notes are accumulated findings from prior sessions on this codebase. Reading a note costs nothing;
+re-reading the file it describes costs tokens and turns.
 
-**During session:** `vectr_remember(content, tags=["tag"], priority="high"|"medium"|"low")`
-When you store a finding you expect to act on later — writing, modifying, or extending it —
-include the actual code block, not a description of it. A note with the real code means the
-next conversation can start working immediately; a note with "see file X line Y" means it has
-to re-read that file first. Prefer 3-5 focused notes (stub + key definitions + pattern template)
-over 1 broad summary.
+**At session start:** `vectr_status()` — always call this first.
+- `notes_count > 0` → call `vectr_recall(query="<your task in plain English>")` once, before opening any files
+- `notes_count == 0` → skip recall and proceed
 
-**At session end:** `vectr_snapshot("label")` — seals notes as a named checkpoint (optional for short sessions).
+**During the session:** `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")`
+Store actual code blocks, not file pointers. "The tp_del slot is set here: `[paste code]`" is useful;
+"see gc.c line 42" is not — the next session still has to re-read the file.
+Prefer 3–5 focused notes (one per key definition or pattern) over one broad summary.
 
-**If no prior notes exist:** briefly state your parametric understanding of this codebase
-before starting exploration — it helps calibrate where to focus searches.
+**When context is getting full or at natural breakpoints:** `vectr_snapshot("label")` — seals current notes as a checkpoint. Once a finding is in a note, you no longer need the source file in your context window. A fresh session recalls exactly what it needs — without re-reading everything this session explored.
 
-**If recalled notes contain the code you need:** work from them directly.
-Use vectr_search or Read to fill gaps — not to re-discover what the notes already say.
+**If recalled notes already contain what you need:** work from them directly.
+Use vectr_search or Read only to fill genuine gaps — not to re-discover what notes already say.
 """
 
 _MCP_JSON = """\

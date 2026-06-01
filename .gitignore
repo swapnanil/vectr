@@ -58,6 +58,9 @@ chroma/
 *.db
 ~/.cache/vectr/
 
+# Benchmark workspaces (repo clones — not /tmp to avoid macOS eviction)
+tmp/
+
 # Benchmark outputs (large JSON/txt artefacts — keep the folder structure)
 benchmarks/*/poc_results_*.json
 benchmarks/*/answer_*.txt
