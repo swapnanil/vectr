@@ -39,7 +39,9 @@ class EvictionAdvisor:
         hint = advisor.eviction_hint() # returns text the LLM can act on
     """
 
-    def __init__(self, eviction_threshold_tokens: int = 4000) -> None:
+    def __init__(self, eviction_threshold_tokens: int = 40_000) -> None:
+        # 40K injected tokens ≈ 60-80% real window fill when accounting for system
+        # prompt and inter-turn overhead (arXiv:2310.08560 + arXiv:2510.24699).
         self._threshold = eviction_threshold_tokens
         self._chunks: list[RetrievedChunk] = []
 

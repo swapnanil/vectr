@@ -236,10 +236,10 @@ MCP_TOOLS = [
     {
         "name": "vectr_snapshot",
         "description": (
-            "Seal all current vectr_remember() notes as a named checkpoint before ending a research session. "
-            "Use at the end of a session where you've stored multiple notes and want to group them "
-            "as a named milestone (e.g. 'research-complete', 'auth-refactor-wip'). "
-            "At the start of the next session, vectr_recall will return these notes. "
+            "Seal all current vectr_remember() notes as a named checkpoint. "
+            "Use when you've stored multiple notes and want to mark a milestone you can return to "
+            "(e.g. 'auth-refactor-wip', 'segment-targeting-done'). "
+            "The next time you work on this, vectr_recall will return these notes. "
             "NOT required if you only stored 1-2 notes — vectr_recall retrieves all notes regardless."
         ),
         "inputSchema": {
@@ -403,6 +403,10 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
         limit = int(arguments.get("limit", 10))
         symbols = service.locate_with_snippets(name, limit=limit)
         text = service.format_locate(symbols, name)
+        if service.should_evict():
+            hint = service.eviction_hint()
+            if hint:
+                text += f"\n\n─── Context management hint ───\n{hint}"
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_trace ----
@@ -416,6 +420,10 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
         limit = int(arguments.get("limit", 20))
         trace_result = service.trace_with_snippets(name, direction=direction, limit=limit)
         text = service.format_trace(trace_result, name)
+        if service.should_evict():
+            hint = service.eviction_hint()
+            if hint:
+                text += f"\n\n─── Context management hint ───\n{hint}"
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_remember ----
@@ -440,6 +448,10 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
         priority = arguments.get("priority") or None
         limit = int(arguments.get("limit", 10))
         text = service.recall(query=query, tags=tags, priority=priority, limit=limit)
+        if service.should_evict():
+            hint = service.eviction_hint()
+            if hint:
+                text += f"\n\n─── Context management hint ───\n{hint}"
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_evict_hint ----

@@ -140,10 +140,10 @@ class TestToolDescriptions:
             "vectr_map must clarify it is not a substitute for vectr_recall / vectr_status"
         )
 
-    def test_snapshot_says_call_before_ending_session(self) -> None:
+    def test_snapshot_describes_milestone_grouping(self) -> None:
         desc = self._desc("vectr_snapshot").lower()
-        assert "end" in desc or "ending" in desc or "before" in desc, (
-            "vectr_snapshot must tell the model to call it before ending a session"
+        assert "milestone" in desc or "checkpoint" in desc or "return" in desc, (
+            "vectr_snapshot must frame itself as a milestone/checkpoint to return to, not as session-ending vocab"
         )
 
     def test_evict_hint_mentions_bidirectional_protocol(self) -> None:
@@ -387,6 +387,19 @@ class TestVectrLocate:
         handle_tools_call("vectr_locate", {"name": "foo", "limit": 5}, svc)
         svc.locate_with_snippets.assert_called_once_with("foo", limit=5)
 
+    def test_locate_appends_eviction_hint_when_should_evict(self) -> None:
+        svc = _mock_service()
+        svc.should_evict.return_value = True
+        svc.eviction_hint.return_value = "Drop these: auth.py"
+        result = handle_tools_call("vectr_locate", {"name": "verify_token"}, svc)
+        assert "Drop these: auth.py" in result["content"][0]["text"]
+
+    def test_locate_no_eviction_hint_when_below_threshold(self) -> None:
+        svc = _mock_service()
+        svc.should_evict.return_value = False
+        result = handle_tools_call("vectr_locate", {"name": "verify_token"}, svc)
+        assert "Context management hint" not in result["content"][0]["text"]
+
 
 # ---------------------------------------------------------------------------
 # vectr_trace
@@ -419,6 +432,19 @@ class TestVectrTrace:
         result = handle_tools_call("vectr_trace", {"name": "dispatch"}, svc)
         assert result["isError"] is False
         assert result["content"][0]["text"] == "No trace."
+
+    def test_trace_appends_eviction_hint_when_should_evict(self) -> None:
+        svc = _mock_service()
+        svc.should_evict.return_value = True
+        svc.eviction_hint.return_value = "Drop these: bidder.py"
+        result = handle_tools_call("vectr_trace", {"name": "dispatch"}, svc)
+        assert "Drop these: bidder.py" in result["content"][0]["text"]
+
+    def test_trace_no_eviction_hint_when_below_threshold(self) -> None:
+        svc = _mock_service()
+        svc.should_evict.return_value = False
+        result = handle_tools_call("vectr_trace", {"name": "dispatch"}, svc)
+        assert "Context management hint" not in result["content"][0]["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +507,19 @@ class TestVectrRecall:
         result = handle_tools_call("vectr_recall", {}, svc)
         assert result["isError"] is False
         assert "Notes" in result["content"][0]["text"]
+
+    def test_recall_appends_eviction_hint_when_should_evict(self) -> None:
+        svc = _mock_service()
+        svc.should_evict.return_value = True
+        svc.eviction_hint.return_value = "Drop these: segment.py"
+        result = handle_tools_call("vectr_recall", {}, svc)
+        assert "Drop these: segment.py" in result["content"][0]["text"]
+
+    def test_recall_no_eviction_hint_when_below_threshold(self) -> None:
+        svc = _mock_service()
+        svc.should_evict.return_value = False
+        result = handle_tools_call("vectr_recall", {}, svc)
+        assert "Context management hint" not in result["content"][0]["text"]
 
 
 # ---------------------------------------------------------------------------

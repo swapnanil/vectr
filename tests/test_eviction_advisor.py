@@ -128,6 +128,21 @@ class TestShouldEvict:
         assert adv_low.should_evict() is True
         assert adv_high.should_evict() is False
 
+    def test_default_threshold_is_40k(self) -> None:
+        # Default threshold must be 40,000 tokens (research-backed: arXiv:2310.08560).
+        # 4K was too low and caused premature eviction hints on small sessions.
+        adv = EvictionAdvisor()
+        assert adv._threshold == 40_000
+
+    def test_40k_chars_triggers_eviction(self) -> None:
+        adv = EvictionAdvisor()
+        # 40K chars ÷ 4 = 10K tokens — below threshold → no eviction
+        adv.record("f.py", "1-100", "fn", "x" * 40_000)
+        assert adv.should_evict() is False
+        # 160K chars ÷ 4 = 40K tokens — at threshold → eviction fires
+        adv.record("g.py", "1-100", "fn2", "y" * 120_000)
+        assert adv.should_evict() is True
+
 
 # ---------------------------------------------------------------------------
 # EvictionAdvisor — total_tokens_in_session
