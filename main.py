@@ -373,6 +373,20 @@ def cmd_restart(args: argparse.Namespace) -> None:
 def cmd_forget(args: argparse.Namespace) -> None:
     import httpx
 
+    # T17: --all clears notes across ALL workspaces directly via SQLite,
+    # bypassing the running server (server may be down, or multiple instances).
+    if getattr(args, "all", False):
+        from agent.working_context_store import WorkingContextStore
+        import glob
+        cache_root = Path.home() / ".cache" / "vectr" / "db"
+        db_files = list(cache_root.glob("*/working_context.sqlite"))
+        total = 0
+        for db_file in db_files:
+            store = WorkingContextStore(str(db_file.parent))
+            total += store.forget_all_workspaces()
+        print(f"Deleted {total} working-memory notes across {len(db_files)} workspace databases.")
+        return
+
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
     try:
@@ -430,9 +444,13 @@ def main() -> None:
     p_restart.add_argument("--path", default=_default_path)
     p_restart.add_argument("--port", type=int, default=_default_port)
 
-    p_forget = sub.add_parser("forget", help="Delete all working-memory notes for a workspace")
+    p_forget = sub.add_parser("forget", help="Delete working-memory notes for a workspace")
     p_forget.add_argument("--path", default=_default_path)
     p_forget.add_argument("--port", type=int, default=_default_port)
+    p_forget.add_argument(
+        "--all", action="store_true",
+        help="T17: Delete notes across ALL workspaces (operates directly on SQLite, no server needed)",
+    )
 
     p_init = sub.add_parser("init", help="Write CLAUDE.md and .mcp.json to a workspace (no server)")
     p_init.add_argument("--path", default=_default_path)

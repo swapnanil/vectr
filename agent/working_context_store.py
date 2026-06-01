@@ -11,11 +11,55 @@ Storage: SQLite in the vectr DB dir — persists across IDE restarts and reboots
 from __future__ import annotations
 
 import json
+import logging
+import logging.handlers
+import os
 import re
 import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# T17: Rotating audit log
+#
+# Logs remember/recall/index/forget events to ~/.vectr/audit.log.
+# Rotates at 10 MB; keeps 3 backups. Disabled if VECTR_AUDIT_LOG="" is set.
+# ---------------------------------------------------------------------------
+
+def _get_audit_logger() -> logging.Logger:
+    """Return the vectr audit logger (lazy-initialised, singleton per process)."""
+    name = "vectr.audit"
+    log = logging.getLogger(name)
+    if log.handlers:
+        return log
+
+    log_path_str = os.getenv("VECTR_AUDIT_LOG", str(Path.home() / ".vectr" / "audit.log"))
+    if not log_path_str:
+        log.addHandler(logging.NullHandler())
+        return log
+
+    log_path = Path(log_path_str)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    handler = logging.handlers.RotatingFileHandler(
+        str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    return log
+
+
+def audit(event: str, **kwargs) -> None:
+    """Write one audit log entry: `event key=val key=val …`"""
+    try:
+        parts = [event] + [f"{k}={v}" for k, v in kwargs.items()]
+        _get_audit_logger().info(" ".join(parts))
+    except Exception:
+        pass  # audit failures must never crash the main path
 
 # Matches file paths in note text — relative (foo/bar.py) and absolute (/usr/local/file.py).
 # False positives that don't exist are skipped during staleness stat().
@@ -132,7 +176,10 @@ class WorkingContextStore:
                 """,
                 (workspace, content, tags_json, priority, now, now, session_id),
             )
-            return cur.lastrowid  # type: ignore[return-value]
+            note_id = cur.lastrowid
+        audit("REMEMBER", workspace=workspace, note_id=note_id, priority=priority,
+              tags=",".join(tags or []), chars=len(content))
+        return note_id  # type: ignore[return-value]
 
     def recall(
         self,
@@ -180,6 +227,8 @@ class WorkingContextStore:
                     f"UPDATE notes SET last_accessed = ? WHERE note_id IN ({','.join('?' * len(ids))})",
                     [time.time(), *ids],
                 )
+
+        audit("RECALL", workspace=workspace, query=query or "", notes_returned=len(notes))
         return notes
 
     def forget(self, workspace: str, note_id: int) -> bool:
@@ -202,9 +251,38 @@ class WorkingContextStore:
     def forget_all(self, workspace: str) -> int:
         """Clear all notes for a workspace."""
         with self._conn() as conn:
-            return conn.execute(
+            deleted = conn.execute(
                 "DELETE FROM notes WHERE workspace = ?", (workspace,)
             ).rowcount
+        audit("FORGET_ALL", workspace=workspace, deleted=deleted)
+        return deleted
+
+    def forget_all_workspaces(self) -> int:
+        """T17: Delete ALL notes across ALL workspaces in this SQLite file.
+
+        Used by `vectr forget --all` to give a global clean slate.
+        Audit entry logged per deletion.
+        """
+        with self._conn() as conn:
+            deleted = conn.execute("DELETE FROM notes").rowcount
+        audit("FORGET_ALL_WORKSPACES", deleted=deleted)
+        return deleted
+
+    def purge_expired_notes(self, workspace: str, ttl_days: float) -> int:
+        """T17: Delete notes older than ttl_days regardless of decay_score.
+
+        Called at startup when VECTR_NOTES_TTL_DAYS is set. Returns the number
+        of notes deleted.
+        """
+        cutoff = time.time() - ttl_days * 86400
+        with self._conn() as conn:
+            deleted = conn.execute(
+                "DELETE FROM notes WHERE workspace = ? AND created_at < ?",
+                (workspace, cutoff),
+            ).rowcount
+        if deleted:
+            audit("PURGE_EXPIRED", workspace=workspace, ttl_days=ttl_days, deleted=deleted)
+        return deleted
 
     def decay_old_notes(self, workspace: str, half_life_days: float = 14.0) -> None:
         """

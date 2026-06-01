@@ -88,6 +88,18 @@ class VectrService:
         if self._indexing:
             return
         self._indexing = True
+
+        # T17: apply TTL to working notes at startup if VECTR_NOTES_TTL_DAYS is set
+        ttl_days_str = os.getenv("VECTR_NOTES_TTL_DAYS", "")
+        if ttl_days_str:
+            try:
+                ttl = float(ttl_days_str)
+                deleted = self._context_store.purge_expired_notes(self._workspace_root, ttl)
+                if deleted:
+                    logger.info("T17: purged %d expired notes (TTL=%.1f days)", deleted, ttl)
+            except (ValueError, Exception):
+                logger.warning("VECTR_NOTES_TTL_DAYS is not a valid float: %r", ttl_days_str)
+
         self._index_thread = threading.Thread(target=self._do_index, daemon=True)
         self._index_thread.start()
         self._watcher.start()
@@ -99,6 +111,10 @@ class VectrService:
                 files, chunks = self._indexer.index_workspace()
                 self._searcher.refresh_bm25()
                 logger.info("Indexed %d files → %d chunks", files, chunks)
+
+                # T17: audit index event
+                from agent.working_context_store import audit as _audit
+                _audit("INDEX", workspace=self._workspace_root, files=files, chunks=chunks)
 
                 self._build_symbol_graph()
                 self._refresh_strategy()
