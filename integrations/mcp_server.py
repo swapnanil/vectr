@@ -11,7 +11,33 @@ MCP_SERVER_INFO = {
     "capabilities": {"tools": {}},
 }
 
-MCP_TOOLS = [
+# ---------------------------------------------------------------------------
+# T13: Adaptive tool registration — session state
+#
+# Exploration tools are always visible. Memory tools (recall, snapshot,
+# snapshot_list, forget, evict_hint) are only added once either:
+#   a) vectr_status() shows notes_count > 0 for the session, OR
+#   b) the agent calls vectr_remember() for the first time.
+#
+# Sessions without an ID get the full tool list for backwards compatibility.
+# ---------------------------------------------------------------------------
+_memory_enabled_sessions: set[str] = set()
+
+
+def enable_memory_for_session(session_id: str | None) -> None:
+    if session_id:
+        _memory_enabled_sessions.add(session_id)
+
+
+def is_memory_enabled(session_id: str | None) -> bool:
+    """True if memory tools should be exposed for this session."""
+    if session_id is None:
+        return True  # no session tracking → show all (backwards compat)
+    return session_id in _memory_enabled_sessions
+
+
+# Exploration tools: always shown
+_EXPLORATION_TOOLS = [
     # ---- L3: content retrieval ----
     {
         "name": "vectr_search",
@@ -146,7 +172,10 @@ MCP_TOOLS = [
             "required": ["name"],
         },
     },
-    # ---- Memory layer ----
+]  # end _EXPLORATION_TOOLS
+
+# Memory tools: exposed on-demand (see is_memory_enabled / enable_memory_for_session)
+_MEMORY_TOOLS = [
     {
         "name": "vectr_remember",
         "description": (
@@ -283,14 +312,39 @@ MCP_TOOLS = [
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
-]
+]  # end _MEMORY_TOOLS
+
+# Full list for serialization / backwards compat
+MCP_TOOLS = _EXPLORATION_TOOLS + _MEMORY_TOOLS
 
 
-def handle_tools_list() -> dict:
-    return {"tools": MCP_TOOLS}
+def handle_tools_list(session_id: str | None = None, service: Any = None) -> dict:
+    """Return tools appropriate for this session.
+
+    Sessions with an ID start with exploration tools only; memory tools are
+    added once the session has notes or has called vectr_remember (T13).
+    Sessions without an ID get the full list for backwards compatibility.
+    """
+    # If the session already has notes (checked via service), pre-enable memory tools
+    if session_id and service and not is_memory_enabled(session_id):
+        try:
+            notes_count = service.count_notes() if hasattr(service, "count_notes") else 0
+            if notes_count > 0:
+                enable_memory_for_session(session_id)
+        except Exception:
+            pass
+
+    if is_memory_enabled(session_id):
+        return {"tools": MCP_TOOLS}
+    return {"tools": _EXPLORATION_TOOLS}
 
 
-def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
+def handle_tools_call(
+    tool_name: str,
+    arguments: dict,
+    service: Any,
+    session_id: str | None = None,
+) -> dict:
     """Dispatch an MCP tool call. `service` is the VectrService instance."""
 
     # ---- vectr_search ----
@@ -356,6 +410,11 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
     if tool_name == "vectr_status":
         status = service.status()
         notes_count = status.get("notes_count", 0)
+
+        # T13: if this session has prior notes, enable memory tools immediately
+        if notes_count > 0:
+            enable_memory_for_session(session_id)
+
         recall_hint = (
             f"  → call vectr_recall(query=...) to retrieve them"
             if notes_count > 0
@@ -442,6 +501,8 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
         if priority not in ("high", "medium", "low"):
             priority = "medium"
         note_id = service.remember(content=content, tags=tags, priority=priority)
+        # T13: first vectr_remember call enables memory tools for this session
+        enable_memory_for_session(session_id)
         return {
             "content": [{"type": "text", "text": f"Stored note #{note_id}. You can safely drop the related code chunks from your context."}],
             "isError": False,

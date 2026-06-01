@@ -16,8 +16,13 @@ import pytest
 
 from integrations.mcp_server import (
     MCP_TOOLS,
+    _EXPLORATION_TOOLS,
+    _MEMORY_TOOLS,
     handle_tools_call,
     handle_tools_list,
+    enable_memory_for_session,
+    is_memory_enabled,
+    _memory_enabled_sessions,
     _mcp_error,
     _format_search_results,
 )
@@ -184,7 +189,8 @@ class TestToolDescriptions:
 # ---------------------------------------------------------------------------
 
 class TestHandleToolsList:
-    def test_returns_all_tools(self) -> None:
+    def test_returns_all_tools_no_session(self) -> None:
+        # No session_id → full list (backwards compat)
         result = handle_tools_list()
         assert "tools" in result
         assert isinstance(result["tools"], list)
@@ -196,11 +202,106 @@ class TestHandleToolsList:
             assert "inputSchema" in tool
             assert tool["inputSchema"]["type"] == "object"
 
-    def test_required_tools_present(self) -> None:
+    def test_required_tools_present_no_session(self) -> None:
         names = {t["name"] for t in handle_tools_list()["tools"]}
         for expected in ("vectr_search", "vectr_status", "vectr_remember", "vectr_recall",
                          "vectr_map", "vectr_locate", "vectr_trace", "vectr_snapshot"):
             assert expected in names
+
+
+# ---------------------------------------------------------------------------
+# T13: Adaptive tool registration
+# ---------------------------------------------------------------------------
+
+class TestAdaptiveToolRegistration:
+    def setup_method(self) -> None:
+        # Isolate session state between tests
+        _memory_enabled_sessions.clear()
+
+    def teardown_method(self) -> None:
+        _memory_enabled_sessions.clear()
+
+    def test_new_session_gets_exploration_tools_only(self) -> None:
+        result = handle_tools_list(session_id="sess-new-001")
+        names = {t["name"] for t in result["tools"]}
+        exploration_names = {t["name"] for t in _EXPLORATION_TOOLS}
+        memory_names = {t["name"] for t in _MEMORY_TOOLS}
+        assert exploration_names.issubset(names)
+        # memory-only tools not exposed until enabled
+        assert not memory_names.intersection(names)
+
+    def test_no_session_id_returns_full_list(self) -> None:
+        result = handle_tools_list(session_id=None)
+        assert len(result["tools"]) == len(MCP_TOOLS)
+
+    def test_enable_memory_makes_memory_tools_visible(self) -> None:
+        sid = "sess-enable-002"
+        assert not is_memory_enabled(sid)
+        enable_memory_for_session(sid)
+        assert is_memory_enabled(sid)
+        result = handle_tools_list(session_id=sid)
+        assert len(result["tools"]) == len(MCP_TOOLS)
+
+    def test_vectr_status_with_notes_enables_memory_tools(self) -> None:
+        from unittest.mock import MagicMock
+        sid = "sess-status-003"
+        svc = MagicMock()
+        svc.status.return_value = {
+            "notes_count": 3, "indexed_files": 10, "total_chunks": 100,
+            "symbol_count": 50, "last_indexed": "1s ago",
+            "embed_model": "test", "workspace_root": "/tmp",
+            "semantic_weight": None,
+        }
+        svc.should_evict.return_value = False
+
+        # Before status call — only exploration tools
+        assert not is_memory_enabled(sid)
+
+        # Call vectr_status
+        handle_tools_call("vectr_status", {}, svc, session_id=sid)
+
+        # After status call with notes_count > 0 — memory enabled
+        assert is_memory_enabled(sid)
+        result = handle_tools_list(session_id=sid)
+        assert len(result["tools"]) == len(MCP_TOOLS)
+
+    def test_vectr_status_no_notes_does_not_enable_memory(self) -> None:
+        from unittest.mock import MagicMock
+        sid = "sess-status-004"
+        svc = MagicMock()
+        svc.status.return_value = {
+            "notes_count": 0, "indexed_files": 10, "total_chunks": 100,
+            "symbol_count": 50, "last_indexed": "1s ago",
+            "embed_model": "test", "workspace_root": "/tmp",
+            "semantic_weight": None,
+        }
+        handle_tools_call("vectr_status", {}, svc, session_id=sid)
+        assert not is_memory_enabled(sid)
+
+    def test_vectr_remember_enables_memory_tools(self) -> None:
+        from unittest.mock import MagicMock
+        sid = "sess-remember-005"
+        svc = MagicMock()
+        svc.remember.return_value = 1
+
+        assert not is_memory_enabled(sid)
+        handle_tools_call("vectr_remember", {"content": "stub code here"}, svc, session_id=sid)
+        assert is_memory_enabled(sid)
+
+    def test_exploration_tools_always_include_core_set(self) -> None:
+        exploration_names = {t["name"] for t in _EXPLORATION_TOOLS}
+        for expected in ("vectr_search", "vectr_status", "vectr_map", "vectr_locate", "vectr_trace"):
+            assert expected in exploration_names
+
+    def test_memory_tools_include_recall_snapshot_forget(self) -> None:
+        memory_names = {t["name"] for t in _MEMORY_TOOLS}
+        for expected in ("vectr_remember", "vectr_recall", "vectr_snapshot", "vectr_forget"):
+            assert expected in memory_names
+
+    def test_session_state_is_independent_between_sessions(self) -> None:
+        enable_memory_for_session("sess-A")
+        assert is_memory_enabled("sess-A")
+        assert not is_memory_enabled("sess-B")
 
 
 # ---------------------------------------------------------------------------
