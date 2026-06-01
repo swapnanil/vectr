@@ -391,6 +391,18 @@ def cmd_init(args: argparse.Namespace) -> None:
     port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", "8765"))
 
     _write_workspace_config(workspace, port)
+
+    # T14: write style override if --style is specified
+    if getattr(args, "style", None):
+        style = args.style
+        if style not in ("additive", "directed", "memory-only"):
+            print(f"Error: --style must be one of: additive, directed, memory-only", file=sys.stderr)
+            sys.exit(1)
+        style_dir = Path(workspace) / ".vectr"
+        style_dir.mkdir(parents=True, exist_ok=True)
+        (style_dir / "style").write_text(style, encoding="utf-8")
+        print(f"  Instruction style set: {style}", file=sys.stderr)
+
     print(f"Workspace configured: {workspace}", file=sys.stderr)
     print(f"  Run 'vectr start --path {workspace}' to index and start the server.", file=sys.stderr)
 
@@ -424,6 +436,12 @@ def main() -> None:
 
     p_init = sub.add_parser("init", help="Write CLAUDE.md and .mcp.json to a workspace (no server)")
     p_init.add_argument("--path", default=_default_path)
+    p_init.add_argument(
+        "--style",
+        choices=["additive", "directed", "memory-only"],
+        default=None,
+        help="Override adaptive instruction style (T14). Stored in .vectr/style.",
+    )
 
     p_index = sub.add_parser("index", help="(Re)index a directory or file")
     p_index.add_argument("--path", default=_default_path)

@@ -438,6 +438,21 @@ def handle_tools_call(
             )
             if status.get("strategy_rationale"):
                 lines.append(f"  Strategy why   : {status['strategy_rationale']}")
+
+        # T14: inject adaptive instruction style hint at session start
+        try:
+            style = service.suggest_instruction_style()
+            style_hints = {
+                "additive":    "Use vectr tools when they'd be faster than reading files — see CLAUDE.md.",
+                "directed":    "This is a large/unfamiliar codebase. Use vectr_map → vectr_search → vectr_locate before reading files.",
+                "memory-only": "Prior notes exist. Call vectr_recall(query=...) first; use search only to fill gaps.",
+            }
+            hint = style_hints.get(style, "")
+            if hint:
+                lines.append(f"  Tool style     : [{style}] {hint}")
+        except Exception:
+            pass
+
         text = "\n".join(lines)
         return {"content": [{"type": "text", "text": text}], "isError": False}
 

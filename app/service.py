@@ -376,3 +376,73 @@ class VectrService:
 
     def should_evict(self) -> bool:
         return self._eviction_advisor.should_evict()
+
+    def count_notes(self) -> int:
+        """Return number of active working-memory notes for this workspace."""
+        return self._context_store.count_notes(self._workspace_root)
+
+    # ------------------------------------------------------------------
+    # T14: Adaptive prompt intelligence
+    # ------------------------------------------------------------------
+
+    def suggest_instruction_style(self) -> str:
+        """Return the recommended CLAUDE.md instruction variant for this workspace.
+
+        Returns one of: "additive" | "directed" | "memory-only".
+
+        Decision logic (priority order):
+        1. File override (.vectr/style) — always wins.
+        2. "memory-only"  — prior notes exist AND codebase is well-known (small
+                            or familiar framework) → recall-forward session.
+        3. "directed"     — large or complex unfamiliar codebase → explicit tool
+                            guidance reduces wasted exploration turns.
+        4. "additive"     — default; model decides based on when-to-use hints.
+
+        Research basis: additive outperforms forced/memory-only in A/B tests
+        (spec §CLAUDE.md framing choices). directed is warranted only when
+        codebase is genuinely unfamiliar at implementation depth.
+        """
+        override = self._read_style_override()
+        if override in ("additive", "directed", "memory-only"):
+            return override
+
+        notes_count = self._context_store.count_notes(self._workspace_root)
+        fp = None
+        if self._strategy is not None:
+            try:
+                from agent.strategy_selector import fingerprint as _fingerprint
+                fp = _fingerprint(self._workspace_root, self._indexer.indexed_file_paths)
+            except Exception:
+                pass
+
+        # Well-known frameworks: model knows these at implementation depth from training
+        _KNOWN_FRAMEWORKS = {
+            "django", "flask", "fastapi", "react", "nextjs", "vue", "angular",
+            "express", "spring-boot", "gin", "echo", "celery",
+        }
+        known_codebase = (
+            fp is not None
+            and bool(_KNOWN_FRAMEWORKS.intersection(set(fp.detected_frameworks)))
+        )
+
+        if notes_count > 0 and (known_codebase or (fp and fp.size_class == "small")):
+            return "memory-only"
+
+        if fp is not None:
+            is_large_unfamiliar = (
+                fp.size_class == "large"
+                and not known_codebase
+            )
+            is_complex = fp.complexity_class == "complex" and not known_codebase
+            if is_large_unfamiliar or is_complex:
+                return "directed"
+
+        return "additive"
+
+    def _read_style_override(self) -> str:
+        """Read .vectr/style file if present."""
+        style_file = Path(self._workspace_root) / ".vectr" / "style"
+        try:
+            return style_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
