@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import json
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -258,7 +259,115 @@ def extract_symbols_from_file(file_path: str) -> tuple[list[dict], list[dict]]:
             seen.add(key)
             deduped_edges.append(e)
 
+    # T26: extract HTTP route symbols (Flask/FastAPI/Express/Spring)
+    symbols.extend(_extract_routes(file_path, code, language))
+
     return symbols, deduped_edges
+
+
+# ---------------------------------------------------------------------------
+# T26: HTTP route extraction — framework-aware route nodes
+#
+# Extracts route symbols from common web frameworks and adds them to the L2
+# symbol graph with kind="route". This makes routes navigable via vectr_locate
+# and searchable without reading controller/view files.
+#
+# Supported frameworks:
+#   Python: Flask (@app.route, @app.get/post/...), FastAPI (@router.get/post/...)
+#   Java:   Spring @GetMapping, @PostMapping, @PutMapping, @DeleteMapping, @RequestMapping
+#   JS/TS:  Express (app.get/post/..., router.get/post/...)
+# ---------------------------------------------------------------------------
+
+# HTTP method verbs — used to identify route patterns
+_HTTP_METHODS = {"get", "post", "put", "delete", "patch", "head", "options"}
+
+# Python decorator patterns: @app.route("/path"), @router.get("/path")
+_PY_ROUTE_DECORATOR = re.compile(
+    r'@\w+\.(route|' + "|".join(_HTTP_METHODS) + r')\s*\(\s*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+# Python: method= kwarg on @app.route
+_PY_ROUTE_METHOD_KW = re.compile(r'methods\s*=\s*\[([^\]]+)\]', re.IGNORECASE)
+
+# Java Spring annotations
+_JAVA_MAPPING = re.compile(
+    r'@(Get|Post|Put|Delete|Patch|Request)Mapping\s*\((?:value\s*=\s*)?["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+
+# Express.js: app.get("/path",  router.post("/path",
+_EXPRESS_ROUTE = re.compile(
+    r'\b(?:app|router|express)\.(get|post|put|delete|patch|use)\s*\(\s*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+
+
+def _extract_routes(file_path: str, source: str, language: str) -> list[dict]:
+    """Return a list of route symbol dicts extracted from source code."""
+    routes: list[dict] = []
+    lines = source.splitlines()
+
+    if language == "python":
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            m = _PY_ROUTE_DECORATOR.search(line)
+            if m:
+                verb_from_decorator = m.group(1).upper()
+                path = m.group(2)
+
+                # If it's @app.route(...), also look for methods=[] kwarg on same line
+                methods: list[str] = []
+                if verb_from_decorator == "ROUTE":
+                    kw = _PY_ROUTE_METHOD_KW.search(line)
+                    if kw:
+                        raw_methods = kw.group(1)
+                        methods = [v.strip().strip("\"'").upper() for v in raw_methods.split(",")]
+                    else:
+                        methods = ["GET"]  # Flask default
+                else:
+                    methods = [verb_from_decorator]
+
+                for method in methods:
+                    routes.append({
+                        "name": f"{method} {path}",
+                        "kind": "route",
+                        "file_path": file_path,
+                        "start_line": i + 1,
+                        "end_line": i + 1,
+                    })
+            i += 1
+
+    elif language == "java":
+        for i, line in enumerate(lines):
+            m = _JAVA_MAPPING.search(line)
+            if m:
+                annotation = m.group(1).upper()
+                path = m.group(2)
+                method = "GET" if annotation == "REQUEST" else annotation
+                routes.append({
+                    "name": f"{method} {path}",
+                    "kind": "route",
+                    "file_path": file_path,
+                    "start_line": i + 1,
+                    "end_line": i + 1,
+                })
+
+    elif language in ("javascript", "typescript"):
+        for i, line in enumerate(lines):
+            m = _EXPRESS_ROUTE.search(line)
+            if m:
+                method = m.group(1).upper()
+                path = m.group(2)
+                routes.append({
+                    "name": f"{method} {path}",
+                    "kind": "route",
+                    "file_path": file_path,
+                    "start_line": i + 1,
+                    "end_line": i + 1,
+                })
+
+    return routes
 
 
 # ---------------------------------------------------------------------------

@@ -368,3 +368,121 @@ class TestFormatting:
         g = SymbolGraph(str(tmp_path))
         text = g.format_trace_for_llm({"callers": [], "callees": []}, "fn")
         assert "none found" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# T26: HTTP route extraction
+# ---------------------------------------------------------------------------
+
+class TestRouteExtraction:
+    def _routes(self, source: str, language: str, suffix: str = ".py") -> list[dict]:
+        from agent.symbol_graph import _extract_routes
+        return _extract_routes(f"app{suffix}", source, language)
+
+    # Flask / FastAPI (Python)
+
+    def test_flask_route_decorator_extracted(self) -> None:
+        source = '@app.route("/users")\ndef get_users(): pass\n'
+        routes = self._routes(source, "python")
+        assert any(r["name"] == "GET /users" for r in routes)
+        assert all(r["kind"] == "route" for r in routes)
+
+    def test_flask_route_post_method(self) -> None:
+        source = '@app.route("/users", methods=["POST"])\ndef create_user(): pass\n'
+        routes = self._routes(source, "python")
+        assert any(r["name"] == "POST /users" for r in routes)
+
+    def test_flask_route_multiple_methods(self) -> None:
+        source = '@app.route("/items", methods=["GET", "POST"])\ndef items(): pass\n'
+        routes = self._routes(source, "python")
+        names = {r["name"] for r in routes}
+        assert "GET /items" in names
+        assert "POST /items" in names
+
+    def test_fastapi_get_decorator(self) -> None:
+        source = '@router.get("/health")\nasync def health_check(): pass\n'
+        routes = self._routes(source, "python")
+        assert any(r["name"] == "GET /health" for r in routes)
+
+    def test_fastapi_post_decorator(self) -> None:
+        source = '@app.post("/login")\nasync def login(): pass\n'
+        routes = self._routes(source, "python")
+        assert any(r["name"] == "POST /login" for r in routes)
+
+    def test_fastapi_delete_decorator(self) -> None:
+        source = '@router.delete("/users/{id}")\nasync def delete_user(id: int): pass\n'
+        routes = self._routes(source, "python")
+        assert any(r["name"] == "DELETE /users/{id}" for r in routes)
+
+    def test_no_routes_in_plain_python(self) -> None:
+        source = 'def helper(): return 42\nclass Foo: pass\n'
+        assert self._routes(source, "python") == []
+
+    # Spring (Java)
+
+    def test_spring_get_mapping(self) -> None:
+        source = '@GetMapping("/api/users")\npublic List<User> getUsers() {}\n'
+        routes = self._routes(source, "java", ".java")
+        assert any(r["name"] == "GET /api/users" for r in routes)
+
+    def test_spring_post_mapping(self) -> None:
+        source = '@PostMapping("/api/orders")\npublic Order create() {}\n'
+        routes = self._routes(source, "java", ".java")
+        assert any(r["name"] == "POST /api/orders" for r in routes)
+
+    def test_spring_delete_mapping(self) -> None:
+        source = '@DeleteMapping("/api/users/{id}")\npublic void delete() {}\n'
+        routes = self._routes(source, "java", ".java")
+        assert any(r["name"] == "DELETE /api/users/{id}" for r in routes)
+
+    def test_spring_request_mapping(self) -> None:
+        source = '@RequestMapping("/api/base")\nclass BaseController {}\n'
+        routes = self._routes(source, "java", ".java")
+        assert any(r["name"] == "GET /api/base" for r in routes)
+
+    # Express (JavaScript)
+
+    def test_express_app_get(self) -> None:
+        source = 'app.get("/users", (req, res) => res.json([]));\n'
+        routes = self._routes(source, "javascript", ".js")
+        assert any(r["name"] == "GET /users" for r in routes)
+
+    def test_express_router_post(self) -> None:
+        source = 'router.post("/login", loginHandler);\n'
+        routes = self._routes(source, "javascript", ".js")
+        assert any(r["name"] == "POST /login" for r in routes)
+
+    def test_express_router_delete(self) -> None:
+        source = 'router.delete("/items/:id", handler);\n'
+        routes = self._routes(source, "javascript", ".js")
+        assert any(r["name"] == "DELETE /items/:id" for r in routes)
+
+    def test_typescript_express_route(self) -> None:
+        source = 'app.put("/profile", updateHandler);\n'
+        routes = self._routes(source, "typescript", ".ts")
+        assert any(r["name"] == "PUT /profile" for r in routes)
+
+    # Integration: routes appear in extract_symbols_from_file
+
+    def test_routes_in_extract_symbols_from_file(self, tmp_path) -> None:
+        from agent.symbol_graph import extract_symbols_from_file
+        f = tmp_path / "views.py"
+        f.write_text(
+            '@app.get("/api/data")\ndef get_data(): return []\n'
+            '\ndef helper(): pass\n'
+        )
+        symbols, _ = extract_symbols_from_file(str(f))
+        route_symbols = [s for s in symbols if s["kind"] == "route"]
+        assert any(s["name"] == "GET /api/data" for s in route_symbols)
+
+    # Routes appear in symbol graph locate
+
+    def test_routes_locatable_via_symbol_graph(self, tmp_path) -> None:
+        from agent.symbol_graph import SymbolGraph
+        f = tmp_path / "api.py"
+        f.write_text('@router.post("/checkout")\ndef checkout(): pass\n')
+        g = SymbolGraph(str(tmp_path))
+        g.index_file(str(tmp_path), str(f))
+        results = g.locate(str(tmp_path), "POST /checkout")
+        assert len(results) >= 1
+        assert results[0].kind == "route"
