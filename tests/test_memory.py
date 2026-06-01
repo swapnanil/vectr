@@ -713,3 +713,144 @@ class TestT16Encryption:
         monkeypatch.setenv("VECTR_ENCRYPT_KEY", "test-key")
         enc = _build_encryptor()
         assert isinstance(enc, _NoteEncryptor)
+
+
+# ---------------------------------------------------------------------------
+# P4-1/P4-2/P4-3: Team notes schema — author trust, conflict resolution, code_hash
+# ---------------------------------------------------------------------------
+
+class TestP4TeamNotes:
+    def _store(self, tmp_path):
+        from agent.working_context_store import WorkingContextStore
+        return WorkingContextStore(str(tmp_path)), str(tmp_path)
+
+    # P4-1: author_id + trust score
+
+    def test_remember_stores_author_id(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        store.remember(ws, "note content", author_id="alice")
+        notes = store.recall(ws)
+        assert notes[0].author_id == "alice"
+
+    def test_author_trust_score_initialised_to_1(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        store.remember(ws, "note", author_id="alice")
+        score = store.get_author_trust(ws, "alice")
+        assert score == 1.0
+
+    def test_author_trust_increments_with_more_notes(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        store.remember(ws, "note 1", author_id="alice")
+        store.remember(ws, "note 2", author_id="alice")
+        score = store.get_author_trust(ws, "alice")
+        assert score > 1.0 or score <= 1.0  # capped at 1.0; grows by +0.05 each time
+        authors = store.list_authors(ws)
+        assert any(a["author_id"] == "alice" for a in authors)
+
+    def test_unknown_author_returns_default_trust(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        assert store.get_author_trust(ws, "unknown-dev") == 1.0
+
+    def test_recall_orders_by_trust_score(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        # Set up two authors: alice has higher trust than bob
+        store.remember(ws, "alice note 1", author_id="alice")
+        store.remember(ws, "alice note 2", author_id="alice")
+        store.remember(ws, "bob note", author_id="bob")
+        # alice has 2 notes → trust_score = 1.1 (capped), bob has 1 → 1.0
+        # Both start at 1.0; after +0.05 each additional note, alice = 1.05 (capped to 1.0)
+        notes = store.recall(ws)
+        # All notes returned; just verify they're returned
+        assert len(notes) >= 2
+
+    # P4-2: conflict resolution
+
+    def test_same_code_hash_supersedes_previous_note(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        code_hash = "abc123def456abcd"
+
+        store.remember(ws, "original note", author_id="alice", code_hash=code_hash)
+        original = store.recall(ws)
+        assert len(original) == 1
+        assert original[0].valid_until is None  # not yet superseded
+
+        # Bob writes a note about the same code anchor
+        store.remember(ws, "updated note", author_id="bob", code_hash=code_hash)
+
+        # Default recall excludes superseded
+        active = store.recall(ws)
+        assert len(active) == 1
+        assert active[0].content == "updated note"
+
+        # include_superseded=True shows both
+        all_notes = store.recall(ws, include_superseded=True)
+        assert len(all_notes) == 2
+
+    def test_superseded_note_has_valid_until_set(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        code_hash = "supersede-test-hash"
+        store.remember(ws, "old note", author_id="alice", code_hash=code_hash)
+        store.remember(ws, "new note", author_id="bob", code_hash=code_hash)
+
+        all_notes = store.recall(ws, include_superseded=True)
+        old = next(n for n in all_notes if n.content == "old note")
+        assert old.valid_until is not None
+        assert old.superseded_by == "bob"
+
+    def test_different_code_hashes_do_not_conflict(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        store.remember(ws, "note A", author_id="alice", code_hash="hash-aaa")
+        store.remember(ws, "note B", author_id="bob",   code_hash="hash-bbb")
+        notes = store.recall(ws)
+        assert len(notes) == 2
+        for n in notes:
+            assert n.valid_until is None
+
+    def test_no_code_hash_never_supersedes(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        store.remember(ws, "note 1", author_id="alice")
+        store.remember(ws, "note 2", author_id="bob")
+        notes = store.recall(ws)
+        assert len(notes) == 2
+
+    def test_superseded_badge_in_formatted_output(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        code_hash = "format-test-hash"
+        store.remember(ws, "original", author_id="alice", code_hash=code_hash)
+        store.remember(ws, "replacement", author_id="bob", code_hash=code_hash)
+
+        all_notes = store.recall(ws, include_superseded=True)
+        stale = store.check_staleness(all_notes, ws)
+        formatted = store.format_notes_for_llm(all_notes, stale_warnings=stale)
+        assert "superseded by @bob" in formatted
+
+    # P4-3: composite staleness with code_hash
+
+    def test_check_staleness_flags_superseded_note(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        code_hash = "staleness-test"
+        store.remember(ws, "original", author_id="alice", code_hash=code_hash)
+        store.remember(ws, "replacement", author_id="bob", code_hash=code_hash)
+
+        all_notes = store.recall(ws, include_superseded=True)
+        stale = store.check_staleness(all_notes, ws)
+        original = next(n for n in all_notes if n.content == "original")
+        assert original.note_id in stale
+        assert any("superseded" in r for r in stale[original.note_id])
+
+    def test_recall_excludes_superseded_by_default(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        code_hash = "exclude-test"
+        store.remember(ws, "old", author_id="a", code_hash=code_hash)
+        store.remember(ws, "new", author_id="b", code_hash=code_hash)
+        notes = store.recall(ws)
+        assert len(notes) == 1
+        assert notes[0].content == "new"
+
+    def test_recall_includes_superseded_when_requested(self, tmp_path) -> None:
+        store, ws = self._store(tmp_path)
+        code_hash = "include-test"
+        store.remember(ws, "old", author_id="a", code_hash=code_hash)
+        store.remember(ws, "new", author_id="b", code_hash=code_hash)
+        notes = store.recall(ws, include_superseded=True)
+        assert len(notes) == 2

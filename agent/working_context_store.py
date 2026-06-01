@@ -146,6 +146,15 @@ class WorkingNote:
     last_accessed: float
     session_id: str | None = None
     decay_score: float = 1.0
+    # P4-1: team/shared notes tri-key model
+    author_id: str = ""              # developer/agent identifier
+    author_trust_score: float = 1.0  # Bayesian weight per contributor (0.0–1.0)
+    valid_from: float = 0.0          # bi-temporal: when the note became valid
+    valid_until: float | None = None # bi-temporal: None = still valid; float = superseded
+    code_hash: str = ""              # sha256[:16] of the anchored code block
+    # P4-2: conflict state
+    superseded_by: str | None = None  # author_id that superseded this note
+    superseded_at: float | None = None
 
 
 @dataclass
@@ -182,19 +191,36 @@ class WorkingContextStore:
         with self._conn() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS notes (
-                    note_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                    workspace     TEXT NOT NULL,
-                    content       TEXT NOT NULL,
-                    tags          TEXT NOT NULL DEFAULT '[]',
-                    priority      TEXT NOT NULL DEFAULT 'medium',
-                    created_at    REAL NOT NULL,
-                    last_accessed REAL NOT NULL,
-                    session_id    TEXT,
-                    decay_score   REAL NOT NULL DEFAULT 1.0
+                    note_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace           TEXT NOT NULL,
+                    content             TEXT NOT NULL,
+                    tags                TEXT NOT NULL DEFAULT '[]',
+                    priority            TEXT NOT NULL DEFAULT 'medium',
+                    created_at          REAL NOT NULL,
+                    last_accessed       REAL NOT NULL,
+                    session_id          TEXT,
+                    decay_score         REAL NOT NULL DEFAULT 1.0,
+                    author_id           TEXT NOT NULL DEFAULT '',
+                    author_trust_score  REAL NOT NULL DEFAULT 1.0,
+                    valid_from          REAL NOT NULL DEFAULT 0.0,
+                    valid_until         REAL,
+                    code_hash           TEXT NOT NULL DEFAULT '',
+                    superseded_by       TEXT,
+                    superseded_at       REAL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_notes_workspace ON notes(workspace);
                 CREATE INDEX IF NOT EXISTS idx_notes_tags ON notes(tags);
+                CREATE INDEX IF NOT EXISTS idx_notes_code_hash ON notes(code_hash);
+                CREATE INDEX IF NOT EXISTS idx_notes_valid ON notes(valid_until);
+
+                CREATE TABLE IF NOT EXISTS author_trust (
+                    workspace           TEXT NOT NULL,
+                    author_id           TEXT NOT NULL,
+                    trust_score         REAL NOT NULL DEFAULT 1.0,
+                    note_count          INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (workspace, author_id)
+                );
 
                 CREATE TABLE IF NOT EXISTS snapshots (
                     snapshot_id  TEXT PRIMARY KEY,
@@ -206,6 +232,20 @@ class WorkingContextStore:
 
                 CREATE INDEX IF NOT EXISTS idx_snap_workspace ON snapshots(workspace);
             """)
+            # P4: migrate existing databases that predate P4 columns
+            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)").fetchall()}
+            p4_cols = {
+                "author_id":          "TEXT NOT NULL DEFAULT ''",
+                "author_trust_score": "REAL NOT NULL DEFAULT 1.0",
+                "valid_from":         "REAL NOT NULL DEFAULT 0.0",
+                "valid_until":        "REAL",
+                "code_hash":          "TEXT NOT NULL DEFAULT ''",
+                "superseded_by":      "TEXT",
+                "superseded_at":      "REAL",
+            }
+            for col, typedef in p4_cols.items():
+                if col not in existing_cols:
+                    conn.execute(f"ALTER TABLE notes ADD COLUMN {col} {typedef}")
 
     # ------------------------------------------------------------------
     # Notes — vectr_remember / vectr_recall / vectr_forget
@@ -218,22 +258,61 @@ class WorkingContextStore:
         tags: list[str] | None = None,
         priority: str = "medium",
         session_id: str | None = None,
+        author_id: str = "",
+        code_hash: str = "",
     ) -> int:
-        """Store a working note. Returns the note_id."""
+        """Store a working note. Returns the note_id.
+
+        P4-2: if code_hash is provided and another non-superseded note exists
+        for the same workspace + code_hash (same code anchor), the older note
+        is marked superseded before the new note is inserted.
+        """
         now = time.time()
         tags_json = json.dumps(tags or [])
         stored_content = self._encryptor.encrypt(content) if self._encryptor else content
+
         with self._conn() as conn:
+            # P4-2: detect and resolve conflicts on the same code anchor
+            if code_hash:
+                conflicting = conn.execute(
+                    """SELECT note_id FROM notes
+                       WHERE workspace = ? AND code_hash = ?
+                       AND valid_until IS NULL""",
+                    (workspace, code_hash),
+                ).fetchall()
+                if conflicting:
+                    conn.execute(
+                        """UPDATE notes SET valid_until = ?, superseded_by = ?, superseded_at = ?
+                           WHERE note_id IN ({})""".format(",".join("?" * len(conflicting))),
+                        [now, author_id or "unknown", now] + [r[0] for r in conflicting],
+                    )
+
             cur = conn.execute(
                 """
                 INSERT INTO notes (workspace, content, tags, priority, created_at,
-                                   last_accessed, session_id, decay_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1.0)
+                                   last_accessed, session_id, decay_score,
+                                   author_id, author_trust_score, valid_from,
+                                   valid_until, code_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?)
                 """,
-                (workspace, stored_content, tags_json, priority, now, now, session_id),
+                (workspace, stored_content, tags_json, priority, now, now, session_id,
+                 author_id, now, code_hash),
             )
             note_id = cur.lastrowid
+
+            # P4-1: update author trust score registry (Bayesian: count-weighted)
+            if author_id:
+                conn.execute(
+                    """INSERT INTO author_trust (workspace, author_id, trust_score, note_count)
+                       VALUES (?, ?, 1.0, 1)
+                       ON CONFLICT(workspace, author_id) DO UPDATE SET
+                           note_count = note_count + 1,
+                           trust_score = MIN(1.0, trust_score + 0.05)""",
+                    (workspace, author_id),
+                )
+
         audit("REMEMBER", workspace=workspace, note_id=note_id, priority=priority,
+              author_id=author_id, code_hash=code_hash[:8] if code_hash else "",
               tags=",".join(tags or []), chars=len(content))
         return note_id  # type: ignore[return-value]
 
@@ -244,21 +323,26 @@ class WorkingContextStore:
         tags: list[str] | None = None,
         priority: str | None = None,
         limit: int = 10,
+        include_superseded: bool = False,
     ) -> list[WorkingNote]:
-        """
-        Retrieve working notes. Filters by tags/priority if provided.
-        Query is a simple substring match against content (fast, no embedding needed —
-        notes are short and precise, written by the LLM itself).
+        """Retrieve working notes.
+
+        P4-2: superseded notes are excluded by default. Pass include_superseded=True
+        to see the full history including notes marked as superseded.
+        P4-1: results ordered by author_trust_score DESC, decay_score DESC, last_accessed DESC
+        so the highest-trust contributor's notes surface first.
         """
         sql = "SELECT * FROM notes WHERE workspace = ?"
         params: list = [workspace]
+
+        if not include_superseded:
+            sql += " AND valid_until IS NULL"
 
         if priority:
             sql += " AND priority = ?"
             params.append(priority)
 
         if tags:
-            # any matching tag
             tag_clauses = " OR ".join(["tags LIKE ?" for _ in tags])
             sql += f" AND ({tag_clauses})"
             params.extend([f'%"{t}"%' for t in tags])
@@ -267,7 +351,7 @@ class WorkingContextStore:
             sql += " AND content LIKE ?"
             params.append(f"%{query}%")
 
-        sql += " ORDER BY decay_score DESC, last_accessed DESC LIMIT ?"
+        sql += " ORDER BY author_trust_score DESC, decay_score DESC, last_accessed DESC LIMIT ?"
         params.append(limit)
 
         with self._conn() as conn:
@@ -275,7 +359,6 @@ class WorkingContextStore:
 
         notes = [self._row_to_note(r) for r in rows]
 
-        # bump last_accessed
         if notes:
             ids = [n.note_id for n in notes]
             with self._conn() as conn:
@@ -471,30 +554,70 @@ class WorkingContextStore:
     ) -> dict[int, list[str]]:
         """Identify notes whose referenced files have changed since the note was written.
 
-        For each note, extracts file paths from the content, stats them against
-        the workspace root, and flags any path whose mtime > note.created_at.
+        P4-3 composite staleness: fires the stale flag when ANY of:
+          - A referenced file's mtime > note.created_at (original mtime check)
+          - note.code_hash != sha256[:16] of the current file content (code moved/changed)
+          - Note is marked superseded (valid_until is set)
 
-        Returns {note_id: [stale_path, ...]} — only notes with ≥1 stale path included.
+        Returns {note_id: [stale_path/reason, ...]} — only stale notes included.
         """
+        import hashlib
         root = Path(workspace_root)
         stale: dict[int, list[str]] = {}
 
         for note in notes:
-            stale_files = []
+            reasons: list[str] = []
+
+            # P4-2: superseded notes are always stale
+            if note.valid_until is not None:
+                sup_by = note.superseded_by or "unknown"
+                reasons.append(f"[superseded by @{sup_by}]")
+
             for raw_path in _extract_file_paths(note.content):
                 path = Path(raw_path)
                 resolved = path if path.is_absolute() else root / path
                 try:
-                    mtime = resolved.stat().st_mtime
+                    stat = resolved.stat()
                 except OSError:
-                    continue  # doesn't exist or inaccessible — skip
-                if mtime > note.created_at:
-                    stale_files.append(raw_path)
+                    continue
 
-            if stale_files:
-                stale[note.note_id] = stale_files
+                # mtime staleness (original signal)
+                if stat.st_mtime > note.created_at:
+                    reasons.append(raw_path)
+
+                # P4-3: code_hash staleness — detect if the anchored code changed
+                if note.code_hash and resolved.suffix.lower() in {".py", ".c", ".h", ".go", ".rs"}:
+                    try:
+                        current_hash = hashlib.sha256(
+                            resolved.read_bytes()
+                        ).hexdigest()[:16]
+                        if current_hash != note.code_hash and raw_path not in reasons:
+                            reasons.append(f"{raw_path}[code_hash_changed]")
+                    except OSError:
+                        pass
+
+            if reasons:
+                stale[note.note_id] = reasons
 
         return stale
+
+    def get_author_trust(self, workspace: str, author_id: str) -> float:
+        """P4-1: Return the Bayesian trust score for an author in this workspace."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT trust_score FROM author_trust WHERE workspace = ? AND author_id = ?",
+                (workspace, author_id),
+            ).fetchone()
+        return row[0] if row else 1.0
+
+    def list_authors(self, workspace: str) -> list[dict]:
+        """P4-1: Return all authors with their trust scores and note counts."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT author_id, trust_score, note_count FROM author_trust WHERE workspace = ? ORDER BY trust_score DESC",
+                (workspace,),
+            ).fetchall()
+        return [{"author_id": r[0], "trust_score": r[1], "note_count": r[2]} for r in rows]
 
     # ------------------------------------------------------------------
     # Helpers
@@ -504,6 +627,7 @@ class WorkingContextStore:
         content = row["content"]
         if self._encryptor:
             content = self._encryptor.decrypt(content)
+        keys = row.keys()
         return WorkingNote(
             note_id=row["note_id"],
             workspace=row["workspace"],
@@ -514,6 +638,14 @@ class WorkingContextStore:
             last_accessed=row["last_accessed"],
             session_id=row["session_id"],
             decay_score=row["decay_score"],
+            # P4-1 fields (present in all new DBs; guarded for old DBs without migration)
+            author_id=row["author_id"] if "author_id" in keys else "",
+            author_trust_score=row["author_trust_score"] if "author_trust_score" in keys else 1.0,
+            valid_from=row["valid_from"] if "valid_from" in keys else 0.0,
+            valid_until=row["valid_until"] if "valid_until" in keys else None,
+            code_hash=row["code_hash"] if "code_hash" in keys else "",
+            superseded_by=row["superseded_by"] if "superseded_by" in keys else None,
+            superseded_at=row["superseded_at"] if "superseded_at" in keys else None,
         )
 
     def format_notes_for_llm(
@@ -542,9 +674,21 @@ class WorkingContextStore:
             age_h = (time.time() - n.created_at) / 3600
             age_str = f"{age_h:.0f}h ago" if age_h < 48 else f"{age_h / 24:.0f}d ago"
             tag_str = f"  [{', '.join(n.tags)}]" if n.tags else ""
+            author_str = f"  @{n.author_id}" if n.author_id else ""
             stale_files = stale_warnings.get(n.note_id, [])
             stale_marker = " [STALE]" if stale_files else ""
-            lines.append(f"[{n.note_id}] [{n.priority.upper()}]{tag_str}  ({age_str}){stale_marker}")
+
+            # P4-2: superseded badge
+            superseded_marker = ""
+            if n.valid_until is not None and n.superseded_by:
+                import datetime as _dt
+                sup_date = _dt.datetime.fromtimestamp(n.superseded_at or n.valid_until).strftime("%Y-%m-%d")
+                superseded_marker = f" [superseded by @{n.superseded_by}, {sup_date}]"
+
+            lines.append(
+                f"[{n.note_id}] [{n.priority.upper()}]{tag_str}{author_str}  ({age_str})"
+                f"{stale_marker}{superseded_marker}"
+            )
             lines.append(f"  {n.content}")
             if stale_files:
                 changed = ", ".join(stale_files)
