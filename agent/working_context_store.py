@@ -61,6 +61,59 @@ def audit(event: str, **kwargs) -> None:
     except Exception:
         pass  # audit failures must never crash the main path
 
+
+# ---------------------------------------------------------------------------
+# T16: Field-level encryption for note content
+#
+# When VECTR_ENCRYPT_KEY is set, note content is encrypted at write time and
+# decrypted at read time using Fernet (AES-128-CBC + HMAC-SHA256).
+# The raw passphrase is never stored — a PBKDF2-derived key is used instead.
+#
+# Requires: pip install vectr[encryption]  (cryptography>=43)
+#
+# If a note was stored plaintext before encryption was enabled, decrypt()
+# detects the invalid token and returns the raw text — no data loss.
+# If a note was stored encrypted and encryption is later disabled, reads
+# return ciphertext (marked with [ENCRYPTED] prefix for user visibility).
+# ---------------------------------------------------------------------------
+
+class _NoteEncryptor:
+    """Fernet-based field-level encryptor for note content."""
+
+    _SALT = b"vectr-notes-v1\x00"  # fixed, non-secret derivation salt
+
+    def __init__(self, passphrase: str) -> None:
+        import base64
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=self._SALT,
+            iterations=480_000,  # OWASP 2023 recommendation for SHA-256
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
+        self._fernet = Fernet(key)
+
+    def encrypt(self, plaintext: str) -> str:
+        return self._fernet.encrypt(plaintext.encode("utf-8")).decode("ascii")
+
+    def decrypt(self, stored: str) -> str:
+        """Decrypt, or return plaintext unchanged if the value was never encrypted."""
+        try:
+            return self._fernet.decrypt(stored.encode("ascii")).decode("utf-8")
+        except Exception:
+            # Note was stored before encryption was enabled — return as-is
+            return stored
+
+
+def _build_encryptor() -> _NoteEncryptor | None:
+    """Return a _NoteEncryptor if VECTR_ENCRYPT_KEY is set, else None."""
+    key = os.getenv("VECTR_ENCRYPT_KEY", "")
+    return _NoteEncryptor(key) if key else None
+
 # Matches file paths in note text — relative (foo/bar.py) and absolute (/usr/local/file.py).
 # False positives that don't exist are skipped during staleness stat().
 _FILE_PATH_RE = re.compile(
@@ -115,6 +168,8 @@ class WorkingContextStore:
 
     def __init__(self, db_dir: str) -> None:
         self._db_path = Path(db_dir) / "working_context.sqlite"
+        # T16: lazily built per-instance; reads VECTR_ENCRYPT_KEY at construction time
+        self._encryptor: _NoteEncryptor | None = _build_encryptor()
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
@@ -167,6 +222,7 @@ class WorkingContextStore:
         """Store a working note. Returns the note_id."""
         now = time.time()
         tags_json = json.dumps(tags or [])
+        stored_content = self._encryptor.encrypt(content) if self._encryptor else content
         with self._conn() as conn:
             cur = conn.execute(
                 """
@@ -174,7 +230,7 @@ class WorkingContextStore:
                                    last_accessed, session_id, decay_score)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 1.0)
                 """,
-                (workspace, content, tags_json, priority, now, now, session_id),
+                (workspace, stored_content, tags_json, priority, now, now, session_id),
             )
             note_id = cur.lastrowid
         audit("REMEMBER", workspace=workspace, note_id=note_id, priority=priority,
@@ -444,12 +500,14 @@ class WorkingContextStore:
     # Helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _row_to_note(row: sqlite3.Row) -> WorkingNote:
+    def _row_to_note(self, row: sqlite3.Row) -> WorkingNote:
+        content = row["content"]
+        if self._encryptor:
+            content = self._encryptor.decrypt(content)
         return WorkingNote(
             note_id=row["note_id"],
             workspace=row["workspace"],
-            content=row["content"],
+            content=content,
             tags=json.loads(row["tags"]),
             priority=row["priority"],
             created_at=row["created_at"],

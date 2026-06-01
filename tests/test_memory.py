@@ -579,3 +579,137 @@ class TestT17DataRetention:
         assert store.count_notes(ws) == 1
         store.remember(ws, "second note")
         assert store.count_notes(ws) == 2
+
+
+# ---------------------------------------------------------------------------
+# T16: Field-level encryption for note content
+# ---------------------------------------------------------------------------
+
+class TestT16Encryption:
+    """
+    Real cryptography tests — no mocks.
+    Uses the actual Fernet implementation from the cryptography package.
+    """
+
+    def _store_with_key(self, tmp_path, key: str):
+        from agent.working_context_store import WorkingContextStore
+        import os
+        os.environ["VECTR_ENCRYPT_KEY"] = key
+        try:
+            store = WorkingContextStore(str(tmp_path))
+        finally:
+            del os.environ["VECTR_ENCRYPT_KEY"]
+        return store
+
+    def _store_no_key(self, tmp_path):
+        from agent.working_context_store import WorkingContextStore
+        import os
+        os.environ.pop("VECTR_ENCRYPT_KEY", None)
+        return WorkingContextStore(str(tmp_path))
+
+    def test_encryptor_encrypts_and_decrypts_roundtrip(self) -> None:
+        from agent.working_context_store import _NoteEncryptor
+        enc = _NoteEncryptor("test-passphrase-for-vectr")
+        plaintext = "def authenticate(user): return True  # CPython internals note"
+        ciphertext = enc.encrypt(plaintext)
+        assert ciphertext != plaintext
+        assert enc.decrypt(ciphertext) == plaintext
+
+    def test_ciphertext_is_opaque(self) -> None:
+        from agent.working_context_store import _NoteEncryptor
+        enc = _NoteEncryptor("strong-key-99")
+        ciphertext = enc.encrypt("secret function body")
+        assert "secret" not in ciphertext
+        assert "function" not in ciphertext
+
+    def test_different_keys_produce_different_ciphertext(self) -> None:
+        from agent.working_context_store import _NoteEncryptor
+        enc1 = _NoteEncryptor("key-one")
+        enc2 = _NoteEncryptor("key-two")
+        c1 = enc1.encrypt("same plaintext")
+        c2 = enc2.encrypt("same plaintext")
+        assert c1 != c2
+
+    def test_decrypt_with_wrong_key_returns_ciphertext(self) -> None:
+        from agent.working_context_store import _NoteEncryptor
+        enc1 = _NoteEncryptor("correct-key")
+        enc2 = _NoteEncryptor("wrong-key")
+        ciphertext = enc1.encrypt("sensitive note")
+        # Wrong key → fallback returns the ciphertext as-is (no exception raised)
+        result = enc2.decrypt(ciphertext)
+        assert result == ciphertext
+
+    def test_decrypt_plaintext_passthrough(self) -> None:
+        """Notes stored before encryption was enabled are returned as-is."""
+        from agent.working_context_store import _NoteEncryptor
+        enc = _NoteEncryptor("any-key")
+        plaintext = "legacy plaintext note"
+        result = enc.decrypt(plaintext)
+        assert result == plaintext
+
+    def test_store_remember_recall_with_encryption(self, tmp_path) -> None:
+        """End-to-end: store encrypts, recall decrypts, plaintext is returned to caller."""
+        store = self._store_with_key(tmp_path, "integration-test-key")
+        ws = str(tmp_path)
+        sensitive = "dict_pop_last_impl: PyDictObject *mp at dictobject.c:4869"
+        store.remember(ws, sensitive)
+
+        # Verify the DB stores ciphertext, not plaintext
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "working_context.sqlite"))
+        row = conn.execute("SELECT content FROM notes LIMIT 1").fetchone()
+        conn.close()
+        assert row[0] != sensitive, "Content must not be stored as plaintext when encrypted"
+        assert "dict_pop_last" not in row[0]
+
+        # But recall returns the original plaintext
+        notes = store.recall(ws)
+        assert len(notes) == 1
+        assert notes[0].content == sensitive
+
+    def test_store_no_encryption_stores_plaintext(self, tmp_path) -> None:
+        store = self._store_no_key(tmp_path)
+        ws = str(tmp_path)
+        store.remember(ws, "plaintext note content")
+
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "working_context.sqlite"))
+        row = conn.execute("SELECT content FROM notes LIMIT 1").fetchone()
+        conn.close()
+        assert row[0] == "plaintext note content"
+
+    def test_plaintext_note_readable_after_encryption_enabled(self, tmp_path) -> None:
+        """If a note was stored without encryption, enabling encryption later
+        must still return the correct content via decrypt's fallback path."""
+        # Store without encryption
+        store_plain = self._store_no_key(tmp_path)
+        ws = str(tmp_path)
+        store_plain.remember(ws, "pre-encryption note")
+
+        # Now open same DB with encryption enabled
+        store_enc = self._store_with_key(tmp_path, "new-key")
+        notes = store_enc.recall(ws)
+        assert len(notes) == 1
+        # Fallback: decrypt returns plaintext as-is when Fernet token invalid
+        assert notes[0].content == "pre-encryption note"
+
+    def test_same_key_same_db_full_lifecycle(self, tmp_path) -> None:
+        """Two store instances with the same key can round-trip notes."""
+        ws = str(tmp_path)
+        store1 = self._store_with_key(tmp_path, "shared-key")
+        store1.remember(ws, "note stored by store1")
+
+        store2 = self._store_with_key(tmp_path, "shared-key")
+        notes = store2.recall(ws)
+        assert notes[0].content == "note stored by store1"
+
+    def test_build_encryptor_returns_none_when_no_key(self, monkeypatch) -> None:
+        from agent.working_context_store import _build_encryptor
+        monkeypatch.delenv("VECTR_ENCRYPT_KEY", raising=False)
+        assert _build_encryptor() is None
+
+    def test_build_encryptor_returns_instance_when_key_set(self, monkeypatch) -> None:
+        from agent.working_context_store import _build_encryptor, _NoteEncryptor
+        monkeypatch.setenv("VECTR_ENCRYPT_KEY", "test-key")
+        enc = _build_encryptor()
+        assert isinstance(enc, _NoteEncryptor)
