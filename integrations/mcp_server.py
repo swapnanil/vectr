@@ -12,7 +12,7 @@ MCP_SERVER_INFO = {
 }
 
 # ---------------------------------------------------------------------------
-# T13: Adaptive tool registration — session state
+# Adaptive tool registration — session state
 #
 # Exploration tools are always visible. Memory tools (recall, snapshot,
 # snapshot_list, forget, evict_hint) are only added once either:
@@ -314,8 +314,44 @@ _MEMORY_TOOLS = [
     },
 ]  # end _MEMORY_TOOLS
 
+# ingest_traces — not gated by session memory (always available)
+_UTILITY_TOOLS = [
+    {
+        "name": "vectr_ingest_traces",
+        "description": (
+            "Import runtime trace events into the symbol graph to enrich static call analysis. "
+            "Use when you have runtime profiling data (Python sys.settrace output, JSON trace logs) "
+            "that reveals dynamic dispatch patterns the static analyser cannot see: decorators, "
+            "__getattr__, dependency injection, monkey-patching, etc. "
+            "Pass a list of trace events: [{caller, callee, caller_file?, caller_line?}, ...]. "
+            "Dynamic edges are stored with edge_type='dynamic' and appear in vectr_trace results. "
+            "NOT needed if static analysis (vectr_trace) already shows the call relationships."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "events": {
+                    "type": "array",
+                    "description": "List of trace events. Each event: {caller, callee, caller_file?, caller_line?}",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "caller":      {"type": "string", "description": "Calling function/symbol name"},
+                            "callee":      {"type": "string", "description": "Called function/symbol name"},
+                            "caller_file": {"type": "string", "description": "Source file of the caller"},
+                            "caller_line": {"type": "integer", "description": "Line number of the call site"},
+                        },
+                        "required": ["caller", "callee"],
+                    },
+                },
+            },
+            "required": ["events"],
+        },
+    },
+]
+
 # Full list for serialization / backwards compat
-MCP_TOOLS = _EXPLORATION_TOOLS + _MEMORY_TOOLS
+MCP_TOOLS = _EXPLORATION_TOOLS + _MEMORY_TOOLS + _UTILITY_TOOLS
 
 
 def handle_tools_list(session_id: str | None = None, service: Any = None) -> dict:
@@ -336,7 +372,8 @@ def handle_tools_list(session_id: str | None = None, service: Any = None) -> dic
 
     if is_memory_enabled(session_id):
         return {"tools": MCP_TOOLS}
-    return {"tools": _EXPLORATION_TOOLS}
+    # Utility tools (ingest_traces) are always available regardless of session state
+    return {"tools": _EXPLORATION_TOOLS + _UTILITY_TOOLS}
 
 
 def handle_tools_call(
@@ -411,7 +448,7 @@ def handle_tools_call(
         status = service.status()
         notes_count = status.get("notes_count", 0)
 
-        # T13: if this session has prior notes, enable memory tools immediately
+        # if this session has prior notes, enable memory tools immediately
         if notes_count > 0:
             enable_memory_for_session(session_id)
 
@@ -439,7 +476,7 @@ def handle_tools_call(
             if status.get("strategy_rationale"):
                 lines.append(f"  Strategy why   : {status['strategy_rationale']}")
 
-        # T14: inject adaptive instruction style hint at session start
+        # inject adaptive instruction style hint at session start
         try:
             style = service.suggest_instruction_style()
             style_hints = {
@@ -516,7 +553,7 @@ def handle_tools_call(
         if priority not in ("high", "medium", "low"):
             priority = "medium"
         note_id = service.remember(content=content, tags=tags, priority=priority)
-        # T13: first vectr_remember call enables memory tools for this session
+        # first vectr_remember call enables memory tools for this session
         enable_memory_for_session(session_id)
         return {
             "content": [{"type": "text", "text": f"Stored note #{note_id}. You can safely drop the related code chunks from your context."}],
@@ -575,6 +612,21 @@ def handle_tools_call(
         deleted = service.forget_all()
         return {
             "content": [{"type": "text", "text": f"Deleted {deleted} working-memory notes. Starting fresh."}],
+            "isError": False,
+        }
+
+    # ---- vectr_ingest_traces ----
+    if tool_name == "vectr_ingest_traces":
+        events = arguments.get("events")
+        if not isinstance(events, list):
+            return _mcp_error("events must be a list of trace event dicts")
+        result = service.ingest_traces(events)
+        return {
+            "content": [{"type": "text", "text": (
+                f"Ingested {result['ingested']} dynamic call edges into the symbol graph. "
+                f"({result['skipped_invalid']} events skipped — missing caller or callee field.) "
+                "Dynamic edges now appear in vectr_trace results alongside static edges."
+            )}],
             "isError": False,
         }
 

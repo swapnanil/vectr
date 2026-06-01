@@ -486,3 +486,100 @@ class TestRouteExtraction:
         results = g.locate(str(tmp_path), "POST /checkout")
         assert len(results) >= 1
         assert results[0].kind == "route"
+
+
+# ---------------------------------------------------------------------------
+# T28: ingest_traces — dynamic call edge ingestion
+# ---------------------------------------------------------------------------
+
+class TestIngestTraces:
+    def _graph(self, tmp_path) -> "SymbolGraph":
+        from agent.symbol_graph import SymbolGraph
+        return SymbolGraph(str(tmp_path))
+
+    def test_ingest_valid_events_returns_count(self, tmp_path) -> None:
+        g = self._graph(tmp_path)
+        events = [
+            {"caller": "view_cart", "callee": "CartService.get", "caller_file": "views.py", "caller_line": 42},
+            {"caller": "checkout", "callee": "PaymentService.charge", "caller_file": "views.py", "caller_line": 88},
+        ]
+        result = g.ingest_trace_data("/ws", events)
+        assert result["ingested"] == 2
+        assert result["skipped_invalid"] == 0
+
+    def test_events_missing_caller_are_skipped(self, tmp_path) -> None:
+        g = self._graph(tmp_path)
+        events = [
+            {"callee": "helper"},          # missing caller
+            {"caller": "main", "callee": "helper"},
+        ]
+        result = g.ingest_trace_data("/ws", events)
+        assert result["ingested"] == 1
+        assert result["skipped_invalid"] == 1
+
+    def test_events_missing_callee_are_skipped(self, tmp_path) -> None:
+        g = self._graph(tmp_path)
+        events = [{"caller": "main"}]  # missing callee
+        result = g.ingest_trace_data("/ws", events)
+        assert result["ingested"] == 0
+        assert result["skipped_invalid"] == 1
+
+    def test_empty_events_list_returns_zero(self, tmp_path) -> None:
+        g = self._graph(tmp_path)
+        result = g.ingest_trace_data("/ws", [])
+        assert result["ingested"] == 0
+        assert result["skipped_invalid"] == 0
+
+    def test_ingested_edges_appear_in_callers(self, tmp_path) -> None:
+        g = self._graph(tmp_path)
+        g.ingest_trace_data("/ws", [
+            {"caller": "process_payment", "callee": "stripe_charge", "caller_file": "billing.py"}
+        ])
+        callers = g.callers("/ws", "stripe_charge")
+        assert any(e.from_symbol == "process_payment" for e in callers)
+
+    def test_ingested_edges_have_dynamic_edge_type(self, tmp_path) -> None:
+        g = self._graph(tmp_path)
+        g.ingest_trace_data("/ws", [
+            {"caller": "handler", "callee": "dispatch", "caller_file": "router.py"}
+        ])
+        callers = g.callers("/ws", "dispatch")
+        dynamic = [e for e in callers if e.edge_type == "dynamic"]
+        assert len(dynamic) >= 1
+
+    def test_duplicate_edges_not_duplicated(self, tmp_path) -> None:
+        g = self._graph(tmp_path)
+        event = {"caller": "a", "callee": "b", "caller_file": "a.py", "caller_line": 1}
+        g.ingest_trace_data("/ws", [event, event, event])
+        # Due to INSERT OR IGNORE, only 1 edge should exist
+        callers = g.callers("/ws", "b")
+        b_callers = [e for e in callers if e.from_symbol == "a"]
+        assert len(b_callers) == 1
+
+    def test_optional_fields_default_gracefully(self, tmp_path) -> None:
+        g = self._graph(tmp_path)
+        events = [{"caller": "main", "callee": "helper"}]  # no caller_file or caller_line
+        result = g.ingest_trace_data("/ws", events)
+        assert result["ingested"] == 1
+
+    def test_mcp_vectr_ingest_traces_dispatches(self) -> None:
+        from unittest.mock import MagicMock
+        from integrations.mcp_server import handle_tools_call
+        svc = MagicMock()
+        svc.ingest_traces.return_value = {"ingested": 3, "skipped_invalid": 0}
+        events = [{"caller": "a", "callee": "b"}]
+        result = handle_tools_call("vectr_ingest_traces", {"events": events}, svc)
+        assert result["isError"] is False
+        svc.ingest_traces.assert_called_once_with(events)
+
+    def test_mcp_vectr_ingest_traces_missing_events_is_error(self) -> None:
+        from unittest.mock import MagicMock
+        from integrations.mcp_server import handle_tools_call
+        svc = MagicMock()
+        result = handle_tools_call("vectr_ingest_traces", {}, svc)
+        assert result["isError"] is True
+
+    def test_vectr_ingest_traces_in_tools_list(self) -> None:
+        from integrations.mcp_server import MCP_TOOLS
+        names = {t["name"] for t in MCP_TOOLS}
+        assert "vectr_ingest_traces" in names

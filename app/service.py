@@ -89,14 +89,14 @@ class VectrService:
             return
         self._indexing = True
 
-        # T17: apply TTL to working notes at startup if VECTR_NOTES_TTL_DAYS is set
+        # apply TTL to working notes at startup if VECTR_NOTES_TTL_DAYS is set
         ttl_days_str = os.getenv("VECTR_NOTES_TTL_DAYS", "")
         if ttl_days_str:
             try:
                 ttl = float(ttl_days_str)
                 deleted = self._context_store.purge_expired_notes(self._workspace_root, ttl)
                 if deleted:
-                    logger.info("T17: purged %d expired notes (TTL=%.1f days)", deleted, ttl)
+                    logger.info("purged %d expired notes (TTL=%.1f days)", deleted, ttl)
             except (ValueError, Exception):
                 logger.warning("VECTR_NOTES_TTL_DAYS is not a valid float: %r", ttl_days_str)
 
@@ -112,7 +112,7 @@ class VectrService:
                 self._searcher.refresh_bm25()
                 logger.info("Indexed %d files → %d chunks", files, chunks)
 
-                # T17: audit index event
+                # audit index event
                 from agent.working_context_store import audit as _audit
                 _audit("INDEX", workspace=self._workspace_root, files=files, chunks=chunks)
 
@@ -321,6 +321,10 @@ class VectrService:
         """Trace call graph. Caller/callee names are returned as-is; AI can locate() them for snippets."""
         return self._symbol_graph.trace(self._workspace_root, name, direction, limit)  # type: ignore[arg-type]
 
+    def ingest_traces(self, trace_events: list[dict]) -> dict:
+        """Ingest runtime trace events into the symbol graph."""
+        return self._symbol_graph.ingest_trace_data(self._workspace_root, trace_events)
+
     def format_locate(self, symbols: list, name: str) -> str:
         return self._symbol_graph.format_locate_for_llm(symbols, name)
 
@@ -398,7 +402,8 @@ class VectrService:
         return self._context_store.count_notes(self._workspace_root)
 
     # ------------------------------------------------------------------
-    # T14: Adaptive prompt intelligence
+    # ------------------------------------------------------------------
+    # Adaptive prompt intelligence
     # ------------------------------------------------------------------
 
     def suggest_instruction_style(self) -> str:

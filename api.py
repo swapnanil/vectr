@@ -52,11 +52,11 @@ app.add_middleware(
 )
 
 
-# T15: optional API key enforcement — only active when VECTR_API_KEY is set.
-# Scope: solo dev / personal machine by default (no key required).
-# For shared/enterprise use: set VECTR_API_KEY and communicate the key to IDE users.
-# The middleware is always registered but checks the env var at request time so
-# the key can be changed without restarting (and tests can patch os.environ cleanly).
+# Optional API key enforcement — only active when VECTR_API_KEY is set.
+# Solo dev / personal machine: no key required by default.
+# For shared/enterprise use: set VECTR_API_KEY and communicate it to IDE users.
+# Middleware reads the env var at request time (not import time) so the key can
+# be changed without restarting and tests can patch os.environ cleanly.
 @app.middleware("http")
 async def require_api_key(request: Request, call_next) -> Response:
     api_key = os.getenv("VECTR_API_KEY", "")

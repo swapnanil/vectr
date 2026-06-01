@@ -22,7 +22,7 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# T17: Rotating audit log
+# Rotating audit log
 #
 # Logs remember/recall/index/forget events to ~/.vectr/audit.log.
 # Rotates at 10 MB; keeps 3 backups. Disabled if VECTR_AUDIT_LOG="" is set.
@@ -63,7 +63,7 @@ def audit(event: str, **kwargs) -> None:
 
 
 # ---------------------------------------------------------------------------
-# T16: Field-level encryption for note content
+# Field-level encryption for note content
 #
 # When VECTR_ENCRYPT_KEY is set, note content is encrypted at write time and
 # decrypted at read time using Fernet (AES-128-CBC + HMAC-SHA256).
@@ -73,8 +73,6 @@ def audit(event: str, **kwargs) -> None:
 #
 # If a note was stored plaintext before encryption was enabled, decrypt()
 # detects the invalid token and returns the raw text — no data loss.
-# If a note was stored encrypted and encryption is later disabled, reads
-# return ciphertext (marked with [ENCRYPTED] prefix for user visibility).
 # ---------------------------------------------------------------------------
 
 class _NoteEncryptor:
@@ -146,13 +144,12 @@ class WorkingNote:
     last_accessed: float
     session_id: str | None = None
     decay_score: float = 1.0
-    # P4-1: team/shared notes tri-key model
+    # team/shared notes tri-key model
     author_id: str = ""              # developer/agent identifier
     author_trust_score: float = 1.0  # Bayesian weight per contributor (0.0–1.0)
     valid_from: float = 0.0          # bi-temporal: when the note became valid
     valid_until: float | None = None # bi-temporal: None = still valid; float = superseded
-    code_hash: str = ""              # sha256[:16] of the anchored code block
-    # P4-2: conflict state
+    code_hash: str = ""              # sha256[:16] of the anchored code block at write time
     superseded_by: str | None = None  # author_id that superseded this note
     superseded_at: float | None = None
 
@@ -177,7 +174,6 @@ class WorkingContextStore:
 
     def __init__(self, db_dir: str) -> None:
         self._db_path = Path(db_dir) / "working_context.sqlite"
-        # T16: lazily built per-instance; reads VECTR_ENCRYPT_KEY at construction time
         self._encryptor: _NoteEncryptor | None = _build_encryptor()
         self._init_db()
 
@@ -263,16 +259,16 @@ class WorkingContextStore:
     ) -> int:
         """Store a working note. Returns the note_id.
 
-        P4-2: if code_hash is provided and another non-superseded note exists
-        for the same workspace + code_hash (same code anchor), the older note
-        is marked superseded before the new note is inserted.
+        If code_hash is provided and another non-superseded note exists for the
+        same workspace + code_hash (same code anchor), the older note is marked
+        superseded before the new note is inserted.
         """
         now = time.time()
         tags_json = json.dumps(tags or [])
         stored_content = self._encryptor.encrypt(content) if self._encryptor else content
 
         with self._conn() as conn:
-            # P4-2: detect and resolve conflicts on the same code anchor
+            # conflict resolution: if another note anchors the same code block, supersede it
             if code_hash:
                 conflicting = conn.execute(
                     """SELECT note_id FROM notes
@@ -300,7 +296,7 @@ class WorkingContextStore:
             )
             note_id = cur.lastrowid
 
-            # P4-1: update author trust score registry (Bayesian: count-weighted)
+            # update author trust score registry (Bayesian: count-weighted)
             if author_id:
                 conn.execute(
                     """INSERT INTO author_trust (workspace, author_id, trust_score, note_count)
@@ -327,9 +323,9 @@ class WorkingContextStore:
     ) -> list[WorkingNote]:
         """Retrieve working notes.
 
-        P4-2: superseded notes are excluded by default. Pass include_superseded=True
+        Superseded notes are excluded by default. Pass include_superseded=True
         to see the full history including notes marked as superseded.
-        P4-1: results ordered by author_trust_score DESC, decay_score DESC, last_accessed DESC
+        Results ordered by author_trust_score DESC, decay_score DESC, last_accessed DESC
         so the highest-trust contributor's notes surface first.
         """
         sql = "SELECT * FROM notes WHERE workspace = ?"
@@ -397,7 +393,7 @@ class WorkingContextStore:
         return deleted
 
     def forget_all_workspaces(self) -> int:
-        """T17: Delete ALL notes across ALL workspaces in this SQLite file.
+        """Delete ALL notes across ALL workspaces in this SQLite file.
 
         Used by `vectr forget --all` to give a global clean slate.
         Audit entry logged per deletion.
@@ -408,7 +404,7 @@ class WorkingContextStore:
         return deleted
 
     def purge_expired_notes(self, workspace: str, ttl_days: float) -> int:
-        """T17: Delete notes older than ttl_days regardless of decay_score.
+        """Delete notes older than ttl_days regardless of decay_score.
 
         Called at startup when VECTR_NOTES_TTL_DAYS is set. Returns the number
         of notes deleted.
@@ -554,7 +550,7 @@ class WorkingContextStore:
     ) -> dict[int, list[str]]:
         """Identify notes whose referenced files have changed since the note was written.
 
-        P4-3 composite staleness: fires the stale flag when ANY of:
+        Composite staleness fires the stale flag when ANY of:
           - A referenced file's mtime > note.created_at (original mtime check)
           - note.code_hash != sha256[:16] of the current file content (code moved/changed)
           - Note is marked superseded (valid_until is set)
@@ -568,7 +564,7 @@ class WorkingContextStore:
         for note in notes:
             reasons: list[str] = []
 
-            # P4-2: superseded notes are always stale
+            # superseded notes are always stale
             if note.valid_until is not None:
                 sup_by = note.superseded_by or "unknown"
                 reasons.append(f"[superseded by @{sup_by}]")
@@ -585,7 +581,7 @@ class WorkingContextStore:
                 if stat.st_mtime > note.created_at:
                     reasons.append(raw_path)
 
-                # P4-3: code_hash staleness — detect if the anchored code changed
+                # code_hash staleness — detect if the anchored code changed
                 if note.code_hash and resolved.suffix.lower() in {".py", ".c", ".h", ".go", ".rs"}:
                     try:
                         current_hash = hashlib.sha256(
@@ -602,7 +598,7 @@ class WorkingContextStore:
         return stale
 
     def get_author_trust(self, workspace: str, author_id: str) -> float:
-        """P4-1: Return the Bayesian trust score for an author in this workspace."""
+        """Return the Bayesian trust score for an author in this workspace."""
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT trust_score FROM author_trust WHERE workspace = ? AND author_id = ?",
@@ -611,7 +607,7 @@ class WorkingContextStore:
         return row[0] if row else 1.0
 
     def list_authors(self, workspace: str) -> list[dict]:
-        """P4-1: Return all authors with their trust scores and note counts."""
+        """Return all authors with their trust scores and note counts."""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT author_id, trust_score, note_count FROM author_trust WHERE workspace = ? ORDER BY trust_score DESC",
@@ -638,7 +634,7 @@ class WorkingContextStore:
             last_accessed=row["last_accessed"],
             session_id=row["session_id"],
             decay_score=row["decay_score"],
-            # P4-1 fields (present in all new DBs; guarded for old DBs without migration)
+            # team notes fields (present in all new DBs; guarded for old DBs without migration)
             author_id=row["author_id"] if "author_id" in keys else "",
             author_trust_score=row["author_trust_score"] if "author_trust_score" in keys else 1.0,
             valid_from=row["valid_from"] if "valid_from" in keys else 0.0,
@@ -678,7 +674,7 @@ class WorkingContextStore:
             stale_files = stale_warnings.get(n.note_id, [])
             stale_marker = " [STALE]" if stale_files else ""
 
-            # P4-2: superseded badge
+            # superseded badge
             superseded_marker = ""
             if n.valid_until is not None and n.superseded_by:
                 import datetime as _dt

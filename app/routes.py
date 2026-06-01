@@ -267,7 +267,7 @@ async def mcp_jsonrpc(request: Request, body: dict = Body(...)) -> dict:
     if method == "ping":
         return _ok({})
 
-    # T13: extract session ID from _meta for adaptive tool registration
+    # extract session ID from _meta for adaptive tool registration
     meta = params.get("_meta") or body.get("_meta") or {}
     session_id = meta.get("sessionId") or request.headers.get("X-Session-ID") or None
 

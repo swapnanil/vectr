@@ -373,7 +373,7 @@ def cmd_restart(args: argparse.Namespace) -> None:
 def cmd_forget(args: argparse.Namespace) -> None:
     import httpx
 
-    # T17: --all clears notes across ALL workspaces directly via SQLite,
+    # --all clears notes across ALL workspaces directly via SQLite,
     # bypassing the running server (server may be down, or multiple instances).
     if getattr(args, "all", False):
         from agent.working_context_store import WorkingContextStore
@@ -406,14 +406,14 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     _write_workspace_config(workspace, port)
 
-    # T19: write user-defined exclusions to .vectrignore
+    # write user-defined exclusions to .vectrignore
     exclude_dirs: list[str] = getattr(args, "exclude", None) or []
     if exclude_dirs:
         from integrations.workspace_detect import write_vectrignore
         write_vectrignore(workspace, exclude_dirs)
         print(f"  Added to .vectrignore: {', '.join(exclude_dirs)}", file=sys.stderr)
 
-    # T14: write style override if --style is specified
+    # write style override if --style is specified
     if getattr(args, "style", None):
         style = args.style
         if style not in ("additive", "directed", "memory-only"):
@@ -456,14 +456,14 @@ def main() -> None:
     p_forget.add_argument("--port", type=int, default=_default_port)
     p_forget.add_argument(
         "--all", action="store_true",
-        help="T17: Delete notes across ALL workspaces (operates directly on SQLite, no server needed)",
+        help="Delete notes across ALL workspaces (operates directly on SQLite, no server needed)",
     )
 
     p_init = sub.add_parser("init", help="Write CLAUDE.md and .mcp.json to a workspace (no server)")
     p_init.add_argument("--path", default=_default_path)
     p_init.add_argument(
         "--exclude", action="append", metavar="DIR", dest="exclude",
-        help="T19: Append a directory name to .vectrignore (repeatable). "
+        help="Append a directory name to .vectrignore (repeatable). "
              "Example: vectr init --exclude vendor --exclude generated",
     )
     p_init.add_argument(

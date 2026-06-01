@@ -43,7 +43,7 @@ def get_gitignore_patterns(workspace_root: str) -> list[str]:
 
 
 def get_vectrignore_dirs(workspace_root: str) -> set[str]:
-    """T19: Read .vectrignore and return a set of directory names to exclude.
+    """Read .vectrignore and return a set of directory names to exclude.
 
     .vectrignore format: one directory name per line, # comments supported.
     Example:
@@ -56,7 +56,7 @@ def get_vectrignore_dirs(workspace_root: str) -> set[str]:
 
 
 def write_vectrignore(workspace_root: str, dirs: list[str]) -> None:
-    """T19: Append directory names to .vectrignore, skipping duplicates."""
+    """Append directory names to .vectrignore, skipping duplicates."""
     vectrignore = Path(workspace_root) / ".vectrignore"
     existing: set[str] = set()
     lines: list[str] = []

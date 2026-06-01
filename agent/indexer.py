@@ -385,7 +385,7 @@ class CodeIndexer:
         )
 
         patterns = gitignore_patterns or get_gitignore_patterns(str(self.workspace_root))
-        # T19: read user-defined exclusions from .vectrignore
+        # read user-defined exclusions from .vectrignore
         vectrignore_dirs = get_vectrignore_dirs(str(self.workspace_root))
         all_excluded = EXCLUDED_DIRS | vectrignore_dirs
 

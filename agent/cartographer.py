@@ -116,7 +116,7 @@ def _detect_frameworks(workspace_root: str, structure: dict[str, list[str]]) -> 
 
 def _build_import_graph(workspace_root: str, indexed_files: list[str] | None = None) -> "dict[str, set[str]]":
     """
-    T27: Build a file-to-file import graph by parsing import statements.
+    Build a file-to-file import graph by parsing import statements.
     Returns {file_path: {imported_file_path, ...}} — edges only to files in the workspace.
     """
     import re as _re
@@ -171,7 +171,7 @@ def detect_module_communities(
     min_community_size: int = 2,
 ) -> list[dict]:
     """
-    T27: Detect module communities using Louvain-style greedy modularity
+    Detect module communities using Louvain-style greedy modularity
     maximisation (via networkx). Returns a list of community dicts:
         [{"id": 0, "label": "auth", "files": ["auth/models.py", ...], "size": 3}, ...]
 
@@ -241,7 +241,7 @@ def collect_raw_metadata(workspace_root: str, indexed_files: list[str] | None = 
     languages = _detect_languages(structure)
     frameworks = _detect_frameworks(workspace_root, structure)
 
-    # T27: Louvain community detection — auto-cluster modules
+    # auto-cluster modules via Louvain community detection
     communities = detect_module_communities(workspace_root, indexed_files)
 
     metadata = {
@@ -288,7 +288,7 @@ def format_raw_metadata_for_llm(metadata: dict) -> str:
     if metadata.get("readme_excerpt"):
         parts.append(f"\nREADME excerpt:\n{metadata['readme_excerpt'][:800]}")
 
-    # T27: include module community clusters if detected
+    # include module community clusters if detected
     communities = metadata.get("module_communities", [])
     if communities:
         parts.append("\nModule communities (auto-clustered by import relationships):")

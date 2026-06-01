@@ -259,14 +259,14 @@ def extract_symbols_from_file(file_path: str) -> tuple[list[dict], list[dict]]:
             seen.add(key)
             deduped_edges.append(e)
 
-    # T26: extract HTTP route symbols (Flask/FastAPI/Express/Spring)
+    # extract HTTP route symbols (Flask/FastAPI/Express/Spring)
     symbols.extend(_extract_routes(file_path, code, language))
 
     return symbols, deduped_edges
 
 
 # ---------------------------------------------------------------------------
-# T26: HTTP route extraction — framework-aware route nodes
+# HTTP route extraction — framework-aware route nodes
 #
 # Extracts route symbols from common web frameworks and adds them to the L2
 # symbol graph with kind="route". This makes routes navigable via vectr_locate
@@ -426,6 +426,8 @@ class SymbolGraph:
                 CREATE INDEX IF NOT EXISTS idx_edge_workspace ON edges(workspace);
                 CREATE INDEX IF NOT EXISTS idx_edge_from ON edges(from_symbol);
                 CREATE INDEX IF NOT EXISTS idx_edge_to ON edges(to_symbol);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_unique
+                    ON edges(workspace, from_file, from_symbol, from_line, to_symbol, edge_type);
             """)
 
     # ------------------------------------------------------------------
@@ -506,6 +508,56 @@ class SymbolGraph:
             return conn.execute(
                 "SELECT COUNT(*) FROM symbols WHERE workspace = ?", (workspace,)
             ).fetchone()[0]
+
+    def ingest_trace_data(
+        self,
+        workspace: str,
+        trace_events: list[dict],
+    ) -> dict:
+        """Ingest runtime trace events and add dynamic call edges to the graph.
+
+        Accepts a list of trace event dicts. Recognised fields:
+          caller      — name of the calling function/symbol (required)
+          callee      — name of the called function/symbol (required)
+          caller_file — source file of the caller (optional, empty string if unknown)
+          caller_line — line number of the call site (optional, 0 if unknown)
+
+        Dynamic edges use edge_type="dynamic" to distinguish them from static
+        analysis edges. This bridges the dynamic dispatch gap: calls via
+        __getattr__, decorators, dependency injection, etc. that static analysis
+        misses are captured here.
+
+        Returns {"ingested": int, "skipped_invalid": int}.
+        """
+        ingested = 0
+        skipped = 0
+
+        with self._conn() as conn:
+            for ev in trace_events:
+                caller = str(ev.get("caller", "")).strip()
+                callee = str(ev.get("callee", "")).strip()
+                if not caller or not callee:
+                    skipped += 1
+                    continue
+
+                caller_file = str(ev.get("caller_file", "")).strip()
+                caller_line = int(ev.get("caller_line", 0))
+
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO edges
+                        (workspace, from_file, from_symbol, from_line, to_symbol, edge_type)
+                    VALUES (?, ?, ?, ?, ?, 'dynamic')
+                    """,
+                    (workspace, caller_file, caller, caller_line, callee),
+                )
+                ingested += 1
+
+        logger.info(
+            "ingest_traces: %d edges added, %d skipped (workspace=%s)",
+            ingested, skipped, workspace,
+        )
+        return {"ingested": ingested, "skipped_invalid": skipped}
 
     # ------------------------------------------------------------------
     # Query: locate
