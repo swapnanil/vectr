@@ -7,7 +7,7 @@ import os
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
@@ -48,7 +48,37 @@ app.add_middleware(
     allow_origins=["http://localhost", "http://127.0.0.1"],
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization", "X-Api-Key"],
 )
+
+
+# T15: optional API key enforcement — only active when VECTR_API_KEY is set.
+# Scope: solo dev / personal machine by default (no key required).
+# For shared/enterprise use: set VECTR_API_KEY and communicate the key to IDE users.
+# The middleware is always registered but checks the env var at request time so
+# the key can be changed without restarting (and tests can patch os.environ cleanly).
+@app.middleware("http")
+async def require_api_key(request: Request, call_next) -> Response:
+    api_key = os.getenv("VECTR_API_KEY", "")
+    if not api_key:
+        return await call_next(request)
+
+    # Allow health check without auth so monitoring tools work
+    if request.url.path == "/v1/health":
+        return await call_next(request)
+
+    # Accept key in X-Api-Key header or Authorization: Bearer <key>
+    provided = (
+        request.headers.get("X-Api-Key", "")
+        or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    )
+    if provided != api_key:
+        return Response(
+            content='{"error":"unauthorized","detail":"Set X-Api-Key or Authorization: Bearer <VECTR_API_KEY>"}',
+            status_code=401,
+            media_type="application/json",
+        )
+    return await call_next(request)
+
 
 app.include_router(router)
