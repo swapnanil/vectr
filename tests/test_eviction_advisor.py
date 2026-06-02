@@ -300,9 +300,9 @@ class TestToolCallCountTrigger:
         assert adv.should_evict() is False
         assert adv._tool_call_count == 0
 
-    def test_default_tool_call_threshold_is_20(self) -> None:
+    def test_default_tool_call_threshold_is_10(self) -> None:
         adv = EvictionAdvisor()
-        assert adv._tool_call_threshold == 20
+        assert adv._tool_call_threshold == 10
 
     def test_21_tool_calls_triggers_eviction(self) -> None:
         adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=20)
@@ -310,8 +310,76 @@ class TestToolCallCountTrigger:
             adv.increment_tool_call()
         assert adv.should_evict() is True
 
-    def test_20_tool_calls_no_eviction(self) -> None:
-        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=20)
-        for _ in range(20):
+    def test_10_tool_calls_no_eviction(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=10,
+                              retrieval_call_threshold=1000, time_threshold_seconds=1000)
+        for _ in range(10):
             adv.increment_tool_call()
-        assert adv.should_evict() is False  # exactly 20, not > 20
+        assert adv.should_evict() is False  # exactly 10, not > 10
+
+
+# ---------------------------------------------------------------------------
+# EvictionAdvisor — retrieval call count secondary trigger
+# ---------------------------------------------------------------------------
+
+class TestRetrievalCallCountTrigger:
+    def test_fires_after_retrieval_threshold(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=1000,
+                              retrieval_call_threshold=1, time_threshold_seconds=1000)
+        assert adv.should_evict() is False
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is False  # exactly at threshold, not over
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is True   # > threshold
+
+    def test_default_retrieval_call_threshold_is_1(self) -> None:
+        adv = EvictionAdvisor()
+        assert adv._retrieval_call_threshold == 1
+
+    def test_fires_independently_of_token_and_tool_count(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=1000,
+                              retrieval_call_threshold=1, time_threshold_seconds=1000)
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is True
+
+    def test_clear_session_resets_retrieval_count(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=1000,
+                              retrieval_call_threshold=1, time_threshold_seconds=1000)
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is True
+        adv.clear_session()
+        assert adv.should_evict() is False
+        assert adv._retrieval_call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# EvictionAdvisor — wall-clock time trigger
+# ---------------------------------------------------------------------------
+
+class TestTimeBasedTrigger:
+    def test_fires_after_time_threshold(self) -> None:
+        import time as _time
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=1000,
+                              retrieval_call_threshold=1000, time_threshold_seconds=0.05)
+        assert adv.should_evict() is False
+        _time.sleep(0.1)
+        assert adv.should_evict() is True
+
+    def test_default_time_threshold_is_180s(self) -> None:
+        adv = EvictionAdvisor()
+        assert adv._time_threshold_seconds == 180.0
+
+    def test_clear_session_resets_timer(self) -> None:
+        import time as _time
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=1000,
+                              retrieval_call_threshold=1000, time_threshold_seconds=0.05)
+        _time.sleep(0.1)
+        assert adv.should_evict() is True
+        adv.clear_session()
+        assert adv.should_evict() is False
+
+    def test_session_started_at_is_float(self) -> None:
+        adv = EvictionAdvisor()
+        assert isinstance(adv._session_started_at, float)

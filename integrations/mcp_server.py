@@ -389,6 +389,13 @@ def handle_tools_call(
     except Exception:
         pass
 
+    # Count retrieval-specific calls (search/locate/trace) for the retrieval-count trigger
+    if tool_name in ("vectr_search", "vectr_locate", "vectr_trace"):
+        try:
+            service._eviction_advisor.increment_retrieval_call()
+        except Exception:
+            pass
+
     # ---- vectr_search ----
     if tool_name == "vectr_search":
         query = arguments.get("query", "")

@@ -39,7 +39,8 @@ where to look — each tool targets a specific gap in what you can address direc
 | `vectr_search("natural language description")` | Semantic search — describe what you're looking for, get the most relevant code chunks back. Replaces grep + cat loops. |
 | `vectr_locate("SymbolName")` | Symbol graph lookup — name → definition file and line. Faster than any file scan. |
 | `vectr_trace("symbol_name")` | Call graph — callers and callees of a symbol, without reading files. |
-| `vectr_map()` | Codebase overview — file tree + module summaries. Use once on a completely unknown repo. |
+| `vectr_map()` | Codebase overview — file tree + module summaries. Use once on a completely unknown repo. On a first visit, it returns raw metadata and you should follow up with `vectr_map_save(summary)` to store your synthesised description as a permanent passport. |
+| `vectr_map_save(summary)` | Save your plain-English codebase summary (~200–350 tokens) as the permanent passport. Only call this when `vectr_map` returned raw metadata (i.e. no passport exists yet). |
 
 If you already know the file path, use Read directly — don't search for what you can address directly.
 
@@ -49,15 +50,12 @@ Notes are accumulated findings from prior sessions on this codebase. Reading a n
 re-reading the file it describes costs tokens and turns.
 
 **At session start:** `vectr_status()` — always call this first.
-- `notes_count > 0` → call `vectr_recall(query="<your task in plain English>")` once, before opening any files
+- `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task in plain English>")` once, before opening any files
 - `notes_count == 0` → skip recall and proceed
 
-**During the session:** `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")`
-Store actual code blocks, not file pointers. "The tp_del slot is set here: `[paste code]`" is useful;
-"see gc.c line 42" is not — the next session still has to re-read the file.
-Prefer 3–5 focused notes (one per key definition or pattern) over one broad summary.
+**The moment you find a key definition, pattern, or non-obvious detail:** `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block, not a file pointer. One note now = 3–5 fewer re-discovery calls next session.
 
-**When context is getting full or at natural breakpoints:** `vectr_snapshot("label")` — seals current notes as a checkpoint. Once a finding is in a note, you no longer need the source file in your context window. A fresh session recalls exactly what it needs — without re-reading everything this session explored.
+**When context is getting full or at natural breakpoints:** `vectr_snapshot("label")` — seals current notes as a checkpoint. Once a finding is in a note, you no longer need the source file in your context window. A fresh session recalls exactly what it needs — without re-reading everything this session explored. Use `vectr_snapshot_list()` at session start to find an existing checkpoint if `vectr_recall` returned nothing useful.
 
 **If recalled notes already contain what you need:** work from them directly.
 Use vectr_search or Read only to fill genuine gaps — not to re-discover what notes already say.

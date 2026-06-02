@@ -51,18 +51,35 @@ class EvictionAdvisor:
     def __init__(
         self,
         eviction_threshold_tokens: int = 40_000,
-        tool_call_threshold: int = 20,
+        tool_call_threshold: int = 10,
+        retrieval_call_threshold: int = 1,
+        time_threshold_seconds: float = 180.0,
     ) -> None:
-        # Fire when EITHER:
-        #   cumulative injected chars ÷ 4 > 40K  (vectr-tracked content)
-        #   tool_call_count > 20                  (total MCP calls this session)
-        # Rationale: the tool-call count catches sessions where the agent reads
-        # mostly via Read/Bash (invisible to token tracking) but is still filling
-        # its context window. arXiv:2310.08560, arXiv:2510.24699.
+        # Fire when ANY of these conditions is met:
+        #   cumulative injected chars ÷ 4 >= 40K  (vectr-tracked content)
+        #   tool_call_count > 10                   (all MCP calls this session)
+        #   retrieval_call_count > 1               (search/locate/trace calls only)
+        #   elapsed seconds >= 180                 (wall-clock since session start)
+        #
+        # Why retrieval_call_threshold: the tool_call_count trigger counts all vectr MCP
+        # calls, but the LLM typically makes only 3-4 per task (status + 1 locate + 2 search)
+        # so threshold=10 never fires. Counting only retrieval calls (search/locate/trace)
+        # and firing on the 2nd one gives a natural mid-task trigger: the LLM has found
+        # something worth keeping before it switches into implementation mode.
+        #
+        # Why time_threshold: the eviction protocol requires vectr to see every retrieval
+        # to track real context pressure (spec line 78), but the LLM uses native Read/Bash
+        # for most reading — those calls are invisible here. A time-based trigger fires
+        # regardless of tool mix, catching sessions where the LLM barely uses vectr at all.
+        # arXiv:2310.08560, arXiv:2510.24699.
         self._threshold = eviction_threshold_tokens
         self._tool_call_threshold = tool_call_threshold
+        self._retrieval_call_threshold = retrieval_call_threshold
+        self._time_threshold_seconds = time_threshold_seconds
         self._chunks: list[RetrievedChunk] = []
         self._tool_call_count: int = 0
+        self._retrieval_call_count: int = 0
+        self._session_started_at: float = time.time()
 
     def record(self, file_path: str, lines: str, symbol_name: str, content: str) -> None:
         """Record a chunk that was delivered to the LLM this session."""
@@ -91,13 +108,20 @@ class EvictionAdvisor:
         """Increment the total MCP tool call counter for this session."""
         self._tool_call_count += 1
 
+    def increment_retrieval_call(self) -> None:
+        """Increment the retrieval-specific call counter (search/locate/trace only)."""
+        self._retrieval_call_count += 1
+
     def total_tokens_in_session(self) -> int:
         return sum(c.estimated_tokens for c in self._chunks)
 
     def should_evict(self) -> bool:
+        elapsed = time.time() - self._session_started_at
         return (
             self.total_tokens_in_session() >= self._threshold
             or self._tool_call_count > self._tool_call_threshold
+            or self._retrieval_call_count > self._retrieval_call_threshold
+            or elapsed >= self._time_threshold_seconds
         )
 
     def eviction_hint(self) -> str:
@@ -128,8 +152,10 @@ class EvictionAdvisor:
 
         lines += [
             "",
-            "To retrieve any of them: vectr_search('<symbol name or description>')",
-            "Recall latency: <50ms. Nothing will be lost.",
+            "To retrieve any of them later: vectr_search('<description>') — <50ms guaranteed.",
+            "Before dropping: if you have synthesized findings to keep for future sessions,",
+            "call vectr_remember(content, tags=[...]) now — raw chunks are always",
+            "re-retrievable, but your reasoning and conclusions about them are not.",
         ]
         return "\n".join(lines)
 
@@ -137,6 +163,8 @@ class EvictionAdvisor:
         """Reset for a new session."""
         self._chunks.clear()
         self._tool_call_count = 0
+        self._retrieval_call_count = 0
+        self._session_started_at = time.time()
 
     def as_chunk_dicts(self) -> list[dict]:
         """Serialisable form for snapshot storage."""
