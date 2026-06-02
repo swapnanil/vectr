@@ -169,6 +169,14 @@ class TestEvictionHint:
         adv = EvictionAdvisor()
         assert adv.eviction_hint() == ""
 
+    def test_empty_chunks_but_time_trigger_returns_generic_nudge(self) -> None:
+        # No vectr_search calls, but time threshold already elapsed → still nudge
+        adv = EvictionAdvisor(time_threshold_seconds=0)
+        hint = adv.eviction_hint()
+        assert hint != "", "should return a nudge when time trigger fired even with no tracked chunks"
+        assert "vectr_remember" in hint
+        assert "ACTION REQUIRED" in hint
+
     def test_hint_mentions_file_path(self) -> None:
         adv = EvictionAdvisor()
         adv.record("auth.py", "1-10", "verify_token", "def verify_token(): ...")

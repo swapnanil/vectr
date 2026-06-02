@@ -127,9 +127,20 @@ class EvictionAdvisor:
     def eviction_hint(self) -> str:
         """
         Return a message the LLM can act on to free its context window.
-        Always safe to call — returns an empty hint if nothing has been retrieved.
+        Always safe to call — returns an empty hint if nothing has been retrieved
+        and no time-based pressure exists.
         """
         if not self._chunks:
+            # No vectr-tracked chunks, but time pressure still warrants a nudge
+            elapsed = time.time() - self._session_started_at
+            if elapsed >= self._time_threshold_seconds:
+                return (
+                    "Context management hint: You've been working for a while. "
+                    "ACTION REQUIRED: Call vectr_remember(content, tags=[...]) NOW with your "
+                    "key findings — what functions you've located, patterns, non-obvious details, "
+                    "and any implementation decisions. Your synthesized understanding does not "
+                    "persist automatically. Do this now, then continue your task."
+                )
             return ""
 
         total_tokens = self.total_tokens_in_session()
