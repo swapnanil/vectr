@@ -96,6 +96,10 @@ _SYMBOL_TYPES: dict[str, dict[str, str]] = {
         "interface_declaration": "interface",
         "enum_declaration": "enum",
     },
+    "zig": {
+        "function_declaration": "function",
+        "variable_declaration": "struct",  # pub const Foo = struct { ... }
+    },
 }
 
 # Call node types per language
@@ -106,6 +110,7 @@ _CALL_TYPES: dict[str, set[str]] = {
     "go": {"call_expression"},
     "rust": {"call_expression", "method_call_expression"},
     "java": {"method_invocation", "object_creation_expression"},
+    "zig": {"call_expression", "builtin_function"},
 }
 
 # Import node types per language
@@ -116,6 +121,7 @@ _IMPORT_TYPES: dict[str, set[str]] = {
     "go": {"import_declaration"},
     "rust": {"use_declaration"},
     "java": {"import_declaration"},
+    "zig": {"variable_declaration"},  # const std = @import("std");
 }
 
 

@@ -360,3 +360,69 @@ class TestCodeSearcher:
         s.refresh_bm25()
         results, _ = s.search("func", n_results=3)
         assert len(results) <= 3
+
+
+# ---------------------------------------------------------------------------
+# Zig language support
+# ---------------------------------------------------------------------------
+
+class TestZigSupport:
+    """chunk_file() must produce AST-aware chunks for .zig files (not window fallback)."""
+
+    _ZIG_CODE = """\
+const std = @import("std");
+
+pub fn add(a: i32, b: i32) i32 {
+    return a + b;
+}
+
+pub fn subtract(a: i32, b: i32) i32 {
+    return a - b;
+}
+
+pub const Account = struct {
+    id: u128,
+    balance: i64,
+
+    pub fn debit(self: *Account, amount: i64) void {
+        self.balance -= amount;
+    }
+};
+"""
+
+    def _write_zig(self, tmp_path) -> str:
+        p = tmp_path / "state_machine.zig"
+        p.write_text(self._ZIG_CODE)
+        return str(p)
+
+    def test_zig_chunks_are_ast_aware(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_zig(tmp_path))
+        node_types = {c.node_type for c in chunks}
+        assert "function_declaration" in node_types or "variable_declaration" in node_types, (
+            "expected AST-aware node types, got window-fallback chunks"
+        )
+
+    def test_zig_function_symbol_name_extracted(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_zig(tmp_path))
+        names = {c.symbol_name for c in chunks}
+        assert "add" in names
+        assert "subtract" in names
+
+    def test_zig_struct_symbol_name_extracted(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_zig(tmp_path))
+        names = {c.symbol_name for c in chunks}
+        assert "Account" in names
+
+    def test_zig_language_label_set(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_zig(tmp_path))
+        assert all(c.language == "zig" for c in chunks)
+
+    def test_zig_file_indexed_by_indexer(self, indexer, tmp_path) -> None:
+        p = tmp_path / "main.zig"
+        p.write_text("pub fn run() void {}\npub fn stop() void {}\n")
+        count = indexer.index_file(str(p))
+        assert count >= 2, f"expected ≥2 Zig chunks, got {count}"

@@ -32,6 +32,7 @@ LANG_BY_EXT: dict[str, str] = {
     ".java": "java",
     ".c": "c",
     ".h": "c",
+    ".zig": "zig",
 }
 
 EXCLUDED_DIRS = {
@@ -151,6 +152,8 @@ def _get_parser(language: str):
             import tree_sitter_rust as ts_lang
         elif language == "java":
             import tree_sitter_java as ts_lang
+        elif language == "zig":
+            import tree_sitter_zig as ts_lang
         else:
             return None
         parser = Parser(Language(ts_lang.language()))
@@ -174,6 +177,7 @@ _CHUNK_NODE_TYPES: dict[str, set[str]] = {
     "go": {"function_declaration", "method_declaration"},
     "rust": {"function_item", "impl_item"},
     "java": {"method_declaration", "class_declaration"},
+    "zig": {"function_declaration", "variable_declaration"},
 }
 
 _SYMBOL_FIELD: dict[str, str] = {
@@ -183,6 +187,7 @@ _SYMBOL_FIELD: dict[str, str] = {
     "go": "name",
     "rust": "name",
     "java": "name",
+    "zig": "name",
 }
 
 
