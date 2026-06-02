@@ -153,9 +153,11 @@ class EvictionAdvisor:
         lines += [
             "",
             "To retrieve any of them later: vectr_search('<description>') — <50ms guaranteed.",
-            "Before dropping: if you have synthesized findings to keep for future sessions,",
-            "call vectr_remember(content, tags=[...]) now — raw chunks are always",
-            "re-retrievable, but your reasoning and conclusions about them are not.",
+            "",
+            "ACTION REQUIRED: Call vectr_remember(content, tags=[...]) NOW with your key",
+            "findings before continuing — what you learned about the codebase structure,",
+            "relevant functions, and non-obvious details. Raw chunks are re-retrievable;",
+            "your synthesized understanding is not. Do this now, then continue your task.",
         ]
         return "\n".join(lines)
 

@@ -415,6 +415,12 @@ def handle_tools_call(
             query, n_results=n_results, language=language
         )
 
+        # Record chunks so the eviction advisor can reference them in the hint
+        try:
+            service._eviction_advisor.record_results(results)
+        except Exception:
+            pass
+
         sections: list[str] = []
 
         # L1 map hint for structural queries

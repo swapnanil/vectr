@@ -770,3 +770,73 @@ class TestFormatSearchResults:
         ]
         text = _format_search_results(results, "query", 10, 100)
         assert "3 results" in text
+
+
+# ---------------------------------------------------------------------------
+# EvictionAdvisor integration — real advisor wired through handle_tools_call
+#
+# Mock-based tests (TestVectrSearch.test_eviction_hint_appended_when_should_evict)
+# mock both should_evict() and eviction_hint() at the service level, so they cannot
+# catch bugs like a missing record_results() call or passive hint text. These tests
+# use a real EvictionAdvisor to catch wiring bugs in mcp_server.py.
+# ---------------------------------------------------------------------------
+
+class TestEvictionAdvisorIntegration:
+
+    def _service_with_real_advisor(self, **advisor_kwargs):
+        from agent.eviction_advisor import EvictionAdvisor
+        svc = _mock_service()
+        real_advisor = EvictionAdvisor(**advisor_kwargs)
+        svc._eviction_advisor = real_advisor
+        svc.should_evict.side_effect = real_advisor.should_evict
+        svc.eviction_hint.side_effect = real_advisor.eviction_hint
+        return svc, real_advisor
+
+    def test_search_populates_chunks_in_eviction_advisor(self) -> None:
+        # Verifies record_results() is called after vectr_search. Without it,
+        # _chunks stays empty and eviction_hint() always returns "".
+        svc, advisor = self._service_with_real_advisor()
+        assert len(advisor._chunks) == 0
+        handle_tools_call("vectr_search", {"query": "verify"}, svc)
+        assert len(advisor._chunks) > 0, (
+            "handle_tools_call must call record_results() after vectr_search so "
+            "eviction_hint() can reference what was retrieved"
+        )
+
+    def test_eviction_hint_fires_in_search_response_after_threshold(self) -> None:
+        # With threshold=0 the hint fires on the 1st retrieval call.
+        svc, _ = self._service_with_real_advisor(
+            retrieval_call_threshold=0,
+            time_threshold_seconds=100_000,
+        )
+        result = handle_tools_call("vectr_search", {"query": "verify"}, svc)
+        assert "Context management hint" in result["content"][0]["text"], (
+            "eviction hint must be injected into vectr_search response when threshold is exceeded"
+        )
+
+    def test_eviction_hint_contains_action_required(self) -> None:
+        # Directive language is required — passive phrasing gets ignored by the LLM.
+        svc, _ = self._service_with_real_advisor(
+            retrieval_call_threshold=0,
+            time_threshold_seconds=100_000,
+        )
+        result = handle_tools_call("vectr_search", {"query": "verify"}, svc)
+        assert "ACTION REQUIRED" in result["content"][0]["text"], (
+            "injected eviction hint must contain 'ACTION REQUIRED' to prompt vectr_remember"
+        )
+
+    def test_no_hint_when_search_returns_empty_results(self) -> None:
+        # should_evict() may be True but empty results → no chunks → hint must not fire.
+        from agent.query_router import RoutingDecision, QueryType
+        svc, _ = self._service_with_real_advisor(
+            retrieval_call_threshold=0,
+            time_threshold_seconds=100_000,
+        )
+        empty_decision = RoutingDecision(
+            query_type=QueryType.SEMANTIC, semantic_weight=0.7,
+            also_run_symbol_lookup=False, also_run_trace=False,
+            include_map_hint=False, rationale="semantic",
+        )
+        svc.search_routed.return_value = ([], 5, empty_decision, [], [])
+        result = handle_tools_call("vectr_search", {"query": "nothing"}, svc)
+        assert "Context management hint" not in result["content"][0]["text"]

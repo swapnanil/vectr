@@ -210,6 +210,22 @@ class TestEvictionHint:
         hint = adv.eviction_hint()
         assert "vectr_search" in hint
 
+    def test_hint_contains_directive_action_required(self) -> None:
+        # Hint must use imperative language so the LLM calls vectr_remember.
+        # Passive/conditional phrasing ("if you have findings...") gets ignored.
+        adv = EvictionAdvisor()
+        adv.record("gc.c", "100-120", "gc_collect", "static int gc_collect() {...}")
+        hint = adv.eviction_hint()
+        assert "ACTION REQUIRED" in hint, (
+            "eviction hint must use directive 'ACTION REQUIRED' language to prompt vectr_remember"
+        )
+
+    def test_hint_contains_vectr_remember_call(self) -> None:
+        adv = EvictionAdvisor()
+        adv.record("f.py", "1-5", "fn", "content" * 10)
+        hint = adv.eviction_hint()
+        assert "vectr_remember" in hint, "hint must tell the LLM to call vectr_remember"
+
 
 # ---------------------------------------------------------------------------
 # EvictionAdvisor — clear_session
