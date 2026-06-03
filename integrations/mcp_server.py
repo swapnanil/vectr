@@ -73,9 +73,9 @@ _EXPLORATION_TOOLS = [
         "name": "vectr_status",
         "description": (
             "Returns index health (files, chunks, embed model) AND notes_count (number of notes "
-            "stored from prior sessions). "
+            "stored — earlier in this session or in prior sessions). "
             "Call once at the start of any session to decide whether vectr_recall is worth calling: "
-            "if notes_count > 0 and you are continuing prior work, call vectr_recall(query=...). "
+            "if notes_count > 0, call vectr_recall(query=...) to retrieve relevant notes. "
             "If notes_count == 0, skip recall entirely. "
             "Also useful when vectr_search returns nothing and you suspect indexing is still running."
         ),
@@ -608,7 +608,7 @@ def handle_tools_call(
         session_id = arguments.get("session_id") or None
         snapshot_id = service.snapshot_session(label=label, session_id=session_id)
         return {
-            "content": [{"type": "text", "text": f"Session snapshot saved: {snapshot_id}\nLabel: {label}\nRestore with vectr_recall (your notes will be there next session)."}],
+            "content": [{"type": "text", "text": f"Snapshot saved: {snapshot_id}\nLabel: {label}\nNotes are available via vectr_recall any time — later in this session or in future sessions."}],
             "isError": False,
         }
 

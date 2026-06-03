@@ -180,7 +180,7 @@ AI assistants get file path, line numbers, function name, and the exact code —
 1. **AST-aware chunking** — `tree-sitter` parses each file and splits at function/class boundaries. No chunk ever breaks mid-logic.
 2. **High-quality embeddings** — `Snowflake/snowflake-arctic-embed-m-v1.5` bridges concept-to-code vocabulary (e.g. "JWT validation" → `verify_jwt_token`). Exact symbol names are covered by BM25.
 3. **Hybrid search** — vector similarity (semantic) + BM25 (keyword) combined. Symbol names and exact strings still surface.
-4. **Cross-session memory** — `vectr_remember` stores structured notes (key files, edge cases, what's still missing) to a persistent SQLite store. `vectr_recall` at the start of a new session replaces re-exploration entirely.
+4. **Working memory** — `vectr_remember` stores structured notes (key files, edge cases, what's still missing) to a persistent SQLite store. The LLM drops explored code from context and recalls it on demand in <50ms — whether later in the same session or in a future one. Re-exploration is never needed.
 5. **MCP protocol** — any MCP-compatible AI code editor can query Vectr without custom plugins.
 
 ## MCP tools
@@ -194,8 +194,8 @@ Vectr exposes 11 tools to your AI code editor. Each is tuned for a specific situ
 | A symbol name | Who calls it / what it calls | `vectr_trace("symbol_name")` |
 | Nothing about the codebase | Architectural overview | `vectr_map()` |
 | vectr_map returned raw metadata | Save your synthesised summary | `vectr_map_save(summary)` |
-| — | Resume where you left off | `vectr_recall()` at session start |
-| A key finding to preserve | Store it before dropping context | `vectr_remember(content)` |
+| Prior work exists on this codebase | Recall notes (same or prior session) | `vectr_recall()` after `vectr_status` shows notes_count > 0 |
+| A key finding to preserve | Store it, drop from context, recall on demand | `vectr_remember(content)` |
 | End of a long session | Seal all notes as a checkpoint | `vectr_snapshot("label")` |
 | Looking for a prior checkpoint | List all saved checkpoints | `vectr_snapshot_list()` |
 | Context window is filling up | Find chunks safe to drop | `vectr_evict_hint()` |
@@ -208,7 +208,7 @@ The `vectr init` / `vectr start` commands write a `CLAUDE.md` with this table in
 
 Vectr's working memory trades accuracy for speed. Two situations where it can produce wrong answers:
 
-**Stale notes after codebase churn** — `vectr_remember` notes store file paths and line numbers at the time they were written. If you refactor significantly between sessions, a note might reference a deleted function or a path that has moved. `vectr_recall` automatically flags notes whose referenced files have changed since the note was written (`[STALE]` marker with a list of changed files). When you see this warning: re-verify the note before acting on it.
+**Stale notes after codebase churn** — `vectr_remember` notes store file paths and line numbers at the time they were written. If you refactor significantly, a note might reference a deleted function or a path that has moved. `vectr_recall` automatically flags notes whose referenced files have changed (`[STALE]` marker). When you see this warning: re-verify the note before acting on it.
 
 **Over-reliant recall on a refactored codebase** — if the codebase has changed substantially since the notes were written, `vectr_recall` may return confident-sounding notes that no longer reflect reality. The fix: after a large refactor, run `vectr_remember` again for the affected areas, or use `vectr_forget` to discard outdated notes.
 

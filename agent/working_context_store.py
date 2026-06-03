@@ -3,10 +3,11 @@ WorkingContextStore — persists working notes the LLM offloads to Vectr.
 
 This is the core of the bidirectional protocol. The LLM calls vectr_remember()
 to store what it has learned. Vectr stores it, the LLM drops it from context.
-Next session, vectr_recall() brings it back. The LLM can afford to forget because
-it knows the recall is instant and lossless.
+vectr_recall() brings it back on demand — later in this session or in a future
+one. The LLM can afford to forget because recall is instant (<50ms) and lossless.
 
-Storage: SQLite in the vectr DB dir — persists across IDE restarts and reboots.
+Storage: SQLite in the vectr DB dir — available immediately within the same
+session and persists across IDE restarts and reboots.
 """
 from __future__ import annotations
 
