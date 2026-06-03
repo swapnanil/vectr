@@ -123,8 +123,8 @@ class TestToolDescriptions:
         desc = self._desc("vectr_recall").lower()
         assert "vectr_status" in desc, "vectr_recall must reference vectr_status as the existence check"
         assert "notes_count" in desc, "vectr_recall must mention notes_count so agent knows when to skip it"
-        assert "continuing prior work" in desc or "prior work" in desc, (
-            "vectr_recall must be framed as conditional on continuing prior work, not unconditional"
+        assert "earlier in this session" in desc or "prior session" in desc or "prior work" in desc, (
+            "vectr_recall must be framed as conditional (within-session or cross-session notes), not unconditional"
         )
         assert "do not" in desc or "not call" in desc or "skip" in desc, (
             "vectr_recall must include a negative trigger — when NOT to call it"

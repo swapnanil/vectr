@@ -179,12 +179,14 @@ _MEMORY_TOOLS = [
     {
         "name": "vectr_remember",
         "description": (
-            "Store a working note that survives IDE restarts and session boundaries. "
-            "Use when you've discovered something non-obvious that would save significant re-exploration later: "
-            "a non-obvious file path, a call pattern, a gotcha, a partial stub, task progress. "
-            "Store the note BEFORE dropping the related code from context — it replaces the need to re-read. "
+            "Store a working note so you can drop the related code from context and recall it on demand — "
+            "whether you need it later this session or in a future session. "
+            "Use the moment you discover something non-obvious: a key file path, a call pattern, a gotcha, "
+            "a partial stub, task progress. "
+            "Store the note BEFORE dropping the related code from context — vectr returns it in <50ms; "
+            "re-reading the file costs tokens and turns. "
             "Do NOT store obvious or easily re-derivable facts (e.g. 'the main file is main.py'). "
-            "Retrieve in future sessions with vectr_recall(query='what you need')."
+            "Retrieve with vectr_recall(query='what you need') — any time, same session or later."
         ),
         "inputSchema": {
             "type": "object",
@@ -217,12 +219,12 @@ _MEMORY_TOOLS = [
     {
         "name": "vectr_recall",
         "description": (
-            "Retrieve stored notes from previous sessions. "
-            "Use when continuing prior work on this codebase AND vectr_status() confirmed notes_count > 0. "
+            "Retrieve notes stored earlier in this session or in prior sessions. "
+            "Use when vectr_status() confirmed notes_count > 0 — notes may have been stored this session "
+            "or in a previous one; either way they are immediately useful. "
             "Pass a targeted query to retrieve only the notes relevant to your current task — "
             "do NOT call with no query unless you need everything (a broad recall inflates context unnecessarily). "
-            "Do NOT call if vectr_status() returned notes_count == 0, or if this is a fresh task "
-            "with no continuity from prior sessions."
+            "Do NOT call if vectr_status() returned notes_count == 0."
         ),
         "inputSchema": {
             "type": "object",

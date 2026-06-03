@@ -29,9 +29,13 @@ _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 _CLAUDE_MD = """\
 # Vectr tools — available alongside Read and Bash
 
-Vectr gives you two things: semantic search over this codebase and a working memory that persists
-across sessions. Use vectr tools in place of grep, find, and Read when you don't already know
-where to look — each tool targets a specific gap in what you can address directly.
+Vectr gives you two things: semantic search over this codebase and a context offload layer.
+Use it to drop explored code from your context window and recall it on demand — whether you need
+it 10 turns later in this same session, or in a fresh session next week. The session boundary
+is irrelevant: offload → free context → recall on demand, any time.
+
+Use vectr tools in place of grep, find, and Read when you don't already know where to look —
+each tool targets a specific gap in what you can address directly.
 
 ## Exploration tools
 
@@ -47,18 +51,18 @@ If you already know the file path, use Read directly — don't search for what y
 
 ## Working memory tools
 
-Notes are accumulated findings from prior sessions on this codebase. Reading a note costs nothing;
-re-reading the file it describes costs tokens and turns.
+Notes are findings you've stored — earlier in this session or in prior sessions. Reading a note
+costs nothing; re-reading the file it describes costs tokens and turns.
 
 **At session start:** `vectr_status()` — always call this first.
 - `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task in plain English>")` once, before opening any files
 - `notes_count == 0` → skip recall and proceed
 
-**The moment you find a key definition, pattern, or non-obvious detail:** `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block, not a file pointer. One note now = 3–5 fewer re-discovery calls next session.
+**The moment you find a key definition, pattern, or non-obvious detail:** `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block, not a file pointer. Once stored, drop the file from context: vectr returns it in <50ms when you need it again. One note now = 3–5 fewer re-discovery calls later — in this session or the next.
 
 **After heavy file reading or at a natural breakpoint (exploration → implementation):** `vectr_evict_hint()` — vectr lists which retrieved chunks are fully indexed (safe to drop from your context window) and prompts you to persist your synthesized findings via `vectr_remember`. Retrieved code is re-retrievable in <50ms; your analysis is not.
 
-**When context is getting full or at natural breakpoints:** `vectr_snapshot("label")` — seals current notes as a checkpoint. Once a finding is in a note, you no longer need the source file in your context window. A fresh session recalls exactly what it needs — without re-reading everything this session explored. Use `vectr_snapshot_list()` at session start to find an existing checkpoint if `vectr_recall` returned nothing useful.
+**When context is getting full or at natural breakpoints:** `vectr_snapshot("label")` — seals current notes as a checkpoint. Once a finding is in a note, you no longer need the source file in your context window. Any future session (or a later point in this one) recalls exactly what it needs — without re-reading everything this session explored. Use `vectr_snapshot_list()` at session start to find an existing checkpoint if `vectr_recall` returned nothing useful.
 
 **If recalled notes already contain what you need:** work from them directly.
 Use vectr_search or Read only to fill genuine gaps — not to re-discover what notes already say.
