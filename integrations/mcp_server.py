@@ -391,6 +391,12 @@ def handle_tools_call(
     except Exception:
         pass
 
+    # Count per-tool calls for benchmark metrics (accurate across parent + sub-agents)
+    try:
+        service.increment_call_count(tool_name)
+    except Exception:
+        pass
+
     # Count retrieval-specific calls (search/locate/trace) for the retrieval-count trigger
     if tool_name in ("vectr_search", "vectr_locate", "vectr_trace"):
         try:

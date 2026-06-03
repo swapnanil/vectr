@@ -78,6 +78,11 @@ class VectrService:
         self._index_thread: threading.Thread | None = None
         self._index_lock = threading.Lock()
 
+        # Per-tool call counters — tracked across all callers (parent + sub-agents)
+        # so benchmark tooling can read accurate counts via GET /v1/call_counts.
+        self._call_counts: dict[str, int] = {}
+        self._call_counts_lock = threading.Lock()
+
         # Adaptive strategy — computed after first index, defaults until then
         from agent.strategy_selector import RetrievalStrategy
         self._strategy: RetrievalStrategy | None = None
@@ -170,6 +175,25 @@ class VectrService:
 
     def shutdown(self) -> None:
         self._watcher.stop()
+
+    # ------------------------------------------------------------------
+    # Call counters — all callers (parent + sub-agents) hit the same server,
+    # so these are accurate totals regardless of how many agents spawned.
+    # ------------------------------------------------------------------
+
+    def increment_call_count(self, tool_name: str) -> None:
+        with self._call_counts_lock:
+            self._call_counts[tool_name] = self._call_counts.get(tool_name, 0) + 1
+
+    def get_call_counts(self) -> dict[str, int]:
+        with self._call_counts_lock:
+            return dict(self._call_counts)
+
+    def reset_call_counts(self) -> dict[str, int]:
+        with self._call_counts_lock:
+            old = dict(self._call_counts)
+            self._call_counts.clear()
+            return old
 
     # ------------------------------------------------------------------
     # L3 — search and index operations

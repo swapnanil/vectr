@@ -110,6 +110,16 @@ async def status(request: Request) -> StatusResponse:
     )
 
 
+@router.get("/v1/call_counts")
+async def get_call_counts(request: Request) -> dict:
+    return _service(request).get_call_counts()
+
+
+@router.delete("/v1/call_counts")
+async def reset_call_counts(request: Request) -> dict:
+    return {"reset": True, "previous_counts": _service(request).reset_call_counts()}
+
+
 # ---------------------------------------------------------------------------
 # REST API — L1 codebase map
 # ---------------------------------------------------------------------------
