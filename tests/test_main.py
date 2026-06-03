@@ -25,6 +25,7 @@ def _make_args(**kwargs) -> argparse.Namespace:
         "query": None,
         "n": 10,
         "language": None,
+        "reset_config": False,
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -302,10 +303,13 @@ class TestWriteWorkspaceConfig:
             "CLAUDE.md must tell agent to work from recalled notes directly, use search only to fill gaps"
         )
 
-    def test_claude_md_not_overwritten_if_present(self, tmp_path):
+    def test_claude_md_existing_content_preserved_block_appended(self, tmp_path):
         (tmp_path / "CLAUDE.md").write_text("custom")
         m._write_workspace_config(str(tmp_path), 8765)
-        assert (tmp_path / "CLAUDE.md").read_text() == "custom"
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "custom" in content
+        assert "<!-- vectr-start -->" in content
+        assert "<!-- vectr-end -->" in content
 
     def test_settings_json_created_if_missing(self, tmp_path):
         m._write_workspace_config(str(tmp_path), 8765)
@@ -357,3 +361,173 @@ class TestCmdForget:
 
         out = capsys.readouterr().out
         assert "7" in out
+
+
+# ---------------------------------------------------------------------------
+# TestMergeSafeInit — T30
+# ---------------------------------------------------------------------------
+
+class TestMergeSafeInit:
+
+    # --- CLAUDE.md ---
+
+    def test_claude_md_created_with_vectr_block_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "<!-- vectr-start -->" in content
+        assert "<!-- vectr-end -->" in content
+        assert "vectr_status" in content
+
+    def test_claude_md_existing_content_preserved_and_block_appended(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("@AGENTS.md\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "@AGENTS.md" in content
+        assert "<!-- vectr-start -->" in content
+        assert "<!-- vectr-end -->" in content
+
+    def test_claude_md_idempotent(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert content.count("<!-- vectr-start -->") == 1
+        assert content.count("<!-- vectr-end -->") == 1
+
+    def test_claude_md_idempotent_with_existing_user_content(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("@AGENTS.md\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert content.count("<!-- vectr-start -->") == 1
+        assert "@AGENTS.md" in content
+
+    # --- AGENTS.md ---
+
+    def test_agents_md_appended_if_exists(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Existing content\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert "Existing content" in content
+        assert "<!-- vectr-start -->" in content
+
+    def test_agents_md_not_created_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert not (tmp_path / "AGENTS.md").exists()
+
+    def test_agents_md_idempotent(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert content.count("<!-- vectr-start -->") == 1
+
+    # --- .cursorrules ---
+
+    def test_cursorrules_appended_if_exists(self, tmp_path):
+        (tmp_path / ".cursorrules").write_text("Existing rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / ".cursorrules").read_text()
+        assert "Existing rules" in content
+        assert "<!-- vectr-start -->" in content
+
+    def test_cursorrules_not_created_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert not (tmp_path / ".cursorrules").exists()
+
+    # --- .cursor/rules/vectr.mdc ---
+
+    def test_cursor_rules_vectr_mdc_always_created(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        mdc = tmp_path / ".cursor" / "rules" / "vectr.mdc"
+        assert mdc.exists()
+        content = mdc.read_text()
+        assert "alwaysApply: true" in content
+        assert "vectr_status" in content
+
+    def test_cursor_rules_vectr_mdc_idempotent(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        m._write_workspace_config(str(tmp_path), 8765)
+        mdc = tmp_path / ".cursor" / "rules" / "vectr.mdc"
+        assert mdc.read_text().count("alwaysApply: true") == 1
+
+    # --- .github/copilot-instructions.md ---
+
+    def test_github_copilot_instructions_appended_if_exists(self, tmp_path):
+        (tmp_path / ".github").mkdir()
+        (tmp_path / ".github" / "copilot-instructions.md").write_text("Copilot rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / ".github" / "copilot-instructions.md").read_text()
+        assert "Copilot rules" in content
+        assert "<!-- vectr-start -->" in content
+
+    def test_github_copilot_instructions_not_created_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert not (tmp_path / ".github" / "copilot-instructions.md").exists()
+
+    # --- GEMINI.md ---
+
+    def test_gemini_md_appended_if_exists(self, tmp_path):
+        (tmp_path / "GEMINI.md").write_text("Gemini rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "GEMINI.md").read_text()
+        assert "Gemini rules" in content
+        assert "<!-- vectr-start -->" in content
+
+    def test_gemini_md_not_created_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert not (tmp_path / "GEMINI.md").exists()
+
+    # --- CODEX.md ---
+
+    def test_codex_md_appended_if_exists(self, tmp_path):
+        (tmp_path / "CODEX.md").write_text("Codex rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CODEX.md").read_text()
+        assert "Codex rules" in content
+        assert "<!-- vectr-start -->" in content
+
+    def test_codex_md_not_created_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert not (tmp_path / "CODEX.md").exists()
+
+    # --- --reset-config ---
+
+    def test_reset_config_removes_vectr_only_claude_md(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert (tmp_path / "CLAUDE.md").exists()
+        with patch("main.InstanceRegistry"):
+            m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        assert not (tmp_path / "CLAUDE.md").exists()
+
+    def test_reset_config_preserves_user_content_in_claude_md(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("@AGENTS.md\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        with patch("main.InstanceRegistry"):
+            m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "@AGENTS.md" in content
+        assert "<!-- vectr-start -->" not in content
+
+    def test_reset_config_removes_vectr_block_from_secondary_files(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert "<!-- vectr-start -->" in (tmp_path / "AGENTS.md").read_text()
+        with patch("main.InstanceRegistry"):
+            m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert "Rules" in content
+        assert "<!-- vectr-start -->" not in content
+
+    def test_reset_config_deletes_cursor_rules_mdc(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        mdc = tmp_path / ".cursor" / "rules" / "vectr.mdc"
+        assert mdc.exists()
+        with patch("main.InstanceRegistry"):
+            m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        assert not mdc.exists()
+
+    def test_reset_config_noop_when_no_vectr_block(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("custom content\n")
+        with patch("main.InstanceRegistry"):
+            m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        assert (tmp_path / "CLAUDE.md").read_text() == "custom content\n"

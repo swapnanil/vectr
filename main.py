@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -97,6 +98,91 @@ _VSCODE_MCP_JSON = """\
 }}
 """
 
+_VECTR_BLOCK_START = "<!-- vectr-start -->"
+_VECTR_BLOCK_END = "<!-- vectr-end -->"
+# Matches the vectr block plus any blank lines immediately before it.
+_VECTR_BLOCK_RE = re.compile(
+    r"\n*<!-- vectr-start -->.*?<!-- vectr-end -->\n?",
+    re.DOTALL,
+)
+
+# IDE config files that get the vectr block appended (not created from scratch).
+_IDE_CONFIG_APPEND_ONLY: tuple[str, ...] = (
+    "AGENTS.md",
+    ".cursorrules",
+    "GEMINI.md",
+    "CODEX.md",
+)
+
+
+def _make_vectr_block() -> str:
+    return f"{_VECTR_BLOCK_START}\n{_CLAUDE_MD.rstrip()}\n{_VECTR_BLOCK_END}\n"
+
+
+def _write_ide_config_merge_safe(path: Path, *, create_if_missing: bool) -> None:
+    """Write the vectr guidance block into an IDE config file.
+
+    - File missing + create_if_missing=True  → create file containing just the block.
+    - File missing + create_if_missing=False → no-op.
+    - File exists, no vectr block            → append block after existing content.
+    - File exists, vectr block present       → replace block in-place (idempotent).
+    """
+    block = _make_vectr_block()
+
+    if not path.exists():
+        if not create_if_missing:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(block, encoding="utf-8")
+        print(f"  Created {path}", file=sys.stderr)
+        return
+
+    existing = path.read_text(encoding="utf-8")
+
+    if _VECTR_BLOCK_START in existing:
+        stripped = _VECTR_BLOCK_RE.sub("", existing).rstrip()
+        new_content = f"{stripped}\n\n{block}" if stripped else block
+        if new_content == existing:
+            return
+        path.write_text(new_content, encoding="utf-8")
+        print(f"  Updated vectr block in {path}", file=sys.stderr)
+    else:
+        path.write_text(f"{existing.rstrip()}\n\n{block}", encoding="utf-8")
+        print(f"  Appended vectr block to {path}", file=sys.stderr)
+
+
+def _remove_vectr_block(path: Path) -> None:
+    """Remove the vectr block from a file. Delete the file if it becomes empty."""
+    if not path.exists():
+        return
+    content = path.read_text(encoding="utf-8")
+    if _VECTR_BLOCK_START not in content:
+        return
+    stripped = _VECTR_BLOCK_RE.sub("", content).rstrip()
+    if stripped:
+        path.write_text(stripped + "\n", encoding="utf-8")
+        print(f"  Removed vectr block from {path}", file=sys.stderr)
+    else:
+        path.unlink()
+        print(f"  Deleted {path} (was vectr-only)", file=sys.stderr)
+
+
+def _write_cursor_rules(workspace: str) -> None:
+    """Write .cursor/rules/vectr.mdc for Cursor IDE (vectr-owned file, always current)."""
+    path = Path(workspace) / ".cursor" / "rules" / "vectr.mdc"
+    content = (
+        "---\n"
+        "description: Vectr tool usage rules for AI-assisted development\n"
+        "alwaysApply: true\n"
+        "---\n\n"
+        f"{_CLAUDE_MD.rstrip()}\n"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existed = path.exists()
+    if not existed or path.read_text(encoding="utf-8") != content:
+        path.write_text(content, encoding="utf-8")
+        print(f"  {'Updated' if existed else 'Created'} {path}", file=sys.stderr)
+
 
 def _api_base(port: int) -> str:
     return f"http://localhost:{port}"
@@ -150,13 +236,16 @@ def _write_or_update(path: Path, content: str, label: str) -> None:
 
 
 def _write_workspace_config(workspace: str, port: int) -> None:
-    """Write per-IDE MCP config files and CLAUDE.md into the workspace root."""
+    """Write per-IDE MCP config files and IDE guidance into the workspace root."""
     root = Path(workspace)
 
-    claude_md = root / "CLAUDE.md"
-    if not claude_md.exists():
-        claude_md.write_text(_CLAUDE_MD)
-        print(f"  Created {claude_md}", file=sys.stderr)
+    _write_ide_config_merge_safe(root / "CLAUDE.md", create_if_missing=True)
+    for _rel in _IDE_CONFIG_APPEND_ONLY:
+        _write_ide_config_merge_safe(root / _rel, create_if_missing=False)
+    _write_ide_config_merge_safe(
+        root / ".github" / "copilot-instructions.md", create_if_missing=False
+    )
+    _write_cursor_rules(workspace)
 
     _write_or_update(root / ".mcp.json", _MCP_JSON.format(port=port), f"port {port}")
     _write_or_update(root / ".cursor" / "mcp.json", _CURSOR_MCP_JSON.format(port=port), f"port {port}")
@@ -401,6 +490,19 @@ def cmd_forget(args: argparse.Namespace) -> None:
 
 def cmd_init(args: argparse.Namespace) -> None:
     workspace = str(Path(args.path).resolve())
+
+    if getattr(args, "reset_config", False):
+        root = Path(workspace)
+        for _rel in ("CLAUDE.md", *_IDE_CONFIG_APPEND_ONLY):
+            _remove_vectr_block(root / _rel)
+        _remove_vectr_block(root / ".github" / "copilot-instructions.md")
+        cursor_mdc = root / ".cursor" / "rules" / "vectr.mdc"
+        if cursor_mdc.exists():
+            cursor_mdc.unlink()
+            print(f"  Deleted {cursor_mdc}", file=sys.stderr)
+        print(f"Vectr config reset for: {workspace}", file=sys.stderr)
+        return
+
     entry = InstanceRegistry().get(workspace_hash(workspace))
     port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", "8765"))
 
@@ -471,6 +573,13 @@ def main() -> None:
         choices=["additive", "directed", "memory-only"],
         default=None,
         help="Override adaptive instruction style (T14). Stored in .vectr/style.",
+    )
+    p_init.add_argument(
+        "--reset-config",
+        action="store_true",
+        default=False,
+        dest="reset_config",
+        help="Remove all vectr blocks from IDE config files in the workspace.",
     )
 
     p_index = sub.add_parser("index", help="(Re)index a directory or file")
