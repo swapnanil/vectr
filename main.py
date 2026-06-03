@@ -60,6 +60,8 @@ costs nothing; re-reading the file it describes costs tokens and turns.
 
 **The moment you find a key definition, pattern, or non-obvious detail:** `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block, not a file pointer. Once stored, drop the file from context: vectr returns it in <50ms when you need it again. One note now = 3–5 fewer re-discovery calls later — in this session or the next.
 
+**Before writing any final output (file, patch, or answer):** call `vectr_remember` at least once with the key type names, entry points, and non-obvious patterns you confirmed. This is the only step that persists your navigational understanding — the output file captures your findings, but not the path you took to reach them. Future sessions (or a later task in this run) cannot recall what was never stored.
+
 **After heavy file reading or at a natural breakpoint (exploration → implementation):** `vectr_evict_hint()` — vectr lists which retrieved chunks are fully indexed (safe to drop from your context window) and prompts you to persist your synthesized findings via `vectr_remember`. Retrieved code is re-retrievable in <50ms; your analysis is not.
 
 **When context is getting full or at natural breakpoints:** `vectr_snapshot("label")` — seals current notes as a checkpoint. Once a finding is in a note, you no longer need the source file in your context window. Any future session (or a later point in this one) recalls exactly what it needs — without re-reading everything this session explored. Use `vectr_snapshot_list()` at session start to find an existing checkpoint if `vectr_recall` returned nothing useful.

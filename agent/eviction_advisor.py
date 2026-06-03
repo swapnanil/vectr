@@ -135,11 +135,11 @@ class EvictionAdvisor:
             elapsed = time.time() - self._session_started_at
             if elapsed >= self._time_threshold_seconds:
                 return (
-                    "Context management hint: You've been working for a while. "
-                    "ACTION REQUIRED: Call vectr_remember(content, tags=[...]) NOW with your "
-                    "key findings — what functions you've located, patterns, non-obvious details, "
-                    "and any implementation decisions. Your synthesized understanding does not "
-                    "persist automatically. Do this now, then continue your task."
+                    "─── ACTION REQUIRED ───\n"
+                    "Call vectr_remember(content, tags=[...]) NOW before continuing.\n"
+                    "Save: key type names, module paths, entry points, non-obvious patterns.\n"
+                    "Your synthesized understanding does not persist automatically.\n"
+                    "Call vectr_remember now, then continue your task."
                 )
             return ""
 
@@ -148,27 +148,33 @@ class EvictionAdvisor:
         for c in self._chunks:
             by_file.setdefault(c.file_path, []).append(c)
 
+        file_items = list(by_file.items())
+        shown = file_items[:5]
+        overflow = len(file_items) - len(shown)
+
         lines = [
-            f"Vectr has {len(self._chunks)} retrieved chunks (~{total_tokens} tokens) "
-            "fully indexed and instantly retrievable.",
-            "You can safely drop these from your context window:",
+            "─── ACTION REQUIRED ───",
+            "Call vectr_remember(content, tags=[...]) NOW before continuing.",
+            "Save: key type names, module paths, entry points, non-obvious patterns.",
+            "Your synthesized understanding does not persist automatically — the output",
+            "file captures findings, not the navigational path to reach them.",
+            "",
+            f"Vectr has {len(self._chunks)} retrieved chunks (~{total_tokens} tokens)"
+            " fully indexed and re-retrievable in <50ms after you save notes:",
             "",
         ]
-        for fpath, chunks in by_file.items():
+        for fpath, chunks in shown:
             ranges = ", ".join(
                 f"lines {c.lines}" + (f" ({c.symbol_name})" if c.symbol_name else "")
                 for c in chunks
             )
             lines.append(f"  {fpath}  [{ranges}]")
+        if overflow:
+            lines.append(f"  ... and {overflow} more file(s). All retrievable via vectr_search('<description>').")
 
         lines += [
             "",
-            "To retrieve any of them later: vectr_search('<description>') — <50ms guaranteed.",
-            "",
-            "ACTION REQUIRED: Call vectr_remember(content, tags=[...]) NOW with your key",
-            "findings before continuing — what you learned about the codebase structure,",
-            "relevant functions, and non-obvious details. Raw chunks are re-retrievable;",
-            "your synthesized understanding is not. Do this now, then continue your task.",
+            "Call vectr_remember now, then continue your task.",
         ]
         return "\n".join(lines)
 
