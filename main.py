@@ -27,47 +27,54 @@ _LEGACY_PID_FILE = Path.home() / ".vectr" / "vectr.pid"
 _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 
 _CLAUDE_MD = """\
-# Vectr tools — available alongside Read and Bash
+# Vectr — semantic search + reliable working memory
 
-Vectr gives you two things: semantic search over this codebase and a context offload layer.
-Use it to drop explored code from your context window and recall it on demand — whether you need
-it 10 turns later in this same session, or in a fresh session next week. The session boundary
-is irrelevant: offload → free context → recall on demand, any time.
+Vectr gives you two capabilities:
 
-Use vectr tools in place of grep, find, and Read when you don't already know where to look —
-each tool targets a specific gap in what you can address directly.
+- **Semantic search**: find any symbol, pattern, or concept in this codebase by describing it in plain English — faster than grep, without knowing where to look.
+- **Working memory**: store findings, drop retrieved code from your context window, and recall it in <50ms on demand. Retrieval is guaranteed — offloading is a gain, not a risk.
 
-## Exploration tools
+## Semantic search — 5 tools
 
-| Tool | Purpose |
-|---|---|
-| `vectr_search("natural language description")` | Semantic search — describe what you're looking for, get the most relevant code chunks back. Replaces grep + cat loops. |
-| `vectr_locate("SymbolName")` | Symbol graph lookup — name → definition file and line. Faster than any file scan. |
-| `vectr_trace("symbol_name")` | Call graph — callers and callees of a symbol, without reading files. |
-| `vectr_map()` | Codebase overview — file tree + module summaries. Use once on a completely unknown repo. On a first visit, it returns raw metadata and you should follow up with `vectr_map_save(summary)` to store your synthesised description as a permanent passport. |
-| `vectr_map_save(summary)` | Save your plain-English codebase summary (~200–350 tokens) as the permanent passport. Only call this when `vectr_map` returned raw metadata (i.e. no passport exists yet). |
+Use these instead of grep / find / Read when you don't already know the file path.
 
-If you already know the file path, use Read directly — don't search for what you can address directly.
+| Tool | Purpose | Example |
+|---|---|---|
+| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. | `vectr_search("workspace lock acquisition and release")` |
+| `vectr_locate("SymbolName")` | Symbol graph lookup — name → file:line. Faster than any file scan. | `vectr_locate("WorkspaceLock")` → `resolver.rs:214` |
+| `vectr_trace("symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace("acquire_lock")` |
+| `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
+| `vectr_map_save(summary)` | Save a plain-English codebase summary (~200–350 tokens) as a permanent passport. Only call when `vectr_map` returned raw metadata. | `vectr_map_save("uv is a Rust-based Python package manager…")` |
 
-## Working memory tools
+If you already know the file path, use Read directly.
 
-Notes are findings you've stored — earlier in this session or in prior sessions. Reading a note
-costs nothing; re-reading the file it describes costs tokens and turns.
+## Working memory — 7 tools
 
-**At session start:** `vectr_status()` — always call this first.
-- `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task in plain English>")` once, before opening any files
-- `notes_count == 0` → skip recall and proceed
+A note is a finding you've saved — in this session or a prior one. Reading a note costs nothing; re-reading the file it came from costs tokens and turns.
 
-**The moment you find a key definition, pattern, or non-obvious detail:** `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block, not a file pointer. Once stored, drop the file from context: vectr returns it in <50ms when you need it again. One note now = 3–5 fewer re-discovery calls later — in this session or the next.
+| Tool | Purpose | Example |
+|---|---|---|
+| `vectr_status()` | Note count + index state. **Always call first at session start.** | `vectr_status()` → `notes_count: 3` → call `vectr_recall` |
+| `vectr_recall(query)` | Retrieve notes relevant to your task. Replaces re-reading already-explored files. | `vectr_recall("workspace lock resolution flow")` |
+| `vectr_remember(content, tags, priority)` | Save a key finding — actual code or pattern, not a file pointer. | `vectr_remember("lock_workspace() at resolver.rs:214 acquires PID-scoped lock; drops on scope exit.", tags=["lock", "resolver"], priority="high")` |
+| `vectr_forget(note_id)` | Delete a stale or superseded note by ID. | `vectr_forget("note_abc123")` |
+| `vectr_evict_hint()` | Lists retrieved chunks that are fully indexed and safe to drop from context (re-retrievable in <50ms). | At exploration → implementation transition |
+| `vectr_snapshot("label")` | Seal current notes as a named checkpoint. | `vectr_snapshot("lock-cycle-mapped")` |
+| `vectr_snapshot_list()` | List saved checkpoints. Use at session start if `vectr_recall` returned nothing useful. | `vectr_snapshot_list()` |
 
-**Before writing any final output (file, patch, or answer):** call `vectr_remember` at least once with the key type names, entry points, and non-obvious patterns you confirmed. This is the only step that persists your navigational understanding — the output file captures your findings, but not the path you took to reach them. Future sessions (or a later task in this run) cannot recall what was never stored.
+## When to use each capability
 
-**After heavy file reading or at a natural breakpoint (exploration → implementation):** `vectr_evict_hint()` — vectr lists which retrieved chunks are fully indexed (safe to drop from your context window) and prompts you to persist your synthesized findings via `vectr_remember`. Retrieved code is re-retrievable in <50ms; your analysis is not.
+**At session start (always):** call `vectr_status()` first.
+- `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task>")` before opening any files.
+- `notes_count == 0` → skip recall and proceed.
 
-**When context is getting full or at natural breakpoints:** `vectr_snapshot("label")` — seals current notes as a checkpoint. Once a finding is in a note, you no longer need the source file in your context window. Any future session (or a later point in this one) recalls exactly what it needs — without re-reading everything this session explored. Use `vectr_snapshot_list()` at session start to find an existing checkpoint if `vectr_recall` returned nothing useful.
+**During exploration — treat search and save as a pair:** after each `vectr_search` or `vectr_locate` call, immediately call `vectr_remember` with the key finding before your next retrieval call. You are not losing the retrieved chunks — vectr has them fully indexed and returns them in <50ms. Every note you save frees context budget for the rest of this task and any tasks that follow in this run. One note now = 3–5 fewer re-discovery calls later.
 
-**If recalled notes already contain what you need:** work from them directly.
-Use vectr_search or Read only to fill genuine gaps — not to re-discover what notes already say.
+**Before writing any final output:** call `vectr_remember` at least once with the key type names, entry points, and non-obvious patterns you confirmed. The output file captures findings; notes capture the navigational path — and the path is what future sessions need.
+
+**At exploration → implementation transition:** call `vectr_evict_hint()` — lists retrieved chunks safe to drop from context. Follow with `vectr_remember` for any synthesized understanding not yet stored.
+
+**If recalled notes already contain what you need:** work from them directly. Use `vectr_search` or Read only to fill genuine gaps.
 """
 
 _MCP_JSON = """\

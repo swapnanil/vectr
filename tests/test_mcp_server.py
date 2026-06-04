@@ -334,6 +334,20 @@ class TestVectrSearch:
         assert result["isError"] is False
         assert "indexing" in result["content"][0]["text"].lower()
 
+    def test_n_results_defaults_to_5(self) -> None:
+        svc = _mock_service()
+        handle_tools_call("vectr_search", {"query": "foo"}, svc)
+        call_kwargs = svc.search_routed.call_args[1]
+        assert call_kwargs["n_results"] == 5, (
+            "default n_results must be 5 to limit token accumulation per search call"
+        )
+
+    def test_explicit_n_results_overrides_default(self) -> None:
+        svc = _mock_service()
+        handle_tools_call("vectr_search", {"query": "foo", "n_results": 10}, svc)
+        call_kwargs = svc.search_routed.call_args[1]
+        assert call_kwargs["n_results"] == 10
+
     def test_n_results_capped_at_50(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_search", {"query": "foo", "n_results": 999}, svc)
@@ -770,6 +784,39 @@ class TestFormatSearchResults:
         ]
         text = _format_search_results(results, "query", 10, 100)
         assert "3 results" in text
+
+    def test_content_over_80_lines_is_truncated(self) -> None:
+        from agent.searcher import SearchResult
+        long_content = "\n".join(f"line {i}" for i in range(120))
+        result = SearchResult(
+            file_path="big.py", lines="1-120", symbol_name="big_fn",
+            language="python", score=0.9, content=long_content,
+        )
+        text = _format_search_results([result], "query", 10, 100)
+        shown_lines = [l for l in text.splitlines() if l.startswith("line ")]
+        assert len(shown_lines) == 80, "exactly 80 content lines must be shown"
+        assert "more lines" in text, "truncation footer must mention remaining line count"
+
+    def test_content_at_or_under_80_lines_shown_in_full(self) -> None:
+        from agent.searcher import SearchResult
+        short_content = "\n".join(f"line {i}" for i in range(60))
+        result = SearchResult(
+            file_path="small.py", lines="1-60", symbol_name="",
+            language="python", score=0.8, content=short_content,
+        )
+        text = _format_search_results([result], "query", 5, 100)
+        assert "more lines" not in text
+        assert "line 59" in text
+
+    def test_truncation_footer_includes_read_pointer(self) -> None:
+        from agent.searcher import SearchResult
+        long_content = "\n".join(f"line {i}" for i in range(120))
+        result = SearchResult(
+            file_path="big.py", lines="1-120", symbol_name="",
+            language="python", score=0.9, content=long_content,
+        )
+        text = _format_search_results([result], "query", 10, 100)
+        assert "Read" in text, "footer must contain a Read pointer for full context"
 
 
 # ---------------------------------------------------------------------------

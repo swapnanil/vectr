@@ -289,11 +289,11 @@ class TestWriteWorkspaceConfig:
     def test_claude_md_encourages_code_in_notes(self, tmp_path):
         m._write_workspace_config(str(tmp_path), 8765)
         content = (tmp_path / "CLAUDE.md").read_text()
-        assert "actual code block" in content or "real code" in content or "code block" in content, (
-            "CLAUDE.md must instruct agent to store code blocks, not prose descriptions"
+        assert "actual code" in content or "code block" in content, (
+            "CLAUDE.md must instruct agent to store actual code, not file pointers or prose"
         )
-        assert "re-read" in content or "re-reading" in content, (
-            "CLAUDE.md must explain that code notes prevent re-reading files"
+        assert "file pointer" in content or "re-read" in content or "re-reading" in content, (
+            "CLAUDE.md must explain why notes beat re-reading files (file pointer or re-reading)"
         )
 
     def test_claude_md_has_recall_usage_guidance(self, tmp_path):
@@ -531,3 +531,59 @@ class TestMergeSafeInit:
         with patch("main.InstanceRegistry"):
             m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
         assert (tmp_path / "CLAUDE.md").read_text() == "custom content\n"
+
+
+# ---------------------------------------------------------------------------
+# CLAUDE.md framing — overview, 12-tool tables, rhythm trigger, gain framing
+# ---------------------------------------------------------------------------
+
+class TestClaudeMdFraming:
+    """Verify the vectr block structure: overview + classified tool tables + rhythm trigger."""
+
+    def _vectr_block(self, tmp_path) -> str:
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        start = content.index("<!-- vectr-start -->")
+        end = content.index("<!-- vectr-end -->") + len("<!-- vectr-end -->")
+        return content[start:end]
+
+    def test_overview_names_both_capabilities(self, tmp_path):
+        block = self._vectr_block(tmp_path)
+        assert "semantic search" in block.lower()
+        assert "working memory" in block.lower()
+
+    def test_search_section_lists_all_five_tools(self, tmp_path):
+        block = self._vectr_block(tmp_path)
+        for tool in ("vectr_search", "vectr_locate", "vectr_trace", "vectr_map", "vectr_map_save"):
+            assert tool in block, f"{tool} must appear in the search section"
+
+    def test_memory_section_lists_all_seven_tools(self, tmp_path):
+        block = self._vectr_block(tmp_path)
+        for tool in ("vectr_status", "vectr_recall", "vectr_remember", "vectr_forget",
+                     "vectr_evict_hint", "vectr_snapshot", "vectr_snapshot_list"):
+            assert tool in block, f"{tool} must appear in the memory section"
+
+    def test_vectr_forget_present(self, tmp_path):
+        """vectr_forget was absent from the old CLAUDE.md — must now appear."""
+        block = self._vectr_block(tmp_path)
+        assert "vectr_forget" in block
+
+    def test_tool_tables_include_example_column(self, tmp_path):
+        block = self._vectr_block(tmp_path)
+        assert "| Example |" in block or "| Example" in block, (
+            "Tool tables must include an Example column"
+        )
+
+    def test_rhythm_trigger_pairs_search_and_save(self, tmp_path):
+        """Mid-task trigger must be rhythm-based (search→save pair), not a subjective qualifier."""
+        block = self._vectr_block(tmp_path)
+        assert "pair" in block.lower(), (
+            "CLAUDE.md must frame vectr_search + vectr_remember as a pair, not a conditional"
+        )
+
+    def test_gain_framing_present(self, tmp_path):
+        """Agent must be told offloading is a gain, not a loss."""
+        block = self._vectr_block(tmp_path)
+        assert "gain" in block.lower() or "freeing" in block.lower(), (
+            "CLAUDE.md must frame offloading as freeing context budget, not as losing content"
+        )

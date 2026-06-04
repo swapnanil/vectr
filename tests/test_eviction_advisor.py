@@ -212,11 +212,15 @@ class TestEvictionHint:
         auth_idx = hint.index("auth.py")
         assert "fn_a" in hint[auth_idx:auth_idx + 200] or "fn_a" in hint
 
-    def test_hint_includes_recall_instruction(self) -> None:
+    def test_hint_distinguishes_chunk_retrieval_from_note_retrieval(self) -> None:
+        # Raw codebase chunks → re-retrievable via vectr_search/vectr_locate
+        # Synthesized analysis (saved via vectr_remember) → retrievable via vectr_recall
+        # Both paths must appear so the LLM understands the full protocol.
         adv = EvictionAdvisor()
         adv.record("f.py", "1-5", "fn", "content" * 10)
         hint = adv.eviction_hint()
-        assert "vectr_search" in hint
+        assert "vectr_search" in hint, "hint must tell LLM how to re-retrieve raw codebase chunks"
+        assert "vectr_recall" in hint, "hint must tell LLM that saved notes are retrieved via vectr_recall, not vectr_search"
 
     def test_hint_contains_directive_action_required(self) -> None:
         # Hint must use imperative language so the LLM calls vectr_remember.

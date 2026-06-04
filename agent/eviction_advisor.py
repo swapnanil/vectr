@@ -160,7 +160,8 @@ class EvictionAdvisor:
             "file captures findings, not the navigational path to reach them.",
             "",
             f"Vectr has {len(self._chunks)} retrieved chunks (~{total_tokens} tokens)"
-            " fully indexed and re-retrievable in <50ms after you save notes:",
+            " fully indexed. The raw chunks are re-retrievable via vectr_search or vectr_locate in <50ms."
+            " Your synthesized analysis (saved via vectr_remember) is retrievable via vectr_recall. Drop these chunks from context:",
             "",
         ]
         for fpath, chunks in shown:

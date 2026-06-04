@@ -407,7 +407,7 @@ def handle_tools_call(
     # ---- vectr_search ----
     if tool_name == "vectr_search":
         query = arguments.get("query", "")
-        n_results = min(int(arguments.get("n_results", 10)), 50)
+        n_results = min(int(arguments.get("n_results", 5)), 50)
         language = arguments.get("language") or None
 
         if not query:
@@ -669,7 +669,13 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         if r.symbol_name:
             lines.append(f"    symbol: {r.symbol_name}  language: {r.language}")
         lines.append("")
-        lines.append(r.content)
+        content_lines = r.content.splitlines()
+        if len(content_lines) > 80:
+            lines.append("\n".join(content_lines[:80]))
+            start = str(r.lines).split("-")[0] if "-" in str(r.lines) else str(r.lines)
+            lines.append(f"... {len(content_lines) - 80} more lines — Read({r.file_path}, offset={start}) for full context")
+        else:
+            lines.append(r.content)
         lines.append("")
     return "\n".join(lines)
 
