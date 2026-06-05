@@ -36,7 +36,7 @@ Vectr gives you two capabilities:
 
 ## Semantic search — 5 tools
 
-Use these instead of grep / find / Read when you don't already know the file path.
+Use these in place of grep / find / Read when you don't already know where to look — each targets a specific gap in what you can address directly.
 
 | Tool | Purpose | Example |
 |---|---|---|
@@ -46,7 +46,7 @@ Use these instead of grep / find / Read when you don't already know the file pat
 | `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
 | `vectr_map_save(summary)` | Save a plain-English codebase summary (~200–350 tokens) as a permanent passport. Only call when `vectr_map` returned raw metadata. | `vectr_map_save("uv is a Rust-based Python package manager…")` |
 
-If you already know the file path, use Read directly.
+If you already know the exact file path, use Read directly — don't search for what you can address directly.
 
 ## Working memory — 7 tools
 
@@ -75,7 +75,7 @@ A note is a finding you've saved — in this session or a prior one. Reading a n
 - `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task>")` before opening any files.
 - `notes_count == 0` → skip recall and proceed.
 
-**During exploration — treat search and save as a pair:** after each `vectr_search` or `vectr_locate` call, immediately call `vectr_remember` with the key finding before your next retrieval call. You are not losing the retrieved chunks — vectr has them fully indexed and returns them in <50ms. Every note you save frees context budget for the rest of this task and any tasks that follow in this run. One note now = 3–5 fewer re-discovery calls later.
+**The moment you find a key definition, pattern, or non-obvious detail:** call `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block or finding, not a file pointer. Treat every `vectr_search` or `vectr_locate` call as a **pair**: search, then immediately save the key finding before your next retrieval. Once stored, drop the file from context: vectr returns it in <50ms when you need it again. One note now = 3–5 fewer re-discovery calls later — in this session or the next.
 
 **Before writing any final output:** call `vectr_remember` at least once with the key type names, entry points, and non-obvious patterns you confirmed. The output file captures findings; notes capture the navigational path — and the path is what future sessions need.
 
