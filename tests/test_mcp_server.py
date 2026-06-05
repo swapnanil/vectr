@@ -17,6 +17,7 @@ import pytest
 from integrations.mcp_server import (
     MCP_TOOLS,
     _EXPLORATION_TOOLS,
+    _MEMORY_WRITE_TOOLS,
     _MEMORY_TOOLS,
     handle_tools_call,
     handle_tools_list,
@@ -221,20 +222,24 @@ class TestAdaptiveToolRegistration:
     def teardown_method(self) -> None:
         _memory_enabled_sessions.clear()
 
-    def test_new_session_gets_exploration_tools_only(self) -> None:
+    def test_new_session_gets_exploration_and_write_tools(self) -> None:
         result = handle_tools_list(session_id="sess-new-001")
         names = {t["name"] for t in result["tools"]}
-        exploration_names = {t["name"] for t in _EXPLORATION_TOOLS}
-        memory_names = {t["name"] for t in _MEMORY_TOOLS}
-        assert exploration_names.issubset(names)
-        # memory-only tools not exposed until enabled
-        assert not memory_names.intersection(names)
+        # exploration tools always present
+        for t in _EXPLORATION_TOOLS:
+            assert t["name"] in names
+        # vectr_remember and vectr_evict_hint always present (write side)
+        assert "vectr_remember" in names
+        assert "vectr_evict_hint" in names
+        # read/manage tools gated until memory enabled
+        for t in _MEMORY_TOOLS:
+            assert t["name"] not in names
 
     def test_no_session_id_returns_full_list(self) -> None:
         result = handle_tools_list(session_id=None)
         assert len(result["tools"]) == len(MCP_TOOLS)
 
-    def test_enable_memory_makes_memory_tools_visible(self) -> None:
+    def test_enable_memory_adds_read_tools(self) -> None:
         sid = "sess-enable-002"
         assert not is_memory_enabled(sid)
         enable_memory_for_session(sid)
@@ -293,10 +298,18 @@ class TestAdaptiveToolRegistration:
         for expected in ("vectr_search", "vectr_status", "vectr_map", "vectr_locate", "vectr_trace"):
             assert expected in exploration_names
 
-    def test_memory_tools_include_recall_snapshot_forget(self) -> None:
+    def test_memory_write_tools_always_visible(self) -> None:
+        write_names = {t["name"] for t in _MEMORY_WRITE_TOOLS}
+        assert "vectr_remember" in write_names
+        assert "vectr_evict_hint" in write_names
+
+    def test_memory_read_tools_gated(self) -> None:
         memory_names = {t["name"] for t in _MEMORY_TOOLS}
-        for expected in ("vectr_remember", "vectr_recall", "vectr_snapshot", "vectr_forget"):
+        for expected in ("vectr_recall", "vectr_snapshot", "vectr_forget"):
             assert expected in memory_names
+        # remember and evict_hint live in _MEMORY_WRITE_TOOLS, not here
+        assert "vectr_remember" not in memory_names
+        assert "vectr_evict_hint" not in memory_names
 
     def test_session_state_is_independent_between_sessions(self) -> None:
         enable_memory_for_session("sess-A")

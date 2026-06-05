@@ -298,7 +298,10 @@ class TestMcpSessionFull:
         # Exploration tools always present
         assert "vectr_search" in names
         assert "vectr_status" in names
-        # Memory tools NOT present: session is fresh + no prior notes
+        # vectr_remember and vectr_evict_hint always present (write side — no catch-22)
+        assert "vectr_remember" in names
+        assert "vectr_evict_hint" in names
+        # Read/manage tools gated until memory is enabled
         assert "vectr_recall" not in names
         assert "vectr_snapshot" not in names
         _memory_enabled_sessions.discard(sid)

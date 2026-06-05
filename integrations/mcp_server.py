@@ -174,8 +174,10 @@ _EXPLORATION_TOOLS = [
     },
 ]  # end _EXPLORATION_TOOLS
 
-# Memory tools: exposed on-demand (see is_memory_enabled / enable_memory_for_session)
-_MEMORY_TOOLS = [
+# Always-on memory write tools — visible from turn 1, no notes required.
+# vectr_remember: only way to create notes; hiding it is a catch-22.
+# vectr_evict_hint: fires on retrieval pressure, not note count.
+_MEMORY_WRITE_TOOLS = [
     {
         "name": "vectr_remember",
         "description": (
@@ -217,6 +219,24 @@ _MEMORY_TOOLS = [
         },
     },
     {
+        "name": "vectr_evict_hint",
+        "description": (
+            "Vectr tells you which retrieved code chunks you can safely drop from your context window — "
+            "any evicted chunk is guaranteed to be retrievable in <50ms on demand via vectr_search. "
+            "Use when your context is large and you need to reclaim space without losing information. "
+            "This is the bidirectional half of the vectr protocol: "
+            "the AI tells vectr what to store (vectr_remember), "
+            "and vectr tells the AI what it can safely forget (vectr_evict_hint). "
+            "NOT needed on short sessions — only when context is approaching the limit."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+]  # end _MEMORY_WRITE_TOOLS
+
+# Memory read/manage tools: only useful when notes already exist.
+# Exposed once notes_count > 0 or vectr_remember has been called this session.
+_MEMORY_TOOLS = [
+    {
         "name": "vectr_recall",
         "description": (
             "Retrieve notes stored earlier in this session or in prior sessions. "
@@ -256,19 +276,6 @@ _MEMORY_TOOLS = [
             },
             "required": [],
         },
-    },
-    {
-        "name": "vectr_evict_hint",
-        "description": (
-            "Vectr tells you which retrieved code chunks you can safely drop from your context window — "
-            "any evicted chunk is guaranteed to be retrievable in <50ms on demand via vectr_search. "
-            "Use when your context is large and you need to reclaim space without losing information. "
-            "This is the bidirectional half of the vectr protocol: "
-            "the AI tells vectr what to store (vectr_remember), "
-            "and vectr tells the AI what it can safely forget (vectr_evict_hint). "
-            "NOT needed on short sessions — only when context is approaching the limit."
-        ),
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "vectr_snapshot",
@@ -353,17 +360,16 @@ _UTILITY_TOOLS = [
 ]
 
 # Full list for serialization / backwards compat
-MCP_TOOLS = _EXPLORATION_TOOLS + _MEMORY_TOOLS + _UTILITY_TOOLS
+MCP_TOOLS = _EXPLORATION_TOOLS + _MEMORY_WRITE_TOOLS + _MEMORY_TOOLS + _UTILITY_TOOLS
 
 
 def handle_tools_list(session_id: str | None = None, service: Any = None) -> dict:
     """Return tools appropriate for this session.
 
-    Sessions with an ID start with exploration tools only; memory tools are
-    added once the session has notes or has called vectr_remember (T13).
-    Sessions without an ID get the full list for backwards compatibility.
+    Always shown: exploration tools + vectr_remember + vectr_evict_hint.
+    Gated on notes existing: vectr_recall, vectr_forget, vectr_snapshot, vectr_snapshot_list.
     """
-    # If the session already has notes (checked via service), pre-enable memory tools
+    # Pre-enable memory read tools if notes already exist
     if session_id and service and not is_memory_enabled(session_id):
         try:
             notes_count = service.count_notes() if hasattr(service, "count_notes") else 0
@@ -372,10 +378,10 @@ def handle_tools_list(session_id: str | None = None, service: Any = None) -> dic
         except Exception:
             pass
 
+    base = _EXPLORATION_TOOLS + _MEMORY_WRITE_TOOLS + _UTILITY_TOOLS
     if is_memory_enabled(session_id):
-        return {"tools": MCP_TOOLS}
-    # Utility tools (ingest_traces) are always available regardless of session state
-    return {"tools": _EXPLORATION_TOOLS + _UTILITY_TOOLS}
+        return {"tools": base + _MEMORY_TOOLS}
+    return {"tools": base}
 
 
 def handle_tools_call(

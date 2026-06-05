@@ -52,13 +52,20 @@ If you already know the file path, use Read directly.
 
 A note is a finding you've saved — in this session or a prior one. Reading a note costs nothing; re-reading the file it came from costs tokens and turns.
 
+**Always available:**
+
 | Tool | Purpose | Example |
 |---|---|---|
 | `vectr_status()` | Note count + index state. **Always call first at session start.** | `vectr_status()` → `notes_count: 3` → call `vectr_recall` |
-| `vectr_recall(query)` | Retrieve notes relevant to your task. Replaces re-reading already-explored files. | `vectr_recall("workspace lock resolution flow")` |
 | `vectr_remember(content, tags, priority)` | Save a key finding — actual code or pattern, not a file pointer. | `vectr_remember("lock_workspace() at resolver.rs:214 acquires PID-scoped lock; drops on scope exit.", tags=["lock", "resolver"], priority="high")` |
-| `vectr_forget(note_id)` | Delete a stale or superseded note by ID. | `vectr_forget("note_abc123")` |
 | `vectr_evict_hint()` | Lists retrieved chunks that are fully indexed and safe to drop from context (re-retrievable in <50ms). | At exploration → implementation transition |
+
+**Unlocked after your first `vectr_remember` call (or when prior notes exist):**
+
+| Tool | Purpose | Example |
+|---|---|---|
+| `vectr_recall(query)` | Retrieve notes relevant to your task. Replaces re-reading already-explored files. | `vectr_recall("workspace lock resolution flow")` |
+| `vectr_forget(note_id)` | Delete a stale or superseded note by ID. | `vectr_forget("note_abc123")` |
 | `vectr_snapshot("label")` | Seal current notes as a named checkpoint. | `vectr_snapshot("lock-cycle-mapped")` |
 | `vectr_snapshot_list()` | List saved checkpoints. Use at session start if `vectr_recall` returned nothing useful. | `vectr_snapshot_list()` |
 
