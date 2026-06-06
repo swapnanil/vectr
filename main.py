@@ -36,21 +36,19 @@ Vectr gives you two capabilities:
 
 ## Semantic search — 5 tools
 
-Use these in place of grep / find / Read when you don't already know where to look — each targets a specific gap in what you can address directly.
+The codebase is fully indexed. One `vectr_search` call returns ranked, relevant code chunks — no grep loops across hundreds of files, no wasted turns reading the wrong files. Use these for all exploration; use Read only to read a specific file that vectr has already pointed you to.
 
 | Tool | Purpose | Example |
 |---|---|---|
-| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. | `vectr_search("workspace lock acquisition and release")` |
-| `vectr_locate("SymbolName")` | Symbol graph lookup — name → file:line. Faster than any file scan. | `vectr_locate("WorkspaceLock")` → `resolver.rs:214` |
+| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. | `vectr_search("workspace lock acquisition and release")` |
+| `vectr_locate("SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate("WorkspaceLock")` → `resolver.rs:214` |
 | `vectr_trace("symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace("acquire_lock")` |
 | `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
 | `vectr_map_save(summary)` | Save a plain-English codebase summary (~200–350 tokens) as a permanent passport. Only call when `vectr_map` returned raw metadata. | `vectr_map_save("uv is a Rust-based Python package manager…")` |
 
-If you already know the exact file path, use Read directly — don't search for what you can address directly.
-
 ## Working memory — 7 tools
 
-A note is a finding you've saved — in this session or a prior one. Reading a note costs nothing; re-reading the file it came from costs tokens and turns.
+Every file you re-read costs tokens and a turn. A note you saved costs nothing to retrieve — vectr returns it in <50ms. Save a finding once, never re-read that file again.
 
 **Always available:**
 
@@ -75,7 +73,7 @@ A note is a finding you've saved — in this session or a prior one. Reading a n
 - `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task>")` before opening any files.
 - `notes_count == 0` → skip recall and proceed.
 
-**The moment you find a key definition, pattern, or non-obvious detail:** call `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block or finding, not a file pointer. Treat every `vectr_search` or `vectr_locate` call as a **pair**: search, then immediately save the key finding before your next retrieval. Once stored, drop the file from context: vectr returns it in <50ms when you need it again. One note now = 3–5 fewer re-discovery calls later — in this session or the next.
+**The moment you find a key definition, pattern, or non-obvious detail:** call `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block or finding, not a file pointer. Treat every `vectr_search` or `vectr_locate` call as a **pair**: search, then immediately save the key finding before your next retrieval. Every note you save is tokens and turns you never spend again — `vectr_recall` retrieves it in <50ms, so you never re-read a file you already explored. One note now = 3–5 fewer re-discovery calls later.
 
 **Before writing any final output:** call `vectr_remember` at least once with the key type names, entry points, and non-obvious patterns you confirmed. The output file captures findings; notes capture the navigational path — and the path is what future sessions need.
 
