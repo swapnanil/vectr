@@ -582,8 +582,8 @@ class TestClaudeMdFraming:
         )
 
     def test_gain_framing_present(self, tmp_path):
-        """Agent must be told offloading is a gain, not a loss."""
+        """Agent must be told saving is a gain (notes survive /compact and future sessions)."""
         block = self._vectr_block(tmp_path)
-        assert "gain" in block.lower() or "freeing" in block.lower(), (
-            "CLAUDE.md must frame offloading as freeing context budget, not as losing content"
+        assert "gain" in block.lower() or "risk" in block.lower(), (
+            "CLAUDE.md must frame saving as a gain, not as losing content"
         )

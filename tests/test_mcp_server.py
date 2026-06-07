@@ -768,10 +768,10 @@ class TestVectrRecall:
 class TestVectrEvictHint:
     def test_returns_hint_when_set(self) -> None:
         svc = _mock_service()
-        svc.eviction_hint.return_value = "Drop auth.py from context."
+        svc.eviction_hint.return_value = "Vectr can re-retrieve auth.py in <50ms."
         result = handle_tools_call("vectr_evict_hint", {}, svc)
         assert result["isError"] is False
-        assert "auth.py" in result["content"][0]["text"]
+        assert "auth.py" in result["content"][0]["text"]  # proxy for hint content passing through
 
     def test_returns_clean_message_when_no_hint(self) -> None:
         svc = _mock_service()

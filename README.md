@@ -180,7 +180,7 @@ AI assistants get file path, line numbers, function name, and the exact code —
 1. **AST-aware chunking** — `tree-sitter` parses each file and splits at function/class boundaries. No chunk ever breaks mid-logic.
 2. **High-quality embeddings** — `Snowflake/snowflake-arctic-embed-m-v1.5` bridges concept-to-code vocabulary (e.g. "JWT validation" → `verify_jwt_token`). Exact symbol names are covered by BM25.
 3. **Hybrid search** — vector similarity (semantic) + BM25 (keyword) combined. Symbol names and exact strings still surface.
-4. **Working memory** — `vectr_remember` stores structured notes (key files, edge cases, what's still missing) to a persistent SQLite store. The LLM drops explored code from context and recalls it on demand in <50ms — whether later in the same session or in a future one. Re-exploration is never needed.
+4. **Working memory** — `vectr_remember` stores structured notes (key findings, call patterns, edge cases, what's still missing) to a persistent SQLite store. Saved notes survive `/compact` and new sessions intact — recall in <50ms, verbatim, any time. Re-exploration is never needed.
 5. **MCP protocol** — any MCP-compatible AI code editor can query Vectr without custom plugins.
 
 ## MCP tools
@@ -195,10 +195,10 @@ Vectr exposes 11 tools to your AI code editor. Each is tuned for a specific situ
 | Nothing about the codebase | Architectural overview | `vectr_map()` |
 | vectr_map returned raw metadata | Save your synthesised summary | `vectr_map_save(summary)` |
 | Prior work exists on this codebase | Recall notes (same or prior session) | `vectr_recall()` after `vectr_status` shows notes_count > 0 |
-| A key finding to preserve | Store it, drop from context, recall on demand | `vectr_remember(content)` |
+| A key finding to preserve | Save it, recall in <50ms any time | `vectr_remember(content)` |
 | End of a long session | Seal all notes as a checkpoint | `vectr_snapshot("label")` |
 | Looking for a prior checkpoint | List all saved checkpoints | `vectr_snapshot_list()` |
-| Context window is filling up | Find chunks safe to drop | `vectr_evict_hint()` |
+| Context window is filling up | Find chunks vectr can re-retrieve in <50ms | `vectr_evict_hint()` |
 | Notes are stale or wrong | Clear all working memory | `vectr_forget()` |
 | — | Check index health / chunk count | `vectr_status()` |
 

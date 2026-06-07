@@ -1,10 +1,10 @@
 """
-EvictionAdvisor — tells the LLM what it can safely drop from its context window.
+EvictionAdvisor — tells the LLM which chunks vectr can re-retrieve in <50ms.
 
-Core guarantee: "If Vectr says you can forget it, you can get it back in <50ms."
-This is the other side of the bidirectional protocol. The LLM calls vectr_remember
-to offload notes; the EvictionAdvisor proactively signals when retrieved content
-can be dropped because it's guaranteed retrievable.
+The guarantee: anything listed here is fully indexed and re-retrievable in <50ms.
+This is the reverse signal in the bidirectional protocol. The LLM calls vectr_remember
+to save notes; the EvictionAdvisor proactively signals when retrieved content
+is fully indexed and can be re-retrieved without re-reading the file.
 
 The advisor tracks which chunks have been retrieved in the current session and
 estimates their token cost. When the session hits a threshold, it fires an
@@ -126,7 +126,7 @@ class EvictionAdvisor:
 
     def eviction_hint(self) -> str:
         """
-        Return a message the LLM can act on to free its context window.
+        Return a message listing chunks vectr can re-retrieve in <50ms.
         Always safe to call — returns an empty hint if nothing has been retrieved
         and no time-based pressure exists.
         """

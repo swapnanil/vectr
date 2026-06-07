@@ -1,10 +1,10 @@
 """
-WorkingContextStore — persists working notes the LLM offloads to Vectr.
+WorkingContextStore — persists working notes the LLM saves to Vectr.
 
 This is the core of the bidirectional protocol. The LLM calls vectr_remember()
-to store what it has learned. Vectr stores it, the LLM drops it from context.
+to store what it has learned. Vectr stores it persistently for fast recall.
 vectr_recall() brings it back on demand — later in this session or in a future
-one. The LLM can afford to forget because recall is instant (<50ms) and lossless.
+one. Recall is instant (<50ms) and lossless.
 
 Storage: SQLite in the vectr DB dir — available immediately within the same
 session and persists across IDE restarts and reboots.
@@ -619,7 +619,7 @@ class WorkingContextStore:
         return json.loads(row["payload"])
 
     # ------------------------------------------------------------------
-    # Eviction hints — what can the LLM safely drop from context?
+    # Eviction hints — which chunks can vectr re-retrieve in <50ms?
     # ------------------------------------------------------------------
 
     def build_eviction_hint(
@@ -629,9 +629,9 @@ class WorkingContextStore:
     ) -> str:
         """
         Given a list of chunks the LLM has retrieved this session,
-        return a message telling the LLM what it can safely drop.
+        return a message listing which chunks vectr can re-retrieve in <50ms.
 
-        The guarantee: anything listed here can be retrieved in <50ms.
+        The guarantee: anything listed here is fully indexed, re-retrievable in <50ms.
         """
         if not session_retrieved_chunks:
             return "No retrieved chunks to evict."
@@ -647,7 +647,7 @@ class WorkingContextStore:
 
         lines = [
             f"Vectr has {len(session_retrieved_chunks)} chunks (~{est_tokens} tokens) indexed and instantly retrievable.",
-            "You can safely drop these from your context window:",
+            "Vectr can re-retrieve these in <50ms — no need to re-read them:",
             "",
         ]
         for fpath, chunks in by_file.items():

@@ -235,11 +235,11 @@ _MEMORY_WRITE_TOOLS = [
     {
         "name": "vectr_remember",
         "description": (
-            "Store a working note so you can drop the related code from context and recall it on demand — "
-            "whether you need it later this session or in a future session. "
+            "Save a working note and recall it on demand in <50ms — "
+            "whether later this session, through /compact, or in a future session. "
             "Use the moment you discover something non-obvious: a key file path, a call pattern, a gotcha, "
             "a partial stub, task progress. "
-            "Store the note BEFORE dropping the related code from context — vectr returns it in <50ms; "
+            "Store the actual code or finding — vectr returns it in <50ms; "
             "re-reading the file costs tokens and turns. "
             "Do NOT store obvious or easily re-derivable facts (e.g. 'the main file is main.py'). "
             "Retrieve with vectr_recall(query='what you need') — any time, same session or later."
@@ -275,13 +275,13 @@ _MEMORY_WRITE_TOOLS = [
     {
         "name": "vectr_evict_hint",
         "description": (
-            "Vectr tells you which retrieved code chunks you can safely drop from your context window — "
-            "any evicted chunk is guaranteed to be retrievable in <50ms on demand via vectr_search. "
-            "Use when your context is large and you need to reclaim space without losing information. "
-            "This is the bidirectional half of the vectr protocol: "
-            "the AI tells vectr what to store (vectr_remember), "
-            "and vectr tells the AI what it can safely forget (vectr_evict_hint). "
-            "NOT needed on short sessions — only when context is approaching the limit."
+            "Vectr lists which retrieved code chunks it can re-retrieve in <50ms — "
+            "you do not need to re-read those files. "
+            "Use at the exploration → implementation transition to avoid unnecessary re-reads. "
+            "This is the reverse signal in the vectr protocol: "
+            "the AI saves findings (vectr_remember), "
+            "vectr signals what it can recall instantly (vectr_evict_hint). "
+            "NOT needed on short sessions — most useful after many vectr_search/vectr_locate calls."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
@@ -653,7 +653,7 @@ def handle_tools_call(
         _reset_calls_since_save(session_id)
         enable_memory_for_session(session_id)
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}. You can safely drop the related code chunks from your context."}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}. Recall with vectr_recall — <50ms, verbatim, any time."}],
             "isError": False,
         }
 

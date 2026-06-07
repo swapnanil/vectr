@@ -194,7 +194,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
     )
     return RememberResponse(
         note_id=note_id,
-        message=f"Stored note #{note_id}. You can safely drop related code chunks from context.",
+        message=f"Stored note #{note_id}. Recall with vectr_recall — <50ms, verbatim, any time.",
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 
