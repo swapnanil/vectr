@@ -32,7 +32,7 @@ _CLAUDE_MD = """\
 Vectr gives you two capabilities:
 
 - **Semantic search**: find any symbol, pattern, or concept in this codebase by describing it in plain English — faster than grep, without knowing where to look.
-- **Working memory**: store findings, drop retrieved code from your context window, and recall it in <50ms on demand. Retrieval is guaranteed — offloading is a gain, not a risk.
+- **Working memory**: store findings and recall them in <50ms on demand — whether later in this session, through `/compact`, or in a future session. Saving is a gain, not a risk.
 
 ## Semantic search — 5 tools
 
@@ -48,7 +48,7 @@ The codebase is fully indexed. One `vectr_search` call returns ranked, relevant 
 
 ## Working memory — 7 tools
 
-Every file you re-read costs tokens and a turn. A note you saved costs nothing to retrieve — vectr returns it in <50ms. Save a finding once, never re-read that file again.
+A note stored with `vectr_remember` is the only finding that survives three things: (1) re-reading the file costs tokens — recalling the note costs almost none; (2) `/compact` replaces the conversation with a summary that loses exact signatures and line numbers — your note does not; (3) a new session starts with zero context — your note is there from turn 1. `vectr_recall` retrieves it in <50ms, verbatim, any time.
 
 **Always available:**
 
@@ -56,7 +56,7 @@ Every file you re-read costs tokens and a turn. A note you saved costs nothing t
 |---|---|---|
 | `vectr_status()` | Note count + index state. **Always call first at session start.** | `vectr_status()` → `notes_count: 3` → call `vectr_recall` |
 | `vectr_remember(content, tags, priority)` | Save a key finding — actual code or pattern, not a file pointer. | `vectr_remember("lock_workspace() at resolver.rs:214 acquires PID-scoped lock; drops on scope exit.", tags=["lock", "resolver"], priority="high")` |
-| `vectr_evict_hint()` | Lists retrieved chunks that are fully indexed and safe to drop from context (re-retrievable in <50ms). | At exploration → implementation transition |
+| `vectr_evict_hint()` | Lists retrieved chunks that vectr can re-retrieve in <50ms — no need to re-read those files later. | At exploration → implementation transition |
 
 **Unlocked after your first `vectr_remember` call (or when prior notes exist):**
 
@@ -73,11 +73,11 @@ Every file you re-read costs tokens and a turn. A note you saved costs nothing t
 - `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task>")` before opening any files.
 - `notes_count == 0` → skip recall and proceed.
 
-**The moment you find a key definition, pattern, or non-obvious detail:** call `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block or finding, not a file pointer. Treat every `vectr_search` or `vectr_locate` call as a **pair**: search, then immediately save the key finding before your next retrieval. Every note you save is tokens and turns you never spend again — `vectr_recall` retrieves it in <50ms, so you never re-read a file you already explored. One note now = 3–5 fewer re-discovery calls later.
+**The moment you find a key definition, pattern, or non-obvious detail:** call `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block or finding, not a file pointer. Treat every `vectr_search` or `vectr_locate` call as a **pair**: search, then immediately save the key finding before your next retrieval. If `/compact` runs later, the conversation summary loses exact details — your note does not. If a new session starts, your note is the only thing that carries forward. One note now = no re-discovery later.
 
-**Before writing any final output:** call `vectr_remember` at least once with the key type names, entry points, and non-obvious patterns you confirmed. The output file captures findings; notes capture the navigational path — and the path is what future sessions need.
+**Before writing any final output:** call `vectr_remember` at least once with the key type names, entry points, and non-obvious patterns you confirmed. The output file captures what you built; notes capture what you learned — and what you learned is what the next session needs.
 
-**At exploration → implementation transition:** call `vectr_evict_hint()` — lists retrieved chunks safe to drop from context. Follow with `vectr_remember` for any synthesized understanding not yet stored.
+**At exploration → implementation transition:** call `vectr_evict_hint()` — lists retrieved chunks that vectr can re-retrieve in <50ms if you need them again. Follow with `vectr_remember` for any synthesized understanding not yet stored.
 
 **If recalled notes already contain what you need:** work from them directly. Use `vectr_search` or Read only to fill genuine gaps.
 """

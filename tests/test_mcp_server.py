@@ -26,6 +26,11 @@ from integrations.mcp_server import (
     _memory_enabled_sessions,
     _mcp_error,
     _format_search_results,
+    _session_calls_since_save,
+    _REMEMBER_NUDGE_THRESHOLD,
+    _REMEMBER_NUDGE_COOLDOWN,
+    _should_nudge_remember,
+    _reset_calls_since_save,
 )
 
 
@@ -624,6 +629,101 @@ class TestVectrRemember:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "note", "priority": "urgent"}, svc)
         svc.remember.assert_called_once_with(content="note", tags=None, priority="medium")
+
+
+# ---------------------------------------------------------------------------
+# Turn-count vectr_remember nudge (E10)
+# ---------------------------------------------------------------------------
+
+class TestRememberNudge:
+    """Verify the MCP-level turn-count reminder fires correctly.
+
+    Each test uses a unique session_id to avoid cross-test state leakage.
+    The counter is also explicitly reset after each test via teardown.
+    """
+
+    _session_prefix = "nudge_test_"
+    _counter = 0
+
+    def _sid(self) -> str:
+        TestRememberNudge._counter += 1
+        return f"{self._session_prefix}{TestRememberNudge._counter}"
+
+    def teardown_method(self, _method):
+        # Clean up any session state written by this test
+        keys = [k for k in list(_session_calls_since_save.keys()) if k.startswith(self._session_prefix)]
+        for k in keys:
+            _session_calls_since_save.pop(k, None)
+
+    def _make_search_calls(self, svc, session_id: str, n: int) -> dict:
+        result = {}
+        for _ in range(n):
+            result = handle_tools_call("vectr_search", {"query": "test"}, svc, session_id=session_id)
+        return result
+
+    def test_nudge_absent_below_threshold(self) -> None:
+        svc = _mock_service()
+        sid = self._sid()
+        result = self._make_search_calls(svc, sid, _REMEMBER_NUDGE_THRESHOLD - 1)
+        assert "vectr_remember reminder" not in result["content"][0]["text"]
+
+    def test_nudge_fires_at_threshold(self) -> None:
+        svc = _mock_service()
+        sid = self._sid()
+        result = self._make_search_calls(svc, sid, _REMEMBER_NUDGE_THRESHOLD)
+        assert "vectr_remember reminder" in result["content"][0]["text"]
+
+    def test_nudge_text_is_imperative_and_cites_compact(self) -> None:
+        svc = _mock_service()
+        sid = self._sid()
+        result = self._make_search_calls(svc, sid, _REMEMBER_NUDGE_THRESHOLD)
+        text = result["content"][0]["text"]
+        assert "vectr_remember" in text
+        assert "/compact" in text
+        assert "future session" in text
+
+    def test_nudge_resets_on_vectr_remember(self) -> None:
+        svc = _mock_service()
+        sid = self._sid()
+        # Hit the threshold
+        self._make_search_calls(svc, sid, _REMEMBER_NUDGE_THRESHOLD)
+        # Save a note — should reset counter
+        handle_tools_call("vectr_remember", {"content": "key finding"}, svc, session_id=sid)
+        # One call below threshold — nudge must NOT appear
+        result = handle_tools_call("vectr_search", {"query": "test"}, svc, session_id=sid)
+        assert "vectr_remember reminder" not in result["content"][0]["text"]
+
+    def test_nudge_fires_again_after_cooldown(self) -> None:
+        svc = _mock_service()
+        sid = self._sid()
+        # Hit threshold, then save to reset
+        self._make_search_calls(svc, sid, _REMEMBER_NUDGE_THRESHOLD)
+        handle_tools_call("vectr_remember", {"content": "key finding"}, svc, session_id=sid)
+        # Hit threshold again + cooldown
+        result = self._make_search_calls(svc, sid, _REMEMBER_NUDGE_THRESHOLD + _REMEMBER_NUDGE_COOLDOWN)
+        assert "vectr_remember reminder" in result["content"][0]["text"]
+
+    def test_nudge_absent_without_session_id(self) -> None:
+        svc = _mock_service()
+        # No session_id → nudge must never fire regardless of call count
+        result = self._make_search_calls(svc, None, _REMEMBER_NUDGE_THRESHOLD + 5)
+        # _make_search_calls passes session_id to handle_tools_call as None
+        assert "vectr_remember reminder" not in result["content"][0]["text"]
+
+    def test_nudge_only_in_discovery_tools_not_in_recall_or_status(self) -> None:
+        svc = _mock_service()
+        # Part A: status and recall never show nudge, even when counter exceeds threshold
+        sid_a = self._sid()
+        for _ in range(_REMEMBER_NUDGE_THRESHOLD + 5):
+            handle_tools_call("vectr_status", {}, svc, session_id=sid_a)
+        assert "vectr_remember reminder" not in \
+            handle_tools_call("vectr_status", {}, svc, session_id=sid_a)["content"][0]["text"]
+        assert "vectr_remember reminder" not in \
+            handle_tools_call("vectr_recall", {}, svc, session_id=sid_a)["content"][0]["text"]
+        # Part B: search DOES show nudge when the search call is exactly the threshold call
+        sid_b = self._sid()
+        result = self._make_search_calls(svc, sid_b, _REMEMBER_NUDGE_THRESHOLD)
+        assert "vectr_remember reminder" in result["content"][0]["text"]
 
 
 # ---------------------------------------------------------------------------

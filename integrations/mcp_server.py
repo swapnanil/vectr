@@ -23,6 +23,60 @@ MCP_SERVER_INFO = {
 # ---------------------------------------------------------------------------
 _memory_enabled_sessions: set[str] = set()
 
+# ---------------------------------------------------------------------------
+# Turn-count vectr_remember nudge
+#
+# After _REMEMBER_NUDGE_THRESHOLD vectr tool calls without a vectr_remember,
+# the next vectr_search / vectr_locate / vectr_trace response appends an
+# imperative reminder. The counter resets on every vectr_remember call.
+# After the threshold fires, it re-fires every _REMEMBER_NUDGE_COOLDOWN
+# calls so a single dismissal cannot silence it for the rest of the session.
+#
+# Fires only when session_id is known (no-op for anonymous sessions).
+# Fires only in discovery tool responses (search/locate/trace) — not in
+# status, recall, map, or remember responses — because those are the moments
+# when the agent has just found something worth saving.
+# ---------------------------------------------------------------------------
+_REMEMBER_NUDGE_THRESHOLD = 10
+_REMEMBER_NUDGE_COOLDOWN = 5
+_session_calls_since_save: dict[str, int] = {}
+
+
+def _increment_calls_since_save(session_id: str | None) -> int:
+    """Increment and return the call count since last vectr_remember."""
+    if not session_id:
+        return 0
+    n = _session_calls_since_save.get(session_id, 0) + 1
+    _session_calls_since_save[session_id] = n
+    return n
+
+
+def _reset_calls_since_save(session_id: str | None) -> None:
+    if session_id:
+        _session_calls_since_save[session_id] = 0
+
+
+def _should_nudge_remember(session_id: str | None) -> bool:
+    if not session_id:
+        return False
+    n = _session_calls_since_save.get(session_id, 0)
+    if n < _REMEMBER_NUDGE_THRESHOLD:
+        return False
+    excess = n - _REMEMBER_NUDGE_THRESHOLD
+    return excess == 0 or excess % _REMEMBER_NUDGE_COOLDOWN == 0
+
+
+def _remember_nudge_text(session_id: str | None) -> str:
+    n = _session_calls_since_save.get(session_id or "", 0)
+    return (
+        f"\n\n─── vectr_remember reminder ({n} calls since last save) ───\n"
+        "If you have found anything non-obvious — a key function body, a design invariant, "
+        "an unexpected pattern, a partial stub — call vectr_remember now with the actual code "
+        "(not a file pointer). "
+        "This note survives /compact and any future session on this codebase. "
+        "One call now = no re-discovery later."
+    )
+
 
 def enable_memory_for_session(session_id: str | None) -> None:
     if session_id:
@@ -403,6 +457,9 @@ def handle_tools_call(
     except Exception:
         pass
 
+    # Increment turn-count nudge counter for all tool calls
+    _increment_calls_since_save(session_id)
+
     # Count retrieval-specific calls (search/locate/trace) for the retrieval-count trigger
     if tool_name in ("vectr_search", "vectr_locate", "vectr_trace"):
         try:
@@ -472,6 +529,9 @@ def handle_tools_call(
             hint = service.eviction_hint()
             if hint:
                 content_text += f"\n\n─── Context management hint ───\n{hint}"
+
+        if _should_nudge_remember(session_id):
+            content_text += _remember_nudge_text(session_id)
 
         return {"content": [{"type": "text", "text": content_text}], "isError": False}
 
@@ -556,6 +616,8 @@ def handle_tools_call(
             hint = service.eviction_hint()
             if hint:
                 text += f"\n\n─── Context management hint ───\n{hint}"
+        if _should_nudge_remember(session_id):
+            text += _remember_nudge_text(session_id)
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_trace ----
@@ -573,6 +635,8 @@ def handle_tools_call(
             hint = service.eviction_hint()
             if hint:
                 text += f"\n\n─── Context management hint ───\n{hint}"
+        if _should_nudge_remember(session_id):
+            text += _remember_nudge_text(session_id)
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_remember ----
@@ -585,7 +649,8 @@ def handle_tools_call(
         if priority not in ("high", "medium", "low"):
             priority = "medium"
         note_id = service.remember(content=content, tags=tags, priority=priority)
-        # first vectr_remember call enables memory tools for this session
+        # reset the turn-count nudge and enable memory tools for this session
+        _reset_calls_since_save(session_id)
         enable_memory_for_session(session_id)
         return {
             "content": [{"type": "text", "text": f"Stored note #{note_id}. You can safely drop the related code chunks from your context."}],
