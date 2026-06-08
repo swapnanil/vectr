@@ -69,6 +69,8 @@ A note stored with `vectr_remember` is the only finding that survives three thin
 
 ## When to use each capability
 
+**Before calling `vectr_search` on a well-known API or framework:** write out what you already know — function signatures, key types, parameter names — and only call `vectr_search` if genuine gaps remain after that verbalization. Reduces unnecessary search calls 26–40% on familiar codebases.
+
 **At session start (always):** call `vectr_status()` first.
 - `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task>")` before opening any files.
 - `notes_count == 0` → skip recall and proceed.

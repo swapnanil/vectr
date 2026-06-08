@@ -587,3 +587,10 @@ class TestClaudeMdFraming:
         assert "gain" in block.lower() or "risk" in block.lower(), (
             "CLAUDE.md must frame saving as a gain, not as losing content"
         )
+
+    def test_sr_rag_verbalization_guidance_present(self, tmp_path):
+        """CLAUDE.md must instruct agents to verbalize parametric knowledge before searching (SR-RAG)."""
+        block = self._vectr_block(tmp_path)
+        assert "verbali" in block.lower(), (
+            "CLAUDE.md must include SR-RAG guidance: write out known facts before calling vectr_search"
+        )

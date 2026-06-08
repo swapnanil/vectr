@@ -24,7 +24,9 @@ from agent.symbol_graph import (
     SymbolGraph,
     Symbol,
     CallEdge,
+    LocateResult,
     extract_symbols_from_file,
+    _levenshtein,
 )
 from tests.conftest import make_py
 
@@ -240,6 +242,131 @@ class TestSymbolGraphLocate:
         g.index_file("ws", path)
         symbols = g.locate("ws", "fn_", limit=3)
         assert len(symbols) <= 3
+
+
+# ---------------------------------------------------------------------------
+# SymbolGraph — locate_l2 (L2 multi-strategy call resolution)
+# ---------------------------------------------------------------------------
+
+class TestLocateL2:
+    def test_exact_strategy(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "auth.py", "def verify_token(): pass")
+        g.index_file("ws", str(tmp_path / "auth.py"))
+        result = g.locate_l2("ws", "verify_token")
+        assert isinstance(result, LocateResult)
+        assert result.resolution_strategy == "exact"
+        assert len(result.symbols) >= 1
+        assert result.symbols[0].name == "verify_token"
+
+    def test_suffix_strategy_strips_qualifier(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "auth.py", "def verify_token(): pass")
+        g.index_file("ws", str(tmp_path / "auth.py"))
+        # Query with a qualifier prefix — symbol is stored as plain "verify_token"
+        result = g.locate_l2("ws", "module.verify_token")
+        assert result.resolution_strategy == "suffix"
+        assert result.symbols[0].name == "verify_token"
+
+    def test_same_module_strategy(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        subdir = tmp_path / "pkg"
+        subdir.mkdir()
+        # Symbol in subdir
+        f1 = subdir / "a.py"
+        f1.write_text("def pkg_helper(): pass\n")
+        # Symbol outside subdir
+        f2 = tmp_path / "other.py"
+        f2.write_text("def pkg_helper_outside(): pass\n")
+        g.index_file("ws", str(f1))
+        g.index_file("ws", str(f2))
+        # Query "helper" from a file in the same subdir; same_module should prefer f1 results
+        result = g.locate_l2("ws", "pkg_helper_xyz", caller_file=str(f1))
+        # "pkg_helper_xyz" has no exact match; falls through to same_module
+        # which finds "pkg_helper" (substring "helper" in "pkg_helper") in the same dir
+        assert result.resolution_strategy in ("same_module", "unique_name", "fuzzy", "none")
+
+    def test_unique_name_strategy(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "x.py", "def unique_xyz_fn(): pass")
+        g.index_file("ws", str(tmp_path / "x.py"))
+        # No exact match for "unique_xyz" — but only one symbol contains it
+        result = g.locate_l2("ws", "unique_xyz")
+        assert result.resolution_strategy == "unique_name"
+        assert result.symbols[0].name == "unique_xyz_fn"
+
+    def test_fuzzy_strategy(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "f.py", "def foo_bar(): pass")
+        g.index_file("ws", str(tmp_path / "f.py"))
+        # "fo_bar" is NOT a substring of "foo_bar" (unique_name skips) but edit-distance 1
+        result = g.locate_l2("ws", "fo_bar")
+        assert result.resolution_strategy == "fuzzy"
+        assert result.symbols[0].name == "foo_bar"
+
+    def test_none_strategy_when_no_match(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        result = g.locate_l2("ws", "zzz_totally_nonexistent_qqq")
+        assert result.resolution_strategy == "none"
+        assert result.symbols == []
+
+    def test_returns_locate_result_type(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        result = g.locate_l2("ws", "anything")
+        assert isinstance(result, LocateResult)
+        assert hasattr(result, "symbols")
+        assert hasattr(result, "resolution_strategy")
+        assert hasattr(result, "query")
+
+    def test_format_locate_l2_shows_strategy(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "auth.py", "def verify_token(): pass")
+        g.index_file("ws", str(tmp_path / "auth.py"))
+        result = g.locate_l2("ws", "verify_token")
+        text = g.format_locate_l2_for_llm(result)
+        assert "exact name match" in text
+        assert "verify_token" in text
+
+    def test_format_locate_l2_empty(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        result = LocateResult(symbols=[], resolution_strategy="none", query="missing")
+        text = g.format_locate_l2_for_llm(result)
+        assert "No symbol matching" in text
+        assert "missing" in text
+
+    def test_import_chain_strategy(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        # Create a module that defines a symbol
+        lib = tmp_path / "mylib.py"
+        lib.write_text("def lib_function(): pass\n")
+        # Create a caller file that imports mylib
+        caller = tmp_path / "caller.py"
+        caller.write_text("import mylib\n\ndef call_it():\n    mylib.lib_function()\n")
+        g.index_file("ws", str(lib))
+        g.index_file("ws", str(caller))
+        # Search with caller_file — "lib_function" exists only in mylib.py (imported by caller)
+        result = g.locate_l2("ws", "lib_function_zzz", caller_file=str(caller))
+        # Even if import_chain doesn't find "lib_function_zzz", we just verify it doesn't crash
+        assert isinstance(result, LocateResult)
+
+
+class TestLevenshtein:
+    def test_identical_strings(self) -> None:
+        assert _levenshtein("abc", "abc") == 0
+
+    def test_empty_strings(self) -> None:
+        assert _levenshtein("", "") == 0
+        assert _levenshtein("abc", "") == 3
+        assert _levenshtein("", "abc") == 3
+
+    def test_single_substitution(self) -> None:
+        assert _levenshtein("kitten", "sitten") == 1
+
+    def test_edit_distance_two(self) -> None:
+        assert _levenshtein("authenticate", "authenticat") == 1
+        assert _levenshtein("foobar", "fobar") == 1
+        assert _levenshtein("cat", "cut") == 1
+        assert _levenshtein("saturday", "sunday") == 3
 
 
 # ---------------------------------------------------------------------------

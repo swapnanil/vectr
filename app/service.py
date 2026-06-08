@@ -339,9 +339,9 @@ class VectrService:
     def locate(self, name: str, limit: int = 10) -> list:
         return self._symbol_graph.locate(self._workspace_root, name, limit)
 
-    def locate_with_snippets(self, name: str, limit: int = 10) -> list:
-        """Locate symbols and return each with a short code snippet. No LLM call."""
-        return self._symbol_graph.locate(self._workspace_root, name, limit)
+    def locate_with_snippets(self, name: str, limit: int = 10, caller_file: str | None = None):
+        """Locate symbols via L2 multi-strategy resolution. Returns LocateResult. No LLM call."""
+        return self._symbol_graph.locate_l2(self._workspace_root, name, limit=limit, caller_file=caller_file)
 
     def trace(self, name: str, direction: str = "both", limit: int = 20) -> dict:
         return self._symbol_graph.trace(self._workspace_root, name, direction, limit)  # type: ignore[arg-type]
@@ -354,8 +354,11 @@ class VectrService:
         """Ingest runtime trace events into the symbol graph."""
         return self._symbol_graph.ingest_trace_data(self._workspace_root, trace_events)
 
-    def format_locate(self, symbols: list, name: str) -> str:
-        return self._symbol_graph.format_locate_for_llm(symbols, name)
+    def format_locate(self, result, name: str = "") -> str:
+        from agent.symbol_graph import LocateResult
+        if isinstance(result, LocateResult):
+            return self._symbol_graph.format_locate_l2_for_llm(result)
+        return self._symbol_graph.format_locate_for_llm(result, name)
 
     def format_trace(self, trace_result: dict, name: str) -> str:
         return self._symbol_graph.format_trace_for_llm(trace_result, name)

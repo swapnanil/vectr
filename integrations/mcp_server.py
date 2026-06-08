@@ -191,6 +191,11 @@ _EXPLORATION_TOOLS = [
                     "description": "Max results (default: 10)",
                     "default": 10,
                 },
+                "caller_file": {
+                    "type": "string",
+                    "description": "Absolute path of the file containing the call site. "
+                                   "Enables same-module and import-chain fallback strategies.",
+                },
             },
             "required": ["name"],
         },
@@ -610,7 +615,8 @@ def handle_tools_call(
         if not name:
             return _mcp_error("name is required")
         limit = int(arguments.get("limit", 10))
-        symbols = service.locate_with_snippets(name, limit=limit)
+        caller_file = arguments.get("caller_file", "").strip() or None
+        symbols = service.locate_with_snippets(name, limit=limit, caller_file=caller_file)
         text = service.format_locate(symbols, name)
         if service.should_evict():
             hint = service.eviction_hint()

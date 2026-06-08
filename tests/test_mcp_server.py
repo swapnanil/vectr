@@ -512,7 +512,7 @@ class TestVectrLocate:
     def test_locate_calls_service(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_locate", {"name": "verify_token"}, svc)
-        svc.locate_with_snippets.assert_called_once_with("verify_token", limit=10)
+        svc.locate_with_snippets.assert_called_once_with("verify_token", limit=10, caller_file=None)
 
     def test_locate_returns_text(self) -> None:
         svc = _mock_service()
@@ -529,7 +529,7 @@ class TestVectrLocate:
     def test_locate_custom_limit(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_locate", {"name": "foo", "limit": 5}, svc)
-        svc.locate_with_snippets.assert_called_once_with("foo", limit=5)
+        svc.locate_with_snippets.assert_called_once_with("foo", limit=5, caller_file=None)
 
     def test_locate_appends_eviction_hint_when_should_evict(self) -> None:
         svc = _mock_service()

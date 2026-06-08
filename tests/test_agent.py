@@ -387,7 +387,7 @@ class TestMcpServer:
         mock_svc.format_locate.return_value = "No results."
         result = handle_tools_call("vectr_locate", {"name": "MyClass"}, mock_svc)
         assert result["isError"] is False
-        mock_svc.locate_with_snippets.assert_called_once_with("MyClass", limit=10)
+        mock_svc.locate_with_snippets.assert_called_once_with("MyClass", limit=10, caller_file=None)
 
     def test_tools_call_unknown_tool(self) -> None:
         from integrations.mcp_server import handle_tools_call
