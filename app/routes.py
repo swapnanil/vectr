@@ -110,6 +110,16 @@ async def status(request: Request) -> StatusResponse:
     )
 
 
+@router.get("/v1/call_counts")
+async def get_call_counts(request: Request) -> dict:
+    return _service(request).get_call_counts()
+
+
+@router.delete("/v1/call_counts")
+async def reset_call_counts(request: Request) -> dict:
+    return {"reset": True, "previous_counts": _service(request).reset_call_counts()}
+
+
 # ---------------------------------------------------------------------------
 # REST API — L1 codebase map
 # ---------------------------------------------------------------------------
@@ -184,7 +194,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
     )
     return RememberResponse(
         note_id=note_id,
-        message=f"Stored note #{note_id}. You can safely drop related code chunks from context.",
+        message=f"Stored note #{note_id}. Recall with vectr_recall — <50ms, verbatim, any time.",
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 
@@ -267,8 +277,13 @@ async def mcp_jsonrpc(request: Request, body: dict = Body(...)) -> dict:
     if method == "ping":
         return _ok({})
 
+    # extract session ID from _meta for adaptive tool registration
+    meta = params.get("_meta") or body.get("_meta") or {}
+    session_id = meta.get("sessionId") or request.headers.get("X-Session-ID") or None
+
     if method == "tools/list":
-        return _ok(handle_tools_list())
+        svc = _service(request)
+        return _ok(handle_tools_list(session_id=session_id, service=svc))
 
     if method == "tools/call":
         tool_name = params.get("name")
@@ -276,14 +291,16 @@ async def mcp_jsonrpc(request: Request, body: dict = Body(...)) -> dict:
         if not tool_name:
             return _err(-32602, "Missing required param: name")
         svc = _service(request)
-        return _ok(handle_tools_call(tool_name, arguments, svc))
+        return _ok(handle_tools_call(tool_name, arguments, svc, session_id=session_id))
 
     return _err(-32601, f"Method not found: {method}")
 
 
 @router.post("/mcp/tools/list")
-async def mcp_tools_list() -> dict:
-    return handle_tools_list()
+async def mcp_tools_list(request: Request, body: dict = Body(default={})) -> dict:
+    svc = _service(request)
+    session_id = request.headers.get("X-Session-ID") or None
+    return handle_tools_list(session_id=session_id, service=svc)
 
 
 @router.post("/mcp/tools/call")
@@ -296,4 +313,5 @@ async def mcp_tools_call(request: Request, body: dict = Body(...)) -> dict:
             detail={"error": "missing_tool_name", "detail": "Request body must include 'name'"},
         )
     svc = _service(request)
-    return handle_tools_call(tool_name, arguments, svc)
+    session_id = request.headers.get("X-Session-ID") or None
+    return handle_tools_call(tool_name, arguments, svc, session_id=session_id)

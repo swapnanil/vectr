@@ -128,6 +128,21 @@ class TestShouldEvict:
         assert adv_low.should_evict() is True
         assert adv_high.should_evict() is False
 
+    def test_default_threshold_is_40k(self) -> None:
+        # Default threshold must be 40,000 tokens (research-backed: arXiv:2310.08560).
+        # 4K was too low and caused premature eviction hints on small sessions.
+        adv = EvictionAdvisor()
+        assert adv._threshold == 40_000
+
+    def test_40k_chars_triggers_eviction(self) -> None:
+        adv = EvictionAdvisor()
+        # 40K chars ÷ 4 = 10K tokens — below threshold → no eviction
+        adv.record("f.py", "1-100", "fn", "x" * 40_000)
+        assert adv.should_evict() is False
+        # 160K chars ÷ 4 = 40K tokens — at threshold → eviction fires
+        adv.record("g.py", "1-100", "fn2", "y" * 120_000)
+        assert adv.should_evict() is True
+
 
 # ---------------------------------------------------------------------------
 # EvictionAdvisor — total_tokens_in_session
@@ -153,6 +168,14 @@ class TestEvictionHint:
     def test_empty_session_returns_empty_string(self) -> None:
         adv = EvictionAdvisor()
         assert adv.eviction_hint() == ""
+
+    def test_empty_chunks_but_time_trigger_returns_generic_nudge(self) -> None:
+        # No vectr_search calls, but time threshold already elapsed → still nudge
+        adv = EvictionAdvisor(time_threshold_seconds=0)
+        hint = adv.eviction_hint()
+        assert hint != "", "should return a nudge when time trigger fired even with no tracked chunks"
+        assert "vectr_remember" in hint
+        assert "ACTION REQUIRED" in hint
 
     def test_hint_mentions_file_path(self) -> None:
         adv = EvictionAdvisor()
@@ -189,11 +212,31 @@ class TestEvictionHint:
         auth_idx = hint.index("auth.py")
         assert "fn_a" in hint[auth_idx:auth_idx + 200] or "fn_a" in hint
 
-    def test_hint_includes_recall_instruction(self) -> None:
+    def test_hint_distinguishes_chunk_retrieval_from_note_retrieval(self) -> None:
+        # Raw codebase chunks → re-retrievable via vectr_search/vectr_locate
+        # Synthesized analysis (saved via vectr_remember) → retrievable via vectr_recall
+        # Both paths must appear so the LLM understands the full protocol.
         adv = EvictionAdvisor()
         adv.record("f.py", "1-5", "fn", "content" * 10)
         hint = adv.eviction_hint()
-        assert "vectr_search" in hint
+        assert "vectr_search" in hint, "hint must tell LLM how to re-retrieve raw codebase chunks"
+        assert "vectr_recall" in hint, "hint must tell LLM that saved notes are retrieved via vectr_recall, not vectr_search"
+
+    def test_hint_contains_directive_action_required(self) -> None:
+        # Hint must use imperative language so the LLM calls vectr_remember.
+        # Passive/conditional phrasing ("if you have findings...") gets ignored.
+        adv = EvictionAdvisor()
+        adv.record("gc.c", "100-120", "gc_collect", "static int gc_collect() {...}")
+        hint = adv.eviction_hint()
+        assert "ACTION REQUIRED" in hint, (
+            "eviction hint must use directive 'ACTION REQUIRED' language to prompt vectr_remember"
+        )
+
+    def test_hint_contains_vectr_remember_call(self) -> None:
+        adv = EvictionAdvisor()
+        adv.record("f.py", "1-5", "fn", "content" * 10)
+        hint = adv.eviction_hint()
+        assert "vectr_remember" in hint, "hint must tell the LLM to call vectr_remember"
 
 
 # ---------------------------------------------------------------------------
@@ -255,3 +298,116 @@ class TestAsChunkDicts:
     def test_empty_session_returns_empty_list(self) -> None:
         adv = EvictionAdvisor()
         assert adv.as_chunk_dicts() == []
+
+
+# ---------------------------------------------------------------------------
+# EvictionAdvisor — tool_call_count secondary trigger
+# ---------------------------------------------------------------------------
+
+class TestToolCallCountTrigger:
+    def test_evicts_after_tool_call_threshold(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=5)
+        assert adv.should_evict() is False
+        for _ in range(5):
+            adv.increment_tool_call()
+        assert adv.should_evict() is False  # exactly at threshold, not over
+        adv.increment_tool_call()
+        assert adv.should_evict() is True   # > threshold
+
+    def test_token_threshold_still_works_independently(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=1, tool_call_threshold=1000)
+        adv.record("f.py", "1-5", "fn", "x" * 100)
+        assert adv.should_evict() is True   # token threshold fired, not tool-call
+
+    def test_clear_session_resets_tool_call_count(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=3)
+        for _ in range(5):
+            adv.increment_tool_call()
+        assert adv.should_evict() is True
+        adv.clear_session()
+        assert adv.should_evict() is False
+        assert adv._tool_call_count == 0
+
+    def test_default_tool_call_threshold_is_10(self) -> None:
+        adv = EvictionAdvisor()
+        assert adv._tool_call_threshold == 10
+
+    def test_21_tool_calls_triggers_eviction(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=20)
+        for _ in range(21):
+            adv.increment_tool_call()
+        assert adv.should_evict() is True
+
+    def test_10_tool_calls_no_eviction(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=10,
+                              retrieval_call_threshold=1000, time_threshold_seconds=1000)
+        for _ in range(10):
+            adv.increment_tool_call()
+        assert adv.should_evict() is False  # exactly 10, not > 10
+
+
+# ---------------------------------------------------------------------------
+# EvictionAdvisor — retrieval call count secondary trigger
+# ---------------------------------------------------------------------------
+
+class TestRetrievalCallCountTrigger:
+    def test_fires_after_retrieval_threshold(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=1000,
+                              retrieval_call_threshold=1, time_threshold_seconds=1000)
+        assert adv.should_evict() is False
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is False  # exactly at threshold, not over
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is True   # > threshold
+
+    def test_default_retrieval_call_threshold_is_1(self) -> None:
+        adv = EvictionAdvisor()
+        assert adv._retrieval_call_threshold == 1
+
+    def test_fires_independently_of_token_and_tool_count(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=1000,
+                              retrieval_call_threshold=1, time_threshold_seconds=1000)
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is True
+
+    def test_clear_session_resets_retrieval_count(self) -> None:
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=1000,
+                              retrieval_call_threshold=1, time_threshold_seconds=1000)
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is True
+        adv.clear_session()
+        assert adv.should_evict() is False
+        assert adv._retrieval_call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# EvictionAdvisor — wall-clock time trigger
+# ---------------------------------------------------------------------------
+
+class TestTimeBasedTrigger:
+    def test_fires_after_time_threshold(self) -> None:
+        import time as _time
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=1000,
+                              retrieval_call_threshold=1000, time_threshold_seconds=0.05)
+        assert adv.should_evict() is False
+        _time.sleep(0.1)
+        assert adv.should_evict() is True
+
+    def test_default_time_threshold_is_180s(self) -> None:
+        adv = EvictionAdvisor()
+        assert adv._time_threshold_seconds == 180.0
+
+    def test_clear_session_resets_timer(self) -> None:
+        import time as _time
+        adv = EvictionAdvisor(eviction_threshold_tokens=100_000, tool_call_threshold=1000,
+                              retrieval_call_threshold=1000, time_threshold_seconds=0.05)
+        _time.sleep(0.1)
+        assert adv.should_evict() is True
+        adv.clear_session()
+        assert adv.should_evict() is False
+
+    def test_session_started_at_is_float(self) -> None:
+        adv = EvictionAdvisor()
+        assert isinstance(adv._session_started_at, float)

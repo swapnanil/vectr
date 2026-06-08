@@ -25,6 +25,7 @@ def _make_args(**kwargs) -> argparse.Namespace:
         "query": None,
         "n": 10,
         "language": None,
+        "reset_config": False,
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -50,7 +51,8 @@ class TestCmdStart:
 
         with patch("main.InstanceRegistry", return_value=reg), \
              patch("agent.instance_registry._is_pid_alive", return_value=True), \
-             patch("main._is_pid_alive", return_value=True):
+             patch("main._is_pid_alive", return_value=True), \
+             patch("main._write_workspace_config"):
             m.cmd_start(_make_args(path=ws, port=8765))
 
         err = capsys.readouterr().err
@@ -274,10 +276,40 @@ class TestWriteWorkspaceConfig:
         m._write_workspace_config(str(tmp_path), 8765)
         assert (tmp_path / "CLAUDE.md").exists()
 
-    def test_claude_md_not_overwritten_if_present(self, tmp_path):
+    def test_claude_md_contains_conditional_recall_guidance(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "vectr_status" in content, "CLAUDE.md must reference vectr_status as the existence check before recall"
+        assert "notes_count" in content, "CLAUDE.md must mention notes_count so agent knows when to skip recall"
+        assert "vectr_recall" in content, "CLAUDE.md must mention vectr_recall"
+        assert "prior work" in content or "continuing" in content, (
+            "CLAUDE.md must frame recall as conditional on continuing prior work"
+        )
+
+    def test_claude_md_encourages_code_in_notes(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "actual code" in content or "code block" in content, (
+            "CLAUDE.md must instruct agent to store actual code, not file pointers or prose"
+        )
+        assert "file pointer" in content or "re-read" in content or "re-reading" in content, (
+            "CLAUDE.md must explain why notes beat re-reading files (file pointer or re-reading)"
+        )
+
+    def test_claude_md_has_recall_usage_guidance(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "fill gaps" in content or "directly" in content, (
+            "CLAUDE.md must tell agent to work from recalled notes directly, use search only to fill gaps"
+        )
+
+    def test_claude_md_existing_content_preserved_block_appended(self, tmp_path):
         (tmp_path / "CLAUDE.md").write_text("custom")
         m._write_workspace_config(str(tmp_path), 8765)
-        assert (tmp_path / "CLAUDE.md").read_text() == "custom"
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "custom" in content
+        assert "<!-- vectr-start -->" in content
+        assert "<!-- vectr-end -->" in content
 
     def test_settings_json_created_if_missing(self, tmp_path):
         m._write_workspace_config(str(tmp_path), 8765)
@@ -329,3 +361,236 @@ class TestCmdForget:
 
         out = capsys.readouterr().out
         assert "7" in out
+
+
+# ---------------------------------------------------------------------------
+# TestMergeSafeInit
+# ---------------------------------------------------------------------------
+
+class TestMergeSafeInit:
+
+    # --- CLAUDE.md ---
+
+    def test_claude_md_created_with_vectr_block_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "<!-- vectr-start -->" in content
+        assert "<!-- vectr-end -->" in content
+        assert "vectr_status" in content
+
+    def test_claude_md_existing_content_preserved_and_block_appended(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("@AGENTS.md\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "@AGENTS.md" in content
+        assert "<!-- vectr-start -->" in content
+        assert "<!-- vectr-end -->" in content
+
+    def test_claude_md_idempotent(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert content.count("<!-- vectr-start -->") == 1
+        assert content.count("<!-- vectr-end -->") == 1
+
+    def test_claude_md_idempotent_with_existing_user_content(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("@AGENTS.md\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert content.count("<!-- vectr-start -->") == 1
+        assert "@AGENTS.md" in content
+
+    # --- AGENTS.md ---
+
+    def test_agents_md_appended_if_exists(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Existing content\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert "Existing content" in content
+        assert "<!-- vectr-start -->" in content
+
+    def test_agents_md_not_created_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert not (tmp_path / "AGENTS.md").exists()
+
+    def test_agents_md_idempotent(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert content.count("<!-- vectr-start -->") == 1
+
+    # --- .cursorrules ---
+
+    def test_cursorrules_appended_if_exists(self, tmp_path):
+        (tmp_path / ".cursorrules").write_text("Existing rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / ".cursorrules").read_text()
+        assert "Existing rules" in content
+        assert "<!-- vectr-start -->" in content
+
+    def test_cursorrules_not_created_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert not (tmp_path / ".cursorrules").exists()
+
+    # --- .cursor/rules/vectr.mdc ---
+
+    def test_cursor_rules_vectr_mdc_always_created(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        mdc = tmp_path / ".cursor" / "rules" / "vectr.mdc"
+        assert mdc.exists()
+        content = mdc.read_text()
+        assert "alwaysApply: true" in content
+        assert "vectr_status" in content
+
+    def test_cursor_rules_vectr_mdc_idempotent(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        m._write_workspace_config(str(tmp_path), 8765)
+        mdc = tmp_path / ".cursor" / "rules" / "vectr.mdc"
+        assert mdc.read_text().count("alwaysApply: true") == 1
+
+    # --- .github/copilot-instructions.md ---
+
+    def test_github_copilot_instructions_appended_if_exists(self, tmp_path):
+        (tmp_path / ".github").mkdir()
+        (tmp_path / ".github" / "copilot-instructions.md").write_text("Copilot rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / ".github" / "copilot-instructions.md").read_text()
+        assert "Copilot rules" in content
+        assert "<!-- vectr-start -->" in content
+
+    def test_github_copilot_instructions_not_created_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert not (tmp_path / ".github" / "copilot-instructions.md").exists()
+
+    # --- GEMINI.md ---
+
+    def test_gemini_md_appended_if_exists(self, tmp_path):
+        (tmp_path / "GEMINI.md").write_text("Gemini rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "GEMINI.md").read_text()
+        assert "Gemini rules" in content
+        assert "<!-- vectr-start -->" in content
+
+    def test_gemini_md_not_created_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert not (tmp_path / "GEMINI.md").exists()
+
+    # --- CODEX.md ---
+
+    def test_codex_md_appended_if_exists(self, tmp_path):
+        (tmp_path / "CODEX.md").write_text("Codex rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CODEX.md").read_text()
+        assert "Codex rules" in content
+        assert "<!-- vectr-start -->" in content
+
+    def test_codex_md_not_created_if_missing(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert not (tmp_path / "CODEX.md").exists()
+
+    # --- --reset-config ---
+
+    def test_reset_config_removes_vectr_only_claude_md(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert (tmp_path / "CLAUDE.md").exists()
+        with patch("main.InstanceRegistry"):
+            m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        assert not (tmp_path / "CLAUDE.md").exists()
+
+    def test_reset_config_preserves_user_content_in_claude_md(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("@AGENTS.md\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        with patch("main.InstanceRegistry"):
+            m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "@AGENTS.md" in content
+        assert "<!-- vectr-start -->" not in content
+
+    def test_reset_config_removes_vectr_block_from_secondary_files(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Rules\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        assert "<!-- vectr-start -->" in (tmp_path / "AGENTS.md").read_text()
+        with patch("main.InstanceRegistry"):
+            m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert "Rules" in content
+        assert "<!-- vectr-start -->" not in content
+
+    def test_reset_config_deletes_cursor_rules_mdc(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        mdc = tmp_path / ".cursor" / "rules" / "vectr.mdc"
+        assert mdc.exists()
+        with patch("main.InstanceRegistry"):
+            m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        assert not mdc.exists()
+
+    def test_reset_config_noop_when_no_vectr_block(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("custom content\n")
+        with patch("main.InstanceRegistry"):
+            m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        assert (tmp_path / "CLAUDE.md").read_text() == "custom content\n"
+
+
+# ---------------------------------------------------------------------------
+# CLAUDE.md framing — overview, 12-tool tables, rhythm trigger, gain framing
+# ---------------------------------------------------------------------------
+
+class TestClaudeMdFraming:
+    """Verify the vectr block structure: overview + classified tool tables + rhythm trigger."""
+
+    def _vectr_block(self, tmp_path) -> str:
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        start = content.index("<!-- vectr-start -->")
+        end = content.index("<!-- vectr-end -->") + len("<!-- vectr-end -->")
+        return content[start:end]
+
+    def test_overview_names_both_capabilities(self, tmp_path):
+        block = self._vectr_block(tmp_path)
+        assert "semantic search" in block.lower()
+        assert "working memory" in block.lower()
+
+    def test_search_section_lists_all_five_tools(self, tmp_path):
+        block = self._vectr_block(tmp_path)
+        for tool in ("vectr_search", "vectr_locate", "vectr_trace", "vectr_map", "vectr_map_save"):
+            assert tool in block, f"{tool} must appear in the search section"
+
+    def test_memory_section_lists_all_seven_tools(self, tmp_path):
+        block = self._vectr_block(tmp_path)
+        for tool in ("vectr_status", "vectr_recall", "vectr_remember", "vectr_forget",
+                     "vectr_evict_hint", "vectr_snapshot", "vectr_snapshot_list"):
+            assert tool in block, f"{tool} must appear in the memory section"
+
+    def test_vectr_forget_present(self, tmp_path):
+        """vectr_forget was absent from the old CLAUDE.md — must now appear."""
+        block = self._vectr_block(tmp_path)
+        assert "vectr_forget" in block
+
+    def test_tool_tables_include_example_column(self, tmp_path):
+        block = self._vectr_block(tmp_path)
+        assert "| Example |" in block or "| Example" in block, (
+            "Tool tables must include an Example column"
+        )
+
+    def test_rhythm_trigger_pairs_search_and_save(self, tmp_path):
+        """Mid-task trigger must be rhythm-based (search→save pair), not a subjective qualifier."""
+        block = self._vectr_block(tmp_path)
+        assert "pair" in block.lower(), (
+            "CLAUDE.md must frame vectr_search + vectr_remember as a pair, not a conditional"
+        )
+
+    def test_gain_framing_present(self, tmp_path):
+        """Agent must be told saving is a gain (notes survive /compact and future sessions)."""
+        block = self._vectr_block(tmp_path)
+        assert "gain" in block.lower() or "risk" in block.lower(), (
+            "CLAUDE.md must frame saving as a gain, not as losing content"
+        )
+
+    def test_sr_rag_verbalization_guidance_present(self, tmp_path):
+        """CLAUDE.md must instruct agents to verbalize parametric knowledge before searching (SR-RAG)."""
+        block = self._vectr_block(tmp_path)
+        assert "verbali" in block.lower(), (
+            "CLAUDE.md must include SR-RAG guidance: write out known facts before calling vectr_search"
+        )

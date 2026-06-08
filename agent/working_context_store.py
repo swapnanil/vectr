@@ -1,21 +1,117 @@
 """
-WorkingContextStore — persists working notes the LLM offloads to Vectr.
+WorkingContextStore — persists working notes the LLM saves to Vectr.
 
 This is the core of the bidirectional protocol. The LLM calls vectr_remember()
-to store what it has learned. Vectr stores it, the LLM drops it from context.
-Next session, vectr_recall() brings it back. The LLM can afford to forget because
-it knows the recall is instant and lossless.
+to store what it has learned. Vectr stores it persistently for fast recall.
+vectr_recall() brings it back on demand — later in this session or in a future
+one. Recall is instant (<50ms) and lossless.
 
-Storage: SQLite in the vectr DB dir — persists across IDE restarts and reboots.
+Storage: SQLite in the vectr DB dir — available immediately within the same
+session and persists across IDE restarts and reboots.
 """
 from __future__ import annotations
 
 import json
+import logging
+import logging.handlers
+import os
 import re
 import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Rotating audit log
+#
+# Logs remember/recall/index/forget events to ~/.vectr/audit.log.
+# Rotates at 10 MB; keeps 3 backups. Disabled if VECTR_AUDIT_LOG="" is set.
+# ---------------------------------------------------------------------------
+
+def _get_audit_logger() -> logging.Logger:
+    """Return the vectr audit logger (lazy-initialised, singleton per process)."""
+    name = "vectr.audit"
+    log = logging.getLogger(name)
+    if log.handlers:
+        return log
+
+    log_path_str = os.getenv("VECTR_AUDIT_LOG", str(Path.home() / ".vectr" / "audit.log"))
+    if not log_path_str:
+        log.addHandler(logging.NullHandler())
+        return log
+
+    log_path = Path(log_path_str)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    handler = logging.handlers.RotatingFileHandler(
+        str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    return log
+
+
+def audit(event: str, **kwargs) -> None:
+    """Write one audit log entry: `event key=val key=val …`"""
+    try:
+        parts = [event] + [f"{k}={v}" for k, v in kwargs.items()]
+        _get_audit_logger().info(" ".join(parts))
+    except Exception:
+        pass  # audit failures must never crash the main path
+
+
+# ---------------------------------------------------------------------------
+# Field-level encryption for note content
+#
+# When VECTR_ENCRYPT_KEY is set, note content is encrypted at write time and
+# decrypted at read time using Fernet (AES-128-CBC + HMAC-SHA256).
+# The raw passphrase is never stored — a PBKDF2-derived key is used instead.
+#
+# Requires: pip install vectr[encryption]  (cryptography>=43)
+#
+# If a note was stored plaintext before encryption was enabled, decrypt()
+# detects the invalid token and returns the raw text — no data loss.
+# ---------------------------------------------------------------------------
+
+class _NoteEncryptor:
+    """Fernet-based field-level encryptor for note content."""
+
+    _SALT = b"vectr-notes-v1\x00"  # fixed, non-secret derivation salt
+
+    def __init__(self, passphrase: str) -> None:
+        import base64
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=self._SALT,
+            iterations=480_000,  # OWASP 2023 recommendation for SHA-256
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
+        self._fernet = Fernet(key)
+
+    def encrypt(self, plaintext: str) -> str:
+        return self._fernet.encrypt(plaintext.encode("utf-8")).decode("ascii")
+
+    def decrypt(self, stored: str) -> str:
+        """Decrypt, or return plaintext unchanged if the value was never encrypted."""
+        try:
+            return self._fernet.decrypt(stored.encode("ascii")).decode("utf-8")
+        except Exception:
+            # Note was stored before encryption was enabled — return as-is
+            return stored
+
+
+def _build_encryptor() -> _NoteEncryptor | None:
+    """Return a _NoteEncryptor if VECTR_ENCRYPT_KEY is set, else None."""
+    key = os.getenv("VECTR_ENCRYPT_KEY", "")
+    return _NoteEncryptor(key) if key else None
 
 # Matches file paths in note text — relative (foo/bar.py) and absolute (/usr/local/file.py).
 # False positives that don't exist are skipped during staleness stat().
@@ -49,6 +145,14 @@ class WorkingNote:
     last_accessed: float
     session_id: str | None = None
     decay_score: float = 1.0
+    # team/shared notes tri-key model
+    author_id: str = ""              # developer/agent identifier
+    author_trust_score: float = 1.0  # Bayesian weight per contributor (0.0–1.0)
+    valid_from: float = 0.0          # bi-temporal: when the note became valid
+    valid_until: float | None = None # bi-temporal: None = still valid; float = superseded
+    code_hash: str = ""              # sha256[:16] of the anchored code block at write time
+    superseded_by: str | None = None  # author_id that superseded this note
+    superseded_at: float | None = None
 
 
 @dataclass
@@ -67,10 +171,32 @@ class WorkingContextStore:
 
     Design principle: the LLM should never be afraid to forget something
     if Vectr has it. This store is the guarantee.
+
+    When embed_fn and notes_chroma_client are provided, note content is embedded
+    at remember() time and stored in a ChromaDB 'working_memory' collection.
+    recall(query=...) then uses cosine similarity to find relevant notes instead
+    of SQL LIKE substring matching. SQL LIKE is retained as a fallback.
     """
 
-    def __init__(self, db_dir: str) -> None:
+    def __init__(
+        self,
+        db_dir: str,
+        embed_fn=None,
+        notes_chroma_client=None,
+    ) -> None:
         self._db_path = Path(db_dir) / "working_context.sqlite"
+        self._encryptor: _NoteEncryptor | None = _build_encryptor()
+        # Semantic recall: embed notes at write time, cosine search at recall time
+        self._embed_fn = embed_fn   # Callable[[list[str]], list[list[float]]] | None
+        self._notes_col = None
+        if embed_fn is not None and notes_chroma_client is not None:
+            try:
+                self._notes_col = notes_chroma_client.get_or_create_collection(
+                    name="working_memory",
+                    metadata={"hnsw:space": "cosine"},
+                )
+            except Exception:
+                pass  # embedding unavailable — fall back to SQL LIKE silently
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
@@ -83,19 +209,34 @@ class WorkingContextStore:
         with self._conn() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS notes (
-                    note_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                    workspace     TEXT NOT NULL,
-                    content       TEXT NOT NULL,
-                    tags          TEXT NOT NULL DEFAULT '[]',
-                    priority      TEXT NOT NULL DEFAULT 'medium',
-                    created_at    REAL NOT NULL,
-                    last_accessed REAL NOT NULL,
-                    session_id    TEXT,
-                    decay_score   REAL NOT NULL DEFAULT 1.0
+                    note_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace           TEXT NOT NULL,
+                    content             TEXT NOT NULL,
+                    tags                TEXT NOT NULL DEFAULT '[]',
+                    priority            TEXT NOT NULL DEFAULT 'medium',
+                    created_at          REAL NOT NULL,
+                    last_accessed       REAL NOT NULL,
+                    session_id          TEXT,
+                    decay_score         REAL NOT NULL DEFAULT 1.0,
+                    author_id           TEXT NOT NULL DEFAULT '',
+                    author_trust_score  REAL NOT NULL DEFAULT 1.0,
+                    valid_from          REAL NOT NULL DEFAULT 0.0,
+                    valid_until         REAL,
+                    code_hash           TEXT NOT NULL DEFAULT '',
+                    superseded_by       TEXT,
+                    superseded_at       REAL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_notes_workspace ON notes(workspace);
                 CREATE INDEX IF NOT EXISTS idx_notes_tags ON notes(tags);
+
+                CREATE TABLE IF NOT EXISTS author_trust (
+                    workspace           TEXT NOT NULL,
+                    author_id           TEXT NOT NULL,
+                    trust_score         REAL NOT NULL DEFAULT 1.0,
+                    note_count          INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (workspace, author_id)
+                );
 
                 CREATE TABLE IF NOT EXISTS snapshots (
                     snapshot_id  TEXT PRIMARY KEY,
@@ -107,6 +248,24 @@ class WorkingContextStore:
 
                 CREATE INDEX IF NOT EXISTS idx_snap_workspace ON snapshots(workspace);
             """)
+            # P4: migrate existing databases that predate P4 columns
+            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)").fetchall()}
+            p4_cols = {
+                "author_id":          "TEXT NOT NULL DEFAULT ''",
+                "author_trust_score": "REAL NOT NULL DEFAULT 1.0",
+                "valid_from":         "REAL NOT NULL DEFAULT 0.0",
+                "valid_until":        "REAL",
+                "code_hash":          "TEXT NOT NULL DEFAULT ''",
+                "superseded_by":      "TEXT",
+                "superseded_at":      "REAL",
+            }
+            for col, typedef in p4_cols.items():
+                if col not in existing_cols:
+                    conn.execute(f"ALTER TABLE notes ADD COLUMN {col} {typedef}")
+
+            # Create indexes that depend on migrated columns — must run AFTER migration
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_code_hash ON notes(code_hash)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_valid ON notes(valid_until)")
 
     # ------------------------------------------------------------------
     # Notes — vectr_remember / vectr_recall / vectr_forget
@@ -119,20 +278,72 @@ class WorkingContextStore:
         tags: list[str] | None = None,
         priority: str = "medium",
         session_id: str | None = None,
+        author_id: str = "",
+        code_hash: str = "",
     ) -> int:
-        """Store a working note. Returns the note_id."""
+        """Store a working note. Returns the note_id.
+
+        If code_hash is provided and another non-superseded note exists for the
+        same workspace + code_hash (same code anchor), the older note is marked
+        superseded before the new note is inserted.
+        """
         now = time.time()
         tags_json = json.dumps(tags or [])
+        stored_content = self._encryptor.encrypt(content) if self._encryptor else content
+
         with self._conn() as conn:
+            # conflict resolution: if another note anchors the same code block, supersede it
+            if code_hash:
+                conflicting = conn.execute(
+                    """SELECT note_id FROM notes
+                       WHERE workspace = ? AND code_hash = ?
+                       AND valid_until IS NULL""",
+                    (workspace, code_hash),
+                ).fetchall()
+                if conflicting:
+                    conn.execute(
+                        """UPDATE notes SET valid_until = ?, superseded_by = ?, superseded_at = ?
+                           WHERE note_id IN ({})""".format(",".join("?" * len(conflicting))),
+                        [now, author_id or "unknown", now] + [r[0] for r in conflicting],
+                    )
+
             cur = conn.execute(
                 """
                 INSERT INTO notes (workspace, content, tags, priority, created_at,
-                                   last_accessed, session_id, decay_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1.0)
+                                   last_accessed, session_id, decay_score,
+                                   author_id, author_trust_score, valid_from,
+                                   valid_until, code_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?)
                 """,
-                (workspace, content, tags_json, priority, now, now, session_id),
+                (workspace, stored_content, tags_json, priority, now, now, session_id,
+                 author_id, now, code_hash),
             )
-            return cur.lastrowid  # type: ignore[return-value]
+            note_id = cur.lastrowid
+
+            # update author trust score registry (Bayesian: count-weighted)
+            if author_id:
+                conn.execute(
+                    """INSERT INTO author_trust (workspace, author_id, trust_score, note_count)
+                       VALUES (?, ?, 1.0, 1)
+                       ON CONFLICT(workspace, author_id) DO UPDATE SET
+                           note_count = note_count + 1,
+                           trust_score = MIN(1.0, trust_score + 0.05)""",
+                    (workspace, author_id),
+                )
+
+        # Embed and store in the vector index so recall(query=...) can use cosine similarity.
+        # content is the plaintext (before encryption) — embeddings are over raw text.
+        if self._notes_col is not None and self._embed_fn is not None:
+            try:
+                vec = self._embed_fn([content])[0]
+                self._notes_col.upsert(ids=[str(note_id)], embeddings=[vec])
+            except Exception:
+                pass  # embedding failure never blocks the write path
+
+        audit("REMEMBER", workspace=workspace, note_id=note_id, priority=priority,
+              author_id=author_id, code_hash=code_hash[:8] if code_hash else "",
+              tags=",".join(tags or []), chars=len(content))
+        return note_id  # type: ignore[return-value]
 
     def recall(
         self,
@@ -141,21 +352,43 @@ class WorkingContextStore:
         tags: list[str] | None = None,
         priority: str | None = None,
         limit: int = 10,
+        include_superseded: bool = False,
     ) -> list[WorkingNote]:
+        """Retrieve working notes.
+
+        When query is provided and semantic search is available (embed_fn + ChromaDB
+        collection configured), uses cosine similarity to rank notes by relevance.
+        Falls back to SQL LIKE substring match when semantic search is unavailable.
+
+        Superseded notes are excluded by default. Pass include_superseded=True
+        to see the full history including notes marked as superseded.
+        Without a query, results are ordered by author_trust_score DESC, decay_score DESC,
+        last_accessed DESC so the highest-trust contributor's notes surface first.
         """
-        Retrieve working notes. Filters by tags/priority if provided.
-        Query is a simple substring match against content (fast, no embedding needed —
-        notes are short and precise, written by the LLM itself).
-        """
+        # Semantic path: embed the query, find cosine-nearest notes, then fetch from SQLite.
+        if query and self._notes_col is not None and self._embed_fn is not None:
+            try:
+                notes = self._semantic_recall(
+                    workspace, query, tags, priority, limit, include_superseded
+                )
+                audit("RECALL", workspace=workspace, query=query, notes_returned=len(notes),
+                      method="semantic")
+                return notes
+            except Exception:
+                pass  # fall through to SQL LIKE
+
+        # SQL path: used when no query, or when semantic search is unavailable/errored.
         sql = "SELECT * FROM notes WHERE workspace = ?"
         params: list = [workspace]
+
+        if not include_superseded:
+            sql += " AND valid_until IS NULL"
 
         if priority:
             sql += " AND priority = ?"
             params.append(priority)
 
         if tags:
-            # any matching tag
             tag_clauses = " OR ".join(["tags LIKE ?" for _ in tags])
             sql += f" AND ({tag_clauses})"
             params.extend([f'%"{t}"%' for t in tags])
@@ -164,7 +397,7 @@ class WorkingContextStore:
             sql += " AND content LIKE ?"
             params.append(f"%{query}%")
 
-        sql += " ORDER BY decay_score DESC, last_accessed DESC LIMIT ?"
+        sql += " ORDER BY author_trust_score DESC, decay_score DESC, last_accessed DESC LIMIT ?"
         params.append(limit)
 
         with self._conn() as conn:
@@ -172,7 +405,6 @@ class WorkingContextStore:
 
         notes = [self._row_to_note(r) for r in rows]
 
-        # bump last_accessed
         if notes:
             ids = [n.note_id for n in notes]
             with self._conn() as conn:
@@ -180,6 +412,68 @@ class WorkingContextStore:
                     f"UPDATE notes SET last_accessed = ? WHERE note_id IN ({','.join('?' * len(ids))})",
                     [time.time(), *ids],
                 )
+
+        audit("RECALL", workspace=workspace, query=query or "", notes_returned=len(notes),
+              method="sql")
+        return notes
+
+    def _semantic_recall(
+        self,
+        workspace: str,
+        query: str,
+        tags: list[str] | None,
+        priority: str | None,
+        limit: int,
+        include_superseded: bool,
+    ) -> list[WorkingNote]:
+        """Find the most relevant notes by cosine similarity, then fetch from SQLite."""
+        # Cap n_results at collection size to avoid ChromaDB errors on small collections
+        col_count = self._notes_col.count()
+        if col_count == 0:
+            return []
+        n_query = min(limit * 3, col_count)
+
+        q_vec = self._embed_fn([query])[0]
+        results = self._notes_col.query(query_embeddings=[q_vec], n_results=n_query)
+
+        if not results or not results["ids"] or not results["ids"][0]:
+            return []
+
+        candidate_ids = [int(id_) for id_ in results["ids"][0]]
+
+        # Fetch from SQLite by semantic candidate IDs, applying metadata filters
+        placeholders = ",".join("?" * len(candidate_ids))
+        sql = f"SELECT * FROM notes WHERE workspace = ? AND note_id IN ({placeholders})"
+        params: list = [workspace, *candidate_ids]
+
+        if not include_superseded:
+            sql += " AND valid_until IS NULL"
+
+        if priority:
+            sql += " AND priority = ?"
+            params.append(priority)
+
+        if tags:
+            tag_clauses = " OR ".join(["tags LIKE ?" for _ in tags])
+            sql += f" AND ({tag_clauses})"
+            params.extend([f'%"{t}"%' for t in tags])
+
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        # Preserve semantic rank order (ChromaDB returns by ascending distance)
+        id_to_row = {r["note_id"]: r for r in rows}
+        ordered = [id_to_row[nid] for nid in candidate_ids if nid in id_to_row][:limit]
+        notes = [self._row_to_note(r) for r in ordered]
+
+        if notes:
+            ids = [n.note_id for n in notes]
+            with self._conn() as conn:
+                conn.execute(
+                    f"UPDATE notes SET last_accessed = ? WHERE note_id IN ({','.join('?' * len(ids))})",
+                    [time.time(), *ids],
+                )
+
         return notes
 
     def forget(self, workspace: str, note_id: int) -> bool:
@@ -189,14 +483,63 @@ class WorkingContextStore:
                 "DELETE FROM notes WHERE workspace = ? AND note_id = ?",
                 (workspace, note_id),
             ).rowcount
+        if count > 0 and self._notes_col is not None:
+            try:
+                self._notes_col.delete(ids=[str(note_id)])
+            except Exception:
+                pass
         return count > 0
+
+    def count_notes(self, workspace: str) -> int:
+        """Return the number of notes stored for this workspace."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM notes WHERE workspace = ?", (workspace,)
+            ).fetchone()
+        return row[0] if row else 0
 
     def forget_all(self, workspace: str) -> int:
         """Clear all notes for a workspace."""
         with self._conn() as conn:
-            return conn.execute(
+            deleted = conn.execute(
                 "DELETE FROM notes WHERE workspace = ?", (workspace,)
             ).rowcount
+        if deleted > 0 and self._notes_col is not None:
+            try:
+                existing_ids = self._notes_col.get(include=[])["ids"]
+                if existing_ids:
+                    self._notes_col.delete(ids=existing_ids)
+            except Exception:
+                pass
+        audit("FORGET_ALL", workspace=workspace, deleted=deleted)
+        return deleted
+
+    def forget_all_workspaces(self) -> int:
+        """Delete ALL notes across ALL workspaces in this SQLite file.
+
+        Used by `vectr forget --all` to give a global clean slate.
+        Audit entry logged per deletion.
+        """
+        with self._conn() as conn:
+            deleted = conn.execute("DELETE FROM notes").rowcount
+        audit("FORGET_ALL_WORKSPACES", deleted=deleted)
+        return deleted
+
+    def purge_expired_notes(self, workspace: str, ttl_days: float) -> int:
+        """Delete notes older than ttl_days regardless of decay_score.
+
+        Called at startup when VECTR_NOTES_TTL_DAYS is set. Returns the number
+        of notes deleted.
+        """
+        cutoff = time.time() - ttl_days * 86400
+        with self._conn() as conn:
+            deleted = conn.execute(
+                "DELETE FROM notes WHERE workspace = ? AND created_at < ?",
+                (workspace, cutoff),
+            ).rowcount
+        if deleted:
+            audit("PURGE_EXPIRED", workspace=workspace, ttl_days=ttl_days, deleted=deleted)
+        return deleted
 
     def decay_old_notes(self, workspace: str, half_life_days: float = 14.0) -> None:
         """
@@ -276,7 +619,7 @@ class WorkingContextStore:
         return json.loads(row["payload"])
 
     # ------------------------------------------------------------------
-    # Eviction hints — what can the LLM safely drop from context?
+    # Eviction hints — which chunks can vectr re-retrieve in <50ms?
     # ------------------------------------------------------------------
 
     def build_eviction_hint(
@@ -286,9 +629,9 @@ class WorkingContextStore:
     ) -> str:
         """
         Given a list of chunks the LLM has retrieved this session,
-        return a message telling the LLM what it can safely drop.
+        return a message listing which chunks vectr can re-retrieve in <50ms.
 
-        The guarantee: anything listed here can be retrieved in <50ms.
+        The guarantee: anything listed here is fully indexed, re-retrievable in <50ms.
         """
         if not session_retrieved_chunks:
             return "No retrieved chunks to evict."
@@ -304,7 +647,7 @@ class WorkingContextStore:
 
         lines = [
             f"Vectr has {len(session_retrieved_chunks)} chunks (~{est_tokens} tokens) indexed and instantly retrievable.",
-            "You can safely drop these from your context window:",
+            "Vectr can re-retrieve these in <50ms — no need to re-read them:",
             "",
         ]
         for fpath, chunks in by_file.items():
@@ -329,47 +672,98 @@ class WorkingContextStore:
     ) -> dict[int, list[str]]:
         """Identify notes whose referenced files have changed since the note was written.
 
-        For each note, extracts file paths from the content, stats them against
-        the workspace root, and flags any path whose mtime > note.created_at.
+        Composite staleness fires the stale flag when ANY of:
+          - A referenced file's mtime > note.created_at (original mtime check)
+          - note.code_hash != sha256[:16] of the current file content (code moved/changed)
+          - Note is marked superseded (valid_until is set)
 
-        Returns {note_id: [stale_path, ...]} — only notes with ≥1 stale path included.
+        Returns {note_id: [stale_path/reason, ...]} — only stale notes included.
         """
+        import hashlib
         root = Path(workspace_root)
         stale: dict[int, list[str]] = {}
 
         for note in notes:
-            stale_files = []
+            reasons: list[str] = []
+
+            # superseded notes are always stale
+            if note.valid_until is not None:
+                sup_by = note.superseded_by or "unknown"
+                reasons.append(f"[superseded by @{sup_by}]")
+
             for raw_path in _extract_file_paths(note.content):
                 path = Path(raw_path)
                 resolved = path if path.is_absolute() else root / path
                 try:
-                    mtime = resolved.stat().st_mtime
+                    stat = resolved.stat()
                 except OSError:
-                    continue  # doesn't exist or inaccessible — skip
-                if mtime > note.created_at:
-                    stale_files.append(raw_path)
+                    continue
 
-            if stale_files:
-                stale[note.note_id] = stale_files
+                # mtime staleness (original signal)
+                if stat.st_mtime > note.created_at:
+                    reasons.append(raw_path)
+
+                # code_hash staleness — detect if the anchored code changed
+                if note.code_hash and resolved.suffix.lower() in {".py", ".c", ".h", ".go", ".rs"}:
+                    try:
+                        current_hash = hashlib.sha256(
+                            resolved.read_bytes()
+                        ).hexdigest()[:16]
+                        if current_hash != note.code_hash and raw_path not in reasons:
+                            reasons.append(f"{raw_path}[code_hash_changed]")
+                    except OSError:
+                        pass
+
+            if reasons:
+                stale[note.note_id] = reasons
 
         return stale
+
+    def get_author_trust(self, workspace: str, author_id: str) -> float:
+        """Return the Bayesian trust score for an author in this workspace."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT trust_score FROM author_trust WHERE workspace = ? AND author_id = ?",
+                (workspace, author_id),
+            ).fetchone()
+        return row[0] if row else 1.0
+
+    def list_authors(self, workspace: str) -> list[dict]:
+        """Return all authors with their trust scores and note counts."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT author_id, trust_score, note_count FROM author_trust WHERE workspace = ? ORDER BY trust_score DESC",
+                (workspace,),
+            ).fetchall()
+        return [{"author_id": r[0], "trust_score": r[1], "note_count": r[2]} for r in rows]
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _row_to_note(row: sqlite3.Row) -> WorkingNote:
+    def _row_to_note(self, row: sqlite3.Row) -> WorkingNote:
+        content = row["content"]
+        if self._encryptor:
+            content = self._encryptor.decrypt(content)
+        keys = row.keys()
         return WorkingNote(
             note_id=row["note_id"],
             workspace=row["workspace"],
-            content=row["content"],
+            content=content,
             tags=json.loads(row["tags"]),
             priority=row["priority"],
             created_at=row["created_at"],
             last_accessed=row["last_accessed"],
             session_id=row["session_id"],
             decay_score=row["decay_score"],
+            # team notes fields (present in all new DBs; guarded for old DBs without migration)
+            author_id=row["author_id"] if "author_id" in keys else "",
+            author_trust_score=row["author_trust_score"] if "author_trust_score" in keys else 1.0,
+            valid_from=row["valid_from"] if "valid_from" in keys else 0.0,
+            valid_until=row["valid_until"] if "valid_until" in keys else None,
+            code_hash=row["code_hash"] if "code_hash" in keys else "",
+            superseded_by=row["superseded_by"] if "superseded_by" in keys else None,
+            superseded_at=row["superseded_at"] if "superseded_at" in keys else None,
         )
 
     def format_notes_for_llm(
@@ -398,9 +792,21 @@ class WorkingContextStore:
             age_h = (time.time() - n.created_at) / 3600
             age_str = f"{age_h:.0f}h ago" if age_h < 48 else f"{age_h / 24:.0f}d ago"
             tag_str = f"  [{', '.join(n.tags)}]" if n.tags else ""
+            author_str = f"  @{n.author_id}" if n.author_id else ""
             stale_files = stale_warnings.get(n.note_id, [])
             stale_marker = " [STALE]" if stale_files else ""
-            lines.append(f"[{n.note_id}] [{n.priority.upper()}]{tag_str}  ({age_str}){stale_marker}")
+
+            # superseded badge
+            superseded_marker = ""
+            if n.valid_until is not None and n.superseded_by:
+                import datetime as _dt
+                sup_date = _dt.datetime.fromtimestamp(n.superseded_at or n.valid_until).strftime("%Y-%m-%d")
+                superseded_marker = f" [superseded by @{n.superseded_by}, {sup_date}]"
+
+            lines.append(
+                f"[{n.note_id}] [{n.priority.upper()}]{tag_str}{author_str}  ({age_str})"
+                f"{stale_marker}{superseded_marker}"
+            )
             lines.append(f"  {n.content}")
             if stale_files:
                 changed = ", ".join(stale_files)

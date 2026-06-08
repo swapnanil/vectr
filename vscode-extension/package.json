@@ -4,9 +4,16 @@
   "description": "Zero-config local codebase indexer. Auto-starts when you open a workspace and serves code context to Claude Code, Cursor, and any MCP-compatible AI assistant.",
   "version": "1.0.0",
   "publisher": "swapnanilsaha",
+  "license": "MIT",
+  "homepage": "https://swapnanilsaha.com/tools/vectr",
+  "bugs": { "url": "https://github.com/swapnanil/vectr/issues" },
+  "repository": { "type": "git", "url": "https://github.com/swapnanil/vectr.git" },
   "engines": { "vscode": "^1.85.0" },
-  "categories": ["AI", "Other"],
-  "keywords": ["ai", "codebase", "search", "mcp", "rag", "semantic", "embeddings"],
+  "categories": ["AI", "Other", "Machine Learning"],
+  "keywords": [
+    "ai", "codebase", "search", "mcp", "rag", "semantic", "embeddings",
+    "claude", "cursor", "copilot", "context", "indexer", "local"
+  ],
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
@@ -30,17 +37,17 @@
         "vectr.port": {
           "type": "number",
           "default": 8765,
-          "description": "Port for the Vectr MCP server"
+          "description": "Preferred starting port for the Vectr MCP server. Actual port may differ if this port is already in use — vectr scans upward until a free port is found."
         },
         "vectr.autoStart": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically start the Vectr daemon when a workspace is opened"
+          "description": "Automatically start the Vectr daemon when a workspace is opened."
         },
         "vectr.embedModel": {
           "type": "string",
           "default": "Snowflake/snowflake-arctic-embed-m-v1.5",
-          "description": "Embedding model to use (any sentence-transformers model). Default runs locally, no API key required. Override with any HuggingFace model ID via VECTR_EMBED_MODEL env var."
+          "description": "Embedding model for semantic search. Default model (~440 MB) runs locally on CPU with no API key required. Override with any HuggingFace sentence-transformers model ID."
         }
       }
     }
@@ -48,11 +55,14 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --no-dependencies",
+    "publish": "vsce publish --no-dependencies"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.24.0"
   }
 }

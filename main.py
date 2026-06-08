@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -26,30 +27,61 @@ _LEGACY_PID_FILE = Path.home() / ".vectr" / "vectr.pid"
 _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 
 _CLAUDE_MD = """\
-# Vectr tools — available alongside Read and Bash
+# Vectr — semantic search + reliable working memory
 
-This workspace is indexed by vectr. Use vectr tools when they'd be faster than reading
-files directly.
+Vectr gives you two capabilities:
 
-## Which exploration tool to use
+- **Semantic search**: find any symbol, pattern, or concept in this codebase by describing it in plain English — faster than grep, without knowing where to look.
+- **Working memory**: store findings and recall them in <50ms on demand — whether later in this session, through `/compact`, or in a future session. Saving is a gain, not a risk.
 
-| You know... | You need... | Use |
+## Semantic search — 5 tools
+
+The codebase is fully indexed. One `vectr_search` call returns ranked, relevant code chunks — no grep loops across hundreds of files, no wasted turns reading the wrong files. Use these for all exploration; use Read only to read a specific file that vectr has already pointed you to.
+
+| Tool | Purpose | Example |
 |---|---|---|
-| A concept or behaviour (not a name) | Any code related to it | `vectr_search("description")` |
-| A symbol name, not its file | Where it's defined | `vectr_locate("SymbolName")` |
-| A symbol name | Who calls it / what it calls | `vectr_trace("symbol_name")` |
-| Nothing about the codebase yet | Architectural overview | `vectr_map()` |
+| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. | `vectr_search("workspace lock acquisition and release")` |
+| `vectr_locate("SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate("WorkspaceLock")` → `resolver.rs:214` |
+| `vectr_trace("symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace("acquire_lock")` |
+| `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
+| `vectr_map_save(summary)` | Save a plain-English codebase summary (~200–350 tokens) as a permanent passport. Only call when `vectr_map` returned raw metadata. | `vectr_map_save("uv is a Rust-based Python package manager…")` |
 
-If you already know the file path, use Read directly — no need for vectr.
+## Working memory — 7 tools
 
-## Memory tools — always use for cross-session continuity
+A note stored with `vectr_remember` is the only finding that survives three things: (1) re-reading the file costs tokens — recalling the note costs almost none; (2) `/compact` replaces the conversation with a summary that loses exact signatures and line numbers — your note does not; (3) a new session starts with zero context — your note is there from turn 1. `vectr_recall` retrieves it in <50ms, verbatim, any time.
 
-The next session starts cold and won't have your current context:
+**Always available:**
 
-- Session START: `vectr_recall()` — retrieve notes from previous sessions before reading any files
-- During session: `vectr_remember(content, tags=["tag"], priority="high"|"medium"|"low")` — store
-  each key finding so you can drop the related code chunks from context
-- Session END: `vectr_snapshot("label")` — seal all notes as a named checkpoint
+| Tool | Purpose | Example |
+|---|---|---|
+| `vectr_status()` | Note count + index state. **Always call first at session start.** | `vectr_status()` → `notes_count: 3` → call `vectr_recall` |
+| `vectr_remember(content, tags, priority)` | Save a key finding — actual code or pattern, not a file pointer. | `vectr_remember("lock_workspace() at resolver.rs:214 acquires PID-scoped lock; drops on scope exit.", tags=["lock", "resolver"], priority="high")` |
+| `vectr_evict_hint()` | Lists retrieved chunks that vectr can re-retrieve in <50ms — no need to re-read those files later. | At exploration → implementation transition |
+
+**Unlocked after your first `vectr_remember` call (or when prior notes exist):**
+
+| Tool | Purpose | Example |
+|---|---|---|
+| `vectr_recall(query)` | Retrieve notes relevant to your task. Replaces re-reading already-explored files. | `vectr_recall("workspace lock resolution flow")` |
+| `vectr_forget(note_id)` | Delete a stale or superseded note by ID. | `vectr_forget("note_abc123")` |
+| `vectr_snapshot("label")` | Seal current notes as a named checkpoint. | `vectr_snapshot("lock-cycle-mapped")` |
+| `vectr_snapshot_list()` | List saved checkpoints. Use at session start if `vectr_recall` returned nothing useful. | `vectr_snapshot_list()` |
+
+## When to use each capability
+
+**Before calling `vectr_search` on a well-known API or framework:** write out what you already know — function signatures, key types, parameter names — and only call `vectr_search` if genuine gaps remain after that verbalization. Reduces unnecessary search calls 26–40% on familiar codebases.
+
+**At session start (always):** call `vectr_status()` first.
+- `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task>")` before opening any files.
+- `notes_count == 0` → skip recall and proceed.
+
+**The moment you find a key definition, pattern, or non-obvious detail:** call `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block or finding, not a file pointer. Treat every `vectr_search` or `vectr_locate` call as a **pair**: search, then immediately save the key finding before your next retrieval. If `/compact` runs later, the conversation summary loses exact details — your note does not. If a new session starts, your note is the only thing that carries forward. One note now = no re-discovery later.
+
+**Before writing any final output:** call `vectr_remember` at least once with the key type names, entry points, and non-obvious patterns you confirmed. The output file captures what you built; notes capture what you learned — and what you learned is what the next session needs.
+
+**At exploration → implementation transition:** call `vectr_evict_hint()` — lists retrieved chunks that vectr can re-retrieve in <50ms if you need them again. Follow with `vectr_remember` for any synthesized understanding not yet stored.
+
+**If recalled notes already contain what you need:** work from them directly. Use `vectr_search` or Read only to fill genuine gaps.
 """
 
 _MCP_JSON = """\
@@ -85,6 +117,91 @@ _VSCODE_MCP_JSON = """\
   }}
 }}
 """
+
+_VECTR_BLOCK_START = "<!-- vectr-start -->"
+_VECTR_BLOCK_END = "<!-- vectr-end -->"
+# Matches the vectr block plus any blank lines immediately before it.
+_VECTR_BLOCK_RE = re.compile(
+    r"\n*<!-- vectr-start -->.*?<!-- vectr-end -->\n?",
+    re.DOTALL,
+)
+
+# IDE config files that get the vectr block appended (not created from scratch).
+_IDE_CONFIG_APPEND_ONLY: tuple[str, ...] = (
+    "AGENTS.md",
+    ".cursorrules",
+    "GEMINI.md",
+    "CODEX.md",
+)
+
+
+def _make_vectr_block() -> str:
+    return f"{_VECTR_BLOCK_START}\n{_CLAUDE_MD.rstrip()}\n{_VECTR_BLOCK_END}\n"
+
+
+def _write_ide_config_merge_safe(path: Path, *, create_if_missing: bool) -> None:
+    """Write the vectr guidance block into an IDE config file.
+
+    - File missing + create_if_missing=True  → create file containing just the block.
+    - File missing + create_if_missing=False → no-op.
+    - File exists, no vectr block            → append block after existing content.
+    - File exists, vectr block present       → replace block in-place (idempotent).
+    """
+    block = _make_vectr_block()
+
+    if not path.exists():
+        if not create_if_missing:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(block, encoding="utf-8")
+        print(f"  Created {path}", file=sys.stderr)
+        return
+
+    existing = path.read_text(encoding="utf-8")
+
+    if _VECTR_BLOCK_START in existing:
+        stripped = _VECTR_BLOCK_RE.sub("", existing).rstrip()
+        new_content = f"{stripped}\n\n{block}" if stripped else block
+        if new_content == existing:
+            return
+        path.write_text(new_content, encoding="utf-8")
+        print(f"  Updated vectr block in {path}", file=sys.stderr)
+    else:
+        path.write_text(f"{existing.rstrip()}\n\n{block}", encoding="utf-8")
+        print(f"  Appended vectr block to {path}", file=sys.stderr)
+
+
+def _remove_vectr_block(path: Path) -> None:
+    """Remove the vectr block from a file. Delete the file if it becomes empty."""
+    if not path.exists():
+        return
+    content = path.read_text(encoding="utf-8")
+    if _VECTR_BLOCK_START not in content:
+        return
+    stripped = _VECTR_BLOCK_RE.sub("", content).rstrip()
+    if stripped:
+        path.write_text(stripped + "\n", encoding="utf-8")
+        print(f"  Removed vectr block from {path}", file=sys.stderr)
+    else:
+        path.unlink()
+        print(f"  Deleted {path} (was vectr-only)", file=sys.stderr)
+
+
+def _write_cursor_rules(workspace: str) -> None:
+    """Write .cursor/rules/vectr.mdc for Cursor IDE (vectr-owned file, always current)."""
+    path = Path(workspace) / ".cursor" / "rules" / "vectr.mdc"
+    content = (
+        "---\n"
+        "description: Vectr tool usage rules for AI-assisted development\n"
+        "alwaysApply: true\n"
+        "---\n\n"
+        f"{_CLAUDE_MD.rstrip()}\n"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existed = path.exists()
+    if not existed or path.read_text(encoding="utf-8") != content:
+        path.write_text(content, encoding="utf-8")
+        print(f"  {'Updated' if existed else 'Created'} {path}", file=sys.stderr)
 
 
 def _api_base(port: int) -> str:
@@ -139,13 +256,16 @@ def _write_or_update(path: Path, content: str, label: str) -> None:
 
 
 def _write_workspace_config(workspace: str, port: int) -> None:
-    """Write per-IDE MCP config files and CLAUDE.md into the workspace root."""
+    """Write per-IDE MCP config files and IDE guidance into the workspace root."""
     root = Path(workspace)
 
-    claude_md = root / "CLAUDE.md"
-    if not claude_md.exists():
-        claude_md.write_text(_CLAUDE_MD)
-        print(f"  Created {claude_md}", file=sys.stderr)
+    _write_ide_config_merge_safe(root / "CLAUDE.md", create_if_missing=True)
+    for _rel in _IDE_CONFIG_APPEND_ONLY:
+        _write_ide_config_merge_safe(root / _rel, create_if_missing=False)
+    _write_ide_config_merge_safe(
+        root / ".github" / "copilot-instructions.md", create_if_missing=False
+    )
+    _write_cursor_rules(workspace)
 
     _write_or_update(root / ".mcp.json", _MCP_JSON.format(port=port), f"port {port}")
     _write_or_update(root / ".cursor" / "mcp.json", _CURSOR_MCP_JSON.format(port=port), f"port {port}")
@@ -211,6 +331,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     entry = registry.get(ws_hash)
     if entry is not None and _is_pid_alive(entry["pid"]):
         port = entry["port"]
+        _write_workspace_config(workspace, port)
         print("Vectr is already running for this workspace.", file=sys.stderr)
         print(f"  Workspace : {workspace}", file=sys.stderr)
         print(f"  Port      : {port}", file=sys.stderr)
@@ -361,6 +482,20 @@ def cmd_restart(args: argparse.Namespace) -> None:
 def cmd_forget(args: argparse.Namespace) -> None:
     import httpx
 
+    # --all clears notes across ALL workspaces directly via SQLite,
+    # bypassing the running server (server may be down, or multiple instances).
+    if getattr(args, "all", False):
+        from agent.working_context_store import WorkingContextStore
+        import glob
+        cache_root = Path.home() / ".cache" / "vectr" / "db"
+        db_files = list(cache_root.glob("*/working_context.sqlite"))
+        total = 0
+        for db_file in db_files:
+            store = WorkingContextStore(str(db_file.parent))
+            total += store.forget_all_workspaces()
+        print(f"Deleted {total} working-memory notes across {len(db_files)} workspace databases.")
+        return
+
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
     try:
@@ -375,10 +510,42 @@ def cmd_forget(args: argparse.Namespace) -> None:
 
 def cmd_init(args: argparse.Namespace) -> None:
     workspace = str(Path(args.path).resolve())
+
+    if getattr(args, "reset_config", False):
+        root = Path(workspace)
+        for _rel in ("CLAUDE.md", *_IDE_CONFIG_APPEND_ONLY):
+            _remove_vectr_block(root / _rel)
+        _remove_vectr_block(root / ".github" / "copilot-instructions.md")
+        cursor_mdc = root / ".cursor" / "rules" / "vectr.mdc"
+        if cursor_mdc.exists():
+            cursor_mdc.unlink()
+            print(f"  Deleted {cursor_mdc}", file=sys.stderr)
+        print(f"Vectr config reset for: {workspace}", file=sys.stderr)
+        return
+
     entry = InstanceRegistry().get(workspace_hash(workspace))
     port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", "8765"))
 
     _write_workspace_config(workspace, port)
+
+    # write user-defined exclusions to .vectrignore
+    exclude_dirs: list[str] = getattr(args, "exclude", None) or []
+    if exclude_dirs:
+        from integrations.workspace_detect import write_vectrignore
+        write_vectrignore(workspace, exclude_dirs)
+        print(f"  Added to .vectrignore: {', '.join(exclude_dirs)}", file=sys.stderr)
+
+    # write style override if --style is specified
+    if getattr(args, "style", None):
+        style = args.style
+        if style not in ("additive", "directed", "memory-only"):
+            print(f"Error: --style must be one of: additive, directed, memory-only", file=sys.stderr)
+            sys.exit(1)
+        style_dir = Path(workspace) / ".vectr"
+        style_dir.mkdir(parents=True, exist_ok=True)
+        (style_dir / "style").write_text(style, encoding="utf-8")
+        print(f"  Instruction style set: {style}", file=sys.stderr)
+
     print(f"Workspace configured: {workspace}", file=sys.stderr)
     print(f"  Run 'vectr start --path {workspace}' to index and start the server.", file=sys.stderr)
 
@@ -406,12 +573,34 @@ def main() -> None:
     p_restart.add_argument("--path", default=_default_path)
     p_restart.add_argument("--port", type=int, default=_default_port)
 
-    p_forget = sub.add_parser("forget", help="Delete all working-memory notes for a workspace")
+    p_forget = sub.add_parser("forget", help="Delete working-memory notes for a workspace")
     p_forget.add_argument("--path", default=_default_path)
     p_forget.add_argument("--port", type=int, default=_default_port)
+    p_forget.add_argument(
+        "--all", action="store_true",
+        help="Delete notes across ALL workspaces (operates directly on SQLite, no server needed)",
+    )
 
     p_init = sub.add_parser("init", help="Write CLAUDE.md and .mcp.json to a workspace (no server)")
     p_init.add_argument("--path", default=_default_path)
+    p_init.add_argument(
+        "--exclude", action="append", metavar="DIR", dest="exclude",
+        help="Append a directory name to .vectrignore (repeatable). "
+             "Example: vectr init --exclude vendor --exclude generated",
+    )
+    p_init.add_argument(
+        "--style",
+        choices=["additive", "directed", "memory-only"],
+        default=None,
+        help="Override adaptive instruction style (T14). Stored in .vectr/style.",
+    )
+    p_init.add_argument(
+        "--reset-config",
+        action="store_true",
+        default=False,
+        dest="reset_config",
+        help="Remove all vectr blocks from IDE config files in the workspace.",
+    )
 
     p_index = sub.add_parser("index", help="(Re)index a directory or file")
     p_index.add_argument("--path", default=_default_path)

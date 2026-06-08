@@ -114,7 +114,122 @@ def _detect_frameworks(workspace_root: str, structure: dict[str, list[str]]) -> 
     return signals
 
 
-def collect_raw_metadata(workspace_root: str) -> dict:
+def _build_import_graph(workspace_root: str, indexed_files: list[str] | None = None) -> "dict[str, set[str]]":
+    """
+    Build a file-to-file import graph by parsing import statements.
+    Returns {file_path: {imported_file_path, ...}} — edges only to files in the workspace.
+    """
+    import re as _re
+    root = Path(workspace_root)
+
+    # Collect all Python/JS/TS files in workspace
+    if indexed_files:
+        candidate_files = [Path(f) for f in indexed_files
+                           if Path(f).suffix.lower() in {".py", ".js", ".ts", ".jsx", ".tsx"}]
+    else:
+        candidate_files = []
+        for f in root.rglob("*.py"):
+            candidate_files.append(f)
+
+    # Build a name → path index for quick resolution
+    name_index: dict[str, Path] = {}
+    for f in candidate_files:
+        # index by stem and by relative path without extension
+        stem = f.stem
+        name_index[stem] = f
+        try:
+            rel = f.relative_to(root)
+            name_index[str(rel).replace(os.sep, ".").removesuffix(f.suffix)] = f
+        except ValueError:
+            pass
+
+    _PY_IMPORT = _re.compile(r'^\s*(?:from|import)\s+([\w.]+)', _re.MULTILINE)
+    graph: dict[str, set[str]] = {}
+
+    for f in candidate_files:
+        try:
+            src = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        deps: set[str] = set()
+        for m in _PY_IMPORT.finditer(src):
+            mod = m.group(1).split(".")[0]  # top-level module name
+            if mod in name_index:
+                target = str(name_index[mod])
+                if target != str(f):
+                    deps.add(target)
+
+        graph[str(f)] = deps
+
+    return graph
+
+
+def detect_module_communities(
+    workspace_root: str,
+    indexed_files: list[str] | None = None,
+    min_community_size: int = 2,
+) -> list[dict]:
+    """
+    Detect module communities using Louvain-style greedy modularity
+    maximisation (via networkx). Returns a list of community dicts:
+        [{"id": 0, "label": "auth", "files": ["auth/models.py", ...], "size": 3}, ...]
+
+    Community label is the most common top-level directory among member files.
+    Falls back gracefully if networkx is unavailable.
+    """
+    import_graph = _build_import_graph(workspace_root, indexed_files)
+    if not import_graph:
+        return []
+
+    try:
+        import networkx as nx
+        from networkx.algorithms.community import greedy_modularity_communities
+
+        G = nx.Graph()
+        for src, dsts in import_graph.items():
+            G.add_node(src)
+            for dst in dsts:
+                G.add_edge(src, dst)
+
+        if G.number_of_nodes() < 2:
+            return []
+
+        raw_communities = list(greedy_modularity_communities(G))
+        root = Path(workspace_root)
+        communities: list[dict] = []
+
+        for i, members in enumerate(raw_communities):
+            files = sorted(members)
+            if len(files) < min_community_size:
+                continue
+
+            # Derive label from the most common top-level directory
+            top_dirs: dict[str, int] = {}
+            for f in files:
+                try:
+                    rel = Path(f).relative_to(root)
+                    top = rel.parts[0] if len(rel.parts) > 1 else rel.stem
+                except ValueError:
+                    top = Path(f).stem
+                top_dirs[top] = top_dirs.get(top, 0) + 1
+            label = max(top_dirs, key=top_dirs.get) if top_dirs else f"cluster_{i}"
+
+            communities.append({
+                "id": i,
+                "label": label,
+                "files": files,
+                "size": len(files),
+            })
+
+        return sorted(communities, key=lambda c: -c["size"])
+
+    except Exception as exc:
+        logger.debug("Louvain community detection skipped: %s", exc)
+        return []
+
+
+def collect_raw_metadata(workspace_root: str, indexed_files: list[str] | None = None) -> dict:
     """
     Collect raw structural metadata about the workspace.
     No LLM call — pure file system inspection.
@@ -126,15 +241,22 @@ def collect_raw_metadata(workspace_root: str) -> dict:
     languages = _detect_languages(structure)
     frameworks = _detect_frameworks(workspace_root, structure)
 
+    # auto-cluster modules via Louvain community detection
+    communities = detect_module_communities(workspace_root, indexed_files)
+
     metadata = {
         "workspace_name": Path(workspace_root).name,
         "languages": languages,
         "frameworks": frameworks,
         "structure": structure,
         "readme_excerpt": readme,
+        "module_communities": communities,
         "collected_at": time.time(),
     }
-    logger.debug("Cartographer: collected metadata — languages=%s, frameworks=%s", languages, frameworks)
+    logger.debug(
+        "Cartographer: collected metadata — languages=%s, frameworks=%s, communities=%d",
+        languages, frameworks, len(communities),
+    )
     return metadata
 
 
@@ -165,6 +287,16 @@ def format_raw_metadata_for_llm(metadata: dict) -> str:
 
     if metadata.get("readme_excerpt"):
         parts.append(f"\nREADME excerpt:\n{metadata['readme_excerpt'][:800]}")
+
+    # include module community clusters if detected
+    communities = metadata.get("module_communities", [])
+    if communities:
+        parts.append("\nModule communities (auto-clustered by import relationships):")
+        for c in communities[:8]:  # show top 8 communities
+            file_sample = ", ".join(Path(f).name for f in c["files"][:4])
+            if len(c["files"]) > 4:
+                file_sample += f", +{len(c['files']) - 4} more"
+            parts.append(f"  [{c['label']}]  ({c['size']} files)  {file_sample}")
 
     return "\n".join(parts)
 

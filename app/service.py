@@ -61,8 +61,13 @@ class VectrService:
         # L2 — symbol graph
         self._symbol_graph = SymbolGraph(db_dir)
 
-        # Memory layer
-        self._context_store = WorkingContextStore(db_dir)
+        # Memory layer — semantic recall enabled via the same embedder + ChromaDB client
+        # used by the code index, so no extra model load or second DB process.
+        self._context_store = WorkingContextStore(
+            db_dir,
+            embed_fn=self._indexer.embed_texts,
+            notes_chroma_client=self._indexer.chroma_client,
+        )
 
         # Session eviction advisor
         self._eviction_advisor = EvictionAdvisor(
@@ -72,6 +77,11 @@ class VectrService:
         self._indexing = False
         self._index_thread: threading.Thread | None = None
         self._index_lock = threading.Lock()
+
+        # Per-tool call counters — tracked across all callers (parent + sub-agents)
+        # so benchmark tooling can read accurate counts via GET /v1/call_counts.
+        self._call_counts: dict[str, int] = {}
+        self._call_counts_lock = threading.Lock()
 
         # Adaptive strategy — computed after first index, defaults until then
         from agent.strategy_selector import RetrievalStrategy
@@ -88,6 +98,18 @@ class VectrService:
         if self._indexing:
             return
         self._indexing = True
+
+        # apply TTL to working notes at startup if VECTR_NOTES_TTL_DAYS is set
+        ttl_days_str = os.getenv("VECTR_NOTES_TTL_DAYS", "")
+        if ttl_days_str:
+            try:
+                ttl = float(ttl_days_str)
+                deleted = self._context_store.purge_expired_notes(self._workspace_root, ttl)
+                if deleted:
+                    logger.info("purged %d expired notes (TTL=%.1f days)", deleted, ttl)
+            except (ValueError, Exception):
+                logger.warning("VECTR_NOTES_TTL_DAYS is not a valid float: %r", ttl_days_str)
+
         self._index_thread = threading.Thread(target=self._do_index, daemon=True)
         self._index_thread.start()
         self._watcher.start()
@@ -99,6 +121,10 @@ class VectrService:
                 files, chunks = self._indexer.index_workspace()
                 self._searcher.refresh_bm25()
                 logger.info("Indexed %d files → %d chunks", files, chunks)
+
+                # audit index event
+                from agent.working_context_store import audit as _audit
+                _audit("INDEX", workspace=self._workspace_root, files=files, chunks=chunks)
 
                 self._build_symbol_graph()
                 self._refresh_strategy()
@@ -149,6 +175,25 @@ class VectrService:
 
     def shutdown(self) -> None:
         self._watcher.stop()
+
+    # ------------------------------------------------------------------
+    # Call counters — all callers (parent + sub-agents) hit the same server,
+    # so these are accurate totals regardless of how many agents spawned.
+    # ------------------------------------------------------------------
+
+    def increment_call_count(self, tool_name: str) -> None:
+        with self._call_counts_lock:
+            self._call_counts[tool_name] = self._call_counts.get(tool_name, 0) + 1
+
+    def get_call_counts(self) -> dict[str, int]:
+        with self._call_counts_lock:
+            return dict(self._call_counts)
+
+    def reset_call_counts(self) -> dict[str, int]:
+        with self._call_counts_lock:
+            old = dict(self._call_counts)
+            self._call_counts.clear()
+            return old
 
     # ------------------------------------------------------------------
     # L3 — search and index operations
@@ -267,6 +312,7 @@ class VectrService:
             "embed_model": self._embed_model,
             "workspace_root": self._workspace_root,
             "symbol_count": self._symbol_graph.symbol_count(self._workspace_root),
+            "notes_count": self._context_store.count_notes(self._workspace_root),
             **strategy_info,
         }
 
@@ -293,9 +339,9 @@ class VectrService:
     def locate(self, name: str, limit: int = 10) -> list:
         return self._symbol_graph.locate(self._workspace_root, name, limit)
 
-    def locate_with_snippets(self, name: str, limit: int = 10) -> list:
-        """Locate symbols and return each with a short code snippet. No LLM call."""
-        return self._symbol_graph.locate(self._workspace_root, name, limit)
+    def locate_with_snippets(self, name: str, limit: int = 10, caller_file: str | None = None):
+        """Locate symbols via L2 multi-strategy resolution. Returns LocateResult. No LLM call."""
+        return self._symbol_graph.locate_l2(self._workspace_root, name, limit=limit, caller_file=caller_file)
 
     def trace(self, name: str, direction: str = "both", limit: int = 20) -> dict:
         return self._symbol_graph.trace(self._workspace_root, name, direction, limit)  # type: ignore[arg-type]
@@ -304,8 +350,15 @@ class VectrService:
         """Trace call graph. Caller/callee names are returned as-is; AI can locate() them for snippets."""
         return self._symbol_graph.trace(self._workspace_root, name, direction, limit)  # type: ignore[arg-type]
 
-    def format_locate(self, symbols: list, name: str) -> str:
-        return self._symbol_graph.format_locate_for_llm(symbols, name)
+    def ingest_traces(self, trace_events: list[dict]) -> dict:
+        """Ingest runtime trace events into the symbol graph."""
+        return self._symbol_graph.ingest_trace_data(self._workspace_root, trace_events)
+
+    def format_locate(self, result, name: str = "") -> str:
+        from agent.symbol_graph import LocateResult
+        if isinstance(result, LocateResult):
+            return self._symbol_graph.format_locate_l2_for_llm(result)
+        return self._symbol_graph.format_locate_for_llm(result, name)
 
     def format_trace(self, trace_result: dict, name: str) -> str:
         return self._symbol_graph.format_trace_for_llm(trace_result, name)
@@ -375,3 +428,74 @@ class VectrService:
 
     def should_evict(self) -> bool:
         return self._eviction_advisor.should_evict()
+
+    def count_notes(self) -> int:
+        """Return number of active working-memory notes for this workspace."""
+        return self._context_store.count_notes(self._workspace_root)
+
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Adaptive prompt intelligence
+    # ------------------------------------------------------------------
+
+    def suggest_instruction_style(self) -> str:
+        """Return the recommended CLAUDE.md instruction variant for this workspace.
+
+        Returns one of: "additive" | "directed" | "memory-only".
+
+        Decision logic (priority order):
+        1. File override (.vectr/style) — always wins.
+        2. "memory-only"  — prior notes exist AND codebase is well-known (small
+                            or familiar framework) → recall-forward session.
+        3. "directed"     — large or complex unfamiliar codebase → explicit tool
+                            guidance reduces wasted exploration turns.
+        4. "additive"     — default; model decides based on when-to-use hints.
+
+        Research basis: additive outperforms forced/memory-only in A/B tests
+        (spec §CLAUDE.md framing choices). directed is warranted only when
+        codebase is genuinely unfamiliar at implementation depth.
+        """
+        override = self._read_style_override()
+        if override in ("additive", "directed", "memory-only"):
+            return override
+
+        notes_count = self._context_store.count_notes(self._workspace_root)
+        fp = None
+        if self._strategy is not None:
+            try:
+                from agent.strategy_selector import fingerprint as _fingerprint
+                fp = _fingerprint(self._workspace_root, self._indexer.indexed_file_paths)
+            except Exception:
+                pass
+
+        # Well-known frameworks: model knows these at implementation depth from training
+        _KNOWN_FRAMEWORKS = {
+            "django", "flask", "fastapi", "react", "nextjs", "vue", "angular",
+            "express", "spring-boot", "gin", "echo", "celery",
+        }
+        known_codebase = (
+            fp is not None
+            and bool(_KNOWN_FRAMEWORKS.intersection(set(fp.detected_frameworks)))
+        )
+
+        if notes_count > 0 and (known_codebase or (fp and fp.size_class == "small")):
+            return "memory-only"
+
+        if fp is not None:
+            is_large_unfamiliar = (
+                fp.size_class == "large"
+                and not known_codebase
+            )
+            is_complex = fp.complexity_class == "complex" and not known_codebase
+            if is_large_unfamiliar or is_complex:
+                return "directed"
+
+        return "additive"
+
+    def _read_style_override(self) -> str:
+        """Read .vectr/style file if present."""
+        style_file = Path(self._workspace_root) / ".vectr" / "style"
+        try:
+            return style_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""

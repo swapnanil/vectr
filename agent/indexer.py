@@ -30,6 +30,9 @@ LANG_BY_EXT: dict[str, str] = {
     ".go": "go",
     ".rs": "rust",
     ".java": "java",
+    ".c": "c",
+    ".h": "c",
+    ".zig": "zig",
 }
 
 EXCLUDED_DIRS = {
@@ -149,6 +152,8 @@ def _get_parser(language: str):
             import tree_sitter_rust as ts_lang
         elif language == "java":
             import tree_sitter_java as ts_lang
+        elif language == "zig":
+            import tree_sitter_zig as ts_lang
         else:
             return None
         parser = Parser(Language(ts_lang.language()))
@@ -172,6 +177,7 @@ _CHUNK_NODE_TYPES: dict[str, set[str]] = {
     "go": {"function_declaration", "method_declaration"},
     "rust": {"function_item", "impl_item"},
     "java": {"method_declaration", "class_declaration"},
+    "zig": {"function_declaration", "variable_declaration"},
 }
 
 _SYMBOL_FIELD: dict[str, str] = {
@@ -181,6 +187,7 @@ _SYMBOL_FIELD: dict[str, str] = {
     "go": "name",
     "rust": "name",
     "java": "name",
+    "zig": "name",
 }
 
 
@@ -378,17 +385,22 @@ class CodeIndexer:
           2. Global batch embed  — 256-chunk batches across all files (vs 64 per-file)
           3. Incremental skip    — files unchanged since last index are skipped via mtime cache
         """
-        from integrations.workspace_detect import should_index_file, get_gitignore_patterns
+        from integrations.workspace_detect import (
+            should_index_file, get_gitignore_patterns, get_vectrignore_dirs,
+        )
 
         patterns = gitignore_patterns or get_gitignore_patterns(str(self.workspace_root))
+        # read user-defined exclusions from .vectrignore
+        vectrignore_dirs = get_vectrignore_dirs(str(self.workspace_root))
+        all_excluded = EXCLUDED_DIRS | vectrignore_dirs
 
         # Collect candidate files
         all_files: list[Path] = []
         for dirpath, dirnames, filenames in os.walk(self.workspace_root):
-            dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS and not d.startswith(".")]
+            dirnames[:] = [d for d in dirnames if d not in all_excluded and not d.startswith(".")]
             for fname in filenames:
                 fpath = Path(dirpath) / fname
-                if should_index_file(str(fpath), patterns):
+                if should_index_file(str(fpath), patterns, extra_excluded_dirs=vectrignore_dirs):
                     all_files.append(fpath)
 
         # Incremental: split into files to index vs unchanged files to skip
@@ -609,6 +621,15 @@ class CodeIndexer:
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query string. Public method for external callers."""
         return self._embed_provider.embed([text])[0]
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of texts using the configured embed provider."""
+        return self._embed_provider.embed(texts)
+
+    @property
+    def chroma_client(self):
+        """The underlying ChromaDB client — shared with the working memory collection."""
+        return self._client
 
     def get_all_documents(self) -> tuple[list[str], list[str], list[dict]]:
         """Return (ids, documents, metadatas) for all stored chunks — used by BM25 index.

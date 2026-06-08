@@ -1,0 +1,4 @@
+# Benchmark output files — not committed
+*.json
+*.txt
+*.patch

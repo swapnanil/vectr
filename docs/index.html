@@ -157,7 +157,7 @@
       <div class="problem-solution">
         <h3>Retrieve, Locate, Remember</h3>
         <p>Vectr replaces the grep-then-read loop with three knowledge layers. A structural map gives the AI a 300-token overview of the entire codebase at session start. A symbol graph answers "where is X defined?" without reading any code. A content index returns the exact function body when needed.</p>
-        <p>And when the session ends, the AI offloads its working notes to Vectr. Next morning, one <code style="font-family:var(--mono);font-size:13px">vectr_recall()</code> brings it back to exactly where it stopped — key files, edge cases, what's still missing. The context window is empty, but the knowledge survived the gap.</p>
+        <p>And as discoveries happen, the AI saves working notes to Vectr. Next morning, one <code style="font-family:var(--mono);font-size:13px">vectr_recall()</code> brings it back to exactly where it stopped — key files, edge cases, what's still missing. The conversation is gone, but the knowledge survived the gap.</p>
       </div>
     </div>
   </div>
@@ -238,11 +238,11 @@
     <div class="features-grid">
       <div class="feature-card reveal">
         <div class="feature-title">Session memory that persists</div>
-        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr_remember</code> offloads a working note — key files, edge cases found, what's still missing — to a SQLite store. <code style="font-family:var(--mono);font-size:12px">vectr_recall</code> retrieves it next session. If referenced files changed since the note was written, recall automatically flags them with a <code style="font-family:var(--mono);font-size:12px">[STALE]</code> warning so the AI knows to re-verify before acting.</div>
+        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr_remember</code> saves a working note — key files, edge cases found, what's still missing — to a SQLite store. The note survives <code style="font-family:var(--mono);font-size:12px">/compact</code> and new sessions. <code style="font-family:var(--mono);font-size:12px">vectr_recall</code> retrieves it in &lt;50ms, verbatim, any time. If referenced files changed since the note was written, recall automatically flags them with a <code style="font-family:var(--mono);font-size:12px">[STALE]</code> warning so the AI knows to re-verify before acting.</div>
       </div>
       <div class="feature-card reveal">
-        <div class="feature-title">Bidirectional context protocol</div>
-        <div class="feature-desc">The AI tells Vectr to remember things. Vectr tells the AI what it can forget. <code style="font-family:var(--mono);font-size:12px">vectr_evict_hint</code> lists every retrieved chunk with its estimated token cost and a &lt;50ms recall guarantee. The context window stays usable, not full.</div>
+        <div class="feature-title">Bidirectional recall protocol</div>
+        <div class="feature-desc">The AI saves findings; Vectr signals what it can recall instantly. <code style="font-family:var(--mono);font-size:12px">vectr_evict_hint</code> lists every retrieved chunk with its estimated token cost and a &lt;50ms re-retrieval guarantee — the AI never needs to re-read those files.</div>
       </div>
       <div class="feature-card reveal">
         <div class="feature-title">Symbol graph, not just search</div>
@@ -346,17 +346,16 @@
   tags=[<span class="str">"segment-targeting"</span>, <span class="str">"wip"</span>],
   priority=<span class="str">"high"</span>
 )
-<span class="str">→ "Stored note #4. You can safely drop
-   related code chunks from context."</span>
+<span class="str">→ "Stored note #4. Recall with vectr_recall — &lt;50ms, verbatim, any time."</span>
 
 <span class="cmt"># Save full session state</span>
 <span class="fn">vectr_snapshot</span>(<span class="str">"segment-targeting-wip"</span>)
 <span class="str">→ "Snapshot saved: a3f9c2b1"</span>
 
-<span class="cmt"># Vectr tells the AI what to drop</span>
+<span class="cmt"># Vectr signals what it can re-retrieve instantly</span>
 <span class="fn">vectr_evict_hint</span>()
-<span class="str">→ "Vectr has 6 chunks (~3,840 tokens) indexed.
-   You can safely drop these from context:
+<span class="str">→ "Vectr has 6 chunks (~3,840 tokens) indexed and instantly retrievable.
+   Vectr can re-retrieve these in &lt;50ms — no need to re-read them:
    targeting/segment/evaluator.go [lines 40-110]
    bidder/auction.go [lines 88-134]
    Recall latency: &lt;50ms. Nothing will be lost."</span></pre>

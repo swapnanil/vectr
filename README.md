@@ -1,17 +1,74 @@
 # Vectr
-> Your AI coding assistant is reading the wrong files. Vectr fixes that.
 
-Part of the [llm-tools suite](https://swapnanilsaha.com/tools/) by [Swapnanil Saha](https://swapnanilsaha.com)
+> **Semantic search and persistent memory for AI code editors.**
 
-## What it solves
+[![CI](https://github.com/swapnanil/vectr/actions/workflows/ci.yml/badge.svg)](https://github.com/swapnanil/vectr/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
 
-When an AI code editor needs to find relevant code, it runs `ripgrep` and reads entire files — consuming hundreds of tokens of irrelevant code every single query. On a 10,000-file codebase, this fills context windows fast and multiplies API costs. Vectr indexes your codebase once using code-specific embeddings and an AST-aware chunker, then serves only the 5–10 most relevant code chunks per query via MCP. The AI editor gets the signal, not the noise.
+Vectr gives AI code editors two things they lack: **semantic codebase search** and **persistent working memory** — both served over MCP with zero configuration.
 
-**No API key required for basic operation.** The default embedding model runs locally.
+Your AI editor forgets everything. Vectr doesn't.
+
+---
+
+## The problem
+
+Every time an AI code editor starts a task, it re-reads the same files it read yesterday. On an unfamiliar codebase it runs ripgrep, reads entire files hunting for the right function, and fills its context window with noise. In a long session it loses findings from turn 1 by turn 40. Across sessions it starts over from zero.
+
+Vectr breaks the re-discovery loop:
+
+- **One index** → semantic search over your whole codebase in <20ms  
+- **One recall call** → structured notes from any prior session, verbatim, in <50ms  
+- **Survives `/compact`** → notes are persisted to disk, not stored in context
+
+**No API key required.** The embedding model runs locally.
+
+---
+
+## Benchmarks — CPython internals sprint (6 tasks, 2 agents)
+
+The benchmark simulates a week of feature work on an unfamiliar C codebase (CPython internals). One research session stores findings with `vectr_remember`; six isolated implementation sessions each open cold and call `vectr_recall`.
+
+**Implementation sessions only — 6 tasks combined:**
+
+| Metric | Vanilla | Vectr | Delta |
+|---|---|---|---|
+| Cost | $2.50 | $1.97 | **−21%** |
+| Wall time | 17.6 min | 13.5 min | **−24%** |
+| Turns | 123 | 94 | **−24%** |
+| Read + Bash calls | 102 | 62 | **−39%** |
+
+**Per-task re-discovery (Read+Bash before first write):**
+
+| Task | Vanilla | Vectr | Delta |
+|---|---|---|---|
+| `debug_gc_finalizer` | 16 | 6 | −62% |
+| `feature_dict_pop_last` | 13 | 3 | −77% |
+| `cross_session_set_cartesian` | 23 | 9 | −61% |
+| `debug_descriptor_priority` | 6 | 6 | 0% |
+| `cross_session_bytes_find_all` | 13 | 2 | −85% |
+| `cross_session_list_rotate` | 21 | 16 | −24% |
+
+**Research vs implementation cost breakdown:**
+
+The research phase (paid once to build notes) costs more for vectr (+94%) because it stores rich code stubs and function signatures via `vectr_remember`. The implementation phases (which repeat every task) cost less because `vectr_recall` replaces file re-discovery. The research overhead breaks even after ~8 tasks of note reuse.
+
+| Phase | Vanilla | Vectr | Why |
+|---|---|---|---|
+| Research (1 session, paid once) | $1.36 | $2.63 | Vectr stores notes — more output tokens |
+| Impl (6 sessions, repeating) | $2.50 | $1.97 | Notes replace re-discovery |
+| Total sprint | $3.86 | $4.60 | Inverts to net gain after ~8 tasks |
+
+Earlier runs on Apache Camel (Java, 5,856 files): **−58% impl cost · −72% impl tool calls · −39% wall time.**
+
+Full results: [`benchmarks/`](benchmarks/)
+
+---
 
 ## Quick start
 
-**Option A — local (recommended for individual developers)**
+**Local (recommended)**
 
 ```bash
 python3.14 -m venv ~/.vectr-env
@@ -21,16 +78,14 @@ cd /path/to/your/project
 vectr start
 ```
 
-**Requires Python 3.14+.** Check with `python3 --version`. To install:
-- **macOS**: `brew install python@3.14`
-- **Ubuntu/Debian**: `sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt-get install python3.14 python3.14-venv`
-- **Windows**: download from [python.org/downloads](https://www.python.org/downloads/)
+**Requires Python 3.14+.** To install:
+- macOS: `brew install python@3.14`
+- Ubuntu/Debian: `sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt install python3.14 python3.14-venv`
+- Windows: [python.org/downloads](https://www.python.org/downloads/)
 
-No `.env` required. Vectr downloads the embedding model once (~440MB), indexes your codebase, and writes MCP config for your AI code editor automatically.
+`vectr start` returns immediately. Indexing runs in the background — run `vectr status` to check progress. On first run the embedding model downloads once (~440 MB). Restart your AI code editor once to pick up the new MCP config.
 
-> **First use:** `vectr start` returns immediately — indexing runs in the background. On the very first run it downloads the embedding model (~440MB, takes a few minutes on a slow connection). Run `vectr status --path .` to check progress; search works once `indexed_files > 0`. If `indexed_files` stays at 0 for more than 10 minutes, check the daemon log shown in the `vectr start` output. Restart your AI code editor once to pick up the new MCP configuration.
-
-**Option B — Docker (for servers or CI, not local IDE use)**
+**Docker (CI/servers)**
 
 ```bash
 git clone https://github.com/swapnanil/vectr
@@ -38,239 +93,182 @@ cd vectr
 docker-compose up api
 ```
 
-The container exposes port 8765. No `.env` required — local embedding is the default. Note: the Docker path does not auto-write IDE config files. Use Option A for local IDE integration; use Docker for CI pipelines or remote search endpoints.
+Exposes port 8765. Docker does not auto-write IDE config files — use local install for IDE integration.
 
-## Connect to your AI assistant
+---
 
-`vectr start` writes the config files below automatically. Restart your AI code editor once after first run to load the new MCP server.
+## Connect to your AI code editor
 
-**Claude Code** — auto-written to `.claude/settings.json`
-**Cursor** — auto-written to `.cursor/mcp.json`
-**VSCode / GitHub Copilot** — auto-written to `.vscode/mcp.json`
+`vectr start` writes the MCP config for your editor automatically. Restart your editor once.
+
+| Editor | Config written automatically |
+|---|---|
+| Claude Code | `.claude/settings.json` |
+| Cursor | `.cursor/mcp.json` |
+| VS Code / GitHub Copilot | `.vscode/mcp.json` |
+| Windsurf, Cline, Continue | See manual setup below |
 
 <details>
-<summary>Manual setup (if auto-write didn't work)</summary>
+<summary>Manual setup</summary>
 
 **Claude Code** — `.claude/settings.json`:
 ```json
-{
-  "mcpServers": {
-    "vectr": { "type": "http", "url": "http://localhost:8765/mcp" }
-  }
-}
+{ "mcpServers": { "vectr": { "type": "http", "url": "http://localhost:8765/mcp" } } }
 ```
 
 **Cursor** — `.cursor/mcp.json`:
 ```json
-{
-  "mcpServers": {
-    "vectr": { "url": "http://localhost:8765/mcp" }
-  }
-}
+{ "mcpServers": { "vectr": { "url": "http://localhost:8765/mcp" } } }
 ```
 
-**VSCode / GitHub Copilot** (1.99+) — `.vscode/mcp.json`:
+**VS Code / GitHub Copilot** (1.99+) — `.vscode/mcp.json`:
 ```json
-{
-  "servers": {
-    "vectr": { "type": "http", "url": "http://localhost:8765/mcp" }
-  }
-}
+{ "servers": { "vectr": { "type": "http", "url": "http://localhost:8765/mcp" } } }
 ```
 
-**Windsurf (Codeium)** — add to `~/.codeium/windsurf/mcp_settings.json`:
+**Windsurf** — `~/.codeium/windsurf/mcp_settings.json`:
 ```json
-{
-  "mcpServers": {
-    "vectr": { "serverUrl": "http://localhost:8765/mcp" }
-  }
-}
+{ "mcpServers": { "vectr": { "serverUrl": "http://localhost:8765/mcp" } } }
 ```
 
-**Continue.dev** — add to `.continue/config.json` under `mcpServers`:
+**Continue.dev** — `.continue/config.json`:
 ```json
-{
-  "mcpServers": [{
-    "name": "vectr",
-    "transport": { "type": "http", "url": "http://localhost:8765/mcp" }
-  }]
-}
+{ "mcpServers": [{ "name": "vectr", "transport": { "type": "http", "url": "http://localhost:8765/mcp" } }] }
 ```
-
-**Cline** — add via the Cline MCP settings UI, or edit `cline_mcp_settings.json` in VSCode's global storage.
 
 </details>
 
-## CLI usage
-
-```bash
-# Start daemon for current directory (returns immediately — runs in background)
-vectr start --path .
-
-# Multiple IDE windows: each workspace gets its own port automatically
-vectr start --path /project/api
-vectr start --path /project/frontend
-
-# List all running instances
-vectr status --all
-
-# Stop the instance serving a specific workspace
-vectr stop --path /project/api
-
-# Stop all running instances
-vectr stop --all
-
-# Restart a workspace
-vectr restart --path /path/to/project
-
-# Delete all working-memory notes for a workspace (after a large refactor, or to start fresh)
-vectr forget --path /path/to/project
-
-# Write CLAUDE.md + .mcp.json + .claude/settings.json without starting the server
-vectr init --path /path/to/project
-
-# Index a specific directory
-vectr index --path /path/to/project
-
-# Search semantically
-vectr search "how are JWT tokens validated"
-vectr search "database connection pool" --language typescript --n 5
-```
-
-## API usage
-
-```bash
-# Search
-curl -X POST http://localhost:8765/v1/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "JWT token validation", "n_results": 5}'
-
-# MCP tool call (how AI code editors use Vectr)
-curl -X POST http://localhost:8765/mcp/tools/call \
-  -H "Content-Type: application/json" \
-  -d '{"name": "vectr_search", "arguments": {"query": "authentication middleware"}}'
-```
-
-## Input / Output
-
-**Query**: `"how are JWT tokens validated"`
-
-**Response**:
-```json
-{
-  "results": [
-    {
-      "file": "src/auth/middleware.py",
-      "lines": "42-67",
-      "symbol": "verify_jwt_token",
-      "language": "python",
-      "score": 0.94,
-      "content": "def verify_jwt_token(token: str) -> dict:\n    try:\n        payload = jwt.decode(token, settings.SECRET_KEY, ...)"
-    }
-  ],
-  "query_time_ms": 18,
-  "chunks_searched": 14523
-}
-```
-
-AI assistants get file path, line numbers, function name, and the exact code — nothing else.
+---
 
 ## How it works
 
-1. **AST-aware chunking** — `tree-sitter` parses each file and splits at function/class boundaries. No chunk ever breaks mid-logic.
-2. **High-quality embeddings** — `Snowflake/snowflake-arctic-embed-m-v1.5` bridges concept-to-code vocabulary (e.g. "JWT validation" → `verify_jwt_token`). Exact symbol names are covered by BM25.
-3. **Hybrid search** — vector similarity (semantic) + BM25 (keyword) combined. Symbol names and exact strings still surface.
-4. **Cross-session memory** — `vectr_remember` stores structured notes (key files, edge cases, what's still missing) to a persistent SQLite store. `vectr_recall` at the start of a new session replaces re-exploration entirely.
-5. **MCP protocol** — any MCP-compatible AI code editor can query Vectr without custom plugins.
+1. **AST-aware chunking** — tree-sitter parses each file and splits at function/class/method boundaries. No chunk breaks mid-logic.
+2. **Code embeddings** — `Snowflake/snowflake-arctic-embed-m-v1.5` maps natural-language queries to code symbols ("JWT validation" → `verify_jwt_token`). BM25 handles exact symbol names.
+3. **Hybrid search** — vector similarity + BM25 combined, weighted by codebase characteristics (large/unfamiliar → semantic-heavy; small/well-documented → BM25-heavy).
+4. **Symbol graph** — call edges, import chains, and HTTP routes (Flask/FastAPI/Express/Spring) are extracted and stored. `vectr_locate` uses 5 fallback strategies: exact match → suffix → same-module → unique-name → import-chain → fuzzy (edit distance ≤ 2).
+5. **Working memory** — `vectr_remember` stores structured notes to SQLite + ChromaDB. `vectr_recall` does semantic search over notes — not SQL LIKE — so multi-word queries always find relevant context.
+6. **MCP protocol** — 12 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
 
-## MCP tools
+---
 
-Vectr exposes 11 tools to your AI code editor. Each is tuned for a specific situation:
+## 12 MCP tools
 
-| You know… | You need… | Tool |
-|---|---|---|
-| A concept or behaviour (no name) | Code related to it | `vectr_search("description")` |
-| A symbol name, not its file | Where it's defined | `vectr_locate("SymbolName")` |
-| A symbol name | Who calls it / what it calls | `vectr_trace("symbol_name")` |
-| Nothing about the codebase | Architectural overview | `vectr_map()` |
-| vectr_map returned raw metadata | Save your synthesised summary | `vectr_map_save(summary)` |
-| — | Resume where you left off | `vectr_recall()` at session start |
-| A key finding to preserve | Store it before dropping context | `vectr_remember(content)` |
-| End of a long session | Seal all notes as a checkpoint | `vectr_snapshot("label")` |
-| Looking for a prior checkpoint | List all saved checkpoints | `vectr_snapshot_list()` |
-| Context window is filling up | Find chunks safe to drop | `vectr_evict_hint()` |
-| Notes are stale or wrong | Clear all working memory | `vectr_forget()` |
-| — | Check index health / chunk count | `vectr_status()` |
+`vectr start` writes a `CLAUDE.md` into your workspace with this table and usage guidance — your AI code editor knows which tool to reach for without being prompted.
 
-The `vectr init` / `vectr start` commands write a `CLAUDE.md` with this table into your workspace, so your AI assistant always knows which tool to reach for.
+**Search tools** — retrieve code from the index:
 
-## When vectr can hurt
+| Situation | Tool |
+|---|---|
+| You know a concept or behaviour, not a name | `vectr_search("description")` |
+| You know a symbol name, not its file | `vectr_locate("SymbolName")` — 5 fallback strategies, optional `caller_file` |
+| You need callers / callees of a symbol | `vectr_trace("symbol_name")` |
+| You need an architectural overview | `vectr_map()` |
+| You want to save a synthesised map summary | `vectr_map_save(summary)` |
+| You have runtime call data to inject | `vectr_ingest_traces([{caller, callee}])` |
+| You need index health / note count | `vectr_status()` |
 
-Vectr's working memory trades accuracy for speed. Two situations where it can produce wrong answers:
+**Memory tools** — store and recall across sessions:
 
-**Stale notes after codebase churn** — `vectr_remember` notes store file paths and line numbers at the time they were written. If you refactor significantly between sessions, a note might reference a deleted function or a path that has moved. `vectr_recall` automatically flags notes whose referenced files have changed since the note was written (`[STALE]` marker with a list of changed files). When you see this warning: re-verify the note before acting on it.
+| Situation | Tool |
+|---|---|
+| Notes exist from a prior session | `vectr_recall(query)` — semantic vector search, not substring match |
+| You found something worth preserving | `vectr_remember(content, tags, priority)` |
+| End of a long session, want a checkpoint | `vectr_snapshot("label")` |
+| Looking for a prior checkpoint | `vectr_snapshot_list()` |
+| Context is filling up | `vectr_evict_hint()` — identifies chunks vectr can re-retrieve |
+| Notes are stale after a large refactor | `vectr_forget()` |
 
-**Over-reliant recall on a refactored codebase** — if the codebase has changed substantially since the notes were written, `vectr_recall` may return confident-sounding notes that no longer reflect reality. The fix: after a large refactor, run `vectr_remember` again for the affected areas, or use `vectr_forget` to discard outdated notes.
+---
 
-## Benchmarks
+## CLI reference
 
-Two-phase benchmark: Phase 1 (Research) stores notes with `vectr_remember`; Phase 2 (Implementation) opens cold, calls `vectr_recall()`, and implements. Vanilla Phase 2 re-reads from scratch.
+```bash
+vectr start                           # index + start daemon for current dir
+vectr start --path /project/api       # specific workspace
+vectr status                          # index health, chunk count, notes count
+vectr status --all                    # all running instances
+vectr stop --path /project/api        # stop one instance
+vectr stop --all                      # stop all instances
+vectr index --path .                  # re-index without restarting daemon
+vectr init --path .                   # write CLAUDE.md + MCP config without starting
+vectr init --exclude vendor           # exclude directories from indexing
+vectr forget --path .                 # delete all working-memory notes
+```
 
-**Run 1 — Django (familiar codebase, 3,020 files):**
+---
 
-| Task | P2 token savings | P2 cost savings |
-|---|---:|---:|
-| `custom_field` (deep ORM internals) | −24% | −60% |
-| `rate_limit_middleware` | −3% | ~0% |
-| `async_signals` (well-known API) | +16% | worse |
+## Excluding paths
 
-Finding: vectr helps where re-discovery is hard. On APIs the model already knows from training, P1 overhead exceeds savings.
+Create `.vectrignore` in your project root (same syntax as `.gitignore`):
 
-**Run 2 — Apache Camel (enterprise Java, 5,856 files, unfamiliar internals):**
+```
+vendor/
+node_modules/
+*.pb.go
+dist/
+```
 
-| Task | Vanilla P2 | Vectr P2 | P2 cost savings |
-|---|---|---|---:|
-| `custom_component` | $0.56, **0 bytes produced** | $0.36, 9,398 bytes (5 files) | −35% |
-| `route_policy` | $1.15, 430s, 59 tools | $0.35, 177s, 16 tools | −70% |
-| `type_converter` | $0.48, 187s | $0.20, 86s | −57% |
-| **Totals** | **$2.19, 135 P2 tools** | **$0.92, 38 P2 tools** | **−58%** |
+Or pass `--exclude` at init time:
 
-Grand total P2 savings: **−40% input tokens · −58% cost · −72% tool calls · −39% wall time.**
+```bash
+vectr init --exclude vendor --exclude dist
+```
 
-The mechanism: `vectr_recall()` returns structured notes in ~200 tokens, replacing hundreds of re-discovery tool calls. On `custom_component`, vanilla spent all 51 P2 tool calls re-exploring and produced nothing; vectr used 1 recall + 5 writes.
-
-Full results: [`benchmarks/`](benchmarks/)
+---
 
 ## Supported languages
 
-Python · JavaScript · TypeScript · Go · Rust · Java
-(All others: indexed via 200-line windows with 50-line overlap)
+| Language | Chunking | Symbol graph |
+|---|---|---|
+| Python | AST (functions, classes) | ✓ |
+| JavaScript | AST (functions, classes, arrow fns) | ✓ |
+| TypeScript | AST | ✓ |
+| Go | AST | ✓ |
+| Rust | AST | ✓ |
+| Java | AST | ✓ |
+| Zig | AST | ✓ |
+| All others | 200-line windows, 50-line overlap | — |
+
+HTTP routes (Flask/FastAPI decorators, Express `app.get()`, Spring `@GetMapping`) are extracted as symbols and searchable via `vectr_locate("GET /api/users")`.
+
+---
 
 ## Cost
 
-| Mode | Cost |
+| | Cost |
 |---|---|
-| Local embedding (default) | **$0.00** — one-time ~440MB model download, cached at `~/.cache/vectr/` |
-| Re-index 10k files (first run) | ~10 minutes on CPU |
-| Incremental re-index per changed file | ~0.5 seconds |
-| `vectr_map` codebase summary | Your AI editor writes it once — cost is your editor's API usage, not vectr's |
+| Embedding model | $0.00 — one-time ~440 MB download, cached at `~/.cache/vectr/` |
+| Re-index (10k files, first run) | ~10 min on CPU; <5 sec on subsequent runs (mtime cache) |
+| Incremental re-index per changed file | ~0.5 sec |
+| vectr_search / vectr_recall | $0.00 — local inference only |
 
-## Security scope
+---
 
-Vectr v1 is designed for a **solo developer on a personal machine**. The codebase index and working notes are stored locally, never transmitted externally, and isolated per workspace. It is not designed for multi-user environments, shared servers, or enterprise deployments without additional hardening.
+## Security
 
-**What this means in practice:**
-- The MCP server binds to `127.0.0.1` only — not reachable from other hosts on the network
-- CORS is restricted to `localhost` and `127.0.0.1` origins — browser-based requests from external pages are rejected
-- Each workspace gets its own isolated DB directory, port, and daemon process
-- No API key authentication in v1 — any local process can query the MCP server
-- Index data and working notes persist locally in `~/.cache/vectr/` indefinitely
+Vectr v1 is designed for a **solo developer on a personal machine**.
 
-If you need multi-user access, authentication, or encryption at rest, those are enterprise requirements out of scope for v1.
+- MCP server binds to `127.0.0.1` only — not reachable from other hosts
+- CORS restricted to localhost origins
+- Each workspace gets its own isolated DB directory, port, and process
+- No API key authentication in v1 — any local process can query
+- Index and notes persist locally in `~/.cache/vectr/`
+
+Multi-user, authentication, and encryption at rest are out of scope for v1.
+
+---
+
+## When vectr can hurt
+
+**Stale notes after codebase churn** — notes store file paths at write time. After a large refactor, `vectr_recall` will flag changed referenced files with `[STALE]`. Re-verify before acting, or run `vectr_forget` to clear.
+
+**Over-retrieval on a well-known API** — if the model already knows a framework deeply from training (React hooks, Django ORM), vectr's research overhead may exceed savings. The benchmark shows 0% improvement on `debug_descriptor_priority` — a task where the model's training knowledge was sufficient to navigate without notes.
+
+---
 
 ## Built with
 
-Python 3.14 · FastAPI · sentence-transformers · tree-sitter · ChromaDB · Docker
+Python 3.14 · FastAPI · sentence-transformers · tree-sitter · ChromaDB · BM25 · Docker
 
 ## Author
 

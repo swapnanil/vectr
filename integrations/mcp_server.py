@@ -11,7 +11,87 @@ MCP_SERVER_INFO = {
     "capabilities": {"tools": {}},
 }
 
-MCP_TOOLS = [
+# ---------------------------------------------------------------------------
+# Adaptive tool registration — session state
+#
+# Exploration tools are always visible. Memory tools (recall, snapshot,
+# snapshot_list, forget, evict_hint) are only added once either:
+#   a) vectr_status() shows notes_count > 0 for the session, OR
+#   b) the agent calls vectr_remember() for the first time.
+#
+# Sessions without an ID get the full tool list for backwards compatibility.
+# ---------------------------------------------------------------------------
+_memory_enabled_sessions: set[str] = set()
+
+# ---------------------------------------------------------------------------
+# Turn-count vectr_remember nudge
+#
+# After _REMEMBER_NUDGE_THRESHOLD vectr tool calls without a vectr_remember,
+# the next vectr_search / vectr_locate / vectr_trace response appends an
+# imperative reminder. The counter resets on every vectr_remember call.
+# After the threshold fires, it re-fires every _REMEMBER_NUDGE_COOLDOWN
+# calls so a single dismissal cannot silence it for the rest of the session.
+#
+# Fires only when session_id is known (no-op for anonymous sessions).
+# Fires only in discovery tool responses (search/locate/trace) — not in
+# status, recall, map, or remember responses — because those are the moments
+# when the agent has just found something worth saving.
+# ---------------------------------------------------------------------------
+_REMEMBER_NUDGE_THRESHOLD = 10
+_REMEMBER_NUDGE_COOLDOWN = 5
+_session_calls_since_save: dict[str, int] = {}
+
+
+def _increment_calls_since_save(session_id: str | None) -> int:
+    """Increment and return the call count since last vectr_remember."""
+    if not session_id:
+        return 0
+    n = _session_calls_since_save.get(session_id, 0) + 1
+    _session_calls_since_save[session_id] = n
+    return n
+
+
+def _reset_calls_since_save(session_id: str | None) -> None:
+    if session_id:
+        _session_calls_since_save[session_id] = 0
+
+
+def _should_nudge_remember(session_id: str | None) -> bool:
+    if not session_id:
+        return False
+    n = _session_calls_since_save.get(session_id, 0)
+    if n < _REMEMBER_NUDGE_THRESHOLD:
+        return False
+    excess = n - _REMEMBER_NUDGE_THRESHOLD
+    return excess == 0 or excess % _REMEMBER_NUDGE_COOLDOWN == 0
+
+
+def _remember_nudge_text(session_id: str | None) -> str:
+    n = _session_calls_since_save.get(session_id or "", 0)
+    return (
+        f"\n\n─── vectr_remember reminder ({n} calls since last save) ───\n"
+        "If you have found anything non-obvious — a key function body, a design invariant, "
+        "an unexpected pattern, a partial stub — call vectr_remember now with the actual code "
+        "(not a file pointer). "
+        "This note survives /compact and any future session on this codebase. "
+        "One call now = no re-discovery later."
+    )
+
+
+def enable_memory_for_session(session_id: str | None) -> None:
+    if session_id:
+        _memory_enabled_sessions.add(session_id)
+
+
+def is_memory_enabled(session_id: str | None) -> bool:
+    """True if memory tools should be exposed for this session."""
+    if session_id is None:
+        return True  # no session tracking → show all (backwards compat)
+    return session_id in _memory_enabled_sessions
+
+
+# Exploration tools: always shown
+_EXPLORATION_TOOLS = [
     # ---- L3: content retrieval ----
     {
         "name": "vectr_search",
@@ -46,9 +126,12 @@ MCP_TOOLS = [
     {
         "name": "vectr_status",
         "description": (
-            "Show server health, indexed file count, chunk count, and embedding model. "
-            "Use when vectr_search returns nothing and you suspect indexing is still running. "
-            "NOT needed during normal exploration — only for debugging the vectr setup."
+            "Returns index health (files, chunks, embed model) AND notes_count (number of notes "
+            "stored — earlier in this session or in prior sessions). "
+            "Call once at the start of any session to decide whether vectr_recall is worth calling: "
+            "if notes_count > 0, call vectr_recall(query=...) to retrieve relevant notes. "
+            "If notes_count == 0, skip recall entirely. "
+            "Also useful when vectr_search returns nothing and you suspect indexing is still running."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
@@ -61,7 +144,8 @@ MCP_TOOLS = [
             "If a passport has been saved: returns a compact (~300 token) plain-English summary instantly. "
             "If not yet saved: returns raw structural metadata (dir tree, languages, frameworks) "
             "and instructs you to call vectr_map_save with your synthesised summary. "
-            "NOT needed if you already know the codebase structure."
+            "NOT needed if you already know the codebase structure. "
+            "NOT a substitute for vectr_recall — call vectr_status first to check for prior notes."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
@@ -107,6 +191,11 @@ MCP_TOOLS = [
                     "description": "Max results (default: 10)",
                     "default": 10,
                 },
+                "caller_file": {
+                    "type": "string",
+                    "description": "Absolute path of the file containing the call site. "
+                                   "Enables same-module and import-chain fallback strategies.",
+                },
             },
             "required": ["name"],
         },
@@ -142,22 +231,36 @@ MCP_TOOLS = [
             "required": ["name"],
         },
     },
-    # ---- Memory layer ----
+]  # end _EXPLORATION_TOOLS
+
+# Always-on memory write tools — visible from turn 1, no notes required.
+# vectr_remember: only way to create notes; hiding it is a catch-22.
+# vectr_evict_hint: fires on retrieval pressure, not note count.
+_MEMORY_WRITE_TOOLS = [
     {
         "name": "vectr_remember",
         "description": (
-            "Store a working note so you can drop the related code chunks from context without losing the information. "
-            "Use whenever you've learned something worth keeping: a file path, a call pattern, a gotcha, "
-            "progress on a task. Notes survive IDE restarts. "
-            "Store the note BEFORE dropping the related code from context. "
-            "Retrieve with vectr_recall at the start of the next session."
+            "Save a working note and recall it on demand in <50ms — "
+            "whether later this session, through /compact, or in a future session. "
+            "Use the moment you discover something non-obvious: a key file path, a call pattern, a gotcha, "
+            "a partial stub, task progress. "
+            "Store the actual code or finding — vectr returns it in <50ms; "
+            "re-reading the file costs tokens and turns. "
+            "Do NOT store obvious or easily re-derivable facts (e.g. 'the main file is main.py'). "
+            "Retrieve with vectr_recall(query='what you need') — any time, same session or later."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "The working note to store (1-3 sentences: what you know, key files, what's left)",
+                    "description": (
+                        "The note to store. Store whatever you would need to avoid re-reading the file later. "
+                        "If you found a function you'll call or modify — paste its signature and body. "
+                        "If you found a pattern you'll need to replicate — paste the pattern. "
+                        "If you found a location — include the file:line AND the relevant excerpt, not just the pointer. "
+                        "Prose descriptions send the next conversation back to the file; actual code does not."
+                    ),
                 },
                 "tags": {
                     "type": "array",
@@ -175,19 +278,43 @@ MCP_TOOLS = [
         },
     },
     {
+        "name": "vectr_evict_hint",
+        "description": (
+            "Vectr lists which retrieved code chunks it can re-retrieve in <50ms — "
+            "you do not need to re-read those files. "
+            "Use at the exploration → implementation transition to avoid unnecessary re-reads. "
+            "This is the reverse signal in the vectr protocol: "
+            "the AI saves findings (vectr_remember), "
+            "vectr signals what it can recall instantly (vectr_evict_hint). "
+            "NOT needed on short sessions — most useful after many vectr_search/vectr_locate calls."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+]  # end _MEMORY_WRITE_TOOLS
+
+# Memory read/manage tools: only useful when notes already exist.
+# Exposed once notes_count > 0 or vectr_remember has been called this session.
+_MEMORY_TOOLS = [
+    {
         "name": "vectr_recall",
         "description": (
-            "ALWAYS call this at the start of an implementation session — before reading any files. "
-            "Returns your stored notes from previous sessions in ~200 tokens, replacing a full re-exploration. "
-            "Optionally filter by query text, tags, or priority. "
-            "If no notes exist, returns an empty result (safe to call unconditionally at session start)."
+            "Retrieve notes stored earlier in this session or in prior sessions. "
+            "Use when vectr_status() confirmed notes_count > 0 — notes may have been stored this session "
+            "or in a previous one; either way they are immediately useful. "
+            "Pass a targeted query to retrieve only the notes relevant to your current task — "
+            "do NOT call with no query unless you need everything (a broad recall inflates context unnecessarily). "
+            "Do NOT call if vectr_status() returned notes_count == 0."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Substring to search for in note content",
+                    "description": (
+                        "Natural language query to retrieve only relevant notes "
+                        "(e.g. 'set cartesian product frozenset' returns notes about that task only). "
+                        "Omit only when you need all stored notes."
+                    ),
                     "nullable": True,
                 },
                 "tags": {
@@ -210,23 +337,13 @@ MCP_TOOLS = [
         },
     },
     {
-        "name": "vectr_evict_hint",
-        "description": (
-            "Vectr tells you which retrieved code chunks you can safely drop from your context window. "
-            "Any evicted chunk is guaranteed to be returned in <50ms on demand. "
-            "Call when your context is large to reclaim space without losing information. "
-            "This is the bidirectional half of the protocol: the AI tells vectr what to store "
-            "(vectr_remember), and vectr tells the AI what it can safely forget (vectr_evict_hint)."
-        ),
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
         "name": "vectr_snapshot",
         "description": (
-            "ALWAYS call before ending a long research or exploration session. "
-            "Seals all vectr_remember() notes as a named checkpoint. "
-            "At the start of the next session, vectr_recall will return these notes automatically — "
-            "no need to restore from the snapshot_id manually."
+            "Seal all current vectr_remember() notes as a named checkpoint. "
+            "Use when you've stored multiple notes and want to mark a milestone you can return to "
+            "(e.g. 'auth-refactor-wip', 'segment-targeting-done'). "
+            "The next time you work on this, vectr_recall will return these notes. "
+            "NOT required if you only stored 1-2 notes — vectr_recall retrieves all notes regardless."
         ),
         "inputSchema": {
             "type": "object",
@@ -263,20 +380,102 @@ MCP_TOOLS = [
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
+]  # end _MEMORY_TOOLS
+
+# ingest_traces — not gated by session memory (always available)
+_UTILITY_TOOLS = [
+    {
+        "name": "vectr_ingest_traces",
+        "description": (
+            "Import runtime trace events into the symbol graph to enrich static call analysis. "
+            "Use when you have runtime profiling data (Python sys.settrace output, JSON trace logs) "
+            "that reveals dynamic dispatch patterns the static analyser cannot see: decorators, "
+            "__getattr__, dependency injection, monkey-patching, etc. "
+            "Pass a list of trace events: [{caller, callee, caller_file?, caller_line?}, ...]. "
+            "Dynamic edges are stored with edge_type='dynamic' and appear in vectr_trace results. "
+            "NOT needed if static analysis (vectr_trace) already shows the call relationships."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "events": {
+                    "type": "array",
+                    "description": "List of trace events. Each event: {caller, callee, caller_file?, caller_line?}",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "caller":      {"type": "string", "description": "Calling function/symbol name"},
+                            "callee":      {"type": "string", "description": "Called function/symbol name"},
+                            "caller_file": {"type": "string", "description": "Source file of the caller"},
+                            "caller_line": {"type": "integer", "description": "Line number of the call site"},
+                        },
+                        "required": ["caller", "callee"],
+                    },
+                },
+            },
+            "required": ["events"],
+        },
+    },
 ]
 
+# Full list for serialization / backwards compat
+MCP_TOOLS = _EXPLORATION_TOOLS + _MEMORY_WRITE_TOOLS + _MEMORY_TOOLS + _UTILITY_TOOLS
 
-def handle_tools_list() -> dict:
-    return {"tools": MCP_TOOLS}
+
+def handle_tools_list(session_id: str | None = None, service: Any = None) -> dict:
+    """Return tools appropriate for this session.
+
+    Always shown: exploration tools + vectr_remember + vectr_evict_hint.
+    Gated on notes existing: vectr_recall, vectr_forget, vectr_snapshot, vectr_snapshot_list.
+    """
+    # Pre-enable memory read tools if notes already exist
+    if session_id and service and not is_memory_enabled(session_id):
+        try:
+            notes_count = service.count_notes() if hasattr(service, "count_notes") else 0
+            if notes_count > 0:
+                enable_memory_for_session(session_id)
+        except Exception:
+            pass
+
+    base = _EXPLORATION_TOOLS + _MEMORY_WRITE_TOOLS + _UTILITY_TOOLS
+    if is_memory_enabled(session_id):
+        return {"tools": base + _MEMORY_TOOLS}
+    return {"tools": base}
 
 
-def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
+def handle_tools_call(
+    tool_name: str,
+    arguments: dict,
+    service: Any,
+    session_id: str | None = None,
+) -> dict:
     """Dispatch an MCP tool call. `service` is the VectrService instance."""
+    # Count every tool call — used by the tool-call-count eviction trigger
+    try:
+        service._eviction_advisor.increment_tool_call()
+    except Exception:
+        pass
+
+    # Count per-tool calls for benchmark metrics (accurate across parent + sub-agents)
+    try:
+        service.increment_call_count(tool_name)
+    except Exception:
+        pass
+
+    # Increment turn-count nudge counter for all tool calls
+    _increment_calls_since_save(session_id)
+
+    # Count retrieval-specific calls (search/locate/trace) for the retrieval-count trigger
+    if tool_name in ("vectr_search", "vectr_locate", "vectr_trace"):
+        try:
+            service._eviction_advisor.increment_retrieval_call()
+        except Exception:
+            pass
 
     # ---- vectr_search ----
     if tool_name == "vectr_search":
         query = arguments.get("query", "")
-        n_results = min(int(arguments.get("n_results", 10)), 50)
+        n_results = min(int(arguments.get("n_results", 5)), 50)
         language = arguments.get("language") or None
 
         if not query:
@@ -291,6 +490,12 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
         results, query_ms, decision, aug_symbols, aug_trace = service.search_routed(
             query, n_results=n_results, language=language
         )
+
+        # Record chunks so the eviction advisor can reference them in the hint
+        try:
+            service._eviction_advisor.record_results(results)
+        except Exception:
+            pass
 
         sections: list[str] = []
 
@@ -330,16 +535,31 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
             if hint:
                 content_text += f"\n\n─── Context management hint ───\n{hint}"
 
+        if _should_nudge_remember(session_id):
+            content_text += _remember_nudge_text(session_id)
+
         return {"content": [{"type": "text", "text": content_text}], "isError": False}
 
     # ---- vectr_status ----
     if tool_name == "vectr_status":
         status = service.status()
+        notes_count = status.get("notes_count", 0)
+
+        # if this session has prior notes, enable memory tools immediately
+        if notes_count > 0:
+            enable_memory_for_session(session_id)
+
+        recall_hint = (
+            f"  → call vectr_recall(query=...) to retrieve them"
+            if notes_count > 0
+            else "  → no prior notes; skip vectr_recall"
+        )
         lines = [
             "Vectr status",
             f"  Indexed files  : {status['indexed_files']}",
             f"  Total chunks   : {status['total_chunks']}",
             f"  Symbols indexed: {status.get('symbol_count', 'n/a')}",
+            f"  Prior notes    : {notes_count}{recall_hint}",
             f"  Last indexed   : {status['last_indexed']}",
             f"  Embed model    : {status['embed_model']}",
             f"  Workspace      : {status['workspace_root']}",
@@ -352,6 +572,21 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
             )
             if status.get("strategy_rationale"):
                 lines.append(f"  Strategy why   : {status['strategy_rationale']}")
+
+        # inject adaptive instruction style hint at session start
+        try:
+            style = service.suggest_instruction_style()
+            style_hints = {
+                "additive":    "Use vectr tools when they'd be faster than reading files — see CLAUDE.md.",
+                "directed":    "This is a large/unfamiliar codebase. Use vectr_map → vectr_search → vectr_locate before reading files.",
+                "memory-only": "Prior notes exist. Call vectr_recall(query=...) first; use search only to fill gaps.",
+            }
+            hint = style_hints.get(style, "")
+            if hint:
+                lines.append(f"  Tool style     : [{style}] {hint}")
+        except Exception:
+            pass
+
         text = "\n".join(lines)
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
@@ -380,8 +615,15 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
         if not name:
             return _mcp_error("name is required")
         limit = int(arguments.get("limit", 10))
-        symbols = service.locate_with_snippets(name, limit=limit)
+        caller_file = arguments.get("caller_file", "").strip() or None
+        symbols = service.locate_with_snippets(name, limit=limit, caller_file=caller_file)
         text = service.format_locate(symbols, name)
+        if service.should_evict():
+            hint = service.eviction_hint()
+            if hint:
+                text += f"\n\n─── Context management hint ───\n{hint}"
+        if _should_nudge_remember(session_id):
+            text += _remember_nudge_text(session_id)
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_trace ----
@@ -395,6 +637,12 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
         limit = int(arguments.get("limit", 20))
         trace_result = service.trace_with_snippets(name, direction=direction, limit=limit)
         text = service.format_trace(trace_result, name)
+        if service.should_evict():
+            hint = service.eviction_hint()
+            if hint:
+                text += f"\n\n─── Context management hint ───\n{hint}"
+        if _should_nudge_remember(session_id):
+            text += _remember_nudge_text(session_id)
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_remember ----
@@ -407,8 +655,11 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
         if priority not in ("high", "medium", "low"):
             priority = "medium"
         note_id = service.remember(content=content, tags=tags, priority=priority)
+        # reset the turn-count nudge and enable memory tools for this session
+        _reset_calls_since_save(session_id)
+        enable_memory_for_session(session_id)
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}. You can safely drop the related code chunks from your context."}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}. Recall with vectr_recall — <50ms, verbatim, any time."}],
             "isError": False,
         }
 
@@ -419,6 +670,10 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
         priority = arguments.get("priority") or None
         limit = int(arguments.get("limit", 10))
         text = service.recall(query=query, tags=tags, priority=priority, limit=limit)
+        if service.should_evict():
+            hint = service.eviction_hint()
+            if hint:
+                text += f"\n\n─── Context management hint ───\n{hint}"
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_evict_hint ----
@@ -436,7 +691,7 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
         session_id = arguments.get("session_id") or None
         snapshot_id = service.snapshot_session(label=label, session_id=session_id)
         return {
-            "content": [{"type": "text", "text": f"Session snapshot saved: {snapshot_id}\nLabel: {label}\nRestore with vectr_recall (your notes will be there next session)."}],
+            "content": [{"type": "text", "text": f"Snapshot saved: {snapshot_id}\nLabel: {label}\nNotes are available via vectr_recall any time — later in this session or in future sessions."}],
             "isError": False,
         }
 
@@ -463,6 +718,21 @@ def handle_tools_call(tool_name: str, arguments: dict, service: Any) -> dict:
             "isError": False,
         }
 
+    # ---- vectr_ingest_traces ----
+    if tool_name == "vectr_ingest_traces":
+        events = arguments.get("events")
+        if not isinstance(events, list):
+            return _mcp_error("events must be a list of trace event dicts")
+        result = service.ingest_traces(events)
+        return {
+            "content": [{"type": "text", "text": (
+                f"Ingested {result['ingested']} dynamic call edges into the symbol graph. "
+                f"({result['skipped_invalid']} events skipped — missing caller or callee field.) "
+                "Dynamic edges now appear in vectr_trace results alongside static edges."
+            )}],
+            "isError": False,
+        }
+
     return _mcp_error(f"Unknown tool: {tool_name}")
 
 
@@ -476,7 +746,13 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         if r.symbol_name:
             lines.append(f"    symbol: {r.symbol_name}  language: {r.language}")
         lines.append("")
-        lines.append(r.content)
+        content_lines = r.content.splitlines()
+        if len(content_lines) > 80:
+            lines.append("\n".join(content_lines[:80]))
+            start = str(r.lines).split("-")[0] if "-" in str(r.lines) else str(r.lines)
+            lines.append(f"... {len(content_lines) - 80} more lines — Read({r.file_path}, offset={start}) for full context")
+        else:
+            lines.append(r.content)
         lines.append("")
     return "\n".join(lines)
 

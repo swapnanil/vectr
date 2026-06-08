@@ -1,6 +1,7 @@
 """Integration tests for FastAPI routes. Uses a fully mocked VectrService — no model loading."""
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -138,6 +139,8 @@ def test_status(client) -> None:
     assert data["indexed_files"] == 12
     assert data["total_chunks"] == 500
     assert "workspace_root" in data
+    assert "notes_count" in data, "/v1/status must include notes_count for agent recall decisions"
+    assert isinstance(data["notes_count"], int)
 
 
 # ---------------------------------------------------------------------------
@@ -190,3 +193,58 @@ def test_mcp_tools_call_status(client) -> None:
     resp = client.post("/mcp/tools/call", json={"name": "vectr_status", "arguments": {}})
     assert resp.status_code == 200
     assert resp.json()["isError"] is False
+
+
+# ---------------------------------------------------------------------------
+# T15: VECTR_API_KEY enforcement
+# ---------------------------------------------------------------------------
+
+class TestApiKeyEnforcement:
+    """T15: VECTR_API_KEY header enforcement.
+
+    The middleware checks os.environ at request time (not at import time),
+    so patch.dict works cleanly without module reloading.
+    """
+
+    def test_no_key_set_allows_all_requests(self, client) -> None:
+        with patch.dict("os.environ", {"VECTR_API_KEY": ""}):
+            resp = client.get("/v1/health")
+        assert resp.status_code == 200
+
+    def test_health_endpoint_bypasses_key_check(self, client) -> None:
+        with patch.dict("os.environ", {"VECTR_API_KEY": "test-secret-key"}):
+            resp = client.get("/v1/health")
+        assert resp.status_code == 200  # health always allowed
+
+    def test_missing_key_returns_401(self, client) -> None:
+        with patch.dict("os.environ", {"VECTR_API_KEY": "test-secret-key"}):
+            resp = client.get("/v1/status")
+        assert resp.status_code == 401
+
+    def test_wrong_key_returns_401(self, client) -> None:
+        with patch.dict("os.environ", {"VECTR_API_KEY": "test-secret-key"}):
+            resp = client.get("/v1/status", headers={"X-Api-Key": "wrong-key"})
+        assert resp.status_code == 401
+
+    def test_correct_x_api_key_header_passes(self, client) -> None:
+        with patch.dict("os.environ", {"VECTR_API_KEY": "test-secret-key"}):
+            resp = client.get("/v1/status", headers={"X-Api-Key": "test-secret-key"})
+        assert resp.status_code == 200
+
+    def test_bearer_token_passes(self, client) -> None:
+        with patch.dict("os.environ", {"VECTR_API_KEY": "test-secret-key"}):
+            resp = client.get("/v1/status", headers={"Authorization": "Bearer test-secret-key"})
+        assert resp.status_code == 200
+
+    def test_401_response_includes_error_field(self, client) -> None:
+        with patch.dict("os.environ", {"VECTR_API_KEY": "test-secret-key"}):
+            resp = client.get("/v1/status")
+        assert resp.status_code == 401
+        body = resp.json()
+        assert "error" in body
+        assert body["error"] == "unauthorized"
+
+    def test_empty_key_env_var_allows_requests(self, client) -> None:
+        with patch.dict("os.environ", {"VECTR_API_KEY": ""}):
+            resp = client.get("/v1/status")
+        assert resp.status_code == 200

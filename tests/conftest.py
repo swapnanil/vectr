@@ -8,11 +8,20 @@ deterministic dummy embedder. No model download required; tests run in <1 s.
 from __future__ import annotations
 
 import os
+import sys
 import textwrap
 import tempfile
 from pathlib import Path
 from typing import Generator
 from unittest.mock import MagicMock, patch
+
+# langchain_community 0.4+ removed chat_models.vertexai (moved to langchain-google-vertexai).
+# Stub it so ragas can be imported without requiring the VertexAI extras.
+if "langchain_community.chat_models.vertexai" not in sys.modules:
+    try:
+        import langchain_community.chat_models.vertexai  # noqa: F401
+    except ModuleNotFoundError:
+        sys.modules["langchain_community.chat_models.vertexai"] = MagicMock()
 
 # Disable cross-encoder reranker before any searcher import so tests never
 # trigger a model download.
@@ -21,6 +30,11 @@ os.environ["VECTR_RERANKER_MODEL"] = ""
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+
+# Saved at collection time (before any fixture patches app.service.VectrService).
+# real_service_client patches that name session-wide; test_ragas_eval uses this
+# reference so it always gets the real constructor, not the mock.
+from app.service import VectrService as _RealVectrService
 
 
 # ---------------------------------------------------------------------------
