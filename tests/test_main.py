@@ -594,3 +594,67 @@ class TestClaudeMdFraming:
         assert "verbali" in block.lower(), (
             "CLAUDE.md must include SR-RAG guidance: write out known facts before calling vectr_search"
         )
+
+
+# ---------------------------------------------------------------------------
+# cmd_watch
+# ---------------------------------------------------------------------------
+
+class TestCmdWatch:
+    def _make_watch_args(self, path: str) -> argparse.Namespace:
+        return argparse.Namespace(path=path)
+
+    def test_watch_indexes_workspace_on_startup(self, tmp_path, capsys):
+        mock_indexer = MagicMock()
+        mock_indexer.index_workspace.return_value = (5, 42)
+        mock_watcher = MagicMock()
+
+        with patch("agent.indexer.CodeIndexer", return_value=mock_indexer), \
+             patch("agent.watcher.CodeWatcher", return_value=mock_watcher), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch("time.sleep", side_effect=KeyboardInterrupt):
+            m.cmd_watch(self._make_watch_args(str(tmp_path)))
+
+        mock_indexer.index_workspace.assert_called_once()
+
+    def test_watch_starts_and_stops_watcher(self, tmp_path):
+        mock_indexer = MagicMock()
+        mock_indexer.index_workspace.return_value = (1, 2)
+        mock_watcher = MagicMock()
+
+        with patch("agent.indexer.CodeIndexer", return_value=mock_indexer), \
+             patch("agent.watcher.CodeWatcher", return_value=mock_watcher), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch("time.sleep", side_effect=KeyboardInterrupt):
+            m.cmd_watch(self._make_watch_args(str(tmp_path)))
+
+        mock_watcher.start.assert_called_once()
+        mock_watcher.stop.assert_called_once()
+
+    def test_watch_prints_start_guidance(self, tmp_path, capsys):
+        mock_indexer = MagicMock()
+        mock_indexer.index_workspace.return_value = (3, 15)
+        mock_watcher = MagicMock()
+
+        with patch("agent.indexer.CodeIndexer", return_value=mock_indexer), \
+             patch("agent.watcher.CodeWatcher", return_value=mock_watcher), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch("time.sleep", side_effect=KeyboardInterrupt):
+            m.cmd_watch(self._make_watch_args(str(tmp_path)))
+
+        err = capsys.readouterr().err
+        assert "vectr start" in err, "cmd_watch must mention 'vectr start' to guide users towards MCP"
+
+    def test_watch_reports_indexed_file_count(self, tmp_path, capsys):
+        mock_indexer = MagicMock()
+        mock_indexer.index_workspace.return_value = (7, 99)
+        mock_watcher = MagicMock()
+
+        with patch("agent.indexer.CodeIndexer", return_value=mock_indexer), \
+             patch("agent.watcher.CodeWatcher", return_value=mock_watcher), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch("time.sleep", side_effect=KeyboardInterrupt):
+            m.cmd_watch(self._make_watch_args(str(tmp_path)))
+
+        err = capsys.readouterr().err
+        assert "7" in err and "99" in err, "cmd_watch must print file and chunk counts"
