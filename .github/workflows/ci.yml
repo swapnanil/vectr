@@ -20,7 +20,7 @@ jobs:
           cache-dependency-path: "pyproject.toml"
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,encryption]"
 
       - name: Run tests
         run: pytest tests/
