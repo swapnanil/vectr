@@ -426,3 +426,118 @@ pub const Account = struct {
         p.write_text("pub fn run() void {}\npub fn stop() void {}\n")
         count = indexer.index_file(str(p))
         assert count >= 2, f"expected ≥2 Zig chunks, got {count}"
+
+
+class TestMarkdownSupport:
+    """chunk_file() produces heading-aware section chunks for .md files."""
+
+    _MD_WITH_HEADINGS = """\
+# My Project
+
+A brief introduction paragraph with some context.
+
+## Installation
+
+Run `pip install myproject` to get started.
+Some additional installation notes here.
+
+## Usage
+
+Here is how to use the tool.
+
+### Advanced Usage
+
+For power users, see the config section.
+
+## API Reference
+
+The main API surface is documented here.
+"""
+
+    _MD_NO_HEADINGS = """\
+This is a flat markdown file.
+It has no headings at all.
+Just plain paragraphs of text spread across multiple lines.
+"""
+
+    def _write_md(self, tmp_path, content: str, name: str = "README.md") -> str:
+        p = tmp_path / name
+        p.write_text(content)
+        return str(p)
+
+    def test_markdown_uses_section_node_type(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_md(tmp_path, self._MD_WITH_HEADINGS))
+        assert any(c.node_type == "section" for c in chunks), (
+            "expected section chunks for markdown with headings"
+        )
+
+    def test_markdown_heading_text_becomes_symbol_name(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_md(tmp_path, self._MD_WITH_HEADINGS))
+        names = {c.symbol_name for c in chunks}
+        assert "Installation" in names
+        assert "Usage" in names
+        assert "API Reference" in names
+
+    def test_markdown_not_window_fallback_for_headings(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_md(tmp_path, self._MD_WITH_HEADINGS))
+        assert not any(c.node_type == "window" for c in chunks), (
+            "headed markdown should not use window fallback"
+        )
+
+    def test_markdown_no_headings_produces_single_preamble_chunk(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_md(tmp_path, self._MD_NO_HEADINGS))
+        # Headingless files flush as a single section with empty symbol_name (no boundary to split on)
+        assert len(chunks) == 1
+        assert chunks[0].language == "markdown"
+        assert chunks[0].symbol_name == ""
+
+    def test_markdown_language_label_set(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_md(tmp_path, self._MD_WITH_HEADINGS))
+        assert all(c.language == "markdown" for c in chunks)
+
+    def test_markdown_file_indexed_by_indexer(self, indexer, tmp_path) -> None:
+        chunks = indexer.index_file(self._write_md(tmp_path, self._MD_WITH_HEADINGS))
+        assert chunks >= 3, f"expected ≥3 markdown sections, got {chunks}"
+
+
+class TestHTMLSupport:
+    """chunk_file() handles .html files (window fallback with 'html' language label)."""
+
+    _HTML = """\
+<!DOCTYPE html>
+<html>
+<head><title>Test Page</title></head>
+<body>
+  <h1>Welcome</h1>
+  <p>Some content here.</p>
+  <section>
+    <h2>About</h2>
+    <p>More content.</p>
+  </section>
+</body>
+</html>
+"""
+
+    def _write_html(self, tmp_path) -> str:
+        p = tmp_path / "index.html"
+        p.write_text(self._HTML)
+        return str(p)
+
+    def test_html_language_label_set(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_html(tmp_path))
+        assert all(c.language == "html" for c in chunks)
+
+    def test_html_produces_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_html(tmp_path))
+        assert len(chunks) >= 1
+
+    def test_html_file_indexed_by_indexer(self, indexer, tmp_path) -> None:
+        count = indexer.index_file(self._write_html(tmp_path))
+        assert count >= 1, f"expected ≥1 HTML chunk, got {count}"

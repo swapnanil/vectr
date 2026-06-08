@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -33,6 +34,8 @@ LANG_BY_EXT: dict[str, str] = {
     ".c": "c",
     ".h": "c",
     ".zig": "zig",
+    ".md": "markdown",
+    ".html": "html",
 }
 
 EXCLUDED_DIRS = {
@@ -301,6 +304,56 @@ def _fallback_window_chunks(lines: list[str], file_path: str, language: str) -> 
     return chunks
 
 
+def _chunk_markdown(lines: list[str], file_path: str) -> list[CodeChunk]:
+    """Split markdown at heading boundaries for coherent section-level embeddings.
+
+    Each ATX heading (# through ######) starts a new chunk. Content before the
+    first heading is treated as a preamble section. Falls back to window chunks
+    if the file has no headings at all (e.g. a flat paragraph document).
+    """
+    chunks: list[CodeChunk] = []
+    current_lines: list[str] = []
+    current_start = 1
+    current_symbol = ""
+
+    for i, line in enumerate(lines, 1):
+        m = re.match(r"^(#{1,6})\s+(.*)", line)
+        if m and current_lines:
+            content = "\n".join(current_lines).strip()
+            if content:
+                chunks.append(CodeChunk(
+                    chunk_id=f"{file_path}:{current_start}-{i - 1}",
+                    content=content,
+                    file_path=file_path,
+                    language="markdown",
+                    node_type="section",
+                    start_line=current_start,
+                    end_line=i - 1,
+                    symbol_name=current_symbol,
+                ))
+            current_start = i
+            current_symbol = m.group(2).strip()
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+
+    if current_lines:
+        content = "\n".join(current_lines).strip()
+        if content:
+            chunks.append(CodeChunk(
+                chunk_id=f"{file_path}:{current_start}-{len(lines)}",
+                content=content,
+                file_path=file_path,
+                language="markdown",
+                node_type="section",
+                start_line=current_start,
+                end_line=len(lines),
+                symbol_name=current_symbol,
+            ))
+
+    return chunks or _fallback_window_chunks(lines, file_path, "markdown")
+
+
 def chunk_file(file_path: str) -> list[CodeChunk]:
     """Parse a file and return AST-aware chunks (falls back to windows)."""
     path = Path(file_path)
@@ -315,6 +368,9 @@ def chunk_file(file_path: str) -> list[CodeChunk]:
     lines = code.splitlines()
     if not lines:
         return []
+
+    if language == "markdown":
+        return _chunk_markdown(lines, file_path)
 
     if language:
         parser = _get_parser(language)

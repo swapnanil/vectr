@@ -102,7 +102,6 @@ class TestIsIndexable:
         assert watcher._is_indexable(path) is True
 
     @pytest.mark.parametrize("path", [
-        "/ws/README.md",
         "/ws/image.png",
         "/ws/data.csv",
         "/ws/notes.txt",
@@ -110,6 +109,14 @@ class TestIsIndexable:
     ])
     def test_non_code_extensions_not_indexable(self, watcher, path):
         assert watcher._is_indexable(path) is False
+
+    @pytest.mark.parametrize("path", [
+        "/ws/README.md",
+        "/ws/docs/guide.md",
+        "/ws/index.html",
+    ])
+    def test_markdown_and_html_are_indexable(self, watcher, path):
+        assert watcher._is_indexable(path) is True
 
     def test_no_extension_not_indexable(self, watcher):
         assert watcher._is_indexable("/ws/Makefile") is False
@@ -135,7 +142,7 @@ class TestOnModified:
     def test_non_indexable_file_ignored(self):
         watcher = CodeWatcher(_mock_indexer())
         watcher._debounce = MagicMock()
-        watcher.on_modified(_mock_event("/ws/README.md"))
+        watcher.on_modified(_mock_event("/ws/data.csv"))
         watcher._debounce.schedule.assert_not_called()
 
 
@@ -188,7 +195,7 @@ class TestOnDeleted:
     def test_non_indexable_file_not_deleted(self):
         indexer = _mock_indexer()
         watcher = CodeWatcher(indexer)
-        watcher.on_deleted(_mock_event("/ws/README.md"))
+        watcher.on_deleted(_mock_event("/ws/data.csv"))
         indexer.delete_file.assert_not_called()
 
 

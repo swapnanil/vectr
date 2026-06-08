@@ -139,10 +139,10 @@ class TestShouldIndexFile:
         f.touch()
         assert should_index_file(str(f), []) is False
 
-    def test_rejects_markdown_file(self, tmp_path) -> None:
+    def test_accepts_markdown_file(self, tmp_path) -> None:
         f = tmp_path / "README.md"
         f.touch()
-        assert should_index_file(str(f), []) is False
+        assert should_index_file(str(f), []) is True
 
     def test_rejects_file_in_node_modules(self, tmp_path) -> None:
         nm = tmp_path / "node_modules" / "pkg"
