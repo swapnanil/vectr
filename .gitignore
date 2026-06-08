@@ -64,7 +64,6 @@ tmp/
 # Benchmark outputs (large JSON/txt artefacts — keep the folder structure)
 benchmarks/*/poc_results_*.json
 benchmarks/*/answer_*.txt
-benchmarks/cpython/run3_*.json
 benchmarks/cpython/research_*.txt
 benchmarks/cpython/impl_*.txt
 benchmarks/cpython/diff_*.patch

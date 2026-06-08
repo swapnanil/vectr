@@ -100,10 +100,68 @@ Most balanced task — P1 costs nearly identical. Vectr P2 still **57% cheaper, 
 
 ---
 
+## Run 3 — CPython internals (unfamiliar C codebase, multi-session)
+
+**Path**: `cpython/`  
+**Codebase**: CPython sparse checkout — `Python/` (~120 files), `Objects/` (~50 files), `Include/` (headers). ~170 C source files.  
+**Prompt variant**: `additive`  
+**Design**: 1 shared research session → 6 isolated implementation sessions (each a fresh `claude -p`, zero prior context). This simulates a week of feature work where research is paid once and impl sessions reuse recalled notes.
+
+### Research vs implementation cost breakdown
+
+Research overhead is a one-time investment. Implementation savings repeat with every task.
+
+| Phase | Vanilla | Vectr | Delta | Why |
+|---|---:|---:|---:|---|
+| Research (1 session, paid once) | $1.36 | $2.63 | +94% | Vectr stores rich notes via `vectr_remember` — more output tokens |
+| Implementation (6 sessions, each repeating) | $2.50 | $1.97 | **−21%** | Recalled notes replace file re-discovery in 4 of 6 tasks |
+| Total sprint | $3.86 | $4.60 | +19% | Research overhead dominates at 6 tasks |
+
+The +19% total headline **inverts to a net gain** after ~8–10 tasks reusing the same notes. Research is paid once; every additional impl session recalling those notes is pure saving.
+
+### Implementation sessions — all 6 tasks combined
+
+| Metric | Vanilla | Vectr | Delta |
+|---|---:|---:|---:|
+| Cost | $2.50 | $1.97 | **−21%** |
+| Wall time | 17.6 min | 13.5 min | **−24%** |
+| Turns | 123 | 94 | **−24%** |
+| Read + Bash calls | 102 | 62 | **−39%** |
+
+### Per-task re-discovery (Read+Bash before first write)
+
+| Task | Vanilla | Vectr | Delta | `vectr_recall` fired |
+|---|---:|---:|---:|---|
+| `debug_gc_finalizer` | 16 | 6 | **−62%** | no |
+| `feature_dict_pop_last` | 13 | 3 | **−77%** | yes |
+| `cross_session_set_cartesian` | 23 | 9 | **−61%** | yes |
+| `debug_descriptor_priority` | 6 | 6 | 0% | no |
+| `cross_session_bytes_find_all` | 13 | 2 | **−85%** | yes |
+| `cross_session_list_rotate` | 21 | 16 | **−24%** | yes |
+
+`debug_descriptor_priority` (0%) is the honest outlier: the model has strong training coverage of Python's descriptor protocol and navigated directly without needing notes. Vectr's advantage is proportional to how unfamiliar the code is.
+
+### Vectr tool usage (impl sessions only)
+
+| Tool | Count |
+|---|---:|
+| `vectr_status` | 5 |
+| `vectr_recall` | 4 |
+| `vectr_search` | 1 |
+| `vectr_locate` / `vectr_trace` | 0 |
+
+`vectr_recall` doing the heavy lifting — not `vectr_search`. When research notes contain exact function signatures and code stubs, impl sessions recall rather than re-explore. `vectr_search` fired once as a targeted top-up for a detail not covered by notes.
+
+**Finding**: The B9 semantic recall fix (vector search instead of SQL LIKE) is the single most impactful change across all CPython runs. Pre-fix: `vectr_recall` returned 0 results on multi-word queries; vectr cost was equal or higher than vanilla on every task. Post-fix: vectr Read+Bash is below vanilla on 5 of 6 tasks.
+
+See `cpython/README.md` for the full task breakdown and methodology.
+
+---
+
 ## Key patterns
 
 **Pattern 1: Vectr value scales with codebase unfamiliarity.**  
-Django (model has training coverage) → mixed results. Camel internals (model has never seen) → consistent −40–58% P2 savings. The stronger the re-discovery pressure in P2, the more `vectr_recall` pays off.
+Django (model has training coverage) → mixed results. Camel internals (model has never seen) → consistent −40–58% P2 savings. CPython C internals → −21% impl cost, −39% R+B across 6 tasks, but 0% on one task where model training knowledge was sufficient. The stronger the genuine re-discovery pressure, the more `vectr_recall` pays off.
 
 **Pattern 2: Structured notes beat prose summaries.**  
 Vanilla P1 produces large prose summaries (8,000–15,000 chars). These help — but not enough for P2 to skip re-exploration on unfamiliar code. Vectr stores exact class names, method signatures, interface contracts, and lifecycle ordering in structured notes. P2 can implement directly from these without re-reading any source.
@@ -134,5 +192,6 @@ Vanilla P2 doesn't just cost more — it can fail entirely. On `custom_component
 |---|---|---|
 | Run 1 (Django) | `django/` | `README.md`, `poc_results_*.json`, `answer_*_p{1,2}.txt` |
 | Run 2 (Camel) | `camel/` | `README.md`, `poc_results_*.json`, `answer_*_p{1,2}.txt` |
+| Run 3 (CPython) | `cpython/` | `README.md`, `run3_*.json` |
 
 POC source: `/Users/swapnanil.s/Documents/swapnanilsaha.com/tools/vectr/poc/`

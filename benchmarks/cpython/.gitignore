@@ -1,4 +1,4 @@
-# Benchmark output files — not committed
-*.json
+# Not committed
 *.txt
 *.patch
+vectr_index.json
