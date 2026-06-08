@@ -151,7 +151,7 @@ Exposes port 8765. Docker does not auto-write IDE config files — use local ins
 
 ---
 
-## 12 MCP tools
+## 13 MCP tools
 
 `vectr start` writes a `CLAUDE.md` into your workspace with this table and usage guidance — your AI code editor knows which tool to reach for without being prompted.
 
