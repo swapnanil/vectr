@@ -550,6 +550,41 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"  Run 'vectr start --path {workspace}' to index and start the server.", file=sys.stderr)
 
 
+def cmd_watch(args: argparse.Namespace) -> None:
+    """Index workspace and start filesystem watcher without launching the MCP server."""
+    import hashlib
+    from agent.indexer import CodeIndexer
+    from agent.watcher import CodeWatcher
+    from integrations.workspace_detect import find_workspace_root
+
+    workspace = find_workspace_root(str(Path(args.path).resolve()))
+    embed_model = os.getenv("VECTR_EMBED_MODEL", "Snowflake/snowflake-arctic-embed-m-v1.5")
+
+    # Use same db layout as VectrService so a later `vectr start` shares the index.
+    db_hash = hashlib.md5(workspace.encode()).hexdigest()[:12]
+    db_dir = Path.home() / ".cache" / "vectr" / db_hash
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    indexer = CodeIndexer(workspace, embed_model=embed_model, db_path=str(db_dir / "chroma"))
+    watcher = CodeWatcher(indexer)
+
+    print(f"Indexing {workspace} ...", file=sys.stderr)
+    files, chunks = indexer.index_workspace()
+    print(f"  Indexed {files} files, {chunks} chunks", file=sys.stderr)
+    print(f"Watching for changes. Press Ctrl+C to stop.", file=sys.stderr)
+    print(f"  Run 'vectr start --path {workspace}' to also serve MCP.", file=sys.stderr)
+
+    watcher.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        watcher.stop()
+        print("\nWatcher stopped.", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -580,6 +615,9 @@ def main() -> None:
         "--all", action="store_true",
         help="Delete notes across ALL workspaces (operates directly on SQLite, no server needed)",
     )
+
+    p_watch = sub.add_parser("watch", help="Index workspace and watch for changes (no MCP server)")
+    p_watch.add_argument("--path", default=_default_path)
 
     p_init = sub.add_parser("init", help="Write CLAUDE.md and .mcp.json to a workspace (no server)")
     p_init.add_argument("--path", default=_default_path)
@@ -622,6 +660,7 @@ def main() -> None:
     dispatch = {
         "start":   cmd_start,
         "restart": cmd_restart,
+        "watch":   cmd_watch,
         "init":    cmd_init,
         "index":   cmd_index,
         "search":  cmd_search,
