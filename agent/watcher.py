@@ -67,7 +67,8 @@ class CodeWatcher(FileSystemEventHandler):
 
     def start(self) -> None:
         self._observer = Observer()
-        self._observer.schedule(self, str(self._indexer.workspace_root), recursive=True)
+        for root in self._indexer.all_roots:
+            self._observer.schedule(self, str(root), recursive=True)
         self._observer.start()
 
     def stop(self) -> None:

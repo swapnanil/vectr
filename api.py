@@ -24,9 +24,11 @@ from app.routes import router
 async def lifespan(application: FastAPI):
     from app.service import VectrService
 
+    import json as _json
     workspace = os.getenv("VECTR_WORKSPACE", ".")
     port = int(os.getenv("VECTR_PORT", "8765"))
-    svc = VectrService(workspace_root=workspace, port=port)
+    extra_roots = _json.loads(os.getenv("VECTR_EXTRA_ROOTS", "[]"))
+    svc = VectrService(workspace_root=workspace, port=port, extra_roots=extra_roots)
     svc.start_background_index()
     application.state.service = svc
     # No internal LLM call at startup. The AI editor calls vectr_map on first use;

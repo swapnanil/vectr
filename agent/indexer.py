@@ -405,8 +405,10 @@ class CodeIndexer:
         workspace_root: str,
         embed_model: str = "Snowflake/snowflake-arctic-embed-m-v1.5",
         db_path: str | None = None,
+        extra_roots: list[str] | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
+        self._extra_roots: list[Path] = [Path(r).resolve() for r in (extra_roots or [])]
         self._embed_provider = get_embed_provider(embed_model)
         self.embed_model = embed_model
 
@@ -429,6 +431,11 @@ class CodeIndexer:
     def _workspace_hash(self) -> str:
         return hashlib.md5(str(self.workspace_root).encode()).hexdigest()[:12]
 
+    @property
+    def all_roots(self) -> list[Path]:
+        """All workspace roots: primary first, then extra roots in order."""
+        return [self.workspace_root] + self._extra_roots
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -445,19 +452,19 @@ class CodeIndexer:
             should_index_file, get_gitignore_patterns, get_vectrignore_dirs,
         )
 
-        patterns = gitignore_patterns or get_gitignore_patterns(str(self.workspace_root))
-        # read user-defined exclusions from .vectrignore
-        vectrignore_dirs = get_vectrignore_dirs(str(self.workspace_root))
-        all_excluded = EXCLUDED_DIRS | vectrignore_dirs
-
-        # Collect candidate files
+        # Collect candidate files across all roots; each root gets its own
+        # gitignore/vectrignore patterns so per-project exclusions are respected.
         all_files: list[Path] = []
-        for dirpath, dirnames, filenames in os.walk(self.workspace_root):
-            dirnames[:] = [d for d in dirnames if d not in all_excluded and not d.startswith(".")]
-            for fname in filenames:
-                fpath = Path(dirpath) / fname
-                if should_index_file(str(fpath), patterns, extra_excluded_dirs=vectrignore_dirs):
-                    all_files.append(fpath)
+        for root in self.all_roots:
+            root_patterns = gitignore_patterns or get_gitignore_patterns(str(root))
+            vectrignore_dirs = get_vectrignore_dirs(str(root))
+            all_excluded = EXCLUDED_DIRS | vectrignore_dirs
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in all_excluded and not d.startswith(".")]
+                for fname in filenames:
+                    fpath = Path(dirpath) / fname
+                    if should_index_file(str(fpath), root_patterns, extra_excluded_dirs=vectrignore_dirs):
+                        all_files.append(fpath)
 
         # Incremental: split into files to index vs unchanged files to skip
         mtime_cache = self._load_mtime_cache()

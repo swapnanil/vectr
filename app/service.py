@@ -25,7 +25,7 @@ def _default_db_dir(workspace_root: str) -> str:
 class VectrService:
     """Singleton-style service. Create once at startup; shared via FastAPI app state."""
 
-    def __init__(self, workspace_root: str, port: int = 8765) -> None:
+    def __init__(self, workspace_root: str, port: int = 8765, extra_roots: list[str] | None = None) -> None:
         from agent.indexer import CodeIndexer
         from agent.searcher import CodeSearcher
         from agent.watcher import CodeWatcher
@@ -37,6 +37,7 @@ class VectrService:
         from integrations.workspace_detect import find_workspace_root
 
         self._workspace_root = find_workspace_root(workspace_root)
+        self._extra_roots: list[str] = list(extra_roots or [])
         self._port = port
         self._embed_model = os.getenv("VECTR_EMBED_MODEL", "Snowflake/snowflake-arctic-embed-m-v1.5")
 
@@ -51,6 +52,7 @@ class VectrService:
             self._workspace_root,
             embed_model=self._embed_model,
             db_path=str(Path(db_dir) / "chroma"),
+            extra_roots=self._extra_roots,
         )
         self._searcher = CodeSearcher(self._indexer)
         self._watcher = CodeWatcher(self._indexer, searcher_refresh_fn=self._searcher.refresh_bm25)
@@ -87,7 +89,8 @@ class VectrService:
         from agent.strategy_selector import RetrievalStrategy
         self._strategy: RetrievalStrategy | None = None
 
-        configure_all(self._workspace_root, port)
+        for root in self._indexer.all_roots:
+            configure_all(str(root), port)
 
     # ------------------------------------------------------------------
     # Lifecycle
