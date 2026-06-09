@@ -284,12 +284,53 @@ def _migrate_legacy_files() -> None:
     _LEGACY_PORT_FILE.unlink(missing_ok=True)
 
 
-def _do_start(workspace: str, port: int, ws_hash: str) -> None:
+def _parse_code_workspace(path: str) -> list[str]:
+    """Parse a .code-workspace file and return the absolute folder paths it lists."""
+    ws_file = Path(path).resolve()
+    data = json.loads(ws_file.read_text(encoding="utf-8"))
+    ws_dir = ws_file.parent
+    roots: list[str] = []
+    for folder in data.get("folders", []):
+        folder_path = folder.get("path", "")
+        p = Path(folder_path)
+        if not p.is_absolute():
+            p = ws_dir / p
+        roots.append(str(p.resolve()))
+    return roots
+
+
+def _resolve_workspace_roots(args: argparse.Namespace) -> list[str]:
+    """Return ordered list of workspace roots from CLI args.
+
+    Priority:
+      1. Positional .code-workspace file  →  all folders listed in the file
+      2. Positional directory             →  that single directory
+      3. --path flags (one or more)       →  those directories in order
+      4. VECTR_WORKSPACE env / default .  →  single directory
+    """
+    ws = getattr(args, "workspace", None)
+    if ws:
+        p = Path(ws)
+        if str(ws).endswith(".code-workspace"):
+            return _parse_code_workspace(ws)
+        return [str(p.resolve())]
+    paths = getattr(args, "paths", None) or []
+    if paths:
+        return [str(Path(p).resolve()) for p in paths]
+    return [str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())]
+
+
+def _do_start(workspace: str, port: int, ws_hash: str, extra_roots: list[str] | None = None) -> None:
     log_dir = Path.home() / ".vectr" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{ws_hash}.log"
 
-    env = {**os.environ, "VECTR_WORKSPACE": workspace, "VECTR_PORT": str(port)}
+    env = {
+        **os.environ,
+        "VECTR_WORKSPACE": workspace,
+        "VECTR_PORT": str(port),
+        "VECTR_EXTRA_ROOTS": json.dumps(extra_roots or []),
+    }
     vectr_dir = Path(__file__).resolve().parent
     with open(log_path, "a") as log_file:
         proc = subprocess.Popen(
@@ -306,6 +347,9 @@ def _do_start(workspace: str, port: int, ws_hash: str) -> None:
     InstanceRegistry().register(ws_hash, workspace, port, proc.pid)
     print(f"Vectr started (PID {proc.pid}) on port {port}", file=sys.stderr)
     print(f"Workspace : {workspace}", file=sys.stderr)
+    if extra_roots:
+        for r in extra_roots:
+            print(f"          + {r}", file=sys.stderr)
     print(f"MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
     print(f"Logs      : {log_path}", file=sys.stderr)
     print(f"Check indexing progress: vectr status --path {workspace}", file=sys.stderr)
@@ -321,7 +365,9 @@ def _get_port_for_workspace(workspace: str, fallback: int) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_start(args: argparse.Namespace) -> None:
-    workspace = str(Path(args.path).resolve())
+    roots = _resolve_workspace_roots(args)
+    workspace = roots[0]
+    extra_roots = roots[1:]
     ws_hash = workspace_hash(workspace)
     preferred_port = args.port
 
@@ -331,7 +377,8 @@ def cmd_start(args: argparse.Namespace) -> None:
     entry = registry.get(ws_hash)
     if entry is not None and _is_pid_alive(entry["pid"]):
         port = entry["port"]
-        _write_workspace_config(workspace, port)
+        for root in roots:
+            _write_workspace_config(root, port)
         print("Vectr is already running for this workspace.", file=sys.stderr)
         print(f"  Workspace : {workspace}", file=sys.stderr)
         print(f"  Port      : {port}", file=sys.stderr)
@@ -339,8 +386,9 @@ def cmd_start(args: argparse.Namespace) -> None:
         return
 
     port = registry.find_free_port(ws_hash, preferred_port)
-    _write_workspace_config(workspace, port)
-    _do_start(workspace, port, ws_hash)
+    for root in roots:
+        _write_workspace_config(root, port)
+    _do_start(workspace, port, ws_hash, extra_roots=extra_roots)
 
 
 def cmd_index(args: argparse.Namespace) -> None:
@@ -462,7 +510,9 @@ def cmd_stop(args: argparse.Namespace) -> None:
 
 
 def cmd_restart(args: argparse.Namespace) -> None:
-    workspace = str(Path(args.path).resolve())
+    roots = _resolve_workspace_roots(args)
+    workspace = roots[0]
+    extra_roots = roots[1:]
     ws_hash = workspace_hash(workspace)
     preferred_port = args.port
 
@@ -475,8 +525,9 @@ def cmd_restart(args: argparse.Namespace) -> None:
         registry.unregister(ws_hash)
 
     port = registry.find_free_port(ws_hash, preferred_port)
-    _write_workspace_config(workspace, port)
-    _do_start(workspace, port, ws_hash)
+    for root in roots:
+        _write_workspace_config(root, port)
+    _do_start(workspace, port, ws_hash, extra_roots=extra_roots)
 
 
 def cmd_forget(args: argparse.Namespace) -> None:
@@ -551,13 +602,15 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 
 def cmd_watch(args: argparse.Namespace) -> None:
-    """Index workspace and start filesystem watcher without launching the MCP server."""
+    """Index workspace(s) and start filesystem watcher without launching the MCP server."""
     import hashlib
     from agent.indexer import CodeIndexer
     from agent.watcher import CodeWatcher
     from integrations.workspace_detect import find_workspace_root
 
-    workspace = find_workspace_root(str(Path(args.path).resolve()))
+    roots = _resolve_workspace_roots(args)
+    workspace = find_workspace_root(roots[0])
+    extra_roots = roots[1:]
     embed_model = os.getenv("VECTR_EMBED_MODEL", "Snowflake/snowflake-arctic-embed-m-v1.5")
 
     # Use same db layout as VectrService so a later `vectr start` shares the index.
@@ -565,10 +618,12 @@ def cmd_watch(args: argparse.Namespace) -> None:
     db_dir = Path.home() / ".cache" / "vectr" / db_hash
     db_dir.mkdir(parents=True, exist_ok=True)
 
-    indexer = CodeIndexer(workspace, embed_model=embed_model, db_path=str(db_dir / "chroma"))
+    indexer = CodeIndexer(workspace, embed_model=embed_model, db_path=str(db_dir / "chroma"),
+                          extra_roots=extra_roots)
     watcher = CodeWatcher(indexer)
 
-    print(f"Indexing {workspace} ...", file=sys.stderr)
+    all_roots_str = ", ".join([workspace] + extra_roots)
+    print(f"Indexing {all_roots_str} ...", file=sys.stderr)
     files, chunks = indexer.index_workspace()
     print(f"  Indexed {files} files, {chunks} chunks", file=sys.stderr)
     print(f"Watching for changes. Press Ctrl+C to stop.", file=sys.stderr)
@@ -596,8 +651,20 @@ def main() -> None:
     _default_path = os.getenv("VECTR_WORKSPACE", ".")
     _default_port = int(os.getenv("VECTR_PORT", "8765"))
 
-    p_start = sub.add_parser("start", help="Start the Vectr daemon and index the workspace")
-    p_start.add_argument("--path", default=_default_path)
+    p_start = sub.add_parser(
+        "start",
+        help="Start the Vectr daemon and index the workspace. "
+             "Accepts a .code-workspace file, one or more --path flags, or defaults to cwd.",
+    )
+    p_start.add_argument(
+        "workspace", nargs="?", default=None,
+        help="Path to a .code-workspace file or a single workspace directory",
+    )
+    p_start.add_argument(
+        "--path", action="append", dest="paths", metavar="DIR",
+        help="Workspace root to index (repeatable for multi-root). "
+             "Example: vectr start --path dir1 --path dir2",
+    )
     p_start.add_argument("--port", type=int, default=_default_port)
 
     p_stop = sub.add_parser("stop", help="Stop the daemon for a workspace")
@@ -605,7 +672,11 @@ def main() -> None:
     p_stop.add_argument("--all", action="store_true", help="Stop all running instances")
 
     p_restart = sub.add_parser("restart", help="Stop and restart the daemon for a workspace")
-    p_restart.add_argument("--path", default=_default_path)
+    p_restart.add_argument(
+        "workspace", nargs="?", default=None,
+        help="Path to a .code-workspace file or a single workspace directory",
+    )
+    p_restart.add_argument("--path", action="append", dest="paths", metavar="DIR")
     p_restart.add_argument("--port", type=int, default=_default_port)
 
     p_forget = sub.add_parser("forget", help="Delete working-memory notes for a workspace")
@@ -616,8 +687,10 @@ def main() -> None:
         help="Delete notes across ALL workspaces (operates directly on SQLite, no server needed)",
     )
 
-    p_watch = sub.add_parser("watch", help="Index workspace and watch for changes (no MCP server)")
-    p_watch.add_argument("--path", default=_default_path)
+    p_watch = sub.add_parser("watch", help="Index workspace(s) and watch for changes (no MCP server)")
+    p_watch.add_argument("workspace", nargs="?", default=None,
+        help="Path to a .code-workspace file or a single workspace directory")
+    p_watch.add_argument("--path", action="append", dest="paths", metavar="DIR")
 
     p_init = sub.add_parser("init", help="Write CLAUDE.md and .mcp.json to a workspace (no server)")
     p_init.add_argument("--path", default=_default_path)

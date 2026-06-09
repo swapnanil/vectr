@@ -18,6 +18,10 @@ import main as m
 
 def _make_args(**kwargs) -> argparse.Namespace:
     defaults = {
+        # Multi-root args (start/restart/watch): workspace=positional, paths=--path list
+        "workspace": None,
+        "paths": None,
+        # Legacy single-path used by stop/status/init/forget
         "path": "/project/a",
         "port": 8765,
         "all": False,
@@ -53,7 +57,7 @@ class TestCmdStart:
              patch("agent.instance_registry._is_pid_alive", return_value=True), \
              patch("main._is_pid_alive", return_value=True), \
              patch("main._write_workspace_config"):
-            m.cmd_start(_make_args(path=ws, port=8765))
+            m.cmd_start(_make_args(paths=[ws], port=8765))
 
         err = capsys.readouterr().err
         assert "already running" in err
@@ -69,9 +73,9 @@ class TestCmdStart:
              patch("agent.instance_registry._port_is_free", return_value=True), \
              patch("main._write_workspace_config"), \
              patch("main._do_start") as mock_do_start:
-            m.cmd_start(_make_args(path=ws, port=8765))
+            m.cmd_start(_make_args(paths=[ws], port=8765))
 
-        mock_do_start.assert_called_once_with(ws, 8765, wh)
+        mock_do_start.assert_called_once_with(ws, 8765, wh, extra_roots=[])
 
     def test_prunes_dead_entries_before_starting(self, tmp_path):
         ws = "/project/a"
@@ -94,7 +98,7 @@ class TestCmdStart:
              patch("agent.instance_registry._port_is_free", return_value=True), \
              patch("main._write_workspace_config"), \
              patch("main._do_start"):
-            m.cmd_start(_make_args(path=ws, port=8765))
+            m.cmd_start(_make_args(paths=[ws], port=8765))
 
         assert prune_called, "prune_dead was not called"
 
@@ -209,7 +213,7 @@ class TestCmdRestart:
              patch("main._stop_server") as mock_stop, \
              patch("main._write_workspace_config"), \
              patch("main._do_start") as mock_do_start:
-            m.cmd_restart(_make_args(path=ws, port=8765))
+            m.cmd_restart(_make_args(paths=[ws], port=8765))
 
         mock_stop.assert_called_once_with(12345)
         mock_do_start.assert_called_once()
@@ -222,7 +226,7 @@ class TestCmdRestart:
              patch("main._stop_server") as mock_stop, \
              patch("main._write_workspace_config"), \
              patch("main._do_start") as mock_do_start:
-            m.cmd_restart(_make_args(path="/project/a", port=8765))
+            m.cmd_restart(_make_args(paths=["/project/a"], port=8765))
 
         mock_stop.assert_not_called()
         mock_do_start.assert_called_once()
@@ -658,3 +662,102 @@ class TestCmdWatch:
 
         err = capsys.readouterr().err
         assert "7" in err and "99" in err, "cmd_watch must print file and chunk counts"
+
+
+# ---------------------------------------------------------------------------
+# Multi-root workspace support
+# ---------------------------------------------------------------------------
+
+class TestMultiRoot:
+    def test_resolve_single_path(self, tmp_path):
+        args = argparse.Namespace(workspace=None, paths=[str(tmp_path)], port=8765)
+        roots = m._resolve_workspace_roots(args)
+        assert roots == [str(tmp_path)]
+
+    def test_resolve_multiple_paths(self, tmp_path):
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        dir_a.mkdir(); dir_b.mkdir()
+        args = argparse.Namespace(workspace=None, paths=[str(dir_a), str(dir_b)], port=8765)
+        roots = m._resolve_workspace_roots(args)
+        assert roots == [str(dir_a), str(dir_b)]
+
+    def test_resolve_code_workspace_file(self, tmp_path):
+        dir_a = tmp_path / "proj_a"
+        dir_b = tmp_path / "proj_b"
+        dir_a.mkdir(); dir_b.mkdir()
+        ws_file = tmp_path / "myworkspace.code-workspace"
+        ws_file.write_text(
+            f'{{"folders": [{{"path": "{dir_a}"}}, {{"path": "{dir_b}"}}]}}'
+        )
+        args = argparse.Namespace(workspace=str(ws_file), paths=None, port=8765)
+        roots = m._resolve_workspace_roots(args)
+        assert str(dir_a) in roots
+        assert str(dir_b) in roots
+        assert roots.index(str(dir_a)) < roots.index(str(dir_b))
+
+    def test_resolve_code_workspace_relative_paths(self, tmp_path):
+        dir_a = tmp_path / "a"
+        dir_a.mkdir()
+        ws_file = tmp_path / "test.code-workspace"
+        ws_file.write_text('{"folders": [{"path": "a"}]}')
+        args = argparse.Namespace(workspace=str(ws_file), paths=None, port=8765)
+        roots = m._resolve_workspace_roots(args)
+        assert str(dir_a) in roots
+
+    def test_parse_code_workspace(self, tmp_path):
+        dir_a = tmp_path / "alpha"
+        dir_b = tmp_path / "beta"
+        dir_a.mkdir(); dir_b.mkdir()
+        ws_file = tmp_path / "multi.code-workspace"
+        ws_file.write_text(
+            f'{{"folders": [{{"path": "{dir_a}"}}, {{"path": "{dir_b}"}}]}}'
+        )
+        roots = m._parse_code_workspace(str(ws_file))
+        assert str(dir_a) in roots
+        assert str(dir_b) in roots
+
+    def test_indexer_extra_roots_property(self, tmp_path):
+        from agent.indexer import CodeIndexer
+        dir_a = tmp_path / "a"; dir_a.mkdir()
+        dir_b = tmp_path / "b"; dir_b.mkdir()
+        indexer = CodeIndexer(str(dir_a), extra_roots=[str(dir_b)])
+        assert len(indexer.all_roots) == 2
+        assert indexer.all_roots[0] == dir_a.resolve()
+        assert indexer.all_roots[1] == dir_b.resolve()
+
+    def test_indexer_all_roots_default_is_primary_only(self, tmp_path):
+        from agent.indexer import CodeIndexer
+        indexer = CodeIndexer(str(tmp_path))
+        assert indexer.all_roots == [tmp_path.resolve()]
+
+    def test_multi_root_indexes_files_from_all_roots(self, tmp_path):
+        from agent.indexer import CodeIndexer
+        dir_a = tmp_path / "a"; dir_a.mkdir()
+        dir_b = tmp_path / "b"; dir_b.mkdir()
+        (dir_a / "mod_a.py").write_text("def func_a(): pass")
+        (dir_b / "mod_b.py").write_text("def func_b(): pass")
+        indexer = CodeIndexer(str(dir_a), extra_roots=[str(dir_b)])
+        files, _ = indexer.index_workspace()
+        assert files == 2, f"expected 2 files across both roots, got {files}"
+        paths = indexer.indexed_file_paths
+        assert any("mod_a" in p for p in paths)
+        assert any("mod_b" in p for p in paths)
+
+    def test_cmd_start_multi_path_passes_extra_roots(self, tmp_path):
+        dir_a = tmp_path / "a"; dir_a.mkdir()
+        dir_b = tmp_path / "b"; dir_b.mkdir()
+        ws_a = str(dir_a)
+        ws_b = str(dir_b)
+        wh = workspace_hash(ws_a)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_start(_make_args(paths=[ws_a, ws_b], port=8765))
+
+        mock_do_start.assert_called_once_with(ws_a, 8765, wh, extra_roots=[ws_b])

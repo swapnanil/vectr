@@ -22,8 +22,10 @@ def _mock_event(src_path: str, is_directory: bool = False):
 
 
 def _mock_indexer(workspace_root: str = "/workspace"):
+    from pathlib import Path
     indexer = MagicMock()
     indexer.workspace_root = workspace_root
+    indexer.all_roots = [Path(workspace_root)]
     return indexer
 
 
