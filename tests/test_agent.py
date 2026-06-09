@@ -281,7 +281,7 @@ class TestWorkspaceDetect:
         assert should_index_file(str(f), []) is False
 
     def test_should_skip_unsupported_ext(self, tmp_path) -> None:
-        f = tmp_path / "README.md"
+        f = tmp_path / "data.csv"
         f.touch()
         from integrations.workspace_detect import should_index_file
         assert should_index_file(str(f), []) is False
