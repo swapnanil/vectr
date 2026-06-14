@@ -133,6 +133,53 @@ class TestIsIndexable:
 
 
 # ---------------------------------------------------------------------------
+# CodeWatcher — _is_excluded (UPG-8.1: watcher honors excluded dirs)
+# ---------------------------------------------------------------------------
+
+class TestIsExcluded:
+    @pytest.mark.parametrize("path", [
+        "/ws/node_modules/pkg/index.js",
+        "/ws/target/debug/build.rs",
+        "/ws/.venv/lib/utils.py",
+        "/ws/build/out.py",
+        "/ws/sub/__pycache__/mod.py",
+    ])
+    def test_builtin_excluded_dirs(self, path):
+        watcher = CodeWatcher(_mock_indexer())
+        assert watcher._is_excluded(path) is True
+
+    @pytest.mark.parametrize("path", [
+        "/ws/src/main.py",
+        "/ws/app/service.py",
+        "/ws/lib.rs",
+    ])
+    def test_normal_paths_not_excluded(self, path):
+        watcher = CodeWatcher(_mock_indexer())
+        assert watcher._is_excluded(path) is False
+
+    def test_vectrignore_dir_excluded(self, tmp_path):
+        # A dir named in .vectrignore (e.g. tmp) must be excluded for the
+        # running instance's watcher, not just the initial index walk.
+        (tmp_path / ".vectrignore").write_text("tmp\nfixtures\n", encoding="utf-8")
+        watcher = CodeWatcher(_mock_indexer(str(tmp_path)))
+        assert watcher._is_excluded(str(tmp_path / "tmp" / "clone" / "main.py")) is True
+        assert watcher._is_excluded(str(tmp_path / "fixtures" / "data.py")) is True
+        assert watcher._is_excluded(str(tmp_path / "src" / "main.py")) is False
+
+    def test_vectrignore_applied_across_extra_roots(self, tmp_path):
+        # Extra roots each contribute their own .vectrignore entries.
+        from pathlib import Path
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        (extra / ".vectrignore").write_text("tmp\n", encoding="utf-8")
+        indexer = MagicMock()
+        indexer.workspace_root = str(tmp_path)
+        indexer.all_roots = [Path(tmp_path), Path(extra)]
+        watcher = CodeWatcher(indexer)
+        assert watcher._is_excluded(str(extra / "tmp" / "poc" / "lib.rs")) is True
+
+
+# ---------------------------------------------------------------------------
 # CodeWatcher — event handlers
 # ---------------------------------------------------------------------------
 
@@ -155,6 +202,12 @@ class TestOnModified:
         watcher.on_modified(_mock_event("/ws/data.csv"))
         watcher._debounce.schedule.assert_not_called()
 
+    def test_excluded_dir_file_ignored(self):
+        watcher = CodeWatcher(_mock_indexer())
+        watcher._debounce = MagicMock()
+        watcher.on_modified(_mock_event("/ws/node_modules/pkg/index.js"))
+        watcher._debounce.schedule.assert_not_called()
+
 
 class TestOnCreated:
     def test_indexable_file_schedules_debounce(self):
@@ -173,6 +226,17 @@ class TestOnCreated:
         watcher = CodeWatcher(_mock_indexer())
         watcher._debounce = MagicMock()
         watcher.on_created(_mock_event("/ws/config.yaml"))
+        watcher._debounce.schedule.assert_not_called()
+
+    def test_excluded_dir_file_ignored(self):
+        # The runaway-reindex case: a clone under tmp/ creates source files.
+        indexer = _mock_indexer("/ws")
+        from pathlib import Path
+        # Simulate .vectrignore-derived exclusion by injecting the dir name.
+        watcher = CodeWatcher(indexer)
+        watcher._excluded_dirs.add("tmp")
+        watcher._debounce = MagicMock()
+        watcher.on_created(_mock_event("/ws/tmp/poc-clone/src/main.py"))
         watcher._debounce.schedule.assert_not_called()
 
 
@@ -246,6 +310,12 @@ class TestOnMoved:
         watcher = CodeWatcher(_mock_indexer())
         watcher._debounce = MagicMock()
         watcher.on_moved(_mock_move_event("/ws/page.py", "/ws/data.csv"))
+        watcher._debounce.schedule.assert_not_called()
+
+    def test_excluded_dest_not_scheduled(self):
+        watcher = CodeWatcher(_mock_indexer())
+        watcher._debounce = MagicMock()
+        watcher.on_moved(_mock_move_event("/ws/x.py", "/ws/node_modules/pkg/y.js"))
         watcher._debounce.schedule.assert_not_called()
 
     def test_directory_move_ignored(self):

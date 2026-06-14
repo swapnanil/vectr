@@ -8,7 +8,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
 
-from agent.indexer import CodeIndexer, LANG_BY_EXT
+from agent.indexer import CodeIndexer, LANG_BY_EXT, EXCLUDED_DIRS
 
 
 class _DebounceTimer:
@@ -42,16 +42,41 @@ class CodeWatcher(FileSystemEventHandler):
         self._searcher_refresh = searcher_refresh_fn
         self._debounce = _DebounceTimer(2.0, self._handle_change)
         self._observer: Observer | None = None
+        self._excluded_dirs = self._collect_excluded_dirs()
+
+    def _collect_excluded_dirs(self) -> set[str]:
+        """Built-in excluded dir names plus every root's .vectrignore entries.
+
+        The observer watches each root recursively, so without this the watcher
+        would re-index files under tmp/, target/, node_modules/, nested clones,
+        etc. on every file event — the runaway re-indexing UPG-8.1 describes.
+        .gitignore/.vectrignore are consulted by the initial walk but not by
+        watchdog events, so we mirror the dir-exclusion rule here.
+        """
+        from integrations.workspace_detect import get_vectrignore_dirs
+        excluded = set(EXCLUDED_DIRS)
+        for root in self._indexer.all_roots:
+            try:
+                excluded |= get_vectrignore_dirs(str(root))
+            except Exception:
+                pass
+        return excluded
 
     def _is_indexable(self, path: str) -> bool:
         return Path(path).suffix.lower() in LANG_BY_EXT
 
+    def _is_excluded(self, path: str) -> bool:
+        """True if any path component is an excluded dir (built-in or .vectrignore)."""
+        return bool(set(Path(path).parts) & self._excluded_dirs)
+
     def on_modified(self, event: FileSystemEvent) -> None:
-        if not event.is_directory and self._is_indexable(event.src_path):
+        if not event.is_directory and self._is_indexable(event.src_path) \
+                and not self._is_excluded(event.src_path):
             self._debounce.schedule(event.src_path, "modify")
 
     def on_created(self, event: FileSystemEvent) -> None:
-        if not event.is_directory and self._is_indexable(event.src_path):
+        if not event.is_directory and self._is_indexable(event.src_path) \
+                and not self._is_excluded(event.src_path):
             self._debounce.schedule(event.src_path, "create")
 
     def on_deleted(self, event: FileSystemEvent) -> None:
@@ -74,8 +99,8 @@ class CodeWatcher(FileSystemEventHandler):
             self._indexer.delete_file(src)
             if self._searcher_refresh:
                 self._searcher_refresh()
-        # The new path is indexed like a create/modify (debounced).
-        if dest and self._is_indexable(dest):
+        # The new path is indexed like a create/modify (debounced) unless excluded.
+        if dest and self._is_indexable(dest) and not self._is_excluded(dest):
             self._debounce.schedule(dest, "move")
 
     def _handle_change(self, path: str, action: str = "modify") -> None:
