@@ -414,6 +414,7 @@ class CodeIndexer:
 
         db_dir = Path(db_path) if db_path else Path.home() / ".cache" / "vectr" / "db" / self._workspace_hash()
         db_dir.mkdir(parents=True, exist_ok=True)
+        self._db_dir = db_dir
 
         self._client = chromadb.PersistentClient(path=str(db_dir))
         self._collection = self._client.get_or_create_collection(
@@ -440,13 +441,23 @@ class CodeIndexer:
     # Public API
     # ------------------------------------------------------------------
 
-    def index_workspace(self, gitignore_patterns: list[str] | None = None) -> tuple[int, int]:
+    def index_workspace(
+        self, gitignore_patterns: list[str] | None = None, force: bool = False,
+    ) -> tuple[int, int]:
         """Walk workspace, index all supported files. Returns (files_indexed, chunks_total).
 
         Three-phase pipeline:
           1. Parallel chunking   — ThreadPoolExecutor, tree-sitter releases GIL
           2. Global batch embed  — 256-chunk batches across all files (vs 64 per-file)
           3. Incremental skip    — files unchanged since last index are skipped via mtime cache
+
+        Before indexing, chunks for files no longer in the walk set (excluded via
+        .vectrignore/.gitignore, deleted, or moved out of all roots) are pruned so
+        the collection never carries orphaned chunks (UPG-8.4).
+
+        force=True ignores the mtime cache and re-chunks/re-embeds every file,
+        replacing its chunks — a clean rebuild that recovers from any cache/
+        collection desync without a manual cache wipe (UPG-8.6).
         """
         from integrations.workspace_detect import (
             should_index_file, get_gitignore_patterns, get_vectrignore_dirs,
@@ -466,8 +477,21 @@ class CodeIndexer:
                     if should_index_file(str(fpath), root_patterns, extra_excluded_dirs=vectrignore_dirs):
                         all_files.append(fpath)
 
-        # Incremental: split into files to index vs unchanged files to skip
+        should_index_paths = {str(f) for f in all_files}
+
+        # Reconcile: drop chunks for files no longer indexable (excluded via
+        # .vectrignore/.gitignore, deleted, or moved out of all roots). Without
+        # this, editing .vectrignore stops *new* indexing but leaves the old
+        # chunks in the collection forever. (UPG-8.4)
         mtime_cache = self._load_mtime_cache()
+        pruned = self._prune_orphaned_chunks(should_index_paths, mtime_cache)
+
+        if force:
+            # Clean rebuild: ignore the mtime cache so every file is re-indexed,
+            # and (in Phase 2) its existing chunks are deleted first. (UPG-8.6)
+            mtime_cache = {}
+
+        # Incremental: split into files to index vs unchanged files to skip
         to_index: list[tuple[Path, float]] = []
         for f in all_files:
             try:
@@ -481,6 +505,8 @@ class CodeIndexer:
                 self._indexed_files.add(str(f))  # already indexed — track in memory
 
         if not to_index:
+            if pruned:
+                self._save_mtime_cache(mtime_cache)  # persist orphan removals
             logger.info("All %d files up to date — nothing to re-index", len(all_files))
             self._last_indexed = time.time()
             return len(self._indexed_files), self._collection.count()
@@ -522,9 +548,11 @@ class CodeIndexer:
             self._last_indexed = time.time()
             return len(self._indexed_files), self._collection.count()
 
-        # Phase 2: delete stale chunks for re-indexed files (no-op for brand-new files)
+        # Phase 2: delete stale chunks for re-indexed files (no-op for brand-new files).
+        # Under force, mtime_cache is empty, so delete by file_path unconditionally
+        # to avoid leaving stale chunks whose ids no longer match (UPG-8.6).
         for fpath_str in new_mtimes:
-            if fpath_str in mtime_cache:  # previously indexed → delete old chunks
+            if force or fpath_str in mtime_cache:  # previously indexed → delete old chunks
                 try:
                     existing = self._collection.get(where={"file_path": fpath_str})
                     if existing["ids"]:
@@ -642,8 +670,13 @@ class CodeIndexer:
     # ------------------------------------------------------------------
 
     def _mtime_cache_path(self) -> Path:
-        db_dir = Path.home() / ".cache" / "vectr" / "db" / self._workspace_hash()
-        return db_dir / "index_cache.json"
+        # Co-locate the mtime cache with the ChromaDB dir so the two always clear
+        # together. Previously this hardcoded ~/.cache/vectr/db/<hash> regardless
+        # of the db_path override, so when the collection lived elsewhere (e.g. the
+        # service's ~/.cache/vectr/<hash>/chroma) the cache could desync — a stale
+        # cache then reported "nothing to re-index" against an empty collection,
+        # leaving 0 chunks. (UPG-8.5)
+        return self._db_dir / "index_cache.json"
 
     def _load_mtime_cache(self) -> dict[str, float]:
         path = self._mtime_cache_path()
@@ -659,6 +692,52 @@ class CodeIndexer:
             path.write_text(json.dumps(cache), encoding="utf-8")
         except OSError:
             pass
+
+    # ------------------------------------------------------------------
+    # Orphan pruning — reconcile the collection against the current walk
+    # ------------------------------------------------------------------
+
+    def _collection_file_paths(self) -> set[str]:
+        """Distinct file_path values currently stored in the collection.
+
+        Metadata-only paginated scan (no documents/embeddings loaded)."""
+        _PAGE = 1000
+        paths: set[str] = set()
+        offset = 0
+        while True:
+            page = self._collection.get(include=["metadatas"], limit=_PAGE, offset=offset)
+            ids = page["ids"]
+            if not ids:
+                break
+            for meta in page["metadatas"]:
+                fp = meta.get("file_path")
+                if fp:
+                    paths.add(fp)
+            offset += len(ids)
+            if len(ids) < _PAGE:
+                break
+        return paths
+
+    def _prune_orphaned_chunks(
+        self, should_index_paths: set[str], mtime_cache: dict[str, float],
+    ) -> int:
+        """Delete chunks for indexed files no longer in the walk set. Returns count.
+
+        Files become orphaned when they're newly excluded (.vectrignore/.gitignore),
+        deleted, or moved out of all roots. `mtime_cache` is mutated in place so the
+        pruned entries don't linger and re-trigger a phantom skip. (UPG-8.4)
+        """
+        try:
+            indexed_paths = self._collection_file_paths()
+        except Exception:
+            return 0
+        orphaned = indexed_paths - should_index_paths
+        for path in orphaned:
+            self.delete_file(path)
+            mtime_cache.pop(path, None)
+        if orphaned:
+            logger.info("Pruned chunks for %d orphaned/excluded file(s)", len(orphaned))
+        return len(orphaned)
 
     # ------------------------------------------------------------------
     # Stats

@@ -214,6 +214,16 @@ Or pass `--exclude` at init time:
 vectr init --exclude vendor --exclude dist
 ```
 
+Exclusions apply to both the initial index walk **and** the live file watcher, so
+adding a directory to `.vectrignore` stops a running instance from re-indexing it.
+The next index also **prunes** any chunks already stored for now-excluded (or
+deleted) files — you don't have to rebuild from scratch. If you ever need a clean
+rebuild (e.g. after changing the embedding model), force one:
+
+```bash
+vectr index --path . --force      # ignore the incremental cache, re-embed everything
+```
+
 ---
 
 ## Supported languages

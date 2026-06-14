@@ -213,7 +213,7 @@ class VectrService:
                 self._symbol_graph.index_file(self._workspace_root, str(target))
                 files, chunks = 1, self._indexer.total_chunks
             else:
-                files, chunks = self._indexer.index_workspace()
+                files, chunks = self._indexer.index_workspace(force=force)
                 self._searcher.refresh_bm25()
                 self._build_symbol_graph()
                 self._refresh_strategy()

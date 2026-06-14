@@ -541,3 +541,90 @@ class TestHTMLSupport:
     def test_html_file_indexed_by_indexer(self, indexer, tmp_path) -> None:
         count = indexer.index_file(self._write_html(tmp_path))
         assert count >= 1, f"expected ≥1 HTML chunk, got {count}"
+
+
+# ---------------------------------------------------------------------------
+# Indexing hygiene — orphan pruning, mtime-cache colocation, force rebuild
+# (UPG-8.4 / UPG-8.5 / UPG-8.6)
+# ---------------------------------------------------------------------------
+
+class TestIndexingHygiene:
+    def _file_paths_in_collection(self, indexer) -> set[str]:
+        _, _, metas = indexer.get_all_documents()
+        return {m.get("file_path", "") for m in metas}
+
+    # --- UPG-8.5: mtime cache lives next to the chroma db dir ---
+    def test_mtime_cache_colocated_with_db(self, indexer, tmp_path) -> None:
+        cache_path = indexer._mtime_cache_path()
+        # Fixture builds CodeIndexer with db_path=tmp_path/"chroma"
+        assert cache_path == (tmp_path / "chroma" / "index_cache.json")
+        # And it must sit inside the indexer's db dir, not a separate /db/ tree
+        assert str(cache_path).startswith(str(tmp_path / "chroma"))
+
+    def test_mtime_cache_written_into_db_dir(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        assert (tmp_path / "chroma" / "index_cache.json").exists()
+
+    # --- UPG-8.4: orphaned chunks pruned when files leave the walk set ---
+    def test_deleted_file_chunks_pruned_on_reindex(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "keep.py", "def keep(): pass")
+        gone = Path(make_py(tmp_path, "gone.py", "def gone(): pass"))
+        indexer.index_workspace()
+        assert any("gone.py" in p for p in self._file_paths_in_collection(indexer))
+
+        gone.unlink()  # file leaves the walk set
+        indexer.index_workspace()
+        paths = self._file_paths_in_collection(indexer)
+        assert not any("gone.py" in p for p in paths), "orphaned chunks not pruned"
+        assert any("keep.py" in p for p in paths), "kept file must remain"
+
+    def test_vectrignore_excluded_dir_pruned_on_reindex(self, indexer, tmp_path) -> None:
+        (tmp_path / "vendor").mkdir()
+        make_py(tmp_path, "vendor/lib.py", "def lib(): pass")
+        make_py(tmp_path, "app.py", "def app(): pass")
+        indexer.index_workspace()
+        assert any("vendor/lib.py" in p for p in self._file_paths_in_collection(indexer))
+
+        # Newly exclude the vendor dir; its chunks must be pruned on next index.
+        (tmp_path / ".vectrignore").write_text("vendor\n", encoding="utf-8")
+        indexer.index_workspace()
+        paths = self._file_paths_in_collection(indexer)
+        assert not any("vendor/lib.py" in p for p in paths), "excluded dir not pruned"
+        assert any("app.py" in p for p in paths)
+
+    def test_prune_drops_mtime_cache_entry(self, indexer, tmp_path) -> None:
+        gone = Path(make_py(tmp_path, "gone.py", "def gone(): pass"))
+        indexer.index_workspace()
+        assert str(gone) in indexer._load_mtime_cache()
+        gone.unlink()
+        indexer.index_workspace()
+        assert str(gone) not in indexer._load_mtime_cache()
+
+    # --- UPG-8.6: force=True rebuilds, ignoring the mtime cache ---
+    def test_force_rebuilds_after_collection_desync(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        n = indexer.total_chunks
+        assert n > 0
+
+        # Simulate a cache/collection desync: wipe the collection but keep the
+        # mtime cache (the exact trap UPG-8.5 describes).
+        ids, _, _ = indexer.get_all_documents()
+        indexer._collection.delete(ids=ids)
+        assert indexer.total_chunks == 0
+
+        # Without force, the stale mtime cache says "nothing to re-index".
+        indexer.index_workspace(force=False)
+        assert indexer.total_chunks == 0
+
+        # force=True ignores the cache and rebuilds.
+        indexer.index_workspace(force=True)
+        assert indexer.total_chunks == n
+
+    def test_force_does_not_duplicate_chunks(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        n = indexer.total_chunks
+        indexer.index_workspace(force=True)
+        assert indexer.total_chunks == n, "force must replace, not duplicate, chunks"
