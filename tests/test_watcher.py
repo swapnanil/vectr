@@ -21,6 +21,14 @@ def _mock_event(src_path: str, is_directory: bool = False):
     return event
 
 
+def _mock_move_event(src_path: str, dest_path: str, is_directory: bool = False):
+    event = MagicMock()
+    event.src_path = src_path
+    event.dest_path = dest_path
+    event.is_directory = is_directory
+    return event
+
+
 def _mock_indexer(workspace_root: str = "/workspace"):
     from pathlib import Path
     indexer = MagicMock()
@@ -198,6 +206,54 @@ class TestOnDeleted:
         indexer = _mock_indexer()
         watcher = CodeWatcher(indexer)
         watcher.on_deleted(_mock_event("/ws/data.csv"))
+        indexer.delete_file.assert_not_called()
+
+
+class TestOnMoved:
+    def test_rename_into_place_indexes_dest(self):
+        # The case that mattered: atomic save / Write tool creates a file via
+        # rename, so the new path must be scheduled for indexing.
+        watcher = CodeWatcher(_mock_indexer())
+        watcher._debounce = MagicMock()
+        watcher.on_moved(_mock_move_event("/ws/new_module.py", "/ws/dest.py"))
+        watcher._debounce.schedule.assert_called_once_with("/ws/dest.py", "move")
+
+    def test_temp_rename_indexes_only_dest(self):
+        # Editor atomic save: temp file (non-indexable) renamed onto real .py
+        indexer = _mock_indexer()
+        watcher = CodeWatcher(indexer)
+        watcher._debounce = MagicMock()
+        watcher.on_moved(_mock_move_event("/ws/.main.py.swp.tmp", "/ws/main.py"))
+        watcher._debounce.schedule.assert_called_once_with("/ws/main.py", "move")
+        indexer.delete_file.assert_not_called()  # temp src was never indexed
+
+    def test_rename_removes_old_indexable_src(self):
+        indexer = _mock_indexer()
+        watcher = CodeWatcher(indexer)
+        watcher._debounce = MagicMock()
+        watcher.on_moved(_mock_move_event("/ws/old.py", "/ws/renamed.py"))
+        indexer.delete_file.assert_called_once_with("/ws/old.py")
+        watcher._debounce.schedule.assert_called_once_with("/ws/renamed.py", "move")
+
+    def test_src_delete_triggers_searcher_refresh(self):
+        refresh = MagicMock()
+        watcher = CodeWatcher(_mock_indexer(), searcher_refresh_fn=refresh)
+        watcher._debounce = MagicMock()
+        watcher.on_moved(_mock_move_event("/ws/old.py", "/ws/new.py"))
+        refresh.assert_called_once()
+
+    def test_non_indexable_dest_not_scheduled(self):
+        watcher = CodeWatcher(_mock_indexer())
+        watcher._debounce = MagicMock()
+        watcher.on_moved(_mock_move_event("/ws/page.py", "/ws/data.csv"))
+        watcher._debounce.schedule.assert_not_called()
+
+    def test_directory_move_ignored(self):
+        indexer = _mock_indexer()
+        watcher = CodeWatcher(indexer)
+        watcher._debounce = MagicMock()
+        watcher.on_moved(_mock_move_event("/ws/src", "/ws/src2", is_directory=True))
+        watcher._debounce.schedule.assert_not_called()
         indexer.delete_file.assert_not_called()
 
 

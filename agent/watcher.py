@@ -60,6 +60,24 @@ class CodeWatcher(FileSystemEventHandler):
             if self._searcher_refresh:
                 self._searcher_refresh()
 
+    def on_moved(self, event: FileSystemEvent) -> None:
+        # A rename/move fires here — NOT on_created or on_modified. Editors and
+        # tools that save atomically (write a temp file, then rename it into
+        # place) land in this path, so without on_moved a freshly created file
+        # is never indexed until it is later edited in place.
+        if event.is_directory:
+            return
+        src = getattr(event, "src_path", None)
+        dest = getattr(event, "dest_path", None)
+        # The old path leaves the index (if it was something we indexed).
+        if src and self._is_indexable(src):
+            self._indexer.delete_file(src)
+            if self._searcher_refresh:
+                self._searcher_refresh()
+        # The new path is indexed like a create/modify (debounced).
+        if dest and self._is_indexable(dest):
+            self._debounce.schedule(dest, "move")
+
     def _handle_change(self, path: str, action: str = "modify") -> None:
         self._indexer.index_file(path)
         if self._searcher_refresh:
