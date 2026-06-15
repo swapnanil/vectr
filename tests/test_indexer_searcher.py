@@ -309,6 +309,38 @@ class TestCodeSearcher:
         results, _ = s.search("function", language="python")
         assert all(r.language == "python" for r in results)
 
+    def test_unfiltered_search_fetches_deeper_pool(self, indexer, tmp_path) -> None:
+        """Unfiltered queries fetch a deeper rerank pool than filtered ones, so real
+        code isn't crowded out by doc prose before the quality prior runs (UPG-2.1 tuning)."""
+        import agent.searcher as searcher_mod
+        # Index enough chunks that both fetch depths are below the total.
+        body = "\n".join(f"def fn_{i}(x):\n    return x + {i}\n" for i in range(80))
+        path = make_py(tmp_path, "many.py", body)
+        indexer.index_file(path)
+        assert indexer.total_chunks >= searcher_mod._RERANK_TOP_K_UNFILTERED
+
+        from agent.searcher import CodeSearcher
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        class _CountingReranker:
+            def __init__(self):
+                self.last_count = 0
+            def rerank(self, query, candidates):
+                self.last_count = len(candidates)
+                return [c for _, c in candidates]
+
+        stub = _CountingReranker()
+        s._reranker = stub  # force the rerank path on
+        s.search("function returning a number", language=None)
+        unfiltered_count = stub.last_count
+        s.search("function returning a number", language="python")
+        filtered_count = stub.last_count
+
+        assert unfiltered_count == min(searcher_mod._RERANK_TOP_K_UNFILTERED, indexer.total_chunks)
+        assert filtered_count == min(searcher_mod._RERANK_TOP_K, indexer.total_chunks)
+        assert unfiltered_count > filtered_count
+
     def test_search_multiple_files_ranked(self, indexer, tmp_path) -> None:
         # Code tokenizer splits camelCase: "RateLimitMiddleware" → ["rate","limit","middleware"]
         # so querying "rate limit" finds middleware.py without any workarounds.

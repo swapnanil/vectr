@@ -54,7 +54,11 @@ def _code_tokenize(text: str) -> list[str]:
 # Optional cross-encoder reranker (lazy-loaded)
 # ---------------------------------------------------------------------------
 
-_RERANK_TOP_K = 20  # rerank this many hybrid candidates before trimming to n_results
+_RERANK_TOP_K = 40  # rerank this many hybrid candidates before trimming to n_results
+# When no language filter is set, doc prose dominates the shallow hybrid pool and
+# real implementation chunks fall outside it (audit: extractor.py / chunk_file never
+# fetched). Fetch a deeper pool in that case so the quality prior has code to surface.
+_RERANK_TOP_K_UNFILTERED = 60
 
 
 class _Reranker:
@@ -147,9 +151,13 @@ class CodeSearcher:
         if self._indexer.total_chunks == 0:
             return [], 0
 
-        # Fetch extra candidates when reranking so the reranker has room to reorder
-        fetch_n = min(_RERANK_TOP_K if (rerank and self._reranker) else n_results * 2,
-                      self._indexer.total_chunks)
+        # Fetch extra candidates when reranking so the reranker has room to reorder.
+        # Go deeper when unfiltered, where doc prose otherwise crowds code out of the pool.
+        if rerank and self._reranker:
+            top_k = _RERANK_TOP_K_UNFILTERED if language is None else _RERANK_TOP_K
+        else:
+            top_k = n_results * 2
+        fetch_n = min(top_k, self._indexer.total_chunks)
 
         # --- Vector search ---
         query_embedding = self._indexer.embed_query(query)

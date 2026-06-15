@@ -134,13 +134,18 @@ def is_navigational_chunk(content: str, language: str = "") -> bool:
 
 
 def is_markdown_heading_only(content: str) -> bool:
-    """True if a markdown chunk is essentially just heading lines (UPG-2.1)."""
-    lines = _meaningful_lines(content)
-    if not lines:
+    """True if a markdown chunk is essentially just heading(s) + a scrap of body.
+
+    ``_meaningful_lines`` already strips ``#``-prefixed lines (markdown headings
+    read as comments), so what's left is the prose body. A chunk with no body, or
+    a heading plus only a tiny fragment of text (e.g. ``### vectr_evict_hint`` /
+    ``No distinct content again.``), carries no real retrieval signal (UPG-2.1).
+    A genuine one-sentence section (≥40 chars of prose) is real content and kept.
+    """
+    body = _meaningful_lines(content)
+    if not body:
         return True
-    non_heading = [l for l in lines if not _MD_HEADING_RE.match(l)]
-    # Allow a tiny bit of trailing text; flag if it's dominated by headings.
-    return len(non_heading) == 0 or (len(lines) <= 2 and len(non_heading) <= 1 and len(" ".join(non_heading)) < 40)
+    return len(body) <= 2 and len(" ".join(body)) < 40
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +211,19 @@ def query_wants_tests(query: str) -> bool:
 # Quality prior (UPG-2.1)
 # ---------------------------------------------------------------------------
 
+# Documentation languages — prose, not implementation. On code-shaped queries the
+# audit found substantive doc prose (blog sections, README walkthroughs, marketing
+# HTML) burying real code, because the embedding model scores natural-language prose
+# highly against natural-language queries. A mild demotion lets near-tied code edge
+# ahead while leaving docs on top when nothing else competes (UPG-2.1).
+_DOC_LANGUAGES = {"markdown", "md", "html", "htm", "rst", "text", "txt", "mdx"}
+
+
+def is_doc_language(language: str) -> bool:
+    """True for documentation/prose languages (vs. implementation code)."""
+    return (language or "").lower() in _DOC_LANGUAGES
+
+
 # Multipliers applied to the hybrid similarity score. 1.0 = neutral.
 _Q_TRIVIAL = 0.15
 _Q_NAVIGATIONAL = 0.35
@@ -213,6 +231,7 @@ _Q_HEADING_ONLY = 0.40
 _Q_GENERATED = 0.45
 _Q_VECTR_CONFIG = 0.10
 _Q_TEST_DEPRIORITISED = 0.55
+_Q_DOC_PROSE = 0.70       # substantive documentation prose vs implementation code
 _Q_SHORT_PENALTY = 0.80   # bodies with very few meaningful lines
 
 
@@ -244,6 +263,8 @@ def quality_score(
         score *= _Q_GENERATED
     if file_path and is_test_file(file_path) and not query_targets_tests:
         score *= _Q_TEST_DEPRIORITISED
+    if is_doc_language(language):
+        score *= _Q_DOC_PROSE
 
     n_lines = len(_meaningful_lines(content))
     if n_lines <= 2:

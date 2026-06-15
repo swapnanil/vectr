@@ -8,6 +8,7 @@ from agent.chunk_quality import (
     is_trivial_chunk,
     is_navigational_chunk,
     is_markdown_heading_only,
+    is_doc_language,
     is_vectr_config_file,
     is_generated_file,
     is_test_file,
@@ -178,6 +179,56 @@ class TestQualityScore:
     def test_navigational_node_type_short_circuits(self):
         s = quality_score("anything at all here", node_type=NAVIGATIONAL_NODE_TYPE)
         assert s == pytest.approx(0.35)
+
+
+class TestIsDocLanguage:
+    @pytest.mark.parametrize("lang", ["markdown", "md", "html", "htm", "rst", "text", "txt", "mdx", "HTML", "Markdown"])
+    def test_doc_languages(self, lang):
+        assert is_doc_language(lang) is True
+
+    @pytest.mark.parametrize("lang", ["python", "rust", "c", "zig", "go", "javascript", "typescript", ""])
+    def test_code_languages(self, lang):
+        assert is_doc_language(lang) is False
+
+
+class TestDocProseDemotion:
+    """Substantive doc prose should rank below comparable implementation code (UPG-2.1 tuning)."""
+
+    def test_doc_prose_demoted_below_code(self):
+        body = (
+            "This section walks through how the resolver acquires the workspace lock,\n"
+            "what happens on contention, and how the PID-scoped guard is released.\n"
+            "It is a real, substantive paragraph of documentation prose."
+        )
+        doc = quality_score(body, file_path="/p/guide.md", language="markdown")
+        code = quality_score(
+            "def f():\n    return compute(x)\n    y = 1\n    z = 2", file_path="/p/a.py", language="python"
+        )
+        assert code > doc
+        # mild, not destructive: real prose stays well above trivial/navigational tiers
+        assert doc == pytest.approx(0.70, abs=0.01)
+
+    def test_html_prose_also_demoted(self):
+        # 3+ meaningful lines so the ≤2-line short penalty doesn't also apply
+        html = quality_score(
+            "<section><p>A long descriptive paragraph about vector databases.</p>\n"
+            "<p>A second paragraph describing nearest-neighbour search.</p>\n"
+            "<p>A third paragraph on indexing.</p></section>",
+            file_path="/p/index.html",
+            language="html",
+        )
+        assert html == pytest.approx(0.70, abs=0.01)
+
+    def test_generated_doc_compounds(self):
+        # a generated markdown file is both doc-prose and generated → multipliers compound
+        s = quality_score(
+            "Auto-generated API reference paragraph one.\n"
+            "Auto-generated paragraph two here.\n"
+            "Auto-generated paragraph three closes it out.",
+            file_path="/p/api.generated.md",
+            language="markdown",
+        )
+        assert s == pytest.approx(0.45 * 0.70, abs=0.01)
 
 
 class TestNormalizedContent:
