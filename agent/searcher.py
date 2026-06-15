@@ -148,6 +148,13 @@ class CodeSearcher:
         """Return (results, query_time_ms)."""
         t0 = time.monotonic()
 
+        # UPG-3.1: normalise the language filter HERE — the single point both the
+        # REST (service.search) and MCP (service.search_routed) paths funnel
+        # through — so case/whitespace ("C", " Rust ") match indexed values and a
+        # blank string degrades to "no filter" consistently for every caller.
+        if language is not None:
+            language = language.strip().lower() or None
+
         if self._indexer.total_chunks == 0:
             return [], 0
 

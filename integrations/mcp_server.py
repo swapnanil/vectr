@@ -116,7 +116,9 @@ _EXPLORATION_TOOLS = [
                 },
                 "language": {
                     "type": "string",
-                    "description": "Filter to a specific language (python, javascript, typescript, go, rust, java)",
+                    "description": "Filter to a specific indexed language (e.g. python, rust, c, zig). "
+                                   "Any language the index contains is accepted; an unindexed "
+                                   "language returns no results plus the list of indexed languages.",
                     "nullable": True,
                 },
             },
@@ -498,6 +500,19 @@ def handle_tools_call(
             pass
 
         sections: list[str] = []
+
+        # UPG-3.1: a language filter that matched nothing because that language
+        # isn't indexed (not merely a query miss) should tell the caller what IS
+        # indexable, rather than silently returning empty.
+        if language and not results:
+            indexed = service.indexed_languages()
+            if language.lower() not in {l.lower() for l in indexed}:
+                avail = ", ".join(indexed) if indexed else "(none yet)"
+                sections.append(
+                    f"─── No results: language={language!r} is not indexed ───\n"
+                    f"Indexed languages: {avail}.\n"
+                    f"Re-run without the language filter, or use one of the above."
+                )
 
         # L1 map hint for structural queries
         if decision.include_map_hint:

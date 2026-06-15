@@ -452,6 +452,7 @@ class CodeIndexer:
         )
         self._last_indexed: float = 0.0
         self._indexed_files: set[str] = set()
+        self._lang_cache: tuple[int, list[str]] | None = None  # (chunk_count, languages) — UPG-3.1
 
     def _workspace_hash(self) -> str:
         return hashlib.md5(str(self.workspace_root).encode()).hexdigest()[:12]
@@ -783,6 +784,36 @@ class CodeIndexer:
     def indexed_file_paths(self) -> list[str]:
         """Return a copy of all file paths currently in the index."""
         return list(self._indexed_files)
+
+    def indexed_languages(self) -> list[str]:
+        """Distinct, sorted `language` values currently in the collection (UPG-3.1).
+
+        The ground truth for which languages the index can actually be filtered to
+        — derived from chunk metadata, not a fixed allow-list. Metadata-only
+        paginated scan, cached against the live chunk count so it only rescans when
+        the index changes.
+        """
+        count = self.total_chunks
+        if self._lang_cache is not None and self._lang_cache[0] == count:
+            return self._lang_cache[1]
+        _PAGE = 1000
+        langs: set[str] = set()
+        offset = 0
+        while True:
+            page = self._collection.get(include=["metadatas"], limit=_PAGE, offset=offset)
+            ids = page["ids"]
+            if not ids:
+                break
+            for meta in page["metadatas"]:
+                lang = meta.get("language")
+                if lang:
+                    langs.add(lang)
+            offset += len(ids)
+            if len(ids) < _PAGE:
+                break
+        result = sorted(langs)
+        self._lang_cache = (count, result)
+        return result
 
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query string. Public method for external callers."""

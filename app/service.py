@@ -231,6 +231,10 @@ class VectrService:
         self._eviction_advisor.record_results(results)
         return results, query_ms
 
+    def indexed_languages(self) -> list[str]:
+        """Distinct languages actually present in the index (UPG-3.1)."""
+        return self._indexer.indexed_languages()
+
     def route_query(self, query: str):
         """Classify a query and return a RoutingDecision."""
         from agent.query_router import route

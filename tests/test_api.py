@@ -106,14 +106,32 @@ def test_search_invalid_n_results_too_high(client) -> None:
     assert resp.status_code == 422
 
 
-def test_search_invalid_language(client) -> None:
-    resp = client.post("/v1/search", json={"query": "auth", "language": "cobol"})
-    assert resp.status_code == 422
+def test_search_unindexed_language_no_422(client) -> None:
+    # UPG-3.1: a real-but-unindexed language must NOT 422 (c/zig were the pain).
+    # It is accepted; unindexed languages simply yield no matches (+ MCP hint).
+    for lang in ("c", "zig", "cobol"):
+        resp = client.post("/v1/search", json={"query": "auth", "language": lang})
+        assert resp.status_code == 200, f"{lang} should be accepted, got {resp.status_code}"
+
+
+def test_search_language_normalized(client) -> None:
+    # mixed case + whitespace normalised to lower/stripped
+    resp = client.post("/v1/search", json={"query": "auth", "language": "  Rust "})
+    assert resp.status_code == 200
 
 
 def test_search_with_language_filter(client) -> None:
     resp = client.post("/v1/search", json={"query": "auth", "language": "python"})
     assert resp.status_code == 200
+
+
+def test_search_request_accepts_any_language() -> None:
+    # UPG-3.1: model no longer rejects/normalises — it just carries the value.
+    # Normalisation is shared in CodeSearcher.search (see test_indexer_searcher).
+    from app.models import SearchRequest
+    assert SearchRequest(query="q", language="c").language == "c"
+    assert SearchRequest(query="q", language="zig").language == "zig"
+    assert SearchRequest(query="q", language=None).language is None
 
 
 # ---------------------------------------------------------------------------

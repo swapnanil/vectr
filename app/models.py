@@ -20,20 +20,15 @@ class IndexRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Natural language or code query")
     n_results: int = Field(default=10, ge=1, le=50, description="Number of results to return")
+    # UPG-3.1: any indexed language is accepted (no fixed allow-list, no 422).
+    # Normalisation (lower/strip, blank→None) lives in CodeSearcher.search — the
+    # shared path for both REST and MCP — so behaviour can't diverge by entrypoint.
     language: str | None = Field(
         default=None,
-        description="Filter to a specific language: python, javascript, typescript, go, rust, java",
+        description="Filter to a specific indexed language (e.g. python, rust, c, zig). "
+                    "Any language the index actually contains is accepted; unindexed "
+                    "languages return no matches rather than an error.",
     )
-
-    @field_validator("language")
-    @classmethod
-    def validate_language(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        allowed = {"python", "javascript", "typescript", "go", "rust", "java"}
-        if v.lower() not in allowed:
-            raise ValueError(f"language must be one of {sorted(allowed)}")
-        return v.lower()
 
 
 # ---------------------------------------------------------------------------

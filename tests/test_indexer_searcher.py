@@ -157,6 +157,25 @@ class TestCodeIndexer:
         indexer.index_file(path)
         assert path in indexer.indexed_file_paths
 
+    def test_indexed_languages_lists_distinct_sorted(self, indexer, tmp_path) -> None:
+        # UPG-3.1: ground-truth language set comes from chunk metadata, not a fixed list.
+        make_py(tmp_path, "a.py", "def x(): pass")
+        js = tmp_path / "b.js"; js.write_text("function y() {}")
+        indexer.index_file(make_py(tmp_path, "a.py", "def x(): pass"))
+        indexer.index_file(str(js))
+        langs = indexer.indexed_languages()
+        assert langs == sorted(langs)
+        assert "python" in langs and "javascript" in langs
+        assert "cobol" not in langs
+
+    def test_indexed_languages_cache_invalidated_on_change(self, indexer, tmp_path) -> None:
+        indexer.index_file(make_py(tmp_path, "a.py", "def x(): pass"))
+        assert "javascript" not in indexer.indexed_languages()
+        js = tmp_path / "b.js"; js.write_text("function y() {}")
+        indexer.index_file(str(js))
+        # chunk count changed → cache recomputed, js now present
+        assert "javascript" in indexer.indexed_languages()
+
     def test_get_all_documents_returns_indexed_content(self, indexer, tmp_path) -> None:
         make_py(tmp_path, "fn.py", """
             def my_special_function():
@@ -308,6 +327,23 @@ class TestCodeSearcher:
         s.refresh_bm25()
         results, _ = s.search("function", language="python")
         assert all(r.language == "python" for r in results)
+
+    def test_search_language_filter_normalized(self, indexer, tmp_path) -> None:
+        # UPG-3.1: case/whitespace on the filter must still match indexed values,
+        # and apply identically regardless of caller (REST vs MCP both hit this).
+        indexer.index_file(make_py(tmp_path, "app.py", "def python_fn(): pass"))
+        js_path = tmp_path / "app.js"; js_path.write_text("function jsFn() {}")
+        indexer.index_file(str(js_path))
+        from agent.searcher import CodeSearcher
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+        for variant in ("PYTHON", "  Python ", "python"):
+            results, _ = s.search("function", language=variant)
+            assert results, f"variant {variant!r} returned nothing"
+            assert all(r.language == "python" for r in results), f"variant {variant!r} leaked non-python"
+        # blank filter degrades to no-filter (can include js)
+        blank, _ = s.search("function", language="   ")
+        assert any(r.language == "javascript" for r in blank) or blank
 
     def test_unfiltered_search_fetches_deeper_pool(self, indexer, tmp_path) -> None:
         """Unfiltered queries fetch a deeper rerank pool than filtered ones, so real
