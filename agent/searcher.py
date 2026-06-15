@@ -9,6 +9,7 @@ from pathlib import Path
 
 from rank_bm25 import BM25Plus
 
+from agent.chunk_quality import normalized_content, quality_score, query_wants_tests
 from agent.indexer import CodeIndexer
 
 
@@ -102,6 +103,8 @@ class SearchResult:
     language: str
     score: float
     content: str
+    node_type: str = ""
+    dup_count: int = 0   # number of identical chunks collapsed into this one (UPG-2.2)
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +209,7 @@ class CodeSearcher:
                 language=meta.get("language", ""),
                 score=round(merged[cid], 4),
                 content=doc[:2000],
+                node_type=meta.get("node_type", ""),
             ))
 
         # --- Cross-encoder rerank ---
@@ -213,5 +217,49 @@ class CodeSearcher:
             doc_candidate_pairs = [(r.content, r) for r in candidates]
             candidates = self._reranker.rerank(query, doc_candidate_pairs)
 
+        # --- Quality prior + dedup + deterministic tiebreaker (UPG-2.1/2.2/2.3) ---
+        candidates = self._apply_quality_and_dedup(query, candidates)
+
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         return candidates[:n_results], elapsed_ms
+
+    def _apply_quality_and_dedup(
+        self, query: str, candidates: list[SearchResult],
+    ) -> list[SearchResult]:
+        """Re-rank by relevance×quality, collapse duplicates, break ties deterministically.
+
+        Relevance is taken from the candidates' current (post-rerank) order; a
+        per-chunk quality prior then demotes trivial / navigational / generated /
+        heading-only / (off-topic) test chunks (UPG-2.1, 2.3). Byte-identical
+        chunks collapse to a single representative with a duplicate count so
+        boilerplate can't flood the top-N (UPG-2.2).
+        """
+        if not candidates:
+            return candidates
+        targets_tests = query_wants_tests(query)
+        n = len(candidates)
+        scored: list[tuple[float, float, int, SearchResult]] = []
+        for i, r in enumerate(candidates):
+            base = 1.0 - (i / n)  # rank-based relevance, best-first
+            q = quality_score(
+                r.content, r.file_path, r.language, r.node_type,
+                query_targets_tests=targets_tests,
+            )
+            scored.append((base * q, q, i, r))
+
+        # Deterministic order: final score desc, quality desc, length desc, then
+        # original rank, then path — so equal-scoring boilerplate never wins by
+        # unstable sort order.
+        scored.sort(key=lambda t: (-t[0], -t[1], -len(t[3].content), t[2], t[3].file_path))
+
+        seen: dict[str, int] = {}
+        out: list[SearchResult] = []
+        for _, _, _, r in scored:
+            key = normalized_content(r.content)
+            if key in seen:
+                out[seen[key]].dup_count += 1
+                continue
+            seen[key] = len(out)
+            r.dup_count = 0
+            out.append(r)
+        return out

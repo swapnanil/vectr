@@ -742,7 +742,8 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
     lines = [f"Found {len(results)} results for '{query}' ({query_ms}ms, {chunks_searched} chunks searched)\n"]
     for i, r in enumerate(results, 1):
         lines.append(f"{'─' * 60}")
-        lines.append(f"[{i}] {r.file_path}  lines {r.lines}  score {r.score:.3f}")
+        dup = f"  (+{r.dup_count} more identical)" if getattr(r, "dup_count", 0) else ""
+        lines.append(f"[{i}] {r.file_path}  lines {r.lines}  score {r.score:.3f}{dup}")
         if r.symbol_name:
             lines.append(f"    symbol: {r.symbol_name}  language: {r.language}")
         lines.append("")

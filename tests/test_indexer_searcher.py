@@ -628,3 +628,95 @@ class TestIndexingHygiene:
         n = indexer.total_chunks
         indexer.index_workspace(force=True)
         assert indexer.total_chunks == n, "force must replace, not duplicate, chunks"
+
+
+# ---------------------------------------------------------------------------
+# Wave 1 ranking — quality prior, dedup, tiebreaker, test de-prioritization
+# (UPG-2.1 / UPG-2.2 / UPG-2.3)
+# ---------------------------------------------------------------------------
+
+def _sr(content, path="/p/a.py", node_type="", score=0.7, lang="python"):
+    from agent.searcher import SearchResult
+    return SearchResult(
+        file_path=path, lines="1-9", symbol_name="", language=lang,
+        score=score, content=content, node_type=node_type,
+    )
+
+
+class TestRankingQuality:
+    def test_duplicates_collapsed(self, searcher) -> None:
+        cands = [
+            _sr("## Create accounts", path="/p/rust/README.md", lang="markdown"),
+            _sr("## Create accounts", path="/p/java/README.md", lang="markdown"),
+            _sr("## Create accounts", path="/p/python/README.md", lang="markdown"),
+        ]
+        out = searcher._apply_quality_and_dedup("create accounts", cands)
+        assert len(out) == 1
+        assert out[0].dup_count == 2  # two identical collapsed into the one kept
+
+    def test_trivial_demoted_below_real(self, searcher) -> None:
+        # Trivial chunk is the most "relevant" (rank 0) but must drop below real code.
+        cands = [
+            _sr("}", path="/p/a.c", lang="c"),
+            _sr("int add(int a, int b) {\n    return a + b;\n}\n// impl", path="/p/a.c", lang="c"),
+        ]
+        out = searcher._apply_quality_and_dedup("add two integers", cands)
+        assert "int add" in out[0].content
+
+    def test_navigational_demoted(self, searcher) -> None:
+        cands = [
+            _sr("pub use a::A;\npub use b::B;\npub use c::C;", path="/p/lib.rs",
+                node_type="navigational", lang="rust"),
+            _sr("pub fn resolve(&self) -> Lock {\n    self.inner.acquire()\n}\n// real",
+                path="/p/resolver.rs", lang="rust"),
+        ]
+        out = searcher._apply_quality_and_dedup("dependency resolution", cands)
+        assert "resolve" in out[0].content
+
+    def test_test_file_demoted_unless_query_targets_tests(self, searcher) -> None:
+        # Realistic candidate set: the test file is ranked #0 (rich doc-comments
+        # match strongly), the impl just below it, then irrelevant filler.
+        test = _sr("def test_resolve():\n    assert resolve()\n    # scenario\n    y=2",
+                   path="/p/tests/test_resolver.py")
+        impl = _sr("def resolve():\n    return pubgrub_solve()\n    # impl body\n    x=1",
+                   path="/p/resolver.py")
+        filler = [_sr(f"def helper{i}():\n    return {i}\n    a={i}\n    b={i}", path=f"/p/h{i}.py")
+                  for i in range(8)]
+        cands = [test, impl] + filler
+
+        # Generic query: implementation surfaces above the test (UPG-2.3).
+        out = searcher._apply_quality_and_dedup("how does resolution work", cands)
+        assert out[0].file_path == "/p/resolver.py"
+        assert out.index(impl) < out.index(test)
+
+        # Test-targeting query: the test file is no longer penalised → keeps #0.
+        out2 = searcher._apply_quality_and_dedup("test for resolve", cands)
+        assert out2[0].file_path == "/p/tests/test_resolver.py"
+
+    def test_empty_candidates(self, searcher) -> None:
+        assert searcher._apply_quality_and_dedup("q", []) == []
+
+
+class TestChunkerHygiene:
+    def test_navigational_window_tagged(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        from agent.chunk_quality import NAVIGATIONAL_NODE_TYPE
+        # Imports-only module → no AST symbols → window fallback → navigational.
+        f = make_py(tmp_path, "barrel.py", "import os\nimport sys\nfrom a import b\nfrom c import d")
+        chunks = chunk_file(f)
+        assert chunks, "expected at least one chunk"
+        assert any(c.node_type == NAVIGATIONAL_NODE_TYPE for c in chunks)
+
+    def test_trivial_only_file_dropped(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        f = tmp_path / "stub.c"      # no C parser → window; single trivial line
+        f.write_text("}\n")
+        chunks = chunk_file(str(f))
+        assert chunks == []
+
+    def test_real_code_kept(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        f = make_py(tmp_path, "real.py", "def compute(x):\n    return x * 2 + offset(x)")
+        chunks = chunk_file(f)
+        assert len(chunks) >= 1
+        assert all(c.node_type != "navigational" for c in chunks)

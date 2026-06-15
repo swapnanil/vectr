@@ -4,6 +4,7 @@ from __future__ import annotations
 import fnmatch
 from pathlib import Path
 
+from agent.chunk_quality import is_generated_file, is_vectr_config_file
 from agent.indexer import LANG_BY_EXT
 
 _SUPPORTED_EXTS = set(LANG_BY_EXT.keys())
@@ -85,6 +86,11 @@ def should_index_file(
     path = Path(file_path)
 
     if path.suffix.lower() not in _SUPPORTED_EXTS:
+        return False
+
+    # UPG-1.3: never index vectr's own injected IDE-config files, nor
+    # machine-generated/vendored files (lookup tables, protobuf, minified).
+    if is_vectr_config_file(file_path) or is_generated_file(file_path):
         return False
 
     excluded = _ALWAYS_SKIP | (extra_excluded_dirs or set())

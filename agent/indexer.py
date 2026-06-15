@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 import chromadb
 import numpy as np
 
+from agent.chunk_quality import (
+    NAVIGATIONAL_NODE_TYPE,
+    is_navigational_chunk,
+    is_trivial_chunk,
+)
+
 
 # ---------------------------------------------------------------------------
 # Language extension mapping
@@ -354,6 +360,24 @@ def _chunk_markdown(lines: list[str], file_path: str) -> list[CodeChunk]:
     return chunks or _fallback_window_chunks(lines, file_path, "markdown")
 
 
+def _postprocess_chunks(chunks: list[CodeChunk]) -> list[CodeChunk]:
+    """Wave 1 chunk hygiene applied to every chunker path.
+
+    - UPG-1.1: drop standalone trivial chunks (bare punctuation/return, lone
+      import/const) — they have no retrieval value and flood top-N on ties.
+    - UPG-1.2: tag re-export / import-only blocks as navigational so the ranker
+      can heavily down-weight them (they're a table of contents, not an answer).
+    """
+    out: list[CodeChunk] = []
+    for c in chunks:
+        if is_trivial_chunk(c.content, c.language):
+            continue
+        if c.node_type != NAVIGATIONAL_NODE_TYPE and is_navigational_chunk(c.content, c.language):
+            c.node_type = NAVIGATIONAL_NODE_TYPE
+        out.append(c)
+    return out
+
+
 def chunk_file(file_path: str) -> list[CodeChunk]:
     """Parse a file and return AST-aware chunks (falls back to windows)."""
     path = Path(file_path)
@@ -370,7 +394,7 @@ def chunk_file(file_path: str) -> list[CodeChunk]:
         return []
 
     if language == "markdown":
-        return _chunk_markdown(lines, file_path)
+        return _postprocess_chunks(_chunk_markdown(lines, file_path))
 
     if language:
         parser = _get_parser(language)
@@ -381,12 +405,12 @@ def chunk_file(file_path: str) -> list[CodeChunk]:
             results: list[CodeChunk] = []
             _collect_chunks_ast(tree.root_node, code_bytes, lines, language, file_path, target_types, results)
             if results:
-                return results
+                return _postprocess_chunks(results)
             # no top-level symbols found → fall through to windows
 
     # fallback
     lang_label = language or path.suffix.lstrip(".") or "text"
-    return _fallback_window_chunks(lines, file_path, lang_label)
+    return _postprocess_chunks(_fallback_window_chunks(lines, file_path, lang_label))
 
 
 # ---------------------------------------------------------------------------
