@@ -66,8 +66,22 @@ class CodeWatcher(FileSystemEventHandler):
         return Path(path).suffix.lower() in LANG_BY_EXT
 
     def _is_excluded(self, path: str) -> bool:
-        """True if any path component is an excluded dir (built-in or .vectrignore)."""
-        return bool(set(Path(path).parts) & self._excluded_dirs)
+        """True if any path component BELOW a workspace root is an excluded dir.
+
+        Only parts relative to the containing root are matched. Matching the
+        absolute prefix too would wrongly exclude an entire workspace that merely
+        lives under a dir named like an excluded one — e.g. any repo checked out
+        under /tmp on Linux (the prefix contains 'tmp'), or a path containing
+        'build'/'target'. (Paths outside every root fall back to all parts.)
+        """
+        p = Path(path)
+        for root in self._indexer.all_roots:
+            try:
+                rel_parts = p.relative_to(root).parts
+                return bool(set(rel_parts) & self._excluded_dirs)
+            except ValueError:
+                continue
+        return bool(set(p.parts) & self._excluded_dirs)
 
     def on_modified(self, event: FileSystemEvent) -> None:
         if not event.is_directory and self._is_indexable(event.src_path) \

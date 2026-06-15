@@ -166,6 +166,21 @@ class TestIsExcluded:
         assert watcher._is_excluded(str(tmp_path / "fixtures" / "data.py")) is True
         assert watcher._is_excluded(str(tmp_path / "src" / "main.py")) is False
 
+    def test_workspace_under_excluded_named_prefix_not_excluded(self, tmp_path):
+        # Regression (CI on Linux): a workspace whose ABSOLUTE path contains an
+        # excluded dir name (e.g. a repo under /tmp, or .../build/proj) must not
+        # have all its files excluded. Only parts BELOW the root count.
+        from pathlib import Path
+        root = tmp_path / "tmp" / "build" / "proj"   # prefix has 'tmp' AND 'build'
+        root.mkdir(parents=True)
+        indexer = MagicMock()
+        indexer.workspace_root = str(root)
+        indexer.all_roots = [Path(root)]
+        watcher = CodeWatcher(indexer)
+        assert watcher._is_excluded(str(root / "src" / "main.py")) is False
+        # but a real excluded dir *inside* the workspace still excludes
+        assert watcher._is_excluded(str(root / "node_modules" / "x.js")) is True
+
     def test_vectrignore_applied_across_extra_roots(self, tmp_path):
         # Extra roots each contribute their own .vectrignore entries.
         from pathlib import Path
