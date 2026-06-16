@@ -29,8 +29,25 @@ from agent.symbol_graph import (
     supports_symbols,
     extract_symbols_from_file,
     _levenshtein,
+    _partial_match_key,
 )
 from tests.conftest import make_py
+
+
+def _seed_symbols(g: "SymbolGraph", workspace: str, specs: list[tuple]) -> None:
+    """Insert synthetic symbols directly so ranking can be tested with precise
+    (name, kind, file_path) control independent of any tree-sitter grammar.
+
+    Each spec is (name, kind, file_path)."""
+    import time
+    now = time.time()
+    with g._conn() as conn:
+        for i, (name, kind, fp) in enumerate(specs):
+            conn.execute(
+                "INSERT INTO symbols (workspace, name, kind, file_path, start_line, end_line, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (workspace, name, kind, fp, i + 1, i + 1, now),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -309,22 +326,22 @@ class TestLocateL2:
         result = g.locate_l2("ws", "pkg_helper_xyz", caller_file=str(f1))
         # "pkg_helper_xyz" has no exact match; falls through to same_module
         # which finds "pkg_helper" (substring "helper" in "pkg_helper") in the same dir
-        assert result.resolution_strategy in ("same_module", "unique_name", "fuzzy", "none")
+        assert result.resolution_strategy in ("same_module", "substring", "fuzzy", "none")
 
-    def test_unique_name_strategy(self, tmp_path) -> None:
+    def test_substring_strategy(self, tmp_path) -> None:
         g = SymbolGraph(str(tmp_path))
         make_py(tmp_path, "x.py", "def unique_xyz_fn(): pass")
         g.index_file("ws", str(tmp_path / "x.py"))
-        # No exact match for "unique_xyz" — but only one symbol contains it
+        # No exact match for "unique_xyz" — but a symbol contains it as a substring
         result = g.locate_l2("ws", "unique_xyz")
-        assert result.resolution_strategy == "unique_name"
+        assert result.resolution_strategy == "substring"
         assert result.symbols[0].name == "unique_xyz_fn"
 
     def test_fuzzy_strategy(self, tmp_path) -> None:
         g = SymbolGraph(str(tmp_path))
         make_py(tmp_path, "f.py", "def foo_bar(): pass")
         g.index_file("ws", str(tmp_path / "f.py"))
-        # "fo_bar" is NOT a substring of "foo_bar" (unique_name skips) but edit-distance 1
+        # "fo_bar" is NOT a substring of "foo_bar" (substring skips) but edit-distance 1
         result = g.locate_l2("ws", "fo_bar")
         assert result.resolution_strategy == "fuzzy"
         assert result.symbols[0].name == "foo_bar"
@@ -735,3 +752,91 @@ class TestIngestTraces:
         from integrations.mcp_server import MCP_TOOLS
         names = {t["name"] for t in MCP_TOOLS}
         assert "vectr_ingest_traces" in names
+
+
+# ---------------------------------------------------------------------------
+# UPG-4.5 — locate: prefer canonical definitions over aliases/impls
+# ---------------------------------------------------------------------------
+
+class TestLocateRankingUPG45:
+    def test_substring_fires_before_fuzzy(self, tmp_path) -> None:
+        # `rand` must resolve to prefix matches (randint/randfraction), never to
+        # fuzzy junk like `nan`/`add`. The substring strategy owns this query.
+        g = SymbolGraph(str(tmp_path))
+        _seed_symbols(g, "ws", [
+            ("randint", "function", str(tmp_path / "random.py")),
+            ("randfraction", "function", str(tmp_path / "random.py")),
+            ("nan", "function", str(tmp_path / "mathmodule.c")),
+            ("add", "function", str(tmp_path / "abstract.c")),
+        ])
+        result = g.locate_l2("ws", "rand")
+        assert result.resolution_strategy == "substring"
+        names = [s.name for s in result.symbols]
+        assert names[0] in ("randint", "randfraction")
+        assert "nan" not in names and "add" not in names
+
+    def test_prefix_match_beats_interior_substring(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        _seed_symbols(g, "ws", [
+            ("myrandom_helper", "function", str(tmp_path / "a.py")),  # interior
+            ("rand_state", "function", str(tmp_path / "b.py")),       # prefix
+        ])
+        result = g.locate_l2("ws", "rand")
+        assert result.symbols[0].name == "rand_state"
+
+    def test_canonical_def_ranks_before_impl_on_exact_match(self, tmp_path) -> None:
+        # Rust: `struct VersionSpecifiers` + several `impl VersionSpecifiers`.
+        # All are an EXACT name hit, so ranking must lead with the struct def.
+        g = SymbolGraph(str(tmp_path))
+        _seed_symbols(g, "ws", [
+            ("VersionSpecifiers", "impl", str(tmp_path / "version.rs")),
+            ("VersionSpecifiers", "impl", str(tmp_path / "ops.rs")),
+            ("VersionSpecifiers", "struct", str(tmp_path / "version.rs")),
+            ("VersionSpecifiers", "impl", str(tmp_path / "cmp.rs")),
+        ])
+        result = g.locate_l2("ws", "VersionSpecifiers")
+        assert result.resolution_strategy == "exact"
+        assert result.symbols[0].kind == "struct"
+
+    def test_function_beats_macro_on_partial_match(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        _seed_symbols(g, "ws", [
+            ("PY_PARSE_MACRO", "macro", str(tmp_path / "pymacro.h")),
+            ("PY_parse_value", "function", str(tmp_path / "parse.c")),
+        ])
+        result = g.locate_l2("ws", "PY_pa")
+        # both are prefix matches; the function definition is more canonical
+        assert result.symbols[0].kind == "function"
+
+    def test_test_and_private_files_deprioritized(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        _seed_symbols(g, "ws", [
+            ("widget_render", "function", str(tmp_path / "test_widget.py")),
+            ("widget_render_helper", "function", str(tmp_path / "_internal.py")),
+            ("widget_render_main", "function", str(tmp_path / "widget.py")),
+        ])
+        # "widget_rend" is an exact match for none of them (all prefix matches),
+        # so the test/private-file penalty decides the lead.
+        result = g.locate_l2("ws", "widget_rend")
+        # real source file leads; test_/_private files sink
+        assert "test_" not in result.symbols[0].file_path.rsplit("/", 1)[-1]
+        assert not result.symbols[0].file_path.rsplit("/", 1)[-1].startswith("_")
+
+    def test_short_query_fuzzy_budget_is_tight(self, tmp_path) -> None:
+        # No substring match exists, so we reach fuzzy. A 3-char query gets dist≤1
+        # and a shared first char, so `add`/`nan` can't match `rnd`.
+        g = SymbolGraph(str(tmp_path))
+        _seed_symbols(g, "ws", [
+            ("add", "function", str(tmp_path / "a.c")),
+            ("nan", "function", str(tmp_path / "b.c")),
+        ])
+        result = g.locate_l2("ws", "rnd")
+        assert result.resolution_strategy == "none"
+
+    def test_partial_match_key_ordering(self) -> None:
+        # Direct unit check on the sort key: prefix < interior; def < impl.
+        prefix_def = {"name": "rand_fn", "kind": "function", "file_path": "src/x.py"}
+        interior = {"name": "myrand", "kind": "function", "file_path": "src/y.py"}
+        prefix_impl = {"name": "rand_x", "kind": "impl", "file_path": "src/z.py"}
+        assert _partial_match_key(prefix_def, "rand") < _partial_match_key(interior, "rand")
+        assert _partial_match_key(prefix_def, "rand") < _partial_match_key(prefix_impl, "rand")

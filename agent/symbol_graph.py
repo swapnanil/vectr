@@ -43,7 +43,7 @@ class Symbol:
 @dataclass
 class LocateResult:
     symbols: list[Symbol]
-    resolution_strategy: str  # exact|suffix|same_module|unique_name|import_chain|fuzzy|none
+    resolution_strategy: str  # exact|suffix|same_module|import_chain|substring|fuzzy|none
     query: str
 
 
@@ -92,7 +92,10 @@ _SYMBOL_TYPES: dict[str, dict[str, str]] = {
     },
     "rust": {
         "function_item": "function",
-        "impl_item": "struct",
+        # An impl block is an implementation, not the type's definition. Keep it a
+        # distinct kind so locate can rank the `struct`/`enum`/`trait` def ahead of
+        # the (often many) impl blocks that share the type's name (UPG-4.5).
+        "impl_item": "impl",
         "struct_item": "struct",
         "trait_item": "interface",
         "enum_item": "enum",
@@ -147,6 +150,57 @@ def supports_symbols(language: str) -> bool:
     norm = language.strip().lower()
     norm = {"c++": "cpp", "cplusplus": "cpp", "objective-c": "c"}.get(norm, norm)
     return norm in SYMBOL_LANGUAGES
+
+
+# Canonical-ness of a symbol kind for `locate` ranking (UPG-4.5). When several
+# symbols share / partially match a name, the user wants "where is X defined",
+# so lead with the type/function definition and bury impl blocks and aliases.
+# Lower rank = more canonical.
+_KIND_RANK: dict[str, int] = {
+    "class": 0, "struct": 0, "enum": 0, "interface": 0, "trait": 0,
+    "function": 1, "method": 1,
+    "route": 2,
+    "macro": 3, "variable": 3,
+    "impl": 4, "alias": 4, "import": 4,
+}
+_KIND_RANK_DEFAULT = 2
+
+
+def _partial_match_key(row, query_lower: str) -> tuple:
+    """Sort key for partial (substring) `locate` matches.
+
+    Ordering, most→least preferred:
+      1. match position — exact (case-insensitive) > prefix > interior substring
+      2. canonical kind — def > impl/alias (see _KIND_RANK)
+      3. not a test/private file
+      4. shorter name (closer to the query)
+      5. file_path (stable tiebreak)
+    """
+    name = row["name"]
+    nl = name.lower()
+    if nl == query_lower:
+        pos = 0
+    elif nl.startswith(query_lower):
+        pos = 1
+    else:
+        pos = 2
+    kind_rank = _KIND_RANK.get(row["kind"], _KIND_RANK_DEFAULT)
+    fp = row["file_path"]
+    fp_low = fp.replace("\\", "/").lower()
+    segments = fp_low.split("/")
+    base = segments[-1]
+    stem = base.rsplit(".", 1)[0]
+    # Test-file / private-file detection must look at the basename and exact path
+    # segments only — substring "test" in a path (e.g. pytest tmp dirs, a
+    # "my_test_project" root) must NOT penalise an otherwise-canonical symbol.
+    is_test = (
+        stem.startswith(("test_", "test-")) or stem in ("test", "tests")
+        or stem.endswith(("_test", ".test", ".spec", "_spec"))
+        or any(seg in ("test", "tests", "testing", "__tests__") for seg in segments[:-1])
+    )
+    is_private = base.startswith("_")
+    test_penalty = 1 if (is_test or is_private) else 0
+    return (pos, kind_rank, test_penalty, len(name), fp)
 
 
 # Call node types per language
@@ -727,9 +781,10 @@ class SymbolGraph:
           0 exact       — name = ?
           1 suffix      — strip qualifier prefix (module.Foo → Foo)
           2 same_module — symbols in same directory as caller_file
-          3 unique_name — exactly one symbol contains name as substring
-          4 import_chain— symbols in files imported by caller_file
-          5 fuzzy       — edit distance ≤ 2
+          3 import_chain— symbols in files imported by caller_file
+          4 substring   — name contained as substring, ranked canonical-first
+                          (prefix > interior, def > impl/alias) — UPG-4.5
+          5 fuzzy       — edit distance ≤ length-scaled threshold, last resort
         """
         def _with_snippets(rows: list) -> list[Symbol]:
             syms = [self._row_to_symbol(r) for r in rows]
@@ -737,15 +792,23 @@ class SymbolGraph:
                 s.snippet = self.get_snippet(s.file_path, s.start_line, s.end_line)
             return syms
 
+        name_lower = name.lower()
+
+        def _ranked_result(rows: list, strategy: str) -> LocateResult:
+            # Canonical-first ordering (UPG-4.5): even within an exact-name hit,
+            # lead with the type/fn definition and bury impl blocks / aliases that
+            # share the name. _partial_match_key handles prefix/kind/test ordering.
+            ranked = sorted(rows, key=lambda r: _partial_match_key(r, name_lower))
+            return LocateResult(symbols=_with_snippets(ranked[:limit]), resolution_strategy=strategy, query=name)
+
         # Strategy 0: exact name match
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM symbols WHERE workspace = ? AND name = ? "
-                "ORDER BY file_path LIMIT ?",
-                (workspace, name, limit),
+                "SELECT * FROM symbols WHERE workspace = ? AND name = ? LIMIT ?",
+                (workspace, name, 200),
             ).fetchall()
         if rows:
-            return LocateResult(symbols=_with_snippets(rows), resolution_strategy="exact", query=name)
+            return _ranked_result(rows, "exact")
 
         # Strategy 1: suffix match — strip qualifier prefix (e.g. "module.Foo" → "Foo")
         suffix = name
@@ -756,12 +819,11 @@ class SymbolGraph:
         if suffix != name:
             with self._conn() as conn:
                 rows = conn.execute(
-                    "SELECT * FROM symbols WHERE workspace = ? AND name = ? "
-                    "ORDER BY file_path LIMIT ?",
-                    (workspace, suffix, limit),
+                    "SELECT * FROM symbols WHERE workspace = ? AND name = ? LIMIT ?",
+                    (workspace, suffix, 200),
                 ).fetchall()
             if rows:
-                return LocateResult(symbols=_with_snippets(rows), resolution_strategy="suffix", query=name)
+                return _ranked_result(rows, "suffix")
 
         # Strategy 2: same-module — symbols in the same directory as caller_file
         if caller_file:
@@ -769,23 +831,13 @@ class SymbolGraph:
             with self._conn() as conn:
                 rows = conn.execute(
                     "SELECT * FROM symbols WHERE workspace = ? AND name LIKE ? "
-                    "AND file_path LIKE ? ORDER BY file_path LIMIT ?",
-                    (workspace, f"%{name}%", f"{caller_dir}/%", limit),
+                    "AND file_path LIKE ? LIMIT ?",
+                    (workspace, f"%{name}%", f"{caller_dir}/%", 200),
                 ).fetchall()
             if rows:
-                return LocateResult(symbols=_with_snippets(rows), resolution_strategy="same_module", query=name)
+                return _ranked_result(rows, "same_module")
 
-        # Strategy 3: unique-name — exactly one symbol matches name as substring
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM symbols WHERE workspace = ? AND name LIKE ? "
-                "ORDER BY length(name) LIMIT ?",
-                (workspace, f"%{name}%", limit + 1),
-            ).fetchall()
-        if len(rows) == 1:
-            return LocateResult(symbols=_with_snippets(rows), resolution_strategy="unique_name", query=name)
-
-        # Strategy 4: import-chain — symbols in files imported by caller_file
+        # Strategy 3: import-chain — symbols in files imported by caller_file
         if caller_file:
             imported = _get_imported_files(caller_file, workspace)
             if imported:
@@ -793,20 +845,41 @@ class SymbolGraph:
                 with self._conn() as conn:
                     rows = conn.execute(
                         f"SELECT * FROM symbols WHERE workspace = ? AND name LIKE ? "
-                        f"AND file_path IN ({ph}) ORDER BY file_path LIMIT ?",
-                        (workspace, f"%{name}%", *imported, limit),
+                        f"AND file_path IN ({ph}) LIMIT ?",
+                        (workspace, f"%{name}%", *imported, 200),
                     ).fetchall()
                 if rows:
-                    return LocateResult(symbols=_with_snippets(rows), resolution_strategy="import_chain", query=name)
+                    return _ranked_result(rows, "import_chain")
 
-        # Strategy 5: fuzzy — edit distance ≤ 2 (pre-filter by length to reduce candidates)
+        # Strategy 4: substring — any symbol whose name contains the query. Always
+        # fires when there's at least one match, so fuzzy is a true last resort.
+        # Prefix matches lead interior ones, and canonical defs lead impls/aliases
+        # (UPG-4.5: `rand` → randint/randfraction before any fuzzy junk). SQL surfaces
+        # prefix matches first into the fetch cap; _partial_match_key does the rest.
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM symbols WHERE workspace = ? AND name LIKE ? "
+                "ORDER BY (CASE WHEN name LIKE ? THEN 0 ELSE 1 END), length(name) LIMIT ?",
+                (workspace, f"%{name}%", f"{name}%", 200),
+            ).fetchall()
+        if rows:
+            return _ranked_result(rows, "substring")
+
+        # Strategy 5: fuzzy — edit distance within a length-scaled threshold, and
+        # only against names that share the first character. Short queries get a
+        # tighter budget so `rand` (len 4) can't match `nan`/`add` (UPG-4.5).
+        max_dist = 1 if len(name) <= 4 else 2
+        first = name_lower[0] if name_lower else ""
         with self._conn() as conn:
             all_rows = conn.execute(
-                "SELECT * FROM symbols WHERE workspace = ? AND ABS(LENGTH(name) - ?) <= 2",
-                (workspace, len(name)),
+                "SELECT * FROM symbols WHERE workspace = ? AND ABS(LENGTH(name) - ?) <= ?",
+                (workspace, len(name), max_dist),
             ).fetchall()
-        name_lower = name.lower()
-        fuzzy = [r for r in all_rows if _levenshtein(name_lower, r["name"].lower()) <= 2]
+        fuzzy = [
+            r for r in all_rows
+            if r["name"] and r["name"][0].lower() == first
+            and _levenshtein(name_lower, r["name"].lower()) <= max_dist
+        ]
         if fuzzy:
             fuzzy.sort(key=lambda r: (_levenshtein(name_lower, r["name"].lower()), len(r["name"])))
             return LocateResult(symbols=_with_snippets(fuzzy[:limit]), resolution_strategy="fuzzy", query=name)
@@ -899,9 +972,9 @@ class SymbolGraph:
             "exact":        "exact name match",
             "suffix":       "suffix match (qualifier stripped)",
             "same_module":  "same-module resolution",
-            "unique_name":  "unique-name match",
+            "substring":    "partial-name match (canonical defs first)",
             "import_chain": "import-chain resolution",
-            "fuzzy":        "fuzzy name match (edit-distance ≤ 2)",
+            "fuzzy":        "fuzzy name match (edit-distance)",
         }
         label = _labels.get(result.resolution_strategy, result.resolution_strategy)
         n = len(result.symbols)
