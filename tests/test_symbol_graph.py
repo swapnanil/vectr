@@ -50,6 +50,20 @@ def _seed_symbols(g: "SymbolGraph", workspace: str, specs: list[tuple]) -> None:
             )
 
 
+def _seed_edges(g: "SymbolGraph", workspace: str, specs: list[tuple]) -> None:
+    """Insert synthetic call edges directly so callee/caller ranking can be
+    tested with precise control over frequency and call sites.
+
+    Each spec is (from_file, from_symbol, from_line, to_symbol)."""
+    with g._conn() as conn:
+        for from_file, from_symbol, from_line, to_symbol in specs:
+            conn.execute(
+                "INSERT INTO edges (workspace, from_file, from_symbol, from_line, to_symbol, edge_type) "
+                "VALUES (?, ?, ?, ?, ?, 'calls')",
+                (workspace, from_file, from_symbol, from_line, to_symbol),
+            )
+
+
 # ---------------------------------------------------------------------------
 # UPG-3.3 — language-capability introspection
 # ---------------------------------------------------------------------------
@@ -951,3 +965,106 @@ class TestTraceCollisionUPG41:
         assert "by_definition" not in result
         text = g.format_trace_for_llm(result, "helper")
         assert "definitions across modules" not in text
+
+
+# ---------------------------------------------------------------------------
+# UPG-4.2 — dedup edges; rank callees/callers by relevance, not alphabetically
+# ---------------------------------------------------------------------------
+
+class TestEdgeAggregationUPG42:
+    def test_callees_deduped_with_count(self, tmp_path) -> None:
+        # `caller` calls `target` from 3 distinct sites; one aggregated entry
+        # carrying call_count=3, not three repeated rows.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "caller", 10, "target"),
+            (f"{ws}/a.py", "caller", 11, "target"),
+            (f"{ws}/a.py", "caller", 12, "target"),
+        ])
+        callees = g.callees(ws, "caller")
+        assert len(callees) == 1
+        assert callees[0].to_symbol == "target"
+        assert callees[0].call_count == 3
+
+    def test_callees_lead_with_repo_defined_not_builtins(self, tmp_path) -> None:
+        # `len`/`assert` are not repo symbols; `helper` is. Even though `len`
+        # is called more often, the repo-defined callee must rank first.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("helper", "function", f"{ws}/util.py")])
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "caller", 1, "len"),
+            (f"{ws}/a.py", "caller", 2, "len"),
+            (f"{ws}/a.py", "caller", 3, "len"),
+            (f"{ws}/a.py", "caller", 4, "assert"),
+            (f"{ws}/a.py", "caller", 5, "helper"),
+        ])
+        callees = g.callees(ws, "caller")
+        assert callees[0].to_symbol == "helper"  # repo-defined leads despite lower count
+
+    def test_callees_ranked_by_frequency_within_tier(self, tmp_path) -> None:
+        # Two repo-defined callees: the more frequently called ranks first
+        # (frequency beats alphabetical — `zeta`×3 before `alpha`×1).
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [
+            ("alpha", "function", f"{ws}/util.py"),
+            ("zeta", "function", f"{ws}/util.py"),
+        ])
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "caller", 1, "alpha"),
+            (f"{ws}/a.py", "caller", 2, "zeta"),
+            (f"{ws}/a.py", "caller", 3, "zeta"),
+            (f"{ws}/a.py", "caller", 4, "zeta"),
+        ])
+        names = [e.to_symbol for e in g.callees(ws, "caller")]
+        assert names == ["zeta", "alpha"]
+
+    def test_important_callee_survives_truncation(self, tmp_path) -> None:
+        # 30 alphabetically-early builtins + one heavily-used repo callee `zzz`.
+        # Old path truncated alphabetically and dropped `zzz`; ranking keeps it.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("zzz", "function", f"{ws}/util.py")])
+        specs = [(f"{ws}/a.py", "caller", i, f"aaa_builtin_{i:02d}") for i in range(30)]
+        specs += [(f"{ws}/a.py", "caller", 100 + j, "zzz") for j in range(5)]
+        _seed_edges(g, ws, specs)
+        names = [e.to_symbol for e in g.callees(ws, "caller", limit=20)]
+        assert "zzz" in names
+        assert names[0] == "zzz"
+
+    def test_callers_deduped_by_function_with_count(self, tmp_path) -> None:
+        # One caller function calls `target` from 3 sites → one entry, count 3.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "on_event", 5, "target"),
+            (f"{ws}/a.py", "on_event", 6, "target"),
+            (f"{ws}/a.py", "on_event", 7, "target"),
+        ])
+        callers = g.callers(ws, "target")
+        assert len(callers) == 1
+        assert callers[0].from_symbol == "on_event"
+        assert callers[0].call_count == 3
+
+    def test_count_suffix_in_formatted_output(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "caller", 1, "target"),
+            (f"{ws}/a.py", "caller", 2, "target"),
+        ])
+        result = g.trace(ws, "caller", direction="callees")
+        text = g.format_trace_for_llm(result, "caller")
+        assert "target" in text
+        assert "×2" in text
+
+    def test_singleton_callee_has_no_count_suffix(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [(f"{ws}/a.py", "caller", 1, "target")])
+        result = g.trace(ws, "caller", direction="callees")
+        text = g.format_trace_for_llm(result, "caller")
+        assert "target" in text
+        assert "×" not in text

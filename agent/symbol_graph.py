@@ -54,6 +54,7 @@ class CallEdge:
     from_line: int
     to_symbol: str
     edge_type: str      # calls | imports | inherits | implements
+    call_count: int = 1  # UPG-4.2: distinct call sites this aggregated edge stands for
 
 
 # ---------------------------------------------------------------------------
@@ -890,33 +891,100 @@ class SymbolGraph:
     # Query: trace (call graph)
     # ------------------------------------------------------------------
 
-    def _edges(self, workspace: str, column: str, name: str, order_by: str, limit: int) -> list[CallEdge]:
+    # UPG-4.2: pull a wide candidate set so dedup + relevance ranking happens
+    # over ALL edges, not a pre-truncated alphabetical slice (the old
+    # `ORDER BY name LIMIT 20` dropped important callees by name, not relevance).
+    _EDGE_FETCH_CAP = 1000
+
+    def _edges(
+        self,
+        workspace: str,
+        column: str,
+        name: str,
+        group: Literal["from_symbol", "to_symbol"],
+        limit: int,
+        rank_repo_defined: bool,
+    ) -> list[CallEdge]:
         """Fetch edges by exact `column` match; fall back to partial (LIKE) only
         when no exact-named edge exists. Exact-first kills the substring
         conflation that merged unrelated symbols — `trace compare` no longer
         pulls in `compare_stacks` / `_Py_atomic_compare_exchange_*` (UPG-4.1).
-        `column` and `order_by` are fixed internal literals, never user input."""
+        Results are deduped and ranked by relevance, then truncated (UPG-4.2).
+        `column` is a fixed internal literal, never user input."""
         with self._conn() as conn:
             rows = conn.execute(
-                f"SELECT * FROM edges WHERE workspace = ? AND {column} = ? "
-                f"ORDER BY {order_by} LIMIT ?",
-                (workspace, name, limit),
+                f"SELECT * FROM edges WHERE workspace = ? AND {column} = ? LIMIT ?",
+                (workspace, name, self._EDGE_FETCH_CAP),
             ).fetchall()
             if not rows:
                 rows = conn.execute(
-                    f"SELECT * FROM edges WHERE workspace = ? AND {column} LIKE ? "
-                    f"ORDER BY {order_by} LIMIT ?",
-                    (workspace, f"%{name}%", limit),
+                    f"SELECT * FROM edges WHERE workspace = ? AND {column} LIKE ? LIMIT ?",
+                    (workspace, f"%{name}%", self._EDGE_FETCH_CAP),
                 ).fetchall()
-        return [self._row_to_edge(r) for r in rows]
+        edges = [self._row_to_edge(r) for r in rows]
+        return self._aggregate_edges(workspace, edges, group, limit, rank_repo_defined)
+
+    def _aggregate_edges(
+        self,
+        workspace: str,
+        edges: list[CallEdge],
+        group: Literal["from_symbol", "to_symbol"],
+        limit: int,
+        rank_repo_defined: bool,
+    ) -> list[CallEdge]:
+        """Collapse edges that share the same caller/callee name into one entry
+        carrying a `call_count` of distinct call sites, then rank by relevance
+        — repo-defined first (callees only), then call frequency, then name —
+        and truncate to `limit`. Replaces the alphabetical-then-truncate path so
+        important, repeatedly-called targets survive the cut (UPG-4.2)."""
+        groups: dict[str, dict] = {}
+        for e in edges:
+            k = e.from_symbol if group == "from_symbol" else e.to_symbol
+            site = (e.from_file, e.from_line, e.to_symbol)
+            g = groups.get(k)
+            if g is None:
+                groups[k] = {"edge": e, "sites": {site}}
+            else:
+                g["sites"].add(site)
+        # Repo-defined ranking only matters for callees (the *from_symbol* of a
+        # caller is by definition a function in this repo). Skipping the lookup
+        # for callers also avoids a needless symbols-table scan.
+        repo = self._known_symbol_names(workspace, list(groups)) if rank_repo_defined else set(groups)
+        ranked: list[tuple] = []
+        for k, g in groups.items():
+            e = g["edge"]
+            e.call_count = len(g["sites"])
+            ranked.append((0 if k in repo else 1, -e.call_count, k, e))
+        ranked.sort(key=lambda t: (t[0], t[1], t[2]))
+        return [t[3] for t in ranked[:limit]]
+
+    def _known_symbol_names(self, workspace: str, names: list[str]) -> set[str]:
+        """Subset of `names` that are defined as symbols in this workspace —
+        used to rank repo-internal calls ahead of builtins/externals (UPG-4.2)."""
+        if not names:
+            return set()
+        found: set[str] = set()
+        with self._conn() as conn:
+            for i in range(0, len(names), 500):  # stay under SQLite's bound-var limit
+                chunk = names[i:i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT DISTINCT name FROM symbols WHERE workspace = ? "
+                    f"AND name IN ({placeholders})",
+                    (workspace, *chunk),
+                ).fetchall()
+                found.update(r["name"] for r in rows)
+        return found
 
     def callers(self, workspace: str, symbol_name: str, limit: int = 20) -> list[CallEdge]:
-        """Who calls this symbol? Exact name match preferred (partial fallback)."""
-        return self._edges(workspace, "to_symbol", symbol_name, "from_file, from_symbol", limit)
+        """Who calls this symbol? Exact name match preferred (partial fallback).
+        Deduped by calling function, ranked by call frequency (UPG-4.2)."""
+        return self._edges(workspace, "to_symbol", symbol_name, "from_symbol", limit, rank_repo_defined=False)
 
     def callees(self, workspace: str, symbol_name: str, limit: int = 20) -> list[CallEdge]:
-        """What does this symbol call? Exact name match preferred (partial fallback)."""
-        return self._edges(workspace, "from_symbol", symbol_name, "to_symbol", limit)
+        """What does this symbol call? Exact name match preferred (partial fallback).
+        Deduped by callee, repo-internal calls ranked ahead of builtins (UPG-4.2)."""
+        return self._edges(workspace, "from_symbol", symbol_name, "to_symbol", limit, rank_repo_defined=True)
 
     def _exact_definitions(self, workspace: str, name: str, limit: int = 20) -> list[Symbol]:
         """Definition sites whose name matches `name` exactly. Each (file_path,
@@ -968,13 +1036,17 @@ class SymbolGraph:
                 for d in defs:
                     rows = conn.execute(
                         "SELECT * FROM edges WHERE workspace = ? AND from_symbol = ? "
-                        "AND from_file = ? ORDER BY to_symbol LIMIT ?",
-                        (workspace, symbol_name, d.file_path, limit),
+                        "AND from_file = ? LIMIT ?",
+                        (workspace, symbol_name, d.file_path, self._EDGE_FETCH_CAP),
                     ).fetchall()
+                    edges = [self._row_to_edge(r) for r in rows]
                     by_def.append({
                         "definition": d,
                         "module": self._module_label(d.file_path, workspace),
-                        "callees": [self._row_to_edge(r) for r in rows],
+                        # dedup + relevance-rank this definition's own callees (UPG-4.2)
+                        "callees": self._aggregate_edges(
+                            workspace, edges, "to_symbol", limit, rank_repo_defined=True
+                        ),
                     })
             result["by_definition"] = by_def
         return result
@@ -1036,6 +1108,11 @@ class SymbolGraph:
                 lines.append("")
         return "\n".join(lines)
 
+    @staticmethod
+    def _count_suffix(edge: CallEdge) -> str:
+        """' ×N' when an aggregated edge stands for multiple call sites (UPG-4.2)."""
+        return f"  ×{edge.call_count}" if edge.call_count > 1 else ""
+
     def format_trace_for_llm(self, trace_result: dict, symbol_name: str) -> str:
         lines = [f"Call graph trace for '{symbol_name}':\n"]
 
@@ -1055,7 +1132,7 @@ class SymbolGraph:
                 lines.append(f"[{d.kind}] {symbol_name} @ {mod}:{d.start_line} — calls ({len(cs)}):")
                 if cs:
                     for e in cs:
-                        lines.append(f"    {e.to_symbol}")
+                        lines.append(f"    {e.to_symbol}{self._count_suffix(e)}")
                 else:
                     lines.append("    (none found in index)")
                 lines.append("")
@@ -1064,7 +1141,7 @@ class SymbolGraph:
                 if callers:
                     lines.append(f"Called by — any '{symbol_name}' ({len(callers)}):")
                     for e in callers:
-                        lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}")
+                        lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}{self._count_suffix(e)}")
                 else:
                     lines.append(f"Called by — any '{symbol_name}': (none found in index)")
             return "\n".join(lines)
@@ -1074,7 +1151,7 @@ class SymbolGraph:
             if callers:
                 lines.append(f"Called by ({len(callers)}):")
                 for e in callers:
-                    lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}")
+                    lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}{self._count_suffix(e)}")
             else:
                 lines.append("Called by: (none found in index)")
 
@@ -1083,7 +1160,7 @@ class SymbolGraph:
             if callees:
                 lines.append(f"\nCalls ({len(callees)}):")
                 for e in callees:
-                    lines.append(f"  {e.to_symbol}")
+                    lines.append(f"  {e.to_symbol}{self._count_suffix(e)}")
             else:
                 lines.append("\nCalls: (none found in index)")
 

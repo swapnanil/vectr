@@ -533,7 +533,8 @@ def handle_tools_call(
         if aug_trace:
             trace_lines = ["─── Callers ───"]
             for e in aug_trace:
-                trace_lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}")
+                suffix = f"  ×{e.call_count}" if getattr(e, "call_count", 1) > 1 else ""
+                trace_lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}{suffix}")
             sections.append("\n".join(trace_lines))
 
         # L3 chunks
