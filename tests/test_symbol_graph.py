@@ -1284,3 +1284,41 @@ class TestRustTypeUsageEdgesUPG44:
         text = g.format_trace_for_llm(result, "RegistryClient")
         assert "Used by" in text
         assert "Called by" not in text
+
+
+# ---------------------------------------------------------------------------
+# UPG-4.6 — locate redirect hint on description-shaped / no-match queries
+#
+# When the LLM misroutes a natural-language description to vectr_locate, name
+# matching returns nothing. Without a nudge the model gets silence and no path
+# forward; with it, locate steers to vectr_search (mirrors UPG-3.1/3.3 hints).
+# ---------------------------------------------------------------------------
+
+class TestLocateDescriptionHintUPG46:
+    def test_description_query_gets_search_hint(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        result = LocateResult(symbols=[], resolution_strategy="none",
+                              query="function that checks whether a number is prime")
+        text = g.format_locate_l2_for_llm(result)
+        assert "No symbol matching" in text
+        assert "vectr_search" in text
+        assert "description" in text.lower()
+
+    def test_single_token_no_match_has_no_hint(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        result = LocateResult(symbols=[], resolution_strategy="none", query="is_prime")
+        text = g.format_locate_l2_for_llm(result)
+        assert "No symbol matching" in text
+        assert "vectr_search" not in text
+
+    def test_legacy_formatter_also_hints(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        text = g.format_locate_for_llm([], "where do we validate the auth token")
+        assert "vectr_search" in text
+
+    def test_looks_like_description_predicate(self) -> None:
+        assert SymbolGraph._looks_like_description("parse the lock file")
+        assert SymbolGraph._looks_like_description("RegistryClient new")
+        assert not SymbolGraph._looks_like_description("RegistryClient")
+        assert not SymbolGraph._looks_like_description("parse_lockfile")
+        assert not SymbolGraph._looks_like_description("  PyList_Append  ")

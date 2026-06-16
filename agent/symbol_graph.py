@@ -1273,9 +1273,27 @@ class SymbolGraph:
     # Formatting for LLM
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _looks_like_description(query: str) -> bool:
+        """A no-match query that reads like a natural-language description rather
+        than a symbol name — the LLM likely misrouted a `vectr_search` query to
+        `locate`. Whitespace between tokens is the tell: `is_prime` won't fire,
+        but "function that checks whether a number is prime" will (UPG-4.6)."""
+        return len(query.split()) > 1
+
+    def _no_match_text(self, query: str) -> str:
+        """Empty-locate message, with a search-redirect hint when the query looks
+        like a description so a misrouting LLM gets a path forward, not silence
+        (UPG-4.6). Mirrors the UPG-3.1 language hint / UPG-3.3 routing hint."""
+        base = f"No symbol matching '{query}' found in the indexed codebase."
+        if self._looks_like_description(query):
+            base += (" This looks like a description, not a symbol name — "
+                     "try vectr_search for concept/semantic lookup.")
+        return base
+
     def format_locate_for_llm(self, symbols: list[Symbol], name: str) -> str:
         if not symbols:
-            return f"No symbol matching '{name}' found in the indexed codebase."
+            return self._no_match_text(name)
         lines = [f"Symbol locations for '{name}' ({len(symbols)} match{'es' if len(symbols) != 1 else ''}):\n"]
         for s in symbols:
             lines.append(f"  [{s.kind}] {s.name}  {s.file_path}:{s.start_line}")
@@ -1287,7 +1305,7 @@ class SymbolGraph:
 
     def format_locate_l2_for_llm(self, result: LocateResult) -> str:
         if not result.symbols:
-            return f"No symbol matching '{result.query}' found in the indexed codebase."
+            return self._no_match_text(result.query)
         _labels = {
             "exact":        "exact name match",
             "suffix":       "suffix match (qualifier stripped)",
