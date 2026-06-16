@@ -50,17 +50,19 @@ def _seed_symbols(g: "SymbolGraph", workspace: str, specs: list[tuple]) -> None:
             )
 
 
-def _seed_edges(g: "SymbolGraph", workspace: str, specs: list[tuple]) -> None:
+def _seed_edges(g: "SymbolGraph", workspace: str, specs: list[tuple],
+                edge_type: str = "calls") -> None:
     """Insert synthetic call edges directly so callee/caller ranking can be
     tested with precise control over frequency and call sites.
 
-    Each spec is (from_file, from_symbol, from_line, to_symbol)."""
+    Each spec is (from_file, from_symbol, from_line, to_symbol). All seeded with
+    `edge_type` (default 'calls'; pass 'uses' for UPG-4.4 type-usage edges)."""
     with g._conn() as conn:
         for from_file, from_symbol, from_line, to_symbol in specs:
             conn.execute(
                 "INSERT INTO edges (workspace, from_file, from_symbol, from_line, to_symbol, edge_type) "
-                "VALUES (?, ?, ?, ?, ?, 'calls')",
-                (workspace, from_file, from_symbol, from_line, to_symbol),
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (workspace, from_file, from_symbol, from_line, to_symbol, edge_type),
             )
 
 
@@ -1170,3 +1172,115 @@ class TestBuiltinSuppressionUPG43:
         resolver = next(e for e in by_def if "resolver" in e["module"])
         assert "read_lockfile" in {e.to_symbol for e in resolver["callees"]}
         assert resolver["hidden_builtins"] == 1
+
+
+# ---------------------------------------------------------------------------
+# UPG-4.4 — Rust trait/impl/type-usage edges
+#
+# `trace <Type>` was empty for heavily-used Rust types (uv RegistryClient,
+# BuildContext, PubGrubPackage) because the dominant interaction — passing a
+# type by ref/value, returning it, holding it in a field, or calling an
+# associated fn `Type::new()` — produced no edge. These record `edge_type=
+# "uses"` so the type's real call sites surface, while staying out of the
+# callees ("Calls:") direction so that stays function calls.
+# ---------------------------------------------------------------------------
+
+def _extract_rs(tmp_path, src: str):
+    f = tmp_path / "lib.rs"
+    f.write_text(src)
+    return extract_symbols_from_file(str(f))
+
+
+def _uses_to(edges):
+    return {e["to_symbol"] for e in edges if e["edge_type"] == "uses"}
+
+
+def _calls_to(edges):
+    return {e["to_symbol"] for e in edges if e["edge_type"] == "calls"}
+
+
+class TestRustTypeUsageEdgesUPG44:
+    def test_param_type_creates_uses_edge(self, tmp_path) -> None:
+        _, edges = _extract_rs(tmp_path, "fn fetch(client: &RegistryClient) {}")
+        assert ("fetch", "RegistryClient") in {(e["from_symbol"], e["to_symbol"]) for e in edges
+                                               if e["edge_type"] == "uses"}
+
+    def test_return_type_creates_uses_edge(self, tmp_path) -> None:
+        _, edges = _extract_rs(tmp_path, "fn build() -> RegistryClient { todo!() }")
+        assert "RegistryClient" in _uses_to(edges)
+
+    def test_generic_arg_type_creates_uses_edge(self, tmp_path) -> None:
+        # nested type arg inside Result<..> must be reached by recursion
+        _, edges = _extract_rs(tmp_path, "fn build() -> Result<RegistryClient, BuildError> { todo!() }")
+        assert {"RegistryClient", "BuildError"} <= _uses_to(edges)
+        assert "Result" not in _uses_to(edges)  # std container skipped
+
+    def test_struct_field_type_creates_uses_edge(self, tmp_path) -> None:
+        _, edges = _extract_rs(tmp_path, "struct Holder { client: RegistryClient }")
+        assert ("Holder", "RegistryClient") in {(e["from_symbol"], e["to_symbol"]) for e in edges
+                                                if e["edge_type"] == "uses"}
+
+    def test_scoped_assoc_call_links_type(self, tmp_path) -> None:
+        # RegistryClient::new() → uses RegistryClient AND calls new
+        _, edges = _extract_rs(tmp_path, "fn f() { let c = RegistryClient::new(); }")
+        assert "RegistryClient" in _uses_to(edges)
+        assert "new" in _calls_to(edges)
+
+    def test_enum_variant_construction_links_type(self, tmp_path) -> None:
+        _, edges = _extract_rs(tmp_path, "fn f() { let p = PubGrubPackage::Package(x); }")
+        assert "PubGrubPackage" in _uses_to(edges)
+
+    def test_impl_header_no_self_loop(self, tmp_path) -> None:
+        # `impl RegistryClient` must not record RegistryClient --uses--> RegistryClient
+        _, edges = _extract_rs(tmp_path, "impl RegistryClient { fn g(&self) {} }")
+        assert ("RegistryClient", "RegistryClient") not in {
+            (e["from_symbol"], e["to_symbol"]) for e in edges if e["edge_type"] == "uses"
+        }
+
+    def test_primitives_and_std_types_skipped(self, tmp_path) -> None:
+        _, edges = _extract_rs(
+            tmp_path,
+            "fn f(a: u32, b: String, c: Vec<u8>, d: bool) -> Self { todo!() }",
+        )
+        targets = _uses_to(edges)
+        for noise in ("u32", "String", "Vec", "u8", "bool", "Self"):
+            assert noise not in targets
+
+    def test_single_char_generic_param_skipped(self, tmp_path) -> None:
+        _, edges = _extract_rs(tmp_path, "fn id<T>(x: T) -> T { x }")
+        assert "T" not in _uses_to(edges)
+
+    def test_trace_type_returns_usage_call_sites(self, tmp_path) -> None:
+        # the headline acceptance: trace a type, get real call sites back
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("RegistryClient", "struct", f"{ws}/client.rs")])
+        _seed_edges(g, ws, [
+            (f"{ws}/ops.rs", "resolve", 10, "RegistryClient"),
+            (f"{ws}/build.rs", "build_dist", 20, "RegistryClient"),
+        ], edge_type="uses")
+        result = g.trace(ws, "RegistryClient", direction="callers")
+        callers = {e.from_symbol for e in result["callers"]}
+        assert callers == {"resolve", "build_dist"}
+
+    def test_uses_edges_excluded_from_callees(self, tmp_path) -> None:
+        # `trace fn` Calls: must list function calls only, not the types it mentions
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("do_work", "function", f"{ws}/m.rs")])
+        _seed_edges(g, ws, [(f"{ws}/m.rs", "do_work", 1, "helper")], edge_type="calls")
+        _seed_edges(g, ws, [(f"{ws}/m.rs", "do_work", 1, "RegistryClient")], edge_type="uses")
+        callees = g.callees(ws, "do_work")
+        names = {e.to_symbol for e in callees}
+        assert "helper" in names
+        assert "RegistryClient" not in names
+
+    def test_caller_verb_used_by_for_pure_type_usage(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("RegistryClient", "struct", f"{ws}/client.rs")])
+        _seed_edges(g, ws, [(f"{ws}/ops.rs", "resolve", 10, "RegistryClient")], edge_type="uses")
+        result = g.trace(ws, "RegistryClient", direction="callers")
+        text = g.format_trace_for_llm(result, "RegistryClient")
+        assert "Used by" in text
+        assert "Called by" not in text

@@ -290,6 +290,51 @@ _CALL_TYPES: dict[str, set[str]] = {
     "cpp": {"call_expression", "new_expression"},
 }
 
+# Type-usage node types per language (UPG-4.4). In some languages the dominant
+# way code interacts with a type is not a free-function call but a by-value/
+# by-reference *usage* — a parameter, return type, field, or generic argument.
+# `trace <Type>` was empty for heavily-used Rust types (uv `RegistryClient`,
+# `BuildContext`, `PubGrubPackage`) because none of those usages produced an
+# edge. We record them as `edge_type="uses"` so the type's call sites surface.
+# Keyed by language so it stays opt-in (Rust only for now; extensible later).
+_TYPE_USAGE_NODES: dict[str, set[str]] = {
+    "rust": {"type_identifier"},
+}
+
+# Rust type names we never record a usage edge for: `Self`, std containers, and
+# the ubiquitous result/option/collection types. They'd be pure noise to trace
+# and would bloat the edge table. Primitives (u32, str, bool, …) are filtered
+# separately by the UpperCamelCase convention check in `_record_rust_type`.
+_RUST_SKIP_TYPES: frozenset[str] = frozenset({
+    "Self", "String", "Vec", "Box", "Rc", "Arc", "Option", "Result", "Cow",
+    "Cell", "RefCell", "Mutex", "RwLock", "HashMap", "HashSet", "BTreeMap",
+    "BTreeSet", "VecDeque", "Ok", "Err", "Some", "None",
+})
+
+
+def _record_rust_type(name: str) -> bool:
+    """A Rust `type_identifier` worth a usage edge: UpperCamelCase (so primitives
+    `u32`/`str`/`bool` and snake_case modules are skipped), longer than one char
+    (drops generic params `T`/`E`/`K`), and not a std container (UPG-4.4)."""
+    return len(name) > 1 and name[0].isupper() and name not in _RUST_SKIP_TYPES
+
+
+def _rust_call_type_head(func_node, code_bytes: bytes) -> str:
+    """Leading type segment of a Rust `Type::assoc(...)` scoped call so
+    `trace Type` finds associated-fn and enum-variant construction sites
+    (`RegistryClient::new`, `PubGrubPackage::Package`). Returns the rightmost
+    path segment for nested paths (`crate::x::RegistryClient::new` → 'RegistryClient')
+    or "" when the call isn't a scoped path (UPG-4.4)."""
+    if func_node is None or func_node.type != "scoped_identifier":
+        return ""
+    path = func_node.child_by_field_name("path")
+    while path is not None and path.type == "scoped_identifier":
+        path = path.child_by_field_name("name")
+    if path is not None and path.type in ("identifier", "type_identifier"):
+        return code_bytes[path.start_byte:path.end_byte].decode("utf-8", errors="replace")
+    return ""
+
+
 # Import node types per language
 _IMPORT_TYPES: dict[str, set[str]] = {
     "python": {"import_statement", "import_from_statement"},
@@ -419,6 +464,7 @@ def _collect_symbols_and_calls(
     current_symbol: str = "",
     current_line: int = 0,
     depth: int = 0,
+    type_usage_nodes: set[str] = frozenset(),
 ) -> None:
     """Recursively walk AST collecting symbols and call edges."""
     if depth > _MAX_DEPTH:
@@ -445,7 +491,7 @@ def _collect_symbols_and_calls(
                 child, code_bytes, language, file_path,
                 symbol_types, call_types, symbols, edges,
                 current_symbol=ctx, current_line=ctx_line,
-                depth=depth + 1,
+                depth=depth + 1, type_usage_nodes=type_usage_nodes,
             )
         return
 
@@ -459,6 +505,33 @@ def _collect_symbols_and_calls(
                 "to_symbol": callee,
                 "edge_type": "calls",
             })
+        # UPG-4.4: `Type::assoc(...)` also links the caller to the TYPE so
+        # `trace Type` surfaces construction / enum-variant sites — not just the
+        # bare `new`/`Package` method name `_get_call_name` returns above.
+        if type_usage_nodes:
+            head = _rust_call_type_head(node.child_by_field_name("function"), code_bytes)
+            if head and head != current_symbol and _record_rust_type(head):
+                edges.append({
+                    "from_file": file_path,
+                    "from_symbol": current_symbol,
+                    "from_line": current_line,
+                    "to_symbol": head,
+                    "edge_type": "uses",
+                })
+
+    # UPG-4.4: a type reference in a signature/field/generic position links the
+    # enclosing symbol to that type. Don't return — generic args nest further
+    # type_identifiers (`Result<RegistryClient, Error>`) reached by recursion.
+    if node.type in type_usage_nodes and current_symbol:
+        tname = code_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+        if tname != current_symbol and _record_rust_type(tname):
+            edges.append({
+                "from_file": file_path,
+                "from_symbol": current_symbol,
+                "from_line": current_line,
+                "to_symbol": tname,
+                "edge_type": "uses",
+            })
 
     for child in node.children:
         _collect_symbols_and_calls(
@@ -467,6 +540,7 @@ def _collect_symbols_and_calls(
             current_symbol=current_symbol, current_line=current_line,
             depth=depth + 1,  # MUST increment — generic nodes dominate deep C ASTs;
                               # leaving this at `depth` let the guard never fire → RecursionError
+            type_usage_nodes=type_usage_nodes,
         )
 
 
@@ -496,12 +570,14 @@ def extract_symbols_from_file(file_path: str) -> tuple[list[dict], list[dict]]:
 
     symbol_types = _SYMBOL_TYPES.get(language, {})
     call_types = _CALL_TYPES.get(language, set())
+    type_usage_nodes = _TYPE_USAGE_NODES.get(language, frozenset())
 
     symbols: list[dict] = []
     edges: list[dict] = []
     _collect_symbols_and_calls(
         tree.root_node, code_bytes, language, file_path,
         symbol_types, call_types, symbols, edges,
+        type_usage_nodes=type_usage_nodes,
     )
 
     # deduplicate edges
@@ -978,6 +1054,7 @@ class SymbolGraph:
         limit: int,
         rank_repo_defined: bool,
         include_builtins: bool = True,
+        exclude_uses: bool = False,
     ) -> tuple[list[CallEdge], int]:
         """Fetch edges by exact `column` match; fall back to partial (LIKE) only
         when no exact-named edge exists. Exact-first kills the substring
@@ -986,15 +1063,19 @@ class SymbolGraph:
         Results are deduped and ranked by relevance, then truncated (UPG-4.2).
         Returns `(edges, hidden_builtins)` — the count of builtin/stdlib callees
         suppressed before truncation when `include_builtins` is False (UPG-4.3).
+        `exclude_uses` drops type-usage edges (UPG-4.4) — set on the callees
+        direction so "Calls:" stays function calls, not the types a function
+        mentions; left off for callers so `trace <Type>` finds its usage sites.
         `column` is a fixed internal literal, never user input."""
+        uses_clause = " AND edge_type != 'uses'" if exclude_uses else ""
         with self._conn() as conn:
             rows = conn.execute(
-                f"SELECT * FROM edges WHERE workspace = ? AND {column} = ? LIMIT ?",
+                f"SELECT * FROM edges WHERE workspace = ? AND {column} = ?{uses_clause} LIMIT ?",
                 (workspace, name, self._EDGE_FETCH_CAP),
             ).fetchall()
             if not rows:
                 rows = conn.execute(
-                    f"SELECT * FROM edges WHERE workspace = ? AND {column} LIKE ? LIMIT ?",
+                    f"SELECT * FROM edges WHERE workspace = ? AND {column} LIKE ?{uses_clause} LIMIT ?",
                     (workspace, f"%{name}%", self._EDGE_FETCH_CAP),
                 ).fetchall()
         edges = [self._row_to_edge(r) for r in rows]
@@ -1089,6 +1170,7 @@ class SymbolGraph:
         edges, _ = self._edges(
             workspace, "from_symbol", symbol_name, "to_symbol", limit,
             rank_repo_defined=True, include_builtins=include_builtins,
+            exclude_uses=True,
         )
         return edges
 
@@ -1140,6 +1222,7 @@ class SymbolGraph:
             callees, hidden = self._edges(
                 workspace, "from_symbol", symbol_name, "to_symbol", limit,
                 rank_repo_defined=True, include_builtins=include_builtins,
+                exclude_uses=True,
             )
             result["callees"] = callees
             result["hidden_builtins"] = hidden
@@ -1152,7 +1235,7 @@ class SymbolGraph:
                 for d in defs:
                     rows = conn.execute(
                         "SELECT * FROM edges WHERE workspace = ? AND from_symbol = ? "
-                        "AND from_file = ? LIMIT ?",
+                        "AND from_file = ? AND edge_type != 'uses' LIMIT ?",
                         (workspace, symbol_name, d.file_path, self._EDGE_FETCH_CAP),
                     ).fetchall()
                     edges = [self._row_to_edge(r) for r in rows]
@@ -1233,6 +1316,18 @@ class SymbolGraph:
         return f"  ×{edge.call_count}" if edge.call_count > 1 else ""
 
     @staticmethod
+    def _caller_verb(callers: list) -> str:
+        """'Used by' when every reference is a type-usage edge (UPG-4.4) — e.g.
+        tracing a Rust struct that's only passed/returned, never free-called;
+        'Called/used by' when mixed; 'Called by' otherwise."""
+        kinds = {getattr(e, "edge_type", "calls") for e in callers}
+        if kinds == {"uses"}:
+            return "Used by"
+        if "uses" in kinds:
+            return "Called/used by"
+        return "Called by"
+
+    @staticmethod
     def _hidden_builtins_note(n: int) -> str:
         """Footer telling the LLM repo-internal calls are shown and how to see the
         rest — the suppressed builtin/stdlib calls (UPG-4.3)."""
@@ -1270,7 +1365,7 @@ class SymbolGraph:
             callers = trace_result.get("callers")
             if callers is not None:
                 if callers:
-                    lines.append(f"Called by — any '{symbol_name}' ({len(callers)}):")
+                    lines.append(f"{self._caller_verb(callers)} — any '{symbol_name}' ({len(callers)}):")
                     for e in callers:
                         lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}{self._count_suffix(e)}")
                 else:
@@ -1280,7 +1375,7 @@ class SymbolGraph:
         callers = trace_result.get("callers", [])
         if callers is not None:
             if callers:
-                lines.append(f"Called by ({len(callers)}):")
+                lines.append(f"{self._caller_verb(callers)} ({len(callers)}):")
                 for e in callers:
                     lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}{self._count_suffix(e)}")
             else:
