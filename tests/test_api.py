@@ -45,6 +45,11 @@ def _make_service():
         "embed_model": "BAAI/bge-base-en-v1.5",
         "workspace_root": "/repo",
         "symbol_count": 0,
+        # UPG-3.3: per-language coverage + symbol availability (real shape)
+        "languages": [
+            {"language": "python", "files": 10, "chunks": 400, "symbols": True},
+            {"language": "markdown", "files": 2, "chunks": 100, "symbols": False},
+        ],
     }
     svc.get_map.return_value = "# Codebase Passport\nFastAPI service."
     # locate_with_snippets returns a LocateResult wrapper (not a bare list) —
@@ -213,6 +218,11 @@ def test_status(client) -> None:
     assert "workspace_root" in data
     assert "notes_count" in data, "/v1/status must include notes_count for agent recall decisions"
     assert isinstance(data["notes_count"], int)
+    # UPG-3.3: per-language coverage with symbol availability
+    langs = {l["language"]: l for l in data["languages"]}
+    assert langs["python"]["symbols"] is True
+    assert langs["python"]["files"] == 10
+    assert langs["markdown"]["symbols"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +275,33 @@ def test_mcp_tools_call_status(client) -> None:
     resp = client.post("/mcp/tools/call", json={"name": "vectr_status", "arguments": {}})
     assert resp.status_code == 200
     assert resp.json()["isError"] is False
+
+
+def test_mcp_status_renders_language_capability(client) -> None:
+    """UPG-3.3: vectr_status text must tell the agent where locate/trace work."""
+    resp = client.post("/mcp/tools/call", json={"name": "vectr_status", "arguments": {}})
+    text = resp.json()["content"][0]["text"]
+    assert "Languages" in text
+    assert "python" in text and "locate/trace" in text
+    assert "markdown" in text and "search-only" in text
+
+
+def test_mcp_status_warns_when_primary_language_has_no_symbols(client) -> None:
+    """If the dominant language is search-only, the agent should be told to prefer
+    search over locate/trace — the adoption-critical routing hint."""
+    app.state.service.status.return_value = {
+        "indexed_files": 240, "total_chunks": 900,
+        "last_indexed": "2026-01-01T00:00:00Z", "embed_model": "x",
+        "workspace_root": "/repo", "symbol_count": 0,
+        "languages": [
+            {"language": "markdown", "files": 240, "chunks": 800, "symbols": False},
+            {"language": "python", "files": 5, "chunks": 100, "symbols": True},
+        ],
+    }
+    resp = client.post("/mcp/tools/call", json={"name": "vectr_status", "arguments": {}})
+    text = resp.json()["content"][0]["text"]
+    assert "Primary language (markdown)" in text
+    assert "prefer vectr_search" in text
 
 
 # ---------------------------------------------------------------------------

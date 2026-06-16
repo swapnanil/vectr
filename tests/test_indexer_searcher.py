@@ -176,6 +176,19 @@ class TestCodeIndexer:
         # chunk count changed → cache recomputed, js now present
         assert "javascript" in indexer.indexed_languages()
 
+    def test_indexed_language_stats_files_and_chunks(self, indexer, tmp_path) -> None:
+        # UPG-3.3: per-language coverage — distinct files + chunk counts per language.
+        indexer.index_file(make_py(tmp_path, "a.py", "def x(): pass"))
+        indexer.index_file(make_py(tmp_path, "b.py", "def y(): pass"))
+        js = tmp_path / "c.js"; js.write_text("function z() {}")
+        indexer.index_file(str(js))
+        stats = indexer.indexed_language_stats()
+        assert stats["python"]["files"] == 2
+        assert stats["python"]["chunks"] >= 2
+        assert stats["javascript"]["files"] == 1
+        # indexed_languages() derives from the same source
+        assert indexer.indexed_languages() == sorted(stats)
+
     def test_get_all_documents_returns_indexed_content(self, indexer, tmp_path) -> None:
         make_py(tmp_path, "fn.py", """
             def my_special_function():

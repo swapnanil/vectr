@@ -129,6 +129,26 @@ _SYMBOL_TYPES: dict[str, dict[str, str]] = {
     },
 }
 
+# Languages vectr can extract a symbol graph for — i.e. where locate/trace work.
+# Anything outside this set is search-only (chunks are indexed, but there are no
+# symbol/call-graph edges). UPG-3.3 surfaces this per-language so the caller LLM
+# can route: use locate/trace where symbols exist, fall back to search elsewhere.
+SYMBOL_LANGUAGES: frozenset[str] = frozenset(_SYMBOL_TYPES)
+
+
+def supports_symbols(language: str) -> bool:
+    """True if `language` has symbol-graph extraction (locate/trace).
+
+    Normalises common display-name spellings (e.g. "C++"→cpp, "C#"→none) so it
+    can be called with either index language keys or human-facing names.
+    """
+    if not language:
+        return False
+    norm = language.strip().lower()
+    norm = {"c++": "cpp", "cplusplus": "cpp", "objective-c": "c"}.get(norm, norm)
+    return norm in SYMBOL_LANGUAGES
+
+
 # Call node types per language
 _CALL_TYPES: dict[str, set[str]] = {
     "python": {"call"},

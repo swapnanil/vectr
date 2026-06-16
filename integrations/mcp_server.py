@@ -579,6 +579,23 @@ def handle_tools_call(
             f"  Embed model    : {status['embed_model']}",
             f"  Workspace      : {status['workspace_root']}",
         ]
+
+        # Per-language coverage + symbol availability (UPG-3.3). Tells the agent
+        # where locate/trace will work (symbol graph) vs. where to use search only.
+        langs = status.get("languages") or []
+        if langs:
+            lines.append("  Languages      : (✓ = locate/trace available; others are search-only)")
+            for L in langs[:8]:
+                mark = "✓ locate/trace" if L["symbols"] else "search-only"
+                lines.append(f"      {L['language']:<12} {L['files']:>5} files   {mark}")
+            if len(langs) > 8:
+                lines.append(f"      … +{len(langs) - 8} more")
+            top = langs[0]
+            if not top["symbols"]:
+                lines.append(
+                    f"  → Primary language ({top['language']}) has no symbol graph — "
+                    "prefer vectr_search; locate/trace will be empty here."
+                )
         if status.get("semantic_weight") is not None:
             lines.append(
                 f"  Retrieval      : semantic={status['semantic_weight']:.0%}  "

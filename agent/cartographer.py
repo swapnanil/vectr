@@ -275,7 +275,14 @@ def format_raw_metadata_for_llm(metadata: dict) -> str:
     ]
 
     if metadata.get("languages"):
+        from agent.symbol_graph import supports_symbols
         parts.append(f"Languages: {', '.join(metadata['languages'])}")
+        with_syms = [l for l in metadata["languages"] if supports_symbols(l)]
+        if with_syms:
+            parts.append(
+                f"  locate/trace available for: {', '.join(with_syms)} "
+                "(other languages are search-only)"
+            )
     if metadata.get("frameworks"):
         parts.append(f"Detected: {', '.join(metadata['frameworks'])}")
 

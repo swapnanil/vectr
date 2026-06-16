@@ -59,6 +59,18 @@ class IndexResponse(BaseModel):
     model: str
 
 
+class LanguageStat(BaseModel):
+    """Per-language index coverage + symbol availability (UPG-3.3).
+
+    `symbols=True` means locate/trace work for this language; otherwise it is
+    search-only. Lets a REST consumer route the same way the MCP agent does.
+    """
+    language: str
+    files: int
+    chunks: int
+    symbols: bool
+
+
 class StatusResponse(BaseModel):
     indexed_files: int
     total_chunks: int
@@ -66,6 +78,7 @@ class StatusResponse(BaseModel):
     embed_model: str
     workspace_root: str
     symbol_count: int = 0
+    languages: list[LanguageStat] = []
     notes_count: int = 0
     processing_ms: int
     model: str

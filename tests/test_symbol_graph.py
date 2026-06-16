@@ -25,10 +25,35 @@ from agent.symbol_graph import (
     Symbol,
     CallEdge,
     LocateResult,
+    SYMBOL_LANGUAGES,
+    supports_symbols,
     extract_symbols_from_file,
     _levenshtein,
 )
 from tests.conftest import make_py
+
+
+# ---------------------------------------------------------------------------
+# UPG-3.3 — language-capability introspection
+# ---------------------------------------------------------------------------
+
+class TestSymbolLanguageCapability:
+    def test_supported_languages_have_symbols(self) -> None:
+        for lang in ("python", "javascript", "typescript", "go", "rust",
+                     "java", "zig", "c", "cpp"):
+            assert supports_symbols(lang), lang
+            assert lang in SYMBOL_LANGUAGES
+
+    def test_doc_and_unknown_languages_have_no_symbols(self) -> None:
+        for lang in ("markdown", "html", "text", "cobol", "", "  "):
+            assert not supports_symbols(lang)
+
+    def test_display_name_spellings_normalized(self) -> None:
+        # map / human-facing names should resolve to the same capability
+        assert supports_symbols("C++")
+        assert supports_symbols("Python")
+        assert supports_symbols("  RUST ")
+        assert not supports_symbols("C#")
 
 
 # ---------------------------------------------------------------------------

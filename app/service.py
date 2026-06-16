@@ -319,9 +319,30 @@ class VectrService:
             "embed_model": self._embed_model,
             "workspace_root": self._workspace_root,
             "symbol_count": self._symbol_graph.symbol_count(self._workspace_root),
+            "languages": self._language_coverage(),
             "notes_count": self._context_store.count_notes(self._workspace_root),
             **strategy_info,
         }
+
+    def _language_coverage(self) -> list[dict]:
+        """Per-language coverage + symbol availability for `status` (UPG-3.3).
+
+        Lets the caller LLM route: `symbols=True` languages support locate/trace;
+        the rest are search-only. Ordered by file count (dominant language first).
+        """
+        from agent.symbol_graph import supports_symbols
+        stats = self._indexer.indexed_language_stats()
+        return [
+            {
+                "language": lang,
+                "files": s["files"],
+                "chunks": s["chunks"],
+                "symbols": supports_symbols(lang),
+            }
+            for lang, s in sorted(
+                stats.items(), key=lambda kv: (-kv[1]["files"], kv[0])
+            )
+        ]
 
     @property
     def total_chunks(self) -> int:

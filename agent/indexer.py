@@ -512,7 +512,7 @@ class CodeIndexer:
         )
         self._last_indexed: float = 0.0
         self._indexed_files: set[str] = set()
-        self._lang_cache: tuple[int, list[str]] | None = None  # (chunk_count, languages) — UPG-3.1
+        self._lang_cache: tuple[int, dict[str, dict[str, int]]] | None = None  # (chunk_count, per-lang stats) — UPG-3.1/3.3
 
     def _workspace_hash(self) -> str:
         return hashlib.md5(str(self.workspace_root).encode()).hexdigest()[:12]
@@ -845,19 +845,21 @@ class CodeIndexer:
         """Return a copy of all file paths currently in the index."""
         return list(self._indexed_files)
 
-    def indexed_languages(self) -> list[str]:
-        """Distinct, sorted `language` values currently in the collection (UPG-3.1).
+    def indexed_language_stats(self) -> dict[str, dict[str, int]]:
+        """Per-language coverage in the collection: `{lang: {"files", "chunks"}}`.
 
-        The ground truth for which languages the index can actually be filtered to
-        — derived from chunk metadata, not a fixed allow-list. Metadata-only
-        paginated scan, cached against the live chunk count so it only rescans when
-        the index changes.
+        The ground truth for what the index actually contains — derived from chunk
+        metadata, not a fixed allow-list. One metadata-only paginated scan, cached
+        against the live chunk count so it only rescans when the index changes.
+        UPG-3.1 (which languages exist) and UPG-3.3 (per-language coverage +
+        symbol availability) both read from this single source.
         """
         count = self.total_chunks
         if self._lang_cache is not None and self._lang_cache[0] == count:
             return self._lang_cache[1]
         _PAGE = 1000
-        langs: set[str] = set()
+        chunks: dict[str, int] = {}
+        files: dict[str, set[str]] = {}
         offset = 0
         while True:
             page = self._collection.get(include=["metadatas"], limit=_PAGE, offset=offset)
@@ -866,14 +868,25 @@ class CodeIndexer:
                 break
             for meta in page["metadatas"]:
                 lang = meta.get("language")
-                if lang:
-                    langs.add(lang)
+                if not lang:
+                    continue
+                chunks[lang] = chunks.get(lang, 0) + 1
+                fp = meta.get("file_path")
+                if fp:
+                    files.setdefault(lang, set()).add(fp)
             offset += len(ids)
             if len(ids) < _PAGE:
                 break
-        result = sorted(langs)
-        self._lang_cache = (count, result)
-        return result
+        stats = {
+            lang: {"files": len(files.get(lang, ())), "chunks": n}
+            for lang, n in chunks.items()
+        }
+        self._lang_cache = (count, stats)
+        return stats
+
+    def indexed_languages(self) -> list[str]:
+        """Distinct, sorted `language` values currently in the collection (UPG-3.1)."""
+        return sorted(self.indexed_language_stats())
 
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query string. Public method for external callers."""
