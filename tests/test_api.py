@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from api import app
 from agent.searcher import SearchResult
 from agent.query_router import RoutingDecision, QueryType
+from agent.symbol_graph import LocateResult, Symbol
 
 
 def _make_service():
@@ -46,8 +47,26 @@ def _make_service():
         "symbol_count": 0,
     }
     svc.get_map.return_value = "# Codebase Passport\nFastAPI service."
-    svc.locate_with_snippets.return_value = []
-    svc.format_locate.return_value = "No results."
+    # locate_with_snippets returns a LocateResult wrapper (not a bare list) —
+    # the REST route must unwrap .symbols. Mock the real shape so the route
+    # contract is actually exercised.
+    svc.locate_with_snippets.return_value = LocateResult(
+        symbols=[
+            Symbol(
+                symbol_id=1,
+                workspace="/repo",
+                name="PyDict_New",
+                kind="function",
+                file_path="Objects/dictobject.c",
+                start_line=812,
+                end_line=824,
+                snippet="PyObject *\nPyDict_New(void)\n{",
+            )
+        ],
+        resolution_strategy="exact",
+        query="PyDict_New",
+    )
+    svc.format_locate.return_value = "PyDict_New  Objects/dictobject.c:812"
     svc.trace_with_snippets.return_value = {}
     svc.format_trace.return_value = "No trace."
     svc.should_evict.return_value = False
@@ -132,6 +151,41 @@ def test_search_request_accepts_any_language() -> None:
     assert SearchRequest(query="q", language="c").language == "c"
     assert SearchRequest(query="q", language="zig").language == "zig"
     assert SearchRequest(query="q", language=None).language is None
+
+
+# ---------------------------------------------------------------------------
+# Locate (symbol graph) — route must unwrap LocateResult.symbols
+# ---------------------------------------------------------------------------
+
+def test_locate_happy_path(client) -> None:
+    resp = client.post("/v1/locate", json={"name": "PyDict_New"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["results"]) == 1
+    sym = data["results"][0]
+    assert sym["name"] == "PyDict_New"
+    assert sym["file_path"] == "Objects/dictobject.c"
+    assert sym["start_line"] == 812
+    assert "formatted" in data
+    assert "processing_ms" in data
+
+
+def test_locate_empty(client) -> None:
+    """A LocateResult with no symbols returns 200 + empty results, not a 500."""
+    app.state.service.locate_with_snippets.return_value = LocateResult(
+        symbols=[], resolution_strategy="none", query="nope"
+    )
+    resp = client.post("/v1/locate", json={"name": "nope"})
+    assert resp.status_code == 200
+    assert resp.json()["results"] == []
+
+
+def test_trace_happy_path(client) -> None:
+    resp = client.post("/v1/trace", json={"name": "get_gc_state"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "formatted" in data
+    assert "processing_ms" in data
 
 
 # ---------------------------------------------------------------------------

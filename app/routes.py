@@ -149,7 +149,7 @@ async def map_save(body: MapSaveRequest, request: Request) -> MapSaveResponse:
 async def locate(body: LocateRequest, request: Request) -> LocateResponse:
     t0 = time.monotonic()
     svc = _service(request)
-    symbols = svc.locate_with_snippets(body.name, limit=body.limit)
+    result = svc.locate_with_snippets(body.name, limit=body.limit)
     return LocateResponse(
         results=[
             SymbolResult(
@@ -160,9 +160,9 @@ async def locate(body: LocateRequest, request: Request) -> LocateResponse:
                 end_line=s.end_line,
                 snippet=s.snippet,
             )
-            for s in symbols
+            for s in result.symbols
         ],
-        formatted=svc.format_locate(symbols, body.name),
+        formatted=svc.format_locate(result, body.name),
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 
