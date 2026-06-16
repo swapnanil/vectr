@@ -890,33 +890,53 @@ class SymbolGraph:
     # Query: trace (call graph)
     # ------------------------------------------------------------------
 
-    def callers(self, workspace: str, symbol_name: str, limit: int = 20) -> list[CallEdge]:
-        """Who calls this symbol? Supports partial match."""
+    def _edges(self, workspace: str, column: str, name: str, order_by: str, limit: int) -> list[CallEdge]:
+        """Fetch edges by exact `column` match; fall back to partial (LIKE) only
+        when no exact-named edge exists. Exact-first kills the substring
+        conflation that merged unrelated symbols — `trace compare` no longer
+        pulls in `compare_stacks` / `_Py_atomic_compare_exchange_*` (UPG-4.1).
+        `column` and `order_by` are fixed internal literals, never user input."""
         with self._conn() as conn:
             rows = conn.execute(
-                """
-                SELECT * FROM edges
-                WHERE workspace = ? AND to_symbol LIKE ?
-                ORDER BY from_file, from_symbol
-                LIMIT ?
-                """,
-                (workspace, f"%{symbol_name}%", limit),
+                f"SELECT * FROM edges WHERE workspace = ? AND {column} = ? "
+                f"ORDER BY {order_by} LIMIT ?",
+                (workspace, name, limit),
             ).fetchall()
+            if not rows:
+                rows = conn.execute(
+                    f"SELECT * FROM edges WHERE workspace = ? AND {column} LIKE ? "
+                    f"ORDER BY {order_by} LIMIT ?",
+                    (workspace, f"%{name}%", limit),
+                ).fetchall()
         return [self._row_to_edge(r) for r in rows]
 
+    def callers(self, workspace: str, symbol_name: str, limit: int = 20) -> list[CallEdge]:
+        """Who calls this symbol? Exact name match preferred (partial fallback)."""
+        return self._edges(workspace, "to_symbol", symbol_name, "from_file, from_symbol", limit)
+
     def callees(self, workspace: str, symbol_name: str, limit: int = 20) -> list[CallEdge]:
-        """What does this symbol call? Supports partial match."""
+        """What does this symbol call? Exact name match preferred (partial fallback)."""
+        return self._edges(workspace, "from_symbol", symbol_name, "to_symbol", limit)
+
+    def _exact_definitions(self, workspace: str, name: str, limit: int = 20) -> list[Symbol]:
+        """Definition sites whose name matches `name` exactly. Each (file_path,
+        name) is a distinct node — this is the fully-qualified identity that
+        keeps same-named symbols in different modules from merging (UPG-4.1)."""
         with self._conn() as conn:
             rows = conn.execute(
-                """
-                SELECT * FROM edges
-                WHERE workspace = ? AND from_symbol LIKE ?
-                ORDER BY to_symbol
-                LIMIT ?
-                """,
-                (workspace, f"%{symbol_name}%", limit),
+                "SELECT * FROM symbols WHERE workspace = ? AND name = ? "
+                "ORDER BY file_path, start_line LIMIT ?",
+                (workspace, name, limit),
             ).fetchall()
-        return [self._row_to_edge(r) for r in rows]
+        return [self._row_to_symbol(r) for r in rows]
+
+    @staticmethod
+    def _module_label(file_path: str, workspace: str) -> str:
+        """Repo-relative path used to qualify a definition in trace output."""
+        try:
+            return str(Path(file_path).relative_to(workspace))
+        except ValueError:
+            return Path(file_path).name
 
     def trace(
         self,
@@ -925,12 +945,38 @@ class SymbolGraph:
         direction: Literal["callers", "callees", "both"] = "both",
         limit: int = 20,
     ) -> dict:
-        """Combined callers + callees lookup."""
+        """Combined callers + callees lookup.
+
+        UPG-4.1: when `symbol_name` has more than one definition across modules,
+        the callees are scoped per definition (by `from_file`) so they are shown
+        separately instead of merged into one node. Callees are exactly
+        attributable (an edge carries the calling definition's file); callers are
+        not (a call site doesn't record which definition it bound), so callers
+        stay a flat list with an ambiguity note in the formatter.
+        """
         result: dict = {}
         if direction in ("callers", "both"):
             result["callers"] = self.callers(workspace, symbol_name, limit)
         if direction in ("callees", "both"):
             result["callees"] = self.callees(workspace, symbol_name, limit)
+
+        defs = self._exact_definitions(workspace, symbol_name)
+        result["definitions"] = defs
+        if direction in ("callees", "both") and len(defs) > 1:
+            by_def = []
+            with self._conn() as conn:
+                for d in defs:
+                    rows = conn.execute(
+                        "SELECT * FROM edges WHERE workspace = ? AND from_symbol = ? "
+                        "AND from_file = ? ORDER BY to_symbol LIMIT ?",
+                        (workspace, symbol_name, d.file_path, limit),
+                    ).fetchall()
+                    by_def.append({
+                        "definition": d,
+                        "module": self._module_label(d.file_path, workspace),
+                        "callees": [self._row_to_edge(r) for r in rows],
+                    })
+            result["by_definition"] = by_def
         return result
 
     def get_snippet(self, file_path: str, start_line: int, end_line: int) -> str:
@@ -992,6 +1038,36 @@ class SymbolGraph:
 
     def format_trace_for_llm(self, trace_result: dict, symbol_name: str) -> str:
         lines = [f"Call graph trace for '{symbol_name}':\n"]
+
+        # UPG-4.1: ambiguous symbol — show callees separated per definition so
+        # the LLM sees e.g. resolver `Lock` vs sync `Lock` as distinct, not merged.
+        by_def = trace_result.get("by_definition")
+        if by_def and len(by_def) > 1:
+            lines.append(
+                f"⚠ '{symbol_name}' has {len(by_def)} definitions across modules — "
+                f"calls are shown per definition. (Callers below match the name only "
+                f"and can't be attributed to one definition by static analysis.)\n"
+            )
+            for entry in by_def:
+                d = entry["definition"]
+                mod = entry.get("module") or d.file_path
+                cs = entry["callees"]
+                lines.append(f"[{d.kind}] {symbol_name} @ {mod}:{d.start_line} — calls ({len(cs)}):")
+                if cs:
+                    for e in cs:
+                        lines.append(f"    {e.to_symbol}")
+                else:
+                    lines.append("    (none found in index)")
+                lines.append("")
+            callers = trace_result.get("callers")
+            if callers is not None:
+                if callers:
+                    lines.append(f"Called by — any '{symbol_name}' ({len(callers)}):")
+                    for e in callers:
+                        lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}")
+                else:
+                    lines.append(f"Called by — any '{symbol_name}': (none found in index)")
+            return "\n".join(lines)
 
         callers = trace_result.get("callers", [])
         if callers is not None:

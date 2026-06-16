@@ -840,3 +840,114 @@ class TestLocateRankingUPG45:
         prefix_impl = {"name": "rand_x", "kind": "impl", "file_path": "src/z.py"}
         assert _partial_match_key(prefix_def, "rand") < _partial_match_key(interior, "rand")
         assert _partial_match_key(prefix_def, "rand") < _partial_match_key(prefix_impl, "rand")
+
+
+# ---------------------------------------------------------------------------
+# UPG-4.1 — namespace symbols to kill name collisions
+# ---------------------------------------------------------------------------
+
+class TestTraceCollisionUPG41:
+    def test_callers_exact_no_substring_bleed(self, tmp_path) -> None:
+        # `compare` and `compare_stacks` are distinct symbols; callers("compare")
+        # must NOT pull in the caller of `compare_stacks` (old LIKE bug).
+        g = SymbolGraph(str(tmp_path))
+        path = make_py(tmp_path, "m.py", textwrap.dedent("""\
+            def compare(): pass
+            def compare_stacks(): pass
+            def user_a():
+                compare()
+            def user_b():
+                compare_stacks()
+        """))
+        g.index_file("ws", path)
+        callers = [e.from_symbol for e in g.callers("ws", "compare")]
+        assert "user_a" in callers
+        assert "user_b" not in callers
+
+    def test_callees_fall_back_to_partial_when_no_exact(self, tmp_path) -> None:
+        # No symbol named exactly "process", so callees("process") should still
+        # find process_data's calls via the partial fallback.
+        g = SymbolGraph(str(tmp_path))
+        path = make_py(tmp_path, "p.py", textwrap.dedent("""\
+            def helper(): pass
+            def process_data():
+                helper()
+        """))
+        g.index_file("ws", path)
+        callees = [e.to_symbol for e in g.callees("ws", "process")]
+        assert "helper" in callees
+
+    def test_trace_separates_same_named_defs_across_modules(self, tmp_path) -> None:
+        # Two `Lock` definitions in different modules, each calling different
+        # things. trace must scope callees per definition, not merge them.
+        resolver = tmp_path / "resolver"
+        sync = tmp_path / "sync"
+        resolver.mkdir()
+        sync.mkdir()
+        (resolver / "lock.py").write_text(textwrap.dedent("""\
+            def read_lockfile(): pass
+            def Lock():
+                read_lockfile()
+        """))
+        (sync / "mutex.py").write_text(textwrap.dedent("""\
+            def os_mutex(): pass
+            def Lock():
+                os_mutex()
+        """))
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g.index_file(ws, str(resolver / "lock.py"))
+        g.index_file(ws, str(sync / "mutex.py"))
+
+        result = g.trace(ws, "Lock", direction="both")
+        assert len(result["definitions"]) == 2
+        by_def = result["by_definition"]
+        assert len(by_def) == 2
+
+        callees_by_module = {
+            e_def["module"]: {e.to_symbol for e in e_def["callees"]}
+            for e_def in by_def
+        }
+        resolver_callees = next(v for k, v in callees_by_module.items() if "resolver" in k)
+        sync_callees = next(v for k, v in callees_by_module.items() if "sync" in k)
+        assert "read_lockfile" in resolver_callees and "os_mutex" not in resolver_callees
+        assert "os_mutex" in sync_callees and "read_lockfile" not in sync_callees
+
+    def test_format_trace_renders_per_definition_separation(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        d1 = Symbol(symbol_id=1, workspace="ws", name="Lock", kind="function",
+                    file_path="/ws/resolver/lock.py", start_line=2, end_line=4)
+        d2 = Symbol(symbol_id=2, workspace="ws", name="Lock", kind="function",
+                    file_path="/ws/sync/mutex.py", start_line=2, end_line=4)
+        trace_result = {
+            "callers": [],
+            "callees": [],
+            "definitions": [d1, d2],
+            "by_definition": [
+                {"definition": d1, "module": "resolver/lock.py",
+                 "callees": [CallEdge(from_file="/ws/resolver/lock.py", from_symbol="Lock",
+                                      from_line=2, to_symbol="read_lockfile", edge_type="calls")]},
+                {"definition": d2, "module": "sync/mutex.py",
+                 "callees": [CallEdge(from_file="/ws/sync/mutex.py", from_symbol="Lock",
+                                      from_line=2, to_symbol="os_mutex", edge_type="calls")]},
+            ],
+        }
+        text = g.format_trace_for_llm(trace_result, "Lock")
+        assert "2 definitions" in text
+        assert "resolver/lock.py" in text and "sync/mutex.py" in text
+        assert "read_lockfile" in text and "os_mutex" in text
+
+    def test_single_definition_uses_flat_format(self, tmp_path) -> None:
+        # One definition → no per-definition block, no ambiguity warning.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        path = make_py(tmp_path, "s.py", textwrap.dedent("""\
+            def helper(): pass
+            def only_caller():
+                helper()
+        """))
+        g.index_file(ws, path)
+        result = g.trace(ws, "helper", direction="both")
+        assert "by_definition" not in result
+        text = g.format_trace_for_llm(result, "helper")
+        assert "definitions across modules" not in text
