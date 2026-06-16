@@ -39,6 +39,12 @@ LANG_BY_EXT: dict[str, str] = {
     ".java": "java",
     ".c": "c",
     ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".hxx": "cpp",
     ".zig": "zig",
     ".md": "markdown",
     ".html": "html",
@@ -163,6 +169,10 @@ def _get_parser(language: str):
             import tree_sitter_java as ts_lang
         elif language == "zig":
             import tree_sitter_zig as ts_lang
+        elif language == "c":
+            import tree_sitter_c as ts_lang
+        elif language == "cpp":
+            import tree_sitter_cpp as ts_lang
         else:
             return None
         parser = Parser(Language(ts_lang.language()))
@@ -187,6 +197,9 @@ _CHUNK_NODE_TYPES: dict[str, set[str]] = {
     "rust": {"function_item", "impl_item"},
     "java": {"method_declaration", "class_declaration"},
     "zig": {"function_declaration", "variable_declaration"},
+    "c": {"function_definition", "struct_specifier", "enum_specifier", "type_definition"},
+    "cpp": {"function_definition", "class_specifier", "struct_specifier",
+            "enum_specifier", "type_definition", "namespace_definition"},
 }
 
 _SYMBOL_FIELD: dict[str, str] = {
@@ -200,7 +213,54 @@ _SYMBOL_FIELD: dict[str, str] = {
 }
 
 
+# C/C++ symbol-name extraction (shared with symbol_graph). Needed because C nests
+# the name under the declarator chain: in `PyObject *PyDict_New(void)` the only
+# direct `type_identifier` child is the RETURN type (PyObject), not the name.
+_C_TYPE_NAME_NODES = {"struct_specifier", "union_specifier", "enum_specifier", "class_specifier"}
+
+
+def _c_declarator_name(node, code_bytes: bytes) -> str:
+    """Follow a C/C++ declarator chain (pointer/function/array/parenthesized) to the name."""
+    cur = node
+    for _ in range(12):  # bounded — declarator nesting is shallow
+        if cur is None:
+            return ""
+        t = cur.type
+        if t in ("identifier", "field_identifier", "type_identifier"):
+            return code_bytes[cur.start_byte:cur.end_byte].decode("utf-8", errors="replace")
+        if t == "qualified_identifier":  # C++ Foo::bar → the trailing member name
+            last = None
+            for c in cur.named_children:
+                if c.type in ("identifier", "field_identifier", "destructor_name", "operator_name"):
+                    last = c
+            return code_bytes[last.start_byte:last.end_byte].decode("utf-8", errors="replace") if last else ""
+        nxt = cur.child_by_field_name("declarator")
+        if nxt is None:
+            nxt = next((c for c in cur.named_children
+                        if c.type.endswith("declarator") or c.type in ("identifier", "qualified_identifier")), None)
+        cur = nxt
+    return ""
+
+
+def c_symbol_name(node, code_bytes: bytes) -> str:
+    """Name of a C/C++ symbol-defining node (handles return-type-vs-name confusion)."""
+    t = node.type
+    if t in _C_TYPE_NAME_NODES or t == "namespace_definition":
+        nm = node.child_by_field_name("name")
+        return code_bytes[nm.start_byte:nm.end_byte].decode("utf-8", errors="replace") if nm is not None else ""
+    if t in ("preproc_def", "preproc_function_def"):
+        nm = node.child_by_field_name("name")
+        return code_bytes[nm.start_byte:nm.end_byte].decode("utf-8", errors="replace") if nm is not None else ""
+    # function_definition / type_definition / declaration → walk the declarator chain
+    d = node.child_by_field_name("declarator")
+    return _c_declarator_name(d if d is not None else node, code_bytes)
+
+
 def _extract_symbol_name(node, language: str, code_bytes: bytes) -> str:
+    if language in ("c", "cpp"):
+        nm = c_symbol_name(node, code_bytes)
+        if nm:
+            return nm
     for child in node.children:
         if child.type in ("identifier", "name", "property_identifier"):
             return code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")

@@ -107,6 +107,26 @@ _SYMBOL_TYPES: dict[str, dict[str, str]] = {
         "function_declaration": "function",
         "variable_declaration": "struct",  # pub const Foo = struct { ... }
     },
+    "c": {
+        "function_definition": "function",
+        "struct_specifier": "struct",
+        "union_specifier": "struct",
+        "enum_specifier": "enum",
+        "type_definition": "type",       # typedef … Name;
+        "preproc_def": "macro",
+        "preproc_function_def": "macro",
+    },
+    "cpp": {
+        "function_definition": "function",
+        "class_specifier": "class",
+        "struct_specifier": "struct",
+        "union_specifier": "struct",
+        "enum_specifier": "enum",
+        "type_definition": "type",
+        "namespace_definition": "namespace",
+        "preproc_def": "macro",
+        "preproc_function_def": "macro",
+    },
 }
 
 # Call node types per language
@@ -118,6 +138,8 @@ _CALL_TYPES: dict[str, set[str]] = {
     "rust": {"call_expression", "method_call_expression"},
     "java": {"method_invocation", "object_creation_expression"},
     "zig": {"call_expression", "builtin_function"},
+    "c": {"call_expression"},
+    "cpp": {"call_expression", "new_expression"},
 }
 
 # Import node types per language
@@ -129,6 +151,8 @@ _IMPORT_TYPES: dict[str, set[str]] = {
     "rust": {"use_declaration"},
     "java": {"import_declaration"},
     "zig": {"variable_declaration"},  # const std = @import("std");
+    "c": {"preproc_include"},
+    "cpp": {"preproc_include"},
 }
 
 
@@ -184,8 +208,13 @@ def _get_imported_files(caller_file: str, workspace: str) -> list[str]:
     return list(dict.fromkeys(imported))  # dedup while preserving order
 
 
-def _get_symbol_name(node, code_bytes: bytes) -> str:
+def _get_symbol_name(node, code_bytes: bytes, language: str = "") -> str:
     """Extract identifier from a symbol-defining node."""
+    if language in ("c", "cpp"):
+        # C/C++ nest the name under the declarator chain; the first direct
+        # type_identifier is the RETURN type, not the name — use the shared helper.
+        from agent.indexer import c_symbol_name
+        return c_symbol_name(node, code_bytes)
     for child in node.children:
         if child.type in ("identifier", "name", "property_identifier", "type_identifier"):
             return code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
@@ -207,10 +236,13 @@ def _get_call_name(node, code_bytes: bytes) -> str:
         return ""
     if func.type in ("identifier", "property_identifier"):
         return code_bytes[func.start_byte:func.end_byte].decode("utf-8", errors="replace")
-    # attribute access: obj.method — extract just the method name
-    if func.type in ("attribute", "member_expression", "field_access"):
+    # attribute access: obj.method / ptr->method (C) — extract just the member name
+    if func.type in ("attribute", "member_expression", "field_access", "field_expression"):
+        fld = func.child_by_field_name("field") or func.child_by_field_name("property")
+        if fld is not None:
+            return code_bytes[fld.start_byte:fld.end_byte].decode("utf-8", errors="replace")
         for child in func.children:
-            if child.type in ("identifier", "property_identifier") and child != func.children[0]:
+            if child.type in ("identifier", "property_identifier", "field_identifier") and child != func.children[0]:
                 return code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
     # fallback: grab last identifier token
     last_ident = ""
@@ -220,7 +252,11 @@ def _get_call_name(node, code_bytes: bytes) -> str:
     return last_ident
 
 
-_MAX_DEPTH = 60  # guard against pathological ASTs blowing Python's stack
+# Guard against pathological ASTs blowing Python's recursion limit. Must be
+# counted on EVERY recursion (see below) or it never fires. 200 is far deeper
+# than real functions/calls nest, while staying well under Python's ~1000 frame
+# limit — deeply-nested data (big C initializer tables) is cut off, not crashed.
+_MAX_DEPTH = 200
 
 
 def _collect_symbols_and_calls(
@@ -240,23 +276,27 @@ def _collect_symbols_and_calls(
     if depth > _MAX_DEPTH:
         return
     if node.type in symbol_types:
-        name = _get_symbol_name(node, code_bytes)
+        name = _get_symbol_name(node, code_bytes, language)
         kind = symbol_types[node.type]
         start = node.start_point[0] + 1
         end = node.end_point[0] + 1
-        symbols.append({
-            "name": name,
-            "kind": kind,
-            "file_path": file_path,
-            "start_line": start,
-            "end_line": end,
-        })
-        # recurse into body with this symbol as context
+        if name:  # skip anonymous nodes (e.g. C anonymous struct inside a typedef)
+            symbols.append({
+                "name": name,
+                "kind": kind,
+                "file_path": file_path,
+                "start_line": start,
+                "end_line": end,
+            })
+        # recurse into body with this symbol as context (use the enclosing symbol
+        # name when this node was anonymous, so nested calls still attribute somewhere)
+        ctx = name or current_symbol
+        ctx_line = start if name else current_line
         for child in node.children:
             _collect_symbols_and_calls(
                 child, code_bytes, language, file_path,
                 symbol_types, call_types, symbols, edges,
-                current_symbol=name, current_line=start,
+                current_symbol=ctx, current_line=ctx_line,
                 depth=depth + 1,
             )
         return
@@ -277,7 +317,8 @@ def _collect_symbols_and_calls(
             child, code_bytes, language, file_path,
             symbol_types, call_types, symbols, edges,
             current_symbol=current_symbol, current_line=current_line,
-            depth=depth,
+            depth=depth + 1,  # MUST increment — generic nodes dominate deep C ASTs;
+                              # leaving this at `depth` let the guard never fire → RecursionError
         )
 
 

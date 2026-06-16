@@ -496,6 +496,127 @@ pub const Account = struct {
         assert count >= 2, f"expected ≥2 Zig chunks, got {count}"
 
 
+# ---------------------------------------------------------------------------
+# C / C++ language support (UPG-3.2 — locate/trace were dead on C)
+# ---------------------------------------------------------------------------
+
+class TestCSupport:
+    _C_CODE = """\
+#include "Python.h"
+
+typedef struct { int n; } GCState;
+
+static GCState *get_gc_state(PyThreadState *tstate) {
+    return &tstate->gc;
+}
+
+PyObject *PyDict_New(void) {
+    GCState *st = get_gc_state(NULL);
+    PyObject *op = _PyObject_GC_New();
+    return op;
+}
+
+#define MAXSIZE 256
+"""
+
+    def _write_c(self, tmp_path, name="dictobject.c") -> str:
+        p = tmp_path / name
+        p.write_text(self._C_CODE)
+        return str(p)
+
+    def test_c_chunks_are_ast_aware(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_c(tmp_path))
+        node_types = {c.node_type for c in chunks}
+        assert "function_definition" in node_types, "expected AST chunks, got window fallback"
+        assert all(c.language == "c" for c in chunks)
+
+    def test_c_function_name_not_return_type(self, tmp_path) -> None:
+        # The return type (PyObject/GCState) must NOT be mistaken for the function name.
+        from agent.indexer import chunk_file
+        names = {c.symbol_name for c in chunk_file(self._write_c(tmp_path))}
+        assert "PyDict_New" in names
+        assert "get_gc_state" in names
+        assert "PyObject" not in names  # return type, not a function symbol
+
+    def test_c_symbols_extracted(self, tmp_path) -> None:
+        from agent.symbol_graph import extract_symbols_from_file
+        syms, _ = extract_symbols_from_file(self._write_c(tmp_path))
+        by_name = {s["name"]: s["kind"] for s in syms}
+        assert by_name.get("get_gc_state") == "function"
+        assert by_name.get("PyDict_New") == "function"
+        assert by_name.get("GCState") == "type"
+        assert by_name.get("MAXSIZE") == "macro"
+        assert "" not in by_name  # no anonymous-struct pollution
+
+    def test_c_call_edges_extracted(self, tmp_path) -> None:
+        from agent.symbol_graph import extract_symbols_from_file
+        _, edges = extract_symbols_from_file(self._write_c(tmp_path))
+        pairs = {(e["from_symbol"], e["to_symbol"]) for e in edges}
+        assert ("PyDict_New", "get_gc_state") in pairs
+        assert ("PyDict_New", "_PyObject_GC_New") in pairs
+
+    def test_c_deeply_nested_does_not_recurse_crash(self, tmp_path) -> None:
+        # Regression: a chain of generic AST nodes (deeply nested parens) used to
+        # blow Python's recursion limit because the walker didn't increment depth
+        # on generic nodes, so _MAX_DEPTH never fired. Must not raise, and the
+        # top-level function must still be extracted.
+        from agent.symbol_graph import extract_symbols_from_file
+        deep = "(" * 1200 + "1" + ")" * 1200
+        p = tmp_path / "deep.c"
+        p.write_text(f"int deeply_nested_fn(void) {{ return {deep}; }}\n")
+        syms, _ = extract_symbols_from_file(str(p))   # must not raise RecursionError
+        assert any(s["name"] == "deeply_nested_fn" for s in syms)
+
+    def test_c_locate_and_trace_via_graph(self, tmp_path) -> None:
+        # End-to-end: the audit's exact failure (locate/trace dead on C) is fixed.
+        from agent.symbol_graph import SymbolGraph
+        db = tmp_path / "sg"; db.mkdir()
+        sg = SymbolGraph(str(db))
+        path = self._write_c(tmp_path)
+        ws = str(tmp_path)
+        sg.index_file(ws, path)
+        hits = sg.locate(ws, "PyDict_New")
+        assert hits and hits[0].name == "PyDict_New"
+        trace = sg.trace(ws, "get_gc_state", direction="callers")
+        caller_names = {c.from_symbol for c in trace.get("callers", [])}
+        assert "PyDict_New" in caller_names
+
+
+class TestCppSupport:
+    _CPP_CODE = """\
+namespace ns {
+
+class Widget {
+public:
+    void render() { paint(); }
+    int size() const { return n; }
+private:
+    int n;
+};
+
+}  // namespace ns
+"""
+
+    def _write_cpp(self, tmp_path, name="widget.cpp") -> str:
+        p = tmp_path / name
+        p.write_text(self._CPP_CODE)
+        return str(p)
+
+    def test_cpp_language_label(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_cpp(tmp_path))
+        assert chunks and all(c.language == "cpp" for c in chunks)
+
+    def test_cpp_class_and_method_symbols(self, tmp_path) -> None:
+        from agent.symbol_graph import extract_symbols_from_file
+        syms, edges = extract_symbols_from_file(self._write_cpp(tmp_path))
+        by_name = {s["name"]: s["kind"] for s in syms}
+        assert by_name.get("Widget") == "class"
+        assert "render" in by_name
+        assert ("render", "paint") in {(e["from_symbol"], e["to_symbol"]) for e in edges}
+
+
 class TestMarkdownSupport:
     """chunk_file() produces heading-aware section chunks for .md files."""
 
