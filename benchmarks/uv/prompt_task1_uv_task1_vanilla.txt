@@ -1,0 +1,45 @@
+The uv Python package manager source code (Rust) is at: /Users/swapnanil.s/Documents/fde/vectr/tmp/poc-uv-vanilla
+
+Explore three related areas of the uv codebase and write investigation files
+documenting your findings. uv is written in Rust — use vectr_search to find
+relevant code since you are not familiar with this codebase's structure.
+
+--- TASK A: Extras validation ---
+
+Investigate what happens when a user specifies an unknown extra
+(e.g., `uv add requests[nonexistent]`). Specifically:
+
+1. Find where extras specifications are parsed from the CLI input.
+2. Trace how extras are stored in the package/dependency types during resolution.
+3. Determine whether uv validates extra names against the package's declared extras
+   from PyPI metadata. If it does not, identify the earliest point in the code
+   where such validation could be added.
+4. Find how PyPI JSON metadata is deserialized — what field carries extras and what
+   does its structure look like in the Rust types?
+
+Write your findings to `uv_extras.txt`.
+
+--- TASK B: Resolver entry point ---
+
+Map the path from the CLI command `uv add foo` to the first resolver invocation.
+
+1. Find the CLI command handler for `uv add` (or `uv pip install`).
+2. Identify the top-level resolver struct(s). What trait/struct drives the PubGrub
+   resolution loop?
+3. Find where the decision "fetch from PyPI" vs "use workspace member / local path" is made.
+4. What is the type that represents a package being resolved — how does it carry the
+   package name, version constraints, and extras together?
+
+Write your findings to `uv_resolver_entry.txt`.
+
+--- TASK C: Platform markers ---
+
+Find how PEP 508 environment markers (e.g., `requests; python_version > "3.8"`) are
+parsed and evaluated.
+
+1. Find the marker parsing code — what crate/module handles it?
+2. When are markers evaluated: at parse time, resolution time, or install time?
+3. Find where marker evaluation gates package inclusion in the lock file.
+4. Find a concrete code path where a marker causes a dependency to be skipped entirely.
+
+Write your findings to `uv_markers.txt`.

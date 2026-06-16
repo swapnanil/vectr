@@ -1068,3 +1068,105 @@ class TestEdgeAggregationUPG42:
         text = g.format_trace_for_llm(result, "caller")
         assert "target" in text
         assert "×" not in text
+
+
+# ---------------------------------------------------------------------------
+# UPG-4.3 — suppress builtins/stdlib from callee lists (repo-internal by default)
+# ---------------------------------------------------------------------------
+
+class TestBuiltinSuppressionUPG43:
+    def _graph_with_mixed_callees(self, tmp_path):
+        # `caller` (in a .py file) calls a repo function + python builtins.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("helper", "function", f"{ws}/util.py")])
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "caller", 1, "helper"),
+            (f"{ws}/a.py", "caller", 2, "len"),
+            (f"{ws}/a.py", "caller", 3, "isinstance"),
+            (f"{ws}/a.py", "caller", 4, "print"),
+        ])
+        return g, ws
+
+    def test_builtins_hidden_by_default_in_trace(self, tmp_path) -> None:
+        g, ws = self._graph_with_mixed_callees(tmp_path)
+        result = g.trace(ws, "caller", direction="callees")  # include_builtins defaults False
+        names = [e.to_symbol for e in result["callees"]]
+        assert names == ["helper"]
+        assert result["hidden_builtins"] == 3
+
+    def test_include_builtins_shows_them(self, tmp_path) -> None:
+        g, ws = self._graph_with_mixed_callees(tmp_path)
+        result = g.trace(ws, "caller", direction="callees", include_builtins=True)
+        names = {e.to_symbol for e in result["callees"]}
+        assert {"helper", "len", "isinstance", "print"} <= names
+        assert result["hidden_builtins"] == 0
+
+    def test_repo_defined_shadowing_a_builtin_is_kept(self, tmp_path) -> None:
+        # The repo defines its own `len`; it must NOT be suppressed as a builtin.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("len", "function", f"{ws}/mylib.py")])
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "caller", 1, "len"),
+            (f"{ws}/a.py", "caller", 2, "isinstance"),
+        ])
+        result = g.trace(ws, "caller", direction="callees")
+        names = [e.to_symbol for e in result["callees"]]
+        assert "len" in names           # repo-defined, kept
+        assert "isinstance" not in names  # true builtin, hidden
+        assert result["hidden_builtins"] == 1
+
+    def test_hidden_note_rendered(self, tmp_path) -> None:
+        g, ws = self._graph_with_mixed_callees(tmp_path)
+        result = g.trace(ws, "caller", direction="callees")
+        text = g.format_trace_for_llm(result, "caller")
+        assert "3 builtin/stdlib calls hidden" in text
+        assert "include_builtins" in text
+
+    def test_callees_method_keeps_builtins_by_default(self, tmp_path) -> None:
+        # The raw callees() API is unfiltered by default (back-compat); only the
+        # trace() display path suppresses.
+        g, ws = self._graph_with_mixed_callees(tmp_path)
+        names = {e.to_symbol for e in g.callees(ws, "caller")}
+        assert "len" in names
+
+    def test_c_builtins_suppressed(self, tmp_path) -> None:
+        # malloc/memcpy/assert from a .c file are libc noise, not repo calls.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("parse_header", "function", f"{ws}/hdr.c")])
+        _seed_edges(g, ws, [
+            (f"{ws}/p.c", "caller", 1, "parse_header"),
+            (f"{ws}/p.c", "caller", 2, "malloc"),
+            (f"{ws}/p.c", "caller", 3, "memcpy"),
+            (f"{ws}/p.c", "caller", 4, "assert"),
+        ])
+        result = g.trace(ws, "caller", direction="callees")
+        names = [e.to_symbol for e in result["callees"]]
+        assert names == ["parse_header"]
+        assert result["hidden_builtins"] == 3
+
+    def test_per_definition_callees_also_suppress_builtins(self, tmp_path) -> None:
+        # Two defs of `Lock` across modules; builtins hidden within each block.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [
+            ("Lock", "function", f"{ws}/resolver/lock.py"),
+            ("Lock", "function", f"{ws}/sync/mutex.py"),
+            ("read_lockfile", "function", f"{ws}/resolver/io.py"),
+        ])
+        _seed_edges(g, ws, [
+            (f"{ws}/resolver/lock.py", "Lock", 1, "read_lockfile"),
+            (f"{ws}/resolver/lock.py", "Lock", 2, "len"),
+            (f"{ws}/sync/mutex.py", "Lock", 1, "print"),
+        ])
+        result = g.trace(ws, "Lock", direction="callees")
+        by_def = result["by_definition"]
+        for entry in by_def:
+            cnames = {e.to_symbol for e in entry["callees"]}
+            assert "len" not in cnames and "print" not in cnames
+        # the resolver def still shows its repo-internal call
+        resolver = next(e for e in by_def if "resolver" in e["module"])
+        assert "read_lockfile" in {e.to_symbol for e in resolver["callees"]}
+        assert resolver["hidden_builtins"] == 1

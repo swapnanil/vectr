@@ -229,6 +229,15 @@ _EXPLORATION_TOOLS = [
                     "description": "Max results per direction (default: 20)",
                     "default": 20,
                 },
+                "include_builtins": {
+                    "type": "boolean",
+                    "description": (
+                        "Include language builtins/stdlib in the 'calls' list (len, assert, "
+                        "Ok, Some, malloc, …). Default false — only repo-internal calls are "
+                        "shown, with a count of how many builtins were hidden."
+                    ),
+                    "default": False,
+                },
             },
             "required": ["name"],
         },
@@ -668,7 +677,10 @@ def handle_tools_call(
         if direction not in ("callers", "callees", "both"):
             direction = "both"
         limit = int(arguments.get("limit", 20))
-        trace_result = service.trace_with_snippets(name, direction=direction, limit=limit)
+        include_builtins = bool(arguments.get("include_builtins", False))
+        trace_result = service.trace_with_snippets(
+            name, direction=direction, limit=limit, include_builtins=include_builtins
+        )
         text = service.format_trace(trace_result, name)
         if service.should_evict():
             hint = service.eviction_hint()

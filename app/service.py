@@ -371,12 +371,15 @@ class VectrService:
         """Locate symbols via L2 multi-strategy resolution. Returns LocateResult. No LLM call."""
         return self._symbol_graph.locate_l2(self._workspace_root, name, limit=limit, caller_file=caller_file)
 
-    def trace(self, name: str, direction: str = "both", limit: int = 20) -> dict:
-        return self._symbol_graph.trace(self._workspace_root, name, direction, limit)  # type: ignore[arg-type]
+    def trace(self, name: str, direction: str = "both", limit: int = 20,
+              include_builtins: bool = False) -> dict:
+        return self._symbol_graph.trace(self._workspace_root, name, direction, limit, include_builtins)  # type: ignore[arg-type]
 
-    def trace_with_snippets(self, name: str, direction: str = "both", limit: int = 20) -> dict:
-        """Trace call graph. Caller/callee names are returned as-is; AI can locate() them for snippets."""
-        return self._symbol_graph.trace(self._workspace_root, name, direction, limit)  # type: ignore[arg-type]
+    def trace_with_snippets(self, name: str, direction: str = "both", limit: int = 20,
+                            include_builtins: bool = False) -> dict:
+        """Trace call graph. Caller/callee names are returned as-is; AI can locate() them for snippets.
+        Builtin/stdlib callees hidden unless include_builtins (UPG-4.3)."""
+        return self._symbol_graph.trace(self._workspace_root, name, direction, limit, include_builtins)  # type: ignore[arg-type]
 
     def ingest_traces(self, trace_events: list[dict]) -> dict:
         """Ingest runtime trace events into the symbol graph."""

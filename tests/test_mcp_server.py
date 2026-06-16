@@ -553,17 +553,26 @@ class TestVectrTrace:
     def test_trace_calls_service(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_trace", {"name": "dispatch"}, svc)
-        svc.trace_with_snippets.assert_called_once_with("dispatch", direction="both", limit=20)
+        svc.trace_with_snippets.assert_called_once_with(
+            "dispatch", direction="both", limit=20, include_builtins=False)
 
     def test_trace_direction_passed_through(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_trace", {"name": "dispatch", "direction": "callers"}, svc)
-        svc.trace_with_snippets.assert_called_once_with("dispatch", direction="callers", limit=20)
+        svc.trace_with_snippets.assert_called_once_with(
+            "dispatch", direction="callers", limit=20, include_builtins=False)
 
     def test_trace_invalid_direction_defaults_to_both(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_trace", {"name": "dispatch", "direction": "invalid_value"}, svc)
-        svc.trace_with_snippets.assert_called_once_with("dispatch", direction="both", limit=20)
+        svc.trace_with_snippets.assert_called_once_with(
+            "dispatch", direction="both", limit=20, include_builtins=False)
+
+    def test_trace_include_builtins_passed_through(self) -> None:
+        svc = _mock_service()
+        handle_tools_call("vectr_trace", {"name": "dispatch", "include_builtins": True}, svc)
+        svc.trace_with_snippets.assert_called_once_with(
+            "dispatch", direction="both", limit=20, include_builtins=True)
 
     def test_trace_missing_name_returns_error(self) -> None:
         svc = _mock_service()

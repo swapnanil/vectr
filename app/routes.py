@@ -171,7 +171,10 @@ async def locate(body: LocateRequest, request: Request) -> LocateResponse:
 async def trace(body: TraceRequest, request: Request) -> TraceResponse:
     t0 = time.monotonic()
     svc = _service(request)
-    trace_result = svc.trace_with_snippets(body.name, direction=body.direction, limit=body.limit)
+    trace_result = svc.trace_with_snippets(
+        body.name, direction=body.direction, limit=body.limit,
+        include_builtins=body.include_builtins,
+    )
     return TraceResponse(
         formatted=svc.format_trace(trace_result, body.name),
         processing_ms=int((time.monotonic() - t0) * 1000),

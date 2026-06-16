@@ -1,0 +1,16 @@
+{
+  "indexed_files": 692,
+  "total_chunks": 8298,
+  "last_indexed": "2026-06-03T13:23:52Z",
+  "embed_model": "Snowflake/snowflake-arctic-embed-m-v1.5",
+  "workspace_root": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-uv-vectr",
+  "symbol_count": 15566,
+  "notes_count": 0,
+  "processing_ms": 47,
+  "model": "claude-sonnet-4-6",
+  "semantic_weight": 0.75,
+  "bm25_weight": 0.25,
+  "graph_first": true,
+  "recommended_embed_model": "Snowflake/snowflake-arctic-embed-m-v1.5",
+  "strategy_rationale": "medium codebase \u2014 balanced hybrid weights; rust \u2014 strong static symbol graph, graph traversal first; well-documented codebase (90% coverage) \u2014 semantic weight boosted; complex codebase (high avg file length) \u2014 graph traversal preferred; code-heavy repo \u2014 default Snowflake/snowflake-arctic-embed-m-v1.5 is optimal"
+}

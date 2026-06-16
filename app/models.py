@@ -184,6 +184,7 @@ class TraceRequest(BaseModel):
     name: str = Field(..., min_length=1)
     direction: str = Field(default="both")
     limit: int = Field(default=20, ge=1, le=100)
+    include_builtins: bool = Field(default=False)
 
     @field_validator("direction")
     @classmethod

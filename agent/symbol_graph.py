@@ -167,6 +167,79 @@ _KIND_RANK: dict[str, int] = {
 _KIND_RANK_DEFAULT = 2
 
 
+# Language builtins / stdlib / ubiquitous constructors that pad callee lists with
+# noise when answering "what does X call *in this codebase*" (UPG-4.3). A callee
+# is treated as a builtin only if it's in this set AND is NOT defined as a symbol
+# in the workspace — so a repo that defines its own `len`/`map` keeps it. These
+# are suppressed from callee lists by default and shown with include_builtins.
+_BUILTINS: dict[str, frozenset[str]] = {
+    "python": frozenset({
+        "print", "len", "isinstance", "issubclass", "assert", "range", "enumerate",
+        "zip", "map", "filter", "sorted", "reversed", "sum", "min", "max", "abs",
+        "any", "all", "open", "format", "repr", "str", "int", "float", "bool",
+        "list", "dict", "set", "tuple", "frozenset", "bytes", "bytearray",
+        "type", "super", "getattr", "setattr", "hasattr", "delattr", "callable",
+        "iter", "next", "vars", "dir", "id", "hash", "round", "divmod", "pow",
+        "join", "split", "strip", "lstrip", "rstrip", "replace", "startswith",
+        "endswith", "lower", "upper", "append", "extend", "pop", "get", "keys",
+        "values", "items", "update", "add", "encode", "decode",
+    }),
+    "rust": frozenset({
+        "Ok", "Err", "Some", "None", "Vec", "String", "Box", "Rc", "Arc", "Cell",
+        "RefCell", "Mutex", "vec", "format", "println", "print", "eprintln",
+        "panic", "assert", "assert_eq", "assert_ne", "write", "writeln", "unwrap",
+        "expect", "clone", "into", "from", "to_string", "to_owned", "as_ref",
+        "as_mut", "as_str", "borrow", "borrow_mut", "iter", "into_iter", "collect",
+        "map", "filter", "push", "pop", "len", "is_empty", "default", "drop",
+        "matches", "min", "max", "Default", "Borrowed", "Owned",
+    }),
+    "go": frozenset({
+        "make", "new", "len", "cap", "append", "copy", "delete", "panic",
+        "recover", "print", "println", "close", "complex", "real", "imag",
+        "string", "byte", "rune", "error", "errors", "fmt",
+    }),
+    "javascript": frozenset({
+        "console", "require", "parseInt", "parseFloat", "isNaN", "JSON",
+        "Object", "Array", "String", "Number", "Boolean", "Math", "Date",
+        "Promise", "Set", "Map", "Symbol", "Error", "push", "pop", "map",
+        "filter", "forEach", "reduce", "slice", "splice", "join", "split",
+        "indexOf", "includes", "keys", "values", "entries", "assign",
+    }),
+    "typescript": frozenset({
+        "console", "require", "parseInt", "parseFloat", "isNaN", "JSON",
+        "Object", "Array", "String", "Number", "Boolean", "Math", "Date",
+        "Promise", "Set", "Map", "Symbol", "Error", "push", "pop", "map",
+        "filter", "forEach", "reduce", "slice", "splice", "join", "split",
+        "indexOf", "includes", "keys", "values", "entries", "assign",
+    }),
+    "java": frozenset({
+        "System", "String", "Integer", "Long", "Double", "Boolean", "Object",
+        "Math", "List", "Map", "Set", "Arrays", "Collections", "Optional",
+        "assert", "equals", "hashCode", "toString", "valueOf", "length", "size",
+        "get", "add", "put", "remove", "contains", "isEmpty", "println", "print",
+    }),
+    "c": frozenset({
+        "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset",
+        "strlen", "strcmp", "strncmp", "strcpy", "strncpy", "strcat", "strchr",
+        "snprintf", "sprintf", "printf", "fprintf", "fputs", "fputc", "puts",
+        "abort", "assert", "exit", "sizeof", "offsetof", "va_start", "va_end",
+        "va_arg", "qsort", "memcmp",
+    }),
+    "cpp": frozenset({
+        "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset",
+        "strlen", "strcmp", "snprintf", "printf", "fprintf", "abort", "assert",
+        "exit", "sizeof", "move", "forward", "make_shared", "make_unique",
+        "push_back", "emplace_back", "size", "begin", "end", "at", "find",
+        "static_cast", "dynamic_cast", "reinterpret_cast", "const_cast",
+    }),
+    "zig": frozenset({
+        "maxInt", "minInt", "assert", "panic", "print", "alloc", "free", "expect",
+        "expectEqual", "expectError", "create", "destroy", "init", "deinit",
+        "format", "warn", "debug", "log", "sizeOf", "alignOf", "as", "intCast",
+    }),
+}
+
+
 def _partial_match_key(row, query_lower: str) -> tuple:
     """Sort key for partial (substring) `locate` matches.
 
@@ -904,12 +977,15 @@ class SymbolGraph:
         group: Literal["from_symbol", "to_symbol"],
         limit: int,
         rank_repo_defined: bool,
-    ) -> list[CallEdge]:
+        include_builtins: bool = True,
+    ) -> tuple[list[CallEdge], int]:
         """Fetch edges by exact `column` match; fall back to partial (LIKE) only
         when no exact-named edge exists. Exact-first kills the substring
         conflation that merged unrelated symbols — `trace compare` no longer
         pulls in `compare_stacks` / `_Py_atomic_compare_exchange_*` (UPG-4.1).
         Results are deduped and ranked by relevance, then truncated (UPG-4.2).
+        Returns `(edges, hidden_builtins)` — the count of builtin/stdlib callees
+        suppressed before truncation when `include_builtins` is False (UPG-4.3).
         `column` is a fixed internal literal, never user input."""
         with self._conn() as conn:
             rows = conn.execute(
@@ -922,7 +998,18 @@ class SymbolGraph:
                     (workspace, f"%{name}%", self._EDGE_FETCH_CAP),
                 ).fetchall()
         edges = [self._row_to_edge(r) for r in rows]
-        return self._aggregate_edges(workspace, edges, group, limit, rank_repo_defined)
+        return self._aggregate_edges(workspace, edges, group, limit, rank_repo_defined, include_builtins)
+
+    @staticmethod
+    def _is_builtin_call(name: str, from_file: str, repo: set[str]) -> bool:
+        """A callee is builtin noise only if it's a known language builtin AND not
+        defined as a symbol in this repo (so a repo's own `len`/`map` stays). The
+        language is inferred from the calling file's extension (UPG-4.3)."""
+        if name in repo:
+            return False
+        from agent.indexer import LANG_BY_EXT
+        lang = LANG_BY_EXT.get(Path(from_file).suffix.lower(), "")
+        return name in _BUILTINS.get(lang, frozenset())
 
     def _aggregate_edges(
         self,
@@ -931,12 +1018,18 @@ class SymbolGraph:
         group: Literal["from_symbol", "to_symbol"],
         limit: int,
         rank_repo_defined: bool,
-    ) -> list[CallEdge]:
+        include_builtins: bool = True,
+    ) -> tuple[list[CallEdge], int]:
         """Collapse edges that share the same caller/callee name into one entry
         carrying a `call_count` of distinct call sites, then rank by relevance
         — repo-defined first (callees only), then call frequency, then name —
         and truncate to `limit`. Replaces the alphabetical-then-truncate path so
-        important, repeatedly-called targets survive the cut (UPG-4.2)."""
+        important, repeatedly-called targets survive the cut (UPG-4.2).
+
+        When `not include_builtins` (callee path only), language-builtin/stdlib
+        callees are dropped *before* truncation so they can't push repo-internal
+        calls out of the window; returns the count hidden (UPG-4.3). Callers are
+        never filtered — a caller is by definition a repo-defined function."""
         groups: dict[str, dict] = {}
         for e in edges:
             k = e.from_symbol if group == "from_symbol" else e.to_symbol
@@ -950,13 +1043,18 @@ class SymbolGraph:
         # caller is by definition a function in this repo). Skipping the lookup
         # for callers also avoids a needless symbols-table scan.
         repo = self._known_symbol_names(workspace, list(groups)) if rank_repo_defined else set(groups)
+        suppress = rank_repo_defined and not include_builtins
         ranked: list[tuple] = []
+        hidden = 0
         for k, g in groups.items():
             e = g["edge"]
+            if suppress and self._is_builtin_call(k, e.from_file, repo):
+                hidden += 1
+                continue
             e.call_count = len(g["sites"])
             ranked.append((0 if k in repo else 1, -e.call_count, k, e))
         ranked.sort(key=lambda t: (t[0], t[1], t[2]))
-        return [t[3] for t in ranked[:limit]]
+        return [t[3] for t in ranked[:limit]], hidden
 
     def _known_symbol_names(self, workspace: str, names: list[str]) -> set[str]:
         """Subset of `names` that are defined as symbols in this workspace —
@@ -979,12 +1077,20 @@ class SymbolGraph:
     def callers(self, workspace: str, symbol_name: str, limit: int = 20) -> list[CallEdge]:
         """Who calls this symbol? Exact name match preferred (partial fallback).
         Deduped by calling function, ranked by call frequency (UPG-4.2)."""
-        return self._edges(workspace, "to_symbol", symbol_name, "from_symbol", limit, rank_repo_defined=False)
+        edges, _ = self._edges(workspace, "to_symbol", symbol_name, "from_symbol", limit, rank_repo_defined=False)
+        return edges
 
-    def callees(self, workspace: str, symbol_name: str, limit: int = 20) -> list[CallEdge]:
+    def callees(
+        self, workspace: str, symbol_name: str, limit: int = 20, include_builtins: bool = True
+    ) -> list[CallEdge]:
         """What does this symbol call? Exact name match preferred (partial fallback).
-        Deduped by callee, repo-internal calls ranked ahead of builtins (UPG-4.2)."""
-        return self._edges(workspace, "from_symbol", symbol_name, "to_symbol", limit, rank_repo_defined=True)
+        Deduped by callee, repo-internal calls ranked ahead of builtins (UPG-4.2);
+        builtin/stdlib callees suppressed unless `include_builtins` (UPG-4.3)."""
+        edges, _ = self._edges(
+            workspace, "from_symbol", symbol_name, "to_symbol", limit,
+            rank_repo_defined=True, include_builtins=include_builtins,
+        )
+        return edges
 
     def _exact_definitions(self, workspace: str, name: str, limit: int = 20) -> list[Symbol]:
         """Definition sites whose name matches `name` exactly. Each (file_path,
@@ -1012,6 +1118,7 @@ class SymbolGraph:
         symbol_name: str,
         direction: Literal["callers", "callees", "both"] = "both",
         limit: int = 20,
+        include_builtins: bool = False,
     ) -> dict:
         """Combined callers + callees lookup.
 
@@ -1021,12 +1128,21 @@ class SymbolGraph:
         attributable (an edge carries the calling definition's file); callers are
         not (a call site doesn't record which definition it bound), so callers
         stay a flat list with an ambiguity note in the formatter.
+
+        UPG-4.3: builtin/stdlib callees are hidden by default; the count hidden is
+        recorded under `hidden_builtins` (flat) / per `by_definition` entry so the
+        formatter can offer `include_builtins`.
         """
         result: dict = {}
         if direction in ("callers", "both"):
             result["callers"] = self.callers(workspace, symbol_name, limit)
         if direction in ("callees", "both"):
-            result["callees"] = self.callees(workspace, symbol_name, limit)
+            callees, hidden = self._edges(
+                workspace, "from_symbol", symbol_name, "to_symbol", limit,
+                rank_repo_defined=True, include_builtins=include_builtins,
+            )
+            result["callees"] = callees
+            result["hidden_builtins"] = hidden
 
         defs = self._exact_definitions(workspace, symbol_name)
         result["definitions"] = defs
@@ -1040,13 +1156,16 @@ class SymbolGraph:
                         (workspace, symbol_name, d.file_path, self._EDGE_FETCH_CAP),
                     ).fetchall()
                     edges = [self._row_to_edge(r) for r in rows]
+                    # dedup + relevance-rank + builtin-suppress this def's callees
+                    cs, hidden = self._aggregate_edges(
+                        workspace, edges, "to_symbol", limit,
+                        rank_repo_defined=True, include_builtins=include_builtins,
+                    )
                     by_def.append({
                         "definition": d,
                         "module": self._module_label(d.file_path, workspace),
-                        # dedup + relevance-rank this definition's own callees (UPG-4.2)
-                        "callees": self._aggregate_edges(
-                            workspace, edges, "to_symbol", limit, rank_repo_defined=True
-                        ),
+                        "callees": cs,
+                        "hidden_builtins": hidden,
                     })
             result["by_definition"] = by_def
         return result
@@ -1113,6 +1232,15 @@ class SymbolGraph:
         """' ×N' when an aggregated edge stands for multiple call sites (UPG-4.2)."""
         return f"  ×{edge.call_count}" if edge.call_count > 1 else ""
 
+    @staticmethod
+    def _hidden_builtins_note(n: int) -> str:
+        """Footer telling the LLM repo-internal calls are shown and how to see the
+        rest — the suppressed builtin/stdlib calls (UPG-4.3)."""
+        if n <= 0:
+            return ""
+        return (f"    (+{n} builtin/stdlib call{'s' if n != 1 else ''} hidden — "
+                f"pass include_builtins=true to show)")
+
     def format_trace_for_llm(self, trace_result: dict, symbol_name: str) -> str:
         lines = [f"Call graph trace for '{symbol_name}':\n"]
 
@@ -1135,6 +1263,9 @@ class SymbolGraph:
                         lines.append(f"    {e.to_symbol}{self._count_suffix(e)}")
                 else:
                     lines.append("    (none found in index)")
+                note = self._hidden_builtins_note(entry.get("hidden_builtins", 0))
+                if note:
+                    lines.append(note)
                 lines.append("")
             callers = trace_result.get("callers")
             if callers is not None:
@@ -1163,6 +1294,9 @@ class SymbolGraph:
                     lines.append(f"  {e.to_symbol}{self._count_suffix(e)}")
             else:
                 lines.append("\nCalls: (none found in index)")
+            note = self._hidden_builtins_note(trace_result.get("hidden_builtins", 0))
+            if note:
+                lines.append(note)
 
         return "\n".join(lines)
 

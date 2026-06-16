@@ -1,0 +1,116 @@
+diff --git a/.claude/settings.json b/.claude/settings.json
+index 88b7e3d..a3d801e 100644
+--- a/.claude/settings.json
++++ b/.claude/settings.json
+@@ -22,5 +22,11 @@
+         ]
+       }
+     ]
++  },
++  "mcpServers": {
++    "vectr": {
++      "type": "http",
++      "url": "http://localhost:8766/mcp"
++    }
+   }
+-}
++}
+\ No newline at end of file
+diff --git a/AGENTS.md b/AGENTS.md
+index 859a144..f50bbbd 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -18,3 +18,45 @@
+ - AVOID shortening variable names, e.g., use `version` instead of `ver`, and `requires_python`
+   instead of `rp`
+ - PREFER [`TypeName`] references when writing Rust doc comments
++
++<!-- vectr-start -->
++# Vectr tools — available alongside Read and Bash
++
++Vectr gives you two things: semantic search over this codebase and a context offload layer.
++Use it to drop explored code from your context window and recall it on demand — whether you need
++it 10 turns later in this same session, or in a fresh session next week. The session boundary
++is irrelevant: offload → free context → recall on demand, any time.
++
++Use vectr tools in place of grep, find, and Read when you don't already know where to look —
++each tool targets a specific gap in what you can address directly.
++
++## Exploration tools
++
++| Tool | Purpose |
++|---|---|
++| `vectr_search("natural language description")` | Semantic search — describe what you're looking for, get the most relevant code chunks back. Replaces grep + cat loops. |
++| `vectr_locate("SymbolName")` | Symbol graph lookup — name → definition file and line. Faster than any file scan. |
++| `vectr_trace("symbol_name")` | Call graph — callers and callees of a symbol, without reading files. |
++| `vectr_map()` | Codebase overview — file tree + module summaries. Use once on a completely unknown repo. On a first visit, it returns raw metadata and you should follow up with `vectr_map_save(summary)` to store your synthesised description as a permanent passport. |
++| `vectr_map_save(summary)` | Save your plain-English codebase summary (~200–350 tokens) as the permanent passport. Only call this when `vectr_map` returned raw metadata (i.e. no passport exists yet). |
++
++If you already know the file path, use Read directly — don't search for what you can address directly.
++
++## Working memory tools
++
++Notes are findings you've stored — earlier in this session or in prior sessions. Reading a note
++costs nothing; re-reading the file it describes costs tokens and turns.
++
++**At session start:** `vectr_status()` — always call this first.
++- `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task in plain English>")` once, before opening any files
++- `notes_count == 0` → skip recall and proceed
++
++**The moment you find a key definition, pattern, or non-obvious detail:** `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block, not a file pointer. Once stored, drop the file from context: vectr returns it in <50ms when you need it again. One note now = 3–5 fewer re-discovery calls later — in this session or the next.
++
++**After heavy file reading or at a natural breakpoint (exploration → implementation):** `vectr_evict_hint()` — vectr lists which retrieved chunks are fully indexed (safe to drop from your context window) and prompts you to persist your synthesized findings via `vectr_remember`. Retrieved code is re-retrievable in <50ms; your analysis is not.
++
++**When context is getting full or at natural breakpoints:** `vectr_snapshot("label")` — seals current notes as a checkpoint. Once a finding is in a note, you no longer need the source file in your context window. Any future session (or a later point in this one) recalls exactly what it needs — without re-reading everything this session explored. Use `vectr_snapshot_list()` at session start to find an existing checkpoint if `vectr_recall` returned nothing useful.
++
++**If recalled notes already contain what you need:** work from them directly.
++Use vectr_search or Read only to fill genuine gaps — not to re-discover what notes already say.
++<!-- vectr-end -->
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 43c994c..227d470 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -1 +1,43 @@
+ @AGENTS.md
++
++<!-- vectr-start -->
++# Vectr tools — available alongside Read and Bash
++
++Vectr gives you two things: semantic search over this codebase and a context offload layer.
++Use it to drop explored code from your context window and recall it on demand — whether you need
++it 10 turns later in this same session, or in a fresh session next week. The session boundary
++is irrelevant: offload → free context → recall on demand, any time.
++
++Use vectr tools in place of grep, find, and Read when you don't already know where to look —
++each tool targets a specific gap in what you can address directly.
++
++## Exploration tools
++
++| Tool | Purpose |
++|---|---|
++| `vectr_search("natural language description")` | Semantic search — describe what you're looking for, get the most relevant code chunks back. Replaces grep + cat loops. |
++| `vectr_locate("SymbolName")` | Symbol graph lookup — name → definition file and line. Faster than any file scan. |
++| `vectr_trace("symbol_name")` | Call graph — callers and callees of a symbol, without reading files. |
++| `vectr_map()` | Codebase overview — file tree + module summaries. Use once on a completely unknown repo. On a first visit, it returns raw metadata and you should follow up with `vectr_map_save(summary)` to store your synthesised description as a permanent passport. |
++| `vectr_map_save(summary)` | Save your plain-English codebase summary (~200–350 tokens) as the permanent passport. Only call this when `vectr_map` returned raw metadata (i.e. no passport exists yet). |
++
++If you already know the file path, use Read directly — don't search for what you can address directly.
++
++## Working memory tools
++
++Notes are findings you've stored — earlier in this session or in prior sessions. Reading a note
++costs nothing; re-reading the file it describes costs tokens and turns.
++
++**At session start:** `vectr_status()` — always call this first.
++- `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task in plain English>")` once, before opening any files
++- `notes_count == 0` → skip recall and proceed
++
++**The moment you find a key definition, pattern, or non-obvious detail:** `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block, not a file pointer. Once stored, drop the file from context: vectr returns it in <50ms when you need it again. One note now = 3–5 fewer re-discovery calls later — in this session or the next.
++
++**After heavy file reading or at a natural breakpoint (exploration → implementation):** `vectr_evict_hint()` — vectr lists which retrieved chunks are fully indexed (safe to drop from your context window) and prompts you to persist your synthesized findings via `vectr_remember`. Retrieved code is re-retrievable in <50ms; your analysis is not.
++
++**When context is getting full or at natural breakpoints:** `vectr_snapshot("label")` — seals current notes as a checkpoint. Once a finding is in a note, you no longer need the source file in your context window. Any future session (or a later point in this one) recalls exactly what it needs — without re-reading everything this session explored. Use `vectr_snapshot_list()` at session start to find an existing checkpoint if `vectr_recall` returned nothing useful.
++
++**If recalled notes already contain what you need:** work from them directly.
++Use vectr_search or Read only to fill genuine gaps — not to re-discover what notes already say.
++<!-- vectr-end -->
