@@ -26,6 +26,12 @@ load_dotenv()
 _LEGACY_PID_FILE = Path.home() / ".vectr" / "vectr.pid"
 _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 
+# Per-turn recall hook tuning (UPG-9.5). Small N + a relevance floor keep the
+# UserPromptSubmit injection tight: only notes genuinely related to the prompt,
+# nothing on an off-topic turn. Override via env without re-running init.
+_HOOK_RECALL_LIMIT = 3
+_HOOK_MIN_SIMILARITY = 0.35
+
 _CLAUDE_MD = """\
 # Vectr — semantic search + reliable working memory
 
@@ -321,6 +327,8 @@ def _write_claude_hooks(workspace: str) -> None:
     # UPG-9.4 — SessionStart: inject the boot set (directives + high tasks) before turn 1.
     _install_hook_group(hooks, "SessionStart", matcher="startup|resume|clear|compact",
                         command="vectr hook session-start")
+    # UPG-9.5 — UserPromptSubmit (no matcher): per-turn semantic recall keyed to the prompt.
+    _install_hook_group(hooks, "UserPromptSubmit", command="vectr hook user-prompt-submit")
 
     settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     print(f"  Wrote vectr hooks to {settings}", file=sys.stderr)
@@ -645,6 +653,18 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # the MEMORY.md equivalent — present before turn 1, zero model agency.
             notes = _fetch_recall(port, {"boot": True})
             _emit_hook_context("SessionStart", notes)
+
+        elif args.hook_event == "user-prompt-submit":
+            # Per-turn semantic recall (UPG-9.5): recall notes keyed to THIS prompt
+            # and inject them before the model sees it. The relevance cutoff
+            # (UPG-5.1) keeps an off-topic prompt from injecting anything.
+            prompt = (event.get("prompt") or "").strip()
+            if not prompt:
+                return
+            limit = int(os.getenv("VECTR_HOOK_RECALL_LIMIT", str(_HOOK_RECALL_LIMIT)))
+            min_sim = float(os.getenv("VECTR_HOOK_MIN_SIMILARITY", str(_HOOK_MIN_SIMILARITY)))
+            notes = _fetch_recall(port, {"query": prompt, "limit": limit, "min_similarity": min_sim})
+            _emit_hook_context("UserPromptSubmit", notes)
     except Exception:
         pass  # hook safety: never propagate
 
@@ -941,7 +961,7 @@ def main() -> None:
         "hook",
         help="Emit Claude Code hook output (invoked by `vectr init --hooks` entries; not called directly)",
     )
-    p_hook.add_argument("hook_event", choices=["session-start"],
+    p_hook.add_argument("hook_event", choices=["session-start", "user-prompt-submit"],
                         help="Which hook event to emit output for")
 
     p_index = sub.add_parser("index", help="(Re)index a directory or file")

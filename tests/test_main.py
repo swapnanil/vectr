@@ -547,6 +547,42 @@ class TestCmdHookSessionStart:
         assert capsys.readouterr().out.strip() == ""
 
 
+class TestCmdHookUserPromptSubmit:
+    def _run(self, stdin_json: str, recall_text: str, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_json))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._fetch_recall", return_value=recall_text) as mock_fetch:
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="user-prompt-submit"))
+        return capsys.readouterr().out, mock_fetch
+
+    def test_emits_userpromptsubmit_envelope_with_recalled_notes(self, monkeypatch, capsys):
+        out, _ = self._run('{"cwd": "/p", "prompt": "fix the workspace lock"}',
+                           "[1] lock_workspace() at resolver.rs:214", monkeypatch, capsys)
+        payload = json.loads(out)
+        assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert "resolver.rs:214" in payload["hookSpecificOutput"]["additionalContext"]
+
+    def test_recalls_with_prompt_as_query_and_cutoff(self, monkeypatch, capsys):
+        _, mock_fetch = self._run('{"cwd": "/p", "prompt": "lock flow"}', "x", monkeypatch, capsys)
+        payload = mock_fetch.call_args[0][1]
+        assert payload["query"] == "lock flow"
+        assert "min_similarity" in payload      # relevance cutoff applied (UPG-5.1)
+        assert payload["limit"] == m._HOOK_RECALL_LIMIT
+
+    def test_empty_prompt_injects_nothing(self, monkeypatch, capsys):
+        out, mock_fetch = self._run('{"cwd": "/p", "prompt": "   "}', "x", monkeypatch, capsys)
+        mock_fetch.assert_not_called()
+        assert out.strip() == ""
+
+    def test_offtopic_recall_empty_injects_nothing(self, monkeypatch, capsys):
+        """When the cutoff withholds everything, the hook injects nothing."""
+        out, _ = self._run('{"cwd": "/p", "prompt": "unrelated"}', "", monkeypatch, capsys)
+        assert out.strip() == ""
+
+
 class TestFetchRecallResilience:
     def test_returns_empty_on_connect_error(self):
         import httpx
@@ -564,6 +600,14 @@ class TestInitHooks:
         assert len(groups) == 1
         assert groups[0]["matcher"] == "startup|resume|clear|compact"
         assert groups[0]["hooks"][0]["command"] == "vectr hook session-start"
+
+    def test_writes_userpromptsubmit_hook_without_matcher(self, tmp_path):
+        m._write_claude_hooks(str(tmp_path))
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        groups = data["hooks"]["UserPromptSubmit"]
+        assert len(groups) == 1
+        assert "matcher" not in groups[0]   # UserPromptSubmit has no matcher
+        assert groups[0]["hooks"][0]["command"] == "vectr hook user-prompt-submit"
 
     def test_preserves_existing_settings(self, tmp_path):
         settings = tmp_path / ".claude" / "settings.json"
