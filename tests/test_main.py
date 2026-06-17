@@ -368,6 +368,121 @@ class TestCmdForget:
 
 
 # ---------------------------------------------------------------------------
+# cmd_remember / cmd_recall (UPG-9.1)
+# ---------------------------------------------------------------------------
+
+class TestCmdRemember:
+    def test_posts_to_remember_endpoint_with_content(self, tmp_path):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"note_id": 1, "message": "Stored note #1.", "processing_ms": 2}
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(content="lock flow at resolver.rs:214", tags=["lock"],
+                                      priority="high", path=str(tmp_path), port=8765)
+            m.cmd_remember(args)
+
+        mock_post.assert_called_once()
+        call_url = mock_post.call_args[0][0]
+        assert "/v1/remember" in call_url
+        payload = mock_post.call_args[1]["json"]
+        assert payload["content"] == "lock flow at resolver.rs:214"
+        assert payload["priority"] == "high"
+        assert payload["tags"] == ["lock"]
+
+    def test_prints_server_message(self, tmp_path, capsys):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"note_id": 7, "message": "Stored note #7.", "processing_ms": 1}
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(content="x", tags=None, priority="medium",
+                                      path=str(tmp_path), port=8765)
+            m.cmd_remember(args)
+
+        assert "Stored note #7." in capsys.readouterr().out
+
+    def test_connect_error_exits_nonzero(self, tmp_path):
+        import argparse
+        import httpx
+        from unittest.mock import patch
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", side_effect=httpx.ConnectError("down")):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(content="x", tags=None, priority="medium",
+                                      path=str(tmp_path), port=8765)
+            with pytest.raises(SystemExit) as exc:
+                m.cmd_remember(args)
+            assert exc.value.code == 1
+
+
+class TestCmdRecall:
+    def test_prints_notes_to_stdout(self, tmp_path, capsys):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"notes": "[#1] lock flow at resolver.rs:214", "processing_ms": 3}
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query="lock flow", tags=None, priority=None,
+                                      limit=10, path=str(tmp_path), port=8765)
+            m.cmd_recall(args)
+
+        call_url = mock_post.call_args[0][0]
+        assert "/v1/recall" in call_url
+        assert mock_post.call_args[1]["json"]["query"] == "lock flow"
+        assert "resolver.rs:214" in capsys.readouterr().out
+
+    def test_empty_notes_prints_nothing(self, tmp_path, capsys):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"notes": "", "processing_ms": 1}
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query=None, tags=None, priority=None,
+                                      limit=10, path=str(tmp_path), port=8765)
+            m.cmd_recall(args)
+
+        assert capsys.readouterr().out == ""
+
+    def test_daemon_down_is_silent_and_exits_zero(self, tmp_path, capsys):
+        """Recall feeds hook-injected context; a down daemon must never break the session."""
+        import argparse
+        import httpx
+        from unittest.mock import patch
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", side_effect=httpx.ConnectError("down")):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query="lock flow", tags=None, priority=None,
+                                      limit=10, path=str(tmp_path), port=8765)
+            # No SystemExit raised → exit 0.
+            m.cmd_recall(args)
+
+        assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
 # TestMergeSafeInit
 # ---------------------------------------------------------------------------
 

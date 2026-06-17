@@ -437,6 +437,57 @@ def cmd_search(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_remember(args: argparse.Namespace) -> None:
+    """Store a working-memory note via the workspace daemon (UPG-9.1).
+
+    Gives `command`-type hooks (and humans) a shell path to the note store,
+    mirroring the MCP `vectr_remember` tool.
+    """
+    import httpx
+
+    workspace = str(Path(args.path).resolve())
+    port = _get_port_for_workspace(workspace, args.port)
+    payload: dict = {"content": args.content, "priority": args.priority}
+    if args.tags:
+        payload["tags"] = args.tags
+    try:
+        resp = httpx.post(f"{_api_base(port)}/v1/remember", json=payload, timeout=30)
+        resp.raise_for_status()
+        print(resp.json().get("message", "Stored note."))
+    except httpx.ConnectError:
+        print(f"Error: Vectr is not running on port {port}. Run: vectr start", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_recall(args: argparse.Namespace) -> None:
+    """Print recalled working-memory notes to stdout (UPG-9.1).
+
+    stdout is the field SessionStart / UserPromptSubmit hooks inject into the
+    model's context, so this command writes notes to stdout and nothing else.
+    It is intentionally resilient: if the daemon is down it emits no notes and
+    still exits 0, so a hook that shells out can never break the session.
+    """
+    import httpx
+
+    workspace = str(Path(args.path).resolve())
+    port = _get_port_for_workspace(workspace, args.port)
+    payload: dict = {"limit": args.limit}
+    if args.query:
+        payload["query"] = args.query
+    if args.tags:
+        payload["tags"] = args.tags
+    if args.priority:
+        payload["priority"] = args.priority
+    try:
+        resp = httpx.post(f"{_api_base(port)}/v1/recall", json=payload, timeout=30)
+        resp.raise_for_status()
+        notes = resp.json().get("notes", "")
+        if notes:
+            print(notes)
+    except httpx.ConnectError:
+        print(f"Vectr not running on port {port}; no notes recalled.", file=sys.stderr)
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     import httpx
 
@@ -724,6 +775,21 @@ def main() -> None:
     p_search.add_argument("--language", help="Filter by language")
     p_search.add_argument("--port", type=int, default=_default_port)
 
+    p_remember = sub.add_parser("remember", help="Store a working-memory note (shell path to the note store)")
+    p_remember.add_argument("content", help="The note content to store")
+    p_remember.add_argument("--tags", action="append", metavar="TAG", help="Topic tag (repeatable)")
+    p_remember.add_argument("--priority", choices=["high", "medium", "low"], default="medium")
+    p_remember.add_argument("--path", default=_default_path)
+    p_remember.add_argument("--port", type=int, default=_default_port)
+
+    p_recall = sub.add_parser("recall", help="Print recalled working-memory notes to stdout (for hooks)")
+    p_recall.add_argument("query", nargs="?", default=None, help="Semantic recall query (optional)")
+    p_recall.add_argument("--tags", action="append", metavar="TAG", help="Filter by tag (repeatable)")
+    p_recall.add_argument("--priority", choices=["high", "medium", "low"], default=None)
+    p_recall.add_argument("--limit", type=int, default=10)
+    p_recall.add_argument("--path", default=_default_path)
+    p_recall.add_argument("--port", type=int, default=_default_port)
+
     p_status = sub.add_parser("status", help="Show status for a workspace")
     p_status.add_argument("--path", default=_default_path)
     p_status.add_argument("--port", type=int, default=_default_port)
@@ -740,6 +806,8 @@ def main() -> None:
         "status":  cmd_status,
         "stop":    cmd_stop,
         "forget":  cmd_forget,
+        "remember": cmd_remember,
+        "recall":  cmd_recall,
     }
     if args.command in dispatch:
         dispatch[args.command](args)
