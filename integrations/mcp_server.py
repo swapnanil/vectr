@@ -355,6 +355,14 @@ _MEMORY_TOOLS = [
                     "nullable": True,
                     "enum": ["directive", "task", "gotcha", "finding", "reference"],
                 },
+                "boot": {
+                    "type": "boolean",
+                    "description": (
+                        "Boot mode: return ALL directives + high-priority task notes unconditionally "
+                        "(no semantic filter, safe on a fresh workspace). Ignores query/tags/priority/kind/limit."
+                    ),
+                    "default": False,
+                },
                 "limit": {
                     "type": "integer",
                     "description": "Max notes to return (default: 10)",
@@ -732,8 +740,9 @@ def handle_tools_call(
         tags = arguments.get("tags") or None
         priority = arguments.get("priority") or None
         kind = arguments.get("kind") or None
+        boot = bool(arguments.get("boot", False))
         limit = int(arguments.get("limit", 10))
-        text = service.recall(query=query, tags=tags, priority=priority, limit=limit, kind=kind)
+        text = service.recall(query=query, tags=tags, priority=priority, limit=limit, kind=kind, boot=boot)
         if service.should_evict():
             hint = service.eviction_hint()
             if hint:

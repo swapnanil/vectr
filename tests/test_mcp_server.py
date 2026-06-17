@@ -751,18 +751,18 @@ class TestVectrRecall:
     def test_recall_calls_service(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_recall", {}, svc)
-        svc.recall.assert_called_once_with(query=None, tags=None, priority=None, limit=10, kind=None)
+        svc.recall.assert_called_once_with(query=None, tags=None, priority=None, limit=10, kind=None, boot=False)
 
     def test_recall_with_filters(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"query": "auth", "tags": ["wip"], "priority": "high", "limit": 5}, svc)
-        svc.recall.assert_called_once_with(query="auth", tags=["wip"], priority="high", limit=5, kind=None)
+        svc.recall.assert_called_once_with(query="auth", tags=["wip"], priority="high", limit=5, kind=None, boot=False)
 
     def test_recall_passes_kind_filter(self) -> None:
         """UPG-9.3: a kind filter reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"kind": "directive"}, svc)
-        svc.recall.assert_called_once_with(query=None, tags=None, priority=None, limit=10, kind="directive")
+        svc.recall.assert_called_once_with(query=None, tags=None, priority=None, limit=10, kind="directive", boot=False)
 
     def test_recall_returns_notes_text(self) -> None:
         svc = _mock_service()

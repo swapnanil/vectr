@@ -154,6 +154,7 @@ class RecallRequest(BaseModel):
     priority: str | None = Field(default=None)
     kind: str | None = Field(default=None, description="Filter by kind: directive | task | gotcha | finding | reference")
     limit: int = Field(default=10, ge=1, le=100)
+    boot: bool = Field(default=False, description="Boot mode (UPG-9.2): unconditional directives + high-priority tasks; ignores query/tags/priority/kind/limit")
 
     @field_validator("kind")
     @classmethod

@@ -474,14 +474,18 @@ def cmd_recall(args: argparse.Namespace) -> None:
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
     payload: dict = {"limit": args.limit}
-    if args.query:
-        payload["query"] = args.query
-    if args.tags:
-        payload["tags"] = args.tags
-    if args.priority:
-        payload["priority"] = args.priority
-    if getattr(args, "kind", None):
-        payload["kind"] = args.kind
+    if getattr(args, "boot", False):
+        # Boot mode ignores all filters server-side; send only the flag.
+        payload = {"boot": True}
+    else:
+        if args.query:
+            payload["query"] = args.query
+        if args.tags:
+            payload["tags"] = args.tags
+        if args.priority:
+            payload["priority"] = args.priority
+        if getattr(args, "kind", None):
+            payload["kind"] = args.kind
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/recall", json=payload, timeout=30)
         resp.raise_for_status()
@@ -794,6 +798,8 @@ def main() -> None:
     p_recall.add_argument("--priority", choices=["high", "medium", "low"], default=None)
     p_recall.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference"],
                           default=None, help="Filter to one memory kind")
+    p_recall.add_argument("--boot", action="store_true",
+                          help="Boot mode: unconditional directives + high-priority tasks (for SessionStart hooks)")
     p_recall.add_argument("--limit", type=int, default=10)
     p_recall.add_argument("--path", default=_default_path)
     p_recall.add_argument("--port", type=int, default=_default_port)

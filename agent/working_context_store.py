@@ -508,6 +508,33 @@ class WorkingContextStore:
 
         return notes
 
+    def boot_recall(self, workspace: str) -> list[WorkingNote]:
+        """Unconditional 'boot set' for harness-injected recall (UPG-9.2).
+
+        Returns ALL directive notes plus high-priority task notes — the
+        must-never-miss memory that should reach the model every session
+        regardless of the prompt. Deliberately NOT semantic and NOT gated on
+        notes_count: a similarity miss on "never push to main" is unacceptable,
+        and a SessionStart hook must work on a fresh (0-note) workspace without
+        erroring. Returns [] when there is nothing to inject.
+
+        Directives are ordered first (they are imperatives), then high tasks,
+        each oldest-first so standing rules stay in a stable order. Does NOT
+        bump last_accessed — boot injection is automatic, not an agency-driven
+        access, so it must not interfere with decay.
+        """
+        sql = (
+            "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
+            "AND (kind = 'directive' OR (kind = 'task' AND priority = 'high')) "
+            "ORDER BY CASE kind WHEN 'directive' THEN 0 ELSE 1 END, created_at ASC "
+            "LIMIT 100"
+        )
+        with self._conn() as conn:
+            rows = conn.execute(sql, (workspace,)).fetchall()
+        notes = [self._row_to_note(r) for r in rows]
+        audit("RECALL", workspace=workspace, query="", notes_returned=len(notes), method="boot")
+        return notes
+
     def forget(self, workspace: str, note_id: int) -> bool:
         """Explicitly delete a note (LLM decided it's no longer relevant)."""
         with self._conn() as conn:

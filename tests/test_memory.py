@@ -283,6 +283,63 @@ class TestKindDimensionUPG93:
 
 
 # ---------------------------------------------------------------------------
+# Boot recall (UPG-9.2)
+# ---------------------------------------------------------------------------
+
+class TestBootRecallUPG92:
+    def test_empty_workspace_returns_empty_list(self, tmp_path) -> None:
+        """A SessionStart hook on a fresh repo must never error — returns []."""
+        store = _store(tmp_path)
+        assert store.boot_recall("/repo") == []
+
+    def test_returns_directives_and_high_tasks_only(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "never push to main", kind="directive", priority="medium")
+        store.remember("/repo", "current sprint goal", kind="task", priority="high")
+        store.remember("/repo", "low-priority task", kind="task", priority="low")
+        store.remember("/repo", "a finding", kind="finding", priority="high")
+        store.remember("/repo", "a gotcha", kind="gotcha", priority="high")
+        boot = store.boot_recall("/repo")
+        contents = [n.content for n in boot]
+        assert "never push to main" in contents
+        assert "current sprint goal" in contents
+        assert "low-priority task" not in contents   # task but not high priority
+        assert "a finding" not in contents           # finding, never in boot set
+        assert "a gotcha" not in contents             # gotcha, never in boot set
+
+    def test_directives_ordered_first(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "high task", kind="task", priority="high")
+        store.remember("/repo", "the directive", kind="directive")
+        boot = store.boot_recall("/repo")
+        assert boot[0].kind == "directive"
+
+    def test_excludes_superseded(self, tmp_path) -> None:
+        import sqlite3
+        store = _store(tmp_path)
+        nid = store.remember("/repo", "old directive", kind="directive")
+        with sqlite3.connect(str(tmp_path / "working_context.sqlite")) as conn:
+            conn.execute("UPDATE notes SET valid_until = ? WHERE note_id = ?", (time.time(), nid))
+        assert store.boot_recall("/repo") == []
+
+    def test_does_not_bump_last_accessed(self, tmp_path) -> None:
+        """Boot injection is automatic, not an access — must not interfere with decay."""
+        import sqlite3
+        store = _store(tmp_path)
+        nid = store.remember("/repo", "a directive", kind="directive")
+        db = str(tmp_path / "working_context.sqlite")
+
+        def _last_accessed() -> float:
+            with sqlite3.connect(db) as conn:
+                return conn.execute("SELECT last_accessed FROM notes WHERE note_id = ?", (nid,)).fetchone()[0]
+
+        before = _last_accessed()
+        time.sleep(0.01)
+        store.boot_recall("/repo")
+        assert _last_accessed() == before  # boot_recall must not touch last_accessed
+
+
+# ---------------------------------------------------------------------------
 # format_notes_for_llm
 # ---------------------------------------------------------------------------
 

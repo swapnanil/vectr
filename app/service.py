@@ -444,7 +444,19 @@ class VectrService:
         priority: str | None = None,
         limit: int = 10,
         kind: str | None = None,
+        boot: bool = False,
     ) -> str:
+        # Boot mode (UPG-9.2): unconditional directive + high-task set for
+        # harness-injected recall. Ignores query/tags/priority/kind/limit and
+        # returns "" (never the "no notes" placeholder) so a SessionStart hook
+        # injects nothing on a fresh workspace rather than noise.
+        if boot:
+            notes = self._context_store.boot_recall(self._workspace_root)
+            if not notes:
+                return ""
+            stale = self._context_store.check_staleness(notes, self._workspace_root)
+            return self._context_store.format_notes_for_llm(notes, stale_warnings=stale)
+
         notes = self._context_store.recall(
             workspace=self._workspace_root,
             query=query,

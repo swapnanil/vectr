@@ -232,3 +232,21 @@ class TestMemoryCrossRequest:
         """An unknown kind is a 422 validation error, not a silent finding."""
         resp = client_real_memory.post("/v1/remember", json={"content": "x", "kind": "bogus"})
         assert resp.status_code == 422
+
+    def test_boot_recall_empty_workspace_returns_blank(self, client_real_memory) -> None:
+        """UPG-9.2: boot recall on a 0-note workspace returns '' with 200 — never errors."""
+        resp = client_real_memory.post("/v1/recall", json={"boot": True})
+        assert resp.status_code == 200
+        assert resp.json()["notes"] == ""
+
+    def test_boot_recall_returns_directives_and_high_tasks_ignoring_query(self, client_real_memory) -> None:
+        """UPG-9.2: boot returns directives + high tasks verbatim regardless of query."""
+        client = client_real_memory
+        client.post("/v1/remember", json={"content": "never push to main", "kind": "directive"})
+        client.post("/v1/remember", json={"content": "sprint goal", "kind": "task", "priority": "high"})
+        client.post("/v1/remember", json={"content": "an ordinary finding"})
+
+        notes = client.post("/v1/recall", json={"boot": True, "query": "totally unrelated topic"}).json()["notes"]
+        assert "never push to main" in notes
+        assert "sprint goal" in notes
+        assert "an ordinary finding" not in notes

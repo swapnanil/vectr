@@ -222,8 +222,14 @@ def client_real_memory(tmp_path):
 
     svc.remember.side_effect = lambda content, tags=None, priority="medium", session_id=None, kind="finding": \
         real_store.remember(ws, content, tags, priority, session_id, kind=kind)
-    svc.recall.side_effect = lambda query=None, tags=None, priority=None, limit=10, kind=None: \
-        real_store.format_notes_for_llm(real_store.recall(ws, query, tags, priority, limit, kind=kind))
+
+    def _recall(query=None, tags=None, priority=None, limit=10, kind=None, boot=False):
+        if boot:
+            boot_notes = real_store.boot_recall(ws)
+            return real_store.format_notes_for_llm(boot_notes) if boot_notes else ""
+        return real_store.format_notes_for_llm(real_store.recall(ws, query, tags, priority, limit, kind=kind))
+
+    svc.recall.side_effect = _recall
     svc.snapshot_session.side_effect = lambda label, session_id=None: \
         real_store.snapshot(ws, label=label)
     svc.list_snapshots.side_effect = lambda: real_store.list_snapshots(ws)

@@ -213,6 +213,7 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
         priority=body.priority,
         limit=body.limit,
         kind=body.kind,
+        boot=body.boot,
     )
     return RecallResponse(
         notes=notes_text,
