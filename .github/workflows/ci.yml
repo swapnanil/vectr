@@ -25,6 +25,9 @@ jobs:
       - name: Run tests
         run: pytest tests/
 
+      - name: Run benchmark harness tests
+        run: pytest benchmarks/harness/
+
   vscode-extension:
     name: VS Code extension (compile)
     runs-on: ubuntu-latest
