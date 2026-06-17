@@ -376,6 +376,7 @@ class WorkingContextStore:
         limit: int = 10,
         include_superseded: bool = False,
         kind: str | None = None,
+        min_similarity: float | None = None,
     ) -> list[WorkingNote]:
         """Retrieve working notes.
 
@@ -392,7 +393,8 @@ class WorkingContextStore:
         if query and self._notes_col is not None and self._embed_fn is not None:
             try:
                 notes = self._semantic_recall(
-                    workspace, query, tags, priority, limit, include_superseded, kind
+                    workspace, query, tags, priority, limit, include_superseded, kind,
+                    min_similarity,
                 )
                 audit("RECALL", workspace=workspace, query=query, notes_returned=len(notes),
                       method="semantic")
@@ -453,8 +455,15 @@ class WorkingContextStore:
         limit: int,
         include_superseded: bool,
         kind: str | None = None,
+        min_similarity: float | None = None,
     ) -> list[WorkingNote]:
-        """Find the most relevant notes by cosine similarity, then fetch from SQLite."""
+        """Find the most relevant notes by cosine similarity, then fetch from SQLite.
+
+        When min_similarity is set (UPG-5.1), candidates whose cosine similarity
+        falls below the floor are dropped, so an off-topic query recalls nothing
+        instead of the nearest-but-irrelevant note. ChromaDB cosine distance is
+        `1 - cosine_similarity`, so similarity = `1 - distance`.
+        """
         # Cap n_results at collection size to avoid ChromaDB errors on small collections
         col_count = self._notes_col.count()
         if col_count == 0:
@@ -467,7 +476,19 @@ class WorkingContextStore:
         if not results or not results["ids"] or not results["ids"][0]:
             return []
 
-        candidate_ids = [int(id_) for id_ in results["ids"][0]]
+        raw_ids = results["ids"][0]
+        distances = (results.get("distances") or [[None] * len(raw_ids)])[0]
+        candidate_ids = [int(id_) for id_ in raw_ids]
+
+        # Relevance cutoff (UPG-5.1) — withhold candidates below the similarity floor.
+        if min_similarity is not None:
+            id_dist = {int(i): d for i, d in zip(raw_ids, distances)}
+            candidate_ids = [
+                nid for nid in candidate_ids
+                if id_dist.get(nid) is None or (1.0 - id_dist[nid]) >= min_similarity
+            ]
+            if not candidate_ids:
+                return []
 
         # Fetch from SQLite by semantic candidate IDs, applying metadata filters
         placeholders = ",".join("?" * len(candidate_ids))

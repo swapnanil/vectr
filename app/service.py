@@ -445,6 +445,7 @@ class VectrService:
         limit: int = 10,
         kind: str | None = None,
         boot: bool = False,
+        min_similarity: float | None = None,
     ) -> str:
         # Boot mode (UPG-9.2): unconditional directive + high-task set for
         # harness-injected recall. Ignores query/tags/priority/kind/limit and
@@ -464,6 +465,7 @@ class VectrService:
             priority=priority,
             limit=limit,
             kind=kind,
+            min_similarity=min_similarity,
         )
         stale = self._context_store.check_staleness(notes, self._workspace_root)
         return self._context_store.format_notes_for_llm(notes, stale_warnings=stale)

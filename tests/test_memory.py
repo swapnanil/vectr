@@ -1063,6 +1063,29 @@ class TestSemanticRecall:
         notes = store.recall(ws, query="anything")
         assert notes == []
 
+    def test_min_similarity_withholds_offtopic(self, tmp_path) -> None:
+        """UPG-5.1: an off-topic query recalls nothing when a cutoff is set.
+
+        _dummy_embed hashes text, so two distinct strings are ~orthogonal
+        (similarity ≈ 0) — well below a 0.5 floor — while the exact text scores 1.0.
+        """
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        store.remember(ws, "gc finalizer tp_del legacy garbage deferral path")
+        # Exact text → similarity 1.0 → passes the floor.
+        assert len(store.recall(ws, query="gc finalizer tp_del legacy garbage deferral path",
+                                min_similarity=0.5)) == 1
+        # Unrelated text → similarity ≈ 0 → withheld by the floor.
+        assert store.recall(ws, query="completely unrelated kubernetes ingress topic",
+                            min_similarity=0.5) == []
+
+    def test_no_cutoff_preserves_default_behavior(self, tmp_path) -> None:
+        """Without min_similarity, recall still returns the nearest note (no regression)."""
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        store.remember(ws, "the only note here")
+        assert len(store.recall(ws, query="something off topic entirely")) == 1
+
     def test_forget_removes_from_chroma(self, tmp_path) -> None:
         import chromadb
         from agent.working_context_store import WorkingContextStore

@@ -155,6 +155,7 @@ class RecallRequest(BaseModel):
     kind: str | None = Field(default=None, description="Filter by kind: directive | task | gotcha | finding | reference")
     limit: int = Field(default=10, ge=1, le=100)
     boot: bool = Field(default=False, description="Boot mode (UPG-9.2): unconditional directives + high-priority tasks; ignores query/tags/priority/kind/limit")
+    min_similarity: float | None = Field(default=None, ge=0.0, le=1.0, description="Relevance cutoff (UPG-5.1): drop semantic matches below this cosine similarity; only applies with a query")
 
     @field_validator("kind")
     @classmethod

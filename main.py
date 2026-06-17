@@ -569,6 +569,8 @@ def cmd_recall(args: argparse.Namespace) -> None:
             payload["priority"] = args.priority
         if getattr(args, "kind", None):
             payload["kind"] = args.kind
+        if getattr(args, "min_similarity", None) is not None:
+            payload["min_similarity"] = args.min_similarity
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/recall", json=payload, timeout=30)
         resp.raise_for_status()
@@ -970,6 +972,8 @@ def main() -> None:
                           default=None, help="Filter to one memory kind")
     p_recall.add_argument("--boot", action="store_true",
                           help="Boot mode: unconditional directives + high-priority tasks (for SessionStart hooks)")
+    p_recall.add_argument("--min-similarity", type=float, default=None, dest="min_similarity",
+                          help="Relevance cutoff [0..1]: drop semantic matches below this cosine similarity")
     p_recall.add_argument("--limit", type=int, default=10)
     p_recall.add_argument("--path", default=_default_path)
     p_recall.add_argument("--port", type=int, default=_default_port)

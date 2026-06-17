@@ -233,6 +233,12 @@ class TestMemoryCrossRequest:
         resp = client_real_memory.post("/v1/remember", json={"content": "x", "kind": "bogus"})
         assert resp.status_code == 422
 
+    def test_min_similarity_out_of_range_rejected(self, client_real_memory) -> None:
+        """UPG-5.1: min_similarity is bounded to [0,1] at the REST boundary."""
+        assert client_real_memory.post("/v1/recall", json={"min_similarity": 1.5}).status_code == 422
+        assert client_real_memory.post("/v1/recall", json={"min_similarity": -0.1}).status_code == 422
+        assert client_real_memory.post("/v1/recall", json={"min_similarity": 0.5}).status_code == 200
+
     def test_boot_recall_empty_workspace_returns_blank(self, client_real_memory) -> None:
         """UPG-9.2: boot recall on a 0-note workspace returns '' with 200 — never errors."""
         resp = client_real_memory.post("/v1/recall", json={"boot": True})
