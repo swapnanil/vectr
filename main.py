@@ -278,6 +278,89 @@ def _write_workspace_config(workspace: str, port: int) -> None:
         print(f"  Created {settings}", file=sys.stderr)
 
 
+def _is_vectr_hook_group(group: dict) -> bool:
+    """True if a hook group contains a vectr-managed command (for idempotent re-init)."""
+    for h in group.get("hooks", []):
+        if isinstance(h, dict) and str(h.get("command", "")).startswith("vectr hook"):
+            return True
+    return False
+
+
+def _install_hook_group(hooks: dict, event: str, *, command: str, matcher: str | None = None) -> None:
+    """Insert (or replace) the vectr-managed hook group for an event, in place.
+
+    Idempotent: any prior vectr group for this event is dropped first, so
+    re-running `vectr init --hooks` never duplicates entries, and non-vectr
+    hook groups the user added are left untouched.
+    """
+    groups = hooks.setdefault(event, [])
+    groups[:] = [g for g in groups if not _is_vectr_hook_group(g)]
+    group: dict = {"hooks": [{"type": "command", "command": command}]}
+    if matcher is not None:
+        group = {"matcher": matcher, **group}
+    groups.append(group)
+
+
+def _write_claude_hooks(workspace: str) -> None:
+    """Merge vectr's hook entries into <workspace>/.claude/settings.json (UPG-9.4+).
+
+    Preserves any existing settings (e.g. enableAllProjectMcpServers) and any
+    non-vectr hooks. Each vectr hook calls the `vectr hook <event>` subcommand,
+    which owns the Claude Code output contract.
+    """
+    settings = Path(workspace) / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    data: dict = {}
+    if settings.exists():
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}  # malformed — overwrite rather than crash init
+    hooks = data.setdefault("hooks", {})
+
+    # UPG-9.4 — SessionStart: inject the boot set (directives + high tasks) before turn 1.
+    _install_hook_group(hooks, "SessionStart", matcher="startup|resume|clear|compact",
+                        command="vectr hook session-start")
+
+    settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print(f"  Wrote vectr hooks to {settings}", file=sys.stderr)
+
+
+def _remove_vectr_hooks(workspace: str) -> None:
+    """Strip vectr-managed hook groups from .claude/settings.json (for --reset-config).
+
+    Leaves all other settings and any non-vectr hooks intact; drops now-empty
+    hook-event lists and an empty `hooks` key.
+    """
+    settings = Path(workspace) / ".claude" / "settings.json"
+    if not settings.exists():
+        return
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    changed = False
+    for event in list(hooks.keys()):
+        groups = hooks[event]
+        if not isinstance(groups, list):
+            continue
+        kept = [g for g in groups if not _is_vectr_hook_group(g)]
+        if len(kept) != len(groups):
+            changed = True
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+    if not hooks:
+        data.pop("hooks", None)
+    if changed:
+        settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        print(f"  Removed vectr hooks from {settings}", file=sys.stderr)
+
+
 def _migrate_legacy_files() -> None:
     """Remove old single-instance PID/port files if they exist."""
     _LEGACY_PID_FILE.unlink(missing_ok=True)
@@ -496,6 +579,74 @@ def cmd_recall(args: argparse.Namespace) -> None:
         print(f"Vectr not running on port {port}; no notes recalled.", file=sys.stderr)
 
 
+def _fetch_recall(port: int, payload: dict) -> str:
+    """POST /v1/recall and return the notes text, or '' on ANY failure.
+
+    Never raises — this feeds harness-injected hook context and must not break
+    the session if the daemon is down, slow, or returns an error.
+    """
+    import httpx
+    try:
+        resp = httpx.post(f"{_api_base(port)}/v1/recall", json=payload, timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("notes", "") or ""
+    except Exception:
+        return ""
+
+
+def _read_hook_stdin() -> dict:
+    """Read the Claude Code hook event JSON from stdin; {} if absent/invalid."""
+    try:
+        raw = sys.stdin.read()
+        return json.loads(raw) if raw.strip() else {}
+    except Exception:
+        return {}
+
+
+def _emit_hook_context(event_name: str, text: str) -> None:
+    """Print the Claude Code additionalContext envelope — only when there's text.
+
+    Emitting nothing (instead of an empty envelope) means a fresh workspace
+    injects nothing rather than noise.
+    """
+    if not text.strip():
+        return
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": text,
+        }
+    }))
+
+
+def cmd_hook(args: argparse.Namespace) -> None:
+    """Emit Claude Code hook output for harness-injected vectr memory (UPG-9.4+).
+
+    Invoked by the hook entries that `vectr init --hooks` writes — not meant to
+    be called by hand. Resolves the workspace from the event's cwd (Claude runs
+    hooks at the project root), then injects the right memory for the event.
+    ALWAYS exits 0 and never raises: a hook must never break the session.
+    """
+    try:
+        event = _read_hook_stdin()
+        workspace = str(Path(event.get("cwd") or os.getcwd()).resolve())
+        # Resolve THIS workspace's daemon via the registry — never fall back to a
+        # default port, which could belong to an unrelated workspace and leak its
+        # memory into this session. No registered instance → inject nothing.
+        entry = InstanceRegistry().get(workspace_hash(workspace))
+        if entry is None:
+            return
+        port = entry["port"]
+
+        if args.hook_event == "session-start":
+            # Unconditional boot set: directives + high-priority tasks (UPG-9.2),
+            # the MEMORY.md equivalent — present before turn 1, zero model agency.
+            notes = _fetch_recall(port, {"boot": True})
+            _emit_hook_context("SessionStart", notes)
+    except Exception:
+        pass  # hook safety: never propagate
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     import httpx
 
@@ -630,6 +781,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         if cursor_mdc.exists():
             cursor_mdc.unlink()
             print(f"  Deleted {cursor_mdc}", file=sys.stderr)
+        _remove_vectr_hooks(workspace)
         print(f"Vectr config reset for: {workspace}", file=sys.stderr)
         return
 
@@ -637,6 +789,10 @@ def cmd_init(args: argparse.Namespace) -> None:
     port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", "8765"))
 
     _write_workspace_config(workspace, port)
+
+    # write Claude Code hook entries (UPG-9.4+) — opt-in via --hooks
+    if getattr(args, "hooks", False):
+        _write_claude_hooks(workspace)
 
     # write user-defined exclusions to .vectrignore
     exclude_dirs: list[str] = getattr(args, "exclude", None) or []
@@ -771,6 +927,20 @@ def main() -> None:
         dest="reset_config",
         help="Remove all vectr blocks from IDE config files in the workspace.",
     )
+    p_init.add_argument(
+        "--hooks",
+        action="store_true",
+        default=False,
+        help="Also write Claude Code hook entries (.claude/settings.json) for "
+             "harness-injected vectr memory (SessionStart boot recall, etc.).",
+    )
+
+    p_hook = sub.add_parser(
+        "hook",
+        help="Emit Claude Code hook output (invoked by `vectr init --hooks` entries; not called directly)",
+    )
+    p_hook.add_argument("hook_event", choices=["session-start"],
+                        help="Which hook event to emit output for")
 
     p_index = sub.add_parser("index", help="(Re)index a directory or file")
     p_index.add_argument("--path", default=_default_path)
@@ -822,6 +992,7 @@ def main() -> None:
         "forget":  cmd_forget,
         "remember": cmd_remember,
         "recall":  cmd_recall,
+        "hook":    cmd_hook,
     }
     if args.command in dispatch:
         dispatch[args.command](args)

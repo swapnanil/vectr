@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import io
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -480,6 +482,133 @@ class TestCmdRecall:
             m.cmd_recall(args)
 
         assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# SessionStart hook + vectr init --hooks (UPG-9.4)
+# ---------------------------------------------------------------------------
+
+class TestCmdHookSessionStart:
+    def _run(self, stdin_json: str, recall_text: str, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_json))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._fetch_recall", return_value=recall_text):
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="session-start"))
+        return capsys.readouterr().out
+
+    def test_emits_additionalcontext_envelope_with_boot_notes(self, monkeypatch, capsys):
+        out = self._run('{"cwd": "/project/a", "source": "startup"}',
+                        "[1] [DIRECTIVE] never push to main", monkeypatch, capsys)
+        payload = json.loads(out)
+        assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert "never push to main" in payload["hookSpecificOutput"]["additionalContext"]
+
+    def test_uses_boot_payload(self, monkeypatch, capsys):
+        """The SessionStart hook must request the unconditional boot set."""
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/project/a"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._fetch_recall", return_value="x") as mock_fetch:
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="session-start"))
+        assert mock_fetch.call_args[0][1] == {"boot": True}
+
+    def test_emits_nothing_when_no_notes(self, monkeypatch, capsys):
+        """A fresh workspace injects nothing — no empty envelope, just silence."""
+        out = self._run('{"cwd": "/project/a"}', "", monkeypatch, capsys)
+        assert out.strip() == ""
+
+    def test_no_registered_daemon_injects_nothing(self, monkeypatch, capsys):
+        """If this workspace has no registered daemon, inject nothing — never fall
+        back to a default port that may serve an UNRELATED workspace's memory."""
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/project/a"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._fetch_recall", return_value="leaked notes") as mock_fetch:
+            MockReg.return_value.get.return_value = None  # no instance for this workspace
+            m.cmd_hook(argparse.Namespace(hook_event="session-start"))
+        mock_fetch.assert_not_called()        # must not even query a daemon
+        assert capsys.readouterr().out.strip() == ""
+
+    def test_never_raises_on_bad_stdin(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO("not json at all"))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._fetch_recall", return_value=""):
+            MockReg.return_value.get.return_value = {"port": 8765}
+            # Must not raise even with garbage stdin.
+            m.cmd_hook(argparse.Namespace(hook_event="session-start"))
+        assert capsys.readouterr().out.strip() == ""
+
+
+class TestFetchRecallResilience:
+    def test_returns_empty_on_connect_error(self):
+        import httpx
+        from unittest.mock import patch
+        with patch("httpx.post", side_effect=httpx.ConnectError("down")):
+            assert m._fetch_recall(8765, {"boot": True}) == ""
+
+
+class TestInitHooks:
+    def test_writes_sessionstart_hook(self, tmp_path):
+        settings = tmp_path / ".claude" / "settings.json"
+        m._write_claude_hooks(str(tmp_path))
+        data = json.loads(settings.read_text())
+        groups = data["hooks"]["SessionStart"]
+        assert len(groups) == 1
+        assert groups[0]["matcher"] == "startup|resume|clear|compact"
+        assert groups[0]["hooks"][0]["command"] == "vectr hook session-start"
+
+    def test_preserves_existing_settings(self, tmp_path):
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text('{"enableAllProjectMcpServers": true}\n')
+        m._write_claude_hooks(str(tmp_path))
+        data = json.loads(settings.read_text())
+        assert data["enableAllProjectMcpServers"] is True
+        assert "SessionStart" in data["hooks"]
+
+    def test_idempotent_no_duplicate_groups(self, tmp_path):
+        m._write_claude_hooks(str(tmp_path))
+        m._write_claude_hooks(str(tmp_path))
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert len(data["hooks"]["SessionStart"]) == 1
+
+    def test_keeps_user_hooks(self, tmp_path):
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({
+            "hooks": {"SessionStart": [
+                {"matcher": "startup", "hooks": [{"type": "command", "command": "my-own-hook"}]}
+            ]}
+        }))
+        m._write_claude_hooks(str(tmp_path))
+        groups = json.loads(settings.read_text())["hooks"]["SessionStart"]
+        cmds = [h["command"] for g in groups for h in g["hooks"]]
+        assert "my-own-hook" in cmds
+        assert "vectr hook session-start" in cmds
+
+    def test_reset_removes_vectr_hooks_only(self, tmp_path):
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({
+            "enableAllProjectMcpServers": True,
+            "hooks": {"SessionStart": [
+                {"matcher": "startup", "hooks": [{"type": "command", "command": "my-own-hook"}]}
+            ]}
+        }))
+        m._write_claude_hooks(str(tmp_path))   # adds vectr group
+        m._remove_vectr_hooks(str(tmp_path))   # removes only vectr group
+        data = json.loads(settings.read_text())
+        assert data["enableAllProjectMcpServers"] is True
+        cmds = [h["command"] for g in data["hooks"]["SessionStart"] for h in g["hooks"]]
+        assert cmds == ["my-own-hook"]
 
 
 # ---------------------------------------------------------------------------
