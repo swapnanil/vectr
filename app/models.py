@@ -80,6 +80,10 @@ class StatusResponse(BaseModel):
     symbol_count: int = 0
     languages: list[LanguageStat] = []
     notes_count: int = 0
+    # Symbol-graph build trust signals (UPG-8.7): complete = no files failed
+    # extraction; failed_files counts those skipped, so a partial graph is visible.
+    symbol_graph_complete: bool = False
+    symbol_graph_failed_files: int = 0
     processing_ms: int
     model: str
     # Adaptive retrieval strategy (populated after first index)

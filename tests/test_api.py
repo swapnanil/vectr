@@ -50,6 +50,9 @@ def _make_service():
             {"language": "python", "files": 10, "chunks": 400, "symbols": True},
             {"language": "markdown", "files": 2, "chunks": 100, "symbols": False},
         ],
+        # UPG-8.7: symbol-graph build trust signals (real shape)
+        "symbol_graph_complete": True,
+        "symbol_graph_failed_files": 0,
     }
     svc.get_map.return_value = "# Codebase Passport\nFastAPI service."
     # locate_with_snippets returns a LocateResult wrapper (not a bare list) —
@@ -218,6 +221,9 @@ def test_status(client) -> None:
     assert "workspace_root" in data
     assert "notes_count" in data, "/v1/status must include notes_count for agent recall decisions"
     assert isinstance(data["notes_count"], int)
+    # UPG-8.7: symbol-graph build trust signals surface in /v1/status
+    assert data["symbol_graph_complete"] is True
+    assert data["symbol_graph_failed_files"] == 0
     # UPG-3.3: per-language coverage with symbol availability
     langs = {l["language"]: l for l in data["languages"]}
     assert langs["python"]["symbols"] is True

@@ -26,11 +26,14 @@ from agent.symbol_graph import (
     CallEdge,
     LocateResult,
     SYMBOL_LANGUAGES,
+    SYMBOL_SCHEMA_VERSION,
+    graph_toolchain_fingerprint,
     supports_symbols,
     extract_symbols_from_file,
     _levenshtein,
     _partial_match_key,
 )
+import agent.symbol_graph as _sgmod
 from tests.conftest import make_py
 
 
@@ -1322,3 +1325,111 @@ class TestLocateDescriptionHintUPG46:
         assert not SymbolGraph._looks_like_description("RegistryClient")
         assert not SymbolGraph._looks_like_description("parse_lockfile")
         assert not SymbolGraph._looks_like_description("  PyList_Append  ")
+
+
+# ---------------------------------------------------------------------------
+# UPG-8.7 — build resilience + version stamp / trust signals
+# ---------------------------------------------------------------------------
+
+class TestBuildResilienceUPG87:
+    """build_for_workspace must be per-file resilient: one file that throws
+    during extraction can no longer abort the whole loop and silently leave
+    every *later* file without symbols (the real cause of the observed
+    '5531 symbols across 154 files' partial graph)."""
+
+    def test_one_throwing_file_does_not_abort_build(self, tmp_path, monkeypatch) -> None:
+        ws = str(tmp_path)
+        a = make_py(tmp_path, "a_first.py", "def a_first_fn(): return 1")
+        b = make_py(tmp_path, "b_boom.py", "def b_boom_fn(): return 2")
+        c = make_py(tmp_path, "c_third.py", "def c_third_fn(): return 3")
+
+        real = _sgmod.extract_symbols_from_file
+
+        def boom(fp):
+            if "b_boom" in fp:
+                raise RecursionError("simulated deep-AST parser crash (cf UPG-3.2)")
+            return real(fp)
+
+        monkeypatch.setattr(_sgmod, "extract_symbols_from_file", boom)
+
+        g = SymbolGraph(ws)
+        stats = g.build_for_workspace(ws, [a, b, c])
+
+        # The file AFTER the bad one keeps its symbols — the loop did not abort.
+        assert g.locate(ws, "a_first_fn")
+        assert g.locate(ws, "c_third_fn")
+        assert not g.locate(ws, "b_boom_fn")  # only the genuinely broken file is missing
+        assert stats["failed"] == 1
+        assert stats["complete"] is False
+
+    def test_clean_build_is_complete(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        a = make_py(tmp_path, "ok1.py", "def ok1(): pass")
+        b = make_py(tmp_path, "ok2.py", "def ok2(): pass")
+        g = SymbolGraph(ws)
+        stats = g.build_for_workspace(ws, [a, b])
+        assert stats["failed"] == 0
+        assert stats["complete"] is True
+
+    def test_partial_build_flagged_in_meta(self, tmp_path, monkeypatch) -> None:
+        ws = str(tmp_path)
+        a = make_py(tmp_path, "good.py", "def good(): pass")
+        bad = make_py(tmp_path, "bad.py", "def bad(): pass")
+        real = _sgmod.extract_symbols_from_file
+        monkeypatch.setattr(
+            _sgmod, "extract_symbols_from_file",
+            lambda fp: (_ for _ in ()).throw(ValueError("x")) if "bad.py" in fp else real(fp),
+        )
+        g = SymbolGraph(ws)
+        g.build_for_workspace(ws, [a, bad])
+        meta = g.graph_meta(ws)
+        assert meta["complete"] == "0"
+        assert meta["failed"] == "1"
+
+
+class TestGraphVersionStampUPG87:
+    """A persisted graph records the toolchain that built it so an upgrade
+    (new parser / changed schema / different model) is detectable and the graph
+    is rebuilt rather than silently serving stale/partial results."""
+
+    def test_fingerprint_stable_and_model_sensitive(self) -> None:
+        assert graph_toolchain_fingerprint("m1") == graph_toolchain_fingerprint("m1")
+        assert graph_toolchain_fingerprint("m1") != graph_toolchain_fingerprint("m2")
+
+    def test_fingerprint_tracks_schema_version(self, monkeypatch) -> None:
+        fp_before = graph_toolchain_fingerprint("m")
+        monkeypatch.setattr(_sgmod, "SYMBOL_SCHEMA_VERSION", SYMBOL_SCHEMA_VERSION + 99)
+        assert graph_toolchain_fingerprint("m") != fp_before
+
+    def test_never_built_is_stale(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        assert g.is_stale(str(tmp_path), "anymodel") is True
+        assert g.graph_meta(str(tmp_path)) == {}
+
+    def test_clean_build_not_stale_same_toolchain(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        a = make_py(tmp_path, "x.py", "def x(): pass")
+        g = SymbolGraph(ws)
+        g.build_for_workspace(ws, [a], embed_model="model-A")
+        assert g.is_stale(ws, "model-A") is False
+
+    def test_model_change_makes_stale(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        a = make_py(tmp_path, "x.py", "def x(): pass")
+        g = SymbolGraph(ws)
+        g.build_for_workspace(ws, [a], embed_model="model-A")
+        assert g.is_stale(ws, "model-B") is True  # toolchain changed → rebuild warranted
+
+    def test_incomplete_build_is_stale(self, tmp_path, monkeypatch) -> None:
+        ws = str(tmp_path)
+        a = make_py(tmp_path, "good.py", "def good(): pass")
+        bad = make_py(tmp_path, "bad.py", "def bad(): pass")
+        real = _sgmod.extract_symbols_from_file
+        monkeypatch.setattr(
+            _sgmod, "extract_symbols_from_file",
+            lambda fp: (_ for _ in ()).throw(ValueError("x")) if "bad.py" in fp else real(fp),
+        )
+        g = SymbolGraph(ws)
+        g.build_for_workspace(ws, [a, bad], embed_model="m")
+        # Same toolchain, but the build was partial → still stale (must rebuild).
+        assert g.is_stale(ws, "m") is True

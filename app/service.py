@@ -159,10 +159,18 @@ class VectrService:
             # guarantees the symbol graph covers exactly the same files as the
             # vector index (same filters, same exclusions).
             file_paths = self._indexer.indexed_file_paths
-            stats = self._symbol_graph.build_for_workspace(self._workspace_root, file_paths)
+            # UPG-8.7: a toolchain change (vectr upgrade / new parser / model)
+            # means the persisted graph is stale; we always full-rebuild here, but
+            # surface *why* so a stale graph is never silently served.
+            if self._symbol_graph.is_stale(self._workspace_root, self._embed_model):
+                logger.info("Symbol graph stale or toolchain changed — full rebuild")
+            stats = self._symbol_graph.build_for_workspace(
+                self._workspace_root, file_paths, embed_model=self._embed_model,
+            )
             logger.info(
-                "Symbol graph: %d symbols, %d edges across %d files",
+                "Symbol graph: %d symbols, %d edges across %d files (%d failed, complete=%s)",
                 stats["symbols"], stats["edges"], stats["files"],
+                stats["failed"], stats["complete"],
             )
         except Exception:
             logger.exception("Symbol graph build failed (non-fatal)")
@@ -321,7 +329,21 @@ class VectrService:
             "symbol_count": self._symbol_graph.symbol_count(self._workspace_root),
             "languages": self._language_coverage(),
             "notes_count": self._context_store.count_notes(self._workspace_root),
+            **self._symbol_graph_status(),
             **strategy_info,
+        }
+
+    def _symbol_graph_status(self) -> dict:
+        """Symbol-graph build trust signals for `status` (UPG-8.7): whether the
+        persisted graph is complete (no files failed extraction) and built by the
+        current toolchain. Lets a benchmark/user confirm locate/trace coverage is
+        trustworthy rather than a silently-partial graph."""
+        meta = self._symbol_graph.graph_meta(self._workspace_root)
+        if not meta:
+            return {"symbol_graph_complete": False, "symbol_graph_failed_files": 0}
+        return {
+            "symbol_graph_complete": meta.get("complete") == "1",
+            "symbol_graph_failed_files": int(meta.get("failed", "0") or "0"),
         }
 
     def _language_coverage(self) -> list[dict]:

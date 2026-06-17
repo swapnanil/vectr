@@ -139,6 +139,30 @@ _SYMBOL_TYPES: dict[str, dict[str, str]] = {
 # can route: use locate/trace where symbols exist, fall back to search elsewhere.
 SYMBOL_LANGUAGES: frozenset[str] = frozenset(_SYMBOL_TYPES)
 
+# Bump whenever symbol/edge extraction changes in a way that makes an
+# already-persisted graph stale (new parser language, new edge type, changed
+# name resolution). Combined with the parser-language set + embed model into the
+# toolchain fingerprint (UPG-8.7) so a vectr upgrade is detectable and the graph
+# is rebuilt rather than silently serving partial/old results.
+SYMBOL_SCHEMA_VERSION = 3  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4)
+
+
+def graph_toolchain_fingerprint(embed_model: str = "") -> str:
+    """Identity of the toolchain that builds the symbol graph.
+
+    A change here means an already-persisted graph was built by a different
+    vectr (new/changed parser, bumped schema, different embed model) and must be
+    rebuilt — otherwise locate/trace silently serve stale or partial results
+    after an upgrade. See UPG-8.7.
+    """
+    import hashlib
+    parts = [
+        f"schema={SYMBOL_SCHEMA_VERSION}",
+        "parsers=" + ",".join(sorted(SYMBOL_LANGUAGES)),
+        f"embed={embed_model}",
+    ]
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
 
 def supports_symbols(language: str) -> bool:
     """True if `language` has symbol-graph extraction (locate/trace).
@@ -758,6 +782,13 @@ class SymbolGraph:
                 CREATE INDEX IF NOT EXISTS idx_edge_to ON edges(to_symbol);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_unique
                     ON edges(workspace, from_file, from_symbol, from_line, to_symbol, edge_type);
+
+                CREATE TABLE IF NOT EXISTS graph_meta (
+                    workspace    TEXT NOT NULL,
+                    key          TEXT NOT NULL,
+                    value        TEXT,
+                    PRIMARY KEY (workspace, key)
+                );
             """)
 
     # ------------------------------------------------------------------
@@ -817,21 +848,89 @@ class SymbolGraph:
                 (workspace, file_path),
             )
 
-    def build_for_workspace(self, workspace: str, file_paths: list[str]) -> dict:
+    def build_for_workspace(
+        self, workspace: str, file_paths: list[str], embed_model: str = "",
+    ) -> dict:
         """
         Index all files in a workspace. Called after the main vector index is built.
-        Returns {"symbols": int, "edges": int, "files": int}
+        Returns {"symbols": int, "edges": int, "files": int, "failed": int, "complete": bool}
+
+        Per-file resilient (UPG-8.7): a file that raises during extraction (e.g. a
+        pathological AST that hits the recursion guard, an unreadable file) is
+        skipped and counted — it can no longer abort the whole loop and silently
+        leave every *later* file without symbols (the real cause of the observed
+        "5531 symbols across 154 files" partial graph). After the build, the
+        toolchain fingerprint + completeness are stamped so an upgrade is
+        detectable and a partial build is never mistaken for a trustworthy one.
         """
         total_symbols = 0
+        failed: list[str] = []
         for fp in file_paths:
-            total_symbols += self.index_file(workspace, fp)
+            try:
+                total_symbols += self.index_file(workspace, fp)
+            except Exception:
+                failed.append(fp)
+                logger.warning("Symbol extraction failed for %s — skipped", fp, exc_info=True)
 
         with self._conn() as conn:
             edge_count = conn.execute(
                 "SELECT COUNT(*) FROM edges WHERE workspace = ?", (workspace,)
             ).fetchone()[0]
 
-        return {"symbols": total_symbols, "edges": edge_count, "files": len(file_paths)}
+        if failed:
+            logger.warning(
+                "Symbol graph: %d/%d files failed extraction (e.g. %s) — graph is PARTIAL",
+                len(failed), len(file_paths), ", ".join(Path(f).name for f in failed[:3]),
+            )
+
+        complete = not failed
+        self._write_meta(workspace, {
+            "fingerprint": graph_toolchain_fingerprint(embed_model),
+            "schema_version": str(SYMBOL_SCHEMA_VERSION),
+            "embed_model": embed_model,
+            "files": str(len(file_paths)),
+            "symbols": str(total_symbols),
+            "failed": str(len(failed)),
+            "complete": "1" if complete else "0",
+            "built_at": str(time.time()),
+        })
+
+        return {
+            "symbols": total_symbols, "edges": edge_count, "files": len(file_paths),
+            "failed": len(failed), "complete": complete,
+        }
+
+    # ------------------------------------------------------------------
+    # Build metadata / version stamp (UPG-8.7)
+    # ------------------------------------------------------------------
+
+    def _write_meta(self, workspace: str, meta: dict[str, str]) -> None:
+        with self._conn() as conn:
+            for k, v in meta.items():
+                conn.execute(
+                    "INSERT INTO graph_meta (workspace, key, value) VALUES (?, ?, ?) "
+                    "ON CONFLICT(workspace, key) DO UPDATE SET value = excluded.value",
+                    (workspace, k, v),
+                )
+
+    def graph_meta(self, workspace: str) -> dict[str, str]:
+        """Stored build stamp for this workspace ({} if never built)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM graph_meta WHERE workspace = ?", (workspace,)
+            ).fetchall()
+        return {r["key"]: r["value"] for r in rows}
+
+    def is_stale(self, workspace: str, embed_model: str = "") -> bool:
+        """True if the persisted graph was built by a different toolchain
+        (vectr upgrade / parser change / model change) or left incomplete, so a
+        full rebuild is warranted. A never-built graph is stale. (UPG-8.7)"""
+        meta = self.graph_meta(workspace)
+        if not meta:
+            return True
+        if meta.get("complete") != "1":
+            return True
+        return meta.get("fingerprint") != graph_toolchain_fingerprint(embed_model)
 
     def symbol_count(self, workspace: str) -> int:
         with self._conn() as conn:
