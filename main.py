@@ -329,6 +329,9 @@ def _write_claude_hooks(workspace: str) -> None:
                         command="vectr hook session-start")
     # UPG-9.5 — UserPromptSubmit (no matcher): per-turn semantic recall keyed to the prompt.
     _install_hook_group(hooks, "UserPromptSubmit", command="vectr hook user-prompt-submit")
+    # UPG-9.6 — PreToolUse (Edit|Write): surface the gotcha recorded against the file being edited.
+    _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write",
+                        command="vectr hook pre-tool-use")
 
     settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     print(f"  Wrote vectr hooks to {settings}", file=sys.stderr)
@@ -629,6 +632,25 @@ def _emit_hook_context(event_name: str, text: str) -> None:
     }))
 
 
+def _resolve_hook_instance(cwd: str) -> dict | None:
+    """Find the running daemon serving `cwd`, or None.
+
+    Multi-instance-safe with NO hardcoded port: the InstanceRegistry keys each
+    `vectr start` workspace by its resolved path, so different folders resolve
+    to different ports purely from cwd. We try the exact cwd first, then walk up
+    parent directories so a hook fired from a subdirectory still finds the
+    enclosing registered workspace. We never fall back to a default port — that
+    could belong to an unrelated workspace and leak its memory into this session.
+    """
+    registry = InstanceRegistry()
+    here = Path(cwd).resolve()
+    for d in (here, *here.parents):
+        entry = registry.get(workspace_hash(str(d)))
+        if entry is not None:
+            return entry
+    return None
+
+
 def cmd_hook(args: argparse.Namespace) -> None:
     """Emit Claude Code hook output for harness-injected vectr memory (UPG-9.4+).
 
@@ -639,13 +661,10 @@ def cmd_hook(args: argparse.Namespace) -> None:
     """
     try:
         event = _read_hook_stdin()
-        workspace = str(Path(event.get("cwd") or os.getcwd()).resolve())
-        # Resolve THIS workspace's daemon via the registry — never fall back to a
-        # default port, which could belong to an unrelated workspace and leak its
-        # memory into this session. No registered instance → inject nothing.
-        entry = InstanceRegistry().get(workspace_hash(workspace))
+        cwd = event.get("cwd") or os.getcwd()
+        entry = _resolve_hook_instance(cwd)
         if entry is None:
-            return
+            return  # no daemon serves this workspace → inject nothing
         port = entry["port"]
 
         if args.hook_event == "session-start":
@@ -665,6 +684,16 @@ def cmd_hook(args: argparse.Namespace) -> None:
             min_sim = float(os.getenv("VECTR_HOOK_MIN_SIMILARITY", str(_HOOK_MIN_SIMILARITY)))
             notes = _fetch_recall(port, {"query": prompt, "limit": limit, "min_similarity": min_sim})
             _emit_hook_context("UserPromptSubmit", notes)
+
+        elif args.hook_event == "pre-tool-use":
+            # Gotcha injection (UPG-9.6): about to Edit/Write a file — surface any
+            # caveat recorded against THAT file, at the moment of the edit. Static
+            # .claude/rules path-scoping can't do this; the gotcha is accrued + semantic.
+            file_path = ((event.get("tool_input") or {}).get("file_path") or "").strip()
+            if not file_path:
+                return
+            notes = _fetch_recall(port, {"file_path": file_path, "kind": "gotcha"})
+            _emit_hook_context("PreToolUse", notes)
     except Exception:
         pass  # hook safety: never propagate
 
@@ -961,7 +990,7 @@ def main() -> None:
         "hook",
         help="Emit Claude Code hook output (invoked by `vectr init --hooks` entries; not called directly)",
     )
-    p_hook.add_argument("hook_event", choices=["session-start", "user-prompt-submit"],
+    p_hook.add_argument("hook_event", choices=["session-start", "user-prompt-submit", "pre-tool-use"],
                         help="Which hook event to emit output for")
 
     p_index = sub.add_parser("index", help="(Re)index a directory or file")

@@ -340,6 +340,37 @@ class TestBootRecallUPG92:
 
 
 # ---------------------------------------------------------------------------
+# Path-anchored recall (UPG-9.6)
+# ---------------------------------------------------------------------------
+
+class TestRecallForPathUPG96:
+    def test_matches_note_mentioning_basename(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "index_file in symbol_graph.py takes workspace FIRST", kind="gotcha")
+        notes = store.recall_for_path("/repo", "/repo/agent/symbol_graph.py", kind="gotcha")
+        assert len(notes) == 1
+        assert "workspace FIRST" in notes[0].content
+
+    def test_unrelated_file_matches_nothing(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "gotcha about symbol_graph.py", kind="gotcha")
+        assert store.recall_for_path("/repo", "/repo/app/routes.py", kind="gotcha") == []
+
+    def test_kind_filter_applies(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "finding mentioning routes.py", kind="finding")
+        store.remember("/repo", "gotcha about routes.py edits", kind="gotcha")
+        gotchas = store.recall_for_path("/repo", "/repo/app/routes.py", kind="gotcha")
+        assert len(gotchas) == 1
+        assert gotchas[0].kind == "gotcha"
+
+    def test_empty_basename_returns_empty(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "x", kind="gotcha")
+        assert store.recall_for_path("/repo", "", kind="gotcha") == []
+
+
+# ---------------------------------------------------------------------------
 # format_notes_for_llm
 # ---------------------------------------------------------------------------
 

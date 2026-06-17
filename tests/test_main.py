@@ -583,6 +583,69 @@ class TestCmdHookUserPromptSubmit:
         assert out.strip() == ""
 
 
+class TestCmdHookPreToolUse:
+    def _run(self, stdin_json: str, recall_text: str, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_json))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._fetch_recall", return_value=recall_text) as mock_fetch:
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="pre-tool-use"))
+        return capsys.readouterr().out, mock_fetch
+
+    def test_emits_gotcha_for_edited_file(self, monkeypatch, capsys):
+        stdin = '{"cwd": "/p", "tool_name": "Edit", "tool_input": {"file_path": "/p/agent/symbol_graph.py"}}'
+        out, mock_fetch = self._run(stdin, "[1] [GOTCHA] index_file takes workspace first", monkeypatch, capsys)
+        payload = json.loads(out)
+        assert payload["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert "index_file takes workspace first" in payload["hookSpecificOutput"]["additionalContext"]
+        sent = mock_fetch.call_args[0][1]
+        assert sent["file_path"] == "/p/agent/symbol_graph.py"
+        assert sent["kind"] == "gotcha"
+
+    def test_no_file_path_injects_nothing(self, monkeypatch, capsys):
+        out, mock_fetch = self._run('{"cwd": "/p", "tool_name": "Bash", "tool_input": {}}', "x", monkeypatch, capsys)
+        mock_fetch.assert_not_called()
+        assert out.strip() == ""
+
+    def test_unrelated_file_no_gotcha_injects_nothing(self, monkeypatch, capsys):
+        stdin = '{"cwd": "/p", "tool_input": {"file_path": "/p/README.md"}}'
+        out, _ = self._run(stdin, "", monkeypatch, capsys)
+        assert out.strip() == ""
+
+
+class TestHookInstanceResolution:
+    """Multi-instance safety: cwd → registry → correct port, no hardcoded port."""
+
+    def test_two_instances_resolve_to_their_own_ports(self, tmp_path):
+        from unittest.mock import patch
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        a, b = tmp_path / "a", tmp_path / "b"
+        a.mkdir(); b.mkdir()
+        reg.register(workspace_hash(str(a.resolve())), str(a.resolve()), 9001, 111)
+        reg.register(workspace_hash(str(b.resolve())), str(b.resolve()), 9002, 222)
+        with patch("main.InstanceRegistry", return_value=reg):
+            assert m._resolve_hook_instance(str(a))["port"] == 9001
+            assert m._resolve_hook_instance(str(b))["port"] == 9002
+
+    def test_walks_up_from_subdirectory(self, tmp_path):
+        from unittest.mock import patch
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        root = tmp_path / "proj"
+        sub = root / "src" / "deep"
+        sub.mkdir(parents=True)
+        reg.register(workspace_hash(str(root.resolve())), str(root.resolve()), 9111, 333)
+        with patch("main.InstanceRegistry", return_value=reg):
+            assert m._resolve_hook_instance(str(sub))["port"] == 9111
+
+    def test_unregistered_workspace_resolves_none(self, tmp_path):
+        from unittest.mock import patch
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        with patch("main.InstanceRegistry", return_value=reg):
+            assert m._resolve_hook_instance(str(tmp_path / "nope")) is None
+
+
 class TestFetchRecallResilience:
     def test_returns_empty_on_connect_error(self):
         import httpx
@@ -608,6 +671,14 @@ class TestInitHooks:
         assert len(groups) == 1
         assert "matcher" not in groups[0]   # UserPromptSubmit has no matcher
         assert groups[0]["hooks"][0]["command"] == "vectr hook user-prompt-submit"
+
+    def test_writes_pretooluse_hook_with_edit_write_matcher(self, tmp_path):
+        m._write_claude_hooks(str(tmp_path))
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        groups = data["hooks"]["PreToolUse"]
+        assert len(groups) == 1
+        assert groups[0]["matcher"] == "Edit|Write"
+        assert groups[0]["hooks"][0]["command"] == "vectr hook pre-tool-use"
 
     def test_preserves_existing_settings(self, tmp_path):
         settings = tmp_path / ".claude" / "settings.json"

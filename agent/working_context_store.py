@@ -556,6 +556,45 @@ class WorkingContextStore:
         audit("RECALL", workspace=workspace, query="", notes_returned=len(notes), method="boot")
         return notes
 
+    def recall_for_path(
+        self,
+        workspace: str,
+        file_path: str,
+        kind: str | None = None,
+        limit: int = 10,
+    ) -> list[WorkingNote]:
+        """Recall notes anchored to a specific file (UPG-9.6).
+
+        Matches notes whose content mentions the file's basename or its
+        workspace-relative path — the anchor a typed gotcha actually carries
+        ("index_file in symbol_graph.py takes workspace first"). Combined with
+        `kind="gotcha"` this powers the PreToolUse hook: editing a file surfaces
+        the caveat recorded against it, and an unrelated file matches nothing.
+        Not semantic — a substring anchor avoids false "nearby file" hits.
+        """
+        basename = Path(file_path).name
+        if not basename:
+            return []
+        try:
+            relpath = str(Path(file_path).resolve().relative_to(Path(workspace).resolve()))
+        except (ValueError, OSError):
+            relpath = ""
+
+        sql = ("SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
+               "AND (content LIKE ? OR content LIKE ?)")
+        params: list = [workspace, f"%{basename}%", f"%{relpath}%" if relpath else f"%{basename}%"]
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY author_trust_score DESC, decay_score DESC, last_accessed DESC LIMIT ?"
+        params.append(limit)
+
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        notes = [self._row_to_note(r) for r in rows]
+        audit("RECALL", workspace=workspace, query=basename, notes_returned=len(notes), method="path")
+        return notes
+
     def forget(self, workspace: str, note_id: int) -> bool:
         """Explicitly delete a note (LLM decided it's no longer relevant)."""
         with self._conn() as conn:

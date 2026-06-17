@@ -215,6 +215,7 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
         kind=body.kind,
         boot=body.boot,
         min_similarity=body.min_similarity,
+        file_path=body.file_path,
     )
     return RecallResponse(
         notes=notes_text,

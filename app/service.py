@@ -446,6 +446,7 @@ class VectrService:
         kind: str | None = None,
         boot: bool = False,
         min_similarity: float | None = None,
+        file_path: str | None = None,
     ) -> str:
         # Boot mode (UPG-9.2): unconditional directive + high-task set for
         # harness-injected recall. Ignores query/tags/priority/kind/limit and
@@ -453,6 +454,17 @@ class VectrService:
         # injects nothing on a fresh workspace rather than noise.
         if boot:
             notes = self._context_store.boot_recall(self._workspace_root)
+            if not notes:
+                return ""
+            stale = self._context_store.check_staleness(notes, self._workspace_root)
+            return self._context_store.format_notes_for_llm(notes, stale_warnings=stale)
+
+        # Path-anchored mode (UPG-9.6): notes recorded against a specific file,
+        # for the PreToolUse gotcha hook. Returns "" when none, so editing a file
+        # with no recorded caveat injects nothing.
+        if file_path:
+            notes = self._context_store.recall_for_path(
+                self._workspace_root, file_path, kind=kind, limit=limit)
             if not notes:
                 return ""
             stale = self._context_store.check_staleness(notes, self._workspace_root)
