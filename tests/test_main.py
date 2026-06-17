@@ -615,6 +615,30 @@ class TestCmdHookPreToolUse:
         assert out.strip() == ""
 
 
+class TestCmdHookPreCompact:
+    def test_snapshots_with_trigger_in_label_and_emits_nothing(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/p", "trigger": "auto"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._post_snapshot", return_value=True) as mock_snap:
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
+        # snapshot taken with a label carrying the trigger; no context injected.
+        label = mock_snap.call_args[0][1]
+        assert "auto" in label and label.startswith("pre-compact-")
+        assert capsys.readouterr().out.strip() == ""
+
+    def test_snapshot_failure_does_not_raise(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/p", "trigger": "manual"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._post_snapshot", return_value=False):
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))  # must not raise
+
+
 class TestHookInstanceResolution:
     """Multi-instance safety: cwd → registry → correct port, no hardcoded port."""
 
@@ -679,6 +703,20 @@ class TestInitHooks:
         assert len(groups) == 1
         assert groups[0]["matcher"] == "Edit|Write"
         assert groups[0]["hooks"][0]["command"] == "vectr hook pre-tool-use"
+
+    def test_writes_precompact_hook(self, tmp_path):
+        m._write_claude_hooks(str(tmp_path))
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        groups = data["hooks"]["PreCompact"]
+        assert len(groups) == 1
+        assert groups[0]["matcher"] == "manual|auto"
+        assert groups[0]["hooks"][0]["command"] == "vectr hook pre-compact"
+
+    def test_sessionstart_compact_matcher_enables_post_compact_reinject(self, tmp_path):
+        """UPG-9.7's re-inject path = the SessionStart `compact` matcher (UPG-9.4)."""
+        m._write_claude_hooks(str(tmp_path))
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert "compact" in data["hooks"]["SessionStart"][0]["matcher"]
 
     def test_preserves_existing_settings(self, tmp_path):
         settings = tmp_path / ".claude" / "settings.json"

@@ -332,6 +332,9 @@ def _write_claude_hooks(workspace: str) -> None:
     # UPG-9.6 — PreToolUse (Edit|Write): surface the gotcha recorded against the file being edited.
     _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write",
                         command="vectr hook pre-tool-use")
+    # UPG-9.7 — PreCompact (manual|auto): snapshot working memory before /compact replaces context.
+    _install_hook_group(hooks, "PreCompact", matcher="manual|auto",
+                        command="vectr hook pre-compact")
 
     settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     print(f"  Wrote vectr hooks to {settings}", file=sys.stderr)
@@ -607,6 +610,21 @@ def _fetch_recall(port: int, payload: dict) -> str:
         return ""
 
 
+def _post_snapshot(port: int, label: str) -> bool:
+    """POST /v1/snapshot; True on success, False on any failure (never raises).
+
+    Used by the PreCompact hook to seal working memory before context is
+    replaced — a snapshot failure must never block compaction.
+    """
+    import httpx
+    try:
+        resp = httpx.post(f"{_api_base(port)}/v1/snapshot", json={"label": label}, timeout=30)
+        resp.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
 def _read_hook_stdin() -> dict:
     """Read the Claude Code hook event JSON from stdin; {} if absent/invalid."""
     try:
@@ -694,6 +712,14 @@ def cmd_hook(args: argparse.Namespace) -> None:
                 return
             notes = _fetch_recall(port, {"file_path": file_path, "kind": "gotcha"})
             _emit_hook_context("PreToolUse", notes)
+
+        elif args.hook_event == "pre-compact":
+            # Seal working memory before /compact replaces the conversation (UPG-9.7).
+            # No context is emitted — compaction discards it anyway; the boot set is
+            # re-injected afterwards by the SessionStart `compact` matcher (UPG-9.4).
+            trigger = (event.get("trigger") or "manual").strip() or "manual"
+            label = f"pre-compact-{trigger}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+            _post_snapshot(port, label)
     except Exception:
         pass  # hook safety: never propagate
 
@@ -990,7 +1016,8 @@ def main() -> None:
         "hook",
         help="Emit Claude Code hook output (invoked by `vectr init --hooks` entries; not called directly)",
     )
-    p_hook.add_argument("hook_event", choices=["session-start", "user-prompt-submit", "pre-tool-use"],
+    p_hook.add_argument("hook_event",
+                        choices=["session-start", "user-prompt-submit", "pre-tool-use", "pre-compact"],
                         help="Which hook event to emit output for")
 
     p_index = sub.add_parser("index", help="(Re)index a directory or file")
