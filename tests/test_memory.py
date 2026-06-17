@@ -214,6 +214,75 @@ class TestCRUD:
 
 
 # ---------------------------------------------------------------------------
+# Memory kind dimension (UPG-9.3)
+# ---------------------------------------------------------------------------
+
+class TestKindDimensionUPG93:
+    def test_default_kind_is_finding(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "a learning")
+        assert store.recall("/repo")[0].kind == "finding"
+
+    def test_kind_round_trips(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "never push to main", kind="directive")
+        note = store.recall("/repo")[0]
+        assert note.kind == "directive"
+
+    def test_recall_filters_by_kind(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "never push to main", kind="directive")
+        store.remember("/repo", "index_file takes workspace first", kind="gotcha")
+        store.remember("/repo", "just a finding")
+        directives = store.recall("/repo", kind="directive")
+        assert len(directives) == 1
+        assert directives[0].kind == "directive"
+        assert all(n.kind == "gotcha" for n in store.recall("/repo", kind="gotcha"))
+
+    def test_invalid_kind_falls_back_to_finding(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "x", kind="bogus")
+        assert store.recall("/repo")[0].kind == "finding"
+
+    def test_format_surfaces_non_default_kind(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "never push to main", kind="directive")
+        store.remember("/repo", "a plain finding")
+        text = store.format_notes_for_llm(store.recall("/repo"))
+        assert "[DIRECTIVE]" in text
+        assert "[FINDING]" not in text  # default kind stays implicit
+
+    def test_migration_adds_kind_to_legacy_db(self, tmp_path) -> None:
+        """An existing DB with no kind column upgrades without data loss; old rows default 'finding'."""
+        import sqlite3
+        import time as _t
+        db_path = tmp_path / "working_context.sqlite"
+        # Build a pre-9.3 notes table (no kind column) with one row.
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                """CREATE TABLE notes (
+                    note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace TEXT NOT NULL, content TEXT NOT NULL,
+                    tags TEXT NOT NULL DEFAULT '[]', priority TEXT NOT NULL DEFAULT 'medium',
+                    created_at REAL NOT NULL, last_accessed REAL NOT NULL,
+                    session_id TEXT, decay_score REAL NOT NULL DEFAULT 1.0)"""
+            )
+            now = _t.time()
+            conn.execute(
+                "INSERT INTO notes (workspace, content, created_at, last_accessed) VALUES (?,?,?,?)",
+                ("/repo", "legacy note", now, now),
+            )
+        # Opening the store runs _init_db migration.
+        store = _store(tmp_path)
+        cols = {r[1] for r in sqlite3.connect(str(db_path)).execute("PRAGMA table_info(notes)").fetchall()}
+        assert "kind" in cols
+        notes = store.recall("/repo")
+        assert len(notes) == 1
+        assert notes[0].content == "legacy note"
+        assert notes[0].kind == "finding"  # legacy rows default to finding
+
+
+# ---------------------------------------------------------------------------
 # format_notes_for_llm
 # ---------------------------------------------------------------------------
 

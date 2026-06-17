@@ -217,3 +217,18 @@ class TestMemoryCrossRequest:
         r1 = client.post("/v1/remember", json={"content": "first"}).json()
         r2 = client.post("/v1/remember", json={"content": "second"}).json()
         assert r2["note_id"] > r1["note_id"]
+
+    def test_kind_filter_via_rest(self, client_real_memory) -> None:
+        """UPG-9.3: kind round-trips through REST and recall can filter on it."""
+        client = client_real_memory
+        client.post("/v1/remember", json={"content": "never push to main", "kind": "directive"})
+        client.post("/v1/remember", json={"content": "just a plain finding"})
+
+        directives = client.post("/v1/recall", json={"kind": "directive"}).json()["notes"]
+        assert "never push to main" in directives
+        assert "just a plain finding" not in directives
+
+    def test_invalid_kind_rejected_via_rest(self, client_real_memory) -> None:
+        """An unknown kind is a 422 validation error, not a silent finding."""
+        resp = client_real_memory.post("/v1/remember", json={"content": "x", "kind": "bogus"})
+        assert resp.status_code == 422

@@ -117,10 +117,14 @@ class MapSaveResponse(BaseModel):
 # Memory / working context
 # ---------------------------------------------------------------------------
 
+_VALID_KINDS = ("directive", "task", "gotcha", "finding", "reference")
+
+
 class RememberRequest(BaseModel):
     content: str = Field(..., min_length=1, description="Working note to store")
     tags: list[str] | None = Field(default=None, description="Topic tags")
     priority: str = Field(default="medium", description="high | medium | low")
+    kind: str = Field(default="finding", description="directive | task | gotcha | finding | reference")
     session_id: str | None = Field(default=None)
 
     @field_validator("priority")
@@ -128,6 +132,13 @@ class RememberRequest(BaseModel):
     def validate_priority(cls, v: str) -> str:
         if v not in ("high", "medium", "low"):
             raise ValueError("priority must be high, medium, or low")
+        return v
+
+    @field_validator("kind")
+    @classmethod
+    def validate_kind(cls, v: str) -> str:
+        if v not in _VALID_KINDS:
+            raise ValueError(f"kind must be one of: {', '.join(_VALID_KINDS)}")
         return v
 
 
@@ -141,7 +152,15 @@ class RecallRequest(BaseModel):
     query: str | None = Field(default=None)
     tags: list[str] | None = Field(default=None)
     priority: str | None = Field(default=None)
+    kind: str | None = Field(default=None, description="Filter by kind: directive | task | gotcha | finding | reference")
     limit: int = Field(default=10, ge=1, le=100)
+
+    @field_validator("kind")
+    @classmethod
+    def validate_kind(cls, v: str | None) -> str | None:
+        if v is not None and v not in _VALID_KINDS:
+            raise ValueError(f"kind must be one of: {', '.join(_VALID_KINDS)}")
+        return v
 
 
 class RecallResponse(BaseModel):

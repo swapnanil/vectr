@@ -134,6 +134,17 @@ def _extract_file_paths(text: str) -> list[str]:
     return result
 
 
+# Memory kinds (UPG-9.3). Mirrors the disk-memory split that makes CLAUDE.md
+# (unconditional directives) distinct from MEMORY.md (relevance-ranked learnings):
+#   directive — must-never-miss rules; injected unconditionally at SessionStart.
+#   task      — current-work context; injected in the SessionStart boot set.
+#   gotcha    — file/path-anchored caveats; injected at PreToolUse + semantic recall.
+#   finding   — relevance-ranked learnings; injected per-prompt at UserPromptSubmit.
+#   reference — pointers (URLs/tickets); surfaced on demand only.
+VALID_KINDS: tuple[str, ...] = ("directive", "task", "gotcha", "finding", "reference")
+DEFAULT_KIND = "finding"
+
+
 @dataclass
 class WorkingNote:
     note_id: int
@@ -145,6 +156,7 @@ class WorkingNote:
     last_accessed: float
     session_id: str | None = None
     decay_score: float = 1.0
+    kind: str = DEFAULT_KIND  # directive | task | gotcha | finding | reference (UPG-9.3)
     # team/shared notes tri-key model
     author_id: str = ""              # developer/agent identifier
     author_trust_score: float = 1.0  # Bayesian weight per contributor (0.0–1.0)
@@ -214,6 +226,7 @@ class WorkingContextStore:
                     content             TEXT NOT NULL,
                     tags                TEXT NOT NULL DEFAULT '[]',
                     priority            TEXT NOT NULL DEFAULT 'medium',
+                    kind                TEXT NOT NULL DEFAULT 'finding',
                     created_at          REAL NOT NULL,
                     last_accessed       REAL NOT NULL,
                     session_id          TEXT,
@@ -258,6 +271,8 @@ class WorkingContextStore:
                 "code_hash":          "TEXT NOT NULL DEFAULT ''",
                 "superseded_by":      "TEXT",
                 "superseded_at":      "REAL",
+                # UPG-9.3: memory kind dimension — existing rows default to 'finding'.
+                "kind":               "TEXT NOT NULL DEFAULT 'finding'",
             }
             for col, typedef in p4_cols.items():
                 if col not in existing_cols:
@@ -266,6 +281,7 @@ class WorkingContextStore:
             # Create indexes that depend on migrated columns — must run AFTER migration
             conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_code_hash ON notes(code_hash)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_valid ON notes(valid_until)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_kind ON notes(kind)")
 
     # ------------------------------------------------------------------
     # Notes — vectr_remember / vectr_recall / vectr_forget
@@ -280,15 +296,21 @@ class WorkingContextStore:
         session_id: str | None = None,
         author_id: str = "",
         code_hash: str = "",
+        kind: str = DEFAULT_KIND,
     ) -> int:
         """Store a working note. Returns the note_id.
 
         If code_hash is provided and another non-superseded note exists for the
         same workspace + code_hash (same code anchor), the older note is marked
         superseded before the new note is inserted.
+
+        `kind` is one of VALID_KINDS (directive|task|gotcha|finding|reference);
+        an unrecognised value falls back to DEFAULT_KIND.
         """
         now = time.time()
         tags_json = json.dumps(tags or [])
+        if kind not in VALID_KINDS:
+            kind = DEFAULT_KIND
         stored_content = self._encryptor.encrypt(content) if self._encryptor else content
 
         with self._conn() as conn:
@@ -309,13 +331,13 @@ class WorkingContextStore:
 
             cur = conn.execute(
                 """
-                INSERT INTO notes (workspace, content, tags, priority, created_at,
+                INSERT INTO notes (workspace, content, tags, priority, kind, created_at,
                                    last_accessed, session_id, decay_score,
                                    author_id, author_trust_score, valid_from,
                                    valid_until, code_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?)
                 """,
-                (workspace, stored_content, tags_json, priority, now, now, session_id,
+                (workspace, stored_content, tags_json, priority, kind, now, now, session_id,
                  author_id, now, code_hash),
             )
             note_id = cur.lastrowid
@@ -341,7 +363,7 @@ class WorkingContextStore:
                 pass  # embedding failure never blocks the write path
 
         audit("REMEMBER", workspace=workspace, note_id=note_id, priority=priority,
-              author_id=author_id, code_hash=code_hash[:8] if code_hash else "",
+              kind=kind, author_id=author_id, code_hash=code_hash[:8] if code_hash else "",
               tags=",".join(tags or []), chars=len(content))
         return note_id  # type: ignore[return-value]
 
@@ -353,6 +375,7 @@ class WorkingContextStore:
         priority: str | None = None,
         limit: int = 10,
         include_superseded: bool = False,
+        kind: str | None = None,
     ) -> list[WorkingNote]:
         """Retrieve working notes.
 
@@ -369,7 +392,7 @@ class WorkingContextStore:
         if query and self._notes_col is not None and self._embed_fn is not None:
             try:
                 notes = self._semantic_recall(
-                    workspace, query, tags, priority, limit, include_superseded
+                    workspace, query, tags, priority, limit, include_superseded, kind
                 )
                 audit("RECALL", workspace=workspace, query=query, notes_returned=len(notes),
                       method="semantic")
@@ -387,6 +410,10 @@ class WorkingContextStore:
         if priority:
             sql += " AND priority = ?"
             params.append(priority)
+
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
 
         if tags:
             tag_clauses = " OR ".join(["tags LIKE ?" for _ in tags])
@@ -425,6 +452,7 @@ class WorkingContextStore:
         priority: str | None,
         limit: int,
         include_superseded: bool,
+        kind: str | None = None,
     ) -> list[WorkingNote]:
         """Find the most relevant notes by cosine similarity, then fetch from SQLite."""
         # Cap n_results at collection size to avoid ChromaDB errors on small collections
@@ -452,6 +480,10 @@ class WorkingContextStore:
         if priority:
             sql += " AND priority = ?"
             params.append(priority)
+
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
 
         if tags:
             tag_clauses = " OR ".join(["tags LIKE ?" for _ in tags])
@@ -756,6 +788,7 @@ class WorkingContextStore:
             last_accessed=row["last_accessed"],
             session_id=row["session_id"],
             decay_score=row["decay_score"],
+            kind=row["kind"] if "kind" in keys else DEFAULT_KIND,
             # team notes fields (present in all new DBs; guarded for old DBs without migration)
             author_id=row["author_id"] if "author_id" in keys else "",
             author_trust_score=row["author_trust_score"] if "author_trust_score" in keys else 1.0,
@@ -803,8 +836,11 @@ class WorkingContextStore:
                 sup_date = _dt.datetime.fromtimestamp(n.superseded_at or n.valid_until).strftime("%Y-%m-%d")
                 superseded_marker = f" [superseded by @{n.superseded_by}, {sup_date}]"
 
+            # Surface the kind when it carries injection semantics (UPG-9.3) —
+            # 'finding' is the default and adds no signal, so it's left implicit.
+            kind_marker = f" [{n.kind.upper()}]" if n.kind and n.kind != DEFAULT_KIND else ""
             lines.append(
-                f"[{n.note_id}] [{n.priority.upper()}]{tag_str}{author_str}  ({age_str})"
+                f"[{n.note_id}] [{n.priority.upper()}]{kind_marker}{tag_str}{author_str}  ({age_str})"
                 f"{stale_marker}{superseded_marker}"
             )
             lines.append(f"  {n.content}")

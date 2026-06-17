@@ -426,6 +426,7 @@ class VectrService:
         tags: list[str] | None = None,
         priority: str = "medium",
         session_id: str | None = None,
+        kind: str = "finding",
     ) -> int:
         return self._context_store.remember(
             workspace=self._workspace_root,
@@ -433,6 +434,7 @@ class VectrService:
             tags=tags,
             priority=priority,
             session_id=session_id,
+            kind=kind,
         )
 
     def recall(
@@ -441,6 +443,7 @@ class VectrService:
         tags: list[str] | None = None,
         priority: str | None = None,
         limit: int = 10,
+        kind: str | None = None,
     ) -> str:
         notes = self._context_store.recall(
             workspace=self._workspace_root,
@@ -448,6 +451,7 @@ class VectrService:
             tags=tags,
             priority=priority,
             limit=limit,
+            kind=kind,
         )
         stale = self._context_store.check_staleness(notes, self._workspace_root)
         return self._context_store.format_notes_for_llm(notes, stale_warnings=stale)

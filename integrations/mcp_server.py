@@ -284,6 +284,17 @@ _MEMORY_WRITE_TOOLS = [
                     "default": "medium",
                     "enum": ["high", "medium", "low"],
                 },
+                "kind": {
+                    "type": "string",
+                    "description": (
+                        "Memory kind, controlling how the note is injected (default 'finding'): "
+                        "'directive' = a must-never-miss rule, injected unconditionally every session; "
+                        "'task' = current-work context; 'gotcha' = a file/path-anchored caveat; "
+                        "'finding' = a relevance-ranked learning; 'reference' = a pointer (URL/ticket)."
+                    ),
+                    "default": "finding",
+                    "enum": ["directive", "task", "gotcha", "finding", "reference"],
+                },
             },
             "required": ["content"],
         },
@@ -337,6 +348,12 @@ _MEMORY_TOOLS = [
                     "type": "string",
                     "description": "Filter by priority: 'high' | 'medium' | 'low'",
                     "nullable": True,
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Filter to one memory kind: 'directive' | 'task' | 'gotcha' | 'finding' | 'reference'",
+                    "nullable": True,
+                    "enum": ["directive", "task", "gotcha", "finding", "reference"],
                 },
                 "limit": {
                     "type": "integer",
@@ -699,7 +716,8 @@ def handle_tools_call(
         priority = arguments.get("priority", "medium")
         if priority not in ("high", "medium", "low"):
             priority = "medium"
-        note_id = service.remember(content=content, tags=tags, priority=priority)
+        kind = arguments.get("kind", "finding")
+        note_id = service.remember(content=content, tags=tags, priority=priority, kind=kind)
         # reset the turn-count nudge and enable memory tools for this session
         _reset_calls_since_save(session_id)
         enable_memory_for_session(session_id)
@@ -713,8 +731,9 @@ def handle_tools_call(
         query = arguments.get("query") or None
         tags = arguments.get("tags") or None
         priority = arguments.get("priority") or None
+        kind = arguments.get("kind") or None
         limit = int(arguments.get("limit", 10))
-        text = service.recall(query=query, tags=tags, priority=priority, limit=limit)
+        text = service.recall(query=query, tags=tags, priority=priority, limit=limit, kind=kind)
         if service.should_evict():
             hint = service.eviction_hint()
             if hint:

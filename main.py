@@ -448,6 +448,8 @@ def cmd_remember(args: argparse.Namespace) -> None:
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
     payload: dict = {"content": args.content, "priority": args.priority}
+    if getattr(args, "kind", None):
+        payload["kind"] = args.kind
     if args.tags:
         payload["tags"] = args.tags
     try:
@@ -478,6 +480,8 @@ def cmd_recall(args: argparse.Namespace) -> None:
         payload["tags"] = args.tags
     if args.priority:
         payload["priority"] = args.priority
+    if getattr(args, "kind", None):
+        payload["kind"] = args.kind
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/recall", json=payload, timeout=30)
         resp.raise_for_status()
@@ -779,6 +783,8 @@ def main() -> None:
     p_remember.add_argument("content", help="The note content to store")
     p_remember.add_argument("--tags", action="append", metavar="TAG", help="Topic tag (repeatable)")
     p_remember.add_argument("--priority", choices=["high", "medium", "low"], default="medium")
+    p_remember.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference"],
+                            default="finding", help="Memory kind (controls injection policy)")
     p_remember.add_argument("--path", default=_default_path)
     p_remember.add_argument("--port", type=int, default=_default_port)
 
@@ -786,6 +792,8 @@ def main() -> None:
     p_recall.add_argument("query", nargs="?", default=None, help="Semantic recall query (optional)")
     p_recall.add_argument("--tags", action="append", metavar="TAG", help="Filter by tag (repeatable)")
     p_recall.add_argument("--priority", choices=["high", "medium", "low"], default=None)
+    p_recall.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference"],
+                          default=None, help="Filter to one memory kind")
     p_recall.add_argument("--limit", type=int, default=10)
     p_recall.add_argument("--path", default=_default_path)
     p_recall.add_argument("--port", type=int, default=_default_port)
