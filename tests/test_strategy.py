@@ -614,10 +614,13 @@ class TestFingerprintRealWorkspace:
         fp = fingerprint(str(Path(__file__).parent.parent), self._collect_py_files())
         assert fp.is_legacy is False
 
-    def test_strategy_no_graph_first(self) -> None:
-        # Python is dynamic; no monorepo, gRPC, legacy, or complex → graph_first=False.
+    def test_strategy_graph_first_tracks_complexity_only(self) -> None:
+        # vectr is pure dynamic Python — not a monorepo, no gRPC, not legacy — so the
+        # ONLY trigger that can set graph_first for this repo is complexity_class.
+        # (As the repo grew, avg file length crossed the 400-line "complex" threshold,
+        # so this is now True; asserting the relationship keeps the test robust to size.)
         fp = fingerprint(str(Path(__file__).parent.parent), self._collect_py_files())
-        assert select_strategy(fp).graph_first is False
+        assert select_strategy(fp).graph_first is (fp.complexity_class == "complex")
 
     def test_size_class_small_or_medium(self) -> None:
         fp = fingerprint(str(Path(__file__).parent.parent), self._collect_py_files())
