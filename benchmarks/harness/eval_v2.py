@@ -389,6 +389,17 @@ def run_session(
     ``turns`` is the ordered list of user messages; include the literal
     ``"/compact"`` where compaction should occur. Returns the parsed event
     list (each event stamped with a synthetic ``_t`` wall-clock) and wall time.
+
+    Messages are sent SYNCHRONOUSLY — each next message is written only after
+    the previous one's completion event is seen, with stdin kept open until the
+    end. (Piping all messages up front and closing stdin drops later messages
+    when an early turn runs long: the CLI finishes the first message and exits
+    rather than draining the buffer.) EVERY message — including ``/compact`` —
+    completes on its own ``result`` event. /compact's result is empty
+    (turns=0), emitted after the compaction sequence (status → init →
+    compact_boundary → injected summary); waiting for it guarantees compaction
+    has fully settled before the next message is sent. The compaction boundary
+    for phase-splitting is recovered separately from the 2nd ``init`` event.
     """
     cmd = [
         CLAUDE_BIN,
@@ -404,7 +415,6 @@ def run_session(
     if use_model:
         cmd += ["--model", use_model]
 
-    stdin_payload = "\n".join(_user_msg(t) for t in turns) + "\n"
     events: list[dict] = []
     start = time.time()
     try:
@@ -421,13 +431,16 @@ def run_session(
         return [{"type": "result", "subtype": "error",
                  "error": "claude CLI not found — is Claude Code installed?"}], 0.0
 
-    # Send all turns up front; the CLI drains the queue sequentially.
-    try:
-        proc.stdin.write(stdin_payload)
-        proc.stdin.flush()
-        proc.stdin.close()
-    except BrokenPipeError:
-        pass
+    def _send(text: str) -> None:
+        try:
+            proc.stdin.write(_user_msg(text) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, ValueError):
+            pass
+
+    # Send the first message; subsequent ones are sent as each result lands.
+    _send(turns[0])
+    sent = 1
 
     deadline = start + timeout_s
     init_count = 0
@@ -456,6 +469,12 @@ def run_session(
             elif etype == "result":
                 logger.info("  phase result: %s (turns=%d)",
                             ev.get("subtype"), ev.get("num_turns", 0))
+                # Every message (including /compact) completes on its result.
+                if sent < len(turns):
+                    _send(turns[sent])
+                    sent += 1
+                else:
+                    break  # last message done; stop reading
             elif etype == "assistant":
                 for block in ev.get("message", {}).get("content", []):
                     if block.get("type") == "tool_use":
@@ -463,6 +482,10 @@ def run_session(
                         logger.info("  tool: %-26s %s", name,
                                     _summarise_input(block.get("name", ""), block.get("input", {})))
     finally:
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, ValueError):
+            pass
         proc.wait()
 
     if proc.returncode not in (0, None) and not any(

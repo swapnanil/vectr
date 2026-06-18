@@ -1,0 +1,47 @@
+{
+  "meta": {
+    "task": "custom_field",
+    "model": "haiku",
+    "arms": [
+      "C"
+    ],
+    "reps": 1,
+    "guardrail": false,
+    "scored": true
+  },
+  "runs": [
+    {
+      "rep": 0,
+      "arm": "C",
+      "task": "custom_field",
+      "compacted": false,
+      "error": "no compaction boundary observed (/compact did not fire)",
+      "wall_s": 189.1,
+      "cost_usd": 0.3136,
+      "research_tokens": 74309,
+      "impl_tokens": 0,
+      "total_tokens": 74309,
+      "research_turns": 36,
+      "impl_turns": 0,
+      "notes_before": 0,
+      "notes_after": 7,
+      "vectr_calls": {
+        "vectr_status": 1,
+        "vectr_locate": 1,
+        "vectr_search": 5,
+        "vectr_remember": 7
+      },
+      "research_injections": 0,
+      "impl_injections": 0,
+      "injected_chars": 0,
+      "compaction_summary_chars": 0,
+      "answer_files": [
+        "money_field_impl.py"
+      ],
+      "exec_ran": true,
+      "exec_passed": 3,
+      "exec_total": 5,
+      "exec_success": false
+    }
+  ]
+}
