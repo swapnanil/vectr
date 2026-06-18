@@ -321,6 +321,33 @@ def hook_injection_stats(events: list[dict]) -> dict:
     }
 
 
+def injection_precision(injected_text: str,
+                        relevant_markers: list[str],
+                        irrelevant_markers: list[str]) -> dict:
+    """How on-topic was the harness-injected memory? Counts sentinel markers in
+    the injected text. Used by the guardrail: when the note store is polluted
+    with off-topic notes, a precise injector surfaces the relevant ones and not
+    the irrelevant ones. precision = relevant / (relevant + irrelevant)."""
+    rel = sum(1 for m in relevant_markers if m in injected_text)
+    irr = sum(1 for m in irrelevant_markers if m in injected_text)
+    total = rel + irr
+    return {
+        "relevant": rel,
+        "irrelevant": irr,
+        "precision": (rel / total) if total else None,
+    }
+
+
+def net_token_delta(totals_by_arm: dict[str, int], baseline: str) -> dict[str, int]:
+    """Bottom-line token delta of each arm vs a baseline arm (negative = cheaper).
+    Operates on already-totalled tokens, so the injection tax an arm paid is
+    already included — this is the net, not the gross saving."""
+    base = totals_by_arm.get(baseline)
+    if base is None:
+        return {}
+    return {arm: t - base for arm, t in totals_by_arm.items() if arm != baseline}
+
+
 def compaction_summary_chars(impl_events: list[dict]) -> int:
     """Size of the compaction summary, if the boundary init carries one."""
     for ev in impl_events:
@@ -507,6 +534,28 @@ def _run_vectr(args: list[str]) -> None:
         logger.warning("vectr %s failed: %s", " ".join(args), e)
 
 
+def _remember_note(content: str, working_dir: str, port: int,
+                   priority: str = "high") -> None:
+    """Store one note in the running daemon (used to pre-seed guardrail memory)."""
+    _run_vectr(["remember", content, "--priority", priority,
+                "--path", working_dir, "--port", str(port)])
+
+
+# Off-topic notes for the irrelevant-memory guardrail. These describe a
+# DIFFERENT Django task (signals / async dispatch) than the one under test, so
+# they are plausible same-repo noise. Each carries a sentinel marker so
+# injection_precision can tell relevant from irrelevant after the run.
+GUARDRAIL_IRRELEVANT_NOTES = [
+    "IRRELEVANT-SIGTASK: Signal.send() in django/dispatch/dispatcher.py iterates "
+    "self.receivers under self.lock; send_robust() swallows receiver exceptions.",
+    "IRRELEVANT-SIGTASK: @receiver decorator and dispatch_uid prevent duplicate "
+    "registration; weak references in _live_receivers cause silent drops.",
+    "IRRELEVANT-SIGTASK: async_to_sync / sync_to_async live in asgiref.sync; "
+    "Signal.asend() would need an async-aware dispatch loop.",
+]
+GUARDRAIL_IRRELEVANT_MARKERS = ["IRRELEVANT-SIGTASK"]
+
+
 def setup_arm(arm: Arm, working_dir: str, vectr_port: int = 8765) -> None:
     """Configure the working dir for one arm. Never hand-writes settings.json —
     arm C's hooks come from `vectr init --hooks`."""
@@ -542,11 +591,18 @@ def run_compact_scenario(
     timeout_s: int = 2400,
     exec_spec=None,
     python_bin: str = "python",
+    seed_notes: list[str] | None = None,
 ) -> CompactSessionResult:
     """Run one arm × task: explore → /compact → implement in one session.
     If exec_spec is given, the held-out test is run after impl for the primary
-    (execution-verified) success signal."""
+    (execution-verified) success signal. seed_notes pre-populates the note store
+    (after the per-rep clear) — used by the irrelevant-memory guardrail."""
     setup_arm(arm, working_dir, vectr_port=vectr_port)
+
+    if seed_notes and arm.use_memory:
+        for note in seed_notes:
+            _remember_note(note, working_dir, vectr_port)
+        logger.info("[%s] seeded %d guardrail note(s)", arm.id, len(seed_notes))
 
     notes_before = _get_vectr_notes_count(port=vectr_port) if arm.use_memory else 0
     if arm.use_memory:

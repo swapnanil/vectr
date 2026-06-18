@@ -15,6 +15,8 @@ from eval_v2 import (
     compaction_summary_chars,
     events_to_timeline,
     hook_injection_stats,
+    injection_precision,
+    net_token_delta,
     setup_arm,
     split_phases_on_compaction,
     usage_from_events,
@@ -193,6 +195,23 @@ def test_hook_injection_stats_empty_for_no_hooks():
     events = [_init(), _assistant_text("hi"), _result("hi")]
     stats = hook_injection_stats(events)
     assert stats["injections"] == 0 and stats["injected_chars"] == 0
+
+
+def test_injection_precision():
+    text = "REL-A widget stuff\nIRRELEVANT-SIGTASK signal stuff\nREL-B more widget"
+    p = injection_precision(text, ["REL-A", "REL-B"], ["IRRELEVANT-SIGTASK"])
+    assert p["relevant"] == 2 and p["irrelevant"] == 1
+    assert abs(p["precision"] - 2 / 3) < 1e-9
+    # nothing injected -> precision is undefined, not a crash
+    assert injection_precision("", ["X"], ["Y"])["precision"] is None
+
+
+def test_net_token_delta():
+    totals = {"A1": 5000, "A2": 4000, "C": 2500, "D": 2700}
+    d = net_token_delta(totals, baseline="A2")
+    assert d["C"] == -1500 and d["D"] == -1300 and d["A1"] == 1000
+    assert "A2" not in d  # baseline excluded
+    assert net_token_delta(totals, baseline="ZZ") == {}
 
 
 def test_impl_phase_injection_is_the_armc_signal():
