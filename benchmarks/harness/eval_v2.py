@@ -387,20 +387,21 @@ def _spawn_env() -> dict:
     """Env for a spawned agent session that mimics a FRESH user invocation of
     Claude Code — not a nested child of the session running this harness.
 
-    The harness runs inside Claude Code, so os.environ carries CLAUDE_CODE_*
-    markers (CHILD_SESSION=1, SESSION_ID, ENTRYPOINT=claude-vscode, the agent
-    SDK version, …) that flip a spawned `claude -p` into child-session /
-    advisor-tool-deferral behavior — not how a real user's Claude Code runs.
-    Strip every CLAUDE*/ANTHROPIC* var so each arm starts clean, then:
-      - disable built-in auto-memory (~/.claude/projects/<proj>/memory/*.md),
-        else every arm — including the bare baselines — silently gains a
-        competing file-memory across /compact, confounding the comparison.
-    OAuth auth still resolves via keychain / ~/.claude credentials (we never
-    pass --bare, so keychain reads are allowed)."""
-    env = {k: v for k, v in os.environ.items()
-           if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))}
-    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
-    return env
+    The harness itself runs inside Claude Code, so os.environ carries
+    CLAUDE_CODE_* markers (CHILD_SESSION=1, SESSION_ID, ENTRYPOINT=claude-vscode,
+    the agent SDK version, …) that flip a spawned `claude -p` into child-session
+    behavior — something NO real user hits (a user runs `claude` from a clean
+    terminal). Stripping every CLAUDE*/ANTHROPIC* var corrects that harness
+    artifact so each arm matches a real invocation. OAuth auth still resolves
+    via keychain / ~/.claude credentials (we never pass --bare).
+
+    NOTE: we deliberately do NOT disable Claude Code's built-in auto-memory
+    here. A real user has it on, and whether the agent chooses vectr over the
+    built-in file memory is an ADOPTION outcome vectr must win in-product (its
+    CLAUDE.md/hooks), not a confound to sanitize away in the harness. Tracked
+    as a vectr product task; see feedback-vectr-bugs-are-product-tasks."""
+    return {k: v for k, v in os.environ.items()
+            if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))}
 
 
 def run_session(
