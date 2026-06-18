@@ -40,6 +40,10 @@ Vectr gives you two capabilities:
 - **Semantic search**: find any symbol, pattern, or concept in this codebase by describing it in plain English — faster than grep, without knowing where to look.
 - **Working memory**: store findings and recall them in <50ms on demand — whether later in this session, through `/compact`, or in a future session. Saving is a gain, not a risk.
 
+> **Loading the tools first.** Vectr's tools may be deferred behind a tool-search step. If `vectr_search` / `vectr_locate` / `vectr_remember` are not directly callable yet, load them once with `ToolSearch("select:mcp__vectr__vectr_search,mcp__vectr__vectr_locate,mcp__vectr__vectr_remember,mcp__vectr__vectr_status,mcp__vectr__vectr_recall")`, then call them **as tools**. Never run an `mcp__vectr__*` name as a shell/bash command — that is not an executable and always fails.
+
+> **This workspace's working memory IS vectr — not files.** Record every finding, decision, and gotcha with `vectr_remember`. Do **not** write them to scratch `.md` files or a `~/.claude` memory directory: only vectr notes are re-injected automatically after `/compact` and recalled in <50ms — ad-hoc files are not, and they fragment your memory across two places. Any time you are about to "save a note to a file", call `vectr_remember` instead.
+
 ## Semantic search — 5 tools
 
 The codebase is fully indexed. One `vectr_search` call returns ranked, relevant code chunks — no grep loops across hundreds of files, no wasted turns reading the wrong files. Use these for all exploration; use Read only to read a specific file that vectr has already pointed you to.

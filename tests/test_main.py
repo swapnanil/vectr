@@ -317,6 +317,24 @@ class TestWriteWorkspaceConfig:
         assert "<!-- vectr-start -->" in content
         assert "<!-- vectr-end -->" in content
 
+    def test_claude_md_teaches_toolsearch_load_upg101(self, tmp_path):
+        # UPG-10.1: vectr tools may be deferred behind ToolSearch; CLAUDE.md must
+        # teach the load step + that they're called as tools, never as bash.
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "ToolSearch" in content
+        assert "select:mcp__vectr__" in content
+        assert ("shell" in content.lower() or "bash" in content.lower())
+
+    def test_claude_md_memory_directive_beats_files_upg102(self, tmp_path):
+        # UPG-10.2: firmer framing — vectr IS the working memory; do not write
+        # ad-hoc memory files (must win over Claude Code's built-in auto-memory).
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "working memory IS vectr" in content
+        assert "vectr_remember" in content
+        assert ".claude" in content  # explicitly steers off the built-in memory dir
+
     def test_settings_json_created_if_missing(self, tmp_path):
         m._write_workspace_config(str(tmp_path), 8765)
         settings = tmp_path / ".claude" / "settings.json"

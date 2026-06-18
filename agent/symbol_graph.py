@@ -133,6 +133,16 @@ _SYMBOL_TYPES: dict[str, dict[str, str]] = {
     },
 }
 
+# UPG-10.3: node types that bind a MODULE-LEVEL name (a constant/config/binding
+# that isn't a function or class but IS something callers `locate` — e.g. Python
+# `_CLAUDE_MD = """..."""`). Indexed only at module scope (see the scope guard in
+# _collect_symbols_and_calls) so function locals never flood the graph. Python
+# only for now; JS/TS/Rust/Go top-level const/static are a follow-up (Zig top-
+# level `pub const Foo = ...` is already covered via _SYMBOL_TYPES["zig"]).
+_MODULE_BINDING_TYPES: dict[str, frozenset[str]] = {
+    "python": frozenset({"assignment"}),
+}
+
 # Languages vectr can extract a symbol graph for — i.e. where locate/trace work.
 # Anything outside this set is search-only (chunks are indexed, but there are no
 # symbol/call-graph edges). UPG-3.3 surfaces this per-language so the caller LLM
@@ -144,7 +154,7 @@ SYMBOL_LANGUAGES: frozenset[str] = frozenset(_SYMBOL_TYPES)
 # name resolution). Combined with the parser-language set + embed model into the
 # toolchain fingerprint (UPG-8.7) so a vectr upgrade is detectable and the graph
 # is rebuilt rather than silently serving partial/old results.
-SYMBOL_SCHEMA_VERSION = 3  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4)
+SYMBOL_SCHEMA_VERSION = 4  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4) · 4: module-level constants (UPG-10.3)
 
 
 def graph_toolchain_fingerprint(embed_model: str = "") -> str:
@@ -469,6 +479,20 @@ def _get_call_name(node, code_bytes: bytes) -> str:
     return last_ident
 
 
+def _module_binding_names(node, code_bytes: bytes, language: str) -> list[tuple[str, int]]:
+    """(name, start_line) for each simple module-level binding target (UPG-10.3).
+    Python: the `left` of a top-level `assignment` when it's a bare identifier
+    (`X = ...`, `X: T = ...`). Tuple/attribute/subscript targets are skipped —
+    those aren't 'definitions' a `locate` is looking for."""
+    if language == "python" and node.type == "assignment":
+        left = node.child_by_field_name("left")
+        if left is not None and left.type == "identifier":
+            name = code_bytes[left.start_byte:left.end_byte].decode("utf-8", errors="replace")
+            if name:
+                return [(name, node.start_point[0] + 1)]
+    return []
+
+
 # Guard against pathological ASTs blowing Python's recursion limit. Must be
 # counted on EVERY recursion (see below) or it never fires. 200 is far deeper
 # than real functions/calls nest, while staying well under Python's ~1000 frame
@@ -518,6 +542,20 @@ def _collect_symbols_and_calls(
                 depth=depth + 1, type_usage_nodes=type_usage_nodes,
             )
         return
+
+    # UPG-10.3: module-level constant/variable bindings. ONLY at module scope —
+    # `current_symbol == ""` means we're not inside any function or class (those
+    # set the context), so locals can never leak in. Don't return: the value side
+    # may still contain calls/symbols worth walking.
+    if not current_symbol and node.type in _MODULE_BINDING_TYPES.get(language, frozenset()):
+        for nm, ln in _module_binding_names(node, code_bytes, language):
+            symbols.append({
+                "name": nm,
+                "kind": "constant" if nm.lstrip("_").isupper() else "variable",
+                "file_path": file_path,
+                "start_line": ln,
+                "end_line": node.end_point[0] + 1,
+            })
 
     if node.type in call_types and current_symbol:
         callee = _get_call_name(node, code_bytes)
@@ -1381,14 +1419,19 @@ class SymbolGraph:
         return len(query.split()) > 1
 
     def _no_match_text(self, query: str) -> str:
-        """Empty-locate message, with a search-redirect hint when the query looks
-        like a description so a misrouting LLM gets a path forward, not silence
-        (UPG-4.6). Mirrors the UPG-3.1 language hint / UPG-3.3 routing hint."""
+        """Empty-locate message that ALWAYS hands the LLM a path forward — never a
+        dead end (UPG-10.3, extends UPG-4.6). A silent no-match trains the model
+        to abandon `locate` and fall back to grep; a redirect keeps it on a vectr
+        tool. Description-shaped misses point at the misroute (UPG-4.6); a plain
+        single-token miss points at content search, since the name may be a kind
+        the symbol graph doesn't make locatable or simply isn't present."""
         base = f"No symbol matching '{query}' found in the indexed codebase."
         if self._looks_like_description(query):
-            base += (" This looks like a description, not a symbol name — "
-                     "try vectr_search for concept/semantic lookup.")
-        return base
+            return base + (" This looks like a description, not a symbol name — "
+                           "try vectr_search for concept/semantic lookup.")
+        return base + (f' Try vectr_search("{query}") to find it by content — it '
+                       "may be defined under a different name or not indexed as a "
+                       "locatable symbol.")
 
     def format_locate_for_llm(self, symbols: list[Symbol], name: str) -> str:
         if not symbols:

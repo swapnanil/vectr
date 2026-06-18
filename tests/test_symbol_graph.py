@@ -1307,12 +1307,17 @@ class TestLocateDescriptionHintUPG46:
         assert "vectr_search" in text
         assert "description" in text.lower()
 
-    def test_single_token_no_match_has_no_hint(self, tmp_path) -> None:
+    def test_single_token_no_match_redirects_to_search_upg103(self, tmp_path) -> None:
+        # UPG-10.3: a single-token miss is no longer a dead end — it redirects to
+        # vectr_search by CONTENT (not the description phrasing) so the agent has
+        # a path forward instead of falling back to grep.
         g = SymbolGraph(str(tmp_path))
         result = LocateResult(symbols=[], resolution_strategy="none", query="is_prime")
         text = g.format_locate_l2_for_llm(result)
         assert "No symbol matching" in text
-        assert "vectr_search" not in text
+        assert "vectr_search" in text
+        assert "is_prime" in text          # echoes the query into the search hint
+        assert "description" not in text.lower()  # this is the content-redirect, not the misroute hint
 
     def test_legacy_formatter_also_hints(self, tmp_path) -> None:
         g = SymbolGraph(str(tmp_path))
@@ -1325,6 +1330,62 @@ class TestLocateDescriptionHintUPG46:
         assert not SymbolGraph._looks_like_description("RegistryClient")
         assert not SymbolGraph._looks_like_description("parse_lockfile")
         assert not SymbolGraph._looks_like_description("  PyList_Append  ")
+
+
+# ---------------------------------------------------------------------------
+# UPG-10.3 — module-level constants are locatable
+# ---------------------------------------------------------------------------
+
+class TestModuleConstantsUPG103:
+    def test_module_level_constant_indexed(self, tmp_path) -> None:
+        path = make_py(tmp_path, "cfg.py", textwrap.dedent('''\
+            _CLAUDE_MD = """hello"""
+            MAX_RETRIES = 5
+        '''))
+        symbols, _ = extract_symbols_from_file(path)
+        by_name = {s["name"]: s for s in symbols}
+        assert "_CLAUDE_MD" in by_name and by_name["_CLAUDE_MD"]["start_line"] == 1
+        assert "MAX_RETRIES" in by_name and by_name["MAX_RETRIES"]["start_line"] == 2
+
+    def test_constant_vs_variable_kind(self, tmp_path) -> None:
+        # UPPER / leading-underscore-UPPER → constant; mixed-case binding → variable
+        path = make_py(tmp_path, "k.py", textwrap.dedent('''\
+            _CLAUDE_MD = "x"
+            logger = make_logger()
+        '''))
+        symbols, _ = extract_symbols_from_file(path)
+        by_name = {s["name"]: s["kind"] for s in symbols}
+        assert by_name["_CLAUDE_MD"] == "constant"
+        assert by_name["logger"] == "variable"
+
+    def test_function_locals_not_indexed(self, tmp_path) -> None:
+        # the scope guard (current_symbol == "") must keep locals out of the graph
+        path = make_py(tmp_path, "scope.py", textwrap.dedent('''\
+            TOP_LEVEL = 1
+            def f():
+                local_var = 2
+                return local_var
+        '''))
+        symbols, _ = extract_symbols_from_file(path)
+        names = {s["name"] for s in symbols}
+        assert "TOP_LEVEL" in names
+        assert "local_var" not in names          # never leaks out of the function
+        assert "f" in names                       # function itself still indexed
+
+    def test_annotated_module_constant_indexed(self, tmp_path) -> None:
+        path = make_py(tmp_path, "ann.py", "TIMEOUT_S: int = 30\n")
+        symbols, _ = extract_symbols_from_file(path)
+        assert any(s["name"] == "TIMEOUT_S" and s["kind"] == "constant" for s in symbols)
+
+    def test_locate_finds_module_constant(self, tmp_path) -> None:
+        # the acceptance case: locate a constant by name, end-to-end
+        g = SymbolGraph(str(tmp_path))
+        path = make_py(tmp_path, "main.py", '_CLAUDE_MD = """vectr"""\ndef go(): pass\n')
+        g.index_file("ws", path)
+        symbols = g.locate("ws", "_CLAUDE_MD")
+        assert len(symbols) >= 1
+        assert symbols[0].name == "_CLAUDE_MD"
+        assert symbols[0].start_line == 1
 
 
 # ---------------------------------------------------------------------------
