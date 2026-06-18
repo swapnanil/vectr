@@ -14,6 +14,7 @@ from eval_v2 import (
     build_turns,
     compaction_summary_chars,
     events_to_timeline,
+    hook_injection_stats,
     setup_arm,
     split_phases_on_compaction,
     usage_from_events,
@@ -164,6 +165,46 @@ def test_arm_tool_sets():
 
 def test_all_five_arms_present():
     assert set(ARMS) == {"A1", "A2", "B", "C", "D"}
+
+
+def _hook_event(hook_name, ctx):
+    # mirrors the real envelope (main.py _emit_hook_context) wrapped in a stream event
+    return {"type": "system", "subtype": "hook_response",
+            "hookResponse": {"hookSpecificOutput": {
+                "hookEventName": hook_name, "additionalContext": ctx}}}
+
+
+def test_hook_injection_stats_counts_and_chars():
+    events = [
+        _init(),
+        _hook_event("UserPromptSubmit", "NOTE-A about widget.py"),
+        _assistant_text("ok"),
+        _hook_event("SessionStart", "boot directives"),
+        _result("ok"),
+    ]
+    stats = hook_injection_stats(events)
+    assert stats["injections"] == 2
+    assert stats["injected_chars"] == len("NOTE-A about widget.py") + len("boot directives")
+    assert stats["by_event"] == {"UserPromptSubmit": 1, "SessionStart": 1}
+    assert "NOTE-A" in stats["injected_text"]
+
+
+def test_hook_injection_stats_empty_for_no_hooks():
+    events = [_init(), _assistant_text("hi"), _result("hi")]
+    stats = hook_injection_stats(events)
+    assert stats["injections"] == 0 and stats["injected_chars"] == 0
+
+
+def test_impl_phase_injection_is_the_armc_signal():
+    # a note re-injected on the post-compact turn is the survives-/compact signal
+    events = [
+        _init(), _hook_event("UserPromptSubmit", "explore-note"), _result("a"),
+        _init(),  # compaction boundary
+        _hook_event("UserPromptSubmit", "explore-note re-injected"), _result("b"),
+    ]
+    _, impl, compacted = split_phases_on_compaction(events)
+    assert compacted
+    assert hook_injection_stats(impl)["injections"] == 1
 
 
 # ---- prompt + orchestration wiring ----

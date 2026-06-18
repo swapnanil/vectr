@@ -155,6 +155,10 @@ class CompactSessionResult:
     notes_count_after: int = 0
     vectr_tool_calls_all: dict[str, int] = field(default_factory=dict)
     compaction_summary_chars: int = 0  # size of the summary the CLI produced
+    # Harness-injected memory (arm C). impl_injection > 0 after compaction is the
+    # core "memory survived /compact with no prompt help" signal.
+    research_injection: dict = field(default_factory=dict)
+    impl_injection: dict = field(default_factory=dict)
 
     @property
     def total_tokens(self) -> int:
@@ -272,6 +276,48 @@ def usage_from_events(events: list[dict]) -> PhaseUsage:
     )
 
 
+def _iter_injections(obj):
+    """Yield (hook_event_name, additionalContext) for every hook-output envelope
+    nested anywhere in a parsed event. Tolerant of how the CLI wraps the hook's
+    stdout — it just looks for any dict carrying additionalContext."""
+    if isinstance(obj, dict):
+        ctx = obj.get("additionalContext")
+        if isinstance(ctx, str) and ctx:
+            name = obj.get("hookEventName") or obj.get("hook_event_name") or "?"
+            yield name, ctx
+        for v in obj.values():
+            yield from _iter_injections(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _iter_injections(v)
+
+
+def hook_injection_stats(events: list[dict]) -> dict:
+    """Aggregate harness-injected memory across a slice (arm C signal).
+
+    Returns counts + total injected characters (injection tax ≈ chars/4 tokens),
+    a per-hook breakdown, and the concatenated injected text (for relevance
+    scoring against the task — injection precision)."""
+    injections = 0
+    chars = 0
+    by_event: dict[str, int] = {}
+    texts: list[str] = []
+    for ev in events:
+        if ev.get("type") != "system":
+            continue
+        for name, ctx in _iter_injections(ev):
+            injections += 1
+            chars += len(ctx)
+            by_event[name] = by_event.get(name, 0) + 1
+            texts.append(ctx)
+    return {
+        "injections": injections,
+        "injected_chars": chars,
+        "by_event": by_event,
+        "injected_text": "\n".join(texts),
+    }
+
+
 def compaction_summary_chars(impl_events: list[dict]) -> int:
     """Size of the compaction summary, if the boundary init carries one."""
     for ev in impl_events:
@@ -320,6 +366,7 @@ def run_session(
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--verbose",
+        "--include-hook-events",   # surface vectr hook injections (arm C metrics)
         "--max-turns", str(max_turns),
         "--allowedTools", ",".join(allowed_tools),
     ]
@@ -513,6 +560,8 @@ def run_compact_scenario(
         compacted=compacted,
         wall_time_s=wall,
         compaction_summary_chars=compaction_summary_chars(impl_ev),
+        research_injection=hook_injection_stats(research_ev),
+        impl_injection=hook_injection_stats(impl_ev),
     )
 
     # Surface a hard error if the session never produced a result.
