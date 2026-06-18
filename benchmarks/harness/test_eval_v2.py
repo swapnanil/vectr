@@ -130,6 +130,22 @@ def test_usage_empty_when_no_result():
     assert usage_from_events([_init(), _assistant_text("x")]) == PhaseUsage()
 
 
+def test_timeline_handles_string_content():
+    # the compaction-injected summary arrives as a user event whose content is a
+    # plain string, not a list of blocks — must not crash the timeline builder
+    events = [
+        _assistant_tool("t1", "vectr_search", {"query": "x"}),
+        _tool_result("t1", "ok"),
+        {"type": "user", "message": {"role": "user",
+         "content": "This session is being continued from a previous conversation..."}},
+        _assistant_text("done"),
+    ]
+    for i, e in enumerate(events):
+        e["_t"] = float(i)
+    tl = events_to_timeline(events, session_start=0.0)  # must not raise
+    assert len(tl) == 1 and tl[0].tool_name == "vectr_search"
+
+
 def test_timeline_reconstructs_tool_calls():
     events = _compact_session_events()
     research, _, _ = split_phases_on_compaction(events)

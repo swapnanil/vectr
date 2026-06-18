@@ -216,17 +216,24 @@ def events_to_timeline(events: list[dict], session_start: float) -> list[ToolEve
     for ev in events:
         now = ev.get("_t", session_start)
         etype = ev.get("type")
+        # content may be a plain string (e.g. the compaction-injected summary
+        # user message) rather than a list of blocks — skip those.
+        content = ev.get("message", {}).get("content", [])
+        if not isinstance(content, list):
+            if etype == "assistant":
+                turn += 1
+            continue
         if etype == "assistant":
             turn += 1
-            for block in ev.get("message", {}).get("content", []):
-                if block.get("type") == "tool_use":
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
                     name = block.get("name", "unknown")
                     tid = block.get("id", "")
                     finput = block.get("input", {})
                     pending[tid] = (name, _summarise_input(name, finput), finput, now)
         elif etype == "user":
-            for block in ev.get("message", {}).get("content", []):
-                if block.get("type") != "tool_result":
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
                     continue
                 tid = block.get("tool_use_id", "")
                 content = block.get("content", "")
