@@ -312,14 +312,35 @@ def hook_injection_stats(events: list[dict]) -> dict:
     chars = 0
     by_event: dict[str, int] = {}
     texts: list[str] = []
-    for ev in events:
-        if ev.get("type") != "system":
-            continue
-        for name, ctx in _iter_injections(ev):
+    seen: set[tuple[str, str]] = set()  # dedupe the same envelope in both output+stdout
+
+    def _consume(obj) -> None:
+        nonlocal injections, chars
+        for name, ctx in _iter_injections(obj):
+            key = (name, ctx)
+            if key in seen:
+                continue
+            seen.add(key)
             injections += 1
             chars += len(ctx)
             by_event[name] = by_event.get(name, 0) + 1
             texts.append(ctx)
+
+    for ev in events:
+        if ev.get("type") != "system":
+            continue
+        _consume(ev)  # structured form (if the CLI ever pre-parses the envelope)
+        # The real 2.1.149 shape: a hook_response carries the hook's stdout as a
+        # JSON *string* in `output`/`stdout` ({"hookSpecificOutput": {...}}), not a
+        # nested dict — so it must be parsed before _iter_injections can see the
+        # additionalContext. Missing this reported every arm-C injection as 0.
+        for field in ("output", "stdout"):
+            raw = ev.get(field)
+            if isinstance(raw, str) and raw.lstrip().startswith("{"):
+                try:
+                    _consume(json.loads(raw))
+                except (json.JSONDecodeError, ValueError):
+                    pass
     return {
         "injections": injections,
         "injected_chars": chars,
@@ -607,9 +628,35 @@ GUARDRAIL_IRRELEVANT_NOTES = [
 GUARDRAIL_IRRELEVANT_MARKERS = ["IRRELEVANT-SIGTASK"]
 
 
+def _auto_memory_dir(working_dir: str) -> Path:
+    """Claude Code's built-in auto-memory dir for a cwd: the realpath with every
+    '/' and '.' replaced by '-', under ~/.claude/projects/<slug>/memory/.
+    e.g. /tmp/poc-django → /private/tmp/poc-django → -private-tmp-poc-django."""
+    real = os.path.realpath(working_dir)
+    slug = real.replace(os.sep, "-").replace(".", "-")
+    return Path.home() / ".claude" / "projects" / slug / "memory"
+
+
+def _clear_auto_memory(working_dir: str) -> None:
+    """Remove the built-in auto-memory dir so each (arm, rep) starts with empty
+    external memory — otherwise one rep's field_*.md notes leak into the next and
+    confound both the vanilla and vectr arms. This is trial-state hygiene (like
+    the per-rep repo reset + vectr-note clear), NOT a vectr workaround: whether
+    the agent chooses vectr over writing its own memory files is still decided
+    inside each session. A real user never re-runs the same task with a prior
+    run's notes pre-loaded."""
+    import shutil
+    d = _auto_memory_dir(working_dir)
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
+        logger.info("cleared built-in auto-memory dir %s", d)
+
+
 def setup_arm(arm: Arm, working_dir: str, vectr_port: int = 8765) -> None:
     """Configure the working dir for one arm. Never hand-writes settings.json —
     arm C's hooks come from `vectr init --hooks`."""
+    # Every arm starts with empty built-in auto-memory (no cross-rep leak).
+    _clear_auto_memory(working_dir)
     # Start from a clean IDE config every time (strip any prior vectr blocks).
     _run_vectr(["init", "--reset-config", "--path", working_dir])
     if arm.uses_vectr:

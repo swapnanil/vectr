@@ -1,6 +1,7 @@
 """Unit tests for eval_v2 stream parsing + arm wiring (no agent sessions)."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -186,10 +187,17 @@ def test_all_five_arms_present():
 
 
 def _hook_event(hook_name, ctx):
-    # mirrors the real envelope (main.py _emit_hook_context) wrapped in a stream event
+    # The REAL Claude Code 2.1.149 shape (verified live): hook_response carries
+    # the hook's stdout as a JSON *string* in `output` (and `stdout`), NOT a
+    # nested dict. The earlier mock wrapped it in a `hookResponse` dict — a
+    # lying shape that let the parser walk it structurally and reported green
+    # while the real `output`-string path was never parsed (arm-C inj=0 bug).
+    envelope = json.dumps({"hookSpecificOutput": {
+        "hookEventName": hook_name, "additionalContext": ctx}})
     return {"type": "system", "subtype": "hook_response",
-            "hookResponse": {"hookSpecificOutput": {
-                "hookEventName": hook_name, "additionalContext": ctx}}}
+            "hook_name": hook_name, "hook_event": hook_name,
+            "output": envelope, "stdout": envelope,
+            "exit_code": 0, "outcome": "success"}
 
 
 def test_hook_injection_stats_counts_and_chars():
@@ -310,3 +318,21 @@ def test_setup_arm_vectr_init_variants(tmp_path, monkeypatch):
     calls.clear()
     setup_arm(ARMS["A1"], str(tmp_path))
     assert all("--reset-config" in c for c in calls if c[0] == "init")
+
+
+def test_auto_memory_dir_slug():
+    d = eval_v2._auto_memory_dir("/tmp/poc-django")
+    assert d.name == "memory"
+    # realpath of /tmp is /private/tmp on macOS, /tmp on linux
+    assert d.parent.name in ("-private-tmp-poc-django", "-tmp-poc-django")
+    assert d.parent.parent.name == "projects"
+
+
+def test_setup_arm_clears_auto_memory(tmp_path, monkeypatch):
+    # every arm must wipe the built-in auto-memory dir so reps don't leak
+    monkeypatch.setattr(eval_v2, "_run_vectr", lambda args: None)
+    monkeypatch.setattr(eval_v2, "_clear_vectr_memory", lambda port=8765: None)
+    cleared = []
+    monkeypatch.setattr(eval_v2, "_clear_auto_memory", lambda wd: cleared.append(wd))
+    setup_arm(ARMS["A1"], str(tmp_path))
+    assert cleared == [str(tmp_path)]
