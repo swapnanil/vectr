@@ -34,6 +34,8 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 
+from pathlib import Path
+
 from run_poc import (
     CLAUDE_BIN,
     MODEL,
@@ -42,9 +44,19 @@ from run_poc import (
     _VECTR_TOOLS,
     _FULL_RESULT_MAX_CHARS,
     _summarise_input,
+    _git_head,
+    _git_diff,
+    _clear_vectr_memory,
+    _get_vectr_notes_count,
+    _reset_vectr_call_counts,
+    _get_vectr_call_counts,
+    _compute_answer_files,
 )
 
 logger = logging.getLogger("eval_v2")
+
+# Always drive the global vectr binary — what the extension and end users use.
+VECTR_BIN = "/opt/homebrew/bin/vectr" if os.path.exists("/opt/homebrew/bin/vectr") else "vectr"
 
 # vectr search/exploration tools (no working-memory tools)
 _VECTR_SEARCH_TOOLS = [
@@ -384,3 +396,150 @@ def run_session(
                        "error": f"claude exited {proc.returncode}: {stderr}",
                        "_t": time.time()})
     return events, time.time() - start
+
+
+# ---------------------------------------------------------------------------
+# Per-arm prompt decoration
+# ---------------------------------------------------------------------------
+# All arms get the SAME task body. The only prompt difference is how each arm
+# is told to persist findings across the /compact boundary and recover them —
+# matching the mechanism that arm actually has. A1 gets nothing (true cold
+# baseline); C gets nothing in the prompt because its CLAUDE.md + hooks carry
+# the memory behaviour (that is the product surface under test).
+
+_EXPLORE_PREAMBLE = {
+    "A1": "",
+    "A2": ("As you explore, maintain a NOTES.md file in the repo root: record the "
+           "exact file paths, function/class signatures, line numbers, and gotchas "
+           "you find. It is your only durable record for the implementation step.\n\n"),
+    "B":  "",
+    "C":  "",
+    "D":  "",
+}
+
+_IMPL_PREAMBLE = {
+    "A1": "",
+    "A2": "First read NOTES.md — it holds the findings from your exploration.\n\n",
+    "B":  ("Use vectr_search / vectr_locate to re-find the exact code you need; "
+           "do not re-read whole files blindly.\n\n"),
+    "C":  "",
+    "D":  ("First call vectr_recall to retrieve the notes you stored while "
+           "exploring, then implement.\n\n"),
+}
+
+
+def build_turns(arm: Arm, task, codebase_path: str, codebase_desc: str) -> list[str]:
+    """[explore prompt, /compact, implement prompt] for the given arm + task."""
+    explore = (
+        f"{codebase_desc} is at: {codebase_path}\n\n"
+        f"{_EXPLORE_PREAMBLE[arm.id]}"
+        f"{task.phase1_description}\n\n"
+        "Do NOT implement anything yet — only explore and understand."
+    )
+    impl = f"{_IMPL_PREAMBLE[arm.id]}{task.phase2_description}"
+    return [explore, COMPACT_TURN, impl]
+
+
+# ---------------------------------------------------------------------------
+# Arm environment setup / teardown
+# ---------------------------------------------------------------------------
+
+def _run_vectr(args: list[str]) -> None:
+    try:
+        subprocess.run([VECTR_BIN, *args], check=False,
+                       capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        logger.warning("vectr %s failed: %s", " ".join(args), e)
+
+
+def setup_arm(arm: Arm, working_dir: str, vectr_port: int = 8765) -> None:
+    """Configure the working dir for one arm. Never hand-writes settings.json —
+    arm C's hooks come from `vectr init --hooks`."""
+    # Start from a clean IDE config every time (strip any prior vectr blocks).
+    _run_vectr(["init", "--reset-config", "--path", working_dir])
+    if arm.uses_vectr:
+        init_cmd = ["init", "--path", working_dir]
+        if arm.hooks:
+            init_cmd.append("--hooks")
+        _run_vectr(init_cmd)
+    if arm.use_memory:
+        # Each rep starts with an empty note store.
+        _clear_vectr_memory(port=vectr_port)
+    notes_path = Path(working_dir) / "NOTES.md"
+    if arm.notes_md:
+        notes_path.write_text("")  # empty scaffold the agent fills in
+    elif notes_path.exists():
+        notes_path.unlink()         # no stale NOTES.md leaking across arms
+
+
+# ---------------------------------------------------------------------------
+# Scenario orchestrator
+# ---------------------------------------------------------------------------
+
+def run_compact_scenario(
+    arm: Arm,
+    task,
+    working_dir: str,
+    codebase_desc: str = "The Django source tree",
+    vectr_port: int = 8765,
+    model: str | None = None,
+    max_turns: int = 60,
+    timeout_s: int = 2400,
+) -> CompactSessionResult:
+    """Run one arm × task: explore → /compact → implement in one session."""
+    setup_arm(arm, working_dir, vectr_port=vectr_port)
+
+    notes_before = _get_vectr_notes_count(port=vectr_port) if arm.use_memory else 0
+    if arm.use_memory:
+        _reset_vectr_call_counts(port=vectr_port)
+    head_before = _git_head(working_dir)
+
+    turns = build_turns(arm, task, working_dir, codebase_desc)
+    logger.info("[%s] %s — running compact scenario", arm.id, task.id)
+    events, wall = run_session(
+        turns, working_dir, arm.allowed_tools(),
+        max_turns=max_turns, timeout_s=timeout_s, model=model,
+    )
+
+    research_ev, impl_ev, compacted = split_phases_on_compaction(events)
+    session_start = events[0].get("_t", 0.0) if events else 0.0
+
+    res = CompactSessionResult(
+        arm_id=arm.id, task_id=task.id,
+        research=usage_from_events(research_ev),
+        impl=usage_from_events(impl_ev),
+        research_timeline=events_to_timeline(research_ev, session_start),
+        impl_timeline=events_to_timeline(impl_ev, session_start),
+        compacted=compacted,
+        wall_time_s=wall,
+        compaction_summary_chars=compaction_summary_chars(impl_ev),
+    )
+
+    # Surface a hard error if the session never produced a result.
+    err = next((e.get("error") for e in events
+                if e.get("type") == "result" and e.get("error")), None)
+    if err:
+        res.error = err
+        logger.error("[%s] %s error: %s", arm.id, task.id, err)
+    if not compacted and not err:
+        res.error = "no compaction boundary observed (/compact did not fire)"
+        logger.error("[%s] %s — %s", arm.id, task.id, res.error)
+
+    res.file_diff = _git_diff(working_dir, head_before)
+    res.answer_files, res.answer_file_chars = _compute_answer_files(
+        res.impl_timeline + res.research_timeline, working_dir
+    )
+    if arm.use_memory:
+        res.notes_count_after = _get_vectr_notes_count(port=vectr_port)
+        res.notes_count_before = notes_before
+        res.vectr_tool_calls_all = _get_vectr_call_counts(port=vectr_port)
+
+    logger.info(
+        "[%s] %s  compacted=%s  research(in=%d out=%d turns=%d) "
+        "impl(in=%d out=%d turns=%d)  notes %d→%d  $%.4f  %.0fs",
+        arm.id, task.id, compacted,
+        res.research.input_tokens, res.research.output_tokens, res.research.turns,
+        res.impl.input_tokens, res.impl.output_tokens, res.impl.turns,
+        res.notes_count_before, res.notes_count_after, res.total_cost, wall,
+    )
+    return res
