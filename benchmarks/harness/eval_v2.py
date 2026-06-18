@@ -383,6 +383,26 @@ def _user_msg(text: str) -> str:
     })
 
 
+def _spawn_env() -> dict:
+    """Env for a spawned agent session that mimics a FRESH user invocation of
+    Claude Code — not a nested child of the session running this harness.
+
+    The harness runs inside Claude Code, so os.environ carries CLAUDE_CODE_*
+    markers (CHILD_SESSION=1, SESSION_ID, ENTRYPOINT=claude-vscode, the agent
+    SDK version, …) that flip a spawned `claude -p` into child-session /
+    advisor-tool-deferral behavior — not how a real user's Claude Code runs.
+    Strip every CLAUDE*/ANTHROPIC* var so each arm starts clean, then:
+      - disable built-in auto-memory (~/.claude/projects/<proj>/memory/*.md),
+        else every arm — including the bare baselines — silently gains a
+        competing file-memory across /compact, confounding the comparison.
+    OAuth auth still resolves via keychain / ~/.claude credentials (we never
+    pass --bare, so keychain reads are allowed)."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))}
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    return env
+
+
 def run_session(
     turns: list[str],
     working_dir: str,
@@ -432,7 +452,7 @@ def run_session(
             stderr=subprocess.PIPE,
             text=True,
             cwd=working_dir,
-            env={**os.environ},
+            env=_spawn_env(),
         )
     except FileNotFoundError:
         return [{"type": "result", "subtype": "error",
