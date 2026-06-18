@@ -411,3 +411,77 @@ class TestTimeBasedTrigger:
     def test_session_started_at_is_float(self) -> None:
         adv = EvictionAdvisor()
         assert isinstance(adv._session_started_at, float)
+
+
+# ---------------------------------------------------------------------------
+# UPG-7.1 — auto_eviction_hint gating (footer fires on escalation, not every response)
+# ---------------------------------------------------------------------------
+
+class TestAutoEvictionHintGatingUPG71:
+    def _adv_with_chunk(self, **kw):
+        # defaults that disable every trigger except the one a test exercises
+        kw.setdefault("eviction_threshold_tokens", 100_000)
+        kw.setdefault("tool_call_threshold", 1000)
+        kw.setdefault("time_threshold_seconds", 100_000)
+        adv = EvictionAdvisor(**kw)
+        adv.record("auth.py", "1-10", "verify", "x" * 400)  # ~100 tracked tokens
+        return adv
+
+    def test_default_rearm_is_4(self) -> None:
+        assert EvictionAdvisor()._rearm_retrieval_calls == 4
+
+    def test_fires_once_then_suppressed(self) -> None:
+        adv = self._adv_with_chunk(retrieval_call_threshold=1)
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()         # count > 1 → should_evict True
+        assert adv.should_evict() is True
+        assert "ACTION REQUIRED" in adv.auto_eviction_hint()   # first fire
+        assert adv.auto_eviction_hint() == ""                  # immediately suppressed
+        assert adv.auto_eviction_hint() == ""                  # still suppressed
+
+    def test_rearms_after_more_retrieval_calls(self) -> None:
+        adv = self._adv_with_chunk(retrieval_call_threshold=1, rearm_retrieval_calls=3)
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() != ""                  # fire at retr=2
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() == ""                  # +2 since fire (<3) → still gated
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() != ""                  # +3 since fire → re-arms
+
+    def test_rearms_on_token_escalation(self) -> None:
+        adv = self._adv_with_chunk(retrieval_call_threshold=1, eviction_threshold_tokens=50)
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() != ""                  # first fire
+        assert adv.auto_eviction_hint() == ""                  # no new pressure → gated
+        adv.record("models.py", "1-50", "Model", "y" * 400)    # +~100 tokens ≥ threshold 50
+        assert adv.auto_eviction_hint() != ""                  # token escalation re-arms
+
+    def test_explicit_eviction_hint_stays_ungated(self) -> None:
+        adv = self._adv_with_chunk(retrieval_call_threshold=1)
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() != ""                  # auto fires once
+        assert adv.auto_eviction_hint() == ""                  # then auto-suppressed
+        # the explicit vectr_evict_hint / REST path must always answer
+        assert "ACTION REQUIRED" in adv.eviction_hint()
+
+    def test_empty_when_not_should_evict(self) -> None:
+        adv = self._adv_with_chunk(retrieval_call_threshold=100)  # never trips
+        assert adv.should_evict() is False
+        assert adv.auto_eviction_hint() == ""
+
+    def test_clear_session_re_arms(self) -> None:
+        adv = self._adv_with_chunk(retrieval_call_threshold=1)
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() != ""
+        assert adv.auto_eviction_hint() == ""
+        adv.clear_session()
+        assert adv._last_emit is None
+        adv.record("new.py", "1-5", "f", "z" * 400)
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() != ""                  # fresh fire after reset

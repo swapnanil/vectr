@@ -111,8 +111,8 @@ _EXPLORATION_TOOLS = [
                 },
                 "n_results": {
                     "type": "integer",
-                    "description": "Number of results to return (default: 10, max: 50)",
-                    "default": 10,
+                    "description": "Number of results to return (default: 5, max: 50)",
+                    "default": 5,
                 },
                 "language": {
                     "type": "string",
@@ -579,11 +579,11 @@ def handle_tools_call(
 
         content_text = "\n\n".join(sections)
 
-        # auto-append eviction hint when context pressure crosses the threshold
-        if service.should_evict():
-            hint = service.eviction_hint()
-            if hint:
-                content_text += f"\n\n─── Context management hint ───\n{hint}"
+        # auto-append eviction hint only on a FRESH context-pressure escalation
+        # (UPG-7.1) — gated so it can't repeat on every response
+        hint = service.auto_eviction_hint()
+        if hint:
+            content_text += f"\n\n─── Context management hint ───\n{hint}"
 
         if _should_nudge_remember(session_id):
             content_text += _remember_nudge_text(session_id)
@@ -685,10 +685,9 @@ def handle_tools_call(
         caller_file = arguments.get("caller_file", "").strip() or None
         symbols = service.locate_with_snippets(name, limit=limit, caller_file=caller_file)
         text = service.format_locate(symbols, name)
-        if service.should_evict():
-            hint = service.eviction_hint()
-            if hint:
-                text += f"\n\n─── Context management hint ───\n{hint}"
+        hint = service.auto_eviction_hint()  # UPG-7.1: gated, not every response
+        if hint:
+            text += f"\n\n─── Context management hint ───\n{hint}"
         if _should_nudge_remember(session_id):
             text += _remember_nudge_text(session_id)
         return {"content": [{"type": "text", "text": text}], "isError": False}
@@ -707,10 +706,9 @@ def handle_tools_call(
             name, direction=direction, limit=limit, include_builtins=include_builtins
         )
         text = service.format_trace(trace_result, name)
-        if service.should_evict():
-            hint = service.eviction_hint()
-            if hint:
-                text += f"\n\n─── Context management hint ───\n{hint}"
+        hint = service.auto_eviction_hint()  # UPG-7.1: gated, not every response
+        if hint:
+            text += f"\n\n─── Context management hint ───\n{hint}"
         if _should_nudge_remember(session_id):
             text += _remember_nudge_text(session_id)
         return {"content": [{"type": "text", "text": text}], "isError": False}
@@ -743,10 +741,9 @@ def handle_tools_call(
         boot = bool(arguments.get("boot", False))
         limit = int(arguments.get("limit", 10))
         text = service.recall(query=query, tags=tags, priority=priority, limit=limit, kind=kind, boot=boot)
-        if service.should_evict():
-            hint = service.eviction_hint()
-            if hint:
-                text += f"\n\n─── Context management hint ───\n{hint}"
+        hint = service.auto_eviction_hint()  # UPG-7.1: gated, not every response
+        if hint:
+            text += f"\n\n─── Context management hint ───\n{hint}"
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_evict_hint ----

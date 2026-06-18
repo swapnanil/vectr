@@ -54,6 +54,7 @@ class EvictionAdvisor:
         tool_call_threshold: int = 10,
         retrieval_call_threshold: int = 1,
         time_threshold_seconds: float = 180.0,
+        rearm_retrieval_calls: int = 4,
     ) -> None:
         # Fire when ANY of these conditions is met:
         #   cumulative injected chars ÷ 4 >= 40K  (vectr-tracked content)
@@ -76,10 +77,17 @@ class EvictionAdvisor:
         self._tool_call_threshold = tool_call_threshold
         self._retrieval_call_threshold = retrieval_call_threshold
         self._time_threshold_seconds = time_threshold_seconds
+        # UPG-7.1: re-arm the auto-footer only after this many further retrieval
+        # calls (or a fresh token/time crossing) since the last time it fired —
+        # so the footer can't repeat on every response.
+        self._rearm_retrieval_calls = rearm_retrieval_calls
         self._chunks: list[RetrievedChunk] = []
         self._tool_call_count: int = 0
         self._retrieval_call_count: int = 0
         self._session_started_at: float = time.time()
+        # (tokens, retrieval_count, wall_time) recorded the last time the auto
+        # footer emitted; None until the first emit. Gates auto_eviction_hint().
+        self._last_emit: tuple[int, int, float] | None = None
 
     def record(self, file_path: str, lines: str, symbol_name: str, content: str) -> None:
         """Record a chunk that was delivered to the LLM this session."""
@@ -123,6 +131,40 @@ class EvictionAdvisor:
             or self._retrieval_call_count > self._retrieval_call_threshold
             or elapsed >= self._time_threshold_seconds
         )
+
+    def _fresh_escalation(self) -> bool:
+        """True on the first auto-emit, then only after a MATERIAL increase since
+        the last one: another full token-threshold retrieved, `_rearm_retrieval_calls`
+        more retrieval calls, or another time-threshold window elapsed. Keeps the
+        per-response footer from repeating once pressure has already been flagged."""
+        if self._last_emit is None:
+            return True
+        tokens0, retr0, t0 = self._last_emit
+        return (
+            self.total_tokens_in_session() - tokens0 >= self._threshold
+            or self._retrieval_call_count - retr0 >= self._rearm_retrieval_calls
+            or (time.time() - t0) >= self._time_threshold_seconds
+        )
+
+    def auto_eviction_hint(self) -> str:
+        """Gated variant for the per-response footer (UPG-7.1). Emits the hint
+        only when context pressure FRESHLY escalates — never on every response.
+        Before this, the footer fired on every search/locate/trace once
+        `retrieval_call_count > 1` or 180s had elapsed (~2k tokens of
+        remember-nudge appended to every turn, inflating token cost and nudging
+        a `vectr_remember` each turn). The explicit `vectr_evict_hint` tool and
+        the `/v1/evict` endpoint still use `eviction_hint()` (ungated): an
+        explicit ask always answers."""
+        if not self.should_evict() or not self._fresh_escalation():
+            return ""
+        hint = self.eviction_hint()
+        if hint:
+            self._last_emit = (
+                self.total_tokens_in_session(),
+                self._retrieval_call_count,
+                time.time(),
+            )
+        return hint
 
     def eviction_hint(self) -> str:
         """
@@ -185,6 +227,7 @@ class EvictionAdvisor:
         self._tool_call_count = 0
         self._retrieval_call_count = 0
         self._session_started_at = time.time()
+        self._last_emit = None
 
     def as_chunk_dicts(self) -> list[dict]:
         """Serialisable form for snapshot storage."""

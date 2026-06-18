@@ -76,6 +76,7 @@ def _mock_service():
     svc.remember.return_value = 42
     svc.recall.return_value = "# Notes\n[1] [HIGH] some note\n"
     svc.eviction_hint.return_value = ""
+    svc.auto_eviction_hint.return_value = ""   # UPG-7.1: gated per-response footer
     svc.should_evict.return_value = False
     svc.snapshot_session.return_value = "snap_xyz"
     svc.list_snapshots.return_value = []
@@ -366,6 +367,15 @@ class TestVectrSearch:
         call_kwargs = svc.search_routed.call_args[1]
         assert call_kwargs["n_results"] == 10
 
+    def test_search_schema_default_matches_handler_upg83(self) -> None:
+        # UPG-8.3: the advertised schema default must match what the handler
+        # actually uses (was schema=10 but handler=5 → agents got fewer results
+        # than the contract promised).
+        from integrations.mcp_server import _EXPLORATION_TOOLS
+        search_tool = next(t for t in _EXPLORATION_TOOLS if t["name"] == "vectr_search")
+        assert search_tool["inputSchema"]["properties"]["n_results"]["default"] == 5
+        assert "default: 5" in search_tool["inputSchema"]["properties"]["n_results"]["description"]
+
     def test_n_results_capped_at_50(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_search", {"query": "foo", "n_results": 999}, svc)
@@ -380,8 +390,7 @@ class TestVectrSearch:
 
     def test_eviction_hint_appended_when_should_evict(self) -> None:
         svc = _mock_service()
-        svc.should_evict.return_value = True
-        svc.eviction_hint.return_value = "Drop these chunks: auth.py"
+        svc.auto_eviction_hint.return_value = "Drop these chunks: auth.py"  # UPG-7.1 gated path
         result = handle_tools_call("vectr_search", {"query": "auth"}, svc)
         assert "Drop these chunks" in result["content"][0]["text"]
 
@@ -533,8 +542,7 @@ class TestVectrLocate:
 
     def test_locate_appends_eviction_hint_when_should_evict(self) -> None:
         svc = _mock_service()
-        svc.should_evict.return_value = True
-        svc.eviction_hint.return_value = "Drop these: auth.py"
+        svc.auto_eviction_hint.return_value = "Drop these: auth.py"  # UPG-7.1 gated path
         result = handle_tools_call("vectr_locate", {"name": "verify_token"}, svc)
         assert "Drop these: auth.py" in result["content"][0]["text"]
 
@@ -588,8 +596,7 @@ class TestVectrTrace:
 
     def test_trace_appends_eviction_hint_when_should_evict(self) -> None:
         svc = _mock_service()
-        svc.should_evict.return_value = True
-        svc.eviction_hint.return_value = "Drop these: bidder.py"
+        svc.auto_eviction_hint.return_value = "Drop these: bidder.py"  # UPG-7.1 gated path
         result = handle_tools_call("vectr_trace", {"name": "dispatch"}, svc)
         assert "Drop these: bidder.py" in result["content"][0]["text"]
 
@@ -772,8 +779,7 @@ class TestVectrRecall:
 
     def test_recall_appends_eviction_hint_when_should_evict(self) -> None:
         svc = _mock_service()
-        svc.should_evict.return_value = True
-        svc.eviction_hint.return_value = "Drop these: segment.py"
+        svc.auto_eviction_hint.return_value = "Drop these: segment.py"  # UPG-7.1 gated path
         result = handle_tools_call("vectr_recall", {}, svc)
         assert "Drop these: segment.py" in result["content"][0]["text"]
 
@@ -973,6 +979,7 @@ class TestEvictionAdvisorIntegration:
         svc._eviction_advisor = real_advisor
         svc.should_evict.side_effect = real_advisor.should_evict
         svc.eviction_hint.side_effect = real_advisor.eviction_hint
+        svc.auto_eviction_hint.side_effect = real_advisor.auto_eviction_hint
         return svc, real_advisor
 
     def test_search_populates_chunks_in_eviction_advisor(self) -> None:

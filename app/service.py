@@ -509,6 +509,12 @@ class VectrService:
     def eviction_hint(self) -> str:
         return self._eviction_advisor.eviction_hint()
 
+    def auto_eviction_hint(self) -> str:
+        """Gated per-response footer (UPG-7.1) — fires only on fresh context-
+        pressure escalation, not every response. Used by the MCP search/locate/
+        trace auto-append; the explicit vectr_evict_hint tool uses eviction_hint()."""
+        return self._eviction_advisor.auto_eviction_hint()
+
     def should_evict(self) -> bool:
         return self._eviction_advisor.should_evict()
 
