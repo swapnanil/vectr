@@ -53,6 +53,8 @@ from run_poc import (
     _compute_answer_files,
 )
 
+from scoring import ExecScore, score_execution  # noqa: E402  (after run_poc import block)
+
 logger = logging.getLogger("eval_v2")
 
 # Always drive the global vectr binary — what the extension and end users use.
@@ -159,6 +161,7 @@ class CompactSessionResult:
     # core "memory survived /compact with no prompt help" signal.
     research_injection: dict = field(default_factory=dict)
     impl_injection: dict = field(default_factory=dict)
+    exec_score: "ExecScore | None" = None  # primary success signal (held-out test)
 
     @property
     def total_tokens(self) -> int:
@@ -475,8 +478,11 @@ _IMPL_PREAMBLE = {
 }
 
 
-def build_turns(arm: Arm, task, codebase_path: str, codebase_desc: str) -> list[str]:
-    """[explore prompt, /compact, implement prompt] for the given arm + task."""
+def build_turns(arm: Arm, task, codebase_path: str, codebase_desc: str,
+                exec_spec=None) -> list[str]:
+    """[explore prompt, /compact, implement prompt] for the given arm + task.
+    If exec_spec is given, the impl prompt names the output path the held-out
+    test will import (the contract is pinned, but identical across arms)."""
     explore = (
         f"{codebase_desc} is at: {codebase_path}\n\n"
         f"{_EXPLORE_PREAMBLE[arm.id]}"
@@ -484,6 +490,8 @@ def build_turns(arm: Arm, task, codebase_path: str, codebase_desc: str) -> list[
         "Do NOT implement anything yet — only explore and understand."
     )
     impl = f"{_IMPL_PREAMBLE[arm.id]}{task.phase2_description}"
+    if exec_spec is not None:
+        impl += exec_spec.output_instruction()
     return [explore, COMPACT_TURN, impl]
 
 
@@ -532,8 +540,12 @@ def run_compact_scenario(
     model: str | None = None,
     max_turns: int = 60,
     timeout_s: int = 2400,
+    exec_spec=None,
+    python_bin: str = "python",
 ) -> CompactSessionResult:
-    """Run one arm × task: explore → /compact → implement in one session."""
+    """Run one arm × task: explore → /compact → implement in one session.
+    If exec_spec is given, the held-out test is run after impl for the primary
+    (execution-verified) success signal."""
     setup_arm(arm, working_dir, vectr_port=vectr_port)
 
     notes_before = _get_vectr_notes_count(port=vectr_port) if arm.use_memory else 0
@@ -541,7 +553,7 @@ def run_compact_scenario(
         _reset_vectr_call_counts(port=vectr_port)
     head_before = _git_head(working_dir)
 
-    turns = build_turns(arm, task, working_dir, codebase_desc)
+    turns = build_turns(arm, task, working_dir, codebase_desc, exec_spec=exec_spec)
     logger.info("[%s] %s — running compact scenario", arm.id, task.id)
     events, wall = run_session(
         turns, working_dir, arm.allowed_tools(),
@@ -582,6 +594,15 @@ def run_compact_scenario(
         res.notes_count_after = _get_vectr_notes_count(port=vectr_port)
         res.notes_count_before = notes_before
         res.vectr_tool_calls_all = _get_vectr_call_counts(port=vectr_port)
+
+    if exec_spec is not None:
+        res.exec_score = score_execution(exec_spec, working_dir, python_bin=python_bin)
+        es = res.exec_score
+        logger.info("[%s] %s  exec: %s  (%d/%d passed, success=%s)%s",
+                    arm.id, task.id,
+                    "ran" if es.ran else "DID-NOT-RUN",
+                    es.passed, es.total, es.success,
+                    f"  err={es.error}" if es.error else "")
 
     logger.info(
         "[%s] %s  compacted=%s  research(in=%d out=%d turns=%d) "
