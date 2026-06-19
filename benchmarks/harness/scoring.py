@@ -180,9 +180,28 @@ def test_default_currency_is_usd():
     assert MoneyField().currency == "USD"
 
 def test_negative_value_rejected():
+    # The spec requires non-negative validation but does not pin WHERE: accept
+    # rejection at the prep-value layer OR via Django's idiomatic validation
+    # path (validators / clean()), since the research prompt steers toward the
+    # latter. Any of these raising on a negative value satisfies the contract.
     MoneyField = _load()
-    with pytest.raises(Exception):
-        MoneyField().get_prep_value(decimal.Decimal("-1.00"))
+    f = MoneyField()
+    neg = decimal.Decimal("-1.00")
+    attempts = [
+        lambda: f.get_prep_value(neg),
+        lambda: f.run_validators(neg),
+        lambda: f.clean(neg, None),
+    ]
+    rejected = False
+    for attempt in attempts:
+        try:
+            attempt()
+        except AttributeError:
+            continue  # field didn't implement this hook; try the next
+        except Exception:
+            rejected = True
+            break
+    assert rejected, "negative value was not rejected at any validation layer"
 '''
 
 DJANGO_EXEC_SPECS: dict[str, ExecSpec] = {
