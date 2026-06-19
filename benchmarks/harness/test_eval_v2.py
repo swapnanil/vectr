@@ -182,6 +182,24 @@ def test_arm_tool_sets():
     assert ARMS["A2"].notes_md is True
 
 
+def test_arm_disallowed_tools_enforce_isolation():
+    # B must hard-deny memory tools (enableAllProjectMcpServers would otherwise
+    # leave them callable despite being absent from --allowedTools).
+    b_deny = ARMS["B"].disallowed_tools()
+    assert set(_VECTR_MEMORY_TOOLS).issubset(b_deny)
+    assert not any(t in b_deny for t in _VECTR_SEARCH_TOOLS)
+
+    # C/D use everything → deny nothing.
+    for arm_id in ("C", "D"):
+        assert ARMS[arm_id].disallowed_tools() == []
+
+    # A1/A2 have no vectr at all → deny every vectr tool, search and memory.
+    for arm_id in ("A1", "A2"):
+        deny = ARMS[arm_id].disallowed_tools()
+        assert set(_VECTR_SEARCH_TOOLS).issubset(deny)
+        assert set(_VECTR_MEMORY_TOOLS).issubset(deny)
+
+
 def test_all_five_arms_present():
     assert set(ARMS) == {"A1", "A2", "B", "C", "D"}
 

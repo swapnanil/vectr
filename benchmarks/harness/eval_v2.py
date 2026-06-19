@@ -104,6 +104,23 @@ class Arm:
             tools += _VECTR_MEMORY_TOOLS
         return tools
 
+    def disallowed_tools(self) -> list[str]:
+        """vectr tools this arm must NOT use, as an explicit deny list.
+
+        `vectr init` writes `enableAllProjectMcpServers: true`, which makes
+        EVERY vectr MCP tool callable in headless mode regardless of
+        `--allowedTools` — so listing a subset in --allowedTools does not deny
+        the rest. `--disallowedTools` (deny) takes precedence over enable, so
+        we hard-deny the complement to enforce the search-vs-memory isolation
+        that arms B/C/D depend on. (Pure experiment isolation — a real user
+        never wants vectr's own tools forcibly disabled.)"""
+        deny: list[str] = []
+        if not self.use_search:
+            deny += _VECTR_SEARCH_TOOLS
+        if not self.use_memory:
+            deny += _VECTR_MEMORY_TOOLS
+        return deny
+
     @property
     def uses_vectr(self) -> bool:
         return self.use_search or self.use_memory
@@ -432,6 +449,7 @@ def run_session(
     max_turns: int = 60,
     timeout_s: int = 2400,
     model: str | None = None,
+    disallowed_tools: list[str] | None = None,
 ) -> tuple[list[dict], float]:
     """Drive one persistent Claude Code session over stream-json stdin.
 
@@ -460,6 +478,8 @@ def run_session(
         "--max-turns", str(max_turns),
         "--allowedTools", ",".join(allowed_tools),
     ]
+    if disallowed_tools:
+        cmd += ["--disallowedTools", ",".join(disallowed_tools)]
     use_model = model or MODEL
     if use_model:
         cmd += ["--model", use_model]
@@ -712,6 +732,7 @@ def run_compact_scenario(
     events, wall = run_session(
         turns, working_dir, arm.allowed_tools(),
         max_turns=max_turns, timeout_s=timeout_s, model=model,
+        disallowed_tools=arm.disallowed_tools(),
     )
 
     research_ev, impl_ev, compacted = split_phases_on_compaction(events)
