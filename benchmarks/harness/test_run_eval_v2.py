@@ -29,6 +29,16 @@ def test_summarize_core_metrics():
     assert s["injected_chars"] == 180
     assert s["exec_success"] is True and s["exec_passed"] == 5
     assert "injection_precision" not in s
+    # passing runs stay lean — no exec_log
+    assert "exec_log" not in s
+
+
+def test_summarize_failed_exec_archives_log():
+    es = ExecScore(task_id="custom_field", ran=True, passed=4, failed=1)
+    es.log_tail = "FAILED test_negative_value_rejected - DID NOT RAISE"
+    s = _summarize(_result(exec_score=es), guardrail=False)
+    assert s["exec_success"] is False
+    assert "test_negative_value_rejected" in s["exec_log"]
 
 
 def test_summarize_guardrail_precision():

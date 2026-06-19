@@ -83,6 +83,11 @@ def _summarize(res, *, guardrail: bool) -> dict:
         "exec_total": es.total if es else None,
         "exec_success": bool(es and es.success),
     }
+    # Archive the pytest tail whenever a run ran but didn't fully pass, so a
+    # failing held-out check is diagnosable from the results JSON without an
+    # expensive re-run. Passing runs stay lean.
+    if es and es.ran and not es.success and es.log_tail:
+        out["exec_log"] = es.log_tail
     if guardrail:
         injected = (res.research_injection.get("injected_text", "")
                     + "\n" + res.impl_injection.get("injected_text", ""))
