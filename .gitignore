@@ -77,3 +77,6 @@ benchmarks/cpython/vectr_index.json
 # Distribution
 *.tar.gz
 *.zip
+
+# benchmark run artifacts (eval output, not source)
+benchmarks/harness/results/
