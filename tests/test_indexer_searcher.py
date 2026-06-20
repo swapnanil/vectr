@@ -98,9 +98,12 @@ class TestCodeIndexer:
         assert indexer.total_chunks == 0
 
     def test_index_workspace_walks_py_files(self, indexer, tmp_path) -> None:
+        # UPG-11.3: .txt files are now indexed (language='txt', doc-prose quality).
+        # The test previously asserted files==2 to confirm .txt was skipped, but
+        # now .txt IS indexed. Update: use a .log extension (not indexed) instead.
         make_py(tmp_path, "a.py", "def foo(): pass")
         make_py(tmp_path, "b.py", "def bar(): pass")
-        (tmp_path / "skip.txt").write_text("not indexed")
+        (tmp_path / "skip.log").write_text("not indexed — .log is not in LANG_BY_EXT")
         files, chunks = indexer.index_workspace()
         assert files == 2
         assert chunks >= 2
@@ -743,6 +746,139 @@ class TestHTMLSupport:
     def test_html_file_indexed_by_indexer(self, indexer, tmp_path) -> None:
         count = indexer.index_file(self._write_html(tmp_path))
         assert count >= 1, f"expected ≥1 HTML chunk, got {count}"
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.3 — .txt and .rst prose files are indexed (F2)
+# ---------------------------------------------------------------------------
+
+class TestTxtRstSupport:
+    """chunk_file() must produce chunks for .txt and .rst files (UPG-11.3).
+
+    Django ships docs as .txt (e.g. docs/howto/custom-model-fields.txt).
+    These were invisible to search before UPG-11.3.
+    They are indexed as prose windows with language='txt'/'rst' and subject to
+    the doc-prose quality multiplier (_Q_DOC_PROSE=0.70) so code still leads.
+    """
+
+    _TXT_CONTENT = """\
+Writing custom model fields
+===========================
+
+To create a custom field, you need to subclass Field and implement deconstruct()
+and from_db_value(). The deconstruct() method must return a 4-tuple
+(name, path, args, kwargs) that allows Django's migration framework to serialize
+the field.
+
+The from_db_value() method is called every time data is loaded from the database,
+including in aggregates and values() calls.
+"""
+
+    _RST_CONTENT = """\
+Custom Lookup Reference
+=======================
+
+.. currentmodule:: django.db.models
+
+Lookup API
+----------
+
+A lookup is a Django expression that determines how a condition is translated
+to a SQL WHERE clause. Custom lookups can be registered via ``register_lookup``.
+"""
+
+    def _write_txt(self, tmp_path) -> str:
+        p = tmp_path / "howto.txt"
+        p.write_text(self._TXT_CONTENT)
+        return str(p)
+
+    def _write_rst(self, tmp_path) -> str:
+        p = tmp_path / "ref.rst"
+        p.write_text(self._RST_CONTENT)
+        return str(p)
+
+    def test_txt_produces_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_txt(tmp_path))
+        assert len(chunks) >= 1, f"expected ≥1 txt chunk, got {len(chunks)}"
+
+    def test_txt_language_label(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_txt(tmp_path))
+        assert all(c.language == "txt" for c in chunks), (
+            f"all chunks must have language='txt', got {[c.language for c in chunks]}"
+        )
+
+    def test_txt_indexed_by_indexer(self, indexer, tmp_path) -> None:
+        count = indexer.index_file(self._write_txt(tmp_path))
+        assert count >= 1, f"expected ≥1 txt chunk indexed, got {count}"
+
+    def test_rst_produces_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_rst(tmp_path))
+        assert len(chunks) >= 1, f"expected ≥1 rst chunk, got {len(chunks)}"
+
+    def test_rst_language_label(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_rst(tmp_path))
+        assert all(c.language == "rst" for c in chunks), (
+            f"all chunks must have language='rst', got {[c.language for c in chunks]}"
+        )
+
+    def test_rst_indexed_by_indexer(self, indexer, tmp_path) -> None:
+        count = indexer.index_file(self._write_rst(tmp_path))
+        assert count >= 1, f"expected ≥1 rst chunk indexed, got {count}"
+
+    def test_txt_in_indexed_languages(self, indexer, tmp_path) -> None:
+        """After indexing a .txt file, /v1/status languages must include 'txt'."""
+        indexer.index_file(self._write_txt(tmp_path))
+        langs = indexer.indexed_languages()
+        assert "txt" in langs, (
+            f"UPG-11.3: 'txt' must appear in indexed languages after indexing a .txt file. "
+            f"Got: {langs}"
+        )
+
+    def test_txt_doc_prose_quality_multiplier(self, tmp_path) -> None:
+        """txt/rst chunks must get the doc-prose quality multiplier (0.70),
+        not the code quality (1.0), so code chunks still lead on code queries."""
+        from agent.chunk_quality import quality_score, is_doc_language
+        # Verify doc language classification
+        assert is_doc_language("txt"), "txt must be classified as doc language"
+        assert is_doc_language("rst"), "rst must be classified as doc language"
+        # quality_score for a non-trivial txt chunk should be 0.70
+        score = quality_score("Custom field description with multiple lines of prose.\n" * 5,
+                              "/docs/howto.txt", language="txt")
+        assert score == pytest.approx(0.70, abs=0.01), (
+            f"UPG-11.3: txt doc chunks must get _Q_DOC_PROSE=0.70 quality. Got {score}"
+        )
+
+    def test_workspace_walk_picks_up_txt_files(self, indexer, tmp_path) -> None:
+        """index_workspace() must include .txt files (they're now in LANG_BY_EXT)."""
+        # Write a Python file and a .txt doc
+        make_py(tmp_path, "models.py", "def model(): pass")
+        (tmp_path / "readme.txt").write_text("Project documentation.\n" * 5)
+        files, chunks = indexer.index_workspace()
+        assert files == 2, f"expected 2 files indexed (1 py + 1 txt), got {files}"
+
+    def test_txt_searchable_after_index(self, indexer, tmp_path) -> None:
+        """txt content must be returned in search results after indexing."""
+        from agent.searcher import CodeSearcher
+
+        txt_file = tmp_path / "custom-model-fields.txt"
+        txt_file.write_text(self._TXT_CONTENT)
+        indexer.index_file(str(txt_file))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        results, _ = s.search(
+            "custom model field deconstruct from_db_value", n_results=5, rerank=False
+        )
+        txt_results = [r for r in results if r.file_path.endswith(".txt")]
+        assert txt_results, (
+            "UPG-11.3: .txt file content must appear in search results. "
+            f"Got: {[r.file_path for r in results]}"
+        )
 
 
 # ---------------------------------------------------------------------------

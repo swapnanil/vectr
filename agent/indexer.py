@@ -48,6 +48,12 @@ LANG_BY_EXT: dict[str, str] = {
     ".zig": "zig",
     ".md": "markdown",
     ".html": "html",
+    # UPG-11.3: prose documentation formats — indexed with the doc-prose quality
+    # multiplier (_Q_DOC_PROSE = 0.70) so code chunks still lead on code queries
+    # while docs surface for prose/howto queries. Uses window-based chunking since
+    # there is no AST grammar for plain text or reStructuredText.
+    ".txt": "txt",
+    ".rst": "rst",
 }
 
 EXCLUDED_DIRS = {

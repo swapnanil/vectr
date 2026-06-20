@@ -114,11 +114,21 @@ class TestIsIndexable:
     @pytest.mark.parametrize("path", [
         "/ws/image.png",
         "/ws/data.csv",
-        "/ws/notes.txt",
         "/ws/archive.zip",
+        "/ws/debug.log",
     ])
     def test_non_code_extensions_not_indexable(self, watcher, path):
+        # UPG-11.3: .txt is now indexed as prose doc; removed from this list.
+        # .log, .csv, .png, .zip remain unsupported.
         assert watcher._is_indexable(path) is False
+
+    @pytest.mark.parametrize("path", [
+        "/ws/howto.txt",
+        "/ws/docs/readme.rst",
+    ])
+    def test_txt_and_rst_are_indexable(self, watcher, path):
+        # UPG-11.3: .txt and .rst are now indexed as prose (F2 fix)
+        assert watcher._is_indexable(path) is True
 
     @pytest.mark.parametrize("path", [
         "/ws/README.md",
