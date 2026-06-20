@@ -88,6 +88,8 @@ async def search(body: SearchRequest, request: Request) -> SearchResponse:
                 language=r.language,
                 score=r.score,
                 content=r.content,
+                symbol_start_line=getattr(r, "symbol_start_line", 0),
+                symbol_end_line=getattr(r, "symbol_end_line", 0),
             )
             for r in results
         ],

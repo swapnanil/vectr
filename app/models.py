@@ -42,6 +42,11 @@ class CodeChunkResult(BaseModel):
     language: str
     score: float
     content: str
+    # UPG-11.4: expand-to-symbol affordance — the exact line range of the indexed
+    # symbol so callers can read the full definition without a blind whole-file re-read.
+    # 0/0 means the chunk was not associated with a named symbol (e.g. a window chunk).
+    symbol_start_line: int = 0
+    symbol_end_line: int = 0
 
 
 class SearchResponse(BaseModel):

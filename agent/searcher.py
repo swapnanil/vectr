@@ -140,6 +140,12 @@ class SearchResult:
     node_type: str = ""
     dup_count: int = 0   # number of identical chunks collapsed into this one (UPG-2.2)
     forced_inclusion: bool = False  # UPG-11.7: chunk was forced into pool by symbol-name match
+    # UPG-11.2: monotonic displayed score — updated after final ranking in _apply_quality_and_dedup
+    # to guarantee non-increasing values down the returned list.
+    # (score above holds the pre-quality hybrid score; this replaces it post-sort.)
+    # UPG-11.4: symbol line-range affordance — populated from indexed metadata at search time.
+    symbol_start_line: int = 0
+    symbol_end_line: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -334,15 +340,21 @@ class CodeSearcher:
         for cid in sorted_ids:
             doc = id_to_doc.get(cid, "")
             meta = id_to_meta.get(cid, {})
+            start_line = int(meta.get("start_line", 0))
+            end_line = int(meta.get("end_line", 0))
             candidates.append(SearchResult(
                 file_path=meta.get("file_path", ""),
-                lines=f"{meta.get('start_line', 0)}-{meta.get('end_line', 0)}",
+                lines=f"{start_line}-{end_line}",
                 symbol_name=meta.get("symbol_name", ""),
                 language=meta.get("language", ""),
                 score=round(merged[cid], 4),
                 content=doc[:2000],
                 node_type=meta.get("node_type", ""),
                 forced_inclusion=cid in forced_cids,
+                # UPG-11.4: carry the exact line range of the indexed symbol so
+                # callers can expand to the full definition without a blind re-read.
+                symbol_start_line=start_line,
+                symbol_end_line=end_line,
             ))
 
         # --- Cross-encoder rerank ---
@@ -411,6 +423,12 @@ class CodeSearcher:
                 if class_ctx:
                     effective_symbol = f"{class_ctx}.{effective_symbol}"
             sym_boost = symbol_identity_boost(effective_symbol, sym_tokens)
+            # UPG-11.10: promote symbol_name to the qualified "Class.leaf" form when
+            # class context was successfully extracted from the indexer-injected prefix.
+            # This makes the REST/MCP `symbol` field show "Field.deconstruct" instead
+            # of the bare "deconstruct", helping callers understand which class owns the chunk.
+            if effective_symbol and effective_symbol != r.symbol_name:
+                r.symbol_name = effective_symbol
             scored.append((base * q + sym_boost, q, i, r))
 
         # Deterministic order: final score desc, quality desc, length desc, then
@@ -420,12 +438,15 @@ class CodeSearcher:
 
         seen: dict[str, int] = {}
         out: list[SearchResult] = []
-        for _, _, _, r in scored:
+        for final_score, _, _, r in scored:
             key = normalized_content(r.content)
             if key in seen:
                 out[seen[key]].dup_count += 1
                 continue
             seen[key] = len(out)
             r.dup_count = 0
+            # UPG-11.2: replace the stale pre-rerank hybrid score with the actual
+            # composite ranking key so displayed scores are non-increasing with rank.
+            r.score = round(final_score, 4)
             out.append(r)
         return out

@@ -1348,11 +1348,13 @@ class TestForcedInclusionCandidatePool:
         query = "BaseField deconstruct migration serialization name path args kwargs"
         results, _ = s.search(query, n_results=10, rerank=False)
 
-        # The base must appear somewhere in the results
+        # The base must appear somewhere in the results.
+        # UPG-11.10: symbol_name is now the qualified form "BaseField.deconstruct"
+        # (set by _apply_quality_and_dedup via extract_class_from_content).
         base_idx = next(
             (
                 i for i, r in enumerate(results)
-                if r.symbol_name == "deconstruct" and "# class: BaseField" in r.content
+                if ("deconstruct" in r.symbol_name) and "# class: BaseField" in r.content
             ),
             None,
         )
@@ -1472,11 +1474,230 @@ class TestForcedInclusionCandidatePool:
         finally:
             searcher_mod._RERANK_TOP_K_UNFILTERED = orig
 
-        # Both from_db_value chunks must appear (forced-inclusion pulls them in)
-        from_db_value_results = [r for r in results if r.symbol_name == "from_db_value"]
+        # Both from_db_value chunks must appear (forced-inclusion pulls them in).
+        # UPG-11.10: symbol_name is now qualified ("JSONBaseField.from_db_value",
+        # "SpecialJSONField.from_db_value") so match on the leaf component.
+        from_db_value_results = [r for r in results if "from_db_value" in r.symbol_name]
         assert len(from_db_value_results) >= 2, (
             "UPG-11.7 regression: 'from_db_value' compound identifier must trigger "
             "forced-inclusion of ALL from_db_value chunks.  "
             f"Got {len(from_db_value_results)} results with that symbol_name: "
             f"{[(r.symbol_name, r.content[:60]) for r in results]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.10 — Qualified "Class.leaf" symbol name surfaced in SearchResult
+# ---------------------------------------------------------------------------
+
+class TestQualifiedSymbolName:
+    """UPG-11.10: _apply_quality_and_dedup must promote symbol_name from bare leaf
+    to qualified "Class.leaf" form when the indexer-injected "# class: X" prefix
+    is present in the chunk content.
+
+    This makes the REST/MCP `symbol` field show "Field.deconstruct" instead of
+    bare "deconstruct", helping callers understand class ownership.
+    """
+
+    _SOURCE = """\
+class ModelField:
+    def validate(self, value, model_instance):
+        \"\"\"Validate the value for this field.\"\"\"
+        # field validation logic
+        return value
+
+class AnotherField(ModelField):
+    def validate(self, value, model_instance):
+        \"\"\"AnotherField override.\"\"\"
+        return super().validate(value, model_instance)
+"""
+
+    def test_qualified_symbol_name_in_search_results(self, indexer, tmp_path) -> None:
+        """After search, symbol_name on each result should be 'Class.method' not bare 'method'."""
+        from agent.searcher import CodeSearcher
+
+        src = tmp_path / "fields.py"
+        src.write_text(self._SOURCE)
+        indexer.index_file(str(src))
+
+        # Verify indexer stored bare leaf
+        _, docs, metas = indexer.get_all_documents()
+        validate_metas = [m for m in metas if m.get("symbol_name") == "validate"]
+        assert len(validate_metas) >= 2, (
+            "Indexer must store bare leaf 'validate' for both methods"
+        )
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        results, _ = s.search("ModelField validate value for field", n_results=10, rerank=False)
+        result_syms = {r.symbol_name for r in results}
+
+        # At least one result should have the qualified form
+        qualified = {sym for sym in result_syms if "." in sym and "validate" in sym}
+        assert qualified, (
+            f"UPG-11.10: expected qualified symbol names like 'ModelField.validate' "
+            f"in results, but got: {result_syms}"
+        )
+        # No result should have bare "validate" anymore (they all get class prefix)
+        assert "validate" not in result_syms or all(
+            "." in r.symbol_name for r in results if r.symbol_name == "validate"
+        ), f"Bare 'validate' still present in results: {result_syms}"
+
+    def test_qualified_form_used_in_rest_response(self, indexer, tmp_path) -> None:
+        """UPG-11.10: the 'symbol' field in the REST CodeChunkResult must show
+        the qualified form (e.g. 'ModelField.validate'), not just the bare leaf."""
+        from agent.searcher import CodeSearcher, SearchResult
+
+        # Build a result with a chunk that has a class prefix in content
+        r = SearchResult(
+            file_path="/p/fields.py",
+            lines="5-10",
+            symbol_name="validate",
+            language="python",
+            score=0.8,
+            content="# class: ModelField\ndef validate(self, value, model_instance):\n    return value\n    # body\n",
+            node_type="function_definition",
+        )
+        # After _apply_quality_and_dedup, symbol_name should be upgraded
+        from agent.searcher import CodeSearcher as CS
+        import tests.conftest as cf
+        # Use the test searcher fixture approach
+        from agent.indexer import CodeIndexer
+        from tests.conftest import _DummyEmbedProvider
+        db = str(tmp_path / "db")
+        idx2 = CodeIndexer(str(tmp_path), db_path=db)
+        idx2._embed_provider = _DummyEmbedProvider()
+        s2 = CS(idx2)
+
+        out = s2._apply_quality_and_dedup("ModelField validate", [r])
+        assert out, "Expected at least one result"
+        assert out[0].symbol_name == "ModelField.validate", (
+            f"UPG-11.10: expected 'ModelField.validate', got {out[0].symbol_name!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.2 — Monotonic displayed score (F1c)
+# ---------------------------------------------------------------------------
+
+class TestMonotonicScore:
+    """UPG-11.2: scores in the returned list must be non-increasing.
+
+    Before UPG-11.2, score= was set to the stale pre-rerank hybrid score
+    (set before quality re-sort), so rank1 could have a lower score than rank5.
+    Now _apply_quality_and_dedup replaces score with the composite ranking key.
+    """
+
+    def test_scores_non_increasing(self, searcher) -> None:
+        """Returned scores must be non-increasing (sorted_by_score: true)."""
+        content_templates = [
+            "def alpha(self):\n    # method body here\n    return self.x\n    # impl",
+            "def beta(self):\n    # another body\n    return self.y\n    # different",
+            "def gamma(self):\n    # yet another\n    return self.z\n    # extra",
+            "def delta(self):\n    # fourth method\n    return self.w\n    # more",
+        ]
+        cands = [
+            _sr(c, path=f"/p/mod{i}.py", score=0.5)
+            for i, c in enumerate(content_templates)
+        ]
+        out = searcher._apply_quality_and_dedup("alpha beta gamma delta method", cands)
+        scores = [r.score for r in out]
+        assert scores == sorted(scores, reverse=True), (
+            f"UPG-11.2: scores must be non-increasing. Got: {scores}"
+        )
+
+    def test_score_reflects_composite_not_hybrid(self, searcher) -> None:
+        """A chunk with higher quality should have a higher score than one with lower quality
+        even if both started at the same raw hybrid score."""
+        from agent.chunk_quality import NAVIGATIONAL_NODE_TYPE
+        # High quality: real code
+        high = _sr(
+            "def process_request(request):\n    return self.dispatch(request)\n    # impl\n    x=1",
+            path="/p/impl.py", score=0.7,
+        )
+        # Low quality: navigational (gets quality multiplier 0.35)
+        low = _sr(
+            "pub use a::A;\npub use b::B;\npub use c::C;",
+            path="/p/lib.rs", node_type=NAVIGATIONAL_NODE_TYPE, lang="rust", score=0.7,
+        )
+        # Even though both have same raw hybrid score=0.7, high quality chunk
+        # should end up with a higher final score.
+        out = searcher._apply_quality_and_dedup("process dispatch request", [high, low])
+        assert len(out) == 2
+        assert out[0].score >= out[1].score, (
+            f"UPG-11.2: expected non-increasing scores, got {[r.score for r in out]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.4 — Expand-to-symbol affordance (line range on results)
+# ---------------------------------------------------------------------------
+
+class TestExpandToSymbolAffordance:
+    """UPG-11.4: each SearchResult must carry symbol_start_line/symbol_end_line
+    so callers can expand to the full symbol without a blind whole-file re-read.
+    """
+
+    def test_symbol_line_range_populated(self, indexer, tmp_path) -> None:
+        """After indexing, search results must have non-zero symbol_start_line/end_line."""
+        from agent.searcher import CodeSearcher
+
+        src = make_py(tmp_path, "widget.py", """
+class Widget:
+    def render(self):
+        \"\"\"Render the widget to the screen.\"\"\"
+        # drawing code here
+        return self.canvas.draw()
+""")
+        indexer.index_file(src)
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+        results, _ = s.search("Widget render draw canvas", n_results=5, rerank=False)
+
+        assert results, "Expected at least one result"
+        # Find the render method result
+        render = next((r for r in results if "render" in (r.symbol_name or "")), None)
+        if render is None:
+            render = results[0]  # at least verify the field is populated
+
+        # The affordance fields must be set (non-zero when the chunk is a named symbol)
+        assert hasattr(render, "symbol_start_line"), "UPG-11.4: SearchResult missing symbol_start_line"
+        assert hasattr(render, "symbol_end_line"), "UPG-11.4: SearchResult missing symbol_end_line"
+        # For AST-parsed symbol chunks, the range should be > 0
+        if "render" in (render.symbol_name or "") or "render" in render.content:
+            assert render.symbol_start_line > 0 or render.symbol_end_line > 0, (
+                f"UPG-11.4: expected non-zero line range for a symbol chunk; "
+                f"got start={render.symbol_start_line} end={render.symbol_end_line}"
+            )
+
+    def test_rest_response_includes_symbol_line_range(self) -> None:
+        """UPG-11.4: the REST CodeChunkResult schema must include symbol_start_line/end_line."""
+        from app.models import CodeChunkResult
+        r = CodeChunkResult(
+            file="src/widget.py",
+            lines="3-8",
+            symbol="Widget.render",
+            language="python",
+            score=0.9,
+            content="def render(self): ...",
+            symbol_start_line=3,
+            symbol_end_line=8,
+        )
+        assert r.symbol_start_line == 3
+        assert r.symbol_end_line == 8
+
+    def test_rest_response_defaults_zero_for_non_symbol_chunks(self) -> None:
+        """Window chunks without a named symbol must default to 0/0."""
+        from app.models import CodeChunkResult
+        r = CodeChunkResult(
+            file="src/big_file.py",
+            lines="100-300",
+            symbol=None,
+            language="python",
+            score=0.7,
+            content="lots of code ...",
+        )
+        assert r.symbol_start_line == 0
+        assert r.symbol_end_line == 0

@@ -815,7 +815,14 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         dup = f"  (+{r.dup_count} more identical)" if getattr(r, "dup_count", 0) else ""
         lines.append(f"[{i}] {r.file_path}  lines {r.lines}  score {r.score:.3f}{dup}")
         if r.symbol_name:
-            lines.append(f"    symbol: {r.symbol_name}  language: {r.language}")
+            # UPG-11.4: include symbol line-range so caller can expand to full definition
+            # without a blind whole-file re-read: Read(file_path, offset=symbol_start_line-1)
+            sym_range = ""
+            s_start = getattr(r, "symbol_start_line", 0)
+            s_end = getattr(r, "symbol_end_line", 0)
+            if s_start and s_end:
+                sym_range = f"  [lines {s_start}–{s_end}]"
+            lines.append(f"    symbol: {r.symbol_name}{sym_range}  language: {r.language}")
         lines.append("")
         content_lines = r.content.splitlines()
         if len(content_lines) > 80:
