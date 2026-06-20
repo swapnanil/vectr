@@ -15,6 +15,9 @@ from agent.chunk_quality import (
     query_wants_tests,
     quality_score,
     normalized_content,
+    symbol_identity_boost,
+    extract_class_from_content,
+    _query_symbol_tokens,
 )
 
 
@@ -239,3 +242,102 @@ class TestNormalizedContent:
         a = normalized_content("## Prompts used\n")
         b = normalized_content("##   Prompts Used")
         assert a == b
+
+
+# ---------------------------------------------------------------------------
+# F6 — stop-word guard on symbol_identity_boost (UPG-11.5)
+# ---------------------------------------------------------------------------
+
+class TestSymbolIdentityBoostStopWords:
+    """Common English words used as method names must NOT get a leaf boost.
+
+    F6: leaf='all' boosted by 'list all migrations' was wrong — 'all' is an
+    accidental word overlap, not a symbol query intent.
+    """
+
+    @pytest.mark.parametrize("leaf,query", [
+        ("all",  "list all database migrations for a project"),
+        ("get",  "get a record from the database"),
+        ("set",  "set field value on a model"),
+        ("run",  "run the test suite"),
+        ("add",  "add a new entry to the registry"),
+        ("map",  "map source to target fields"),
+        ("log",  "log a warning message"),
+        ("use",  "use the base class method"),
+        ("ok",   "check if the response is ok"),
+        ("id",   "get the record id from the database"),
+    ])
+    def test_stop_word_leaf_receives_no_boost(self, leaf: str, query: str) -> None:
+        tokens = _query_symbol_tokens(query)
+        boost = symbol_identity_boost(leaf, tokens)
+        assert boost == 0.0, (
+            f"symbol_identity_boost('{leaf}', ...) returned {boost} != 0.0 "
+            f"for query {query!r}. Stop-word leaves must not be boosted."
+        )
+
+    def test_specific_method_name_still_boosted(self) -> None:
+        """Non-stop-word specific method names must still receive a boost."""
+        tokens = _query_symbol_tokens("Field deconstruct base class name path args kwargs migration")
+        boost = symbol_identity_boost("deconstruct", tokens)
+        assert boost > 0.0, (
+            f"Expected positive boost for 'deconstruct' but got {boost}. "
+            "The stop-word guard must NOT suppress specific method names."
+        )
+
+    def test_qualified_stop_word_still_boosted(self) -> None:
+        """A stop-word leaf IS boosted when it has a class prefix: 'Field.all' is specific."""
+        tokens = _query_symbol_tokens("Field all fields query")
+        boost = symbol_identity_boost("Field.all", tokens)
+        assert boost > 0.0, (
+            "Qualified 'Field.all' should still be boosted — the stop-word guard "
+            "applies only to bare unqualified single-word leaves."
+        )
+
+    @pytest.mark.parametrize("leaf", ["all", "get", "set", "run"])
+    def test_short_stop_word_bare_no_boost(self, leaf: str) -> None:
+        """Bare stop-word leaves must return 0.0 regardless of query."""
+        query = f"Field {leaf} value from database"
+        tokens = _query_symbol_tokens(query)
+        assert symbol_identity_boost(leaf, tokens) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# F4 — extract_class_from_content (UPG-11.1-fix)
+# ---------------------------------------------------------------------------
+
+class TestExtractClassFromContent:
+    """extract_class_from_content must recover the class name from the indexer prefix."""
+
+    def test_extracts_class_name(self) -> None:
+        content = "# class: Field\ndef deconstruct(self):\n    return name, path, args, kwargs\n"
+        assert extract_class_from_content(content) == "Field"
+
+    def test_extracts_class_name_with_spaces(self) -> None:
+        content = "#   class:   RemoveField  \ndef deconstruct(self):\n    pass\n"
+        assert extract_class_from_content(content) == "RemoveField"
+
+    def test_returns_empty_when_no_prefix(self) -> None:
+        content = "def deconstruct(self):\n    return name, path, args, kwargs\n"
+        assert extract_class_from_content(content) == ""
+
+    def test_handles_leading_comment_in_content(self) -> None:
+        # Leading comments before the class prefix line should not confuse extraction
+        content = "# some other comment\n# class: JSONField\ndef from_db_value(self, value, expression, connection):\n    pass\n"
+        assert extract_class_from_content(content) == "JSONField"
+
+    def test_qualified_boost_fires_after_extraction(self) -> None:
+        """End-to-end: bare leaf + class prefix content → qualified boost fires."""
+        # Simulate what the real indexer produces for a method chunk
+        content = "# class: Field\ndef deconstruct(self):\n    name, path, args, kwargs = ...\n"
+        class_ctx = extract_class_from_content(content)
+        bare_leaf = "deconstruct"
+        qualified = f"{class_ctx}.{bare_leaf}" if class_ctx else bare_leaf
+
+        tokens = _query_symbol_tokens("Field deconstruct base class name path args kwargs migration")
+        boost = symbol_identity_boost(qualified, tokens)
+        # Must get the QUALIFIED boost (+0.20), not just the leaf boost (+0.10)
+        from agent.chunk_quality import _SYM_QUALIFIED_BOOST
+        assert boost == _SYM_QUALIFIED_BOOST, (
+            f"Expected qualified boost {_SYM_QUALIFIED_BOOST} but got {boost}. "
+            "This confirms the F4 path is active."
+        )
