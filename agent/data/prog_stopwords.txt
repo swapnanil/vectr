@@ -1,0 +1,68 @@
+# Programming-aware stopword supplement for vectr symbol-boost guard.
+# Purpose: covers short common-programming words that the length guard (min_leaf_len=4)
+# would otherwise let through because they are exactly 2-3 chars but appear casually
+# in natural-language queries (e.g. "get", "set", "run", "add").
+# Also covers programming abbreviations/identifiers that are <= 3 chars and would
+# match accidentally (idx, len, str, int, id, db, ok, etc.).
+# One word per line. Comments (#) and blank lines are stripped by the loader.
+# Do NOT add words longer than 3 chars here — the length guard handles those;
+# this list exists specifically for the short words that slip through.
+get
+set
+run
+add
+new
+old
+put
+pop
+top
+end
+key
+map
+use
+log
+out
+try
+do
+for
+in
+on
+of
+to
+by
+is
+as
+at
+it
+or
+not
+has
+can
+may
+let
+via
+per
+fit
+hit
+cut
+bit
+sum
+min
+max
+raw
+tag
+ref
+val
+row
+col
+idx
+len
+num
+str
+int
+id
+ok
+no
+up
+go
+db

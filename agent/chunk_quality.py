@@ -19,6 +19,13 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 
+from agent.config import (
+    SYMBOL_QUALIFIED_BOOST as _SYM_QUALIFIED_BOOST,
+    SYMBOL_LEAF_BOOST as _SYM_LEAF_BOOST,
+    SYMBOL_STOP_WORDS as _SYM_STOP_WORDS,
+    SYMBOL_MIN_LEAF_LEN as _SYM_MIN_LEAF_LEN,
+)
+
 # A synthetic node_type stamped on re-export / import-only chunks so the ranker
 # can recognise them without re-parsing.
 NAVIGATIONAL_NODE_TYPE = "navigational"
@@ -276,29 +283,12 @@ def quality_score(
 # Symbol identity boost (UPG-11.1)
 # ---------------------------------------------------------------------------
 
-# Multipliers for the additive symbol-name bonus folded into rank scoring.
-# These are additive boosts on top of base × quality, so they are intentionally
-# small — large enough to flip a tie (or a near-tie where quality is equal)
-# without overriding a genuinely more-relevant candidate.
-_SYM_QUALIFIED_BOOST = 0.20   # query names BOTH the class and the leaf method
-_SYM_LEAF_BOOST = 0.10        # query names only the leaf method / symbol token
-
-# Common English words that coincidentally match short method names (UPG-11.5 / F6).
-# A bare single-word leaf in this set must NOT receive a boost just because the word
-# appears casually in a query like "list all migrations" (leaf "all" → +0.10 is wrong).
-_SYM_STOP_WORDS: frozenset[str] = frozenset({
-    "all", "any", "get", "set", "run", "add", "new", "old", "put", "pop",
-    "top", "end", "key", "map", "use", "log", "out", "try", "do", "for",
-    "in", "on", "of", "to", "by", "is", "as", "at", "it", "or", "not",
-    "has", "can", "may", "let", "via", "per", "fit", "hit", "cut", "bit",
-    "sum", "min", "max", "raw", "tag", "ref", "val", "row", "col", "idx",
-    "len", "num", "str", "int", "id", "ok", "no", "up", "go", "db",
-})
-
-# Minimum character length for a bare single-word leaf to receive a boost.
-# Two- and three-letter leaves (except specific compounds) are too likely to be
-# common English; four characters is a reasonable floor for specificity.
-_SYM_MIN_LEAF_LEN = 4
+# Symbol-boost tunables and stop-word set are loaded from agent/config.yaml via
+# agent/config.py (importlib.resources — works for both repo and installed binary).
+# The private aliases (_SYM_*) are kept so the rest of this module and the
+# existing test suite can still reference them without change.
+# _SYM_QUALIFIED_BOOST, _SYM_LEAF_BOOST, _SYM_STOP_WORDS, _SYM_MIN_LEAF_LEN
+# are all imported at the top of this file from agent.config.
 
 # Regex to detect a CLASS-prefix line injected by the indexer (UPG-F4).
 # The indexer prepends "# class: ClassName\n" to method chunks so the embedding

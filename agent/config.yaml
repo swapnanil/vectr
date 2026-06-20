@@ -1,0 +1,30 @@
+# vectr internal configuration — versioned in the repo.
+# All tunables that affect ranking behaviour live here so changes are auditable
+# via git history rather than buried in code.
+#
+# Do NOT set these via environment variables or per-user config files.
+# Runtime code reads this file via importlib.resources so it works for both
+# the repo-local interpreter and the pip-installed global binary.
+
+ranking:
+  symbol_boost:
+    # Additive score boost when BOTH the class prefix AND the leaf method name
+    # appear in the query tokens (e.g. query "Field deconstruct" matches
+    # the chunk for Field.deconstruct).
+    qualified_boost: 0.20
+
+    # Additive score boost when only the leaf method name appears in the query
+    # tokens (e.g. query "deconstruct migration" matches any *.deconstruct chunk).
+    leaf_boost: 0.10
+
+    # Bare single-word leaves shorter than this many characters receive NO boost,
+    # even if they appear in the query.  Two- and three-letter identifiers are
+    # too ambiguous (e.g. leaf "do", "in", "on" would falsely boost on prose).
+    # The prog_stopwords list catches the borderline 3-letter programming words.
+    min_leaf_len: 4
+
+    # Stopword data files (relative to the agent package, loaded via importlib).
+    # Both files are merged into a single frozenset at startup.
+    stopwords_files:
+      - data/english_stopwords.txt   # NLTK English corpus (vendored offline)
+      - data/prog_stopwords.txt      # short programming abbreviations supplement

@@ -1,0 +1,4 @@
+# Include bundled config and stopword data files in source distributions.
+# These are read at runtime via importlib.resources (agent/config.py).
+recursive-include agent *.yaml
+recursive-include agent/data *.txt
