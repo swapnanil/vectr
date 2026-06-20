@@ -845,6 +845,15 @@ def _sr(content, path="/p/a.py", node_type="", score=0.7, lang="python"):
     )
 
 
+def _sr_sym(symbol_name, content, path="/p/a.py", lang="python"):
+    """Create a SearchResult with an explicit symbol_name, for symbol-ranking tests."""
+    from agent.searcher import SearchResult
+    return SearchResult(
+        file_path=path, lines="1-9", symbol_name=symbol_name, language=lang,
+        score=0.7, content=content, node_type="function_definition",
+    )
+
+
 class TestRankingQuality:
     def test_duplicates_collapsed(self, searcher) -> None:
         cands = [
@@ -897,6 +906,144 @@ class TestRankingQuality:
 
     def test_empty_candidates(self, searcher) -> None:
         assert searcher._apply_quality_and_dedup("q", []) == []
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.1 — Symbol identity as a ranking signal (F1 / F1b)
+# ---------------------------------------------------------------------------
+
+class TestSymbolIdentityRanking:
+    """Symbol-name match must promote the canonical symbol above same-named decoys.
+
+    F1:  query "Field deconstruct ..." → Field.deconstruct must outrank RemoveField.deconstruct.
+    F1b: query "from_db_value ..." → Field.from_db_value must outrank Field.get_db_prep_value.
+
+    These tests construct candidates without a live index: the hybrid retriever
+    happens to rank the wrong symbol first (rank 0), and _apply_quality_and_dedup
+    must flip the order via the symbol-identity bonus.
+    """
+
+    # Minimal but realistic content for each candidate so quality_score stays at 1.0
+    # for all of them — only the symbol-name signal should differentiate them.
+    _FIELD_DECONSTRUCT = (
+        "def deconstruct(self):\n"
+        "    name, path, args, kwargs = super().deconstruct()\n"
+        "    return name, path, args, kwargs\n"
+        "    # Field base class implementation\n"
+    )
+    _REMOVEFIELD_DECONSTRUCT = (
+        "def deconstruct(self):\n"
+        "    return super().deconstruct()\n"
+        "    # RemoveField migration operation\n"
+        "    # used in migrations only\n"
+    )
+    _FIELD_FROM_DB_VALUE = (
+        "def from_db_value(self, value, expression, connection):\n"
+        "    return self.to_python(value)\n"
+        "    # called after database fetch\n"
+        "    # override in subclasses\n"
+    )
+    _FIELD_GET_DB_PREP_VALUE = (
+        "def get_db_prep_value(self, value, connection, prepared=False):\n"
+        "    return self.get_prep_value(value)\n"
+        "    # called before database write\n"
+        "    # sibling method on Field\n"
+    )
+
+    def test_F1_canonical_Field_deconstruct_outranks_RemoveField_deconstruct(
+        self, searcher
+    ) -> None:
+        """F1: RemoveField.deconstruct at rank 0 must drop below Field.deconstruct."""
+        # The decoy (RemoveField.deconstruct) is at rank 0 — hybrid retriever put it first.
+        # Canonical (Field.deconstruct) is at rank 1 — one slot below.
+        decoy = _sr_sym(
+            "RemoveField.deconstruct", self._REMOVEFIELD_DECONSTRUCT,
+            path="/p/django/db/migrations/operations/fields.py",
+        )
+        canonical = _sr_sym(
+            "Field.deconstruct", self._FIELD_DECONSTRUCT,
+            path="/p/django/db/models/fields/__init__.py",
+        )
+        filler = [
+            _sr_sym(f"OtherOp{i}.run", f"def run(self):\n    pass\n    # op {i}\n    x={i}",
+                    path=f"/p/ops{i}.py")
+            for i in range(4)
+        ]
+        # decoy first (rank 0), canonical second — wrong order going in
+        cands = [decoy, canonical] + filler
+        query = "Field deconstruct base class name path args kwargs migration"
+        out = searcher._apply_quality_and_dedup(query, cands)
+        canonical_idx = next(i for i, r in enumerate(out) if r.symbol_name == "Field.deconstruct")
+        decoy_idx = next(i for i, r in enumerate(out) if r.symbol_name == "RemoveField.deconstruct")
+        assert canonical_idx < decoy_idx, (
+            f"Expected Field.deconstruct (idx={canonical_idx}) to outrank "
+            f"RemoveField.deconstruct (idx={decoy_idx}) for query {query!r}"
+        )
+
+    def test_F1b_from_db_value_outranks_get_db_prep_value(
+        self, searcher
+    ) -> None:
+        """F1b: Field.get_db_prep_value at rank 0 must drop below Field.from_db_value."""
+        decoy = _sr_sym(
+            "Field.get_db_prep_value", self._FIELD_GET_DB_PREP_VALUE,
+            path="/p/django/db/models/fields/__init__.py",
+        )
+        canonical = _sr_sym(
+            "Field.from_db_value", self._FIELD_FROM_DB_VALUE,
+            path="/p/django/db/models/fields/__init__.py",
+        )
+        filler = [
+            _sr_sym(f"Field.helper{i}", f"def helper{i}(self):\n    return self.val\n    # {i}\n    x={i}",
+                    path="/p/django/db/models/fields/__init__.py")
+            for i in range(4)
+        ]
+        cands = [decoy, canonical] + filler
+        query = "from_db_value convert database value to python object on a model field"
+        out = searcher._apply_quality_and_dedup(query, cands)
+        canonical_idx = next(i for i, r in enumerate(out) if r.symbol_name == "Field.from_db_value")
+        decoy_idx = next(i for i, r in enumerate(out) if r.symbol_name == "Field.get_db_prep_value")
+        assert canonical_idx < decoy_idx, (
+            f"Expected Field.from_db_value (idx={canonical_idx}) to outrank "
+            f"Field.get_db_prep_value (idx={decoy_idx}) for query {query!r}"
+        )
+
+    def test_symbol_boost_does_not_affect_no_symbol_queries(
+        self, searcher
+    ) -> None:
+        """A generic prose query must not be disrupted by the symbol-name boost."""
+        cands = [
+            _sr_sym("Widget.render", "def render(self):\n    self.paint()\n    # draw\n    x=1",
+                    path="/p/widget.py"),
+            _sr_sym("Widget.update", "def update(self):\n    self.refresh()\n    # live\n    x=1",
+                    path="/p/widget.py"),
+        ]
+        query = "how does widget rendering work in the UI framework"
+        # Must not crash, and the result count must be preserved.
+        out = searcher._apply_quality_and_dedup(query, cands)
+        assert len(out) == 2
+
+    def test_exact_leaf_match_beats_partial_match(self, searcher) -> None:
+        """When query names only the leaf method, exact leaf match wins."""
+        # query: "deconstruct method"
+        # both candidates have "deconstruct" as leaf — but Field.deconstruct
+        # is canonical (rank 1) and RemoveField.deconstruct is rank 0.
+        # Since both have the same leaf match, the original rank should hold
+        # when the class name in the query is absent, i.e. no extra advantage.
+        # This test ensures the boost doesn't break stable ranking for equal matches.
+        decoy = _sr_sym(
+            "RemoveField.deconstruct", self._REMOVEFIELD_DECONSTRUCT,
+            path="/p/ops.py",
+        )
+        canonical = _sr_sym(
+            "Field.deconstruct", self._FIELD_DECONSTRUCT,
+            path="/p/fields.py",
+        )
+        # leaf-only query — no class hint
+        query = "deconstruct method"
+        cands = [decoy, canonical]
+        out = searcher._apply_quality_and_dedup(query, cands)
+        # With same leaf boost both receive equal boost — original rank wins
+        assert out[0].symbol_name == "RemoveField.deconstruct"
 
 
 class TestChunkerHygiene:

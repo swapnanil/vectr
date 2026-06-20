@@ -273,6 +273,135 @@ def quality_score(
 
 
 # ---------------------------------------------------------------------------
+# Symbol identity boost (UPG-11.1)
+# ---------------------------------------------------------------------------
+
+# Multipliers for the additive symbol-name bonus folded into rank scoring.
+# These are additive boosts on top of base × quality, so they are intentionally
+# small — large enough to flip a tie (or a near-tie where quality is equal)
+# without overriding a genuinely more-relevant candidate.
+_SYM_QUALIFIED_BOOST = 0.20   # query names BOTH the class and the leaf method
+_SYM_LEAF_BOOST = 0.10        # query names only the leaf method / symbol token
+
+
+def _query_symbol_tokens(query: str) -> set[str]:
+    """Extract identifier-like tokens from the query (lowercased).
+
+    Splits on non-alphanumeric boundaries AND camelCase so that a query like
+    "Field deconstruct" yields {"field", "deconstruct"} and a query like
+    "from_db_value convert ..." yields {"from", "db", "value", "from_db_value"}.
+    The full snake_case identifier is also kept so exact leaf matches work even
+    when the name contains underscores.
+    """
+    # Keep whole snake_case tokens as-is (for leaf matching)
+    raw_tokens = re.split(r"[^a-zA-Z0-9_]+", query)
+    tokens: set[str] = set()
+    for tok in raw_tokens:
+        if len(tok) < 2:
+            continue
+        tokens.add(tok.lower())
+        # Also split on underscores and camelCase sub-words
+        sub = re.split(r"_+", tok)
+        for part in sub:
+            if len(part) >= 2:
+                tokens.add(part.lower())
+        # camelCase split
+        expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", tok)
+        for part in expanded.split():
+            if len(part) >= 2:
+                tokens.add(part.lower())
+    return tokens
+
+
+def symbol_identity_boost(symbol_name: str, query_tokens: set[str]) -> float:
+    """Return an additive ranking boost when the symbol name matches the query intent.
+
+    A *qualified match* (both class and leaf parts appear in the query tokens)
+    earns a higher boost than a *leaf-only match* (only the final component
+    appears).  No match → zero boost.  This is a general signal — it rewards
+    whichever candidate's symbol name best aligns with the query vocabulary,
+    without hard-coding any language or codebase specifics.
+
+    **Matching strategy** (to avoid rewarding accidental sub-token overlap):
+
+    1. *Exact leaf match*: the full leaf identifier (e.g. ``from_db_value``,
+       ``deconstruct``) appears verbatim in ``query_tokens``.  This is the
+       primary signal — the user explicitly named the method.
+    2. *Sub-word leaf match*: when the leaf is a single word (no underscores /
+       camelCase parts), every meaningful sub-token of it must appear together.
+       We do NOT boost on partial sub-word overlaps for compound names because
+       common sub-words (``value``, ``db``, ``get``) pollute too many symbols.
+    3. *Qualified boost*: if a leaf match is found AND at least one prefix part
+       also appears in the query tokens (exact or as a single sub-word), the
+       boost is upgraded from ``_SYM_LEAF_BOOST`` to ``_SYM_QUALIFIED_BOOST``.
+
+    Args:
+        symbol_name: The chunk's symbol name (e.g. "Field.deconstruct",
+                     "RemoveField.deconstruct", or a bare "deconstruct").
+        query_tokens: The lowercased identifier tokens extracted from the query
+                      via ``_query_symbol_tokens``.
+    """
+    if not symbol_name or not query_tokens:
+        return 0.0
+
+    # Split on dots / :: (Python, C++, Ruby qualified names).
+    # Preserve original casing for camelCase splitting; lowercase at use sites.
+    parts = re.split(r"[.:]+", symbol_name)
+    # Leaf = last component (original case for camelCase split); prefix = rest.
+    leaf_orig = parts[-1]
+    leaf = leaf_orig.lower()
+    prefix_orig_parts = parts[:-1]
+
+    # --- Leaf match ---
+    # Primary: exact full identifier (lowercased) is in query tokens.
+    exact_leaf_hit = leaf in query_tokens
+
+    if not exact_leaf_hit:
+        # Fallback for simple single-word leaves: all camelCase / snake sub-words
+        # present in query.  This handles queries like "deconstruct" where the leaf
+        # is a plain word (no compound parts) and also appears as-is in tokens.
+        # For compound names like get_db_prep_value we require the full identifier,
+        # NOT just any sub-word overlap (too noisy).
+        leaf_sub: set[str] = set()
+        leaf_sub.update(t.lower() for t in re.split(r"_+", leaf_orig) if len(t) >= 2)
+        expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", leaf_orig)
+        leaf_sub.update(t.lower() for t in expanded.split() if len(t) >= 2)
+        # Only trust sub-word split when the leaf itself has no compound parts
+        # (i.e. single-word identifiers).  For compound leaves require exact.
+        is_compound = "_" in leaf or (leaf_orig != leaf_orig.lower() and "_" not in leaf_orig)
+        if is_compound:
+            # compound identifier — require exact match only
+            return 0.0
+        # simple single-word leaf: check if it appears as a whole word in query
+        if not leaf_sub.issubset(query_tokens):
+            return 0.0
+
+    # --- Qualified match: does any prefix part also appear in the query? ---
+    prefix_hit = False
+    for p in prefix_orig_parts:
+        p_lower = p.lower()
+        if p_lower in query_tokens:
+            prefix_hit = True
+            break
+        # Single-word camelCase class names: split "RemoveField" → "remove", "field"
+        expanded_p = re.sub(r"([a-z])([A-Z])", r"\1 \2", p)
+        sub_p = {t.lower() for t in expanded_p.split() if len(t) >= 2}
+        # Only count as a prefix hit when the EXACT class name or its
+        # sub-words appear in the query — but avoid false positives from
+        # coincidental shared sub-words (e.g. "field" in a long prose query).
+        # Require that the whole class identifier appears, OR that ALL its
+        # sub-words appear together.
+        if p_lower in query_tokens or sub_p.issubset(query_tokens):
+            prefix_hit = True
+            break
+
+    if prefix_orig_parts and prefix_hit:
+        return _SYM_QUALIFIED_BOOST
+
+    return _SYM_LEAF_BOOST
+
+
+# ---------------------------------------------------------------------------
 # Dedup (UPG-2.2)
 # ---------------------------------------------------------------------------
 

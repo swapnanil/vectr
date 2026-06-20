@@ -9,7 +9,13 @@ from pathlib import Path
 
 from rank_bm25 import BM25Plus
 
-from agent.chunk_quality import normalized_content, quality_score, query_wants_tests
+from agent.chunk_quality import (
+    normalized_content,
+    quality_score,
+    query_wants_tests,
+    symbol_identity_boost,
+    _query_symbol_tokens,
+)
 from agent.indexer import CodeIndexer
 
 
@@ -252,6 +258,8 @@ class CodeSearcher:
         if not candidates:
             return candidates
         targets_tests = query_wants_tests(query)
+        # Precompute query tokens once for symbol-identity scoring (UPG-11.1).
+        sym_tokens = _query_symbol_tokens(query)
         n = len(candidates)
         scored: list[tuple[float, float, int, SearchResult]] = []
         for i, r in enumerate(candidates):
@@ -260,7 +268,10 @@ class CodeSearcher:
                 r.content, r.file_path, r.language, r.node_type,
                 query_targets_tests=targets_tests,
             )
-            scored.append((base * q, q, i, r))
+            # Symbol-identity bonus: additive boost when the candidate's symbol
+            # name matches the query's symbol intent (UPG-11.1).
+            sym_boost = symbol_identity_boost(r.symbol_name, sym_tokens)
+            scored.append((base * q + sym_boost, q, i, r))
 
         # Deterministic order: final score desc, quality desc, length desc, then
         # original rank, then path — so equal-scoring boilerplate never wins by
