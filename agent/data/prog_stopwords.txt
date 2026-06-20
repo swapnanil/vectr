@@ -5,8 +5,16 @@
 # Also covers programming abbreviations/identifiers that are <= 3 chars and would
 # match accidentally (idx, len, str, int, id, db, ok, etc.).
 # One word per line. Comments (#) and blank lines are stripped by the loader.
-# Do NOT add words longer than 3 chars here — the length guard handles those;
+# Do NOT add words longer than 3 chars here (3-char section) — the length guard handles those;
 # this list exists specifically for the short words that slip through.
+#
+# UPG-11.8: 4-letter common English words that also appear as method/function names.
+# These cause false +0.10 boosts when they appear as prose verbs in a query
+# (e.g. "read lines from a text file" spuriously boosts any symbol leaf="read").
+# Safety: prog_stopwords.txt feeds ONLY the symbol_identity_boost guard (chunk_quality.py)
+# and forced-inclusion token guard (searcher.py) — NOT BM25 tokenisation or embedding.
+# Verified: grep SYMBOL_STOP_WORDS agent/searcher.py agent/chunk_quality.py confirms
+# there are only 2 call sites, both in ranking/inclusion guards.
 get
 set
 run
@@ -66,3 +74,49 @@ no
 up
 go
 db
+# UPG-11.8: 4-letter common English words / generic programming method names
+# that appear as prose verbs in natural-language queries.
+read
+join
+call
+send
+hash
+open
+eval
+exec
+iter
+next
+sort
+copy
+load
+dump
+emit
+bind
+wait
+recv
+poll
+seek
+tell
+peek
+skip
+scan
+wrap
+swap
+pack
+push
+pull
+post
+show
+hide
+mark
+test
+draw
+list
+find
+save
+free
+stop
+move
+size
+flip
+init
