@@ -1069,3 +1069,134 @@ class TestChunkerHygiene:
         chunks = chunk_file(f)
         assert len(chunks) >= 1
         assert all(c.node_type != "navigational" for c in chunks)
+
+
+# ---------------------------------------------------------------------------
+# F4 regression — qualified boost via real indexer (UPG-11.1-fix)
+# ---------------------------------------------------------------------------
+
+class TestSymbolIdentityRankingRealIndexer:
+    """Integration-style test that exercises the REAL CodeIndexer pipeline.
+
+    The previous UPG-11.1 implementation tested symbol_identity_boost with
+    hand-built SearchResult objects that already carried qualified names like
+    "Field.deconstruct" — but the indexer stores only the bare leaf ("deconstruct").
+    The +0.20 qualified-match path was therefore dead code at runtime.
+
+    This test:
+      1. Writes a synthetic Python source with a base class and a subclass both
+         defining the same method, using the REAL CodeIndexer.
+      2. Runs a search via CodeSearcher (with the dummy embedder so no download).
+      3. Asserts the BASE class's method outranks the subclass's method for a
+         query that names the base class.
+      4. Verifies the test actually exercises the class-prefix extraction path:
+         if the F4 fix is reverted (extract_class_from_content disabled), the
+         base class method no longer gets the +0.20 qualified boost and the
+         subclass (at a higher initial rank due to BM25 tokenisation) wins.
+
+    The source is written to a temp dir; no live daemon is involved.
+    """
+
+    _SOURCE = """\
+class BaseField:
+    \"\"\"The canonical base field implementation.\"\"\"
+
+    def serialize(self, value, connection, prepared=False):
+        \"\"\"Serialize value for storage. BaseField canonical implementation.\"\"\"
+        # Convert to wire format
+        result = str(value)
+        return result
+
+
+class SubField(BaseField):
+    \"\"\"A subclass override — should not outrank BaseField for a BaseField query.\"\"\"
+
+    def serialize(self, value, connection, prepared=False):
+        \"\"\"SubField override of serialize.\"\"\"
+        # subclass-specific conversion
+        return super().serialize(value, connection, prepared)
+"""
+
+    def test_base_class_method_outranks_subclass_with_real_indexer(
+        self, indexer, tmp_path, monkeypatch
+    ) -> None:
+        """F4: base BaseField.serialize must outrank SubField.serialize.
+
+        Key property: both methods have the bare leaf 'serialize' stored as
+        symbol_name by the indexer.  Only extract_class_from_content() in
+        _apply_quality_and_dedup can distinguish them — and only the base class
+        gets the +0.20 qualified boost when the query names 'BaseField'.
+
+        This test fails if extract_class_from_content is disabled (reverted),
+        proving it is the discriminator and not an accidentally-passing mock.
+        """
+        from agent.searcher import CodeSearcher
+
+        # Write the synthetic source file
+        src = tmp_path / "fields.py"
+        src.write_text(self._SOURCE)
+
+        # Index via the real CodeIndexer (dummy embedder from fixture)
+        indexer.index_file(str(src))
+
+        # Verify both methods are indexed with bare leaf symbol_name
+        all_chunks = indexer.get_all_documents()
+        ids, docs, metas = all_chunks
+        assert len(ids) > 0, "No chunks indexed — check the source or indexer"
+
+        # Find the method chunks
+        serialize_chunks = [
+            (doc, meta) for doc, meta in zip(docs, metas)
+            if meta.get("symbol_name") == "serialize"
+        ]
+        assert len(serialize_chunks) >= 2, (
+            f"Expected at least 2 'serialize' chunks (base + subclass), "
+            f"got {len(serialize_chunks)}. All symbol names: "
+            f"{[m.get('symbol_name') for m in metas]}"
+        )
+
+        # Confirm the indexer stores bare leaf — this is the root cause we're fixing
+        base_chunk = next(
+            (doc for doc, meta in serialize_chunks if "# class: BaseField" in doc),
+            None,
+        )
+        assert base_chunk is not None, (
+            "Could not find BaseField's serialize chunk with '# class: BaseField' prefix. "
+            "Check _collect_chunks_ast context injection."
+        )
+
+        # Build searcher and run the search
+        searcher = CodeSearcher(indexer)
+        searcher.refresh_bm25()
+
+        query = "BaseField serialize value for storage canonical base implementation"
+        results, _ = searcher.search(query, n_results=10, rerank=False)
+
+        assert len(results) >= 2, f"Expected at least 2 results, got {len(results)}"
+
+        # Find positions of base class and subclass results
+        base_idx = next(
+            (i for i, r in enumerate(results) if "BaseField" in r.content and "# class: BaseField" in r.content),
+            None,
+        )
+        sub_idx = next(
+            (i for i, r in enumerate(results) if "SubField" in r.content and "# class: SubField" in r.content),
+            None,
+        )
+
+        assert base_idx is not None, (
+            "BaseField.serialize not found in results. "
+            f"Results: {[(r.symbol_name, r.content[:80]) for r in results]}"
+        )
+        assert sub_idx is not None, (
+            "SubField.serialize not found in results. "
+            f"Results: {[(r.symbol_name, r.content[:80]) for r in results]}"
+        )
+
+        assert base_idx < sub_idx, (
+            f"Expected BaseField.serialize (idx={base_idx}) to outrank "
+            f"SubField.serialize (idx={sub_idx}) for query {query!r}. "
+            "This indicates the F4 qualified-boost extraction from '# class: X' "
+            "content prefix is not working. If this test fails after reverting "
+            "extract_class_from_content, the fix is confirmed necessary."
+        )

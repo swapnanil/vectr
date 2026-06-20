@@ -14,6 +14,7 @@ from agent.chunk_quality import (
     quality_score,
     query_wants_tests,
     symbol_identity_boost,
+    extract_class_from_content,
     _query_symbol_tokens,
 )
 from agent.indexer import CodeIndexer
@@ -270,7 +271,20 @@ class CodeSearcher:
             )
             # Symbol-identity bonus: additive boost when the candidate's symbol
             # name matches the query's symbol intent (UPG-11.1).
-            sym_boost = symbol_identity_boost(r.symbol_name, sym_tokens)
+            #
+            # F4 (UPG-11.1-fix): the indexer stores symbol_name as the bare leaf
+            # (e.g. "deconstruct"), never "Class.leaf".  The qualified-match path
+            # (+0.20) was therefore dead code.  Fix: when the stored symbol_name
+            # has no dot/colon qualifier, extract the class name from the indexer-
+            # injected "# class: X" prefix in the chunk content and pass the
+            # reconstructed "X.leaf" form to symbol_identity_boost.  This works
+            # for already-indexed corpora with no reindex required.
+            effective_symbol = r.symbol_name
+            if effective_symbol and "." not in effective_symbol and "::" not in effective_symbol:
+                class_ctx = extract_class_from_content(r.content)
+                if class_ctx:
+                    effective_symbol = f"{class_ctx}.{effective_symbol}"
+            sym_boost = symbol_identity_boost(effective_symbol, sym_tokens)
             scored.append((base * q + sym_boost, q, i, r))
 
         # Deterministic order: final score desc, quality desc, length desc, then

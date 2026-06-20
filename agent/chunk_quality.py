@@ -283,6 +283,29 @@ def quality_score(
 _SYM_QUALIFIED_BOOST = 0.20   # query names BOTH the class and the leaf method
 _SYM_LEAF_BOOST = 0.10        # query names only the leaf method / symbol token
 
+# Common English words that coincidentally match short method names (UPG-11.5 / F6).
+# A bare single-word leaf in this set must NOT receive a boost just because the word
+# appears casually in a query like "list all migrations" (leaf "all" → +0.10 is wrong).
+_SYM_STOP_WORDS: frozenset[str] = frozenset({
+    "all", "any", "get", "set", "run", "add", "new", "old", "put", "pop",
+    "top", "end", "key", "map", "use", "log", "out", "try", "do", "for",
+    "in", "on", "of", "to", "by", "is", "as", "at", "it", "or", "not",
+    "has", "can", "may", "let", "via", "per", "fit", "hit", "cut", "bit",
+    "sum", "min", "max", "raw", "tag", "ref", "val", "row", "col", "idx",
+    "len", "num", "str", "int", "id", "ok", "no", "up", "go", "db",
+})
+
+# Minimum character length for a bare single-word leaf to receive a boost.
+# Two- and three-letter leaves (except specific compounds) are too likely to be
+# common English; four characters is a reasonable floor for specificity.
+_SYM_MIN_LEAF_LEN = 4
+
+# Regex to detect a CLASS-prefix line injected by the indexer (UPG-F4).
+# The indexer prepends "# class: ClassName\n" to method chunks so the embedding
+# has class context.  We extract this at query time to reconstruct the qualified
+# name when symbol_name is a bare leaf.
+_CLASS_PREFIX_RE = re.compile(r"^#\s*class:\s*(\w+)", re.MULTILINE)
+
 
 def _query_symbol_tokens(query: str) -> set[str]:
     """Extract identifier-like tokens from the query (lowercased).
@@ -313,6 +336,21 @@ def _query_symbol_tokens(query: str) -> set[str]:
     return tokens
 
 
+def extract_class_from_content(content: str) -> str:
+    """Extract the class name from an indexer-injected '# class: X' prefix line.
+
+    The indexer prepends ``# class: ClassName`` to method chunks so they are
+    self-contained for the embedder (indexer.py _collect_chunks_ast).  This
+    function recovers that class name at query time so we can reconstruct the
+    qualified ``ClassName.leaf`` form when ``symbol_name`` was stored as a bare
+    leaf (UPG-F4).
+
+    Returns the class name string, or ``""`` if no prefix is found.
+    """
+    m = _CLASS_PREFIX_RE.search(content)
+    return m.group(1) if m else ""
+
+
 def symbol_identity_boost(symbol_name: str, query_tokens: set[str]) -> float:
     """Return an additive ranking boost when the symbol name matches the query intent.
 
@@ -334,10 +372,17 @@ def symbol_identity_boost(symbol_name: str, query_tokens: set[str]) -> float:
     3. *Qualified boost*: if a leaf match is found AND at least one prefix part
        also appears in the query tokens (exact or as a single sub-word), the
        boost is upgraded from ``_SYM_LEAF_BOOST`` to ``_SYM_QUALIFIED_BOOST``.
+    4. *Stop-word guard* (F6): a bare single-word leaf that is a common English
+       word (in ``_SYM_STOP_WORDS``) or is very short (< ``_SYM_MIN_LEAF_LEN``
+       chars) receives NO boost, even if it appears in the query, because such
+       words appear casually in prose and the overlap is accidental.
 
     Args:
-        symbol_name: The chunk's symbol name (e.g. "Field.deconstruct",
-                     "RemoveField.deconstruct", or a bare "deconstruct").
+        symbol_name: The chunk's symbol name.  May be a qualified name already
+                     (e.g. ``"Field.deconstruct"``, ``"RemoveField.deconstruct"``)
+                     or a bare leaf stored by the indexer (e.g. ``"deconstruct"``).
+                     If the caller has already reconstructed a qualified form
+                     (via ``extract_class_from_content``), pass that in.
         query_tokens: The lowercased identifier tokens extracted from the query
                       via ``_query_symbol_tokens``.
     """
@@ -351,6 +396,15 @@ def symbol_identity_boost(symbol_name: str, query_tokens: set[str]) -> float:
     leaf_orig = parts[-1]
     leaf = leaf_orig.lower()
     prefix_orig_parts = parts[:-1]
+
+    # --- Stop-word / length guard (F6) ---
+    # Only applied when there is NO class prefix in the symbol_name — a qualified
+    # name like "Field.all" is specific enough that the class context disambiguates.
+    if not prefix_orig_parts:
+        if leaf in _SYM_STOP_WORDS:
+            return 0.0
+        if len(leaf) < _SYM_MIN_LEAF_LEN:
+            return 0.0
 
     # --- Leaf match ---
     # Primary: exact full identifier (lowercased) is in query tokens.
