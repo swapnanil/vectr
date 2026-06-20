@@ -17,6 +17,10 @@ from agent.chunk_quality import (
     extract_class_from_content,
     _query_symbol_tokens,
 )
+from agent.config import (
+    SYMBOL_STOP_WORDS as _SYM_STOP_WORDS_VAL,
+    SYMBOL_MIN_LEAF_LEN as _SYM_MIN_LEAF_LEN_VAL,
+)
 from agent.indexer import CodeIndexer
 
 
@@ -67,6 +71,25 @@ _RERANK_TOP_K = 40  # rerank this many hybrid candidates before trimming to n_re
 # fetched). Fetch a deeper pool in that case so the quality prior has code to surface.
 _RERANK_TOP_K_UNFILTERED = 60
 
+# UPG-11.7: forced-inclusion safety cap — when a query has a clear symbol-name intent,
+# ALL chunks whose symbol_name leaf exactly matches a guarded query token are unioned
+# into the candidate pool so the rerank + UPG-11.1 quality prior can place the right
+# one at the top.  _FORCED_INCLUSION_MAX is a safety cap against pathological corpora
+# where a common method name appears in thousands of files; real codebases typically
+# have ≤100 chunks for any single method name.  Set high enough that all same-named
+# methods in a typical codebase are included (Django has 81 "deconstruct" chunks).
+_FORCED_INCLUSION_MAX = 200
+
+# UPG-11.7: forced-inclusion token guard — stricter than the UPG-11.1 ranking-boost
+# guard (min_leaf_len=4) because forced-inclusion directly adds chunks to the pool.
+# We only trigger on tokens that look like explicit symbol names in the query:
+# - Compound identifiers (containing "_"): from_db_value, get_queryset, etc.
+# - Long identifiers (≥ this many chars): deconstruct (11), migration (9), etc.
+# Short common prose words like "name", "path", "args", "kwargs", "field", "class"
+# (≤6 chars, no underscore) do NOT trigger forced-inclusion even if they appear in
+# the query, to avoid the N-churn problem where common property names flood the pool.
+_FORCED_INCLUSION_MIN_IDENTIFIER_LEN = 7
+
 
 class _Reranker:
     """Lazy-loads a cross-encoder; gracefully disabled if model unavailable."""
@@ -116,6 +139,7 @@ class SearchResult:
     content: str
     node_type: str = ""
     dup_count: int = 0   # number of identical chunks collapsed into this one (UPG-2.2)
+    forced_inclusion: bool = False  # UPG-11.7: chunk was forced into pool by symbol-name match
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +235,92 @@ class CodeSearcher:
             merged[cid] = semantic_weight * v + (1.0 - semantic_weight) * b
 
         sorted_ids = sorted(merged, key=lambda x: merged[x], reverse=True)[:fetch_n]
+        forced_cids: set[str] = set()  # UPG-11.7: chunks added by forced-inclusion
+
+        # --- UPG-11.7: Forced-inclusion of exact symbol-name matches ---
+        # When the query names a specific symbol (e.g. "Field deconstruct …" or
+        # "from_db_value …"), the canonical base-class definition may have a long
+        # docstring that dilutes both embedding similarity AND BM25 keyword density,
+        # causing it to fall outside the top-fetch_n slice.  The UPG-11.1 ranking
+        # boost is applied POST-retrieval and cannot rescue a chunk that never entered
+        # the pool.  Solution: union ALL chunks whose stored symbol_name leaf exactly
+        # matches a guarded query token into sorted_ids BEFORE the candidate list is
+        # built, so the reranker + quality prior can place the right one at the top.
+        #
+        # Guard: stricter than UPG-11.1 (which guards ranking boost at min_leaf_len=4).
+        # Forced-inclusion directly adds chunks to the pool, so we require tokens to
+        # look like explicit identifier references — either compound (containing "_",
+        # e.g. from_db_value) or long enough to be specific (≥ _FORCED_INCLUSION_MIN_IDENTIFIER_LEN).
+        # Short prose words like "name", "path", "args", "field" (≤6 chars, no underscore)
+        # are excluded so common Python attribute names don't flood the candidate pool
+        # and overpower real results via the UPG-11.1 sym_boost they'd inherit.
+        # Additionally: case-SENSITIVE leaf match avoids matching class names like
+        # "Migration" against the lowercase token "migration" from the query prose.
+        # Safety cap: _FORCED_INCLUSION_MAX total additional chunks prevents flooding
+        # on pathological corpora where a common method name appears in thousands of
+        # files (a real-world codebase typically has ≤100 same-named methods).
+        if self._bm25 is not None:
+            sym_tokens_for_inclusion = {
+                tok for tok in _query_symbol_tokens(query)
+                if (
+                    "_" in tok  # compound identifier: from_db_value, get_queryset …
+                    or len(tok) >= _FORCED_INCLUSION_MIN_IDENTIFIER_LEN  # long specific word
+                )
+                and tok not in _SYM_STOP_WORDS_VAL
+            }
+            if sym_tokens_for_inclusion:
+                sorted_set = set(sorted_ids)
+                # Compute FULL query symbol tokens once for the qualified boost check
+                # (we need ALL query tokens so the class-name prefix can match, e.g.
+                # "field" from "Field deconstruct …" to qualify Field.deconstruct).
+                all_query_sym_tokens = _query_symbol_tokens(query)
+                # Collect forced candidates with their pre-computed symbol-identity
+                # score (UPG-11.1 qualified vs leaf boost) so they enter sorted_ids
+                # in a meaningful order: qualified matches (Class.method where class
+                # appears in query, e.g. Field.deconstruct for "Field deconstruct …")
+                # get a higher pseudo-score than plain leaf matches, and therefore get
+                # a better rank-based-relevance in _apply_quality_and_dedup.
+                forced_candidates: list[tuple[float, str]] = []
+                for idx, meta in enumerate(self._bm25_metas):
+                    if len(forced_candidates) >= _FORCED_INCLUSION_MAX:
+                        break
+                    cid = self._bm25_ids[idx]
+                    if cid in sorted_set:
+                        continue
+                    # Apply language filter if set (same as the BM25 scoring path).
+                    if language and meta.get("language") != language:
+                        continue
+                    sym = meta.get("symbol_name", "") or ""
+                    # Case-SENSITIVE bare leaf comparison: "deconstruct" matches
+                    # stored "deconstruct" but NOT "Migration" for token "migration".
+                    leaf = sym.split(".")[-1].split("::")[-1]
+                    if not leaf or leaf not in sym_tokens_for_inclusion:
+                        continue
+                    # Pre-compute the UPG-11.1 qualified symbol boost against ALL
+                    # query tokens (not just the stricter inclusion tokens) so the
+                    # class-name prefix can participate: "field" is a query token
+                    # that qualifies "Field.deconstruct" even though "field" alone
+                    # doesn't trigger forced-inclusion.
+                    doc = self._bm25_docs[idx]
+                    eff_sym = sym
+                    if eff_sym and "." not in eff_sym and "::" not in eff_sym:
+                        class_ctx = extract_class_from_content(doc)
+                        if class_ctx:
+                            eff_sym = f"{class_ctx}.{eff_sym}"
+                    pseudo_score = symbol_identity_boost(eff_sym, all_query_sym_tokens)
+                    forced_candidates.append((pseudo_score, cid))
+
+                # Sort forced candidates by sym-boost score descending so qualified
+                # matches (Field.deconstruct with +0.20) precede leaf-only matches
+                # (CharField.deconstruct with +0.10).  Within equal scores the
+                # original scan order (stable sort) is preserved.
+                forced_candidates.sort(key=lambda t: t[0], reverse=True)
+                for pseudo_score, cid in forced_candidates:
+                    if cid not in sorted_set:  # safety: shouldn't happen but guard
+                        merged[cid] = pseudo_score
+                        sorted_ids.append(cid)
+                        sorted_set.add(cid)
+                        forced_cids.add(cid)
 
         # Build result objects
         id_to_doc: dict[str, str] = dict(zip(vec_ids, vec_docs))
@@ -232,12 +342,28 @@ class CodeSearcher:
                 score=round(merged[cid], 4),
                 content=doc[:2000],
                 node_type=meta.get("node_type", ""),
+                forced_inclusion=cid in forced_cids,
             ))
 
         # --- Cross-encoder rerank ---
+        # UPG-11.7: separate forced-inclusion candidates so the cross-encoder
+        # does not bury them.  Forced chunks often have long docstrings that
+        # dilute cross-encoder similarity despite being the canonical definition.
+        # We cross-encode only the naturally-retrieved pool; forced chunks are
+        # inserted BEFORE the cross-encoded results so _apply_quality_and_dedup
+        # sees them at early rank positions where the +0.20 qualified sym_boost
+        # can lift them above overrides (which get +0.10).
         if rerank and self._reranker and len(candidates) > 1:
-            doc_candidate_pairs = [(r.content, r) for r in candidates]
-            candidates = self._reranker.rerank(query, doc_candidate_pairs)
+            forced_results = [r for r in candidates if r.forced_inclusion]
+            regular_results = [r for r in candidates if not r.forced_inclusion]
+            if regular_results:
+                doc_candidate_pairs = [(r.content, r) for r in regular_results]
+                regular_results = self._reranker.rerank(query, doc_candidate_pairs)
+            # Prepend forced results so they get high rank-based relevance in
+            # _apply_quality_and_dedup. The sym_boost will further separate
+            # qualified forced matches (Field.deconstruct, +0.20) from leaf-only
+            # forced matches (CharField.deconstruct, +0.10).
+            candidates = forced_results + regular_results
 
         # --- Quality prior + dedup + deterministic tiebreaker (UPG-2.1/2.2/2.3) ---
         candidates = self._apply_quality_and_dedup(query, candidates)
