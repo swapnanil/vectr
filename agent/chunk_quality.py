@@ -24,6 +24,14 @@ from agent.config import (
     SYMBOL_LEAF_BOOST as _SYM_LEAF_BOOST,
     SYMBOL_STOP_WORDS as _SYM_STOP_WORDS,
     SYMBOL_MIN_LEAF_LEN as _SYM_MIN_LEAF_LEN,
+    QUALITY_TRIVIAL as _Q_TRIVIAL,
+    QUALITY_NAVIGATIONAL as _Q_NAVIGATIONAL,
+    QUALITY_HEADING_ONLY as _Q_HEADING_ONLY,
+    QUALITY_GENERATED as _Q_GENERATED,
+    QUALITY_VECTR_CONFIG as _Q_VECTR_CONFIG,
+    QUALITY_TEST_DEPRIORITISED as _Q_TEST_DEPRIORITISED,
+    QUALITY_DOC_PROSE as _Q_DOC_PROSE,
+    QUALITY_SHORT_PENALTY as _Q_SHORT_PENALTY,
 )
 
 # A synthetic node_type stamped on re-export / import-only chunks so the ranker
@@ -231,15 +239,10 @@ def is_doc_language(language: str) -> bool:
     return (language or "").lower() in _DOC_LANGUAGES
 
 
-# Multipliers applied to the hybrid similarity score. 1.0 = neutral.
-_Q_TRIVIAL = 0.15
-_Q_NAVIGATIONAL = 0.35
-_Q_HEADING_ONLY = 0.40
-_Q_GENERATED = 0.45
-_Q_VECTR_CONFIG = 0.10
-_Q_TEST_DEPRIORITISED = 0.55
-_Q_DOC_PROSE = 0.70       # substantive documentation prose vs implementation code
-_Q_SHORT_PENALTY = 0.80   # bodies with very few meaningful lines
+# Multipliers applied to the hybrid similarity score — sourced from
+# agent/config.yaml (ranking.quality_priors) via agent/config.py.
+# The _Q_* aliases are imported at the top of this file so all call sites
+# inside this module continue to work without change (UPG-12.1).
 
 
 def quality_score(

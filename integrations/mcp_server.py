@@ -4,6 +4,11 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from agent.config import (
+    BEHAVIOR_REMEMBER_NUDGE_THRESHOLD as _REMEMBER_NUDGE_THRESHOLD,
+    BEHAVIOR_REMEMBER_NUDGE_COOLDOWN as _REMEMBER_NUDGE_COOLDOWN,
+)
+
 MCP_SERVER_INFO = {
     "name": "vectr",
     "version": "2.0.0",
@@ -37,8 +42,9 @@ _memory_enabled_sessions: set[str] = set()
 # status, recall, map, or remember responses — because those are the moments
 # when the agent has just found something worth saving.
 # ---------------------------------------------------------------------------
-_REMEMBER_NUDGE_THRESHOLD = 10
-_REMEMBER_NUDGE_COOLDOWN = 5
+# UPG-12.1: _REMEMBER_NUDGE_THRESHOLD / _REMEMBER_NUDGE_COOLDOWN are sourced
+# from agent/config.yaml (behavior.remember_nudge) via agent/config.py —
+# imported above as aliases so all existing call sites work without change.
 _session_calls_since_save: dict[str, int] = {}
 
 

@@ -21,11 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-logger = logging.getLogger(__name__)
+from agent.config import OUTPUT_SNIPPET_LINES as SNIPPET_LINES
 
-# Number of lines returned as a snippet with each symbol location.
-# Enough for the AI to understand signature + first few lines of the body.
-SNIPPET_LINES = 12
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -149,6 +147,9 @@ _MODULE_BINDING_TYPES: dict[str, frozenset[str]] = {
 # can route: use locate/trace where symbols exist, fall back to search elsewhere.
 SYMBOL_LANGUAGES: frozenset[str] = frozenset(_SYMBOL_TYPES)
 
+# Intentionally NOT in config.yaml (Tier-3): SYMBOL_SCHEMA_VERSION is a
+# schema-migration trigger.  Changing it via config would silently corrupt or
+# force a full reindex without the usual version-bump safeguards.
 # Bump whenever symbol/edge extraction changes in a way that makes an
 # already-persisted graph stale (new parser language, new edge type, changed
 # name resolution). Combined with the parser-language set + embed model into the
@@ -493,6 +494,9 @@ def _module_binding_names(node, code_bytes: bytes, language: str) -> list[tuple[
     return []
 
 
+# Intentionally NOT in config.yaml (Tier-3): _MAX_DEPTH is a recursion
+# safety guard tied to Python's frame limit (~1000).  A user who bumped it
+# via config could trigger RecursionError on pathological ASTs.
 # Guard against pathological ASTs blowing Python's recursion limit. Must be
 # counted on EVERY recursion (see below) or it never fires. 200 is far deeper
 # than real functions/calls nest, while staying well under Python's ~1000 frame

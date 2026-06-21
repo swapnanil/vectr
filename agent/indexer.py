@@ -22,6 +22,10 @@ from agent.chunk_quality import (
     is_navigational_chunk,
     is_trivial_chunk,
 )
+from agent.config import (
+    INDEXING_MAX_CHUNK_LINES as _MAX_CHUNK_LINES,
+    INDEXING_CLASS_HEADER_LINES as _CLASS_HEADER_LINES,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +192,10 @@ def _get_parser(language: str):
         return None
 
 
-_MAX_CHUNK_LINES = 150   # hard cap — prevents single huge chunks diluting embeddings
-_CLASS_HEADER_LINES = 40  # lines kept for class-level chunk (sig + docstring + attrs)
+# UPG-12.1: _MAX_CHUNK_LINES / _CLASS_HEADER_LINES are sourced from
+# agent/config.yaml (indexing.*) via agent/config.py — imported above as
+# _MAX_CHUNK_LINES / _CLASS_HEADER_LINES.  The alias names are kept so all
+# existing call sites work without change.
 
 # Node types that represent class declarations (handled specially — emit header + recurse)
 _CLASS_NODE_TYPES = {"class_definition", "class_declaration"}
@@ -483,6 +489,11 @@ def chunk_file(file_path: str) -> list[CodeChunk]:
 # Indexer: manages ChromaDB collection
 # ---------------------------------------------------------------------------
 
+# Intentionally NOT in config.yaml (Tier-3): perf/throughput constants.
+# _UPSERT_BATCH_SIZE=100 is bounded by SQLite's 999-variable limit (a code
+# invariant: 6 fields × 100 = 600 ≤ 999); changing it via config could
+# silently corrupt batch inserts.  _FILE_BATCH_SIZE/_EMBED_BATCH_SIZE are
+# pure throughput levers with no behavioural effect on ranking or output.
 _FILE_BATCH_SIZE = 64     # used by index_file() — single-file watcher path
 _EMBED_BATCH_SIZE = 256   # texts per model.encode() call — larger = better BLAS utilisation
 _UPSERT_BATCH_SIZE = 100  # rows per ChromaDB upsert — SQLite variable limit is 999; 6 fields×100=600
