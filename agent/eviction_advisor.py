@@ -24,6 +24,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
+from agent.config import EVICTION_RETRIEVED_TOKEN_GATE
+
 
 @dataclass
 class RetrievedChunk:
@@ -55,6 +57,7 @@ class EvictionAdvisor:
         retrieval_call_threshold: int = 1,
         time_threshold_seconds: float = 180.0,
         rearm_retrieval_calls: int = 4,
+        retrieved_token_gate: int | None = None,
     ) -> None:
         # Fire when ANY of these conditions is met:
         #   cumulative injected chars ÷ 4 >= 40K  (vectr-tracked content)
@@ -81,6 +84,15 @@ class EvictionAdvisor:
         # calls (or a fresh token/time crossing) since the last time it fired —
         # so the footer can't repeat on every response.
         self._rearm_retrieval_calls = rearm_retrieval_calls
+        # UPG-11.15: suppress auto_eviction_hint() when accumulated retrieved
+        # tokens since the last hint (or session start) are below this gate.
+        # Prevents a burst of small-result searches from triggering the full
+        # ACTION REQUIRED block before real context pressure has accumulated.
+        # None → use the config value (EVICTION_RETRIEVED_TOKEN_GATE).
+        self._retrieved_token_gate: int = (
+            retrieved_token_gate if retrieved_token_gate is not None
+            else EVICTION_RETRIEVED_TOKEN_GATE
+        )
         self._chunks: list[RetrievedChunk] = []
         self._tool_call_count: int = 0
         self._retrieval_call_count: int = 0
@@ -146,16 +158,31 @@ class EvictionAdvisor:
             or (time.time() - t0) >= self._time_threshold_seconds
         )
 
+    def _tokens_since_last_hint(self) -> int:
+        """Tokens accumulated since the last auto-hint emit (or session start)."""
+        tokens_at_last = self._last_emit[0] if self._last_emit is not None else 0
+        return self.total_tokens_in_session() - tokens_at_last
+
     def auto_eviction_hint(self) -> str:
-        """Gated variant for the per-response footer (UPG-7.1). Emits the hint
-        only when context pressure FRESHLY escalates — never on every response.
-        Before this, the footer fired on every search/locate/trace once
-        `retrieval_call_count > 1` or 180s had elapsed (~2k tokens of
-        remember-nudge appended to every turn, inflating token cost and nudging
-        a `vectr_remember` each turn). The explicit `vectr_evict_hint` tool and
-        the `/v1/evict` endpoint still use `eviction_hint()` (ungated): an
-        explicit ask always answers."""
+        """Gated variant for the per-response footer (UPG-7.1 / UPG-11.15).
+
+        Emits the hint only when BOTH conditions hold:
+          1. Context pressure freshly escalates (UPG-7.1 — never on every response).
+          2. Accumulated retrieved tokens since the last hint (or session start)
+             have crossed _retrieved_token_gate (UPG-11.15 — suppresses bursts of
+             small-result searches that add negligible context pressure).
+
+        The explicit ``vectr_evict_hint`` tool and the ``/v1/evict`` endpoint
+        still use ``eviction_hint()`` (ungated): an explicit ask always answers.
+        """
         if not self.should_evict() or not self._fresh_escalation():
+            return ""
+        # UPG-11.15: even if should_evict() is true (e.g. retrieval_call_count
+        # tripped), don't emit if the retrieved content since the last hint is
+        # small.  The per-call-count trigger fires on the 2nd retrieval call,
+        # but three 15-line methods contribute only ~100–150 tokens — far below
+        # real context pressure.
+        if self._tokens_since_last_hint() < self._retrieved_token_gate:
             return ""
         hint = self.eviction_hint()
         if hint:
