@@ -179,6 +179,8 @@ _di_cfg: dict[str, Any] = _cfg["ranking"]["doc_intent"]
 
 DOC_INTENT_SUPPRESS_FORCED_INCLUSION: bool = bool(_di_cfg["suppress_forced_inclusion"])
 DOC_INTENT_DOC_PROSE_MULTIPLIER: float = float(_di_cfg["doc_prose_multiplier"])
+DOC_INTENT_PREFIXES: tuple[str, ...] = tuple(_di_cfg["prefixes"])
+DOC_INTENT_ANY_SUBSTRINGS: tuple[str, ...] = tuple(_di_cfg["any_substrings"])
 
 # ---------------------------------------------------------------------------
 # Quality priors — ranking multipliers (UPG-12.1)

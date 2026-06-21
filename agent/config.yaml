@@ -76,6 +76,50 @@ ranking:
     # 1.0 = neutral (no penalty); set to doc_prose or above for intermediate.
     doc_prose_multiplier: 1.0
 
+    # Anchored-prefix phrases: a query is doc-intent when its lowercased,
+    # stripped form STARTS WITH any of these. These mark a question/explanation
+    # request, so symbol names in the query describe a topic rather than a
+    # forced-inclusion target (UPG-11.11). Edit here, not in code.
+    prefixes:
+      - "how to "
+      - "how do "
+      - "how does "
+      - "how can "
+      - "how should "
+      - "what is "
+      - "what are "
+      - "what does "
+      - "what's "
+      - "why is "
+      - "why does "
+      - "why do "
+      - "explain "
+      - "tutorial"
+      - "guide to "
+      - "introduction to "
+      - "overview of "
+      - "difference between "
+      - "when to use "
+      - "when should "
+      - "best way to "
+      - "best practice"
+      - "example of "
+      - "examples of "
+      - "usage of "
+
+    # Substring phrases: a query is also doc-intent when its lowercased form
+    # CONTAINS any of these. Leading space anchors them to word boundaries so
+    # identifiers like "tutorial_mode"/"guided_setup" don't false-trigger.
+    any_substrings:
+      - " tutorial"
+      - " howto"
+      - " guide"
+      - " walkthrough"
+      - " example of "
+      - " examples of "
+      - " usage of "
+      - " usage example"
+
   quality_priors:
     # Multipliers applied to the hybrid similarity score. 1.0 = neutral.
     # Lower = de-ranked further. Applied in chunk_quality.quality_score().

@@ -33,6 +33,8 @@ from agent.config import (
     QUALITY_DOC_PROSE as _Q_DOC_PROSE,
     QUALITY_SHORT_PENALTY as _Q_SHORT_PENALTY,
     DOC_INTENT_DOC_PROSE_MULTIPLIER as _Q_DOC_PROSE_DOC_INTENT,
+    DOC_INTENT_PREFIXES,
+    DOC_INTENT_ANY_SUBSTRINGS,
 )
 
 # A synthetic node_type stamped on re-export / import-only chunks so the ranker
@@ -223,49 +225,14 @@ def query_wants_tests(query: str) -> bool:
     return any(kw in q for kw in ("test", "fixture", "scenario", "spec ", "unittest", "pytest", "assertion"))
 
 
-# Doc-intent query patterns — matched against the lowercased query.
+# Doc-intent query patterns are sourced from agent/config.yaml
+# (ranking.doc_intent.prefixes / .any_substrings) via agent/config.py.
 # A query is doc-intent when the user is asking about a *topic* or *concept*,
-# not looking for a specific symbol implementation.  These patterns indicate that
-# any symbol names appearing in the query are context/description of the topic,
-# not targets for forced-inclusion (UPG-11.11 / F2).
-_DOC_INTENT_PREFIXES: tuple[str, ...] = (
-    "how to ",
-    "how do ",
-    "how does ",
-    "how can ",
-    "how should ",
-    "what is ",
-    "what are ",
-    "what does ",
-    "what's ",
-    "why is ",
-    "why does ",
-    "why do ",
-    "explain ",
-    "tutorial",
-    "guide to ",
-    "introduction to ",
-    "overview of ",
-    "difference between ",
-    "when to use ",
-    "when should ",
-    "best way to ",
-    "best practice",
-    "example of ",
-    "examples of ",
-    "usage of ",
-)
-
-_DOC_INTENT_ANY: tuple[str, ...] = (
-    " tutorial",
-    " howto",
-    " guide",
-    " walkthrough",
-    " example of ",
-    " examples of ",
-    " usage of ",
-    " usage example",
-)
+# not looking for a specific symbol implementation — symbol names in the query
+# are context/description, not forced-inclusion targets (UPG-11.11 / F2).
+# The _DOC_INTENT_* aliases preserve the in-module call sites below.
+_DOC_INTENT_PREFIXES: tuple[str, ...] = DOC_INTENT_PREFIXES
+_DOC_INTENT_ANY: tuple[str, ...] = DOC_INTENT_ANY_SUBSTRINGS
 
 
 def is_doc_intent_query(query: str) -> bool:

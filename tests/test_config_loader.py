@@ -405,3 +405,14 @@ class TestConfigLoaderDocIntent:
         """searcher.py must import DOC_INTENT_SUPPRESS_FORCED_INCLUSION from config."""
         from agent.searcher import _DOC_INTENT_SUPPRESS_FORCED_INCLUSION
         assert _DOC_INTENT_SUPPRESS_FORCED_INCLUSION is cfg.DOC_INTENT_SUPPRESS_FORCED_INCLUSION
+
+    def test_doc_intent_phrase_lists_are_config_sourced(self) -> None:
+        """The doc-intent trigger phrases must live in config.yaml, not be
+        hardcoded in chunk_quality.py — chunk_quality must alias the config tuples."""
+        from agent.chunk_quality import _DOC_INTENT_PREFIXES, _DOC_INTENT_ANY
+        assert _DOC_INTENT_PREFIXES is cfg.DOC_INTENT_PREFIXES
+        assert _DOC_INTENT_ANY is cfg.DOC_INTENT_ANY_SUBSTRINGS
+        assert isinstance(cfg.DOC_INTENT_PREFIXES, tuple)
+        assert isinstance(cfg.DOC_INTENT_ANY_SUBSTRINGS, tuple)
+        assert "how to " in cfg.DOC_INTENT_PREFIXES
+        assert " tutorial" in cfg.DOC_INTENT_ANY_SUBSTRINGS
