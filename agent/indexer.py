@@ -48,6 +48,12 @@ LANG_BY_EXT: dict[str, str] = {
     ".zig": "zig",
     ".md": "markdown",
     ".html": "html",
+    # UPG-11.3: prose documentation formats — indexed with the doc-prose quality
+    # multiplier (_Q_DOC_PROSE = 0.70) so code chunks still lead on code queries
+    # while docs surface for prose/howto queries. Uses window-based chunking since
+    # there is no AST grammar for plain text or reStructuredText.
+    ".txt": "txt",
+    ".rst": "rst",
 }
 
 EXCLUDED_DIRS = {
@@ -941,3 +947,47 @@ class CodeIndexer:
             where=where,
             include=["documents", "metadatas", "distances"],
         )
+
+    def get_chunk_cosine_similarities(
+        self, query_embedding: list[float], chunk_ids: list[str]
+    ) -> dict[str, float]:
+        """Return cosine similarity scores for a specific set of chunk IDs.
+
+        Used by the forced-inclusion relevance gate (UPG-11.12) to check vector
+        similarity for non-compound candidates that are not in the natural pool.
+        ChromaDB embeddings are L2-normalised by default, so cosine = dot product.
+
+        Returns a dict {chunk_id: cosine_similarity}.  Chunk IDs not found in the
+        collection are absent from the result (similarity treated as 0.0 by caller).
+        """
+        if not chunk_ids or not query_embedding:
+            return {}
+        try:
+            batch = self._collection.get(ids=chunk_ids, include=["embeddings"])
+        except Exception:
+            return {}
+        result: dict[str, float] = {}
+        import numpy as np
+        q = np.asarray(query_embedding, dtype=np.float32)
+        q_norm = float(np.linalg.norm(q))
+        if q_norm == 0.0:
+            return result
+        # batch["embeddings"] may be a numpy array — avoid truthiness check on it.
+        embeddings_raw = batch.get("embeddings")
+        ids_raw = batch.get("ids")
+        if embeddings_raw is None or ids_raw is None:
+            return result
+        embeddings_list = list(embeddings_raw) if not isinstance(embeddings_raw, list) else embeddings_raw
+        ids_list = list(ids_raw) if not isinstance(ids_raw, list) else ids_raw
+        for cid, emb_raw in zip(ids_list, embeddings_list):
+            if emb_raw is None:
+                continue
+            emb = np.asarray(emb_raw, dtype=np.float32)
+            if emb.size == 0:
+                continue
+            dot = float(np.dot(q, emb))
+            e_norm = float(np.linalg.norm(emb))
+            if e_norm == 0.0:
+                continue
+            result[cid] = dot / (q_norm * e_norm)
+        return result

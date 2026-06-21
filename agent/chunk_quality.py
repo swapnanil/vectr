@@ -435,7 +435,10 @@ def symbol_identity_boost(symbol_name: str, query_tokens: set[str]) -> float:
         # coincidental shared sub-words (e.g. "field" in a long prose query).
         # Require that the whole class identifier appears, OR that ALL its
         # sub-words appear together.
-        if p_lower in query_tokens or sub_p.issubset(query_tokens):
+        # UPG-11.9: skip the subset-check when sub_p is empty — a single-char
+        # class name like "Q" produces no sub-parts, and set().issubset(...)
+        # is vacuously True, firing +0.20 unconditionally.
+        if p_lower in query_tokens or (sub_p and sub_p.issubset(query_tokens)):
             prefix_hit = True
             break
 

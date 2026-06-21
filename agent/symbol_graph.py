@@ -154,7 +154,7 @@ SYMBOL_LANGUAGES: frozenset[str] = frozenset(_SYMBOL_TYPES)
 # name resolution). Combined with the parser-language set + embed model into the
 # toolchain fingerprint (UPG-8.7) so a vectr upgrade is detectable and the graph
 # is rebuilt rather than silently serving partial/old results.
-SYMBOL_SCHEMA_VERSION = 4  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4) · 4: module-level constants (UPG-10.3)
+SYMBOL_SCHEMA_VERSION = 5  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4) · 4: module-level constants (UPG-10.3) · 5: .txt/.rst prose docs indexed (UPG-11.3)
 
 
 def graph_toolchain_fingerprint(embed_model: str = "") -> str:

@@ -341,3 +341,85 @@ class TestExtractClassFromContent:
             f"Expected qualified boost {_SYM_QUALIFIED_BOOST} but got {boost}. "
             "This confirms the F4 path is active."
         )
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.8 — 4-letter common word leaf-boost gap (F8)
+# ---------------------------------------------------------------------------
+
+class TestFourLetterStopWords:
+    """UPG-11.8: common 4-letter words that double as method names must receive
+    NO symbol boost when they appear as natural-language prose in a query.
+
+    The fix: add them to prog_stopwords.txt, which feeds ONLY the
+    symbol_identity_boost guard (not BM25 or embedding).
+    """
+
+    @pytest.mark.parametrize("leaf,query", [
+        ("read", "read lines from a text file"),
+        ("join", "join two lists together"),
+        ("call", "call the handler function"),
+        ("send", "send a message to the server"),
+        ("hash", "hash a password for storage"),
+        ("open", "open a file for reading"),
+        ("eval", "eval an expression dynamically"),
+        ("exec", "exec a subprocess command"),
+        ("iter", "iter over collection items"),
+        ("next", "next item in the iterator"),
+        ("sort", "sort the list by key"),
+        ("copy", "copy a file to destination"),
+        ("load", "load data from disk"),
+        ("dump", "dump state to JSON"),
+        ("emit", "emit events to subscribers"),
+        ("bind", "bind socket to address"),
+        ("wait", "wait for async operation"),
+        ("recv", "recv bytes from socket"),
+        ("find", "find all occurrences in text"),
+        ("list", "list all available options"),
+        ("test", "test the implementation"),
+        ("save", "save the file to disk"),
+        ("init", "init the module"),
+    ])
+    def test_common_4letter_leaf_no_boost(self, leaf, query) -> None:
+        """Bare 4-letter common leaves must get zero boost for prose queries."""
+        tokens = _query_symbol_tokens(query)
+        boost = symbol_identity_boost(leaf, tokens)
+        assert boost == 0.0, (
+            f"UPG-11.8: leaf={leaf!r} got boost={boost} for query {query!r}. "
+            "Expected 0.0 — it must be in SYMBOL_STOP_WORDS."
+        )
+
+    def test_qualified_read_still_boosted(self) -> None:
+        """UPG-11.8: qualified form 'Buffer.read' must still get a boost
+        because the stop-word guard only applies to bare single-word leaves."""
+        # query with class name "buffer" in tokens
+        query = "read data from Buffer object"
+        tokens = _query_symbol_tokens(query)
+        boost = symbol_identity_boost("Buffer.read", tokens)
+        # "buffer" is in query tokens, leaf="read" -> qualified boost (+0.20)
+        from agent.chunk_quality import _SYM_QUALIFIED_BOOST
+        assert boost == _SYM_QUALIFIED_BOOST, (
+            f"UPG-11.8: qualified 'Buffer.read' should get qualified boost "
+            f"{_SYM_QUALIFIED_BOOST} but got {boost}."
+        )
+
+    def test_qualified_read_leaf_boost_when_class_absent(self) -> None:
+        """Without the class name in the query, Buffer.read gets leaf boost only."""
+        query = "read bytes from socket"  # no 'buffer' in tokens
+        tokens = _query_symbol_tokens(query)
+        boost = symbol_identity_boost("Buffer.read", tokens)
+        from agent.chunk_quality import _SYM_LEAF_BOOST
+        assert boost == _SYM_LEAF_BOOST, (
+            f"UPG-11.8: 'Buffer.read' with class absent should get leaf boost "
+            f"{_SYM_LEAF_BOOST} but got {boost}. "
+            "The stop-word guard must NOT apply to qualified symbols."
+        )
+
+    def test_f8_read_no_boost_for_prose_query(self) -> None:
+        """F8 acceptance: symbol leaf='read' must have zero boost for 'read lines from a text file'."""
+        from agent.config import SYMBOL_STOP_WORDS
+        assert "read" in SYMBOL_STOP_WORDS, (
+            "UPG-11.8: 'read' must be in SYMBOL_STOP_WORDS after prog_stopwords.txt update"
+        )
+        tokens = _query_symbol_tokens("read lines from a text file")
+        assert symbol_identity_boost("read", tokens) == 0.0

@@ -134,8 +134,16 @@ class TestShouldIndexFile:
         f.touch()
         assert should_index_file(str(f), []) is True
 
-    def test_rejects_txt_file(self, tmp_path) -> None:
+    def test_accepts_txt_file(self, tmp_path) -> None:
+        # UPG-11.3: .txt files are now indexed as prose (language='txt', doc-prose quality).
+        # This is the fix for F2: django docs/howto/custom-model-fields.txt was invisible.
         f = tmp_path / "notes.txt"
+        f.touch()
+        assert should_index_file(str(f), []) is True
+
+    def test_rejects_log_file(self, tmp_path) -> None:
+        # .log is NOT in LANG_BY_EXT — use this as the "unsupported extension" check
+        f = tmp_path / "debug.log"
         f.touch()
         assert should_index_file(str(f), []) is False
 

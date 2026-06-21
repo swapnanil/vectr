@@ -960,6 +960,89 @@ class TestFormatSearchResults:
         text = _format_search_results([result], "query", 10, 100)
         assert "Read" in text, "footer must contain a Read pointer for full context"
 
+    def test_expand_hint_fires_when_content_capped_by_2000_char_limit(self) -> None:
+        """UPG-11.4-b: when content was truncated by the 2000-char storage cap
+        (stored content is significantly shorter than the full symbol line range),
+        the formatter must emit an expand instruction so the caller can read the
+        full definition without a blind whole-file read.
+
+        E.g. Field.deconstruct is 100 lines; content[:2000] captures ~48 lines.
+        The old 80-line guard never fires (48 < 80) so the hint was never shown.
+        """
+        from agent.searcher import SearchResult
+        # Simulate a 100-line symbol where only 45 lines survived the 2000-char cap.
+        stored_content = "\n".join(f"    line {i}" for i in range(45))
+        result = SearchResult(
+            file_path="django/db/models/fields/__init__.py",
+            lines="606-705",
+            symbol_name="Field.deconstruct",
+            language="python",
+            score=1.2,
+            content=stored_content,
+            symbol_start_line=606,
+            symbol_end_line=705,
+        )
+        text = _format_search_results([result], "Field deconstruct", 10, 41447)
+        # Must include expand hint because 45 lines << 100 lines (symbol_range=100, floor=5)
+        assert "more lines" in text, (
+            "UPG-11.4-b: expand hint must fire when stored content is shorter than symbol range. "
+            f"Got: {text[-200:]}"
+        )
+        assert "Read(" in text, (
+            "UPG-11.4-b: expand hint must contain a Read() pointer for the full definition."
+        )
+        assert "offset=605" in text, (
+            "UPG-11.4-b: expand hint offset must be symbol_start_line - 1 = 605 (0-indexed). "
+            f"Got: {text[-200:]}"
+        )
+
+    def test_expand_hint_not_fired_when_content_covers_full_symbol(self) -> None:
+        """UPG-11.4-b: when the stored content fully covers the symbol line range,
+        no expand hint should be emitted.
+        """
+        from agent.searcher import SearchResult
+        # 30-line symbol, 28 lines stored — well within the 5-line tolerance
+        stored_content = "\n".join(f"    line {i}" for i in range(28))
+        result = SearchResult(
+            file_path="auth.py",
+            lines="10-39",
+            symbol_name="login",
+            language="python",
+            score=0.88,
+            content=stored_content,
+            symbol_start_line=10,
+            symbol_end_line=39,  # 30 lines total
+        )
+        text = _format_search_results([result], "login", 7, 100)
+        # 28 stored lines vs 30 symbol lines: difference is 2, below tolerance of 5
+        assert "more lines (content capped" not in text, (
+            "UPG-11.4-b: expand hint must NOT fire when content covers the full symbol range. "
+            f"Got: {text[-200:]}"
+        )
+
+    def test_expand_hint_shows_correct_limit(self) -> None:
+        """UPG-11.4-b: the expand hint must pass limit=symbol_range_lines so the
+        caller reads exactly the full definition, not an arbitrary window.
+        """
+        from agent.searcher import SearchResult
+        stored_content = "\n".join(f"    line {i}" for i in range(45))
+        result = SearchResult(
+            file_path="fields.py",
+            lines="1-100",
+            symbol_name="MyField.deconstruct",
+            language="python",
+            score=1.0,
+            content=stored_content,
+            symbol_start_line=1,
+            symbol_end_line=100,  # 100-line symbol
+        )
+        text = _format_search_results([result], "deconstruct", 5, 100)
+        # Expand hint should include limit=100 (the full symbol range)
+        assert "limit=100" in text, (
+            "UPG-11.4-b: expand hint must include limit=symbol_range_lines (100). "
+            f"Got: {text[-300:]}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # EvictionAdvisor integration — real advisor wired through handle_tools_call

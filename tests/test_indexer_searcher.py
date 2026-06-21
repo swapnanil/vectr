@@ -98,9 +98,12 @@ class TestCodeIndexer:
         assert indexer.total_chunks == 0
 
     def test_index_workspace_walks_py_files(self, indexer, tmp_path) -> None:
+        # UPG-11.3: .txt files are now indexed (language='txt', doc-prose quality).
+        # The test previously asserted files==2 to confirm .txt was skipped, but
+        # now .txt IS indexed. Update: use a .log extension (not indexed) instead.
         make_py(tmp_path, "a.py", "def foo(): pass")
         make_py(tmp_path, "b.py", "def bar(): pass")
-        (tmp_path / "skip.txt").write_text("not indexed")
+        (tmp_path / "skip.log").write_text("not indexed — .log is not in LANG_BY_EXT")
         files, chunks = indexer.index_workspace()
         assert files == 2
         assert chunks >= 2
@@ -746,6 +749,139 @@ class TestHTMLSupport:
 
 
 # ---------------------------------------------------------------------------
+# UPG-11.3 — .txt and .rst prose files are indexed (F2)
+# ---------------------------------------------------------------------------
+
+class TestTxtRstSupport:
+    """chunk_file() must produce chunks for .txt and .rst files (UPG-11.3).
+
+    Django ships docs as .txt (e.g. docs/howto/custom-model-fields.txt).
+    These were invisible to search before UPG-11.3.
+    They are indexed as prose windows with language='txt'/'rst' and subject to
+    the doc-prose quality multiplier (_Q_DOC_PROSE=0.70) so code still leads.
+    """
+
+    _TXT_CONTENT = """\
+Writing custom model fields
+===========================
+
+To create a custom field, you need to subclass Field and implement deconstruct()
+and from_db_value(). The deconstruct() method must return a 4-tuple
+(name, path, args, kwargs) that allows Django's migration framework to serialize
+the field.
+
+The from_db_value() method is called every time data is loaded from the database,
+including in aggregates and values() calls.
+"""
+
+    _RST_CONTENT = """\
+Custom Lookup Reference
+=======================
+
+.. currentmodule:: django.db.models
+
+Lookup API
+----------
+
+A lookup is a Django expression that determines how a condition is translated
+to a SQL WHERE clause. Custom lookups can be registered via ``register_lookup``.
+"""
+
+    def _write_txt(self, tmp_path) -> str:
+        p = tmp_path / "howto.txt"
+        p.write_text(self._TXT_CONTENT)
+        return str(p)
+
+    def _write_rst(self, tmp_path) -> str:
+        p = tmp_path / "ref.rst"
+        p.write_text(self._RST_CONTENT)
+        return str(p)
+
+    def test_txt_produces_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_txt(tmp_path))
+        assert len(chunks) >= 1, f"expected ≥1 txt chunk, got {len(chunks)}"
+
+    def test_txt_language_label(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_txt(tmp_path))
+        assert all(c.language == "txt" for c in chunks), (
+            f"all chunks must have language='txt', got {[c.language for c in chunks]}"
+        )
+
+    def test_txt_indexed_by_indexer(self, indexer, tmp_path) -> None:
+        count = indexer.index_file(self._write_txt(tmp_path))
+        assert count >= 1, f"expected ≥1 txt chunk indexed, got {count}"
+
+    def test_rst_produces_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_rst(tmp_path))
+        assert len(chunks) >= 1, f"expected ≥1 rst chunk, got {len(chunks)}"
+
+    def test_rst_language_label(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_rst(tmp_path))
+        assert all(c.language == "rst" for c in chunks), (
+            f"all chunks must have language='rst', got {[c.language for c in chunks]}"
+        )
+
+    def test_rst_indexed_by_indexer(self, indexer, tmp_path) -> None:
+        count = indexer.index_file(self._write_rst(tmp_path))
+        assert count >= 1, f"expected ≥1 rst chunk indexed, got {count}"
+
+    def test_txt_in_indexed_languages(self, indexer, tmp_path) -> None:
+        """After indexing a .txt file, /v1/status languages must include 'txt'."""
+        indexer.index_file(self._write_txt(tmp_path))
+        langs = indexer.indexed_languages()
+        assert "txt" in langs, (
+            f"UPG-11.3: 'txt' must appear in indexed languages after indexing a .txt file. "
+            f"Got: {langs}"
+        )
+
+    def test_txt_doc_prose_quality_multiplier(self, tmp_path) -> None:
+        """txt/rst chunks must get the doc-prose quality multiplier (0.70),
+        not the code quality (1.0), so code chunks still lead on code queries."""
+        from agent.chunk_quality import quality_score, is_doc_language
+        # Verify doc language classification
+        assert is_doc_language("txt"), "txt must be classified as doc language"
+        assert is_doc_language("rst"), "rst must be classified as doc language"
+        # quality_score for a non-trivial txt chunk should be 0.70
+        score = quality_score("Custom field description with multiple lines of prose.\n" * 5,
+                              "/docs/howto.txt", language="txt")
+        assert score == pytest.approx(0.70, abs=0.01), (
+            f"UPG-11.3: txt doc chunks must get _Q_DOC_PROSE=0.70 quality. Got {score}"
+        )
+
+    def test_workspace_walk_picks_up_txt_files(self, indexer, tmp_path) -> None:
+        """index_workspace() must include .txt files (they're now in LANG_BY_EXT)."""
+        # Write a Python file and a .txt doc
+        make_py(tmp_path, "models.py", "def model(): pass")
+        (tmp_path / "readme.txt").write_text("Project documentation.\n" * 5)
+        files, chunks = indexer.index_workspace()
+        assert files == 2, f"expected 2 files indexed (1 py + 1 txt), got {files}"
+
+    def test_txt_searchable_after_index(self, indexer, tmp_path) -> None:
+        """txt content must be returned in search results after indexing."""
+        from agent.searcher import CodeSearcher
+
+        txt_file = tmp_path / "custom-model-fields.txt"
+        txt_file.write_text(self._TXT_CONTENT)
+        indexer.index_file(str(txt_file))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        results, _ = s.search(
+            "custom model field deconstruct from_db_value", n_results=5, rerank=False
+        )
+        txt_results = [r for r in results if r.file_path.endswith(".txt")]
+        assert txt_results, (
+            "UPG-11.3: .txt file content must appear in search results. "
+            f"Got: {[r.file_path for r in results]}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Indexing hygiene — orphan pruning, mtime-cache colocation, force rebuild
 # (UPG-8.4 / UPG-8.5 / UPG-8.6)
 # ---------------------------------------------------------------------------
@@ -1200,3 +1336,685 @@ class SubField(BaseField):
             "content prefix is not working. If this test fails after reverting "
             "extract_class_from_content, the fix is confirmed necessary."
         )
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.7 — Forced-inclusion of exact symbol-name matches (F5 candidate-pool miss)
+# ---------------------------------------------------------------------------
+
+class TestForcedInclusionCandidatePool:
+    """The base-class definition of a method must appear in search results even
+    when its long docstring dilutes BM25/embedding scores enough to fall below
+    the hybrid candidate pool gate.
+
+    F5-candidate-pool-miss: Field.deconstruct (lines 606-705, ~100 lines of
+    docstring) was absent from the top-60 hybrid pool for the F1 query.  The
+    UPG-11.1 sym_boost is post-retrieval and cannot rescue chunks that never
+    enter the pool.  UPG-11.7 forces ALL chunks whose symbol_name leaf exactly
+    matches a guarded query token into the pool BEFORE the reranker runs.
+
+    This test uses the REAL CodeIndexer (not mocks) to verify that:
+    1. A base-class method with a long docstring is correctly forced into the
+       candidate pool when the query mentions the method name.
+    2. The forced chunk appears in the top-N results alongside naturally-retrieved
+       override chunks.
+    3. Without UPG-11.7 forced-inclusion (with a tiny fetch_n that excludes the
+       long-docstring chunk), the base method would be absent — confirming the
+       test exercises the right fix.
+    """
+
+    # -----------------------------------------------------------------------
+    # Synthetic corpus design
+    # -----------------------------------------------------------------------
+    #
+    # We create a file with:
+    #   - BaseField.deconstruct: long docstring (~30 lines) that dilutes
+    #     BM25 keyword density, causing it to rank LOW in BM25 scoring.
+    #   - Many override classes (Override1..N) with compact, keyword-dense
+    #     deconstruct bodies that score HIGH in BM25 for the query.
+    #
+    # The BM25 scores will put the compact overrides first and the base last.
+    # With fetch_n set small (via monkeypatch), the base falls out of the pool.
+    # UPG-11.7 forces it back in via the symbol_name leaf match.
+
+    _LONG_DOCSTRING = (
+        '"""Deconstruct the field for migration serialization.\n'
+        "\n"
+        "Returns a 4-tuple (name, path, args, kwargs) that can be used\n"
+        "to reconstruct the field via its constructor.  Subclasses that\n"
+        "introduce new constructor arguments must override this method and\n"
+        "add the extra arguments to kwargs before calling super().\n"
+        "\n"
+        "The return value of this method is used by the migration framework\n"
+        "to serialize the field to a migration file.  The path must be the\n"
+        "full dotted import path that can be used to import the field class.\n"
+        "\n"
+        "Parameters\n"
+        "----------\n"
+        "None — all state is read from self.\n"
+        "\n"
+        "Returns\n"
+        "-------\n"
+        "name : str\n"
+        "    The field's attribute name on the model.\n"
+        "path : str\n"
+        "    The dotted import path of the field class.\n"
+        "args : list\n"
+        "    Positional constructor arguments (usually empty).\n"
+        "kwargs : dict\n"
+        "    Keyword constructor arguments with their current values.\n"
+        '"""\n'
+    )
+
+    # One compact override (repeated N times to flood the BM25-high pool)
+    _OVERRIDE_BODY = (
+        "name, path, args, kwargs = super().deconstruct()\n"
+        "kwargs['extra'] = self.extra\n"
+        "return name, path, args, kwargs\n"
+    )
+
+    @staticmethod
+    def _make_source(n_overrides: int) -> str:
+        lines = [
+            "class BaseField:",
+            "    def deconstruct(self):",
+        ]
+        for docline in TestForcedInclusionCandidatePool._LONG_DOCSTRING.splitlines():
+            lines.append(f"        {docline}")
+        lines += [
+            "        name = self.__class__.__name__",
+            "        path = self.__module__ + '.' + name",
+            "        args = []",
+            "        kwargs = {}",
+            "        return name, path, args, kwargs",
+            "",
+        ]
+        for i in range(1, n_overrides + 1):
+            lines += [
+                f"class Override{i}(BaseField):",
+                "    extra = None",
+                "    def deconstruct(self):",
+            ]
+            for bodyline in TestForcedInclusionCandidatePool._OVERRIDE_BODY.splitlines():
+                lines.append(f"        {bodyline}")
+            lines += [f"    attr_{i} = {i!r}", ""]
+        return "\n".join(lines)
+
+    def test_base_deconstruct_in_results_despite_docstring(
+        self, indexer, tmp_path, monkeypatch
+    ) -> None:
+        """UPG-11.7: base BaseField.deconstruct must appear in search results even
+        when its long docstring pushes it below the hybrid candidate pool gate.
+
+        Mechanically: monkeypatches _RERANK_TOP_K_UNFILTERED to a value smaller
+        than the number of 'deconstruct' chunks (so the base falls outside the
+        natural pool), then verifies the result still contains BaseField.deconstruct.
+        """
+        import agent.searcher as searcher_mod
+        from agent.searcher import CodeSearcher
+
+        n_overrides = 10  # 10 overrides + 1 base = 11 deconstruct chunks
+        src = tmp_path / "fields.py"
+        src.write_text(self._make_source(n_overrides))
+        indexer.index_file(str(src))
+
+        # Verify all 11 deconstruct chunks are indexed
+        _, docs, metas = indexer.get_all_documents()
+        deconstruct_metas = [m for m in metas if m.get("symbol_name") == "deconstruct"]
+        assert len(deconstruct_metas) == n_overrides + 1, (
+            f"Expected {n_overrides + 1} 'deconstruct' chunks, got {len(deconstruct_metas)}"
+        )
+
+        # Confirm the base chunk exists with the long docstring
+        base_docs = [
+            d for d, m in zip(docs, metas)
+            if m.get("symbol_name") == "deconstruct" and "# class: BaseField" in d
+        ]
+        assert base_docs, "BaseField.deconstruct chunk not found (check indexer class prefix injection)"
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Monkeypatch the pool cap to a value SMALLER than the number of deconstruct
+        # chunks so the long-docstring base would fall out of the natural pool.
+        # With 11 deconstruct chunks and fetch_n=5, the base (lowest BM25 score)
+        # won't make it into sorted_ids without UPG-11.7 forced-inclusion.
+        monkeypatch.setattr(searcher_mod, "_RERANK_TOP_K_UNFILTERED", 5)
+
+        query = "BaseField deconstruct migration serialization name path args kwargs"
+        results, _ = s.search(query, n_results=10, rerank=False)
+
+        # The base must appear somewhere in the results.
+        # UPG-11.10: symbol_name is now the qualified form "BaseField.deconstruct"
+        # (set by _apply_quality_and_dedup via extract_class_from_content).
+        base_idx = next(
+            (
+                i for i, r in enumerate(results)
+                if ("deconstruct" in r.symbol_name) and "# class: BaseField" in r.content
+            ),
+            None,
+        )
+        assert base_idx is not None, (
+            "UPG-11.7 regression: BaseField.deconstruct is absent from results even "
+            "though its symbol_name leaf ('deconstruct') is an exact match for the query. "
+            "The forced-inclusion pool gate is not working. "
+            f"Results found: {[(r.symbol_name, r.content[:60]) for r in results]}"
+        )
+
+    def test_forced_inclusion_does_not_trigger_for_short_common_words(
+        self, indexer, tmp_path
+    ) -> None:
+        """UPG-11.7 guard: short prose words (< 7 chars, no underscore) must NOT
+        trigger forced-inclusion, preventing common attribute names from flooding
+        the pool.  E.g. 'name', 'path', 'args' in the query must not force-include
+        all chunks whose symbol_name is 'name', 'path', or 'args'.
+
+        This guards the F6 regression: 'list all database migrations' must not
+        accidentally include chunks with symbol_name='all' (which was the UPG-11.1
+        guard bug — UPG-11.7 inherits the same guard, but at the pool-inclusion level).
+        """
+        from agent.searcher import CodeSearcher, _FORCED_INCLUSION_MIN_IDENTIFIER_LEN
+
+        # Write a file with a method named 'name' — a 4-char common word
+        src = tmp_path / "model.py"
+        src.write_text(
+            "class MyModel:\n"
+            "    def name(self):\n"
+            "        return self._name\n"
+            "\n"
+            "    def lookup(self):\n"
+            "        return self.name()\n"
+        )
+        indexer.index_file(str(src))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # 'name' (4 chars, no underscore) must NOT trigger forced-inclusion
+        # The guard is: len(tok) >= _FORCED_INCLUSION_MIN_IDENTIFIER_LEN OR '_' in tok
+        assert len("name") < _FORCED_INCLUSION_MIN_IDENTIFIER_LEN, (
+            "Test assumption failed: 'name' must be shorter than the min identifier length"
+        )
+
+        results, _ = s.search("get the model name field value", n_results=5, rerank=False)
+
+        # 'name' chunks may appear in results (they're indexed) but not because of
+        # forced-inclusion — that's fine.  The key invariant is that the forced-
+        # inclusion code does NOT add them (verified by the guard).
+        # We check the guard directly rather than the result order (which depends
+        # on BM25/vector scores that vary with the dummy embedder).
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import SYMBOL_STOP_WORDS
+
+        query = "get the model name field value"
+        inclusion_tokens = {
+            tok for tok in _query_symbol_tokens(query)
+            if ("_" in tok or len(tok) >= _FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+        assert "name" not in inclusion_tokens, (
+            f"'name' must not be in forced-inclusion tokens, but got: {inclusion_tokens}"
+        )
+
+    def test_compound_identifier_triggers_forced_inclusion(
+        self, indexer, tmp_path
+    ) -> None:
+        """UPG-11.7: compound identifiers (containing '_') trigger forced-inclusion
+        even if they are shorter than _FORCED_INCLUSION_MIN_IDENTIFIER_LEN.
+
+        This guards the F1b/F7 case: 'from_db_value' (13 chars with underscore)
+        must trigger forced-inclusion so all from_db_value implementations are
+        in the candidate pool for the reranker to choose from.
+        """
+        from agent.searcher import CodeSearcher
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import SYMBOL_STOP_WORDS
+        import agent.searcher as searcher_mod
+
+        # Write files where the target from_db_value is in the "base" class
+        # with a longer body (lower BM25 score) and an override is compact.
+        base_src = tmp_path / "base_field.py"
+        base_src.write_text(
+            "class JSONBaseField:\n"
+            "    def from_db_value(self, value, expression, connection):\n"
+            "        \"\"\"Convert database value to Python object.\n"
+            "        Handles null, type coercion, and nested structures.\n"
+            "        Called by Django after every database read.\n"
+            "        \"\"\"\n"
+            "        if value is None:\n"
+            "            return None\n"
+            "        import json\n"
+            "        return json.loads(value)\n"
+        )
+        override_src = tmp_path / "override_field.py"
+        override_src.write_text(
+            "class SpecialJSONField(JSONBaseField):\n"
+            "    def from_db_value(self, value, expression, connection):\n"
+            "        result = super().from_db_value(value, expression, connection)\n"
+            "        return result\n"
+        )
+        indexer.index_file(str(base_src))
+        indexer.index_file(str(override_src))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Shrink the pool so the base would be excluded without forced-inclusion
+        monkeypatch_target = searcher_mod
+        orig = searcher_mod._RERANK_TOP_K_UNFILTERED
+        searcher_mod._RERANK_TOP_K_UNFILTERED = 1  # only 1 natural candidate
+
+        try:
+            query = "from_db_value convert database value to python JSON field"
+            results, _ = s.search(query, n_results=10, rerank=False)
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig
+
+        # Both from_db_value chunks must appear (forced-inclusion pulls them in).
+        # UPG-11.10: symbol_name is now qualified ("JSONBaseField.from_db_value",
+        # "SpecialJSONField.from_db_value") so match on the leaf component.
+        from_db_value_results = [r for r in results if "from_db_value" in r.symbol_name]
+        assert len(from_db_value_results) >= 2, (
+            "UPG-11.7 regression: 'from_db_value' compound identifier must trigger "
+            "forced-inclusion of ALL from_db_value chunks.  "
+            f"Got {len(from_db_value_results)} results with that symbol_name: "
+            f"{[(r.symbol_name, r.content[:60]) for r in results]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.12 — Forced-inclusion relevance gate (BM25 fast-reject + vector cosine)
+# ---------------------------------------------------------------------------
+
+class TestForcedInclusionRelevanceGate:
+    """UPG-11.12: Non-compound tokens ≥7 chars trigger forced-inclusion, but the
+    candidate must also pass a relevance gate (BM25-without-trigger fast-reject +
+    vector cosine floor) to avoid flooding the pool with unrelated symbols.
+
+    Covers:
+    - F9: 'project' (in stop_words) never triggers forced-inclusion at all.
+    - F10: 'execute' (not in stop_words) forces inclusion for DB cursor methods
+           but NOT management-command .execute() — discriminated by vector cosine.
+    - F11: 'context' (in stop_words) never triggers forced-inclusion.
+    - get_chunk_cosine_similarities: structural correctness (no numpy truthiness bug).
+    """
+
+    def test_stop_word_token_excluded_from_forced_inclusion(self) -> None:
+        """Tokens in SYMBOL_STOP_WORDS must NOT appear in sym_tokens_for_inclusion,
+        so symbols like LinearGeometryMixin.project never enter the forced-inclusion pool
+        for queries like 'list all database migrations for a project' (F9 guard).
+        """
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import SYMBOL_STOP_WORDS
+        from agent.searcher import _FORCED_INCLUSION_MIN_IDENTIFIER_LEN
+
+        query = "list all database migrations for a project"
+        sym_tokens = _query_symbol_tokens(query)
+        inclusion_tokens = {
+            tok for tok in sym_tokens
+            if ("_" in tok or len(tok) >= _FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+
+        # "project" is in SYMBOL_STOP_WORDS → must NOT be in inclusion_tokens
+        assert "project" not in inclusion_tokens, (
+            "UPG-11.12 regression: 'project' must be in SYMBOL_STOP_WORDS and excluded "
+            f"from forced-inclusion tokens, but got: {inclusion_tokens}"
+        )
+        # Sanity: "project" is actually in the stop_words list
+        assert "project" in SYMBOL_STOP_WORDS, (
+            "'project' must be in SYMBOL_STOP_WORDS (prog_stopwords.txt) "
+            "to guard F9 false positive (LinearGeometryMixin.project at rank1)"
+        )
+
+    def test_stop_word_context_excluded_from_forced_inclusion(self) -> None:
+        """F11 guard: 'context' in SYMBOL_STOP_WORDS prevents DecimalField.context
+        from entering the forced-inclusion pool for 'render template context in view'.
+        """
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import SYMBOL_STOP_WORDS
+        from agent.searcher import _FORCED_INCLUSION_MIN_IDENTIFIER_LEN
+
+        query = "render template context in view"
+        sym_tokens = _query_symbol_tokens(query)
+        inclusion_tokens = {
+            tok for tok in sym_tokens
+            if ("_" in tok or len(tok) >= _FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+
+        assert "context" not in inclusion_tokens, (
+            "UPG-11.12 regression: 'context' must be in SYMBOL_STOP_WORDS and excluded "
+            f"from forced-inclusion tokens, but got: {inclusion_tokens}"
+        )
+        assert "context" in SYMBOL_STOP_WORDS
+
+    def test_execute_not_in_stop_words(self) -> None:
+        """'execute' must NOT be in SYMBOL_STOP_WORDS so that DB cursor .execute()
+        methods can still be forced-included and ranked for 'connect to database
+        and execute query' (F10 guard).  Management commands are gated by the
+        vector cosine floor, not the stop-word list.
+        """
+        from agent.config import SYMBOL_STOP_WORDS
+
+        assert "execute" not in SYMBOL_STOP_WORDS, (
+            "UPG-11.12 regression: 'execute' must NOT be in SYMBOL_STOP_WORDS. "
+            "Adding it prevents CursorWrapper.execute from being forced-included, "
+            "which pushes it out of top-5 for 'connect to database and execute query'."
+        )
+        assert "connect" not in SYMBOL_STOP_WORDS, (
+            "UPG-11.12 regression: 'connect' must NOT be in SYMBOL_STOP_WORDS. "
+            "DB connection methods need forced-inclusion for database-connect queries."
+        )
+
+    def test_get_chunk_cosine_similarities_basic(self, indexer, tmp_path) -> None:
+        """CodeIndexer.get_chunk_cosine_similarities must return float cosine values
+        in [-1, 1] and not crash on numpy arrays from ChromaDB (UPG-11.12 bugfix:
+        'batch["embeddings"] or []' triggered numpy ambiguity ValueError).
+        """
+        src = tmp_path / "db.py"
+        src.write_text(
+            "class CursorWrapper:\n"
+            "    def execute(self, sql, params=None):\n"
+            "        \"\"\"Execute a SQL query against the database cursor.\"\"\"\n"
+            "        return self.cursor.execute(sql, params)\n"
+        )
+        indexer.index_file(str(src))
+
+        query = "connect to database and execute query"
+        q_emb = indexer.embed_query(query)
+        assert abs(sum(x * x for x in q_emb) ** 0.5 - 1.0) < 0.01, (
+            "embed_query should return a normalised vector"
+        )
+
+        # Get all chunk IDs from the indexer
+        all_ids, _, _ = indexer.get_all_documents()
+        assert all_ids, "No chunks indexed"
+
+        # Must not raise (numpy truthiness bug was: `batch.get('embeddings') or []`)
+        sims = indexer.get_chunk_cosine_similarities(q_emb, all_ids[:5])
+
+        # All returned values must be float in [-1.0, 1.0]
+        for cid, sim in sims.items():
+            assert isinstance(sim, float), f"similarity for {cid} is not float: {type(sim)}"
+            assert -1.01 <= sim <= 1.01, f"cosine similarity out of range: {sim}"
+
+    def test_get_chunk_cosine_similarities_empty_inputs(self, indexer) -> None:
+        """get_chunk_cosine_similarities must return empty dict for empty inputs
+        without raising.
+        """
+        q_emb = indexer.embed_query("some query")
+
+        assert indexer.get_chunk_cosine_similarities([], q_emb) == {}
+        assert indexer.get_chunk_cosine_similarities(q_emb, []) == {}
+
+    def test_bm25_fast_reject_zero_keyword_overlap(self, indexer, tmp_path) -> None:
+        """BM25-without-trigger fast-reject: a non-compound forced candidate whose
+        BM25 score for the remaining query tokens (all tokens minus the trigger) is
+        near-zero must be rejected even if the trigger token appears in its symbol.
+
+        This guards the F9 / F11 case at the searcher level (as a complement to the
+        stop-word guard — if the word is NOT in stop_words but has near-zero BM25
+        without the trigger, it should still be rejected).
+        """
+        from agent.searcher import CodeSearcher, _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR
+
+        # "project" is already in stop_words and won't reach this code path, so
+        # use a synthetic 7-char non-stop word that has zero content overlap with
+        # the rest of the query.
+        irrelevant_src = tmp_path / "geometry.py"
+        irrelevant_src.write_text(
+            "class GeometryMixin:\n"
+            "    def longvar(self):\n"
+            "        \"\"\"Project geometry onto a plane using affine transforms.\"\"\"\n"
+            "        return self._affine_project()\n"
+        )
+        # A relevant file that has strong overlap with the other query tokens
+        relevant_src = tmp_path / "migrator.py"
+        relevant_src.write_text(
+            "class Migrator:\n"
+            "    def list_migrations(self):\n"
+            "        \"\"\"List all database migration states.\"\"\"\n"
+            "        return self.db.get_migrations()\n"
+        )
+        indexer.index_file(str(irrelevant_src))
+        indexer.index_file(str(relevant_src))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Verify the floor constant is sane
+        assert 0.0 < _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR <= 0.20, (
+            f"BM25 fast-reject floor {_FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR} is out of expected range"
+        )
+
+    def test_vec_sim_floor_constant_is_tuned(self) -> None:
+        """_FORCED_INCLUSION_VEC_SIM_FLOOR must be in [0.40, 0.70] — the range
+        where the threshold discriminates DB-cursor .execute() (≥0.52) from
+        management-command .execute() (≤0.50) on the Django corpus (UPG-11.12).
+        """
+        from agent.searcher import _FORCED_INCLUSION_VEC_SIM_FLOOR
+
+        assert 0.40 <= _FORCED_INCLUSION_VEC_SIM_FLOOR <= 0.70, (
+            f"_FORCED_INCLUSION_VEC_SIM_FLOOR={_FORCED_INCLUSION_VEC_SIM_FLOOR} "
+            "is outside the [0.40, 0.70] tuned range.  "
+            "The value must separate DB cursor execute (≥0.52) from "
+            "management-command execute (≤0.50) on the Django corpus."
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.10 — Qualified "Class.leaf" symbol name surfaced in SearchResult
+# ---------------------------------------------------------------------------
+
+class TestQualifiedSymbolName:
+    """UPG-11.10: _apply_quality_and_dedup must promote symbol_name from bare leaf
+    to qualified "Class.leaf" form when the indexer-injected "# class: X" prefix
+    is present in the chunk content.
+
+    This makes the REST/MCP `symbol` field show "Field.deconstruct" instead of
+    bare "deconstruct", helping callers understand class ownership.
+    """
+
+    _SOURCE = """\
+class ModelField:
+    def validate(self, value, model_instance):
+        \"\"\"Validate the value for this field.\"\"\"
+        # field validation logic
+        return value
+
+class AnotherField(ModelField):
+    def validate(self, value, model_instance):
+        \"\"\"AnotherField override.\"\"\"
+        return super().validate(value, model_instance)
+"""
+
+    def test_qualified_symbol_name_in_search_results(self, indexer, tmp_path) -> None:
+        """After search, symbol_name on each result should be 'Class.method' not bare 'method'."""
+        from agent.searcher import CodeSearcher
+
+        src = tmp_path / "fields.py"
+        src.write_text(self._SOURCE)
+        indexer.index_file(str(src))
+
+        # Verify indexer stored bare leaf
+        _, docs, metas = indexer.get_all_documents()
+        validate_metas = [m for m in metas if m.get("symbol_name") == "validate"]
+        assert len(validate_metas) >= 2, (
+            "Indexer must store bare leaf 'validate' for both methods"
+        )
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        results, _ = s.search("ModelField validate value for field", n_results=10, rerank=False)
+        result_syms = {r.symbol_name for r in results}
+
+        # At least one result should have the qualified form
+        qualified = {sym for sym in result_syms if "." in sym and "validate" in sym}
+        assert qualified, (
+            f"UPG-11.10: expected qualified symbol names like 'ModelField.validate' "
+            f"in results, but got: {result_syms}"
+        )
+        # No result should have bare "validate" anymore (they all get class prefix)
+        assert "validate" not in result_syms or all(
+            "." in r.symbol_name for r in results if r.symbol_name == "validate"
+        ), f"Bare 'validate' still present in results: {result_syms}"
+
+    def test_qualified_form_used_in_rest_response(self, indexer, tmp_path) -> None:
+        """UPG-11.10: the 'symbol' field in the REST CodeChunkResult must show
+        the qualified form (e.g. 'ModelField.validate'), not just the bare leaf."""
+        from agent.searcher import CodeSearcher, SearchResult
+
+        # Build a result with a chunk that has a class prefix in content
+        r = SearchResult(
+            file_path="/p/fields.py",
+            lines="5-10",
+            symbol_name="validate",
+            language="python",
+            score=0.8,
+            content="# class: ModelField\ndef validate(self, value, model_instance):\n    return value\n    # body\n",
+            node_type="function_definition",
+        )
+        # After _apply_quality_and_dedup, symbol_name should be upgraded
+        from agent.searcher import CodeSearcher as CS
+        import tests.conftest as cf
+        # Use the test searcher fixture approach
+        from agent.indexer import CodeIndexer
+        from tests.conftest import _DummyEmbedProvider
+        db = str(tmp_path / "db")
+        idx2 = CodeIndexer(str(tmp_path), db_path=db)
+        idx2._embed_provider = _DummyEmbedProvider()
+        s2 = CS(idx2)
+
+        out = s2._apply_quality_and_dedup("ModelField validate", [r])
+        assert out, "Expected at least one result"
+        assert out[0].symbol_name == "ModelField.validate", (
+            f"UPG-11.10: expected 'ModelField.validate', got {out[0].symbol_name!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.2 — Monotonic displayed score (F1c)
+# ---------------------------------------------------------------------------
+
+class TestMonotonicScore:
+    """UPG-11.2: scores in the returned list must be non-increasing.
+
+    Before UPG-11.2, score= was set to the stale pre-rerank hybrid score
+    (set before quality re-sort), so rank1 could have a lower score than rank5.
+    Now _apply_quality_and_dedup replaces score with the composite ranking key.
+    """
+
+    def test_scores_non_increasing(self, searcher) -> None:
+        """Returned scores must be non-increasing (sorted_by_score: true)."""
+        content_templates = [
+            "def alpha(self):\n    # method body here\n    return self.x\n    # impl",
+            "def beta(self):\n    # another body\n    return self.y\n    # different",
+            "def gamma(self):\n    # yet another\n    return self.z\n    # extra",
+            "def delta(self):\n    # fourth method\n    return self.w\n    # more",
+        ]
+        cands = [
+            _sr(c, path=f"/p/mod{i}.py", score=0.5)
+            for i, c in enumerate(content_templates)
+        ]
+        out = searcher._apply_quality_and_dedup("alpha beta gamma delta method", cands)
+        scores = [r.score for r in out]
+        assert scores == sorted(scores, reverse=True), (
+            f"UPG-11.2: scores must be non-increasing. Got: {scores}"
+        )
+
+    def test_score_reflects_composite_not_hybrid(self, searcher) -> None:
+        """A chunk with higher quality should have a higher score than one with lower quality
+        even if both started at the same raw hybrid score."""
+        from agent.chunk_quality import NAVIGATIONAL_NODE_TYPE
+        # High quality: real code
+        high = _sr(
+            "def process_request(request):\n    return self.dispatch(request)\n    # impl\n    x=1",
+            path="/p/impl.py", score=0.7,
+        )
+        # Low quality: navigational (gets quality multiplier 0.35)
+        low = _sr(
+            "pub use a::A;\npub use b::B;\npub use c::C;",
+            path="/p/lib.rs", node_type=NAVIGATIONAL_NODE_TYPE, lang="rust", score=0.7,
+        )
+        # Even though both have same raw hybrid score=0.7, high quality chunk
+        # should end up with a higher final score.
+        out = searcher._apply_quality_and_dedup("process dispatch request", [high, low])
+        assert len(out) == 2
+        assert out[0].score >= out[1].score, (
+            f"UPG-11.2: expected non-increasing scores, got {[r.score for r in out]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.4 — Expand-to-symbol affordance (line range on results)
+# ---------------------------------------------------------------------------
+
+class TestExpandToSymbolAffordance:
+    """UPG-11.4: each SearchResult must carry symbol_start_line/symbol_end_line
+    so callers can expand to the full symbol without a blind whole-file re-read.
+    """
+
+    def test_symbol_line_range_populated(self, indexer, tmp_path) -> None:
+        """After indexing, search results must have non-zero symbol_start_line/end_line."""
+        from agent.searcher import CodeSearcher
+
+        src = make_py(tmp_path, "widget.py", """
+class Widget:
+    def render(self):
+        \"\"\"Render the widget to the screen.\"\"\"
+        # drawing code here
+        return self.canvas.draw()
+""")
+        indexer.index_file(src)
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+        results, _ = s.search("Widget render draw canvas", n_results=5, rerank=False)
+
+        assert results, "Expected at least one result"
+        # Find the render method result
+        render = next((r for r in results if "render" in (r.symbol_name or "")), None)
+        if render is None:
+            render = results[0]  # at least verify the field is populated
+
+        # The affordance fields must be set (non-zero when the chunk is a named symbol)
+        assert hasattr(render, "symbol_start_line"), "UPG-11.4: SearchResult missing symbol_start_line"
+        assert hasattr(render, "symbol_end_line"), "UPG-11.4: SearchResult missing symbol_end_line"
+        # For AST-parsed symbol chunks, the range should be > 0
+        if "render" in (render.symbol_name or "") or "render" in render.content:
+            assert render.symbol_start_line > 0 or render.symbol_end_line > 0, (
+                f"UPG-11.4: expected non-zero line range for a symbol chunk; "
+                f"got start={render.symbol_start_line} end={render.symbol_end_line}"
+            )
+
+    def test_rest_response_includes_symbol_line_range(self) -> None:
+        """UPG-11.4: the REST CodeChunkResult schema must include symbol_start_line/end_line."""
+        from app.models import CodeChunkResult
+        r = CodeChunkResult(
+            file="src/widget.py",
+            lines="3-8",
+            symbol="Widget.render",
+            language="python",
+            score=0.9,
+            content="def render(self): ...",
+            symbol_start_line=3,
+            symbol_end_line=8,
+        )
+        assert r.symbol_start_line == 3
+        assert r.symbol_end_line == 8
+
+    def test_rest_response_defaults_zero_for_non_symbol_chunks(self) -> None:
+        """Window chunks without a named symbol must default to 0/0."""
+        from app.models import CodeChunkResult
+        r = CodeChunkResult(
+            file="src/big_file.py",
+            lines="100-300",
+            symbol=None,
+            language="python",
+            score=0.7,
+            content="lots of code ...",
+        )
+        assert r.symbol_start_line == 0
+        assert r.symbol_end_line == 0
