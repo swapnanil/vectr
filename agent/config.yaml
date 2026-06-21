@@ -60,6 +60,27 @@ ranking:
     # cosine similarity threshold (0..1)
     vec_sim_floor: 0.52
 
+    # Curated short-verb forced-inclusion allowlist (UPG-11.14 / F13).
+    # These single-word verbs are so commonly used as plain ORM/API method names
+    # that natural-language queries (e.g. "save a model instance to the database")
+    # genuinely name the symbol.  They are below the min_identifier_len=7 guard
+    # (so they would normally be excluded from forced-inclusion) AND are in
+    # prog_stopwords.txt (so the symbol-identity boost is also suppressed for them
+    # as bare leaves).  This list reinstates forced-inclusion ONLY — the BM25 floor
+    # and vec_sim_floor relevance gates still apply, so irrelevant overrides that
+    # only share the verb name are rejected by the gate.
+    # Rule: tokens in this list bypass the length AND stop-word guards but are
+    # treated as NON-COMPOUND (gate-checked) candidates, not compound (unconditional).
+    # Edit here — do NOT hardcode this list anywhere in Python source.
+    short_verb_allowlist:
+      - save
+      - get
+      - set
+      - add
+      - create
+      - delete
+      - update
+
   doc_intent:
     # When the query is doc-intent (starts with "how to", "what is", "explain",
     # "tutorial", or has a why/how question shape), suppress forced-inclusion so

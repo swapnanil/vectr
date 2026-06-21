@@ -172,3 +172,11 @@ applies
 destroy
 compute
 returns
+# UPG-11.14 / F14: prose nouns that appear as common method/property names in
+# admin/view frameworks but are used as container nouns in natural-language queries.
+# Adding to this list blocks forced-inclusion (which would flood the candidate pool
+# with framework-adapter variants instead of the core ORM/API method the user wants).
+# Example: "exclude certain records from a queryset" → 'queryset' (8 chars, no
+# underscore) would otherwise trigger forced-inclusion of ALL ListFilter.queryset()
+# admin variants, burying QuerySet.exclude at rank4.
+queryset

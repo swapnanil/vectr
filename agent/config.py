@@ -33,6 +33,13 @@ FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR : float
 FORCED_INCLUSION_VEC_SIM_FLOOR : float
     Cosine similarity floor for non-compound forced candidates (UPG-11.12).
 
+FORCED_INCLUSION_SHORT_VERB_ALLOWLIST : frozenset[str]
+    Curated set of short verb identifiers that bypass the min_identifier_len and
+    stop-word guards for forced-inclusion, but are still subject to the BM25 floor
+    and vec_sim_floor relevance gate (UPG-11.14 / F13).  Verbs like "save", "get",
+    "create", "delete", "update" commonly name ORM/API methods that a user's
+    natural-language query genuinely targets.
+
 QUALITY_TRIVIAL : float
     Quality prior for bare stub chunks (UPG-12.1).
 
@@ -170,6 +177,9 @@ FORCED_INCLUSION_MAX: int = int(_fi_cfg["max_candidates"])
 FORCED_INCLUSION_MIN_IDENTIFIER_LEN: int = int(_fi_cfg["min_identifier_len"])
 FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR: float = float(_fi_cfg["nontrigger_bm25_floor"])
 FORCED_INCLUSION_VEC_SIM_FLOOR: float = float(_fi_cfg["vec_sim_floor"])
+FORCED_INCLUSION_SHORT_VERB_ALLOWLIST: frozenset[str] = frozenset(
+    str(v).lower() for v in _fi_cfg["short_verb_allowlist"]
+)
 
 # ---------------------------------------------------------------------------
 # Doc-intent query classification (UPG-11.11)

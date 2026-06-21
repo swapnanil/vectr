@@ -25,6 +25,7 @@ from agent.config import (
     FORCED_INCLUSION_MIN_IDENTIFIER_LEN as _FORCED_INCLUSION_MIN_IDENTIFIER_LEN,
     FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR as _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR,
     FORCED_INCLUSION_VEC_SIM_FLOOR as _FORCED_INCLUSION_VEC_SIM_FLOOR,
+    FORCED_INCLUSION_SHORT_VERB_ALLOWLIST as _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST,
     RERANK_TOP_K as _RERANK_TOP_K,
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
     DOC_INTENT_SUPPRESS_FORCED_INCLUSION as _DOC_INTENT_SUPPRESS_FORCED_INCLUSION,
@@ -279,20 +280,32 @@ class CodeSearcher:
         # implementation — so flooding the pool with 80+ same-named code chunks would
         # bury the documentation the user is actually asking for (F2).
         if self._bm25 is not None and not (_is_doc_intent and _DOC_INTENT_SUPPRESS_FORCED_INCLUSION):
+            _all_query_sym_toks = _query_symbol_tokens(query)
             sym_tokens_for_inclusion = {
-                tok for tok in _query_symbol_tokens(query)
+                tok for tok in _all_query_sym_toks
                 if (
                     "_" in tok  # compound identifier: from_db_value, get_queryset …
                     or len(tok) >= _FORCED_INCLUSION_MIN_IDENTIFIER_LEN  # long specific word
                 )
                 and tok not in _SYM_STOP_WORDS_VAL
             }
+            # UPG-11.14 / F13: short-verb allowlist bypass.
+            # Verbs like "save", "get", "create" are below min_identifier_len AND in
+            # prog_stopwords.txt (so they are excluded by both guards above).  But when
+            # they appear in the query they frequently name the exact ORM/API method the
+            # user wants (e.g. "save a model instance to the database" → Model.save).
+            # The allowlist reinstates forced-inclusion for these verbs ONLY; they are
+            # treated as NON-COMPOUND candidates so the BM25 floor + vec_sim_floor
+            # relevance gate still applies — irrelevant overrides are rejected by the gate.
+            for tok in _all_query_sym_toks:
+                if tok in _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST:
+                    sym_tokens_for_inclusion.add(tok)
             if sym_tokens_for_inclusion:
                 sorted_set = set(sorted_ids)
-                # Compute FULL query symbol tokens once for the qualified boost check
-                # (we need ALL query tokens so the class-name prefix can match, e.g.
-                # "field" from "Field deconstruct …" to qualify Field.deconstruct).
-                all_query_sym_tokens = _query_symbol_tokens(query)
+                # Use the already-computed full query symbol tokens for the qualified
+                # boost check (class-name prefix matching, e.g. "field" from
+                # "Field deconstruct …" to qualify Field.deconstruct).
+                all_query_sym_tokens = _all_query_sym_toks
 
                 # UPG-11.12: relevance gate for NON-COMPOUND forced candidates.
                 # Precompute BM25-without-trigger scores for each non-compound token.
