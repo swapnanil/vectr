@@ -59,3 +59,63 @@ ranking:
     # reach this threshold to be included; either signal passing is sufficient.
     # cosine similarity threshold (0..1)
     vec_sim_floor: 0.52
+
+  quality_priors:
+    # Multipliers applied to the hybrid similarity score. 1.0 = neutral.
+    # Lower = de-ranked further. Applied in chunk_quality.quality_score().
+
+    # Bare stub chunks with almost no content (single-line import, lone brace, etc.)
+    trivial: 0.15
+
+    # Re-export / import-only "navigational" chunks (no implementation substance)
+    navigational: 0.35
+
+    # Markdown chunks that contain only headings (no prose or code body)
+    heading_only: 0.40
+
+    # Machine-generated files (migrations, protobuf output, build artifacts)
+    generated: 0.45
+
+    # vectr's own config files — we never want to surface our own internals
+    vectr_config: 0.10
+
+    # Test files when the query does not explicitly target tests
+    test_deprioritised: 0.55
+
+    # substantive documentation prose vs implementation code
+    doc_prose: 0.70
+
+    # bodies with very few meaningful lines
+    short_penalty: 0.80
+
+  rerank:
+    # rerank this many hybrid candidates before trimming to n_results
+    top_k: 40
+
+    # When no language filter is set, doc prose dominates the shallow hybrid pool and
+    # real implementation chunks fall outside it (audit: extractor.py / chunk_file never
+    # fetched). Fetch a deeper pool in that case so the quality prior has code to surface.
+    top_k_unfiltered: 60
+
+indexing:
+  # hard cap — prevents single huge chunks diluting embeddings
+  max_chunk_lines: 150
+
+  # lines kept for class-level chunk (sig + docstring + attrs)
+  class_header_lines: 40
+
+output:
+  # Number of lines returned as a snippet with each symbol location.
+  # Enough for the AI to understand signature + first few lines of the body.
+  snippet_lines: 12
+
+behavior:
+  remember_nudge:
+    # After this many vectr tool calls without a vectr_remember, the next
+    # vectr_search / vectr_locate / vectr_trace response appends an imperative
+    # reminder. The counter resets on every vectr_remember call.
+    threshold: 10
+
+    # After the threshold fires, re-fires every this many calls so a single
+    # dismissal cannot silence it for the rest of the session.
+    cooldown: 5

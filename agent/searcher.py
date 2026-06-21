@@ -24,6 +24,8 @@ from agent.config import (
     FORCED_INCLUSION_MIN_IDENTIFIER_LEN as _FORCED_INCLUSION_MIN_IDENTIFIER_LEN,
     FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR as _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR,
     FORCED_INCLUSION_VEC_SIM_FLOOR as _FORCED_INCLUSION_VEC_SIM_FLOOR,
+    RERANK_TOP_K as _RERANK_TOP_K,
+    RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
 )
 from agent.indexer import CodeIndexer
 
@@ -69,11 +71,10 @@ def _code_tokenize(text: str) -> list[str]:
 # Optional cross-encoder reranker (lazy-loaded)
 # ---------------------------------------------------------------------------
 
-_RERANK_TOP_K = 40  # rerank this many hybrid candidates before trimming to n_results
-# When no language filter is set, doc prose dominates the shallow hybrid pool and
-# real implementation chunks fall outside it (audit: extractor.py / chunk_file never
-# fetched). Fetch a deeper pool in that case so the quality prior has code to surface.
-_RERANK_TOP_K_UNFILTERED = 60
+# UPG-12.1: _RERANK_TOP_K / _RERANK_TOP_K_UNFILTERED are sourced from
+# agent/config.yaml (ranking.rerank) via agent/config.py — imported above as
+# _RERANK_TOP_K / _RERANK_TOP_K_UNFILTERED.  The alias names are kept so all
+# existing call sites and tests work without change.
 
 # UPG-11.7 / UPG-11.12: forced-inclusion tunables — sourced from agent/config.yaml
 # (ranking.forced_inclusion block) via agent/config.py.  See config.yaml for the

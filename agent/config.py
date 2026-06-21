@@ -32,6 +32,51 @@ FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR : float
 
 FORCED_INCLUSION_VEC_SIM_FLOOR : float
     Cosine similarity floor for non-compound forced candidates (UPG-11.12).
+
+QUALITY_TRIVIAL : float
+    Quality prior for bare stub chunks (UPG-12.1).
+
+QUALITY_NAVIGATIONAL : float
+    Quality prior for re-export / import-only navigational chunks (UPG-12.1).
+
+QUALITY_HEADING_ONLY : float
+    Quality prior for markdown heading-only chunks (UPG-12.1).
+
+QUALITY_GENERATED : float
+    Quality prior for machine-generated files (UPG-12.1).
+
+QUALITY_VECTR_CONFIG : float
+    Quality prior for vectr's own config files (UPG-12.1).
+
+QUALITY_TEST_DEPRIORITISED : float
+    Quality prior for test files when query does not target tests (UPG-12.1).
+
+QUALITY_DOC_PROSE : float
+    Quality prior for documentation prose chunks (UPG-12.1).
+
+QUALITY_SHORT_PENALTY : float
+    Quality prior for chunks with very few meaningful lines (UPG-12.1).
+
+RERANK_TOP_K : int
+    Number of hybrid candidates to rerank before trimming to n_results (UPG-12.1).
+
+RERANK_TOP_K_UNFILTERED : int
+    Deeper candidate pool for unfiltered (no language filter) queries (UPG-12.1).
+
+INDEXING_MAX_CHUNK_LINES : int
+    Hard cap on lines per chunk — prevents single huge chunks diluting embeddings (UPG-12.1).
+
+INDEXING_CLASS_HEADER_LINES : int
+    Lines kept for class-level chunk (sig + docstring + attrs) (UPG-12.1).
+
+OUTPUT_SNIPPET_LINES : int
+    Lines returned as a snippet with each symbol location (UPG-12.1).
+
+BEHAVIOR_REMEMBER_NUDGE_THRESHOLD : int
+    Tool calls without vectr_remember before a nudge fires (UPG-12.1).
+
+BEHAVIOR_REMEMBER_NUDGE_COOLDOWN : int
+    Calls between repeated nudges after the threshold first fires (UPG-12.1).
 """
 from __future__ import annotations
 
@@ -109,3 +154,53 @@ FORCED_INCLUSION_MAX: int = int(_fi_cfg["max_candidates"])
 FORCED_INCLUSION_MIN_IDENTIFIER_LEN: int = int(_fi_cfg["min_identifier_len"])
 FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR: float = float(_fi_cfg["nontrigger_bm25_floor"])
 FORCED_INCLUSION_VEC_SIM_FLOOR: float = float(_fi_cfg["vec_sim_floor"])
+
+# ---------------------------------------------------------------------------
+# Quality priors — ranking multipliers (UPG-12.1)
+# ---------------------------------------------------------------------------
+
+_qp_cfg: dict[str, Any] = _cfg["ranking"]["quality_priors"]
+
+QUALITY_TRIVIAL: float = float(_qp_cfg["trivial"])
+QUALITY_NAVIGATIONAL: float = float(_qp_cfg["navigational"])
+QUALITY_HEADING_ONLY: float = float(_qp_cfg["heading_only"])
+QUALITY_GENERATED: float = float(_qp_cfg["generated"])
+QUALITY_VECTR_CONFIG: float = float(_qp_cfg["vectr_config"])
+QUALITY_TEST_DEPRIORITISED: float = float(_qp_cfg["test_deprioritised"])
+QUALITY_DOC_PROSE: float = float(_qp_cfg["doc_prose"])
+QUALITY_SHORT_PENALTY: float = float(_qp_cfg["short_penalty"])
+
+# ---------------------------------------------------------------------------
+# Rerank pool sizes (UPG-12.1)
+# ---------------------------------------------------------------------------
+
+_rr_cfg: dict[str, Any] = _cfg["ranking"]["rerank"]
+
+RERANK_TOP_K: int = int(_rr_cfg["top_k"])
+RERANK_TOP_K_UNFILTERED: int = int(_rr_cfg["top_k_unfiltered"])
+
+# ---------------------------------------------------------------------------
+# Indexing tunables (UPG-12.1)
+# ---------------------------------------------------------------------------
+
+_idx_cfg: dict[str, Any] = _cfg["indexing"]
+
+INDEXING_MAX_CHUNK_LINES: int = int(_idx_cfg["max_chunk_lines"])
+INDEXING_CLASS_HEADER_LINES: int = int(_idx_cfg["class_header_lines"])
+
+# ---------------------------------------------------------------------------
+# Output tunables (UPG-12.1)
+# ---------------------------------------------------------------------------
+
+_out_cfg: dict[str, Any] = _cfg["output"]
+
+OUTPUT_SNIPPET_LINES: int = int(_out_cfg["snippet_lines"])
+
+# ---------------------------------------------------------------------------
+# Behaviour tunables (UPG-12.1)
+# ---------------------------------------------------------------------------
+
+_beh_cfg: dict[str, Any] = _cfg["behavior"]["remember_nudge"]
+
+BEHAVIOR_REMEMBER_NUDGE_THRESHOLD: int = int(_beh_cfg["threshold"])
+BEHAVIOR_REMEMBER_NUDGE_COOLDOWN: int = int(_beh_cfg["cooldown"])
