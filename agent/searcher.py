@@ -13,6 +13,7 @@ from agent.chunk_quality import (
     normalized_content,
     quality_score,
     query_wants_tests,
+    is_doc_intent_query,
     symbol_identity_boost,
     extract_class_from_content,
     _query_symbol_tokens,
@@ -26,6 +27,7 @@ from agent.config import (
     FORCED_INCLUSION_VEC_SIM_FLOOR as _FORCED_INCLUSION_VEC_SIM_FLOOR,
     RERANK_TOP_K as _RERANK_TOP_K,
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
+    DOC_INTENT_SUPPRESS_FORCED_INCLUSION as _DOC_INTENT_SUPPRESS_FORCED_INCLUSION,
 )
 from agent.indexer import CodeIndexer
 
@@ -193,6 +195,10 @@ class CodeSearcher:
         if language is not None:
             language = language.strip().lower() or None
 
+        # UPG-11.11: classify query intent once so both forced-inclusion suppression
+        # and quality-score adjustment are consistent within a single search call.
+        _is_doc_intent = is_doc_intent_query(query)
+
         if self._indexer.total_chunks == 0:
             return [], 0
 
@@ -266,7 +272,13 @@ class CodeSearcher:
         # Safety cap: _FORCED_INCLUSION_MAX total additional chunks prevents flooding
         # on pathological corpora where a common method name appears in thousands of
         # files (a real-world codebase typically has ≤100 same-named methods).
-        if self._bm25 is not None:
+        #
+        # UPG-11.11: Doc-intent queries (e.g. "how to …", "explain …", "tutorial")
+        # suppress forced-inclusion entirely.  On a doc-intent query, symbol names
+        # appearing in the query describe the *topic* — not a request for the symbol
+        # implementation — so flooding the pool with 80+ same-named code chunks would
+        # bury the documentation the user is actually asking for (F2).
+        if self._bm25 is not None and not (_is_doc_intent and _DOC_INTENT_SUPPRESS_FORCED_INCLUSION):
             sym_tokens_for_inclusion = {
                 tok for tok in _query_symbol_tokens(query)
                 if (
@@ -432,13 +444,14 @@ class CodeSearcher:
             candidates = forced_results + regular_results
 
         # --- Quality prior + dedup + deterministic tiebreaker (UPG-2.1/2.2/2.3) ---
-        candidates = self._apply_quality_and_dedup(query, candidates)
+        candidates = self._apply_quality_and_dedup(query, candidates, is_doc_intent=_is_doc_intent)
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         return candidates[:n_results], elapsed_ms
 
     def _apply_quality_and_dedup(
         self, query: str, candidates: list[SearchResult],
+        *, is_doc_intent: bool = False,
     ) -> list[SearchResult]:
         """Re-rank by relevance×quality, collapse duplicates, break ties deterministically.
 
@@ -447,6 +460,11 @@ class CodeSearcher:
         heading-only / (off-topic) test chunks (UPG-2.1, 2.3). Byte-identical
         chunks collapse to a single representative with a duplicate count so
         boilerplate can't flood the top-N (UPG-2.2).
+
+        Args:
+            is_doc_intent: When True, documentation prose chunks are scored with
+                the elevated ``DOC_INTENT_DOC_PROSE_MULTIPLIER`` (default 1.0) so
+                they can compete with code on how-to/explain queries (UPG-11.11).
         """
         if not candidates:
             return candidates
@@ -460,6 +478,7 @@ class CodeSearcher:
             q = quality_score(
                 r.content, r.file_path, r.language, r.node_type,
                 query_targets_tests=targets_tests,
+                query_is_doc_intent=is_doc_intent,
             )
             # Symbol-identity bonus: additive boost when the candidate's symbol
             # name matches the query's symbol intent (UPG-11.1).

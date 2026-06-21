@@ -60,6 +60,22 @@ ranking:
     # cosine similarity threshold (0..1)
     vec_sim_floor: 0.52
 
+  doc_intent:
+    # When the query is doc-intent (starts with "how to", "what is", "explain",
+    # "tutorial", or has a why/how question shape), suppress forced-inclusion so
+    # symbol-name tokens in the query (e.g. "deconstruct", "from_db_value") don't
+    # flood the candidate pool with 80+ code chunks, burying the documentation
+    # the user is actually asking for (UPG-11.11 / F2).
+    # Suppressing forced-inclusion is safe for doc-intent queries because the user
+    # is asking about a topic, not requesting a specific symbol implementation.
+    suppress_forced_inclusion: true
+
+    # When the query is doc-intent, promote documentation prose chunks from
+    # doc_prose (0.70) to this multiplier. Prevents code chunks that naturally
+    # rank above doc prose from dominating for how-to/explain queries.
+    # 1.0 = neutral (no penalty); set to doc_prose or above for intermediate.
+    doc_prose_multiplier: 1.0
+
   quality_priors:
     # Multipliers applied to the hybrid similarity score. 1.0 = neutral.
     # Lower = de-ranked further. Applied in chunk_quality.quality_score().

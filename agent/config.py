@@ -82,6 +82,17 @@ EVICTION_RETRIEVED_TOKEN_GATE : int
     Minimum accumulated retrieved-token estimate since the last auto-eviction hint
     before auto_eviction_hint() will emit. Suppresses the hint on bursts of tiny
     searches that contribute negligible context pressure (UPG-11.15).
+
+DOC_INTENT_SUPPRESS_FORCED_INCLUSION : bool
+    When True (default), suppress forced-inclusion for doc-intent queries so that
+    symbol-name tokens don't flood the candidate pool with code chunks, which would
+    bury the documentation the user is actually asking for (UPG-11.11 / F2).
+
+DOC_INTENT_DOC_PROSE_MULTIPLIER : float
+    Quality multiplier for doc prose chunks on doc-intent queries (UPG-11.11).
+    When the query is doc-intent, this replaces the normal doc_prose multiplier
+    (0.70) so documentation can compete with code on how-to/explain queries.
+    Default 1.0 = neutral (no doc penalty for doc-intent queries).
 """
 from __future__ import annotations
 
@@ -159,6 +170,15 @@ FORCED_INCLUSION_MAX: int = int(_fi_cfg["max_candidates"])
 FORCED_INCLUSION_MIN_IDENTIFIER_LEN: int = int(_fi_cfg["min_identifier_len"])
 FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR: float = float(_fi_cfg["nontrigger_bm25_floor"])
 FORCED_INCLUSION_VEC_SIM_FLOOR: float = float(_fi_cfg["vec_sim_floor"])
+
+# ---------------------------------------------------------------------------
+# Doc-intent query classification (UPG-11.11)
+# ---------------------------------------------------------------------------
+
+_di_cfg: dict[str, Any] = _cfg["ranking"]["doc_intent"]
+
+DOC_INTENT_SUPPRESS_FORCED_INCLUSION: bool = bool(_di_cfg["suppress_forced_inclusion"])
+DOC_INTENT_DOC_PROSE_MULTIPLIER: float = float(_di_cfg["doc_prose_multiplier"])
 
 # ---------------------------------------------------------------------------
 # Quality priors — ranking multipliers (UPG-12.1)
