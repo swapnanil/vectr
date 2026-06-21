@@ -1,387 +1,26 @@
 """
-SymbolGraph — L2 knowledge layer: symbols, call graph, import graph.
-
-Enables vectr_locate (where is X defined/used?) and vectr_trace (what calls X?
-what does X call?). Built from tree-sitter, no embeddings, no LLM needed.
-
-Design principle: vectr never calls an LLM internally. locate() returns a short
-code snippet alongside each symbol so the AI editor can read and understand it
-directly — no separate description generation step.
-
-Storage: SQLite in the vectr DB dir. Rebuilt incrementally as files change.
+SQLite-backed SymbolGraph: locate, trace, format, and persistence.
 """
 from __future__ import annotations
 
 import logging
-import json
 import re
 import sqlite3
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from agent.config import OUTPUT_SNIPPET_LINES as SNIPPET_LINES
+from agent.symbol_graph._types import Symbol, LocateResult, CallEdge
+from agent.symbol_graph._constants import (
+    SNIPPET_LINES,
+    SYMBOL_SCHEMA_VERSION,
+    _KIND_RANK,
+    _KIND_RANK_DEFAULT,
+    _BUILTINS,
+    graph_toolchain_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class Symbol:
-    symbol_id: int
-    workspace: str
-    name: str
-    kind: str           # function | method | class | interface | struct | enum
-    file_path: str
-    start_line: int
-    end_line: int
-    snippet: str = field(default="")     # first SNIPPET_LINES of the symbol body
-
-
-@dataclass
-class LocateResult:
-    symbols: list[Symbol]
-    resolution_strategy: str  # exact|suffix|same_module|import_chain|substring|fuzzy|none
-    query: str
-
-
-@dataclass
-class CallEdge:
-    from_file: str
-    from_symbol: str
-    from_line: int
-    to_symbol: str
-    edge_type: str      # calls | imports | inherits | implements
-    call_count: int = 1  # UPG-4.2: distinct call sites this aggregated edge stands for
-
-
-# ---------------------------------------------------------------------------
-# Tree-sitter helpers (reuse indexer's parser cache)
-# ---------------------------------------------------------------------------
-
-def _get_parser(language: str):
-    from agent.indexer import _get_parser as _base_get_parser
-    return _base_get_parser(language)
-
-
-# Node types that define symbols per language
-_SYMBOL_TYPES: dict[str, dict[str, str]] = {
-    "python": {
-        "function_definition": "function",
-        "class_definition": "class",
-        "decorated_definition": "function",
-    },
-    "javascript": {
-        "function_declaration": "function",
-        "method_definition": "method",
-        "class_declaration": "class",
-        "arrow_function": "function",
-    },
-    "typescript": {
-        "function_declaration": "function",
-        "method_definition": "method",
-        "class_declaration": "class",
-        "interface_declaration": "interface",
-        "arrow_function": "function",
-    },
-    "go": {
-        "function_declaration": "function",
-        "method_declaration": "method",
-        "type_declaration": "struct",
-    },
-    "rust": {
-        "function_item": "function",
-        # An impl block is an implementation, not the type's definition. Keep it a
-        # distinct kind so locate can rank the `struct`/`enum`/`trait` def ahead of
-        # the (often many) impl blocks that share the type's name (UPG-4.5).
-        "impl_item": "impl",
-        "struct_item": "struct",
-        "trait_item": "interface",
-        "enum_item": "enum",
-    },
-    "java": {
-        "method_declaration": "method",
-        "class_declaration": "class",
-        "interface_declaration": "interface",
-        "enum_declaration": "enum",
-    },
-    "zig": {
-        "function_declaration": "function",
-        "variable_declaration": "struct",  # pub const Foo = struct { ... }
-    },
-    "c": {
-        "function_definition": "function",
-        "struct_specifier": "struct",
-        "union_specifier": "struct",
-        "enum_specifier": "enum",
-        "type_definition": "type",       # typedef … Name;
-        "preproc_def": "macro",
-        "preproc_function_def": "macro",
-    },
-    "cpp": {
-        "function_definition": "function",
-        "class_specifier": "class",
-        "struct_specifier": "struct",
-        "union_specifier": "struct",
-        "enum_specifier": "enum",
-        "type_definition": "type",
-        "namespace_definition": "namespace",
-        "preproc_def": "macro",
-        "preproc_function_def": "macro",
-    },
-}
-
-# UPG-10.3: node types that bind a MODULE-LEVEL name (a constant/config/binding
-# that isn't a function or class but IS something callers `locate` — e.g. Python
-# `_CLAUDE_MD = """..."""`). Indexed only at module scope (see the scope guard in
-# _collect_symbols_and_calls) so function locals never flood the graph. Python
-# only for now; JS/TS/Rust/Go top-level const/static are a follow-up (Zig top-
-# level `pub const Foo = ...` is already covered via _SYMBOL_TYPES["zig"]).
-_MODULE_BINDING_TYPES: dict[str, frozenset[str]] = {
-    "python": frozenset({"assignment"}),
-}
-
-# Languages vectr can extract a symbol graph for — i.e. where locate/trace work.
-# Anything outside this set is search-only (chunks are indexed, but there are no
-# symbol/call-graph edges). UPG-3.3 surfaces this per-language so the caller LLM
-# can route: use locate/trace where symbols exist, fall back to search elsewhere.
-SYMBOL_LANGUAGES: frozenset[str] = frozenset(_SYMBOL_TYPES)
-
-# Intentionally NOT in config.yaml (Tier-3): SYMBOL_SCHEMA_VERSION is a
-# schema-migration trigger.  Changing it via config would silently corrupt or
-# force a full reindex without the usual version-bump safeguards.
-# Bump whenever symbol/edge extraction changes in a way that makes an
-# already-persisted graph stale (new parser language, new edge type, changed
-# name resolution). Combined with the parser-language set + embed model into the
-# toolchain fingerprint (UPG-8.7) so a vectr upgrade is detectable and the graph
-# is rebuilt rather than silently serving partial/old results.
-SYMBOL_SCHEMA_VERSION = 5  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4) · 4: module-level constants (UPG-10.3) · 5: .txt/.rst prose docs indexed (UPG-11.3)
-
-
-def graph_toolchain_fingerprint(embed_model: str = "") -> str:
-    """Identity of the toolchain that builds the symbol graph.
-
-    A change here means an already-persisted graph was built by a different
-    vectr (new/changed parser, bumped schema, different embed model) and must be
-    rebuilt — otherwise locate/trace silently serve stale or partial results
-    after an upgrade. See UPG-8.7.
-    """
-    import hashlib
-    parts = [
-        f"schema={SYMBOL_SCHEMA_VERSION}",
-        "parsers=" + ",".join(sorted(SYMBOL_LANGUAGES)),
-        f"embed={embed_model}",
-    ]
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
-
-
-def supports_symbols(language: str) -> bool:
-    """True if `language` has symbol-graph extraction (locate/trace).
-
-    Normalises common display-name spellings (e.g. "C++"→cpp, "C#"→none) so it
-    can be called with either index language keys or human-facing names.
-    """
-    if not language:
-        return False
-    norm = language.strip().lower()
-    norm = {"c++": "cpp", "cplusplus": "cpp", "objective-c": "c"}.get(norm, norm)
-    return norm in SYMBOL_LANGUAGES
-
-
-# Canonical-ness of a symbol kind for `locate` ranking (UPG-4.5). When several
-# symbols share / partially match a name, the user wants "where is X defined",
-# so lead with the type/function definition and bury impl blocks and aliases.
-# Lower rank = more canonical.
-_KIND_RANK: dict[str, int] = {
-    "class": 0, "struct": 0, "enum": 0, "interface": 0, "trait": 0,
-    "function": 1, "method": 1,
-    "route": 2,
-    "macro": 3, "variable": 3,
-    "impl": 4, "alias": 4, "import": 4,
-}
-_KIND_RANK_DEFAULT = 2
-
-
-# Language builtins / stdlib / ubiquitous constructors that pad callee lists with
-# noise when answering "what does X call *in this codebase*" (UPG-4.3). A callee
-# is treated as a builtin only if it's in this set AND is NOT defined as a symbol
-# in the workspace — so a repo that defines its own `len`/`map` keeps it. These
-# are suppressed from callee lists by default and shown with include_builtins.
-_BUILTINS: dict[str, frozenset[str]] = {
-    "python": frozenset({
-        "print", "len", "isinstance", "issubclass", "assert", "range", "enumerate",
-        "zip", "map", "filter", "sorted", "reversed", "sum", "min", "max", "abs",
-        "any", "all", "open", "format", "repr", "str", "int", "float", "bool",
-        "list", "dict", "set", "tuple", "frozenset", "bytes", "bytearray",
-        "type", "super", "getattr", "setattr", "hasattr", "delattr", "callable",
-        "iter", "next", "vars", "dir", "id", "hash", "round", "divmod", "pow",
-        "join", "split", "strip", "lstrip", "rstrip", "replace", "startswith",
-        "endswith", "lower", "upper", "append", "extend", "pop", "get", "keys",
-        "values", "items", "update", "add", "encode", "decode",
-    }),
-    "rust": frozenset({
-        "Ok", "Err", "Some", "None", "Vec", "String", "Box", "Rc", "Arc", "Cell",
-        "RefCell", "Mutex", "vec", "format", "println", "print", "eprintln",
-        "panic", "assert", "assert_eq", "assert_ne", "write", "writeln", "unwrap",
-        "expect", "clone", "into", "from", "to_string", "to_owned", "as_ref",
-        "as_mut", "as_str", "borrow", "borrow_mut", "iter", "into_iter", "collect",
-        "map", "filter", "push", "pop", "len", "is_empty", "default", "drop",
-        "matches", "min", "max", "Default", "Borrowed", "Owned",
-    }),
-    "go": frozenset({
-        "make", "new", "len", "cap", "append", "copy", "delete", "panic",
-        "recover", "print", "println", "close", "complex", "real", "imag",
-        "string", "byte", "rune", "error", "errors", "fmt",
-    }),
-    "javascript": frozenset({
-        "console", "require", "parseInt", "parseFloat", "isNaN", "JSON",
-        "Object", "Array", "String", "Number", "Boolean", "Math", "Date",
-        "Promise", "Set", "Map", "Symbol", "Error", "push", "pop", "map",
-        "filter", "forEach", "reduce", "slice", "splice", "join", "split",
-        "indexOf", "includes", "keys", "values", "entries", "assign",
-    }),
-    "typescript": frozenset({
-        "console", "require", "parseInt", "parseFloat", "isNaN", "JSON",
-        "Object", "Array", "String", "Number", "Boolean", "Math", "Date",
-        "Promise", "Set", "Map", "Symbol", "Error", "push", "pop", "map",
-        "filter", "forEach", "reduce", "slice", "splice", "join", "split",
-        "indexOf", "includes", "keys", "values", "entries", "assign",
-    }),
-    "java": frozenset({
-        "System", "String", "Integer", "Long", "Double", "Boolean", "Object",
-        "Math", "List", "Map", "Set", "Arrays", "Collections", "Optional",
-        "assert", "equals", "hashCode", "toString", "valueOf", "length", "size",
-        "get", "add", "put", "remove", "contains", "isEmpty", "println", "print",
-    }),
-    "c": frozenset({
-        "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset",
-        "strlen", "strcmp", "strncmp", "strcpy", "strncpy", "strcat", "strchr",
-        "snprintf", "sprintf", "printf", "fprintf", "fputs", "fputc", "puts",
-        "abort", "assert", "exit", "sizeof", "offsetof", "va_start", "va_end",
-        "va_arg", "qsort", "memcmp",
-    }),
-    "cpp": frozenset({
-        "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset",
-        "strlen", "strcmp", "snprintf", "printf", "fprintf", "abort", "assert",
-        "exit", "sizeof", "move", "forward", "make_shared", "make_unique",
-        "push_back", "emplace_back", "size", "begin", "end", "at", "find",
-        "static_cast", "dynamic_cast", "reinterpret_cast", "const_cast",
-    }),
-    "zig": frozenset({
-        "maxInt", "minInt", "assert", "panic", "print", "alloc", "free", "expect",
-        "expectEqual", "expectError", "create", "destroy", "init", "deinit",
-        "format", "warn", "debug", "log", "sizeOf", "alignOf", "as", "intCast",
-    }),
-}
-
-
-def _partial_match_key(row, query_lower: str) -> tuple:
-    """Sort key for partial (substring) `locate` matches.
-
-    Ordering, most→least preferred:
-      1. match position — exact (case-insensitive) > prefix > interior substring
-      2. canonical kind — def > impl/alias (see _KIND_RANK)
-      3. not a test/private file
-      4. shorter name (closer to the query)
-      5. file_path (stable tiebreak)
-    """
-    name = row["name"]
-    nl = name.lower()
-    if nl == query_lower:
-        pos = 0
-    elif nl.startswith(query_lower):
-        pos = 1
-    else:
-        pos = 2
-    kind_rank = _KIND_RANK.get(row["kind"], _KIND_RANK_DEFAULT)
-    fp = row["file_path"]
-    fp_low = fp.replace("\\", "/").lower()
-    segments = fp_low.split("/")
-    base = segments[-1]
-    stem = base.rsplit(".", 1)[0]
-    # Test-file / private-file detection must look at the basename and exact path
-    # segments only — substring "test" in a path (e.g. pytest tmp dirs, a
-    # "my_test_project" root) must NOT penalise an otherwise-canonical symbol.
-    is_test = (
-        stem.startswith(("test_", "test-")) or stem in ("test", "tests")
-        or stem.endswith(("_test", ".test", ".spec", "_spec"))
-        or any(seg in ("test", "tests", "testing", "__tests__") for seg in segments[:-1])
-    )
-    is_private = base.startswith("_")
-    test_penalty = 1 if (is_test or is_private) else 0
-    return (pos, kind_rank, test_penalty, len(name), fp)
-
-
-# Call node types per language
-_CALL_TYPES: dict[str, set[str]] = {
-    "python": {"call"},
-    "javascript": {"call_expression", "new_expression"},
-    "typescript": {"call_expression", "new_expression"},
-    "go": {"call_expression"},
-    "rust": {"call_expression", "method_call_expression"},
-    "java": {"method_invocation", "object_creation_expression"},
-    "zig": {"call_expression", "builtin_function"},
-    "c": {"call_expression"},
-    "cpp": {"call_expression", "new_expression"},
-}
-
-# Type-usage node types per language (UPG-4.4). In some languages the dominant
-# way code interacts with a type is not a free-function call but a by-value/
-# by-reference *usage* — a parameter, return type, field, or generic argument.
-# `trace <Type>` was empty for heavily-used Rust types (uv `RegistryClient`,
-# `BuildContext`, `PubGrubPackage`) because none of those usages produced an
-# edge. We record them as `edge_type="uses"` so the type's call sites surface.
-# Keyed by language so it stays opt-in (Rust only for now; extensible later).
-_TYPE_USAGE_NODES: dict[str, set[str]] = {
-    "rust": {"type_identifier"},
-}
-
-# Rust type names we never record a usage edge for: `Self`, std containers, and
-# the ubiquitous result/option/collection types. They'd be pure noise to trace
-# and would bloat the edge table. Primitives (u32, str, bool, …) are filtered
-# separately by the UpperCamelCase convention check in `_record_rust_type`.
-_RUST_SKIP_TYPES: frozenset[str] = frozenset({
-    "Self", "String", "Vec", "Box", "Rc", "Arc", "Option", "Result", "Cow",
-    "Cell", "RefCell", "Mutex", "RwLock", "HashMap", "HashSet", "BTreeMap",
-    "BTreeSet", "VecDeque", "Ok", "Err", "Some", "None",
-})
-
-
-def _record_rust_type(name: str) -> bool:
-    """A Rust `type_identifier` worth a usage edge: UpperCamelCase (so primitives
-    `u32`/`str`/`bool` and snake_case modules are skipped), longer than one char
-    (drops generic params `T`/`E`/`K`), and not a std container (UPG-4.4)."""
-    return len(name) > 1 and name[0].isupper() and name not in _RUST_SKIP_TYPES
-
-
-def _rust_call_type_head(func_node, code_bytes: bytes) -> str:
-    """Leading type segment of a Rust `Type::assoc(...)` scoped call so
-    `trace Type` finds associated-fn and enum-variant construction sites
-    (`RegistryClient::new`, `PubGrubPackage::Package`). Returns the rightmost
-    path segment for nested paths (`crate::x::RegistryClient::new` → 'RegistryClient')
-    or "" when the call isn't a scoped path (UPG-4.4)."""
-    if func_node is None or func_node.type != "scoped_identifier":
-        return ""
-    path = func_node.child_by_field_name("path")
-    while path is not None and path.type == "scoped_identifier":
-        path = path.child_by_field_name("name")
-    if path is not None and path.type in ("identifier", "type_identifier"):
-        return code_bytes[path.start_byte:path.end_byte].decode("utf-8", errors="replace")
-    return ""
-
-
-# Import node types per language
-_IMPORT_TYPES: dict[str, set[str]] = {
-    "python": {"import_statement", "import_from_statement"},
-    "javascript": {"import_declaration"},
-    "typescript": {"import_declaration"},
-    "go": {"import_declaration"},
-    "rust": {"use_declaration"},
-    "java": {"import_declaration"},
-    "zig": {"variable_declaration"},  # const std = @import("std");
-    "c": {"preproc_include"},
-    "cpp": {"preproc_include"},
-}
 
 
 def _levenshtein(a: str, b: str) -> int:
@@ -436,334 +75,41 @@ def _get_imported_files(caller_file: str, workspace: str) -> list[str]:
     return list(dict.fromkeys(imported))  # dedup while preserving order
 
 
-def _get_symbol_name(node, code_bytes: bytes, language: str = "") -> str:
-    """Extract identifier from a symbol-defining node."""
-    if language in ("c", "cpp"):
-        # C/C++ nest the name under the declarator chain; the first direct
-        # type_identifier is the RETURN type, not the name — use the shared helper.
-        from agent.indexer import c_symbol_name
-        return c_symbol_name(node, code_bytes)
-    for child in node.children:
-        if child.type in ("identifier", "name", "property_identifier", "type_identifier"):
-            return code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
-    return ""
+def _partial_match_key(row, query_lower: str) -> tuple:
+    """Sort key for partial (substring) `locate` matches.
 
-
-def _get_call_name(node, code_bytes: bytes) -> str:
-    """Extract called function name from a call node."""
-    # Python: call → function(identifier | attribute)
-    # JS/TS/Go: call_expression → function(identifier | member_expression)
-    func = (
-        node.child_by_field_name("function")
-        or node.child_by_field_name("name")
-        or node.child_by_field_name("method")
-    )
-    if func is None and node.children:
-        func = node.children[0]
-    if func is None:
-        return ""
-    if func.type in ("identifier", "property_identifier"):
-        return code_bytes[func.start_byte:func.end_byte].decode("utf-8", errors="replace")
-    # attribute access: obj.method / ptr->method (C) — extract just the member name
-    if func.type in ("attribute", "member_expression", "field_access", "field_expression"):
-        fld = func.child_by_field_name("field") or func.child_by_field_name("property")
-        if fld is not None:
-            return code_bytes[fld.start_byte:fld.end_byte].decode("utf-8", errors="replace")
-        for child in func.children:
-            if child.type in ("identifier", "property_identifier", "field_identifier") and child != func.children[0]:
-                return code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
-    # fallback: grab last identifier token
-    last_ident = ""
-    for child in func.children:
-        if child.type in ("identifier", "property_identifier"):
-            last_ident = code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
-    return last_ident
-
-
-def _module_binding_names(node, code_bytes: bytes, language: str) -> list[tuple[str, int]]:
-    """(name, start_line) for each simple module-level binding target (UPG-10.3).
-    Python: the `left` of a top-level `assignment` when it's a bare identifier
-    (`X = ...`, `X: T = ...`). Tuple/attribute/subscript targets are skipped —
-    those aren't 'definitions' a `locate` is looking for."""
-    if language == "python" and node.type == "assignment":
-        left = node.child_by_field_name("left")
-        if left is not None and left.type == "identifier":
-            name = code_bytes[left.start_byte:left.end_byte].decode("utf-8", errors="replace")
-            if name:
-                return [(name, node.start_point[0] + 1)]
-    return []
-
-
-# Intentionally NOT in config.yaml (Tier-3): _MAX_DEPTH is a recursion
-# safety guard tied to Python's frame limit (~1000).  A user who bumped it
-# via config could trigger RecursionError on pathological ASTs.
-# Guard against pathological ASTs blowing Python's recursion limit. Must be
-# counted on EVERY recursion (see below) or it never fires. 200 is far deeper
-# than real functions/calls nest, while staying well under Python's ~1000 frame
-# limit — deeply-nested data (big C initializer tables) is cut off, not crashed.
-_MAX_DEPTH = 200
-
-
-def _collect_symbols_and_calls(
-    node,
-    code_bytes: bytes,
-    language: str,
-    file_path: str,
-    symbol_types: dict[str, str],
-    call_types: set[str],
-    symbols: list[dict],
-    edges: list[dict],
-    current_symbol: str = "",
-    current_line: int = 0,
-    depth: int = 0,
-    type_usage_nodes: set[str] = frozenset(),
-) -> None:
-    """Recursively walk AST collecting symbols and call edges."""
-    if depth > _MAX_DEPTH:
-        return
-    if node.type in symbol_types:
-        name = _get_symbol_name(node, code_bytes, language)
-        kind = symbol_types[node.type]
-        start = node.start_point[0] + 1
-        end = node.end_point[0] + 1
-        if name:  # skip anonymous nodes (e.g. C anonymous struct inside a typedef)
-            symbols.append({
-                "name": name,
-                "kind": kind,
-                "file_path": file_path,
-                "start_line": start,
-                "end_line": end,
-            })
-        # recurse into body with this symbol as context (use the enclosing symbol
-        # name when this node was anonymous, so nested calls still attribute somewhere)
-        ctx = name or current_symbol
-        ctx_line = start if name else current_line
-        for child in node.children:
-            _collect_symbols_and_calls(
-                child, code_bytes, language, file_path,
-                symbol_types, call_types, symbols, edges,
-                current_symbol=ctx, current_line=ctx_line,
-                depth=depth + 1, type_usage_nodes=type_usage_nodes,
-            )
-        return
-
-    # UPG-10.3: module-level constant/variable bindings. ONLY at module scope —
-    # `current_symbol == ""` means we're not inside any function or class (those
-    # set the context), so locals can never leak in. Don't return: the value side
-    # may still contain calls/symbols worth walking.
-    if not current_symbol and node.type in _MODULE_BINDING_TYPES.get(language, frozenset()):
-        for nm, ln in _module_binding_names(node, code_bytes, language):
-            symbols.append({
-                "name": nm,
-                "kind": "constant" if nm.lstrip("_").isupper() else "variable",
-                "file_path": file_path,
-                "start_line": ln,
-                "end_line": node.end_point[0] + 1,
-            })
-
-    if node.type in call_types and current_symbol:
-        callee = _get_call_name(node, code_bytes)
-        if callee and callee not in {"if", "for", "while", "return", "print"}:
-            edges.append({
-                "from_file": file_path,
-                "from_symbol": current_symbol,
-                "from_line": current_line,
-                "to_symbol": callee,
-                "edge_type": "calls",
-            })
-        # UPG-4.4: `Type::assoc(...)` also links the caller to the TYPE so
-        # `trace Type` surfaces construction / enum-variant sites — not just the
-        # bare `new`/`Package` method name `_get_call_name` returns above.
-        if type_usage_nodes:
-            head = _rust_call_type_head(node.child_by_field_name("function"), code_bytes)
-            if head and head != current_symbol and _record_rust_type(head):
-                edges.append({
-                    "from_file": file_path,
-                    "from_symbol": current_symbol,
-                    "from_line": current_line,
-                    "to_symbol": head,
-                    "edge_type": "uses",
-                })
-
-    # UPG-4.4: a type reference in a signature/field/generic position links the
-    # enclosing symbol to that type. Don't return — generic args nest further
-    # type_identifiers (`Result<RegistryClient, Error>`) reached by recursion.
-    if node.type in type_usage_nodes and current_symbol:
-        tname = code_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
-        if tname != current_symbol and _record_rust_type(tname):
-            edges.append({
-                "from_file": file_path,
-                "from_symbol": current_symbol,
-                "from_line": current_line,
-                "to_symbol": tname,
-                "edge_type": "uses",
-            })
-
-    for child in node.children:
-        _collect_symbols_and_calls(
-            child, code_bytes, language, file_path,
-            symbol_types, call_types, symbols, edges,
-            current_symbol=current_symbol, current_line=current_line,
-            depth=depth + 1,  # MUST increment — generic nodes dominate deep C ASTs;
-                              # leaving this at `depth` let the guard never fire → RecursionError
-            type_usage_nodes=type_usage_nodes,
-        )
-
-
-def extract_symbols_from_file(file_path: str) -> tuple[list[dict], list[dict]]:
+    Ordering, most→least preferred:
+      1. match position — exact (case-insensitive) > prefix > interior substring
+      2. canonical kind — def > impl/alias (see _KIND_RANK)
+      3. not a test/private file
+      4. shorter name (closer to the query)
+      5. file_path (stable tiebreak)
     """
-    Parse a source file and return (symbols, edges).
-    Symbols: list of {name, kind, file_path, start_line, end_line}
-    Edges:   list of {from_file, from_symbol, from_line, to_symbol, edge_type}
-    """
-    from agent.indexer import LANG_BY_EXT
-    path = Path(file_path)
-    language = LANG_BY_EXT.get(path.suffix.lower(), "")
-    if not language:
-        return [], []
-
-    parser = _get_parser(language)
-    if parser is None:
-        return [], []
-
-    try:
-        code = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return [], []
-
-    code_bytes = code.encode("utf-8")
-    tree = parser.parse(code_bytes)
-
-    symbol_types = _SYMBOL_TYPES.get(language, {})
-    call_types = _CALL_TYPES.get(language, set())
-    type_usage_nodes = _TYPE_USAGE_NODES.get(language, frozenset())
-
-    symbols: list[dict] = []
-    edges: list[dict] = []
-    _collect_symbols_and_calls(
-        tree.root_node, code_bytes, language, file_path,
-        symbol_types, call_types, symbols, edges,
-        type_usage_nodes=type_usage_nodes,
+    name = row["name"]
+    nl = name.lower()
+    if nl == query_lower:
+        pos = 0
+    elif nl.startswith(query_lower):
+        pos = 1
+    else:
+        pos = 2
+    kind_rank = _KIND_RANK.get(row["kind"], _KIND_RANK_DEFAULT)
+    fp = row["file_path"]
+    fp_low = fp.replace("\\", "/").lower()
+    segments = fp_low.split("/")
+    base = segments[-1]
+    stem = base.rsplit(".", 1)[0]
+    # Test-file / private-file detection must look at the basename and exact path
+    # segments only — substring "test" in a path (e.g. pytest tmp dirs, a
+    # "my_test_project" root) must NOT penalise an otherwise-canonical symbol.
+    is_test = (
+        stem.startswith(("test_", "test-")) or stem in ("test", "tests")
+        or stem.endswith(("_test", ".test", ".spec", "_spec"))
+        or any(seg in ("test", "tests", "testing", "__tests__") for seg in segments[:-1])
     )
-
-    # deduplicate edges
-    seen = set()
-    deduped_edges: list[dict] = []
-    for e in edges:
-        key = (e["from_file"], e["from_symbol"], e["to_symbol"])
-        if key not in seen:
-            seen.add(key)
-            deduped_edges.append(e)
-
-    # extract HTTP route symbols (Flask/FastAPI/Express/Spring)
-    symbols.extend(_extract_routes(file_path, code, language))
-
-    return symbols, deduped_edges
-
-
-# ---------------------------------------------------------------------------
-# HTTP route extraction — framework-aware route nodes
-#
-# Extracts route symbols from common web frameworks and adds them to the L2
-# symbol graph with kind="route". This makes routes navigable via vectr_locate
-# and searchable without reading controller/view files.
-#
-# Supported frameworks:
-#   Python: Flask (@app.route, @app.get/post/...), FastAPI (@router.get/post/...)
-#   Java:   Spring @GetMapping, @PostMapping, @PutMapping, @DeleteMapping, @RequestMapping
-#   JS/TS:  Express (app.get/post/..., router.get/post/...)
-# ---------------------------------------------------------------------------
-
-# HTTP method verbs — used to identify route patterns
-_HTTP_METHODS = {"get", "post", "put", "delete", "patch", "head", "options"}
-
-# Python decorator patterns: @app.route("/path"), @router.get("/path")
-_PY_ROUTE_DECORATOR = re.compile(
-    r'@\w+\.(route|' + "|".join(_HTTP_METHODS) + r')\s*\(\s*["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
-# Python: method= kwarg on @app.route
-_PY_ROUTE_METHOD_KW = re.compile(r'methods\s*=\s*\[([^\]]+)\]', re.IGNORECASE)
-
-# Java Spring annotations
-_JAVA_MAPPING = re.compile(
-    r'@(Get|Post|Put|Delete|Patch|Request)Mapping\s*\((?:value\s*=\s*)?["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
-
-# Express.js: app.get("/path",  router.post("/path",
-_EXPRESS_ROUTE = re.compile(
-    r'\b(?:app|router|express)\.(get|post|put|delete|patch|use)\s*\(\s*["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
-
-
-def _extract_routes(file_path: str, source: str, language: str) -> list[dict]:
-    """Return a list of route symbol dicts extracted from source code."""
-    routes: list[dict] = []
-    lines = source.splitlines()
-
-    if language == "python":
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            m = _PY_ROUTE_DECORATOR.search(line)
-            if m:
-                verb_from_decorator = m.group(1).upper()
-                path = m.group(2)
-
-                # If it's @app.route(...), also look for methods=[] kwarg on same line
-                methods: list[str] = []
-                if verb_from_decorator == "ROUTE":
-                    kw = _PY_ROUTE_METHOD_KW.search(line)
-                    if kw:
-                        raw_methods = kw.group(1)
-                        methods = [v.strip().strip("\"'").upper() for v in raw_methods.split(",")]
-                    else:
-                        methods = ["GET"]  # Flask default
-                else:
-                    methods = [verb_from_decorator]
-
-                for method in methods:
-                    routes.append({
-                        "name": f"{method} {path}",
-                        "kind": "route",
-                        "file_path": file_path,
-                        "start_line": i + 1,
-                        "end_line": i + 1,
-                    })
-            i += 1
-
-    elif language == "java":
-        for i, line in enumerate(lines):
-            m = _JAVA_MAPPING.search(line)
-            if m:
-                annotation = m.group(1).upper()
-                path = m.group(2)
-                method = "GET" if annotation == "REQUEST" else annotation
-                routes.append({
-                    "name": f"{method} {path}",
-                    "kind": "route",
-                    "file_path": file_path,
-                    "start_line": i + 1,
-                    "end_line": i + 1,
-                })
-
-    elif language in ("javascript", "typescript"):
-        for i, line in enumerate(lines):
-            m = _EXPRESS_ROUTE.search(line)
-            if m:
-                method = m.group(1).upper()
-                path = m.group(2)
-                routes.append({
-                    "name": f"{method} {path}",
-                    "kind": "route",
-                    "file_path": file_path,
-                    "start_line": i + 1,
-                    "end_line": i + 1,
-                })
-
-    return routes
+    is_private = base.startswith("_")
+    test_penalty = 1 if (is_test or is_private) else 0
+    return (pos, kind_rank, test_penalty, len(name), fp)
 
 
 # ---------------------------------------------------------------------------
@@ -842,8 +188,13 @@ class SymbolGraph:
         Index one file: extract symbols and call edges, store in DB.
         Returns number of symbols found.
         Replaces any previous index for this file.
+
+        Calls extract_symbols_from_file through the package namespace so that
+        test-time monkeypatching of agent.symbol_graph.extract_symbols_from_file
+        is reflected here (identical to the original flat-module behaviour).
         """
-        symbols, edges = extract_symbols_from_file(file_path)
+        import agent.symbol_graph as _sg
+        symbols, edges = _sg.extract_symbols_from_file(file_path)
         now = time.time()
 
         with self._conn() as conn:
