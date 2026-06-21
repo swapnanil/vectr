@@ -1,0 +1,427 @@
+"""MCP tool dispatch — handle_tools_call and handle_tools_list."""
+from __future__ import annotations
+
+from typing import Any
+
+from integrations.mcp_server._schemas import (
+    _EXPLORATION_TOOLS,
+    _MEMORY_WRITE_TOOLS,
+    _MEMORY_TOOLS,
+    _UTILITY_TOOLS,
+    MCP_TOOLS,
+)
+from integrations.mcp_server._session import (
+    _memory_enabled_sessions,
+    _session_calls_since_save,
+    _increment_calls_since_save,
+    _reset_calls_since_save,
+    _should_nudge_remember,
+    _remember_nudge_text,
+    enable_memory_for_session,
+    is_memory_enabled,
+)
+
+
+def handle_tools_list(session_id: str | None = None, service: Any = None) -> dict:
+    """Return tools appropriate for this session.
+
+    Always shown: exploration tools + vectr_remember + vectr_evict_hint.
+    Gated on notes existing: vectr_recall, vectr_forget, vectr_snapshot, vectr_snapshot_list.
+    """
+    # Pre-enable memory read tools if notes already exist
+    if session_id and service and not is_memory_enabled(session_id):
+        try:
+            notes_count = service.count_notes() if hasattr(service, "count_notes") else 0
+            if notes_count > 0:
+                enable_memory_for_session(session_id)
+        except Exception:
+            pass
+
+    base = _EXPLORATION_TOOLS + _MEMORY_WRITE_TOOLS + _UTILITY_TOOLS
+    if is_memory_enabled(session_id):
+        return {"tools": base + _MEMORY_TOOLS}
+    return {"tools": base}
+
+
+def handle_tools_call(
+    tool_name: str,
+    arguments: dict,
+    service: Any,
+    session_id: str | None = None,
+) -> dict:
+    """Dispatch an MCP tool call. `service` is the VectrService instance."""
+    # Count every tool call — used by the tool-call-count eviction trigger
+    try:
+        service._eviction_advisor.increment_tool_call()
+    except Exception:
+        pass
+
+    # Count per-tool calls for benchmark metrics (accurate across parent + sub-agents)
+    try:
+        service.increment_call_count(tool_name)
+    except Exception:
+        pass
+
+    # Increment turn-count nudge counter for all tool calls
+    _increment_calls_since_save(session_id)
+
+    # Count retrieval-specific calls (search/locate/trace) for the retrieval-count trigger
+    if tool_name in ("vectr_search", "vectr_locate", "vectr_trace"):
+        try:
+            service._eviction_advisor.increment_retrieval_call()
+        except Exception:
+            pass
+
+    # ---- vectr_search ----
+    if tool_name == "vectr_search":
+        query = arguments.get("query", "")
+        n_results = min(int(arguments.get("n_results", 5)), 50)
+        language = arguments.get("language") or None
+
+        if not query:
+            return _mcp_error("query is required")
+
+        if service.total_chunks == 0:
+            return {
+                "content": [{"type": "text", "text": "Vectr is still indexing the codebase. Try again in a few moments."}],
+                "isError": False,
+            }
+
+        results, query_ms, decision, aug_symbols, aug_trace = service.search_routed(
+            query, n_results=n_results, language=language
+        )
+
+        # Record chunks so the eviction advisor can reference them in the hint
+        try:
+            service._eviction_advisor.record_results(results)
+        except Exception:
+            pass
+
+        sections: list[str] = []
+
+        # UPG-3.1: a language filter that matched nothing because that language
+        # isn't indexed (not merely a query miss) should tell the caller what IS
+        # indexable, rather than silently returning empty.
+        if language and not results:
+            indexed = service.indexed_languages()
+            if language.lower() not in {l.lower() for l in indexed}:
+                avail = ", ".join(indexed) if indexed else "(none yet)"
+                sections.append(
+                    f"─── No results: language={language!r} is not indexed ───\n"
+                    f"Indexed languages: {avail}.\n"
+                    f"Re-run without the language filter, or use one of the above."
+                )
+
+        # L1 map hint for structural queries
+        if decision.include_map_hint:
+            map_text = service.get_map()
+            if map_text and "Set ANTHROPIC_API_KEY" not in map_text:
+                sections.append(f"─── Codebase map (structural context) ───\n{map_text}")
+
+        # L2 symbol augmentation — snippets included so AI reads code directly
+        if aug_symbols:
+            sym_lines = [f"─── Symbol locations (query type: {decision.query_type.value}) ───"]
+            for s in aug_symbols:
+                sym_lines.append(f"  [{s.kind}] {s.name}  {s.file_path}:{s.start_line}")
+                if s.snippet:
+                    for ln in s.snippet.splitlines()[:6]:  # brief preview in search results
+                        sym_lines.append(f"    {ln}")
+            sections.append("\n".join(sym_lines))
+
+        if aug_trace:
+            trace_lines = ["─── Callers ───"]
+            for e in aug_trace:
+                suffix = f"  ×{e.call_count}" if getattr(e, "call_count", 1) > 1 else ""
+                trace_lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}{suffix}")
+            sections.append("\n".join(trace_lines))
+
+        # L3 chunks
+        sections.append(_format_search_results(results, query, query_ms, service.total_chunks))
+
+        # routing footnote
+        sections.append(f"─── Routing: {decision.rationale} ───")
+
+        content_text = "\n\n".join(sections)
+
+        # auto-append eviction hint only on a FRESH context-pressure escalation
+        # (UPG-7.1) — gated so it can't repeat on every response
+        hint = service.auto_eviction_hint()
+        if hint:
+            content_text += f"\n\n─── Context management hint ───\n{hint}"
+
+        if _should_nudge_remember(session_id):
+            content_text += _remember_nudge_text(session_id)
+
+        return {"content": [{"type": "text", "text": content_text}], "isError": False}
+
+    # ---- vectr_status ----
+    if tool_name == "vectr_status":
+        status = service.status()
+        notes_count = status.get("notes_count", 0)
+
+        # if this session has prior notes, enable memory tools immediately
+        if notes_count > 0:
+            enable_memory_for_session(session_id)
+
+        recall_hint = (
+            f"  → call vectr_recall(query=...) to retrieve them"
+            if notes_count > 0
+            else "  → no prior notes; skip vectr_recall"
+        )
+        lines = [
+            "Vectr status",
+            f"  Indexed files  : {status['indexed_files']}",
+            f"  Total chunks   : {status['total_chunks']}",
+            f"  Symbols indexed: {status.get('symbol_count', 'n/a')}",
+            f"  Prior notes    : {notes_count}{recall_hint}",
+            f"  Last indexed   : {status['last_indexed']}",
+            f"  Embed model    : {status['embed_model']}",
+            f"  Workspace      : {status['workspace_root']}",
+        ]
+
+        # Per-language coverage + symbol availability (UPG-3.3). Tells the agent
+        # where locate/trace will work (symbol graph) vs. where to use search only.
+        langs = status.get("languages") or []
+        if langs:
+            lines.append("  Languages      : (✓ = locate/trace available; others are search-only)")
+            for L in langs[:8]:
+                mark = "✓ locate/trace" if L["symbols"] else "search-only"
+                lines.append(f"      {L['language']:<12} {L['files']:>5} files   {mark}")
+            if len(langs) > 8:
+                lines.append(f"      … +{len(langs) - 8} more")
+            top = langs[0]
+            if not top["symbols"]:
+                lines.append(
+                    f"  → Primary language ({top['language']}) has no symbol graph — "
+                    "prefer vectr_search; locate/trace will be empty here."
+                )
+        if status.get("semantic_weight") is not None:
+            lines.append(
+                f"  Retrieval      : semantic={status['semantic_weight']:.0%}  "
+                f"bm25={status['bm25_weight']:.0%}  "
+                f"graph_first={status['graph_first']}"
+            )
+            if status.get("strategy_rationale"):
+                lines.append(f"  Strategy why   : {status['strategy_rationale']}")
+
+        # inject adaptive instruction style hint at session start
+        try:
+            style = service.suggest_instruction_style()
+            style_hints = {
+                "additive":    "Use vectr tools when they'd be faster than reading files — see CLAUDE.md.",
+                "directed":    "This is a large/unfamiliar codebase. Use vectr_map → vectr_search → vectr_locate before reading files.",
+                "memory-only": "Prior notes exist. Call vectr_recall(query=...) first; use search only to fill gaps.",
+            }
+            hint = style_hints.get(style, "")
+            if hint:
+                lines.append(f"  Tool style     : [{style}] {hint}")
+        except Exception:
+            pass
+
+        text = "\n".join(lines)
+        return {"content": [{"type": "text", "text": text}], "isError": False}
+
+    # ---- vectr_map ----
+    if tool_name == "vectr_map":
+        text = service.get_map()
+        return {"content": [{"type": "text", "text": text}], "isError": False}
+
+    # ---- vectr_map_save ----
+    if tool_name == "vectr_map_save":
+        summary = arguments.get("summary", "").strip()
+        if not summary:
+            return _mcp_error("summary is required")
+        service.save_map(summary)
+        return {
+            "content": [{"type": "text", "text": (
+                f"Passport saved ({len(summary)} chars). "
+                "Future vectr_map calls will return this summary instantly."
+            )}],
+            "isError": False,
+        }
+
+    # ---- vectr_locate ----
+    if tool_name == "vectr_locate":
+        name = arguments.get("name", "").strip()
+        if not name:
+            return _mcp_error("name is required")
+        limit = int(arguments.get("limit", 10))
+        caller_file = arguments.get("caller_file", "").strip() or None
+        symbols = service.locate_with_snippets(name, limit=limit, caller_file=caller_file)
+        text = service.format_locate(symbols, name)
+        hint = service.auto_eviction_hint()  # UPG-7.1: gated, not every response
+        if hint:
+            text += f"\n\n─── Context management hint ───\n{hint}"
+        if _should_nudge_remember(session_id):
+            text += _remember_nudge_text(session_id)
+        return {"content": [{"type": "text", "text": text}], "isError": False}
+
+    # ---- vectr_trace ----
+    if tool_name == "vectr_trace":
+        name = arguments.get("name", "").strip()
+        if not name:
+            return _mcp_error("name is required")
+        direction = arguments.get("direction", "both")
+        if direction not in ("callers", "callees", "both"):
+            direction = "both"
+        limit = int(arguments.get("limit", 20))
+        include_builtins = bool(arguments.get("include_builtins", False))
+        trace_result = service.trace_with_snippets(
+            name, direction=direction, limit=limit, include_builtins=include_builtins
+        )
+        text = service.format_trace(trace_result, name)
+        hint = service.auto_eviction_hint()  # UPG-7.1: gated, not every response
+        if hint:
+            text += f"\n\n─── Context management hint ───\n{hint}"
+        if _should_nudge_remember(session_id):
+            text += _remember_nudge_text(session_id)
+        return {"content": [{"type": "text", "text": text}], "isError": False}
+
+    # ---- vectr_remember ----
+    if tool_name == "vectr_remember":
+        content = arguments.get("content", "").strip()
+        if not content:
+            return _mcp_error("content is required")
+        tags = arguments.get("tags") or None
+        priority = arguments.get("priority", "medium")
+        if priority not in ("high", "medium", "low"):
+            priority = "medium"
+        kind = arguments.get("kind", "finding")
+        note_id = service.remember(content=content, tags=tags, priority=priority, kind=kind)
+        # reset the turn-count nudge and enable memory tools for this session
+        _reset_calls_since_save(session_id)
+        enable_memory_for_session(session_id)
+        return {
+            "content": [{"type": "text", "text": f"Stored note #{note_id}. Recall with vectr_recall — <50ms, verbatim, any time."}],
+            "isError": False,
+        }
+
+    # ---- vectr_recall ----
+    if tool_name == "vectr_recall":
+        query = arguments.get("query") or None
+        tags = arguments.get("tags") or None
+        priority = arguments.get("priority") or None
+        kind = arguments.get("kind") or None
+        boot = bool(arguments.get("boot", False))
+        limit = int(arguments.get("limit", 10))
+        text = service.recall(query=query, tags=tags, priority=priority, limit=limit, kind=kind, boot=boot)
+        hint = service.auto_eviction_hint()  # UPG-7.1: gated, not every response
+        if hint:
+            text += f"\n\n─── Context management hint ───\n{hint}"
+        return {"content": [{"type": "text", "text": text}], "isError": False}
+
+    # ---- vectr_evict_hint ----
+    if tool_name == "vectr_evict_hint":
+        hint = service.eviction_hint()
+        if not hint:
+            hint = "No retrieved chunks to evict. Context window is clean."
+        return {"content": [{"type": "text", "text": hint}], "isError": False}
+
+    # ---- vectr_snapshot ----
+    if tool_name == "vectr_snapshot":
+        label = arguments.get("label", "").strip()
+        if not label:
+            return _mcp_error("label is required")
+        session_id = arguments.get("session_id") or None
+        snapshot_id = service.snapshot_session(label=label, session_id=session_id)
+        return {
+            "content": [{"type": "text", "text": f"Snapshot saved: {snapshot_id}\nLabel: {label}\nNotes are available via vectr_recall any time — later in this session or in future sessions."}],
+            "isError": False,
+        }
+
+    # ---- vectr_snapshot_list ----
+    if tool_name == "vectr_snapshot_list":
+        snapshots = service.list_snapshots()
+        if not snapshots:
+            text = "No snapshots saved for this workspace yet. Use vectr_snapshot to save one."
+        else:
+            import datetime
+            lines = [f"Saved snapshots ({len(snapshots)}):\n"]
+            for s in snapshots:
+                ts = datetime.datetime.fromtimestamp(s["created_at"]).strftime("%Y-%m-%d %H:%M")
+                lines.append(f"  {s['snapshot_id']}  [{ts}]  {s['label']}")
+            lines.append("\nUse vectr_recall to retrieve the notes from any session.")
+            text = "\n".join(lines)
+        return {"content": [{"type": "text", "text": text}], "isError": False}
+
+    # ---- vectr_forget ----
+    if tool_name == "vectr_forget":
+        deleted = service.forget_all()
+        return {
+            "content": [{"type": "text", "text": f"Deleted {deleted} working-memory notes. Starting fresh."}],
+            "isError": False,
+        }
+
+    # ---- vectr_ingest_traces ----
+    if tool_name == "vectr_ingest_traces":
+        events = arguments.get("events")
+        if not isinstance(events, list):
+            return _mcp_error("events must be a list of trace event dicts")
+        result = service.ingest_traces(events)
+        return {
+            "content": [{"type": "text", "text": (
+                f"Ingested {result['ingested']} dynamic call edges into the symbol graph. "
+                f"({result['skipped_invalid']} events skipped — missing caller or callee field.) "
+                "Dynamic edges now appear in vectr_trace results alongside static edges."
+            )}],
+            "isError": False,
+        }
+
+    return _mcp_error(f"Unknown tool: {tool_name}")
+
+
+def _format_search_results(results, query: str, query_ms: int, chunks_searched: int) -> str:
+    if not results:
+        return f"No results found for: {query}"
+    lines = [f"Found {len(results)} results for '{query}' ({query_ms}ms, {chunks_searched} chunks searched)\n"]
+    for i, r in enumerate(results, 1):
+        lines.append(f"{'─' * 60}")
+        dup = f"  (+{r.dup_count} more identical)" if getattr(r, "dup_count", 0) else ""
+        lines.append(f"[{i}] {r.file_path}  lines {r.lines}  score {r.score:.3f}{dup}")
+        if r.symbol_name:
+            # UPG-11.4: include symbol line-range so caller can expand to full definition
+            # without a blind whole-file re-read: Read(file_path, offset=symbol_start_line-1)
+            sym_range = ""
+            s_start = getattr(r, "symbol_start_line", 0)
+            s_end = getattr(r, "symbol_end_line", 0)
+            if s_start and s_end:
+                sym_range = f"  [lines {s_start}–{s_end}]"
+            lines.append(f"    symbol: {r.symbol_name}{sym_range}  language: {r.language}")
+        lines.append("")
+        content_lines = r.content.splitlines()
+        # UPG-11.4-b: emit an expand hint when the stored content was truncated
+        # by the 2000-char cap (searcher stores content[:2000], ~48 lines for
+        # dense methods).  We detect truncation by comparing the number of
+        # content lines to the full symbol line range stored in metadata:
+        # if the chunk has symbol_start_line / symbol_end_line set and the
+        # content is more than 5 lines shorter than the full range, the content
+        # was capped and the caller needs a Read() to see the whole definition.
+        s_start = getattr(r, "symbol_start_line", 0)
+        s_end = getattr(r, "symbol_end_line", 0)
+        symbol_range_lines = (s_end - s_start + 1) if (s_start and s_end and s_end > s_start) else 0
+        content_truncated = symbol_range_lines > 0 and len(content_lines) < symbol_range_lines - 5
+        if len(content_lines) > 80:
+            # Hard cap: the content itself is long but we also cap the display.
+            lines.append("\n".join(content_lines[:80]))
+            start = str(r.lines).split("-")[0] if "-" in str(r.lines) else str(r.lines)
+            lines.append(f"... {len(content_lines) - 80} more lines — Read({r.file_path!r}, offset={start}) for full context")
+        elif content_truncated:
+            # Content was silently capped by the 2000-char storage limit before
+            # it reached the full symbol body.  Show what we have, then prompt.
+            lines.append(r.content)
+            missing = symbol_range_lines - len(content_lines)
+            lines.append(
+                f"... {missing} more lines (content capped at ~2000 chars) — "
+                f"Read({r.file_path!r}, offset={s_start - 1}, limit={symbol_range_lines}) for full definition"
+            )
+        else:
+            lines.append(r.content)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _mcp_error(message: str) -> dict:
+    return {
+        "content": [{"type": "text", "text": f"Error: {message}"}],
+        "isError": True,
+    }
