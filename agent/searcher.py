@@ -501,6 +501,10 @@ class CodeSearcher:
             r.dup_count = 0
             # UPG-11.2: replace the stale pre-rerank hybrid score with the actual
             # composite ranking key so displayed scores are non-increasing with rank.
-            r.score = round(final_score, 4)
+            # UPG-11.13: clamp to [0, 1] so callers with a confidence gate (score > 0.8)
+            # don't get false positives from sym_boost (which can push the raw composite
+            # above 1.0, e.g. base*quality=1.0 + qualified_boost=0.20 → 1.2).
+            # The sort above uses final_score (unclamped) so rank order is preserved.
+            r.score = round(min(1.0, final_score), 4)
             out.append(r)
         return out

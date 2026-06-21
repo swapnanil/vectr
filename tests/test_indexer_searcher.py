@@ -1948,6 +1948,105 @@ class TestMonotonicScore:
 
 
 # ---------------------------------------------------------------------------
+# UPG-11.13 — Score clamped to [0, 1] (F12)
+# ---------------------------------------------------------------------------
+
+class TestScoreClamp:
+    """UPG-11.13: surfaced scores must be in [0, 1].
+
+    The composite key is base_rank * quality + sym_boost.  When the top-ranked
+    candidate is also a qualified symbol match (sym_boost = 0.20), the raw
+    composite exceeds 1.0 (e.g. 1.0 * 1.0 + 0.20 = 1.20).  Callers that gate
+    on score > 0.8 as "confident" would get false positives without the clamp.
+
+    The clamp is applied AFTER the sort so rank order is unchanged — this class
+    also verifies that invariant.
+    """
+
+    # Reuse realistic content from TestSymbolIdentityRanking
+    _FIELD_DECONSTRUCT = (
+        "def deconstruct(self):\n"
+        "    name, path, args, kwargs = super().deconstruct()\n"
+        "    return name, path, args, kwargs\n"
+        "    # Field base class implementation\n"
+    )
+    _REMOVEFIELD_DECONSTRUCT = (
+        "def deconstruct(self):\n"
+        "    return super().deconstruct()\n"
+        "    # RemoveField migration operation\n"
+        "    # used in migrations only\n"
+    )
+
+    def test_score_capped_at_one(self, searcher) -> None:
+        """No returned score may exceed 1.0, even when sym_boost pushes raw composite above 1."""
+        # Construct a single candidate that will get rank 0 (base=1.0), quality~1.0,
+        # AND the +0.20 qualified sym_boost so raw composite ~1.20.
+        canonical = _sr_sym(
+            "Field.deconstruct", self._FIELD_DECONSTRUCT,
+            path="/p/django/db/models/fields/__init__.py",
+        )
+        query = "Field deconstruct base class name path args kwargs"
+        out = searcher._apply_quality_and_dedup(query, [canonical])
+        assert len(out) == 1
+        assert out[0].score <= 1.0, (
+            f"UPG-11.13: score must be <= 1.0, got {out[0].score}"
+        )
+
+    def test_all_scores_capped_at_one(self, searcher) -> None:
+        """Multi-result list: every score must be in [0, 1]."""
+        canonical = _sr_sym(
+            "Field.deconstruct", self._FIELD_DECONSTRUCT,
+            path="/p/django/db/models/fields/__init__.py",
+        )
+        decoy = _sr_sym(
+            "RemoveField.deconstruct", self._REMOVEFIELD_DECONSTRUCT,
+            path="/p/django/db/migrations/operations/fields.py",
+        )
+        query = "Field deconstruct base class name path args kwargs migration"
+        out = searcher._apply_quality_and_dedup(query, [canonical, decoy])
+        for r in out:
+            assert r.score <= 1.0, (
+                f"UPG-11.13: score {r.score} for {r.symbol_name!r} exceeds 1.0"
+            )
+
+    def test_rank_order_preserved_after_clamp(self, searcher) -> None:
+        """Clamping must not change the returned rank order.
+
+        When Field.deconstruct (qualified match, +0.20) is already at rank 0,
+        it produces the highest raw composite (e.g. 1.0*q + 0.20 > 1.0).
+        After clamping, it must still come first — the sort is done before
+        the clamp so the distinction between candidates is preserved by sort order,
+        not by the displayed score value.
+
+        This is distinct from the F1 flip test (TestSymbolIdentityRanking.test_F1_*),
+        which verifies promotion of a lower-ranked candidate.  Here we verify that
+        clamping does not demote an already-correct first-place result.
+        """
+        canonical = _sr_sym(
+            "Field.deconstruct", self._FIELD_DECONSTRUCT,
+            path="/p/django/db/models/fields/__init__.py",
+        )
+        decoy = _sr_sym(
+            "RemoveField.deconstruct", self._REMOVEFIELD_DECONSTRUCT,
+            path="/p/django/db/migrations/operations/fields.py",
+        )
+        # canonical first (already correct order), decoy second
+        # Both get sym_boost > 0 so both raw composites may exceed 1.0.
+        # After clamping, canonical must still lead.
+        query = "Field deconstruct base class name path args kwargs migration"
+        out = searcher._apply_quality_and_dedup(query, [canonical, decoy])
+        canonical_idx = next(i for i, r in enumerate(out) if r.symbol_name == "Field.deconstruct")
+        decoy_idx = next(i for i, r in enumerate(out) if r.symbol_name == "RemoveField.deconstruct")
+        assert canonical_idx < decoy_idx, (
+            f"UPG-11.13: rank order must be preserved after clamp. "
+            f"Field.deconstruct at idx={canonical_idx}, RemoveField.deconstruct at idx={decoy_idx}"
+        )
+        # Both scores must be clamped
+        for r in out:
+            assert r.score <= 1.0, f"score {r.score} for {r.symbol_name!r} exceeds 1.0"
+
+
+# ---------------------------------------------------------------------------
 # UPG-11.4 — Expand-to-symbol affordance (line range on results)
 # ---------------------------------------------------------------------------
 
