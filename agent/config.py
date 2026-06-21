@@ -20,6 +20,18 @@ SYMBOL_LEAF_BOOST : float
 
 SYMBOL_MIN_LEAF_LEN : int
     Minimum character length for a bare leaf to be eligible for a boost.
+
+FORCED_INCLUSION_MAX : int
+    Safety cap on forced-inclusion candidate pool size (UPG-11.7).
+
+FORCED_INCLUSION_MIN_IDENTIFIER_LEN : int
+    Minimum bare-identifier length to trigger forced-inclusion (UPG-11.7).
+
+FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR : float
+    BM25 relevance floor for non-compound forced candidates (UPG-11.12).
+
+FORCED_INCLUSION_VEC_SIM_FLOOR : float
+    Cosine similarity floor for non-compound forced candidates (UPG-11.12).
 """
 from __future__ import annotations
 
@@ -86,3 +98,14 @@ SYMBOL_STOP_WORDS: frozenset[str] = frozenset(_merged_stop)
 SYMBOL_QUALIFIED_BOOST: float = float(_sym_cfg["qualified_boost"])
 SYMBOL_LEAF_BOOST: float = float(_sym_cfg["leaf_boost"])
 SYMBOL_MIN_LEAF_LEN: int = int(_sym_cfg["min_leaf_len"])
+
+# ---------------------------------------------------------------------------
+# Forced-inclusion tunables (UPG-11.7 / UPG-11.12)
+# ---------------------------------------------------------------------------
+
+_fi_cfg: dict[str, Any] = _cfg["ranking"]["forced_inclusion"]
+
+FORCED_INCLUSION_MAX: int = int(_fi_cfg["max_candidates"])
+FORCED_INCLUSION_MIN_IDENTIFIER_LEN: int = int(_fi_cfg["min_identifier_len"])
+FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR: float = float(_fi_cfg["nontrigger_bm25_floor"])
+FORCED_INCLUSION_VEC_SIM_FLOOR: float = float(_fi_cfg["vec_sim_floor"])

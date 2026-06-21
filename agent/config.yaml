@@ -28,3 +28,34 @@ ranking:
     stopwords_files:
       - data/english_stopwords.txt   # NLTK English corpus (vendored offline)
       - data/prog_stopwords.txt      # short programming abbreviations supplement
+
+  forced_inclusion:
+    # Safety cap on the total number of extra chunks added to the candidate pool
+    # via forced-inclusion.  Prevents flooding on pathological corpora where a
+    # common method name appears in thousands of files.  Real codebases typically
+    # have ≤100 same-named methods (Django has 81 "deconstruct" chunks).
+    max_candidates: 200
+
+    # Minimum character length for a bare (non-compound) identifier token to
+    # trigger forced-inclusion.  Stricter than the ranking-boost guard (min_leaf_len=4)
+    # because forced-inclusion directly adds chunks to the candidate pool.
+    # Compound identifiers (containing "_", e.g. from_db_value) always trigger
+    # regardless of length.  Short common prose words like "name", "path", "args",
+    # "kwargs", "field", "class" (≤6 chars, no underscore) are excluded to avoid
+    # flooding the pool with common Python attribute names.
+    min_identifier_len: 7
+
+    # Non-compound forced-inclusion BM25 relevance floor (Signal A).
+    # Score the forced candidate against the full query MINUS the trigger token.
+    # If the remaining-term BM25 score (normalised 0..1) is below this floor the
+    # chunk is fast-rejected before the more expensive vector cosine check.
+    # 5% of max-raw BM25 from remaining tokens — catches zero-overlap geometry/GIS
+    # chunks that share only a symbol name with an unrelated migrations query.
+    nontrigger_bm25_floor: 0.05
+
+    # Non-compound forced-inclusion vector cosine similarity floor (Signal B).
+    # Forced candidates that survive the BM25 fast-reject (Signal A) are then
+    # gated by cosine similarity to the full query embedding.  A candidate must
+    # reach this threshold to be included; either signal passing is sufficient.
+    # cosine similarity threshold (0..1)
+    vec_sim_floor: 0.52

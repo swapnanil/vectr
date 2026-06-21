@@ -131,3 +131,51 @@ class TestConfigLoaderConsistencyWithChunkQuality:
         assert _SYM_LEAF_BOOST == cfg.SYMBOL_LEAF_BOOST
         assert _SYM_STOP_WORDS == cfg.SYMBOL_STOP_WORDS
         assert _SYM_MIN_LEAF_LEN == cfg.SYMBOL_MIN_LEAF_LEN
+
+
+class TestConfigLoaderForcedInclusion:
+    """ranking.forced_inclusion values must load correctly from config.yaml (UPG-11.7/11.12)."""
+
+    def test_forced_inclusion_max_default(self) -> None:
+        assert cfg.FORCED_INCLUSION_MAX == 200, (
+            f"FORCED_INCLUSION_MAX should be 200, got {cfg.FORCED_INCLUSION_MAX}"
+        )
+
+    def test_forced_inclusion_min_identifier_len_default(self) -> None:
+        assert cfg.FORCED_INCLUSION_MIN_IDENTIFIER_LEN == 7, (
+            f"FORCED_INCLUSION_MIN_IDENTIFIER_LEN should be 7, "
+            f"got {cfg.FORCED_INCLUSION_MIN_IDENTIFIER_LEN}"
+        )
+
+    def test_forced_inclusion_nontrigger_bm25_floor_default(self) -> None:
+        assert cfg.FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR == 0.05, (
+            f"FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR should be 0.05, "
+            f"got {cfg.FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR}"
+        )
+
+    def test_forced_inclusion_vec_sim_floor_default(self) -> None:
+        assert cfg.FORCED_INCLUSION_VEC_SIM_FLOOR == 0.52, (
+            f"FORCED_INCLUSION_VEC_SIM_FLOOR should be 0.52, "
+            f"got {cfg.FORCED_INCLUSION_VEC_SIM_FLOOR}"
+        )
+
+    def test_forced_inclusion_max_is_int(self) -> None:
+        assert isinstance(cfg.FORCED_INCLUSION_MAX, int)
+
+    def test_forced_inclusion_min_identifier_len_is_int(self) -> None:
+        assert isinstance(cfg.FORCED_INCLUSION_MIN_IDENTIFIER_LEN, int)
+
+    def test_forced_inclusion_nontrigger_bm25_floor_is_float(self) -> None:
+        assert isinstance(cfg.FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR, float)
+
+    def test_forced_inclusion_vec_sim_floor_is_float(self) -> None:
+        assert isinstance(cfg.FORCED_INCLUSION_VEC_SIM_FLOOR, float)
+
+    def test_searcher_imports_from_config(self) -> None:
+        """searcher.py must import forced_inclusion values from config, not define its own."""
+        import agent.searcher as searcher_mod
+        # The aliases in searcher.py must resolve to the same objects as config.py exports.
+        assert searcher_mod._FORCED_INCLUSION_MAX is cfg.FORCED_INCLUSION_MAX
+        assert searcher_mod._FORCED_INCLUSION_MIN_IDENTIFIER_LEN is cfg.FORCED_INCLUSION_MIN_IDENTIFIER_LEN
+        assert searcher_mod._FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR is cfg.FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR
+        assert searcher_mod._FORCED_INCLUSION_VEC_SIM_FLOOR is cfg.FORCED_INCLUSION_VEC_SIM_FLOOR

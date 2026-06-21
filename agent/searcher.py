@@ -20,6 +20,10 @@ from agent.chunk_quality import (
 from agent.config import (
     SYMBOL_STOP_WORDS as _SYM_STOP_WORDS_VAL,
     SYMBOL_MIN_LEAF_LEN as _SYM_MIN_LEAF_LEN_VAL,
+    FORCED_INCLUSION_MAX as _FORCED_INCLUSION_MAX,
+    FORCED_INCLUSION_MIN_IDENTIFIER_LEN as _FORCED_INCLUSION_MIN_IDENTIFIER_LEN,
+    FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR as _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR,
+    FORCED_INCLUSION_VEC_SIM_FLOOR as _FORCED_INCLUSION_VEC_SIM_FLOOR,
 )
 from agent.indexer import CodeIndexer
 
@@ -71,55 +75,20 @@ _RERANK_TOP_K = 40  # rerank this many hybrid candidates before trimming to n_re
 # fetched). Fetch a deeper pool in that case so the quality prior has code to surface.
 _RERANK_TOP_K_UNFILTERED = 60
 
-# UPG-11.7: forced-inclusion safety cap — when a query has a clear symbol-name intent,
-# ALL chunks whose symbol_name leaf exactly matches a guarded query token are unioned
-# into the candidate pool so the rerank + UPG-11.1 quality prior can place the right
-# one at the top.  _FORCED_INCLUSION_MAX is a safety cap against pathological corpora
-# where a common method name appears in thousands of files; real codebases typically
-# have ≤100 chunks for any single method name.  Set high enough that all same-named
-# methods in a typical codebase are included (Django has 81 "deconstruct" chunks).
-_FORCED_INCLUSION_MAX = 200
-
-# UPG-11.7: forced-inclusion token guard — stricter than the UPG-11.1 ranking-boost
-# guard (min_leaf_len=4) because forced-inclusion directly adds chunks to the pool.
-# We only trigger on tokens that look like explicit symbol names in the query:
-# - Compound identifiers (containing "_"): from_db_value, get_queryset, etc.
-# - Long identifiers (≥ this many chars): deconstruct (11), migration (9), etc.
-# Short common prose words like "name", "path", "args", "kwargs", "field", "class"
-# (≤6 chars, no underscore) do NOT trigger forced-inclusion even if they appear in
-# the query, to avoid the N-churn problem where common property names flood the pool.
-_FORCED_INCLUSION_MIN_IDENTIFIER_LEN = 7
-
-# UPG-11.12: non-compound forced-inclusion relevance gate.
+# UPG-11.7 / UPG-11.12: forced-inclusion tunables — sourced from agent/config.yaml
+# (ranking.forced_inclusion block) via agent/config.py.  See config.yaml for the
+# full rationale comments.  The names below are thin aliases kept for readability
+# at the call sites; all four values are imported from config at module load.
 #
-# A token like "project" (7 chars, no underscore) meets the length guard above but
-# may be prose: "for a project" is NOT a symbol reference, while "deconstruct" in
-# "Field deconstruct …" IS.  Two complementary signals gate non-compound forced
-# candidates; either signal passing is sufficient for inclusion:
+# Summary of what each controls:
+#   _FORCED_INCLUSION_MAX               — safety cap on pool additions (default 200)
+#   _FORCED_INCLUSION_MIN_IDENTIFIER_LEN — min bare-token length to trigger (default 7)
+#   _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR — BM25 fast-reject floor for non-compound
+#                                             tokens, 5% of max-raw (default 0.05)
+#   _FORCED_INCLUSION_VEC_SIM_FLOOR     — cosine similarity gate for non-compound
+#                                         tokens (default 0.52)
 #
-# Signal A — BM25 relevance beyond the trigger token:
-#   Score the candidate chunk against the FULL query MINUS the trigger token.
-#   If the chunk has zero overlap with the remaining query terms (e.g.
-#   LinearGeometryMixin.project for "list all database migrations for a project":
-#   removing "project" leaves migration/database terms absent from the GIS chunk),
-#   the BM25 score without trigger is ≈0 → below _NONTRIGGER_BM25_FLOOR.
-#
-# Signal B — Vector (cosine) similarity to the full query:
-#   Fetch the stored embedding for the forced candidate and compute cosine similarity
-#   to the query embedding.  A forced candidate that is semantically unrelated to
-#   the full query (e.g. geometry.py project method for a migrations query) will have
-#   low cosine similarity.  A genuinely relevant forced candidate (e.g.
-#   CursorWrapper.execute for "connect to database and execute query") will have
-#   high cosine similarity because its content is about database cursor SQL execution.
-#
-# Implementation: for each non-compound trigger token, first collect the forced
-# candidate IDs (BM25 scan), then batch-fetch their cosine similarities in one
-# ChromaDB call (cheap — forced candidates are capped at _FORCED_INCLUSION_MAX=200).
-# Compound identifiers (anything with "_", e.g. from_db_value) keep firing
-# unconditionally; a compound token in a query almost certainly IS an explicit
-# symbol reference.
-_FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR = 0.05   # 5% of max-raw BM25 from remaining tokens
-_FORCED_INCLUSION_VEC_SIM_FLOOR = 0.52            # cosine similarity threshold (0..1)
+# (imported above from agent.config)
 
 
 class _Reranker:
