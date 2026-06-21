@@ -90,6 +90,37 @@ _FORCED_INCLUSION_MAX = 200
 # the query, to avoid the N-churn problem where common property names flood the pool.
 _FORCED_INCLUSION_MIN_IDENTIFIER_LEN = 7
 
+# UPG-11.12: non-compound forced-inclusion relevance gate.
+#
+# A token like "project" (7 chars, no underscore) meets the length guard above but
+# may be prose: "for a project" is NOT a symbol reference, while "deconstruct" in
+# "Field deconstruct …" IS.  Two complementary signals gate non-compound forced
+# candidates; either signal passing is sufficient for inclusion:
+#
+# Signal A — BM25 relevance beyond the trigger token:
+#   Score the candidate chunk against the FULL query MINUS the trigger token.
+#   If the chunk has zero overlap with the remaining query terms (e.g.
+#   LinearGeometryMixin.project for "list all database migrations for a project":
+#   removing "project" leaves migration/database terms absent from the GIS chunk),
+#   the BM25 score without trigger is ≈0 → below _NONTRIGGER_BM25_FLOOR.
+#
+# Signal B — Vector (cosine) similarity to the full query:
+#   Fetch the stored embedding for the forced candidate and compute cosine similarity
+#   to the query embedding.  A forced candidate that is semantically unrelated to
+#   the full query (e.g. geometry.py project method for a migrations query) will have
+#   low cosine similarity.  A genuinely relevant forced candidate (e.g.
+#   CursorWrapper.execute for "connect to database and execute query") will have
+#   high cosine similarity because its content is about database cursor SQL execution.
+#
+# Implementation: for each non-compound trigger token, first collect the forced
+# candidate IDs (BM25 scan), then batch-fetch their cosine similarities in one
+# ChromaDB call (cheap — forced candidates are capped at _FORCED_INCLUSION_MAX=200).
+# Compound identifiers (anything with "_", e.g. from_db_value) keep firing
+# unconditionally; a compound token in a query almost certainly IS an explicit
+# symbol reference.
+_FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR = 0.05   # 5% of max-raw BM25 from remaining tokens
+_FORCED_INCLUSION_VEC_SIM_FLOOR = 0.52            # cosine similarity threshold (0..1)
+
 
 class _Reranker:
     """Lazy-loads a cross-encoder; gracefully disabled if model unavailable."""
@@ -280,49 +311,102 @@ class CodeSearcher:
                 # (we need ALL query tokens so the class-name prefix can match, e.g.
                 # "field" from "Field deconstruct …" to qualify Field.deconstruct).
                 all_query_sym_tokens = _query_symbol_tokens(query)
-                # Collect forced candidates with their pre-computed symbol-identity
-                # score (UPG-11.1 qualified vs leaf boost) so they enter sorted_ids
-                # in a meaningful order: qualified matches (Class.method where class
-                # appears in query, e.g. Field.deconstruct for "Field deconstruct …")
-                # get a higher pseudo-score than plain leaf matches, and therefore get
-                # a better rank-based-relevance in _apply_quality_and_dedup.
-                forced_candidates: list[tuple[float, str]] = []
+
+                # UPG-11.12: relevance gate for NON-COMPOUND forced candidates.
+                # Precompute BM25-without-trigger scores for each non-compound token.
+                # Compound tokens (containing "_") keep firing unconditionally.
+                non_compound_bm25_without: dict[str, list[float]] = {}
+                for tok in sym_tokens_for_inclusion:
+                    if "_" in tok:
+                        continue
+                    tokens_without = [t for t in query_tokens if t != tok]
+                    if not tokens_without:
+                        continue  # query was only the trigger token — no constraint
+                    raw_without = self._bm25.get_scores(tokens_without)
+                    max_raw_without = max(raw_without) if len(raw_without) > 0 else 0.0
+                    if max_raw_without > 0:
+                        non_compound_bm25_without[tok] = [s / max_raw_without for s in raw_without]
+                    else:
+                        non_compound_bm25_without[tok] = [0.0] * len(raw_without)
+
+                # Pass 1: collect raw forced candidates, separating non-compound
+                # (which need the relevance gate) from compound (unconditional).
+                # raw_non_compound: list of (idx, cid, leaf) for gate checking.
+                raw_non_compound: list[tuple[int, str, str]] = []
+                confirmed_forced: list[tuple[float, str]] = []  # (pseudo_score, cid)
+
                 for idx, meta in enumerate(self._bm25_metas):
-                    if len(forced_candidates) >= _FORCED_INCLUSION_MAX:
+                    if len(raw_non_compound) + len(confirmed_forced) >= _FORCED_INCLUSION_MAX:
                         break
                     cid = self._bm25_ids[idx]
                     if cid in sorted_set:
                         continue
-                    # Apply language filter if set (same as the BM25 scoring path).
                     if language and meta.get("language") != language:
                         continue
                     sym = meta.get("symbol_name", "") or ""
-                    # Case-SENSITIVE bare leaf comparison: "deconstruct" matches
-                    # stored "deconstruct" but NOT "Migration" for token "migration".
+                    # Case-SENSITIVE bare leaf comparison.
                     leaf = sym.split(".")[-1].split("::")[-1]
                     if not leaf or leaf not in sym_tokens_for_inclusion:
                         continue
-                    # Pre-compute the UPG-11.1 qualified symbol boost against ALL
-                    # query tokens (not just the stricter inclusion tokens) so the
-                    # class-name prefix can participate: "field" is a query token
-                    # that qualifies "Field.deconstruct" even though "field" alone
-                    # doesn't trigger forced-inclusion.
-                    doc = self._bm25_docs[idx]
-                    eff_sym = sym
-                    if eff_sym and "." not in eff_sym and "::" not in eff_sym:
-                        class_ctx = extract_class_from_content(doc)
-                        if class_ctx:
-                            eff_sym = f"{class_ctx}.{eff_sym}"
-                    pseudo_score = symbol_identity_boost(eff_sym, all_query_sym_tokens)
-                    forced_candidates.append((pseudo_score, cid))
 
-                # Sort forced candidates by sym-boost score descending so qualified
-                # matches (Field.deconstruct with +0.20) precede leaf-only matches
-                # (CharField.deconstruct with +0.10).  Within equal scores the
-                # original scan order (stable sort) is preserved.
+                    if "_" in leaf:
+                        # Compound identifier → unconditional forced-inclusion.
+                        doc = self._bm25_docs[idx]
+                        eff_sym = sym
+                        if eff_sym and "." not in eff_sym and "::" not in eff_sym:
+                            class_ctx = extract_class_from_content(doc)
+                            if class_ctx:
+                                eff_sym = f"{class_ctx}.{eff_sym}"
+                        confirmed_forced.append((symbol_identity_boost(eff_sym, all_query_sym_tokens), cid))
+                    else:
+                        # Non-compound identifier: apply BM25-without-trigger as a
+                        # fast-reject filter.  Chunks with near-zero BM25 score for
+                        # the full query minus the trigger token (e.g.
+                        # LinearGeometryMixin.project for "…migrations for a project"
+                        # where removing "project" leaves migration/database terms
+                        # absent from the geometry chunk) are immediately rejected.
+                        # Chunks with any non-trivial BM25 overlap are deferred to
+                        # the vector cosine check (pass 2).
+                        if leaf in non_compound_bm25_without:
+                            scores_arr = non_compound_bm25_without[leaf]
+                            bm25_without = scores_arr[idx] if idx < len(scores_arr) else 0.0
+                        else:
+                            bm25_without = 1.0  # no constraint → defer to vector check
+                        if bm25_without < _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR:
+                            continue  # fast-reject: zero relevant keyword overlap
+                        # Non-trivial BM25 OR unconstrained → defer to vector check.
+                        raw_non_compound.append((idx, cid, leaf))
+
+                # Pass 2: batch-fetch vector cosine similarities for all non-compound
+                # candidates that survived the BM25 fast-reject.
+                # One ChromaDB call covers all of them (capped at _FORCED_INCLUSION_MAX).
+                # The vector check is the primary gate: a forced candidate must be
+                # semantically relevant to the FULL query — not just share a symbol
+                # name with one query token.
+                if raw_non_compound:
+                    deferred_ids = [cid for _, cid, _ in raw_non_compound]
+                    vec_sims = self._indexer.get_chunk_cosine_similarities(
+                        query_embedding, deferred_ids
+                    )
+                    for idx, cid, leaf in raw_non_compound:
+                        sim = vec_sims.get(cid, 0.0)
+                        if sim < _FORCED_INCLUSION_VEC_SIM_FLOOR:
+                            continue  # vector gate: not semantically relevant to full query
+                        # Passes both gates — include in forced pool.
+                        sym = self._bm25_metas[idx].get("symbol_name", "") or ""
+                        doc = self._bm25_docs[idx]
+                        eff_sym = sym
+                        if eff_sym and "." not in eff_sym and "::" not in eff_sym:
+                            class_ctx = extract_class_from_content(doc)
+                            if class_ctx:
+                                eff_sym = f"{class_ctx}.{eff_sym}"
+                        confirmed_forced.append((symbol_identity_boost(eff_sym, all_query_sym_tokens), cid))
+
+                # Sort and commit all confirmed forced candidates.
+                forced_candidates = confirmed_forced
                 forced_candidates.sort(key=lambda t: t[0], reverse=True)
                 for pseudo_score, cid in forced_candidates:
-                    if cid not in sorted_set:  # safety: shouldn't happen but guard
+                    if cid not in sorted_set:
                         merged[cid] = pseudo_score
                         sorted_ids.append(cid)
                         sorted_set.add(cid)

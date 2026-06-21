@@ -1623,6 +1623,187 @@ class TestForcedInclusionCandidatePool:
 
 
 # ---------------------------------------------------------------------------
+# UPG-11.12 — Forced-inclusion relevance gate (BM25 fast-reject + vector cosine)
+# ---------------------------------------------------------------------------
+
+class TestForcedInclusionRelevanceGate:
+    """UPG-11.12: Non-compound tokens ≥7 chars trigger forced-inclusion, but the
+    candidate must also pass a relevance gate (BM25-without-trigger fast-reject +
+    vector cosine floor) to avoid flooding the pool with unrelated symbols.
+
+    Covers:
+    - F9: 'project' (in stop_words) never triggers forced-inclusion at all.
+    - F10: 'execute' (not in stop_words) forces inclusion for DB cursor methods
+           but NOT management-command .execute() — discriminated by vector cosine.
+    - F11: 'context' (in stop_words) never triggers forced-inclusion.
+    - get_chunk_cosine_similarities: structural correctness (no numpy truthiness bug).
+    """
+
+    def test_stop_word_token_excluded_from_forced_inclusion(self) -> None:
+        """Tokens in SYMBOL_STOP_WORDS must NOT appear in sym_tokens_for_inclusion,
+        so symbols like LinearGeometryMixin.project never enter the forced-inclusion pool
+        for queries like 'list all database migrations for a project' (F9 guard).
+        """
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import SYMBOL_STOP_WORDS
+        from agent.searcher import _FORCED_INCLUSION_MIN_IDENTIFIER_LEN
+
+        query = "list all database migrations for a project"
+        sym_tokens = _query_symbol_tokens(query)
+        inclusion_tokens = {
+            tok for tok in sym_tokens
+            if ("_" in tok or len(tok) >= _FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+
+        # "project" is in SYMBOL_STOP_WORDS → must NOT be in inclusion_tokens
+        assert "project" not in inclusion_tokens, (
+            "UPG-11.12 regression: 'project' must be in SYMBOL_STOP_WORDS and excluded "
+            f"from forced-inclusion tokens, but got: {inclusion_tokens}"
+        )
+        # Sanity: "project" is actually in the stop_words list
+        assert "project" in SYMBOL_STOP_WORDS, (
+            "'project' must be in SYMBOL_STOP_WORDS (prog_stopwords.txt) "
+            "to guard F9 false positive (LinearGeometryMixin.project at rank1)"
+        )
+
+    def test_stop_word_context_excluded_from_forced_inclusion(self) -> None:
+        """F11 guard: 'context' in SYMBOL_STOP_WORDS prevents DecimalField.context
+        from entering the forced-inclusion pool for 'render template context in view'.
+        """
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import SYMBOL_STOP_WORDS
+        from agent.searcher import _FORCED_INCLUSION_MIN_IDENTIFIER_LEN
+
+        query = "render template context in view"
+        sym_tokens = _query_symbol_tokens(query)
+        inclusion_tokens = {
+            tok for tok in sym_tokens
+            if ("_" in tok or len(tok) >= _FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+
+        assert "context" not in inclusion_tokens, (
+            "UPG-11.12 regression: 'context' must be in SYMBOL_STOP_WORDS and excluded "
+            f"from forced-inclusion tokens, but got: {inclusion_tokens}"
+        )
+        assert "context" in SYMBOL_STOP_WORDS
+
+    def test_execute_not_in_stop_words(self) -> None:
+        """'execute' must NOT be in SYMBOL_STOP_WORDS so that DB cursor .execute()
+        methods can still be forced-included and ranked for 'connect to database
+        and execute query' (F10 guard).  Management commands are gated by the
+        vector cosine floor, not the stop-word list.
+        """
+        from agent.config import SYMBOL_STOP_WORDS
+
+        assert "execute" not in SYMBOL_STOP_WORDS, (
+            "UPG-11.12 regression: 'execute' must NOT be in SYMBOL_STOP_WORDS. "
+            "Adding it prevents CursorWrapper.execute from being forced-included, "
+            "which pushes it out of top-5 for 'connect to database and execute query'."
+        )
+        assert "connect" not in SYMBOL_STOP_WORDS, (
+            "UPG-11.12 regression: 'connect' must NOT be in SYMBOL_STOP_WORDS. "
+            "DB connection methods need forced-inclusion for database-connect queries."
+        )
+
+    def test_get_chunk_cosine_similarities_basic(self, indexer, tmp_path) -> None:
+        """CodeIndexer.get_chunk_cosine_similarities must return float cosine values
+        in [-1, 1] and not crash on numpy arrays from ChromaDB (UPG-11.12 bugfix:
+        'batch["embeddings"] or []' triggered numpy ambiguity ValueError).
+        """
+        src = tmp_path / "db.py"
+        src.write_text(
+            "class CursorWrapper:\n"
+            "    def execute(self, sql, params=None):\n"
+            "        \"\"\"Execute a SQL query against the database cursor.\"\"\"\n"
+            "        return self.cursor.execute(sql, params)\n"
+        )
+        indexer.index_file(str(src))
+
+        query = "connect to database and execute query"
+        q_emb = indexer.embed_query(query)
+        assert abs(sum(x * x for x in q_emb) ** 0.5 - 1.0) < 0.01, (
+            "embed_query should return a normalised vector"
+        )
+
+        # Get all chunk IDs from the indexer
+        all_ids, _, _ = indexer.get_all_documents()
+        assert all_ids, "No chunks indexed"
+
+        # Must not raise (numpy truthiness bug was: `batch.get('embeddings') or []`)
+        sims = indexer.get_chunk_cosine_similarities(q_emb, all_ids[:5])
+
+        # All returned values must be float in [-1.0, 1.0]
+        for cid, sim in sims.items():
+            assert isinstance(sim, float), f"similarity for {cid} is not float: {type(sim)}"
+            assert -1.01 <= sim <= 1.01, f"cosine similarity out of range: {sim}"
+
+    def test_get_chunk_cosine_similarities_empty_inputs(self, indexer) -> None:
+        """get_chunk_cosine_similarities must return empty dict for empty inputs
+        without raising.
+        """
+        q_emb = indexer.embed_query("some query")
+
+        assert indexer.get_chunk_cosine_similarities([], q_emb) == {}
+        assert indexer.get_chunk_cosine_similarities(q_emb, []) == {}
+
+    def test_bm25_fast_reject_zero_keyword_overlap(self, indexer, tmp_path) -> None:
+        """BM25-without-trigger fast-reject: a non-compound forced candidate whose
+        BM25 score for the remaining query tokens (all tokens minus the trigger) is
+        near-zero must be rejected even if the trigger token appears in its symbol.
+
+        This guards the F9 / F11 case at the searcher level (as a complement to the
+        stop-word guard — if the word is NOT in stop_words but has near-zero BM25
+        without the trigger, it should still be rejected).
+        """
+        from agent.searcher import CodeSearcher, _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR
+
+        # "project" is already in stop_words and won't reach this code path, so
+        # use a synthetic 7-char non-stop word that has zero content overlap with
+        # the rest of the query.
+        irrelevant_src = tmp_path / "geometry.py"
+        irrelevant_src.write_text(
+            "class GeometryMixin:\n"
+            "    def longvar(self):\n"
+            "        \"\"\"Project geometry onto a plane using affine transforms.\"\"\"\n"
+            "        return self._affine_project()\n"
+        )
+        # A relevant file that has strong overlap with the other query tokens
+        relevant_src = tmp_path / "migrator.py"
+        relevant_src.write_text(
+            "class Migrator:\n"
+            "    def list_migrations(self):\n"
+            "        \"\"\"List all database migration states.\"\"\"\n"
+            "        return self.db.get_migrations()\n"
+        )
+        indexer.index_file(str(irrelevant_src))
+        indexer.index_file(str(relevant_src))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Verify the floor constant is sane
+        assert 0.0 < _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR <= 0.20, (
+            f"BM25 fast-reject floor {_FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR} is out of expected range"
+        )
+
+    def test_vec_sim_floor_constant_is_tuned(self) -> None:
+        """_FORCED_INCLUSION_VEC_SIM_FLOOR must be in [0.40, 0.70] — the range
+        where the threshold discriminates DB-cursor .execute() (≥0.52) from
+        management-command .execute() (≤0.50) on the Django corpus (UPG-11.12).
+        """
+        from agent.searcher import _FORCED_INCLUSION_VEC_SIM_FLOOR
+
+        assert 0.40 <= _FORCED_INCLUSION_VEC_SIM_FLOOR <= 0.70, (
+            f"_FORCED_INCLUSION_VEC_SIM_FLOOR={_FORCED_INCLUSION_VEC_SIM_FLOOR} "
+            "is outside the [0.40, 0.70] tuned range.  "
+            "The value must separate DB cursor execute (≥0.52) from "
+            "management-command execute (≤0.50) on the Django corpus."
+        )
+
+
+# ---------------------------------------------------------------------------
 # UPG-11.10 — Qualified "Class.leaf" symbol name surfaced in SearchResult
 # ---------------------------------------------------------------------------
 

@@ -825,10 +825,31 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
             lines.append(f"    symbol: {r.symbol_name}{sym_range}  language: {r.language}")
         lines.append("")
         content_lines = r.content.splitlines()
+        # UPG-11.4-b: emit an expand hint when the stored content was truncated
+        # by the 2000-char cap (searcher stores content[:2000], ~48 lines for
+        # dense methods).  We detect truncation by comparing the number of
+        # content lines to the full symbol line range stored in metadata:
+        # if the chunk has symbol_start_line / symbol_end_line set and the
+        # content is more than 5 lines shorter than the full range, the content
+        # was capped and the caller needs a Read() to see the whole definition.
+        s_start = getattr(r, "symbol_start_line", 0)
+        s_end = getattr(r, "symbol_end_line", 0)
+        symbol_range_lines = (s_end - s_start + 1) if (s_start and s_end and s_end > s_start) else 0
+        content_truncated = symbol_range_lines > 0 and len(content_lines) < symbol_range_lines - 5
         if len(content_lines) > 80:
+            # Hard cap: the content itself is long but we also cap the display.
             lines.append("\n".join(content_lines[:80]))
             start = str(r.lines).split("-")[0] if "-" in str(r.lines) else str(r.lines)
-            lines.append(f"... {len(content_lines) - 80} more lines — Read({r.file_path}, offset={start}) for full context")
+            lines.append(f"... {len(content_lines) - 80} more lines — Read({r.file_path!r}, offset={start}) for full context")
+        elif content_truncated:
+            # Content was silently capped by the 2000-char storage limit before
+            # it reached the full symbol body.  Show what we have, then prompt.
+            lines.append(r.content)
+            missing = symbol_range_lines - len(content_lines)
+            lines.append(
+                f"... {missing} more lines (content capped at ~2000 chars) — "
+                f"Read({r.file_path!r}, offset={s_start - 1}, limit={symbol_range_lines}) for full definition"
+            )
         else:
             lines.append(r.content)
         lines.append("")
