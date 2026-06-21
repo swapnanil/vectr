@@ -119,3 +119,14 @@ behavior:
     # After the threshold fires, re-fires every this many calls so a single
     # dismissal cannot silence it for the rest of the session.
     cooldown: 5
+
+  eviction:
+    # Minimum accumulated retrieved-token estimate (since the last auto-eviction
+    # hint or session start) required before auto_eviction_hint() will emit the
+    # ACTION REQUIRED block.  Gates on real context pressure rather than raw
+    # call count — a burst of tiny searches (7-15 line methods, ~30-60 tokens
+    # each) does not trigger the hint until meaningful content has been retrieved.
+    # Token estimate: len(content) // 4.  At ~100 chars/line, 4000 tokens ≈ 10
+    # small methods or 2-3 medium functions.  The explicit vectr_evict_hint tool
+    # and /v1/evict endpoint remain ungated.
+    retrieved_token_gate: 4000

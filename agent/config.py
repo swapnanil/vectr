@@ -77,6 +77,11 @@ BEHAVIOR_REMEMBER_NUDGE_THRESHOLD : int
 
 BEHAVIOR_REMEMBER_NUDGE_COOLDOWN : int
     Calls between repeated nudges after the threshold first fires (UPG-12.1).
+
+EVICTION_RETRIEVED_TOKEN_GATE : int
+    Minimum accumulated retrieved-token estimate since the last auto-eviction hint
+    before auto_eviction_hint() will emit. Suppresses the hint on bursts of tiny
+    searches that contribute negligible context pressure (UPG-11.15).
 """
 from __future__ import annotations
 
@@ -204,3 +209,11 @@ _beh_cfg: dict[str, Any] = _cfg["behavior"]["remember_nudge"]
 
 BEHAVIOR_REMEMBER_NUDGE_THRESHOLD: int = int(_beh_cfg["threshold"])
 BEHAVIOR_REMEMBER_NUDGE_COOLDOWN: int = int(_beh_cfg["cooldown"])
+
+# ---------------------------------------------------------------------------
+# Eviction auto-hint token gate (UPG-11.15)
+# ---------------------------------------------------------------------------
+
+_evict_cfg: dict[str, Any] = _cfg["behavior"]["eviction"]
+
+EVICTION_RETRIEVED_TOKEN_GATE: int = int(_evict_cfg["retrieved_token_gate"])

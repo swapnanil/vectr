@@ -1078,9 +1078,12 @@ class TestEvictionAdvisorIntegration:
 
     def test_eviction_hint_fires_in_search_response_after_threshold(self) -> None:
         # With threshold=0 the hint fires on the 1st retrieval call.
+        # retrieved_token_gate=0 disables the UPG-11.15 token-accumulation gate
+        # so this test focuses solely on the call-count trigger path.
         svc, _ = self._service_with_real_advisor(
             retrieval_call_threshold=0,
             time_threshold_seconds=100_000,
+            retrieved_token_gate=0,
         )
         result = handle_tools_call("vectr_search", {"query": "verify"}, svc)
         assert "Context management hint" in result["content"][0]["text"], (
@@ -1089,9 +1092,12 @@ class TestEvictionAdvisorIntegration:
 
     def test_eviction_hint_contains_action_required(self) -> None:
         # Directive language is required — passive phrasing gets ignored by the LLM.
+        # retrieved_token_gate=0 disables the UPG-11.15 token-accumulation gate
+        # so this test focuses solely on directive language in the injected hint.
         svc, _ = self._service_with_real_advisor(
             retrieval_call_threshold=0,
             time_threshold_seconds=100_000,
+            retrieved_token_gate=0,
         )
         result = handle_tools_call("vectr_search", {"query": "verify"}, svc)
         assert "ACTION REQUIRED" in result["content"][0]["text"], (
@@ -1100,10 +1106,13 @@ class TestEvictionAdvisorIntegration:
 
     def test_no_hint_when_search_returns_empty_results(self) -> None:
         # should_evict() may be True but empty results → no chunks → hint must not fire.
+        # retrieved_token_gate=0 disables the UPG-11.15 gate so suppression is due
+        # to the empty-chunk path in eviction_hint(), not the token accumulation gate.
         from agent.query_router import RoutingDecision, QueryType
         svc, _ = self._service_with_real_advisor(
             retrieval_call_threshold=0,
             time_threshold_seconds=100_000,
+            retrieved_token_gate=0,
         )
         empty_decision = RoutingDecision(
             query_type=QueryType.SEMANTIC, semantic_weight=0.7,

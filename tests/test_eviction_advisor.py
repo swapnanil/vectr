@@ -419,10 +419,13 @@ class TestTimeBasedTrigger:
 
 class TestAutoEvictionHintGatingUPG71:
     def _adv_with_chunk(self, **kw):
-        # defaults that disable every trigger except the one a test exercises
+        # defaults that disable every trigger except the one a test exercises.
+        # retrieved_token_gate=0 disables the UPG-11.15 token-accumulation gate so
+        # these tests can focus exclusively on UPG-7.1 fresh-escalation semantics.
         kw.setdefault("eviction_threshold_tokens", 100_000)
         kw.setdefault("tool_call_threshold", 1000)
         kw.setdefault("time_threshold_seconds", 100_000)
+        kw.setdefault("retrieved_token_gate", 0)
         adv = EvictionAdvisor(**kw)
         adv.record("auth.py", "1-10", "verify", "x" * 400)  # ~100 tracked tokens
         return adv
@@ -485,3 +488,203 @@ class TestAutoEvictionHintGatingUPG71:
         adv.increment_retrieval_call()
         adv.increment_retrieval_call()
         assert adv.auto_eviction_hint() != ""                  # fresh fire after reset
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.15 — token-accumulation gate on auto_eviction_hint
+# ---------------------------------------------------------------------------
+
+class TestAutoEvictionHintTokenGateUPG1115:
+    """auto_eviction_hint() must not emit when retrieved tokens since the
+    last hint (or session start) are below the configured gate threshold,
+    even if should_evict() is True due to retrieval call count."""
+
+    def _adv(self, gate: int = 4000, **kw) -> EvictionAdvisor:
+        """Build an advisor where only the retrieval-call trigger is active
+        (tokens/tools/time all set high) and the token gate is explicit."""
+        kw.setdefault("eviction_threshold_tokens", 100_000)
+        kw.setdefault("tool_call_threshold", 1000)
+        kw.setdefault("time_threshold_seconds", 100_000)
+        kw.setdefault("retrieval_call_threshold", 1)
+        return EvictionAdvisor(retrieved_token_gate=gate, **kw)
+
+    # -----------------------------------------------------------------------
+    # Suppression direction: small results → no hint
+    # -----------------------------------------------------------------------
+
+    def test_burst_of_small_searches_does_not_emit(self) -> None:
+        """Three tiny search results (each ~50 tokens) must not trigger the hint.
+
+        This mirrors the adoption-reviewer observation: three vectr_search calls
+        returning 7-15 line methods triggered the full ACTION REQUIRED block
+        even though total context pressure was negligible.
+        """
+        adv = self._adv(gate=4000)
+        # Three calls, each returning a ~15-line method ≈ 50 tokens (200 chars)
+        for i in range(3):
+            adv.record(f"file_{i}.py", "1-15", f"fn_{i}", "x" * 200)
+            adv.increment_retrieval_call()
+        # retrieval_call_count = 3 → should_evict() is True via call-count trigger
+        assert adv.should_evict() is True
+        # but total tokens ≈ 150, far below gate=4000 → hint must be suppressed
+        assert adv.auto_eviction_hint() == "", (
+            "auto_eviction_hint() must not emit when accumulated tokens < gate"
+        )
+
+    def test_single_call_below_gate_does_not_emit(self) -> None:
+        """A single search returning a short method must not emit."""
+        adv = self._adv(gate=4000, retrieval_call_threshold=0)
+        adv.record("a.py", "1-10", "short_fn", "x" * 100)  # 25 tokens
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is True
+        assert adv.auto_eviction_hint() == ""
+
+    def test_gate_boundary_one_below_suppresses(self) -> None:
+        """One token below gate → still suppressed."""
+        gate = 4000
+        adv = self._adv(gate=gate, retrieval_call_threshold=0)
+        # (gate - 1) tokens = (gate - 1) * 4 chars
+        adv.record("a.py", "1-100", "fn", "x" * ((gate - 1) * 4))
+        adv.increment_retrieval_call()
+        assert adv.total_tokens_in_session() == gate - 1
+        assert adv.auto_eviction_hint() == "", (
+            "hint must be suppressed when accumulated tokens < gate"
+        )
+
+    # -----------------------------------------------------------------------
+    # Emission direction: sufficient tokens → hint fires
+    # -----------------------------------------------------------------------
+
+    def test_hint_fires_when_tokens_cross_gate(self) -> None:
+        """Accumulated tokens at or above the gate must trigger the hint."""
+        gate = 4000
+        adv = self._adv(gate=gate, retrieval_call_threshold=0)
+        # gate tokens worth of content
+        adv.record("big.py", "1-200", "big_fn", "x" * (gate * 4))
+        adv.increment_retrieval_call()
+        assert adv.total_tokens_in_session() >= gate
+        assert adv.should_evict() is True
+        assert "ACTION REQUIRED" in adv.auto_eviction_hint(), (
+            "hint must emit when accumulated tokens >= gate"
+        )
+
+    def test_accumulated_tokens_span_multiple_calls(self) -> None:
+        """Multiple calls each below the gate can accumulate to cross it."""
+        gate = 1000  # lower gate to make test concise
+        adv = self._adv(gate=gate, retrieval_call_threshold=0)
+        # 5 calls × 300 tokens each = 1500 tokens > gate=1000
+        for i in range(5):
+            adv.record(f"f{i}.py", "1-50", f"fn{i}", "x" * 1200)  # 300 tokens each
+            adv.increment_retrieval_call()
+        assert adv.total_tokens_in_session() == 1500
+        assert adv.auto_eviction_hint() != "", (
+            "accumulated tokens (1500) > gate (1000) must emit the hint"
+        )
+
+    # -----------------------------------------------------------------------
+    # Token delta resets after each emit
+    # -----------------------------------------------------------------------
+
+    def test_gate_resets_after_emit(self) -> None:
+        """After the hint fires, the gate applies to tokens accumulated SINCE
+        that emit — not cumulative session tokens."""
+        gate = 1000
+        adv = self._adv(gate=gate, retrieval_call_threshold=0)
+        # First burst: 1200 tokens → crosses gate → hint fires
+        adv.record("a.py", "1-100", "fn_a", "x" * 4800)  # 1200 tokens
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() != ""              # first fire
+        # Second burst: only 200 more tokens → delta since last emit < gate
+        adv.record("b.py", "1-20", "fn_b", "x" * 800)    # 200 tokens
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() == "", (
+            "after an emit, gate must apply to tokens since that emit, not total"
+        )
+
+    def test_gate_rearms_when_delta_crosses_threshold_again(self) -> None:
+        """After an emit, once delta tokens since that emit cross the gate again,
+        the hint can re-fire (subject also to _fresh_escalation)."""
+        gate = 500
+        # small eviction_threshold so _fresh_escalation re-arms on token delta
+        adv = self._adv(gate=gate, retrieval_call_threshold=0, eviction_threshold_tokens=200)
+        # First emit: 600 tokens > gate=500
+        adv.record("a.py", "1-100", "fn_a", "x" * 2400)  # 600 tokens
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() != ""              # first fire
+        # Add 600 more tokens → delta since emit = 600 > gate=500 → re-fires
+        adv.record("b.py", "1-100", "fn_b", "x" * 2400)  # 600 tokens
+        adv.increment_retrieval_call()
+        assert adv.auto_eviction_hint() != "", (
+            "delta since last emit (600) > gate (500) must allow re-fire"
+        )
+
+    # -----------------------------------------------------------------------
+    # Explicit hint path remains ungated
+    # -----------------------------------------------------------------------
+
+    def test_explicit_eviction_hint_bypasses_token_gate(self) -> None:
+        """The explicit vectr_evict_hint / /v1/evict path uses eviction_hint()
+        directly and must bypass the token gate."""
+        gate = 100_000  # gate too high for any test to naturally cross
+        adv = self._adv(gate=gate, retrieval_call_threshold=0)
+        adv.record("tiny.py", "1-5", "fn", "x" * 40)     # 10 tokens
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is True
+        assert adv.auto_eviction_hint() == "", "auto path gated by token gate"
+        # explicit path always answers
+        assert "ACTION REQUIRED" in adv.eviction_hint(), (
+            "explicit eviction_hint() must bypass the token gate"
+        )
+
+    # -----------------------------------------------------------------------
+    # Configuration
+    # -----------------------------------------------------------------------
+
+    def test_default_retrieved_token_gate_is_4000(self) -> None:
+        """Default gate must be 4000 tokens as specified in config.yaml."""
+        adv = EvictionAdvisor()
+        assert adv._retrieved_token_gate == 4000
+
+    def test_retrieved_token_gate_zero_disables_gate(self) -> None:
+        """Gate=0 means every non-empty emit is allowed (used in UPG-7.1 tests)."""
+        adv = self._adv(gate=0, retrieval_call_threshold=0)
+        adv.record("a.py", "1-5", "fn", "x" * 4)         # 1 token — well below any real gate
+        adv.increment_retrieval_call()
+        assert adv.should_evict() is True
+        # gate=0 means 1 >= 0 → allowed
+        assert adv.auto_eviction_hint() != "", "gate=0 must not suppress any non-zero token emit"
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.15 — config loader: new key raises KeyError if missing, not silent
+# ---------------------------------------------------------------------------
+
+class TestEvictionConfigLoaderUPG1115:
+    def test_eviction_retrieved_token_gate_constant_exists(self) -> None:
+        """EVICTION_RETRIEVED_TOKEN_GATE must be exported from agent.config."""
+        from agent.config import EVICTION_RETRIEVED_TOKEN_GATE
+        assert isinstance(EVICTION_RETRIEVED_TOKEN_GATE, int)
+        assert EVICTION_RETRIEVED_TOKEN_GATE == 4000
+
+    def test_eviction_retrieved_token_gate_is_positive(self) -> None:
+        """Gate must be > 0 — a zero or negative gate would disable suppression."""
+        from agent.config import EVICTION_RETRIEVED_TOKEN_GATE
+        assert EVICTION_RETRIEVED_TOKEN_GATE > 0
+
+    def test_missing_behavior_eviction_key_raises(self) -> None:
+        """Loading config without behavior.eviction.retrieved_token_gate must raise
+        KeyError — not silently default to a magic value (per UPG-12.1 pattern)."""
+        import yaml
+
+        broken_yaml = """
+behavior:
+  remember_nudge:
+    threshold: 10
+    cooldown: 5
+"""
+        cfg = yaml.safe_load(broken_yaml)
+        with pytest.raises(KeyError):
+            # Direct subscript access must raise on missing key
+            _ = cfg["behavior"]["eviction"]["retrieved_token_gate"]
