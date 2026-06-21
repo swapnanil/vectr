@@ -2190,3 +2190,270 @@ class Widget:
         )
         assert r.symbol_start_line == 0
         assert r.symbol_end_line == 0
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.14 — Short-verb forced-inclusion allowlist (F13) + queryset stop-word (F14)
+# ---------------------------------------------------------------------------
+
+class TestShortVerbAllowlistAndQuerysetBlocklist:
+    """UPG-11.14 guards:
+
+    F13: Short verbs like 'save' are below min_identifier_len=7 AND in
+         prog_stopwords.txt, so they are normally excluded from forced-inclusion.
+         The short_verb_allowlist in config.yaml reinstates forced-inclusion for
+         these verbs while keeping the BM25 floor + vec_sim_floor relevance gates.
+
+    F14: 'queryset' (8 chars, no underscore) passes the normal forced-inclusion
+         length guard.  Adding it to prog_stopwords.txt prevents it from triggering
+         forced-inclusion of all ListFilter.queryset() admin variants for queries
+         like "exclude certain records from a queryset".
+    """
+
+    # --- F13 config and token-selection tests ---
+
+    def test_short_verb_allowlist_in_config(self) -> None:
+        """FORCED_INCLUSION_SHORT_VERB_ALLOWLIST must be a non-empty frozenset
+        containing at least 'save', 'create', 'delete', 'update' (UPG-11.14 / F13).
+        """
+        from agent.config import FORCED_INCLUSION_SHORT_VERB_ALLOWLIST
+
+        assert isinstance(FORCED_INCLUSION_SHORT_VERB_ALLOWLIST, frozenset), (
+            "FORCED_INCLUSION_SHORT_VERB_ALLOWLIST must be a frozenset"
+        )
+        assert "save" in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST, (
+            "UPG-11.14: 'save' must be in the short_verb_allowlist so 'save a model "
+            "instance to the database' triggers forced-inclusion for Model.save (F13)"
+        )
+        for verb in ("get", "set", "add", "create", "delete", "update"):
+            assert verb in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST, (
+                f"UPG-11.14: '{verb}' must be in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST "
+                f"(config.yaml ranking.forced_inclusion.short_verb_allowlist)"
+            )
+
+    def test_save_is_in_prog_stopwords(self) -> None:
+        """'save' is in SYMBOL_STOP_WORDS (it was added in UPG-11.8 as a 4-letter
+        common verb that causes spurious leaf boosts).  The short-verb allowlist
+        must reinstate forced-inclusion for 'save' despite the stop-word block.
+        This test confirms the baseline state that makes the allowlist necessary.
+        """
+        from agent.config import SYMBOL_STOP_WORDS
+
+        assert "save" in SYMBOL_STOP_WORDS, (
+            "'save' must remain in SYMBOL_STOP_WORDS (prog_stopwords.txt) so it still "
+            "suppresses the symbol-identity BOOST for bare 'save' leaves — the allowlist "
+            "only reinstates FORCED-INCLUSION, not the boost (UPG-11.14 / F13)"
+        )
+
+    def test_save_enters_sym_tokens_for_inclusion_via_allowlist(self) -> None:
+        """When a query contains 'save' and forced-inclusion is computing
+        sym_tokens_for_inclusion, 'save' must appear in that set because it is
+        in the short_verb_allowlist — even though it is in SYMBOL_STOP_WORDS and
+        below min_identifier_len (UPG-11.14 / F13).
+        """
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import (
+            SYMBOL_STOP_WORDS,
+            FORCED_INCLUSION_MIN_IDENTIFIER_LEN,
+            FORCED_INCLUSION_SHORT_VERB_ALLOWLIST,
+        )
+
+        query = "save a model instance to the database"
+        all_sym_toks = _query_symbol_tokens(query)
+
+        # Baseline: 'save' would be excluded by both the length guard and stop-word check.
+        assert "save" not in {
+            tok for tok in all_sym_toks
+            if ("_" in tok or len(tok) >= FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }, (
+            "Baseline failed: 'save' should be excluded by the normal length+stop-word guard "
+            "before the allowlist augments the token set"
+        )
+
+        # After allowlist: 'save' must be included.
+        sym_tokens_for_inclusion = {
+            tok for tok in all_sym_toks
+            if ("_" in tok or len(tok) >= FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+        for tok in all_sym_toks:
+            if tok in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST:
+                sym_tokens_for_inclusion.add(tok)
+
+        assert "save" in sym_tokens_for_inclusion, (
+            "UPG-11.14 / F13: 'save' must enter sym_tokens_for_inclusion via the "
+            "short_verb_allowlist for query 'save a model instance to the database'. "
+            f"Tokens in set: {sym_tokens_for_inclusion}"
+        )
+
+    def test_short_verb_allowlist_forced_inclusion_search(self, indexer, tmp_path) -> None:
+        """Integration: Model.save must appear in top-5 for 'save a model instance
+        to the database' via the short_verb_allowlist forced-inclusion path (F13).
+
+        The candidate pool is artificially reduced so that Model.save would be
+        excluded without forced-inclusion (the deeper ModelAdmin.save_model wins
+        in the natural hybrid ranking because save_model is compound and matches
+        'save'+'model' in the embedding space).
+        """
+        import agent.searcher as searcher_mod
+        from agent.searcher import CodeSearcher
+
+        # A realistic Model.save implementation (long body — lower BM25 density)
+        model_src = tmp_path / "base.py"
+        model_src.write_text(
+            "class Model:\n"
+            "    def save(self, force_insert=False, force_update=False,\n"
+            "             using=None, update_fields=None):\n"
+            "        \"\"\"\n"
+            "        Save the current instance.  Override this in a subclass if you want\n"
+            "        to control the saving process.\n"
+            "        Persists the model instance to the database.\n"
+            "        \"\"\"\n"
+            "        self._do_update(force_insert=force_insert,\n"
+            "                        force_update=force_update,\n"
+            "                        using=using, update_fields=update_fields)\n"
+        )
+        # An admin helper that competes via compound name (save_model)
+        admin_src = tmp_path / "admin.py"
+        admin_src.write_text(
+            "class ModelAdmin:\n"
+            "    def save_model(self, request, obj, form, change):\n"
+            "        \"\"\"Save the given model instance to the database.\"\"\"\n"
+            "        obj.save()\n"
+        )
+        indexer.index_file(str(model_src))
+        indexer.index_file(str(admin_src))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        orig_top_k = searcher_mod._RERANK_TOP_K_UNFILTERED
+        # Shrink the natural pool so Model.save would be excluded without forced-inclusion
+        searcher_mod._RERANK_TOP_K_UNFILTERED = 2
+        try:
+            query = "save a model instance to the database"
+            results, _ = s.search(query, n_results=5, rerank=False)
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_top_k
+
+        model_save_present = any(
+            "save" in (r.symbol_name or "").lower()
+            and "class: Model" in r.content
+            for r in results
+        )
+        assert model_save_present, (
+            "UPG-11.14 / F13: Model.save must be in top-5 for 'save a model instance "
+            "to the database' via short_verb_allowlist forced-inclusion. "
+            f"Results: {[(r.symbol_name, r.content[:60]) for r in results]}"
+        )
+
+    # --- F14 queryset stop-word tests ---
+
+    def test_queryset_in_prog_stopwords(self) -> None:
+        """'queryset' must be in SYMBOL_STOP_WORDS (prog_stopwords.txt) so that
+        forced-inclusion of ListFilter.queryset() variants is suppressed for queries
+        like 'exclude certain records from a queryset' (UPG-11.14 / F14).
+        """
+        from agent.config import SYMBOL_STOP_WORDS
+
+        assert "queryset" in SYMBOL_STOP_WORDS, (
+            "UPG-11.14 / F14: 'queryset' must be in SYMBOL_STOP_WORDS (prog_stopwords.txt) "
+            "to prevent forced-inclusion of admin ListFilter.queryset() variants when "
+            "'queryset' is used as a prose noun in the query "
+            "(e.g. 'exclude certain records from a queryset' → QuerySet.exclude must "
+            "outrank ListFilter.queryset at rank1-3)"
+        )
+
+    def test_queryset_excluded_from_forced_inclusion_tokens(self) -> None:
+        """For 'exclude certain records from a queryset', 'queryset' must NOT appear
+        in sym_tokens_for_inclusion — it is in SYMBOL_STOP_WORDS so it is blocked
+        even though it is 8 chars (above min_identifier_len=7) (UPG-11.14 / F14).
+        """
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import (
+            SYMBOL_STOP_WORDS,
+            FORCED_INCLUSION_MIN_IDENTIFIER_LEN,
+            FORCED_INCLUSION_SHORT_VERB_ALLOWLIST,
+        )
+
+        query = "exclude certain records from a queryset"
+        all_sym_toks = _query_symbol_tokens(query)
+
+        sym_tokens_for_inclusion = {
+            tok for tok in all_sym_toks
+            if ("_" in tok or len(tok) >= FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+        for tok in all_sym_toks:
+            if tok in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST:
+                sym_tokens_for_inclusion.add(tok)
+
+        assert "queryset" not in sym_tokens_for_inclusion, (
+            "UPG-11.14 / F14: 'queryset' must NOT be in sym_tokens_for_inclusion — "
+            "it is in SYMBOL_STOP_WORDS so forced-inclusion of ListFilter.queryset() "
+            "variants is suppressed. "
+            f"sym_tokens_for_inclusion: {sym_tokens_for_inclusion}"
+        )
+        # Also verify 'queryset' is NOT in the short-verb allowlist (it's a noun, not a verb)
+        assert "queryset" not in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST, (
+            "UPG-11.14: 'queryset' must NOT be in the short_verb_allowlist — "
+            "it is a noun (container) and should stay fully blocked by the stop-word list"
+        )
+
+    def test_queryset_search_does_not_flood_with_listfilter_variants(
+        self, indexer, tmp_path
+    ) -> None:
+        """Integration (F14): when 'queryset' appears as a prose noun in the query,
+        ListFilter.queryset() variants must NOT dominate results over the genuinely
+        relevant ORM method (QuerySet.exclude in this test).
+
+        Verifies that the stop-word block prevents queryset-named symbols from being
+        force-included into the candidate pool.
+        """
+        from agent.searcher import CodeSearcher
+
+        # The correct ORM method
+        qs_src = tmp_path / "query.py"
+        qs_src.write_text(
+            "class QuerySet:\n"
+            "    def exclude(self, *args, **kwargs):\n"
+            "        \"\"\"\n"
+            "        Return a new QuerySet instance with NOT (args) ANDed to the existing\n"
+            "        set. Equivalent to SQL 'WHERE NOT (...)'. Excludes matching records.\n"
+            "        \"\"\"\n"
+            "        return self._filter_or_exclude(True, args, kwargs)\n"
+        )
+        # Admin ListFilter.queryset variants that should NOT be forced into the pool
+        admin_src = tmp_path / "admin.py"
+        admin_src.write_text(
+            "class SimpleListFilter:\n"
+            "    def queryset(self, request, queryset):\n"
+            "        \"\"\"Return the filtered queryset for the list display.\"\"\"\n"
+            "        return queryset\n"
+            "\n"
+            "class RelatedFieldListFilter:\n"
+            "    def queryset(self, request, queryset):\n"
+            "        \"\"\"Apply filter to the queryset for related field.\"\"\"\n"
+            "        return queryset.filter(**self.used_params())\n"
+        )
+        indexer.index_file(str(qs_src))
+        indexer.index_file(str(admin_src))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Verify no ListFilter.queryset chunk is marked as forced_inclusion
+        query = "exclude certain records from a queryset"
+        results, _ = s.search(query, n_results=10, rerank=False)
+
+        forced_queryset = [
+            r for r in results
+            if r.forced_inclusion and "queryset" in (r.symbol_name or "").lower()
+        ]
+        assert not forced_queryset, (
+            "UPG-11.14 / F14: No ListFilter.queryset chunk must be force-included for "
+            "'exclude certain records from a queryset' — 'queryset' is in SYMBOL_STOP_WORDS "
+            "and must be blocked. "
+            f"Force-included queryset results: {[(r.symbol_name, r.content[:60]) for r in forced_queryset]}"
+        )
