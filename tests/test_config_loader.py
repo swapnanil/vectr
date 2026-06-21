@@ -361,3 +361,58 @@ class TestConfigLoaderBehavior:
         )
         assert _REMEMBER_NUDGE_THRESHOLD is cfg.BEHAVIOR_REMEMBER_NUDGE_THRESHOLD
         assert _REMEMBER_NUDGE_COOLDOWN is cfg.BEHAVIOR_REMEMBER_NUDGE_COOLDOWN
+
+
+class TestConfigLoaderDocIntent:
+    """ranking.doc_intent values must load correctly from config.yaml (UPG-11.11)."""
+
+    def test_suppress_forced_inclusion_default(self) -> None:
+        """suppress_forced_inclusion defaults to True — doc-intent queries must
+        suppress forced-inclusion so symbol-name tokens don't flood the pool."""
+        assert cfg.DOC_INTENT_SUPPRESS_FORCED_INCLUSION is True, (
+            f"DOC_INTENT_SUPPRESS_FORCED_INCLUSION should be True, "
+            f"got {cfg.DOC_INTENT_SUPPRESS_FORCED_INCLUSION}"
+        )
+
+    def test_suppress_forced_inclusion_is_bool(self) -> None:
+        assert isinstance(cfg.DOC_INTENT_SUPPRESS_FORCED_INCLUSION, bool)
+
+    def test_doc_prose_multiplier_default(self) -> None:
+        """doc_prose_multiplier defaults to 1.0 — no doc penalty on doc-intent queries."""
+        assert cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER == pytest.approx(1.0, abs=0.001), (
+            f"DOC_INTENT_DOC_PROSE_MULTIPLIER should be 1.0, "
+            f"got {cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER}"
+        )
+
+    def test_doc_prose_multiplier_is_float(self) -> None:
+        assert isinstance(cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER, float)
+
+    def test_doc_prose_multiplier_exceeds_quality_doc_prose(self) -> None:
+        """The doc-intent multiplier must be >= the normal doc_prose multiplier so
+        doc chunks are not demoted below code on doc-intent queries."""
+        assert cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER >= cfg.QUALITY_DOC_PROSE, (
+            f"DOC_INTENT_DOC_PROSE_MULTIPLIER ({cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER}) "
+            f"must be >= QUALITY_DOC_PROSE ({cfg.QUALITY_DOC_PROSE}) so documentation "
+            f"can compete on doc-intent queries (UPG-11.11)."
+        )
+
+    def test_chunk_quality_imports_doc_intent_multiplier(self) -> None:
+        """chunk_quality.py must import DOC_INTENT_DOC_PROSE_MULTIPLIER from config."""
+        from agent.chunk_quality import _Q_DOC_PROSE_DOC_INTENT
+        assert _Q_DOC_PROSE_DOC_INTENT is cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER
+
+    def test_searcher_imports_doc_intent_suppress(self) -> None:
+        """searcher.py must import DOC_INTENT_SUPPRESS_FORCED_INCLUSION from config."""
+        from agent.searcher import _DOC_INTENT_SUPPRESS_FORCED_INCLUSION
+        assert _DOC_INTENT_SUPPRESS_FORCED_INCLUSION is cfg.DOC_INTENT_SUPPRESS_FORCED_INCLUSION
+
+    def test_doc_intent_phrase_lists_are_config_sourced(self) -> None:
+        """The doc-intent trigger phrases must live in config.yaml, not be
+        hardcoded in chunk_quality.py — chunk_quality must alias the config tuples."""
+        from agent.chunk_quality import _DOC_INTENT_PREFIXES, _DOC_INTENT_ANY
+        assert _DOC_INTENT_PREFIXES is cfg.DOC_INTENT_PREFIXES
+        assert _DOC_INTENT_ANY is cfg.DOC_INTENT_ANY_SUBSTRINGS
+        assert isinstance(cfg.DOC_INTENT_PREFIXES, tuple)
+        assert isinstance(cfg.DOC_INTENT_ANY_SUBSTRINGS, tuple)
+        assert "how to " in cfg.DOC_INTENT_PREFIXES
+        assert " tutorial" in cfg.DOC_INTENT_ANY_SUBSTRINGS

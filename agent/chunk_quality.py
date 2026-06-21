@@ -32,6 +32,9 @@ from agent.config import (
     QUALITY_TEST_DEPRIORITISED as _Q_TEST_DEPRIORITISED,
     QUALITY_DOC_PROSE as _Q_DOC_PROSE,
     QUALITY_SHORT_PENALTY as _Q_SHORT_PENALTY,
+    DOC_INTENT_DOC_PROSE_MULTIPLIER as _Q_DOC_PROSE_DOC_INTENT,
+    DOC_INTENT_PREFIXES,
+    DOC_INTENT_ANY_SUBSTRINGS,
 )
 
 # A synthetic node_type stamped on re-export / import-only chunks so the ranker
@@ -222,6 +225,46 @@ def query_wants_tests(query: str) -> bool:
     return any(kw in q for kw in ("test", "fixture", "scenario", "spec ", "unittest", "pytest", "assertion"))
 
 
+# Doc-intent query patterns are sourced from agent/config.yaml
+# (ranking.doc_intent.prefixes / .any_substrings) via agent/config.py.
+# A query is doc-intent when the user is asking about a *topic* or *concept*,
+# not looking for a specific symbol implementation — symbol names in the query
+# are context/description, not forced-inclusion targets (UPG-11.11 / F2).
+# The _DOC_INTENT_* aliases preserve the in-module call sites below.
+_DOC_INTENT_PREFIXES: tuple[str, ...] = DOC_INTENT_PREFIXES
+_DOC_INTENT_ANY: tuple[str, ...] = DOC_INTENT_ANY_SUBSTRINGS
+
+
+def is_doc_intent_query(query: str) -> bool:
+    """True when the query describes a topic or asks for documentation/tutorial.
+
+    Doc-intent queries are distinguished from code-intent queries by the presence
+    of natural-language question/topic phrases.  When a query is doc-intent, forced-
+    inclusion of exact symbol-name matches is suppressed (UPG-11.11): symbol names
+    in the query describe the *topic* (e.g. "how to use deconstruct") rather than
+    requesting a specific symbol implementation.
+
+    Design notes:
+    - Anchored-prefix patterns ("how to …", "what is …") are the primary signal —
+      they indicate the query is a question/explanation request.
+    - Substring patterns (" tutorial", " guide") are secondary, anchored to avoid
+      false hits on identifiers like "tutorial_mode" or "guided_setup".
+    - The check is intentionally simple and cheap (string matching) — no regex, no
+      NLP — consistent with vectr's zero-LLM-call constraint.
+    - Compound queries that START with a doc phrase are classified as doc-intent even
+      if they also name specific symbols: "how to write a custom field with deconstruct"
+      is doc-intent because the user wants documentation, not the deconstruct method.
+    """
+    q = query.lower().strip()
+    for prefix in _DOC_INTENT_PREFIXES:
+        if q.startswith(prefix):
+            return True
+    for phrase in _DOC_INTENT_ANY:
+        if phrase in q:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Quality prior (UPG-2.1)
 # ---------------------------------------------------------------------------
@@ -252,12 +295,19 @@ def quality_score(
     node_type: str = "",
     *,
     query_targets_tests: bool = False,
+    query_is_doc_intent: bool = False,
 ) -> float:
     """A per-chunk usefulness prior in (0, 1], folded into ranking as a multiplier.
 
     Relevance × usefulness: similarity already models relevance; this models
     "is this chunk a good answer at all, regardless of similarity". Cheap and
     language-agnostic. Lower = worse answer.
+
+    Args:
+        query_is_doc_intent: When True, documentation prose chunks receive
+            ``_Q_DOC_PROSE_DOC_INTENT`` (default 1.0 = no penalty) instead of
+            ``_Q_DOC_PROSE`` (0.70), so they can compete with code on how-to /
+            explain / tutorial queries (UPG-11.11).
     """
     if file_path and is_vectr_config_file(file_path):
         return _Q_VECTR_CONFIG
@@ -274,7 +324,9 @@ def quality_score(
     if file_path and is_test_file(file_path) and not query_targets_tests:
         score *= _Q_TEST_DEPRIORITISED
     if is_doc_language(language):
-        score *= _Q_DOC_PROSE
+        # UPG-11.11: on doc-intent queries use the elevated multiplier so doc
+        # prose is not knocked below code by the normal 0.70 demote.
+        score *= _Q_DOC_PROSE_DOC_INTENT if query_is_doc_intent else _Q_DOC_PROSE
 
     n_lines = len(_meaningful_lines(content))
     if n_lines <= 2:

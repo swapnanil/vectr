@@ -880,6 +880,79 @@ to a SQL WHERE clause. Custom lookups can be registered via ``register_lookup``.
             f"Got: {[r.file_path for r in results]}"
         )
 
+    def test_f2_doc_intent_query_surfaces_txt_over_code(
+        self, indexer, tmp_path
+    ) -> None:
+        """UPG-11.11 / F2: a how-to doc-intent query must surface the .txt
+        documentation file in the top results, even when the query also names
+        symbols (deconstruct, from_db_value) that would normally trigger
+        forced-inclusion.
+
+        Scenario mirrors the real F2 acceptance case:
+        - docs/howto/custom-model-fields.txt is indexed (it covers the topic)
+        - Multiple Python files implement deconstruct() and from_db_value()
+        - Code-intent query "Field deconstruct …" keeps forced-inclusion ON and
+          surfaces code (F1 regression guard)
+        - Doc-intent query "how to write a custom model field with deconstruct
+          and from_db_value" suppresses forced-inclusion AND relaxes the doc-prose
+          quality penalty, so the .txt file can reach the top results
+        """
+        from agent.searcher import CodeSearcher
+        from agent.chunk_quality import is_doc_intent_query
+
+        # Index the how-to .txt file
+        txt_file = tmp_path / "custom-model-fields.txt"
+        txt_file.write_text(self._TXT_CONTENT)
+        indexer.index_file(str(txt_file))
+
+        # Index several Python files that implement deconstruct / from_db_value
+        # (simulating the Django corpus where 80+ such chunks exist)
+        for i in range(4):
+            py_file = tmp_path / f"field_{i}.py"
+            py_file.write_text(
+                f"class Field{i}:\n"
+                f"    def deconstruct(self):\n"
+                f"        \"\"\"Deconstruct the field for migration serialization.\"\"\"\n"
+                f"        return (self.name, 'myapp.Field{i}', [], {{}})\n"
+                f"\n"
+                f"    def from_db_value(self, value, expression, connection):\n"
+                f"        \"\"\"Convert database value to Python object.\"\"\"\n"
+                f"        if value is None:\n"
+                f"            return None\n"
+                f"        return str(value)\n"
+            )
+            indexer.index_file(str(py_file))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Guard: F2 query must be classified as doc-intent
+        f2_query = "how to write a custom model field with deconstruct and from_db_value"
+        assert is_doc_intent_query(f2_query) is True, (
+            "Pre-condition failed: F2 query must be doc-intent"
+        )
+
+        # F2 query must surface the txt file in top-5
+        results, _ = s.search(f2_query, n_results=5, rerank=False)
+        txt_results = [r for r in results if r.file_path.endswith(".txt")]
+        assert txt_results, (
+            "UPG-11.11 / F2: docs/howto/custom-model-fields.txt must appear in top-5 "
+            "results for the doc-intent 'how to' query, even though the query names "
+            "symbols (deconstruct, from_db_value). Forced-inclusion must be suppressed "
+            "for doc-intent queries so the doc file is not crowded out by code chunks. "
+            f"Got: {[(r.file_path, r.score) for r in results]}"
+        )
+
+        # Regression guard: F1 code-intent query must still surface code (not only docs)
+        f1_query = "Field deconstruct base class name path args kwargs migration"
+        f1_results, _ = s.search(f1_query, n_results=5, rerank=False)
+        code_results = [r for r in f1_results if r.file_path.endswith(".py")]
+        assert code_results, (
+            "UPG-11.11 regression: F1 code-intent query must still surface Python code "
+            "files (forced-inclusion must NOT be suppressed for code-intent queries). "
+            f"Got: {[(r.file_path, r.score) for r in f1_results]}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Indexing hygiene — orphan pruning, mtime-cache colocation, force rebuild

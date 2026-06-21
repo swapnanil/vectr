@@ -13,6 +13,7 @@ from agent.chunk_quality import (
     is_generated_file,
     is_test_file,
     query_wants_tests,
+    is_doc_intent_query,
     quality_score,
     normalized_content,
     symbol_identity_boost,
@@ -423,3 +424,147 @@ class TestFourLetterStopWords:
         )
         tokens = _query_symbol_tokens("read lines from a text file")
         assert symbol_identity_boost("read", tokens) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.11 — Doc-intent query classifier
+# ---------------------------------------------------------------------------
+
+class TestDocIntentQueryClassifier:
+    """is_doc_intent_query() must classify how-to / explain / tutorial queries
+    as doc-intent and leave code-shaped symbol queries as code-intent (UPG-11.11 / F2).
+
+    The classifier gates forced-inclusion suppression: on doc-intent queries,
+    symbol-name tokens in the query describe the topic (not the implementation
+    target), so they must NOT pull 80+ code chunks into the hybrid pool.
+    """
+
+    # Queries that ARE doc-intent (should return True)
+    @pytest.mark.parametrize("query", [
+        # F2 exact query
+        "how to write a custom model field with deconstruct and from_db_value",
+        # how-to / how-do prefix variants
+        "how to use signals in Django",
+        "how do I configure database connections",
+        "how does the middleware stack work",
+        "how can I override the queryset",
+        "how should I structure my models",
+        # what-is prefix variants
+        "what is a model field in Django",
+        "what are migrations and how do they work",
+        "what does the deconstruct method do",
+        "what's the difference between null and blank",
+        # why prefix
+        "why is my queryset returning duplicate results",
+        "why does save() fail silently",
+        "why do I need to call super().__init__",
+        # explain prefix
+        "explain the Django ORM query lifecycle",
+        "explain how from_db_value converts database values",
+        # tutorial / guide suffix
+        "writing custom model fields tutorial",
+        "database optimization guide",
+        "guide to Django migrations",
+        # best way / best practice
+        "best way to handle file uploads",
+        "best practices for model design",
+        # introduction / overview
+        "introduction to Django class based views",
+        "overview of the QuerySet API",
+        # when to use
+        "when to use select_related vs prefetch_related",
+        # example of
+        "example of a custom manager",
+        "examples of model field validation",
+    ])
+    def test_doc_intent_true(self, query: str) -> None:
+        assert is_doc_intent_query(query) is True, (
+            f"UPG-11.11: expected is_doc_intent_query({query!r}) to be True (doc-intent), "
+            f"but got False. This query describes a topic, not a symbol implementation."
+        )
+
+    # Queries that are NOT doc-intent (code-intent; should return False)
+    @pytest.mark.parametrize("query", [
+        # F1 / F1b / F4 / F5 exact queries
+        "Field deconstruct base class name path args kwargs migration",
+        "from_db_value convert database value to python object on a model field",
+        # code-shaped symbol lookups
+        "deconstruct method implementation",
+        "from_db_value JSONField",
+        "QuerySet.exclude filter records",
+        "CursorWrapper execute SQL",
+        "Model.save implementation",
+        # F6 / F8 regression guards
+        "list all database migrations for a project",
+        "read lines from a text file",
+        "connect to database and execute query",
+        "render template context in view",
+        "exclude certain records from a queryset",
+        # natural-language code queries that don't start with doc phrases
+        "save a model instance to the database",
+        "get all objects from a queryset",
+    ])
+    def test_doc_intent_false(self, query: str) -> None:
+        assert is_doc_intent_query(query) is False, (
+            f"UPG-11.11: expected is_doc_intent_query({query!r}) to be False (code-intent), "
+            f"but got True. Forced-inclusion must NOT be suppressed for code-intent queries."
+        )
+
+    def test_f2_query_is_doc_intent(self) -> None:
+        """F2 acceptance guard: the exact F2 query must be classified as doc-intent."""
+        q = "how to write a custom model field with deconstruct and from_db_value"
+        assert is_doc_intent_query(q) is True, (
+            f"UPG-11.11 regression: F2 query must be doc-intent so forced-inclusion "
+            f"is suppressed and docs/howto/custom-model-fields.txt can surface in top-5."
+        )
+
+    def test_f1_query_is_not_doc_intent(self) -> None:
+        """F1 regression guard: the F1 query must NOT be classified as doc-intent
+        (forced-inclusion must still fire for code-shaped queries)."""
+        q = "Field deconstruct base class name path args kwargs migration"
+        assert is_doc_intent_query(q) is False, (
+            f"UPG-11.11 regression: F1 query must NOT be doc-intent — "
+            f"forced-inclusion must still fire to surface Field.deconstruct."
+        )
+
+    def test_f1b_query_is_not_doc_intent(self) -> None:
+        """F1b regression guard: from_db_value compound-identifier query stays code-intent."""
+        q = "from_db_value convert database value to python object on a model field"
+        assert is_doc_intent_query(q) is False, (
+            f"UPG-11.11 regression: F1b query must NOT be doc-intent."
+        )
+
+    def test_doc_intent_quality_score_elevated_for_doc_prose(self) -> None:
+        """On doc-intent queries, doc prose chunks must get the elevated quality
+        score (DOC_INTENT_DOC_PROSE_MULTIPLIER, default 1.0) instead of the
+        normal _Q_DOC_PROSE (0.70) so they can rank above code on how-to queries."""
+        from agent.config import DOC_INTENT_DOC_PROSE_MULTIPLIER, QUALITY_DOC_PROSE
+
+        doc_content = (
+            "Writing custom model fields\n"
+            "This tutorial walks through how to write a custom Django model field.\n"
+            "You need to implement deconstruct() and from_db_value() methods.\n"
+            "The deconstruct() method is called during migrations to serialize the field.\n"
+        )
+        # Code-intent: doc prose gets 0.70 penalty
+        code_score = quality_score(
+            doc_content, "/docs/howto/custom-model-fields.txt", language="txt",
+            query_is_doc_intent=False,
+        )
+        assert code_score == pytest.approx(QUALITY_DOC_PROSE, abs=0.01), (
+            f"Doc prose on code-intent query must get QUALITY_DOC_PROSE={QUALITY_DOC_PROSE}, "
+            f"got {code_score}"
+        )
+
+        # Doc-intent: doc prose gets the elevated multiplier (1.0 by default)
+        doc_score = quality_score(
+            doc_content, "/docs/howto/custom-model-fields.txt", language="txt",
+            query_is_doc_intent=True,
+        )
+        assert doc_score == pytest.approx(DOC_INTENT_DOC_PROSE_MULTIPLIER, abs=0.01), (
+            f"Doc prose on doc-intent query must get DOC_INTENT_DOC_PROSE_MULTIPLIER="
+            f"{DOC_INTENT_DOC_PROSE_MULTIPLIER}, got {doc_score}"
+        )
+        assert doc_score > code_score, (
+            "Doc prose must score HIGHER on a doc-intent query than a code-intent query."
+        )
