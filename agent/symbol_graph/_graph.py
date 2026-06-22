@@ -75,6 +75,55 @@ def _get_imported_files(caller_file: str, workspace: str) -> list[str]:
     return list(dict.fromkeys(imported))  # dedup while preserving order
 
 
+_CLASS_DEF_RE = re.compile(r"^class\s+(\w+)")
+
+
+def _enclosing_class_from_file(file_path: str, start_line: int) -> str:
+    """Scan backward from *start_line* (1-indexed) in *file_path* to find the
+    immediately enclosing class definition.
+
+    Returns the class name string, or ``""`` when the symbol is not inside a
+    class (e.g. a module-level function).  Only examines lines that are at a
+    *lesser indentation level* than the symbol's first line, so nested methods
+    are correctly attributed to their direct parent class rather than a grandparent.
+
+    This complements ``extract_class_from_content`` (which reads the
+    ``# class: X`` prefix that the *indexer* injects into ChromaDB chunks).
+    For the symbol-graph locate surface, snippets come directly from raw file
+    content and carry no such prefix — hence the file-scan path here.
+    """
+    try:
+        lines = Path(file_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return ""
+
+    if not lines or start_line < 1:
+        return ""
+
+    # 0-indexed line of the symbol itself
+    sym_idx = min(start_line - 1, len(lines) - 1)
+    sym_line = lines[sym_idx]
+    sym_indent = len(sym_line) - len(sym_line.lstrip())
+
+    # Walk backward looking for a class definition at a strictly lesser indent
+    for idx in range(sym_idx - 1, -1, -1):
+        line = lines[idx]
+        stripped = line.lstrip()
+        if not stripped:
+            continue  # blank line — keep scanning
+        indent = len(line) - len(stripped)
+        if indent >= sym_indent:
+            continue  # same or deeper indent — not a parent scope
+        m = _CLASS_DEF_RE.match(stripped)
+        if m:
+            return m.group(1)
+        # Once we find a non-blank line at lesser indent that is NOT a class,
+        # we've exited the potential enclosing class scope.
+        break
+
+    return ""
+
+
 def _partial_match_key(row, query_lower: str) -> tuple:
     """Sort key for partial (substring) `locate` matches.
 
@@ -427,45 +476,110 @@ class SymbolGraph:
           4 substring   — name contained as substring, ranked canonical-first
                           (prefix > interior, def > impl/alias) — UPG-4.5
           5 fuzzy       — edit distance ≤ length-scaled threshold, last resort
+
+        UPG-11.10-b: when *name* contains a class qualifier (``"Class.method"``
+        form), strategies 1–5 use the bare leaf for the DB lookup and then
+        filter the results to symbols whose enclosing class matches the
+        qualifier.  The qualified ``Class.method`` form is also populated on
+        the returned symbol's ``name`` field whenever the symbol lives inside
+        a class (parity with the searcher's qualified display).  Bare-leaf
+        queries (no ``.``) are unchanged.
         """
+        # UPG-11.10-b: detect "Class.method" qualifier in the query.
+        # We re-use the same [.:] split convention used elsewhere in the codebase.
+        _class_qualifier: str = ""   # e.g. "Field"  (empty = unqualified query)
+        _leaf: str = name            # e.g. "deconstruct" (the bare DB lookup key)
+        if "." in name or ":" in name:
+            import re as _re
+            parts = _re.split(r"[.:]", name, maxsplit=1)
+            if len(parts) == 2 and parts[0] and parts[1]:
+                # Only treat as a class-qualified locate when the LHS looks like
+                # a class name (starts with uppercase) or is an explicit
+                # Class.method form (two non-empty parts).  This avoids treating
+                # dotted module paths like "os.path" as class qualifiers when
+                # the user really wants "module.Foo" suffix-stripping (strategy 1).
+                # Heuristic: if LHS is UpperCamelCase, treat as class qualifier;
+                # otherwise fall through to existing suffix-strip strategy 1.
+                if parts[0][0].isupper():
+                    _class_qualifier = parts[0]
+                    _leaf = parts[1]
+
         def _with_snippets(rows: list) -> list[Symbol]:
             syms = [self._row_to_symbol(r) for r in rows]
             for s in syms:
                 s.snippet = self.get_snippet(s.file_path, s.start_line, s.end_line)
+                # UPG-11.10-b: populate qualified name on the symbol so callers
+                # see "Class.method" rather than bare "method" — parity with
+                # the searcher's qualified display via extract_class_from_content.
+                if "." not in s.name and "::" not in s.name:
+                    cls = _enclosing_class_from_file(s.file_path, s.start_line)
+                    if cls:
+                        s.name = f"{cls}.{s.name}"
             return syms
 
+        def _filter_by_class(syms: list[Symbol]) -> list[Symbol]:
+            """Keep only symbols whose enclosing class matches *_class_qualifier*.
+            Returns *syms* unmodified when no qualifier is active."""
+            if not _class_qualifier:
+                return syms
+            return [
+                s for s in syms
+                # After _with_snippets, qualified symbols have "Class.method"
+                if s.name.split(".")[0] == _class_qualifier
+                or s.name.split("::")[0] == _class_qualifier
+            ]
+
         name_lower = name.lower()
+        leaf_lower = _leaf.lower()
 
         def _ranked_result(rows: list, strategy: str) -> LocateResult:
             # Canonical-first ordering (UPG-4.5): even within an exact-name hit,
             # lead with the type/fn definition and bury impl blocks / aliases that
             # share the name. _partial_match_key handles prefix/kind/test ordering.
-            ranked = sorted(rows, key=lambda r: _partial_match_key(r, name_lower))
-            return LocateResult(symbols=_with_snippets(ranked[:limit]), resolution_strategy=strategy, query=name)
+            ranked = sorted(rows, key=lambda r: _partial_match_key(r, leaf_lower))
+            syms = _with_snippets(ranked[:limit])
+            filtered = _filter_by_class(syms)
+            # When the qualifier is active and all results were filtered out,
+            # fall through (return None so the caller tries the next strategy).
+            if _class_qualifier and not filtered:
+                return None  # type: ignore[return-value]
+            return LocateResult(
+                symbols=filtered if _class_qualifier else syms,
+                resolution_strategy=strategy,
+                query=name,
+            )
 
-        # Strategy 0: exact name match
+        # Strategy 0: exact name match (uses _leaf when qualifier is active)
+        lookup_name = _leaf if _class_qualifier else name
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM symbols WHERE workspace = ? AND name = ? LIMIT ?",
-                (workspace, name, 200),
+                (workspace, lookup_name, 200),
             ).fetchall()
         if rows:
-            return _ranked_result(rows, "exact")
+            result = _ranked_result(rows, "exact")
+            if result is not None:
+                return result
 
-        # Strategy 1: suffix match — strip qualifier prefix (e.g. "module.Foo" → "Foo")
-        suffix = name
-        for sep in (":", "."):
-            if sep in name:
-                suffix = name.rsplit(sep, 1)[-1]
-                break
-        if suffix != name:
-            with self._conn() as conn:
-                rows = conn.execute(
-                    "SELECT * FROM symbols WHERE workspace = ? AND name = ? LIMIT ?",
-                    (workspace, suffix, 200),
-                ).fetchall()
-            if rows:
-                return _ranked_result(rows, "suffix")
+        # Strategy 1: suffix match — strip qualifier prefix (e.g. "module.Foo" → "Foo").
+        # When a class qualifier was already parsed above, strategy 1 is skipped
+        # (the leaf is already extracted) to avoid double-stripping.
+        if not _class_qualifier:
+            suffix = name
+            for sep in (":", "."):
+                if sep in name:
+                    suffix = name.rsplit(sep, 1)[-1]
+                    break
+            if suffix != name:
+                with self._conn() as conn:
+                    rows = conn.execute(
+                        "SELECT * FROM symbols WHERE workspace = ? AND name = ? LIMIT ?",
+                        (workspace, suffix, 200),
+                    ).fetchall()
+                if rows:
+                    result = _ranked_result(rows, "suffix")
+                    if result is not None:
+                        return result
 
         # Strategy 2: same-module — symbols in the same directory as caller_file
         if caller_file:
@@ -474,10 +588,12 @@ class SymbolGraph:
                 rows = conn.execute(
                     "SELECT * FROM symbols WHERE workspace = ? AND name LIKE ? "
                     "AND file_path LIKE ? LIMIT ?",
-                    (workspace, f"%{name}%", f"{caller_dir}/%", 200),
+                    (workspace, f"%{lookup_name}%", f"{caller_dir}/%", 200),
                 ).fetchall()
             if rows:
-                return _ranked_result(rows, "same_module")
+                result = _ranked_result(rows, "same_module")
+                if result is not None:
+                    return result
 
         # Strategy 3: import-chain — symbols in files imported by caller_file
         if caller_file:
@@ -488,10 +604,12 @@ class SymbolGraph:
                     rows = conn.execute(
                         f"SELECT * FROM symbols WHERE workspace = ? AND name LIKE ? "
                         f"AND file_path IN ({ph}) LIMIT ?",
-                        (workspace, f"%{name}%", *imported, 200),
+                        (workspace, f"%{lookup_name}%", *imported, 200),
                     ).fetchall()
                 if rows:
-                    return _ranked_result(rows, "import_chain")
+                    result = _ranked_result(rows, "import_chain")
+                    if result is not None:
+                        return result
 
         # Strategy 4: substring — any symbol whose name contains the query. Always
         # fires when there's at least one match, so fuzzy is a true last resort.
@@ -502,29 +620,38 @@ class SymbolGraph:
             rows = conn.execute(
                 "SELECT * FROM symbols WHERE workspace = ? AND name LIKE ? "
                 "ORDER BY (CASE WHEN name LIKE ? THEN 0 ELSE 1 END), length(name) LIMIT ?",
-                (workspace, f"%{name}%", f"{name}%", 200),
+                (workspace, f"%{lookup_name}%", f"{lookup_name}%", 200),
             ).fetchall()
         if rows:
-            return _ranked_result(rows, "substring")
+            result = _ranked_result(rows, "substring")
+            if result is not None:
+                return result
 
         # Strategy 5: fuzzy — edit distance within a length-scaled threshold, and
         # only against names that share the first character. Short queries get a
         # tighter budget so `rand` (len 4) can't match `nan`/`add` (UPG-4.5).
-        max_dist = 1 if len(name) <= 4 else 2
-        first = name_lower[0] if name_lower else ""
+        max_dist = 1 if len(lookup_name) <= 4 else 2
+        first = leaf_lower[0] if leaf_lower else ""
         with self._conn() as conn:
             all_rows = conn.execute(
                 "SELECT * FROM symbols WHERE workspace = ? AND ABS(LENGTH(name) - ?) <= ?",
-                (workspace, len(name), max_dist),
+                (workspace, len(lookup_name), max_dist),
             ).fetchall()
         fuzzy = [
             r for r in all_rows
             if r["name"] and r["name"][0].lower() == first
-            and _levenshtein(name_lower, r["name"].lower()) <= max_dist
+            and _levenshtein(leaf_lower, r["name"].lower()) <= max_dist
         ]
         if fuzzy:
-            fuzzy.sort(key=lambda r: (_levenshtein(name_lower, r["name"].lower()), len(r["name"])))
-            return LocateResult(symbols=_with_snippets(fuzzy[:limit]), resolution_strategy="fuzzy", query=name)
+            fuzzy.sort(key=lambda r: (_levenshtein(leaf_lower, r["name"].lower()), len(r["name"])))
+            syms = _with_snippets(fuzzy[:limit])
+            filtered = _filter_by_class(syms)
+            if filtered or not _class_qualifier:
+                return LocateResult(
+                    symbols=filtered if _class_qualifier else syms,
+                    resolution_strategy="fuzzy",
+                    query=name,
+                )
 
         return LocateResult(symbols=[], resolution_strategy="none", query=name)
 
