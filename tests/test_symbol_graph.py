@@ -1494,3 +1494,159 @@ class TestGraphVersionStampUPG87:
         g.build_for_workspace(ws, [a, bad], embed_model="m")
         # Same toolchain, but the build was partial → still stale (must rebuild).
         assert g.is_stale(ws, "m") is True
+
+
+# ---------------------------------------------------------------------------
+# UPG-11.10-b — qualified locate: accept + return "Class.method" form
+#
+# Acceptance bar:
+#   1. locate("Class.method") returns only the matching class's symbol,
+#      discriminated from identically-named overrides in other classes.
+#   2. locate("method") bare leaf still returns ALL overrides (no regression).
+#   3. Located results carry a qualified "Class.method" name when the symbol
+#      lives inside a class (parity with vectr_search qualified display).
+# ---------------------------------------------------------------------------
+
+class TestQualifiedLocateUPG1110b:
+    """Two classes define the same method name.  A qualified locate query
+    must filter to the named class while the bare-leaf query must return both."""
+
+    def _fixture(self, tmp_path) -> tuple:
+        """Write a fixture with two classes each defining 'deconstruct' and a
+        top-level 'deconstruct' function.  Returns (g, ws, filepath)."""
+        src = textwrap.dedent("""\
+            class Field:
+                def deconstruct(self):
+                    return "field"
+
+            class RemoveField:
+                def deconstruct(self):
+                    return "remove"
+
+            def deconstruct():
+                pass
+        """)
+        fp = tmp_path / "fields.py"
+        fp.write_text(src)
+        g = SymbolGraph(str(tmp_path))
+        g.index_file(str(tmp_path), str(fp))
+        return g, str(tmp_path), str(fp)
+
+    # --- Part (a): accepting qualified query ---
+
+    def test_qualified_locate_filters_to_named_class(self, tmp_path) -> None:
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "Field.deconstruct")
+        # Only Field.deconstruct, not RemoveField.deconstruct
+        assert result.resolution_strategy in ("exact", "suffix")
+        names = [s.name for s in result.symbols]
+        assert any("Field" in n for n in names), f"expected Field in names, got {names}"
+        assert not any("Remove" in n for n in names), \
+            f"RemoveField.deconstruct must be filtered out, got {names}"
+
+    def test_qualified_locate_field_not_removefield(self, tmp_path) -> None:
+        """The base Field.deconstruct is discriminated from RemoveField.deconstruct."""
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "Field.deconstruct")
+        qualified_names = [s.name for s in result.symbols]
+        # Must include Field.deconstruct
+        assert "Field.deconstruct" in qualified_names, \
+            f"Field.deconstruct not found; got {qualified_names}"
+        # Must NOT include RemoveField.deconstruct
+        assert "RemoveField.deconstruct" not in qualified_names, \
+            f"RemoveField.deconstruct incorrectly included; got {qualified_names}"
+
+    def test_qualified_locate_removefield(self, tmp_path) -> None:
+        """RemoveField.deconstruct can be located by its own qualifier."""
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "RemoveField.deconstruct")
+        qualified_names = [s.name for s in result.symbols]
+        assert "RemoveField.deconstruct" in qualified_names, \
+            f"RemoveField.deconstruct not found; got {qualified_names}"
+        assert "Field.deconstruct" not in qualified_names, \
+            f"Field.deconstruct must not appear in RemoveField results; got {qualified_names}"
+
+    # --- Part (b): bare-leaf locate unchanged ---
+
+    def test_bare_leaf_locate_returns_all_overrides(self, tmp_path) -> None:
+        """Bare 'deconstruct' must still return ALL definitions (no regression)."""
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "deconstruct")
+        # All three deconstruct symbols should be returned
+        names = [s.name for s in result.symbols]
+        # At minimum Field.deconstruct and RemoveField.deconstruct must appear
+        class_names = {n.split(".")[0] for n in names if "." in n}
+        assert "Field" in class_names, f"Field not in results for bare query: {names}"
+        assert "RemoveField" in class_names, f"RemoveField not in results for bare query: {names}"
+
+    def test_bare_leaf_strategy_unchanged(self, tmp_path) -> None:
+        """Bare-leaf locate uses exact strategy, not filtered."""
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "deconstruct")
+        assert result.resolution_strategy == "exact"
+        # Count: should have at least 2 class methods + 1 top-level
+        assert len(result.symbols) >= 2
+
+    # --- Part (b): qualified names in returned symbols ---
+
+    def test_qualified_name_returned_for_class_method(self, tmp_path) -> None:
+        """locate_l2 populates 'Class.method' on the symbol.name (not bare leaf)."""
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "deconstruct")
+        names = [s.name for s in result.symbols]
+        # At least one symbol should carry a qualified name
+        assert any("." in n for n in names), \
+            f"No qualified names returned; got {names}"
+
+    def test_toplevel_function_stays_unqualified(self, tmp_path) -> None:
+        """A top-level function (no enclosing class) must NOT get a class prefix."""
+        src = textwrap.dedent("""\
+            def standalone():
+                pass
+        """)
+        fp = tmp_path / "top.py"
+        fp.write_text(src)
+        g = SymbolGraph(str(tmp_path))
+        g.index_file(str(tmp_path), str(fp))
+        result = g.locate_l2(str(tmp_path), "standalone")
+        assert len(result.symbols) >= 1
+        assert result.symbols[0].name == "standalone", \
+            f"Top-level function should stay unqualified; got {result.symbols[0].name}"
+
+    # --- enclosing class helper unit tests ---
+
+    def test_enclosing_class_from_file_method(self, tmp_path) -> None:
+        from agent.symbol_graph._graph import _enclosing_class_from_file
+        src = textwrap.dedent("""\
+            class MyClass:
+                def my_method(self):
+                    pass
+        """)
+        fp = tmp_path / "c.py"
+        fp.write_text(src)
+        # my_method starts at line 2
+        cls = _enclosing_class_from_file(str(fp), 2)
+        assert cls == "MyClass", f"Expected 'MyClass', got '{cls}'"
+
+    def test_enclosing_class_from_file_toplevel(self, tmp_path) -> None:
+        from agent.symbol_graph._graph import _enclosing_class_from_file
+        src = "def standalone(): pass\n"
+        fp = tmp_path / "t.py"
+        fp.write_text(src)
+        cls = _enclosing_class_from_file(str(fp), 1)
+        assert cls == "", f"Top-level function should return empty, got '{cls}'"
+
+    def test_enclosing_class_from_file_nonexistent(self, tmp_path) -> None:
+        from agent.symbol_graph._graph import _enclosing_class_from_file
+        cls = _enclosing_class_from_file(str(tmp_path / "ghost.py"), 1)
+        assert cls == ""
+
+    # --- format integration ---
+
+    def test_format_l2_shows_qualified_name(self, tmp_path) -> None:
+        """format_locate_l2_for_llm should display Class.method, not bare leaf."""
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "Field.deconstruct")
+        text = g.format_locate_l2_for_llm(result)
+        assert "Field.deconstruct" in text, \
+            f"Qualified name not in formatted output:\n{text}"
