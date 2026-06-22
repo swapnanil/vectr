@@ -91,11 +91,18 @@ ranking:
     # is asking about a topic, not requesting a specific symbol implementation.
     suppress_forced_inclusion: true
 
-    # When the query is doc-intent, promote documentation prose chunks from
-    # doc_prose (0.70) to this multiplier. Prevents code chunks that naturally
-    # rank above doc prose from dominating for how-to/explain queries.
-    # 1.0 = neutral (no penalty); set to doc_prose or above for intermediate.
-    doc_prose_multiplier: 1.0
+    # When the query is doc-intent, promote documentation prose chunks by this
+    # multiplier. Must be a genuine BOOST (> 1.0), not just penalty removal:
+    # for a how-to query that also names real symbols (e.g. "how to write a
+    # custom model field with deconstruct and from_db_value"), the code chunks
+    # for those symbols score ~1.0 from hybrid retrieval, so a neutral 1.0
+    # multiplier leaves the doc at its raw ~0.82 and it loses (UPG-11.11-b / F2).
+    # 1.2 lifts a strong doc (~0.82 raw, final ~= hybrid_sim x quality) to ~0.98
+    # so it competes into the top-k at a distinct rank, staying just under the
+    # downstream [0,1] clamp (a value >~1.22 would clamp to 1.0 and merely tie
+    # the rank-1 code chunk). Applied in chunk_quality.quality_score() only when
+    # is_doc_intent_query fires; tuned against the django acceptance corpus (F2).
+    doc_prose_multiplier: 1.2
 
     # Anchored-prefix phrases: a query is doc-intent when its lowercased,
     # stripped form STARTS WITH any of these. These mark a question/explanation
