@@ -42,9 +42,12 @@ class TestChunkFile:
         assert "hello" in symbols or "Greeter" in symbols
 
     def test_chunk_id_format(self) -> None:
+        # Use a non-trivial function body so the chunk is not filtered by is_trivial_chunk
+        # (UPG-15.1: 2-line declaration+pass stubs are now dropped as trivial).
+        # This test checks the chunk_id format "file:symbol", not stub filtering.
         path = make_temp_py("""
-            def foo() -> None:
-                pass
+            def foo(x: int) -> int:
+                return x + 1
         """)
         from agent.indexer import chunk_file
         chunks = chunk_file(path)
