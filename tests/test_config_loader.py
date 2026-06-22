@@ -377,12 +377,16 @@ class TestConfigLoaderDocIntent:
     def test_suppress_forced_inclusion_is_bool(self) -> None:
         assert isinstance(cfg.DOC_INTENT_SUPPRESS_FORCED_INCLUSION, bool)
 
-    def test_doc_prose_multiplier_default(self) -> None:
-        """doc_prose_multiplier defaults to 1.0 — no doc penalty on doc-intent queries."""
-        assert cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER == pytest.approx(1.0, abs=0.001), (
-            f"DOC_INTENT_DOC_PROSE_MULTIPLIER should be 1.0, "
+    def test_doc_prose_multiplier_is_genuine_boost(self) -> None:
+        """doc_prose_multiplier must be a genuine boost > 1.0 on doc-intent queries
+        (UPG-11.11-b / F2). A neutral 1.0 only removes the 0.70 penalty and leaves a
+        strong doc at its raw similarity, below code chunks scoring ~1.0 for the
+        symbols the query names — so the howto doc loses. 1.2 lifts it into the top-k."""
+        assert cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER == pytest.approx(1.2, abs=0.001), (
+            f"DOC_INTENT_DOC_PROSE_MULTIPLIER should be 1.2 (a boost), "
             f"got {cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER}"
         )
+        assert cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER > 1.0
 
     def test_doc_prose_multiplier_is_float(self) -> None:
         assert isinstance(cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER, float)

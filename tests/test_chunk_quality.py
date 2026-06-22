@@ -576,6 +576,31 @@ class TestDocIntentQueryClassifier:
             f"is suppressed and docs/howto/custom-model-fields.txt can surface in top-5."
         )
 
+    def test_f2_doc_intent_is_genuine_boost(self) -> None:
+        """F2 regression guard (UPG-11.11-b): on a doc-intent query, doc-prose
+        chunks must be BOOSTED (multiplier > 1.0), not merely un-penalised.
+
+        A neutral 1.0 leaves a strong doc at its raw similarity (~0.82), below
+        code chunks that score ~1.0 for the symbols the query names — so the
+        howto doc loses (the original F2 'passing' was never actually green).
+        """
+        import agent.config as cfg
+        assert cfg.DOC_INTENT_DOC_PROSE_MULTIPLIER > 1.0, (
+            "doc_prose_multiplier must be a genuine boost (>1.0) on doc-intent "
+            "queries; 1.0 (neutral) regresses F2 — the howto doc cannot overtake "
+            "code chunks scoring ~1.0 for deconstruct/from_db_value."
+        )
+        body = (
+            "How to write a custom model field.\n"
+            "Subclass Field and implement deconstruct() so migrations recreate it.\n"
+            "Implement from_db_value() to convert the database value to Python.\n"
+            "See the field API reference for the full contract."
+        )
+        doc_intent = quality_score(body, language="txt", query_is_doc_intent=True)
+        code_intent = quality_score(body, language="txt", query_is_doc_intent=False)
+        assert doc_intent > code_intent, "doc-intent must score above code-intent for doc prose"
+        assert doc_intent > 1.0, "doc-intent doc prose must be boosted above the neutral baseline"
+
     def test_f1_query_is_not_doc_intent(self) -> None:
         """F1 regression guard: the F1 query must NOT be classified as doc-intent
         (forced-inclusion must still fire for code-shaped queries)."""
