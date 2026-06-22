@@ -86,6 +86,41 @@ _IMPORT_LINE_RE = re.compile(
 
 _MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
 
+# Two-line stub detection (UPG-15.1, Python-focused).
+# A chunk whose only content is a declaration header followed by a lone stub body
+# (pass / ... / raise NotImplementedError) has no retrieval value.  Structural
+# patterns — not tunables.
+#
+# _STUB_BODY_RE: the second meaningful line is a pure empty-body placeholder.
+_STUB_BODY_RE = re.compile(
+    r"^[\s]*(pass|\.\.\.|(raise\s+NotImplementedError(\s*\(.*\))?));?[\s]*$"
+)
+
+# _DECL_HEADER_RE: the first meaningful line is a class declaration or a
+# PARAMETER-LESS function declaration (empty parens, or self/cls only, with an
+# optional return-type annotation).  Functions with real parameters
+# (e.g. ``def handle(request, uid=None):``) carry semantic signal in their
+# signature even when the body is ``pass``, so those are excluded here.
+# Class declarations are always matched regardless of base classes, because
+# a bare class name + bases without any body is not a useful code chunk.
+#
+# Matches:
+#   class Foo:                class Foo(Base, Meta):
+#   def foo():                def foo() -> T:
+#   async def foo():          async def foo() -> None:
+#   def foo(self):            def foo(cls) -> T:
+# Does NOT match (functions with real parameters):
+#   def handle(request):      def send(sender, uid=None, **kwargs):
+_DECL_HEADER_RE = re.compile(
+    r"^[\s]*(?:"
+    r"class\s+\w+[^:]*:"                             # class Name (any bases OK) + colon
+    r"|(?:async\s+)?def\s+\w+\s*\("                  # def/async def Name(
+    r"(?:\s*(?:self|cls)\s*)?"                        # optional self or cls only
+    r"\s*\)\s*(?:->[^:]+)?"                          # optional -> return type
+    r":"                                              # colon
+    r")\s*$"
+)
+
 
 def _meaningful_lines(content: str) -> list[str]:
     """Lines that are neither blank nor comment/context-prefix lines."""
@@ -127,6 +162,15 @@ def is_trivial_chunk(content: str, language: str = "") -> bool:
         # A single very short token line (e.g. `bad_extension = true;`) with no
         # structure is also low value.
         if len(line) <= 3:
+            return True
+    if len(lines) == 2:
+        # Declaration header + lone stub body → no retrieval value.
+        # e.g. "class Style:\n    pass"  or  "def foo():\n    ..."
+        # Only fires when: (1) first line is a class/def declaration header,
+        # AND (2) second line is a pure stub (pass / ... / raise NotImplementedError).
+        # A real second line ("return self.x", "x = 1") is NOT a stub body and
+        # keeps the chunk alive.
+        if _DECL_HEADER_RE.match(lines[0]) and _STUB_BODY_RE.match(lines[1]):
             return True
     return False
 

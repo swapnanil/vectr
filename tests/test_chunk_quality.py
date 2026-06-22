@@ -56,6 +56,64 @@ class TestIsTrivialChunk:
         assert is_trivial_chunk(content) is False
 
 
+class TestTwoLineStubChunks:
+    """UPG-15.1 (F15): two-line declaration+stub chunks must be filtered as trivial.
+
+    A class/def header followed by pass/.../ raise NotImplementedError carries no
+    retrieval value — it is an empty body stub.  These escaped the original
+    is_trivial_chunk() which only guarded the single-meaningful-line case.
+    """
+
+    # Acceptance cases (red → green)
+    @pytest.mark.parametrize("content", [
+        # class stubs — any base list is OK; body is pass/...
+        "class Style:\n    pass",
+        "class NewsArticle(Article):\n    pass",
+        "class Foo(Base, Meta):\n    pass",
+        "class Empty:\n    ...",
+        # parameter-less / self-only function stubs
+        "def foo():\n    ...",
+        "def foo():\n    pass",
+        "def foo() -> None:\n    pass",
+        "async def foo():\n    pass",
+        "def foo(self):\n    pass",
+        "def foo(self) -> None:\n    ...",
+        "def foo():\n    raise NotImplementedError",
+        "def foo():\n    raise NotImplementedError()",
+        "def foo(self):\n    raise NotImplementedError",
+        # indented versions (chunker may include leading whitespace)
+        "    def foo(self):\n        pass",
+        "    class Inner:\n        ...",
+    ])
+    def test_two_line_stub_is_trivial(self, content: str) -> None:
+        assert is_trivial_chunk(content, "python") is True, (
+            f"UPG-15.1: two-line stub chunk should be trivial but is_trivial_chunk returned False.\n"
+            f"Content: {content!r}"
+        )
+
+    # Negative guards — real code with 2 meaningful lines must stay non-trivial
+    @pytest.mark.parametrize("content", [
+        # second line is real code, not a stub body
+        "class Foo:\n    x = 1",
+        "def foo():\n    return self.compute()",
+        "def foo():\n    return 42",
+        "class Foo:\n    field = models.CharField(max_length=100)",
+        # real multi-line method (>2 meaningful lines)
+        "def foo():\n    x = 1\n    return x + self.y",
+        "class Foo:\n    x = 1\n    def bar(self):\n        pass",
+        # functions with real parameters carry signal in their signature even
+        # when the body is pass — they are not trivial stubs (UPG-15.1 conservative scope)
+        "def send_signal_dispatch_uid(sender, **kwargs):\n    pass",
+        "def handle(self, request):\n    raise NotImplementedError('subclasses must implement')",
+        "async def bar(self, x: int) -> None:\n    ...",
+    ])
+    def test_two_line_real_code_is_not_trivial(self, content: str) -> None:
+        assert is_trivial_chunk(content, "python") is False, (
+            f"UPG-15.1: real 2-line chunk should NOT be trivial but is_trivial_chunk returned True.\n"
+            f"Content: {content!r}"
+        )
+
+
 class TestIsNavigationalChunk:
     def test_rust_reexport_block(self):
         content = "pub use crate::a::A;\npub use crate::b::B;\npub use crate::c::C;"
