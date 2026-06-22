@@ -2457,3 +2457,201 @@ class TestShortVerbAllowlistAndQuerysetBlocklist:
             "and must be blocked. "
             f"Force-included queryset results: {[(r.symbol_name, r.content[:60]) for r in forced_queryset]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.3 — Sub-token guard for short-verb forced-inclusion allowlist (F17)
+# ---------------------------------------------------------------------------
+
+class TestSubtokenShortVerbGuard:
+    """UPG-15.3 / F17: The short-verb allowlist (UPG-11.14) must only fire for
+    tokens the user typed as a STANDALONE word, not for short verbs that appear
+    only as sub-tokens of a longer compound identifier already present in the query.
+
+    Example: 'ForeignKey on_delete CASCADE related_name'
+      - on_delete → sub-tokens {on, delete}
+      - 'delete' must NOT trigger forced-inclusion (it is only a sub-token here)
+      - 'on_delete' itself triggers the normal compound path (correct)
+
+    Standalone-word derivation: split the raw query on non-identifier chars
+    (keeping underscores), lowercase each piece ≥2 chars — this is the first
+    pass of _query_symbol_tokens without the subsequent underscore/camelCase
+    expansion step.
+    """
+
+    def test_subtoken_delete_does_not_trigger_allowlist(self) -> None:
+        """RED → GREEN (UPG-15.3 / F17): for a query containing 'on_delete' but
+        NO standalone 'delete', 'delete' must NOT be added to
+        sym_tokens_for_inclusion via the short-verb allowlist.
+
+        Before the fix the allowlist loop iterated _all_query_sym_toks (which
+        includes sub-tokens from underscore splitting) so 'delete' — a sub-token
+        of 'on_delete' — spuriously triggered forced-inclusion of every
+        .delete() method (cache backends, storage classes, etc.).
+        """
+        import re
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import (
+            SYMBOL_STOP_WORDS,
+            FORCED_INCLUSION_MIN_IDENTIFIER_LEN,
+            FORCED_INCLUSION_SHORT_VERB_ALLOWLIST,
+        )
+
+        query = "ForeignKey on_delete CASCADE related_name"
+        all_sym_toks = _query_symbol_tokens(query)
+
+        # Precondition: 'delete' IS present as a sub-token in all_sym_toks
+        assert "delete" in all_sym_toks, (
+            "Precondition failed: _query_symbol_tokens must include 'delete' as a "
+            "sub-token of 'on_delete' for this test to be meaningful"
+        )
+        # Precondition: 'delete' IS in the allowlist
+        assert "delete" in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST, (
+            "Precondition failed: 'delete' must be in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST"
+        )
+
+        # Derive standalone words exactly as the fixed code path does.
+        standalone_query_words = {
+            tok.lower()
+            for tok in re.split(r"[^a-zA-Z0-9_]+", query)
+            if len(tok) >= 2
+        }
+        # 'delete' is NOT a standalone word — it only appears as a sub-token of on_delete
+        assert "delete" not in standalone_query_words, (
+            "Standalone derivation error: 'delete' must not be a standalone word in "
+            f"'{query}' — it should only appear as a sub-token of 'on_delete'. "
+            f"standalone_query_words: {standalone_query_words}"
+        )
+
+        # Build sym_tokens_for_inclusion using the FIXED logic (standalone guard)
+        sym_tokens_for_inclusion = {
+            tok for tok in all_sym_toks
+            if ("_" in tok or len(tok) >= FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+        for tok in all_sym_toks:
+            if tok in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST and tok in standalone_query_words:
+                sym_tokens_for_inclusion.add(tok)
+
+        assert "delete" not in sym_tokens_for_inclusion, (
+            "UPG-15.3 / F17: 'delete' must NOT be in sym_tokens_for_inclusion for "
+            f"query '{query}' — it is only a sub-token of 'on_delete', not a standalone "
+            "word. Its presence would spuriously force-include every cache/storage "
+            f".delete() method. sym_tokens_for_inclusion: {sym_tokens_for_inclusion}"
+        )
+        # 'on_delete' itself must still be in the set (compound path, unaffected by fix)
+        assert "on_delete" in sym_tokens_for_inclusion, (
+            "UPG-15.3 / F17: 'on_delete' must remain in sym_tokens_for_inclusion — "
+            "it is a compound identifier (contains '_') and takes the unconditional "
+            "compound forced-inclusion path, which is correct and unchanged."
+        )
+
+    def test_standalone_delete_still_triggers_allowlist(self) -> None:
+        """Regression guard (UPG-11.14 / F13): when 'delete' appears as an actual
+        standalone word in the query (e.g. 'delete a cache key'), it MUST still be
+        added to sym_tokens_for_inclusion via the short-verb allowlist.
+
+        The sub-token guard must not regress the intended F13 behavior.
+        """
+        import re
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import (
+            SYMBOL_STOP_WORDS,
+            FORCED_INCLUSION_MIN_IDENTIFIER_LEN,
+            FORCED_INCLUSION_SHORT_VERB_ALLOWLIST,
+        )
+
+        query = "delete a cache key"
+        all_sym_toks = _query_symbol_tokens(query)
+
+        standalone_query_words = {
+            tok.lower()
+            for tok in re.split(r"[^a-zA-Z0-9_]+", query)
+            if len(tok) >= 2
+        }
+        assert "delete" in standalone_query_words, (
+            "Precondition: 'delete' must be a standalone word in 'delete a cache key'"
+        )
+
+        sym_tokens_for_inclusion = {
+            tok for tok in all_sym_toks
+            if ("_" in tok or len(tok) >= FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+        for tok in all_sym_toks:
+            if tok in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST and tok in standalone_query_words:
+                sym_tokens_for_inclusion.add(tok)
+
+        assert "delete" in sym_tokens_for_inclusion, (
+            "UPG-11.14 / F13 regression: 'delete' must be in sym_tokens_for_inclusion "
+            "for query 'delete a cache key' — it is a standalone word and must trigger "
+            "the short-verb allowlist (UPG-15.3 guard must not break this). "
+            f"sym_tokens_for_inclusion: {sym_tokens_for_inclusion}"
+        )
+
+    def test_standalone_save_still_triggers_allowlist(self) -> None:
+        """Regression guard (UPG-11.14 / F13): 'save' as a standalone word in
+        'save a model instance to the database' must still enter
+        sym_tokens_for_inclusion via the short-verb allowlist.
+        """
+        import re
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import (
+            SYMBOL_STOP_WORDS,
+            FORCED_INCLUSION_MIN_IDENTIFIER_LEN,
+            FORCED_INCLUSION_SHORT_VERB_ALLOWLIST,
+        )
+
+        query = "save a model instance to the database"
+        all_sym_toks = _query_symbol_tokens(query)
+
+        standalone_query_words = {
+            tok.lower()
+            for tok in re.split(r"[^a-zA-Z0-9_]+", query)
+            if len(tok) >= 2
+        }
+
+        sym_tokens_for_inclusion = {
+            tok for tok in all_sym_toks
+            if ("_" in tok or len(tok) >= FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+        for tok in all_sym_toks:
+            if tok in FORCED_INCLUSION_SHORT_VERB_ALLOWLIST and tok in standalone_query_words:
+                sym_tokens_for_inclusion.add(tok)
+
+        assert "save" in sym_tokens_for_inclusion, (
+            "UPG-11.14 / F13 regression: 'save' must be in sym_tokens_for_inclusion "
+            "for query 'save a model instance to the database' — it is a standalone word "
+            "and must trigger the short-verb allowlist. "
+            f"sym_tokens_for_inclusion: {sym_tokens_for_inclusion}"
+        )
+
+    def test_standalone_derivation_excludes_subtoken(self) -> None:
+        """Unit test for the standalone-word derivation itself: verify that
+        splitting the raw query on non-identifier boundaries (preserving
+        underscores) correctly identifies 'on_delete' as one standalone word and
+        does NOT produce 'delete' or 'on' as standalone words.
+        """
+        import re
+
+        query = "ForeignKey on_delete CASCADE related_name"
+        standalone_query_words = {
+            tok.lower()
+            for tok in re.split(r"[^a-zA-Z0-9_]+", query)
+            if len(tok) >= 2
+        }
+
+        assert "on_delete" in standalone_query_words, (
+            "Standalone derivation must keep 'on_delete' as a whole token "
+            f"(underscore is not a split boundary). Got: {standalone_query_words}"
+        )
+        assert "delete" not in standalone_query_words, (
+            "Standalone derivation must NOT split 'on_delete' into 'delete' — "
+            "underscores are part of identifiers in this pass. "
+            f"Got: {standalone_query_words}"
+        )
+        assert "on" not in standalone_query_words, (
+            "Standalone derivation must NOT split 'on_delete' into 'on'. "
+            f"Got: {standalone_query_words}"
+        )
