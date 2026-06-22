@@ -297,8 +297,27 @@ class CodeSearcher:
             # The allowlist reinstates forced-inclusion for these verbs ONLY; they are
             # treated as NON-COMPOUND candidates so the BM25 floor + vec_sim_floor
             # relevance gate still applies — irrelevant overrides are rejected by the gate.
+            #
+            # UPG-15.3 / F17: sub-token guard.
+            # _query_symbol_tokens expands compound identifiers like "on_delete" into
+            # sub-tokens {"on_delete", "on", "delete"}.  The allowlist must only fire
+            # for a short verb that the user typed as a STANDALONE word in the query,
+            # not for one that appears only as a sub-token of a longer compound already
+            # present.  Otherwise "on_delete" → sub-token "delete" → forced-inclusion of
+            # every cache/storage .delete() method, burying the actual ForeignKey code.
+            # _standalone_query_words splits on non-identifier boundaries without any
+            # subsequent underscore/camelCase expansion — so "on_delete" is one token
+            # and the bare "delete" sub-token is absent from the standalone set.
+            _standalone_query_words = {
+                tok.lower()
+                for tok in re.split(r"[^a-zA-Z0-9_]+", query)
+                if len(tok) >= 2
+            }
             for tok in _all_query_sym_toks:
-                if tok in _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST:
+                if (
+                    tok in _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST
+                    and tok in _standalone_query_words
+                ):
                     sym_tokens_for_inclusion.add(tok)
             if sym_tokens_for_inclusion:
                 sorted_set = set(sorted_ids)
