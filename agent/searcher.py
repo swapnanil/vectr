@@ -313,6 +313,17 @@ class CodeSearcher:
                 for tok in re.split(r"[^a-zA-Z0-9_]+", query)
                 if len(tok) >= 2
             }
+            # UPG-15.4: tokens the user typed with identifier casing — i.e. tokens
+            # containing an underscore OR at least one uppercase letter.  Used below to
+            # guard CamelCase leaf matches: a CamelCase symbol leaf is force-included
+            # only when the user wrote that identifier with identifier casing in the
+            # query (e.g. "ForeignKey"), not when they used it as lowercase prose
+            # (e.g. "migration" must not force-include class Migration).
+            _ident_cased_query_toks = {
+                tok.lower()
+                for tok in re.split(r"[^a-zA-Z0-9_]+", query)
+                if len(tok) >= 2 and ("_" in tok or any(c.isupper() for c in tok))
+            }
             for tok in _all_query_sym_toks:
                 if (
                     tok in _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST
@@ -358,9 +369,19 @@ class CodeSearcher:
                     if language and meta.get("language") != language:
                         continue
                     sym = meta.get("symbol_name", "") or ""
-                    # Case-SENSITIVE bare leaf comparison.
+                    # Case-insensitive bare leaf comparison (UPG-15.4).
                     leaf = sym.split(".")[-1].split("::")[-1]
-                    if not leaf or leaf not in sym_tokens_for_inclusion:
+                    leaf_lower = leaf.lower()
+                    if not leaf or leaf_lower not in sym_tokens_for_inclusion:
+                        continue
+                    # Case discipline: a leaf with uppercase characters is a CamelCase /
+                    # Pascal class symbol.  Force-include it only when the user typed that
+                    # identifier with identifier casing (CamelCase or underscore) in the
+                    # query — not when it appears only as lowercase prose.  This preserves
+                    # the UPG-11 guard: the word "migration" (no uppercase, no underscore)
+                    # must NOT force-include class Migration, while a query that literally
+                    # names "ForeignKey" (CamelCase) should surface class ForeignKey.
+                    if leaf != leaf_lower and leaf_lower not in _ident_cased_query_toks:
                         continue
 
                     if "_" in leaf:
@@ -381,8 +402,8 @@ class CodeSearcher:
                         # absent from the geometry chunk) are immediately rejected.
                         # Chunks with any non-trivial BM25 overlap are deferred to
                         # the vector cosine check (pass 2).
-                        if leaf in non_compound_bm25_without:
-                            scores_arr = non_compound_bm25_without[leaf]
+                        if leaf_lower in non_compound_bm25_without:
+                            scores_arr = non_compound_bm25_without[leaf_lower]
                             bm25_without = scores_arr[idx] if idx < len(scores_arr) else 0.0
                         else:
                             bm25_without = 1.0  # no constraint → defer to vector check
