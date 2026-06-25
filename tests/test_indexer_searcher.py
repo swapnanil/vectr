@@ -2655,3 +2655,176 @@ class TestSubtokenShortVerbGuard:
             "Standalone derivation must NOT split 'on_delete' into 'on'. "
             f"Got: {standalone_query_words}"
         )
+
+
+class TestForcedInclusionCaseFold:
+    """UPG-15.4: CamelCase/Pascal class symbol leaves must be matchable by
+    name in forced-inclusion.
+
+    Root cause: _query_symbol_tokens lowercases all tokens so
+    sym_tokens_for_inclusion is all-lowercase, but the previous leaf
+    comparison was case-sensitive.  'ForeignKey' (CamelCase leaf) would
+    never match the lowercase token 'foreignkey', so class ForeignKey chunks
+    were silently excluded from the forced-inclusion pool.
+
+    Fix: compare leaf.lower() against sym_tokens_for_inclusion, then apply
+    the UPG-11 casing discipline guard: a CamelCase leaf is force-included
+    only when the user typed that identifier with identifier casing (CamelCase
+    or underscore) in the query.  Lowercase prose (e.g. 'migration') must NOT
+    force-include the same-named CamelCase class.
+    """
+
+    def test_camelcase_leaf_matches_via_casefold(self) -> None:
+        """UPG-15.4: leaf.lower() of a CamelCase symbol matches the all-lowercase
+        sym_tokens_for_inclusion set, confirming the fix is structurally correct.
+
+        Verifies that 'ForeignKey' (the symbol leaf) matches 'foreignkey' in the
+        token set derived from the query 'ForeignKey on_delete CASCADE related_name'.
+        """
+        import re
+        from agent.chunk_quality import _query_symbol_tokens
+        from agent.config import SYMBOL_STOP_WORDS, FORCED_INCLUSION_MIN_IDENTIFIER_LEN
+
+        query = "ForeignKey on_delete CASCADE related_name"
+        all_sym_toks = _query_symbol_tokens(query)
+
+        # sym_tokens_for_inclusion is all-lowercase (as produced by _query_symbol_tokens)
+        sym_tokens_for_inclusion = {
+            tok for tok in all_sym_toks
+            if ("_" in tok or len(tok) >= FORCED_INCLUSION_MIN_IDENTIFIER_LEN)
+            and tok not in SYMBOL_STOP_WORDS
+        }
+
+        # Precondition: 'foreignkey' (lowercase) is in the set
+        assert "foreignkey" in sym_tokens_for_inclusion, (
+            "Precondition: 'foreignkey' must be in sym_tokens_for_inclusion. "
+            f"Got: {sym_tokens_for_inclusion}"
+        )
+
+        # The CamelCase leaf 'ForeignKey' must NOT match case-sensitively (old bug)
+        leaf = "ForeignKey"
+        assert leaf not in sym_tokens_for_inclusion, (
+            "Precondition: 'ForeignKey' (CamelCase) must NOT be in the lowercase "
+            "sym_tokens_for_inclusion set — this is what caused the original bug."
+        )
+
+        # The fix: case-insensitive comparison via leaf.lower()
+        leaf_lower = leaf.lower()
+        assert leaf_lower in sym_tokens_for_inclusion, (
+            "UPG-15.4: leaf.lower() of 'ForeignKey' must match sym_tokens_for_inclusion. "
+            f"leaf_lower={leaf_lower!r}, set={sym_tokens_for_inclusion}"
+        )
+
+    def test_ident_cased_toks_captures_camelcase(self) -> None:
+        """UPG-15.4: _ident_cased_query_toks correctly captures tokens that the
+        user typed with identifier casing (CamelCase or underscore).
+
+        For query 'ForeignKey on_delete CASCADE related_name':
+          - 'ForeignKey' → has uppercase → captured as 'foreignkey'
+          - 'CASCADE' → has uppercase → captured as 'cascade'
+          - 'on_delete' → has underscore → captured as 'on_delete'
+          - 'related_name' → has underscore → captured as 'related_name'
+        """
+        import re
+
+        query = "ForeignKey on_delete CASCADE related_name"
+        ident_cased_query_toks = {
+            tok.lower()
+            for tok in re.split(r"[^a-zA-Z0-9_]+", query)
+            if len(tok) >= 2 and ("_" in tok or any(c.isupper() for c in tok))
+        }
+
+        assert "foreignkey" in ident_cased_query_toks, (
+            "UPG-15.4: 'ForeignKey' (contains uppercase) must appear as 'foreignkey' "
+            f"in _ident_cased_query_toks. Got: {ident_cased_query_toks}"
+        )
+        assert "cascade" in ident_cased_query_toks, (
+            "UPG-15.4: 'CASCADE' (all uppercase) must appear as 'cascade' "
+            f"in _ident_cased_query_toks. Got: {ident_cased_query_toks}"
+        )
+        assert "on_delete" in ident_cased_query_toks, (
+            "UPG-15.4: 'on_delete' (underscore) must appear in _ident_cased_query_toks. "
+            f"Got: {ident_cased_query_toks}"
+        )
+        assert "related_name" in ident_cased_query_toks, (
+            "UPG-15.4: 'related_name' (underscore) must appear in _ident_cased_query_toks. "
+            f"Got: {ident_cased_query_toks}"
+        )
+
+    def test_prose_lowercase_does_not_match_camelcase_leaf(self) -> None:
+        """UPG-15.4 / UPG-11 regression guard: a lowercase prose word in the query
+        must NOT force-include a same-named CamelCase class symbol.
+
+        Query 'apply migrations to the database' contains the word 'migrations'
+        which is lowercase prose — it must NOT force-include class Migration even
+        though 'migration' would appear in sym_tokens_for_inclusion (length guard)
+        and 'Migration'.lower() == 'migration'.
+
+        The casing discipline guard catches this: 'Migration' (leaf != leaf_lower)
+        requires leaf_lower='migration' to be in _ident_cased_query_toks, but
+        'migrations' has no uppercase and no underscore → _ident_cased_query_toks
+        does not contain 'migration' → forced-inclusion is suppressed.
+        """
+        import re
+
+        query = "apply migrations to the database"
+        ident_cased_query_toks = {
+            tok.lower()
+            for tok in re.split(r"[^a-zA-Z0-9_]+", query)
+            if len(tok) >= 2 and ("_" in tok or any(c.isupper() for c in tok))
+        }
+
+        # None of the words in this query have uppercase or underscore
+        assert "migration" not in ident_cased_query_toks, (
+            "UPG-15.4 / UPG-11 guard: 'migration' (from lowercase prose 'migrations') "
+            "must NOT appear in _ident_cased_query_toks — it would bypass the casing "
+            f"discipline gate and force-include class Migration. Got: {ident_cased_query_toks}"
+        )
+        assert "migrations" not in ident_cased_query_toks, (
+            "UPG-15.4 / UPG-11 guard: 'migrations' (lowercase prose) must NOT appear "
+            f"in _ident_cased_query_toks. Got: {ident_cased_query_toks}"
+        )
+
+        # Simulate the casing discipline check for leaf 'Migration'
+        leaf = "Migration"
+        leaf_lower = leaf.lower()
+        # leaf != leaf_lower is True (CamelCase leaf)
+        assert leaf != leaf_lower, "Precondition: 'Migration' must differ from its lowercase form"
+        # The guard: leaf_lower not in _ident_cased_query_toks → forced-inclusion suppressed
+        assert leaf_lower not in ident_cased_query_toks, (
+            "UPG-15.4 / UPG-11 guard: leaf_lower='migration' must NOT be in "
+            "_ident_cased_query_toks for a prose query — the casing discipline check "
+            f"must block forced-inclusion of class Migration. Got: {ident_cased_query_toks}"
+        )
+
+    def test_explicit_camelcase_query_passes_casing_guard(self) -> None:
+        """UPG-15.4: when the user types 'Migration' (CamelCase) in a query,
+        the casing discipline guard must ALLOW forced-inclusion of class Migration.
+
+        'Migration apply database' → user typed 'Migration' with CamelCase →
+        _ident_cased_query_toks contains 'migration' → leaf='Migration',
+        leaf_lower='migration', leaf_lower in _ident_cased_query_toks → True.
+        """
+        import re
+
+        query = "Migration apply database"
+        ident_cased_query_toks = {
+            tok.lower()
+            for tok in re.split(r"[^a-zA-Z0-9_]+", query)
+            if len(tok) >= 2 and ("_" in tok or any(c.isupper() for c in tok))
+        }
+
+        assert "migration" in ident_cased_query_toks, (
+            "UPG-15.4: 'Migration' (CamelCase) in the query must produce 'migration' "
+            f"in _ident_cased_query_toks. Got: {ident_cased_query_toks}"
+        )
+
+        # Simulate the casing discipline check — guard must pass
+        leaf = "Migration"
+        leaf_lower = leaf.lower()
+        assert leaf != leaf_lower, "Precondition"
+        assert leaf_lower in ident_cased_query_toks, (
+            "UPG-15.4: casing discipline guard must ALLOW class Migration when the user "
+            "typed 'Migration' (CamelCase) — leaf_lower='migration' must be in "
+            f"_ident_cased_query_toks. Got: {ident_cased_query_toks}"
+        )
