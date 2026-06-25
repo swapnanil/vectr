@@ -253,8 +253,11 @@ class TestConfigLoaderRerank:
         assert cfg.RERANK_TOP_K == 40, f"RERANK_TOP_K should be 40, got {cfg.RERANK_TOP_K}"
 
     def test_top_k_unfiltered_default(self) -> None:
-        assert cfg.RERANK_TOP_K_UNFILTERED == 60, (
-            f"RERANK_TOP_K_UNFILTERED should be 60, got {cfg.RERANK_TOP_K_UNFILTERED}"
+        # UPG-15.5: raised from 60 → 200 so trivial HTML/TXT fixtures that flood
+        # the embedding top-60 don't crowd out real code entirely.  The threshold
+        # must be ≥ 200 and > RERANK_TOP_K (verified by test_unfiltered_exceeds_filtered).
+        assert cfg.RERANK_TOP_K_UNFILTERED >= 200, (
+            f"RERANK_TOP_K_UNFILTERED should be ≥ 200 (UPG-15.5), got {cfg.RERANK_TOP_K_UNFILTERED}"
         )
 
     def test_top_k_is_int(self) -> None:

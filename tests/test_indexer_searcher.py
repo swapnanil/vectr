@@ -363,13 +363,26 @@ class TestCodeSearcher:
 
     def test_unfiltered_search_fetches_deeper_pool(self, indexer, tmp_path) -> None:
         """Unfiltered queries fetch a deeper rerank pool than filtered ones, so real
-        code isn't crowded out by doc prose before the quality prior runs (UPG-2.1 tuning)."""
+        code isn't crowded out by doc prose before the quality prior runs (UPG-2.1 tuning).
+
+        UPG-15.5: RERANK_TOP_K_UNFILTERED was raised from 60 → 200 so trivial HTML/TXT
+        fixture chunks don't crowd out real code by filling the entire shallow pool.
+        This test verifies the invariant (unfiltered > filtered) using monkeypatching
+        rather than generating enough synthetic chunks to match the absolute config value.
+        """
         import agent.searcher as searcher_mod
-        # Index enough chunks that both fetch depths are below the total.
-        body = "\n".join(f"def fn_{i}(x):\n    return x + {i}\n" for i in range(80))
+        # Index enough chunks that both FILTERED and UNFILTERED pool depths are reachable
+        # without needing to hit the full RERANK_TOP_K_UNFILTERED=200 absolute limit.
+        # We monkeypatch to small values so the fixture stays fast.
+        n_filtered = searcher_mod._RERANK_TOP_K
+        n_unfiltered_test = n_filtered + 10   # just needs to exceed the filtered depth
+
+        body = "\n".join(f"def fn_{i}(x):\n    return x + {i}\n" for i in range(n_unfiltered_test + 5))
         path = make_py(tmp_path, "many.py", body)
         indexer.index_file(path)
-        assert indexer.total_chunks >= searcher_mod._RERANK_TOP_K_UNFILTERED
+        assert indexer.total_chunks >= n_unfiltered_test, (
+            f"Need at least {n_unfiltered_test} chunks in index, got {indexer.total_chunks}"
+        )
 
         from agent.searcher import CodeSearcher
         s = CodeSearcher(indexer)
@@ -384,12 +397,21 @@ class TestCodeSearcher:
 
         stub = _CountingReranker()
         s._reranker = stub  # force the rerank path on
-        s.search("function returning a number", language=None)
-        unfiltered_count = stub.last_count
-        s.search("function returning a number", language="python")
-        filtered_count = stub.last_count
 
-        assert unfiltered_count == min(searcher_mod._RERANK_TOP_K_UNFILTERED, indexer.total_chunks)
+        # Monkeypatch RERANK_TOP_K_UNFILTERED to a small testable value so we don't
+        # need hundreds of chunks in the fixture.  The invariant under test is
+        # "unfiltered > filtered" — independent of the absolute config value.
+        orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        searcher_mod._RERANK_TOP_K_UNFILTERED = n_unfiltered_test
+        try:
+            s.search("function returning a number", language=None)
+            unfiltered_count = stub.last_count
+            s.search("function returning a number", language="python")
+            filtered_count = stub.last_count
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+
+        assert unfiltered_count == min(n_unfiltered_test, indexer.total_chunks)
         assert filtered_count == min(searcher_mod._RERANK_TOP_K, indexer.total_chunks)
         assert unfiltered_count > filtered_count
 

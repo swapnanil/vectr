@@ -64,6 +64,12 @@ QUALITY_DOC_PROSE : float
 QUALITY_SHORT_PENALTY : float
     Quality prior for chunks with very few meaningful lines (UPG-12.1).
 
+TRIVIAL_DOC_MAX_LINES : int
+    Maximum non-blank lines for an HTML/markup or plain-text chunk to be
+    classified as trivial by is_trivial_chunk() (UPG-15.5). 1–2-line test
+    fixture templates and egg-info TXT files are trivial; multi-line .rst/.txt
+    docs are not affected.
+
 RERANK_TOP_K : int
     Number of hybrid candidates to rerank before trimming to n_results (UPG-12.1).
 
@@ -206,6 +212,7 @@ QUALITY_VECTR_CONFIG: float = float(_qp_cfg["vectr_config"])
 QUALITY_TEST_DEPRIORITISED: float = float(_qp_cfg["test_deprioritised"])
 QUALITY_DOC_PROSE: float = float(_qp_cfg["doc_prose"])
 QUALITY_SHORT_PENALTY: float = float(_qp_cfg["short_penalty"])
+TRIVIAL_DOC_MAX_LINES: int = int(_qp_cfg["trivial_doc_max_lines"])
 
 # ---------------------------------------------------------------------------
 # Rerank pool sizes (UPG-12.1)
