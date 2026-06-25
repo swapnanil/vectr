@@ -76,6 +76,12 @@ RERANK_TOP_K : int
 RERANK_TOP_K_UNFILTERED : int
     Deeper candidate pool for unfiltered (no language filter) queries (UPG-12.1).
 
+RERANK_PRE_FILTER_FETCH_K : int
+    Over-fetch depth for the pool-entry trivial filter (UPG-15.7). The hybrid
+    retrieval fetches this many raw candidates, drops trivial (non-forced) chunks
+    via is_trivial_chunk(), then trims to top_k_unfiltered before the cross-encoder
+    runs. Ensures the rerank pool is filled with real code on fixture-heavy corpora.
+
 INDEXING_MAX_CHUNK_LINES : int
     Hard cap on lines per chunk — prevents single huge chunks diluting embeddings (UPG-12.1).
 
@@ -222,6 +228,7 @@ _rr_cfg: dict[str, Any] = _cfg["ranking"]["rerank"]
 
 RERANK_TOP_K: int = int(_rr_cfg["top_k"])
 RERANK_TOP_K_UNFILTERED: int = int(_rr_cfg["top_k_unfiltered"])
+RERANK_PRE_FILTER_FETCH_K: int = int(_rr_cfg["pre_filter_fetch_k"])
 
 # ---------------------------------------------------------------------------
 # Indexing tunables (UPG-12.1)

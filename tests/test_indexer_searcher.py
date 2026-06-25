@@ -362,22 +362,22 @@ class TestCodeSearcher:
         assert any(r.language == "javascript" for r in blank) or blank
 
     def test_unfiltered_search_fetches_deeper_pool(self, indexer, tmp_path) -> None:
-        """Unfiltered queries fetch a deeper rerank pool than filtered ones, so real
-        code isn't crowded out by doc prose before the quality prior runs (UPG-2.1 tuning).
+        """Unfiltered queries over-fetch, apply trivial pre-filter, then trim to
+        top_k_unfiltered before reranking (UPG-15.7).
 
-        UPG-15.5: RERANK_TOP_K_UNFILTERED was raised from 60 → 200 so trivial HTML/TXT
-        fixture chunks don't crowd out real code by filling the entire shallow pool.
-        This test verifies the invariant (unfiltered > filtered) using monkeypatching
-        rather than generating enough synthetic chunks to match the absolute config value.
+        This test verifies the invariant (unfiltered reranker pool > filtered) using
+        monkeypatching.  The corpus is pure Python so no chunks are classified trivial
+        — the final reranker pool equals the trimmed top_k_unfiltered limit.
+        pre_filter_fetch_k drives the initial hybrid fetch; the cross-encoder only
+        ever sees ≤ top_k_unfiltered candidates.
         """
         import agent.searcher as searcher_mod
-        # Index enough chunks that both FILTERED and UNFILTERED pool depths are reachable
-        # without needing to hit the full RERANK_TOP_K_UNFILTERED=200 absolute limit.
-        # We monkeypatch to small values so the fixture stays fast.
+        # Index enough chunks that both FILTERED and UNFILTERED pool depths are reachable.
+        # Monkeypatch to small values so the fixture stays fast.
         n_filtered = searcher_mod._RERANK_TOP_K
-        n_unfiltered_test = n_filtered + 10   # just needs to exceed the filtered depth
+        n_unfiltered_test = n_filtered + 10   # final pool after trivial filter
 
-        body = "\n".join(f"def fn_{i}(x):\n    return x + {i}\n" for i in range(n_unfiltered_test + 5))
+        body = "\n".join(f"def fn_{i}(x):\n    return x + {i}\n" for i in range(n_unfiltered_test + 20))
         path = make_py(tmp_path, "many.py", body)
         indexer.index_file(path)
         assert indexer.total_chunks >= n_unfiltered_test, (
@@ -398,11 +398,13 @@ class TestCodeSearcher:
         stub = _CountingReranker()
         s._reranker = stub  # force the rerank path on
 
-        # Monkeypatch RERANK_TOP_K_UNFILTERED to a small testable value so we don't
-        # need hundreds of chunks in the fixture.  The invariant under test is
-        # "unfiltered > filtered" — independent of the absolute config value.
+        # Monkeypatch both the trim target (top_k_unfiltered) and the over-fetch depth
+        # (pre_filter_fetch_k) to small testable values.  The invariant under test is
+        # "reranker sees ≤ top_k_unfiltered" and "unfiltered > filtered".
         orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        orig_prefetch = searcher_mod._RERANK_PRE_FILTER_FETCH_K
         searcher_mod._RERANK_TOP_K_UNFILTERED = n_unfiltered_test
+        searcher_mod._RERANK_PRE_FILTER_FETCH_K = n_unfiltered_test + 15
         try:
             s.search("function returning a number", language=None)
             unfiltered_count = stub.last_count
@@ -410,7 +412,9 @@ class TestCodeSearcher:
             filtered_count = stub.last_count
         finally:
             searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+            searcher_mod._RERANK_PRE_FILTER_FETCH_K = orig_prefetch
 
+        # Reranker sees at most top_k_unfiltered non-trivial candidates (Python corpus → no trivials).
         assert unfiltered_count == min(n_unfiltered_test, indexer.total_chunks)
         assert filtered_count == min(searcher_mod._RERANK_TOP_K, indexer.total_chunks)
         assert unfiltered_count > filtered_count
@@ -1714,6 +1718,166 @@ class TestForcedInclusionCandidatePool:
             "forced-inclusion of ALL from_db_value chunks.  "
             f"Got {len(from_db_value_results)} results with that symbol_name: "
             f"{[(r.symbol_name, r.content[:60]) for r in results]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.7 — Pool-entry trivial filter (F19 fix)
+# ---------------------------------------------------------------------------
+
+class TestPoolEntryTrivialFilter:
+    """UPG-15.7: trivial HTML/TXT chunks are dropped BEFORE the cross-encoder reranks,
+    so real code fills the small rerank pool even when the corpus has many trivial fixtures.
+
+    Design:
+    - Over-fetch pre_filter_fetch_k (e.g. 200) raw hybrid candidates.
+    - Drop any that is_trivial_chunk() == True and are not forced-inclusion candidates.
+    - Trim to top_k_unfiltered (e.g. 60) before reranking.
+    - Forced-inclusion candidates (added after the filter) are never dropped.
+
+    The test builds a corpus of many 1-line HTML fixture chunks plus a few real Python
+    code chunks, then verifies:
+    1. With a small top_k_unfiltered, the reranker pool contains the real code chunks
+       (trivial HTML was dropped before the pool limit was reached).
+    2. A forced-inclusion candidate (added with forced_inclusion=True by the UPG-11.7
+       mechanism) is NOT dropped by the trivial filter even if it would classify as trivial.
+    """
+
+    def test_trivial_html_filtered_before_rerank_pool(self, indexer, tmp_path) -> None:
+        """Real code chunks must survive to the reranker pool even when many trivial
+        HTML/TXT chunks rank above them in the initial hybrid sort (F19 scenario)."""
+        import agent.searcher as searcher_mod
+        from agent.searcher import CodeSearcher
+
+        # --- Corpus ---
+        # Many 1-line HTML fixtures — each is trivial (is_trivial_chunk == True).
+        # They will rank high on a short natural-language query due to embedding similarity.
+        n_trivial = 30
+        for i in range(n_trivial):
+            p = tmp_path / f"fixture_{i}.html"
+            # 1-line HTML content — matches is_trivial_chunk for language=html
+            p.write_text(f"<p>Session expired. Please log in again. {i}</p>")
+            indexer.index_file(str(p))
+
+        # A few real Python implementation chunks.
+        real_py = tmp_path / "sessions.py"
+        real_py.write_text(
+            "class SessionBackend:\n"
+            "    def expire_session(self, session_key):\n"
+            "        \"\"\"Expire the session identified by session_key.\"\"\"\n"
+            "        self._store.delete(session_key)\n"
+            "        self._notify_logout(session_key)\n"
+            "        return True\n"
+            "\n"
+            "    def is_expired(self, session_key):\n"
+            "        \"\"\"Return True if the session has expired.\"\"\"\n"
+            "        return self._store.ttl(session_key) <= 0\n"
+        )
+        indexer.index_file(str(real_py))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Patch top_k_unfiltered to a small value (5) and pre_filter_fetch_k to a larger
+        # value (n_trivial + 10) so trivial HTML can be over-fetched and then dropped.
+        # Without the filter, top-5 would be all trivial HTML; with it, real code appears.
+        orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        orig_prefetch = searcher_mod._RERANK_PRE_FILTER_FETCH_K
+
+        # Use a real (stub) reranker so the filter+trim path executes.
+        class _PassthroughReranker:
+            def rerank(self, query, candidates):
+                return [c for _, c in candidates]
+
+        s._reranker = _PassthroughReranker()
+
+        searcher_mod._RERANK_TOP_K_UNFILTERED = 5   # tiny pool — would be all HTML without filter
+        searcher_mod._RERANK_PRE_FILTER_FETCH_K = n_trivial + 10  # fetch all trivial + real code
+        try:
+            results, _ = s.search("session expired logout", n_results=5, language=None)
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+            searcher_mod._RERANK_PRE_FILTER_FETCH_K = orig_prefetch
+
+        # After the trivial filter, the rerank pool should contain real Python code, not HTML fixtures.
+        languages = [r.language for r in results]
+        assert "python" in languages, (
+            "UPG-15.7 regression: real Python code must survive to the rerank pool "
+            "when trivial HTML fixtures are filtered at pool-entry. "
+            f"Got languages: {languages}"
+        )
+        # No 1-line HTML fixtures should appear in the top-5 (they are trivial and should be dropped).
+        html_results = [r for r in results if r.language == "html"]
+        assert len(html_results) == 0, (
+            "UPG-15.7 regression: trivial 1-line HTML fixture chunks must be excluded "
+            "from the rerank pool by the pool-entry trivial filter. "
+            f"HTML results in top-5: {[(r.file_path, r.content[:60]) for r in html_results]}"
+        )
+
+    def test_forced_inclusion_candidates_not_filtered(self, indexer, tmp_path) -> None:
+        """Forced-inclusion candidates must survive the pool-entry trivial filter.
+
+        A chunk added by the UPG-11.7 forced-inclusion mechanism (symbol-name match)
+        must NOT be discarded by the trivial filter — forced-inclusion is a deliberate
+        override that says 'this chunk is the one the user asked for regardless of its
+        quality prior'.
+        """
+        import agent.searcher as searcher_mod
+        from agent.searcher import CodeSearcher, SearchResult
+
+        # Verify the contract at the searcher level: forced_inclusion=True results
+        # survive even when they would be trivial.  We test this by verifying that
+        # forced_cids (set inside search()) is excluded from the trivial filter loop.
+        # The simplest way: forced candidates are appended to sorted_ids AFTER the
+        # filter runs (in the UPG-11.7 block), so they are never subject to it.
+        #
+        # Behavioural test: create a corpus where the only real symbol is a short
+        # 2-line function whose compound name exactly matches the query.  Fill the
+        # rest with HTML trivial chunks.  Verify the symbol surfaces in results
+        # (it gets forced-included after the filter, then ranked by the quality prior).
+        n_trivial = 10
+        for i in range(n_trivial):
+            p = tmp_path / f"tpl_{i}.html"
+            p.write_text(f"<p>page {i}</p>")
+            indexer.index_file(str(p))
+
+        # A short function whose compound name triggers forced-inclusion.
+        real_py = tmp_path / "auth.py"
+        real_py.write_text(
+            "class AuthManager:\n"
+            "    def expire_session(self, key):\n"
+            "        self._cache.delete(key)\n"
+            "        return True\n"
+        )
+        indexer.index_file(str(real_py))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        class _PassthroughReranker:
+            def rerank(self, query, candidates):
+                return [c for _, c in candidates]
+
+        s._reranker = _PassthroughReranker()
+
+        orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        orig_prefetch = searcher_mod._RERANK_PRE_FILTER_FETCH_K
+        # Make the pool so small trivial chunks would crowd it out without forced-inclusion.
+        searcher_mod._RERANK_TOP_K_UNFILTERED = 3
+        searcher_mod._RERANK_PRE_FILTER_FETCH_K = n_trivial + 5
+        try:
+            results, _ = s.search("expire_session authentication cache", n_results=5, language=None)
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+            searcher_mod._RERANK_PRE_FILTER_FETCH_K = orig_prefetch
+
+        # The expire_session symbol should appear via forced-inclusion.
+        sym_names = [r.symbol_name for r in results]
+        expire_results = [r for r in results if "expire_session" in (r.symbol_name or "")]
+        assert expire_results, (
+            "UPG-15.7: forced-inclusion candidates must NOT be excluded by the pool-entry "
+            "trivial filter. expire_session was not found in results: "
+            f"{[(r.symbol_name, r.language, r.content[:60]) for r in results]}"
         )
 
 
