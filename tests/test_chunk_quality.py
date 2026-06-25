@@ -651,3 +651,74 @@ class TestDocIntentQueryClassifier:
         assert doc_score > code_score, (
             "Doc prose must score HIGHER on a doc-intent query than a code-intent query."
         )
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.6 — plural prose nouns stopword additions (F20)
+# ---------------------------------------------------------------------------
+
+class TestPluralProseNounStopWords:
+    """UPG-15.6: plural forms of prose nouns already in prog_stopwords.txt must be
+    in SYMBOL_STOP_WORDS when their plural is >=7 chars (passing forced-inclusion
+    min_identifier_len guard) and the plural is a natural-language query noun that
+    also names Django method/property groups.
+
+    F20: 'configure Django settings for production deployment' — 'settings' (8 chars)
+    was not in the stopword list, causing forced-inclusion to promote all .settings
+    properties (MailersHandler.settings, BaseConnectionHandler.settings) to rank 1-2.
+    """
+
+    # Each plural whose singular is already in prog_stopwords.txt and whose
+    # plural passes the min_identifier_len=7 guard.
+    _EXPECTED_PLURAL_STOPWORDS = [
+        "settings",   # plural of 'setting' (already listed); .settings property overload
+        "responses",  # plural of 'response'; prose: "HTTP responses"
+        "processes",  # plural of 'process'; prose: "OS processes"
+        "handlers",   # plural of 'handler'; prose: "event handlers"
+        "backends",   # plural of 'backend'; prose: "database backends"
+    ]
+
+    @pytest.mark.parametrize("word", _EXPECTED_PLURAL_STOPWORDS)
+    def test_plural_is_in_symbol_stop_words(self, word: str) -> None:
+        """Each UPG-15.6 plural must be present in the loaded SYMBOL_STOP_WORDS frozenset."""
+        from agent.config import SYMBOL_STOP_WORDS
+        assert word in SYMBOL_STOP_WORDS, (
+            f"UPG-15.6: '{word}' must be in SYMBOL_STOP_WORDS after prog_stopwords.txt update. "
+            f"Plural prose nouns >=7 chars whose singular is stopworded must also be stopworded "
+            f"to prevent forced-inclusion false positives."
+        )
+
+    @pytest.mark.parametrize("word", _EXPECTED_PLURAL_STOPWORDS)
+    def test_plural_leaf_receives_no_boost(self, word: str) -> None:
+        """UPG-15.6: bare plural leaf must get zero symbol_identity_boost for a
+        natural-language query that names it as a prose noun."""
+        query = f"configure Django {word} for production deployment"
+        tokens = _query_symbol_tokens(query)
+        boost = symbol_identity_boost(word, tokens)
+        assert boost == 0.0, (
+            f"UPG-15.6: symbol_identity_boost('{word}', ...) returned {boost} != 0.0 "
+            f"for query {query!r}. Plural prose-noun stopwords must not be boosted."
+        )
+
+    def test_f20_settings_no_boost_for_prose_query(self) -> None:
+        """F20 acceptance: leaf='settings' must have zero boost for the F20 query."""
+        from agent.config import SYMBOL_STOP_WORDS
+        assert "settings" in SYMBOL_STOP_WORDS, (
+            "UPG-15.6: 'settings' must be in SYMBOL_STOP_WORDS — add it to prog_stopwords.txt"
+        )
+        tokens = _query_symbol_tokens("configure Django settings for production deployment")
+        assert symbol_identity_boost("settings", tokens) == 0.0, (
+            "UPG-15.6/F20: 'settings' leaf must get zero boost on a prose settings query; "
+            "MailersHandler.settings / BaseConnectionHandler.settings must not reach rank 1-2."
+        )
+
+    def test_qualified_settings_still_boosted(self) -> None:
+        """UPG-15.6: qualified 'LazySettings.configure' must still be boosted because
+        the stop-word guard applies only to bare unqualified leaves."""
+        # 'lazysettings' or 'configure' — neither is a stopword, qualified form should boost
+        tokens = _query_symbol_tokens("LazySettings configure production")
+        boost = symbol_identity_boost("LazySettings.configure", tokens)
+        assert boost > 0.0, (
+            "UPG-15.6: qualified 'LazySettings.configure' must still get a positive boost. "
+            "The stopword guard only suppresses bare unqualified leaves like 'settings'."
+        )

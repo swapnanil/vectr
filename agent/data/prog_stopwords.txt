@@ -180,3 +180,14 @@ returns
 # underscore) would otherwise trigger forced-inclusion of ALL ListFilter.queryset()
 # admin variants, burying QuerySet.exclude at rank4.
 queryset
+# UPG-15.6: plural forms of prose nouns already in this file whose plurals are >=7 chars
+# and would otherwise pass the forced-inclusion min_identifier_len guard.
+# Rule: only plurals of singulars already listed above (plural-of-existing, no new stopwords).
+# Each plural is a natural-language query noun that also names Django method/property groups
+# (e.g. ".settings", ".handlers"), causing false forced-inclusion promotion of framework
+# adapter variants over the canonical reference a user actually wants.
+settings
+responses
+processes
+handlers
+backends
