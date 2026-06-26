@@ -323,9 +323,10 @@ class CodeSearcher:
             # On a doc-intent query ("how to…", "what is…") the authoritative
             # documentation file is frequently outranked in BOTH vec and bm25 by a
             # large population of code/test chunks that lexically match the query's
-            # nouns (e.g. ~40 management-command *.py files for "custom management
-            # command", or 200+ inner ``class Meta:`` test stubs for "model Meta
-            # class").  The doc then never enters the top-_RERANK_TOP_K_UNFILTERED
+            # nouns — true for any codebase with substantial docs alongside code.
+            # (django benchmark witnesses: ~40 management-command *.py files for
+            # "custom management command", or 200+ inner ``class Meta:`` test stubs
+            # for "model Meta class".)  The doc then never enters the top-_RERANK_TOP_K_UNFILTERED
             # union above, so the doc-prose multiplier (which only re-weights chunks
             # already in the pool) cannot reach it.  Reserve up to
             # _DOC_INTENT_POOL_RESERVE slots for the highest vec-similarity
@@ -336,10 +337,12 @@ class CodeSearcher:
             if _is_doc_intent and _DOC_INTENT_POOL_RESERVE > 0:
                 # UPG-15.13 / F25: dedicated documentation retrieval.  The
                 # authoritative doc frequently embeds BELOW the unfiltered vec
-                # fetch entirely — e.g. docs/ref/models/options.txt is absent
-                # from the top-200 for "what is a model Meta class" (code chunks
-                # dominate) yet ranks #3 when the query is restricted to
-                # doc-language chunks.  Iterating the main vec pool (the old
+                # fetch entirely in a code-dominated corpus — its prose simply
+                # doesn't out-embed the surrounding code for the query.  (django
+                # benchmark witness: docs/ref/models/options.txt is absent from
+                # the top-200 for "what is a model Meta class" yet ranks #3 when
+                # the query is restricted to doc-language chunks.)  Iterating the
+                # main vec pool (the old
                 # approach) therefore could not reach it.  Run a SEPARATE vector
                 # query filtered to doc languages so the best documentation
                 # always reaches the candidate pool, then reserve up to
@@ -474,9 +477,11 @@ class CodeSearcher:
             # concept/symbol lookup, not prose — so force-include symbols whose leaf
             # EXACTLY matches that word OR its singular/plural form, bypassing the
             # length, stop-word, and case-discipline guards that exist only to
-            # prevent prose flooding.  e.g. "signals" -> class Signal
-            # (django/dispatch/dispatcher.py).  Exact-leaf (not substring) matching
-            # keeps this tight: leaf "signal" matches one symbol, not SignalTests.
+            # prevent prose flooding.  Exact-leaf (not substring) matching keeps
+            # this tight: a leaf matches the few symbols actually named that, not
+            # every identifier containing it.  (django benchmark witness: "signals"
+            # -> the singular leaf "signal" matches the one Signal class, not the
+            # many SignalTests/SignalHandler classes a substring match would pull.)
             # These are treated as UNCONDITIONAL (like compound identifiers) because
             # a one-word query naming a symbol is an unambiguous high-intent request.
             _single_token_force: set[str] = set()

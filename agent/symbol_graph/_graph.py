@@ -195,6 +195,25 @@ def _enclosing_class_from_file(file_path: str, start_line: int) -> str:
     return ""
 
 
+# UPG-15.16: SQL pre-ranking order applied BEFORE the exact/suffix LIMIT cap so
+# the canonical definition of a frequently-defined name enters the candidate pool
+# that _partial_match_key then ranks. In any large codebase a common class or
+# function name can have more exact matches than the cap — typically many
+# test/fixture stubs plus one real library definition. Without ordering, SQLite
+# returns an arbitrary rowid-ordered subset that can omit the real definition
+# entirely, and that subset shifts across re-indexes as rowids change, so locate
+# is both wrong and non-deterministic. Order non-test files first (tests/ dirs and
+# test_*.py basenames), then larger line-span first (real defs tend to be large,
+# stubs tiny); _partial_match_key does the precise ranking within the cap.
+# (Witnessed by the django benchmark corpus: the name "Model" has 236 matches,
+# mostly inner test classes, so the library definition fell outside a 200 cap.)
+_CANONICAL_FETCH_ORDER = (
+    "ORDER BY (CASE WHEN file_path LIKE '%/tests/%' "
+    "OR file_path LIKE '%/test\\_%' ESCAPE '\\' THEN 1 ELSE 0 END), "
+    "(end_line - start_line) DESC"
+)
+
+
 def _partial_match_key(row, query_lower: str, scope_depth: int = 0) -> tuple:
     """Sort key for `locate` matches (used in every strategy via ``_ranked_result``).
 
@@ -649,7 +668,8 @@ class SymbolGraph:
         lookup_name = _leaf if _class_qualifier else name
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM symbols WHERE workspace = ? AND name = ? LIMIT ?",
+                "SELECT * FROM symbols WHERE workspace = ? AND name = ? "
+                + _CANONICAL_FETCH_ORDER + " LIMIT ?",
                 (workspace, lookup_name, 200),
             ).fetchall()
         if rows:
@@ -669,7 +689,8 @@ class SymbolGraph:
             if suffix != name:
                 with self._conn() as conn:
                     rows = conn.execute(
-                        "SELECT * FROM symbols WHERE workspace = ? AND name = ? LIMIT ?",
+                        "SELECT * FROM symbols WHERE workspace = ? AND name = ? "
+                        + _CANONICAL_FETCH_ORDER + " LIMIT ?",
                         (workspace, suffix, 200),
                     ).fetchall()
                 if rows:
