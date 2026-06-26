@@ -362,21 +362,27 @@ class TestCodeSearcher:
         assert any(r.language == "javascript" for r in blank) or blank
 
     def test_unfiltered_search_fetches_deeper_pool(self, indexer, tmp_path) -> None:
-        """Unfiltered queries over-fetch, apply trivial pre-filter, then trim to
-        top_k_unfiltered before reranking (UPG-15.7).
+        """Unfiltered queries over-fetch, apply union-of-signals trivial filter (UPG-15.7 revised).
 
-        This test verifies the invariant (unfiltered reranker pool > filtered) using
-        monkeypatching.  The corpus is pure Python so no chunks are classified trivial
-        — the final reranker pool equals the trimmed top_k_unfiltered limit.
-        pre_filter_fetch_k drives the initial hybrid fetch; the cross-encoder only
-        ever sees ≤ top_k_unfiltered candidates.
+        Pool selection: take the first top_k_unfiltered non-trivial chunks from the
+        vec-similarity ranking UNION the first top_k_unfiltered non-trivial chunks from
+        the BM25 ranking.  This is bounded by 2*top_k_unfiltered (and by pre_filter_fetch_k).
+        The corpus is pure Python so no chunks are classified trivial — both per-signal
+        lists fill to top_k_unfiltered, so the union can be anywhere in
+        [top_k_unfiltered, min(2*top_k_unfiltered, pre_filter_fetch_k)].
+
+        Key invariants:
+        - unfiltered pool > filtered pool (filtered uses the smaller _RERANK_TOP_K).
+        - unfiltered pool <= min(2*top_k_unfiltered, pre_filter_fetch_k, total_chunks).
+        - cross-encoder sees no trivial chunks (tested in TestPoolEntryTrivialFilter).
         """
         import agent.searcher as searcher_mod
         # Index enough chunks that both FILTERED and UNFILTERED pool depths are reachable.
         # Monkeypatch to small values so the fixture stays fast.
         n_filtered = searcher_mod._RERANK_TOP_K
-        n_unfiltered_test = n_filtered + 10   # final pool after trivial filter
+        n_unfiltered_test = n_filtered + 10   # per-signal cap for unfiltered pool
 
+        pre_fetch_k = n_unfiltered_test + 15
         body = "\n".join(f"def fn_{i}(x):\n    return x + {i}\n" for i in range(n_unfiltered_test + 20))
         path = make_py(tmp_path, "many.py", body)
         indexer.index_file(path)
@@ -398,13 +404,12 @@ class TestCodeSearcher:
         stub = _CountingReranker()
         s._reranker = stub  # force the rerank path on
 
-        # Monkeypatch both the trim target (top_k_unfiltered) and the over-fetch depth
-        # (pre_filter_fetch_k) to small testable values.  The invariant under test is
-        # "reranker sees ≤ top_k_unfiltered" and "unfiltered > filtered".
+        # Monkeypatch both the per-signal cap (top_k_unfiltered) and the over-fetch depth
+        # (pre_filter_fetch_k) to small testable values.
         orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
         orig_prefetch = searcher_mod._RERANK_PRE_FILTER_FETCH_K
         searcher_mod._RERANK_TOP_K_UNFILTERED = n_unfiltered_test
-        searcher_mod._RERANK_PRE_FILTER_FETCH_K = n_unfiltered_test + 15
+        searcher_mod._RERANK_PRE_FILTER_FETCH_K = pre_fetch_k
         try:
             s.search("function returning a number", language=None)
             unfiltered_count = stub.last_count
@@ -414,10 +419,18 @@ class TestCodeSearcher:
             searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
             searcher_mod._RERANK_PRE_FILTER_FETCH_K = orig_prefetch
 
-        # Reranker sees at most top_k_unfiltered non-trivial candidates (Python corpus → no trivials).
-        assert unfiltered_count == min(n_unfiltered_test, indexer.total_chunks)
+        # Union pool is bounded by pre_filter_fetch_k (the hybrid fetch ceiling) AND
+        # 2*top_k_unfiltered (union of two per-signal lists of size top_k_unfiltered each).
+        max_unfiltered = min(2 * n_unfiltered_test, pre_fetch_k, indexer.total_chunks)
+        assert unfiltered_count <= max_unfiltered, (
+            f"UPG-15.7: unfiltered pool must be <= min(2*top_k_unfiltered, pre_filter_fetch_k) "
+            f"= {max_unfiltered}, got {unfiltered_count}"
+        )
         assert filtered_count == min(searcher_mod._RERANK_TOP_K, indexer.total_chunks)
-        assert unfiltered_count > filtered_count
+        assert unfiltered_count > filtered_count, (
+            f"UPG-15.7: unfiltered pool ({unfiltered_count}) must exceed filtered pool "
+            f"({filtered_count}) so there is more room to rerank"
+        )
 
     def test_search_multiple_files_ranked(self, indexer, tmp_path) -> None:
         # Code tokenizer splits camelCase: "RateLimitMiddleware" → ["rate","limit","middleware"]
@@ -1878,6 +1891,81 @@ class TestPoolEntryTrivialFilter:
             "UPG-15.7: forced-inclusion candidates must NOT be excluded by the pool-entry "
             "trivial filter. expire_session was not found in results: "
             f"{[(r.symbol_name, r.language, r.content[:60]) for r in results]}"
+        )
+
+    def test_union_of_signals_keeps_vec_strong_bm25_weak_chunk(self, indexer, tmp_path) -> None:
+        """UPG-15.7 (revised): a non-trivial chunk that is strong on vector similarity
+        but weak on BM25 (prose doc) must survive pool selection when keyword-heavy
+        chunks would outrank it on the blended merged score.
+
+        Regression guard for F2/F18: the prior merged-score trim dropped
+        custom-model-fields.txt because keyword-heavy fixture chunks beat it on
+        the blended score; union-of-signals must include it via the vec-only arm.
+        """
+        import agent.searcher as searcher_mod
+        from agent.searcher import CodeSearcher
+
+        # --- Corpus ---
+        # Keyword-rich Python chunks that will dominate on BM25 for the query tokens.
+        n_kw = 8
+        for i in range(n_kw):
+            p = tmp_path / f"kw_{i}.py"
+            # Each chunk has the exact query words → high BM25 score.
+            p.write_text(
+                f"# custom model field tutorial write howto {i}\n"
+                f"class CustomField{i}:\n"
+                f"    '''Write a custom model field howto tutorial {i}.'''\n"
+                f"    pass\n"
+            )
+            indexer.index_file(str(p))
+
+        # One prose doc that is semantically on-topic but has low keyword density.
+        # This simulates docs/howto/custom-model-fields.txt (F2/F18).
+        prose_doc = tmp_path / "custom_model_fields.txt"
+        prose_doc.write_text(
+            "Writing custom model fields\n\n"
+            "Django's ORM lets you create your own field types that can be added to\n"
+            "your models. A custom field must implement deconstruct() so that Django\n"
+            "migrations can serialise it, and from_db_value() to convert the database\n"
+            "representation back to a Python object.\n"
+        )
+        indexer.index_file(str(prose_doc))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Track which file_paths reach the reranker (reranker receives (content, SearchResult)).
+        seen_files: list[str] = []
+
+        class _TrackingReranker:
+            def rerank(self, query, candidates):
+                seen_files.extend(sr.file_path for _, sr in candidates)
+                return [sr for _, sr in candidates]
+
+        s._reranker = _TrackingReranker()
+
+        # Patch to a small pool so the merged-score trim would have dropped the prose doc.
+        orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        orig_prefetch = searcher_mod._RERANK_PRE_FILTER_FETCH_K
+        # top_k_unfiltered = n_kw: the keyword chunks fill the merged-score top-N, squeezing
+        # the prose doc out.  The union arm must rescue it via the vec channel.
+        searcher_mod._RERANK_TOP_K_UNFILTERED = n_kw
+        searcher_mod._RERANK_PRE_FILTER_FETCH_K = n_kw + 5
+        try:
+            results, _ = s.search(
+                "how to write a custom model field", n_results=5, language=None
+            )
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+            searcher_mod._RERANK_PRE_FILTER_FETCH_K = orig_prefetch
+
+        # The prose .txt chunk must have reached the reranker pool (union kept it via vec arm).
+        prose_in_pool = any(f.endswith("custom_model_fields.txt") for f in seen_files)
+        assert prose_in_pool, (
+            "UPG-15.7 union regression: prose doc (vec-strong/bm25-weak) was NOT passed "
+            "to the reranker.  The union-of-signals pool selection must include chunks from "
+            "the vec arm even when the merged score would trim them out.\n"
+            f"seen_files={seen_files}"
         )
 
 
