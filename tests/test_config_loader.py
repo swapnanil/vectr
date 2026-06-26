@@ -253,8 +253,11 @@ class TestConfigLoaderRerank:
         assert cfg.RERANK_TOP_K == 40, f"RERANK_TOP_K should be 40, got {cfg.RERANK_TOP_K}"
 
     def test_top_k_unfiltered_default(self) -> None:
+        # UPG-15.7: top_k_unfiltered reverted to 60 (the reranker pool size).
+        # Trivial HTML/TXT flooding is now prevented by the pool-entry filter
+        # (pre_filter_fetch_k over-fetches, drops trivial, trims to top_k_unfiltered).
         assert cfg.RERANK_TOP_K_UNFILTERED == 60, (
-            f"RERANK_TOP_K_UNFILTERED should be 60, got {cfg.RERANK_TOP_K_UNFILTERED}"
+            f"RERANK_TOP_K_UNFILTERED should be 60 (UPG-15.7), got {cfg.RERANK_TOP_K_UNFILTERED}"
         )
 
     def test_top_k_is_int(self) -> None:
@@ -270,11 +273,30 @@ class TestConfigLoaderRerank:
             f"RERANK_TOP_K ({cfg.RERANK_TOP_K})"
         )
 
+    def test_pre_filter_fetch_k_default(self) -> None:
+        # UPG-15.7: over-fetch depth for the pool-entry trivial filter.
+        # Must be strictly larger than top_k_unfiltered so there is room to filter
+        # trivial chunks and still fill the rerank pool.
+        assert cfg.RERANK_PRE_FILTER_FETCH_K >= 200, (
+            f"RERANK_PRE_FILTER_FETCH_K should be ≥ 200 (UPG-15.7), got {cfg.RERANK_PRE_FILTER_FETCH_K}"
+        )
+
+    def test_pre_filter_fetch_k_is_int(self) -> None:
+        assert isinstance(cfg.RERANK_PRE_FILTER_FETCH_K, int)
+
+    def test_pre_filter_fetch_k_exceeds_top_k_unfiltered(self) -> None:
+        """pre_filter_fetch_k must exceed top_k_unfiltered so there is room to filter."""
+        assert cfg.RERANK_PRE_FILTER_FETCH_K > cfg.RERANK_TOP_K_UNFILTERED, (
+            f"RERANK_PRE_FILTER_FETCH_K ({cfg.RERANK_PRE_FILTER_FETCH_K}) must exceed "
+            f"RERANK_TOP_K_UNFILTERED ({cfg.RERANK_TOP_K_UNFILTERED})"
+        )
+
     def test_searcher_rerank_aliases_from_config(self) -> None:
         """searcher.py must import rerank pool sizes from config, not define its own."""
         import agent.searcher as searcher_mod
         assert searcher_mod._RERANK_TOP_K is cfg.RERANK_TOP_K
         assert searcher_mod._RERANK_TOP_K_UNFILTERED is cfg.RERANK_TOP_K_UNFILTERED
+        assert searcher_mod._RERANK_PRE_FILTER_FETCH_K is cfg.RERANK_PRE_FILTER_FETCH_K
 
 
 class TestConfigLoaderIndexing:

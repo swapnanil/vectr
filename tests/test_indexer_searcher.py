@@ -362,14 +362,33 @@ class TestCodeSearcher:
         assert any(r.language == "javascript" for r in blank) or blank
 
     def test_unfiltered_search_fetches_deeper_pool(self, indexer, tmp_path) -> None:
-        """Unfiltered queries fetch a deeper rerank pool than filtered ones, so real
-        code isn't crowded out by doc prose before the quality prior runs (UPG-2.1 tuning)."""
+        """Unfiltered queries over-fetch, apply union-of-signals trivial filter (UPG-15.7 revised).
+
+        Pool selection: take the first top_k_unfiltered non-trivial chunks from the
+        vec-similarity ranking UNION the first top_k_unfiltered non-trivial chunks from
+        the BM25 ranking.  This is bounded by 2*top_k_unfiltered (and by pre_filter_fetch_k).
+        The corpus is pure Python so no chunks are classified trivial — both per-signal
+        lists fill to top_k_unfiltered, so the union can be anywhere in
+        [top_k_unfiltered, min(2*top_k_unfiltered, pre_filter_fetch_k)].
+
+        Key invariants:
+        - unfiltered pool > filtered pool (filtered uses the smaller _RERANK_TOP_K).
+        - unfiltered pool <= min(2*top_k_unfiltered, pre_filter_fetch_k, total_chunks).
+        - cross-encoder sees no trivial chunks (tested in TestPoolEntryTrivialFilter).
+        """
         import agent.searcher as searcher_mod
-        # Index enough chunks that both fetch depths are below the total.
-        body = "\n".join(f"def fn_{i}(x):\n    return x + {i}\n" for i in range(80))
+        # Index enough chunks that both FILTERED and UNFILTERED pool depths are reachable.
+        # Monkeypatch to small values so the fixture stays fast.
+        n_filtered = searcher_mod._RERANK_TOP_K
+        n_unfiltered_test = n_filtered + 10   # per-signal cap for unfiltered pool
+
+        pre_fetch_k = n_unfiltered_test + 15
+        body = "\n".join(f"def fn_{i}(x):\n    return x + {i}\n" for i in range(n_unfiltered_test + 20))
         path = make_py(tmp_path, "many.py", body)
         indexer.index_file(path)
-        assert indexer.total_chunks >= searcher_mod._RERANK_TOP_K_UNFILTERED
+        assert indexer.total_chunks >= n_unfiltered_test, (
+            f"Need at least {n_unfiltered_test} chunks in index, got {indexer.total_chunks}"
+        )
 
         from agent.searcher import CodeSearcher
         s = CodeSearcher(indexer)
@@ -384,14 +403,34 @@ class TestCodeSearcher:
 
         stub = _CountingReranker()
         s._reranker = stub  # force the rerank path on
-        s.search("function returning a number", language=None)
-        unfiltered_count = stub.last_count
-        s.search("function returning a number", language="python")
-        filtered_count = stub.last_count
 
-        assert unfiltered_count == min(searcher_mod._RERANK_TOP_K_UNFILTERED, indexer.total_chunks)
+        # Monkeypatch both the per-signal cap (top_k_unfiltered) and the over-fetch depth
+        # (pre_filter_fetch_k) to small testable values.
+        orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        orig_prefetch = searcher_mod._RERANK_PRE_FILTER_FETCH_K
+        searcher_mod._RERANK_TOP_K_UNFILTERED = n_unfiltered_test
+        searcher_mod._RERANK_PRE_FILTER_FETCH_K = pre_fetch_k
+        try:
+            s.search("function returning a number", language=None)
+            unfiltered_count = stub.last_count
+            s.search("function returning a number", language="python")
+            filtered_count = stub.last_count
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+            searcher_mod._RERANK_PRE_FILTER_FETCH_K = orig_prefetch
+
+        # Union pool is bounded by pre_filter_fetch_k (the hybrid fetch ceiling) AND
+        # 2*top_k_unfiltered (union of two per-signal lists of size top_k_unfiltered each).
+        max_unfiltered = min(2 * n_unfiltered_test, pre_fetch_k, indexer.total_chunks)
+        assert unfiltered_count <= max_unfiltered, (
+            f"UPG-15.7: unfiltered pool must be <= min(2*top_k_unfiltered, pre_filter_fetch_k) "
+            f"= {max_unfiltered}, got {unfiltered_count}"
+        )
         assert filtered_count == min(searcher_mod._RERANK_TOP_K, indexer.total_chunks)
-        assert unfiltered_count > filtered_count
+        assert unfiltered_count > filtered_count, (
+            f"UPG-15.7: unfiltered pool ({unfiltered_count}) must exceed filtered pool "
+            f"({filtered_count}) so there is more room to rerank"
+        )
 
     def test_search_multiple_files_ranked(self, indexer, tmp_path) -> None:
         # Code tokenizer splits camelCase: "RateLimitMiddleware" → ["rate","limit","middleware"]
@@ -1692,6 +1731,241 @@ class TestForcedInclusionCandidatePool:
             "forced-inclusion of ALL from_db_value chunks.  "
             f"Got {len(from_db_value_results)} results with that symbol_name: "
             f"{[(r.symbol_name, r.content[:60]) for r in results]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.7 — Pool-entry trivial filter (F19 fix)
+# ---------------------------------------------------------------------------
+
+class TestPoolEntryTrivialFilter:
+    """UPG-15.7: trivial HTML/TXT chunks are dropped BEFORE the cross-encoder reranks,
+    so real code fills the small rerank pool even when the corpus has many trivial fixtures.
+
+    Design:
+    - Over-fetch pre_filter_fetch_k (e.g. 200) raw hybrid candidates.
+    - Drop any that is_trivial_chunk() == True and are not forced-inclusion candidates.
+    - Trim to top_k_unfiltered (e.g. 60) before reranking.
+    - Forced-inclusion candidates (added after the filter) are never dropped.
+
+    The test builds a corpus of many 1-line HTML fixture chunks plus a few real Python
+    code chunks, then verifies:
+    1. With a small top_k_unfiltered, the reranker pool contains the real code chunks
+       (trivial HTML was dropped before the pool limit was reached).
+    2. A forced-inclusion candidate (added with forced_inclusion=True by the UPG-11.7
+       mechanism) is NOT dropped by the trivial filter even if it would classify as trivial.
+    """
+
+    def test_trivial_html_filtered_before_rerank_pool(self, indexer, tmp_path) -> None:
+        """Real code chunks must survive to the reranker pool even when many trivial
+        HTML/TXT chunks rank above them in the initial hybrid sort (F19 scenario)."""
+        import agent.searcher as searcher_mod
+        from agent.searcher import CodeSearcher
+
+        # --- Corpus ---
+        # Many 1-line HTML fixtures — each is trivial (is_trivial_chunk == True).
+        # They will rank high on a short natural-language query due to embedding similarity.
+        n_trivial = 30
+        for i in range(n_trivial):
+            p = tmp_path / f"fixture_{i}.html"
+            # 1-line HTML content — matches is_trivial_chunk for language=html
+            p.write_text(f"<p>Session expired. Please log in again. {i}</p>")
+            indexer.index_file(str(p))
+
+        # A few real Python implementation chunks.
+        real_py = tmp_path / "sessions.py"
+        real_py.write_text(
+            "class SessionBackend:\n"
+            "    def expire_session(self, session_key):\n"
+            "        \"\"\"Expire the session identified by session_key.\"\"\"\n"
+            "        self._store.delete(session_key)\n"
+            "        self._notify_logout(session_key)\n"
+            "        return True\n"
+            "\n"
+            "    def is_expired(self, session_key):\n"
+            "        \"\"\"Return True if the session has expired.\"\"\"\n"
+            "        return self._store.ttl(session_key) <= 0\n"
+        )
+        indexer.index_file(str(real_py))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Patch top_k_unfiltered to a small value (5) and pre_filter_fetch_k to a larger
+        # value (n_trivial + 10) so trivial HTML can be over-fetched and then dropped.
+        # Without the filter, top-5 would be all trivial HTML; with it, real code appears.
+        orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        orig_prefetch = searcher_mod._RERANK_PRE_FILTER_FETCH_K
+
+        # Use a real (stub) reranker so the filter+trim path executes.
+        class _PassthroughReranker:
+            def rerank(self, query, candidates):
+                return [c for _, c in candidates]
+
+        s._reranker = _PassthroughReranker()
+
+        searcher_mod._RERANK_TOP_K_UNFILTERED = 5   # tiny pool — would be all HTML without filter
+        searcher_mod._RERANK_PRE_FILTER_FETCH_K = n_trivial + 10  # fetch all trivial + real code
+        try:
+            results, _ = s.search("session expired logout", n_results=5, language=None)
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+            searcher_mod._RERANK_PRE_FILTER_FETCH_K = orig_prefetch
+
+        # After the trivial filter, the rerank pool should contain real Python code, not HTML fixtures.
+        languages = [r.language for r in results]
+        assert "python" in languages, (
+            "UPG-15.7 regression: real Python code must survive to the rerank pool "
+            "when trivial HTML fixtures are filtered at pool-entry. "
+            f"Got languages: {languages}"
+        )
+        # No 1-line HTML fixtures should appear in the top-5 (they are trivial and should be dropped).
+        html_results = [r for r in results if r.language == "html"]
+        assert len(html_results) == 0, (
+            "UPG-15.7 regression: trivial 1-line HTML fixture chunks must be excluded "
+            "from the rerank pool by the pool-entry trivial filter. "
+            f"HTML results in top-5: {[(r.file_path, r.content[:60]) for r in html_results]}"
+        )
+
+    def test_forced_inclusion_candidates_not_filtered(self, indexer, tmp_path) -> None:
+        """Forced-inclusion candidates must survive the pool-entry trivial filter.
+
+        A chunk added by the UPG-11.7 forced-inclusion mechanism (symbol-name match)
+        must NOT be discarded by the trivial filter — forced-inclusion is a deliberate
+        override that says 'this chunk is the one the user asked for regardless of its
+        quality prior'.
+        """
+        import agent.searcher as searcher_mod
+        from agent.searcher import CodeSearcher, SearchResult
+
+        # Verify the contract at the searcher level: forced_inclusion=True results
+        # survive even when they would be trivial.  We test this by verifying that
+        # forced_cids (set inside search()) is excluded from the trivial filter loop.
+        # The simplest way: forced candidates are appended to sorted_ids AFTER the
+        # filter runs (in the UPG-11.7 block), so they are never subject to it.
+        #
+        # Behavioural test: create a corpus where the only real symbol is a short
+        # 2-line function whose compound name exactly matches the query.  Fill the
+        # rest with HTML trivial chunks.  Verify the symbol surfaces in results
+        # (it gets forced-included after the filter, then ranked by the quality prior).
+        n_trivial = 10
+        for i in range(n_trivial):
+            p = tmp_path / f"tpl_{i}.html"
+            p.write_text(f"<p>page {i}</p>")
+            indexer.index_file(str(p))
+
+        # A short function whose compound name triggers forced-inclusion.
+        real_py = tmp_path / "auth.py"
+        real_py.write_text(
+            "class AuthManager:\n"
+            "    def expire_session(self, key):\n"
+            "        self._cache.delete(key)\n"
+            "        return True\n"
+        )
+        indexer.index_file(str(real_py))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        class _PassthroughReranker:
+            def rerank(self, query, candidates):
+                return [c for _, c in candidates]
+
+        s._reranker = _PassthroughReranker()
+
+        orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        orig_prefetch = searcher_mod._RERANK_PRE_FILTER_FETCH_K
+        # Make the pool so small trivial chunks would crowd it out without forced-inclusion.
+        searcher_mod._RERANK_TOP_K_UNFILTERED = 3
+        searcher_mod._RERANK_PRE_FILTER_FETCH_K = n_trivial + 5
+        try:
+            results, _ = s.search("expire_session authentication cache", n_results=5, language=None)
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+            searcher_mod._RERANK_PRE_FILTER_FETCH_K = orig_prefetch
+
+        # The expire_session symbol should appear via forced-inclusion.
+        sym_names = [r.symbol_name for r in results]
+        expire_results = [r for r in results if "expire_session" in (r.symbol_name or "")]
+        assert expire_results, (
+            "UPG-15.7: forced-inclusion candidates must NOT be excluded by the pool-entry "
+            "trivial filter. expire_session was not found in results: "
+            f"{[(r.symbol_name, r.language, r.content[:60]) for r in results]}"
+        )
+
+    def test_union_of_signals_keeps_vec_strong_bm25_weak_chunk(self, indexer, tmp_path) -> None:
+        """UPG-15.7 (revised): a non-trivial chunk that is strong on vector similarity
+        but weak on BM25 (prose doc) must survive pool selection when keyword-heavy
+        chunks would outrank it on the blended merged score.
+
+        Regression guard for F2/F18: the prior merged-score trim dropped
+        custom-model-fields.txt because keyword-heavy fixture chunks beat it on
+        the blended score; union-of-signals must include it via the vec-only arm.
+        """
+        import agent.searcher as searcher_mod
+        from agent.searcher import CodeSearcher
+
+        # --- Corpus ---
+        # Keyword-rich Python chunks that will dominate on BM25 for the query tokens.
+        n_kw = 8
+        for i in range(n_kw):
+            p = tmp_path / f"kw_{i}.py"
+            # Each chunk has the exact query words → high BM25 score.
+            p.write_text(
+                f"# custom model field tutorial write howto {i}\n"
+                f"class CustomField{i}:\n"
+                f"    '''Write a custom model field howto tutorial {i}.'''\n"
+                f"    pass\n"
+            )
+            indexer.index_file(str(p))
+
+        # One prose doc that is semantically on-topic but has low keyword density.
+        # This simulates docs/howto/custom-model-fields.txt (F2/F18).
+        prose_doc = tmp_path / "custom_model_fields.txt"
+        prose_doc.write_text(
+            "Writing custom model fields\n\n"
+            "Django's ORM lets you create your own field types that can be added to\n"
+            "your models. A custom field must implement deconstruct() so that Django\n"
+            "migrations can serialise it, and from_db_value() to convert the database\n"
+            "representation back to a Python object.\n"
+        )
+        indexer.index_file(str(prose_doc))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Track which file_paths reach the reranker (reranker receives (content, SearchResult)).
+        seen_files: list[str] = []
+
+        class _TrackingReranker:
+            def rerank(self, query, candidates):
+                seen_files.extend(sr.file_path for _, sr in candidates)
+                return [sr for _, sr in candidates]
+
+        s._reranker = _TrackingReranker()
+
+        # Patch to a small pool so the merged-score trim would have dropped the prose doc.
+        orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        orig_prefetch = searcher_mod._RERANK_PRE_FILTER_FETCH_K
+        # top_k_unfiltered = n_kw: the keyword chunks fill the merged-score top-N, squeezing
+        # the prose doc out.  The union arm must rescue it via the vec channel.
+        searcher_mod._RERANK_TOP_K_UNFILTERED = n_kw
+        searcher_mod._RERANK_PRE_FILTER_FETCH_K = n_kw + 5
+        try:
+            results, _ = s.search(
+                "how to write a custom model field", n_results=5, language=None
+            )
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+            searcher_mod._RERANK_PRE_FILTER_FETCH_K = orig_prefetch
+
+        # The prose .txt chunk must have reached the reranker pool (union kept it via vec arm).
+        prose_in_pool = any(f.endswith("custom_model_fields.txt") for f in seen_files)
+        assert prose_in_pool, (
+            "UPG-15.7 union regression: prose doc (vec-strong/bm25-weak) was NOT passed "
+            "to the reranker.  The union-of-signals pool selection must include chunks from "
+            "the vec arm even when the merged score would trim them out.\n"
+            f"seen_files={seen_files}"
         )
 
 

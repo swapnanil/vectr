@@ -35,6 +35,7 @@ from agent.config import (
     DOC_INTENT_DOC_PROSE_MULTIPLIER as _Q_DOC_PROSE_DOC_INTENT,
     DOC_INTENT_PREFIXES,
     DOC_INTENT_ANY_SUBSTRINGS,
+    TRIVIAL_DOC_MAX_LINES as _TRIVIAL_DOC_MAX_LINES,
 )
 
 # A synthetic node_type stamped on re-export / import-only chunks so the ranker
@@ -145,10 +146,27 @@ def is_trivial_chunk(content: str, language: str = "") -> bool:
     A chunk is trivial when, after dropping comments/context lines, it is empty
     or its only meaningful line is pure punctuation, a bare return, a lone block
     keyword, or a single import. These never answer a query on their own.
+
+    UPG-15.5: HTML/markup and plain-text chunks with ≤ TRIVIAL_DOC_MAX_LINES
+    non-blank lines are also trivial.  This catches 1–2-line test-fixture
+    templates ("Logged out", "{{ form }}", "<h1>Error</h1>") and egg-info TXT
+    stubs ("django", "from-my-custom-list") that otherwise flood short
+    natural-language queries.  Multi-line .txt/.rst documentation (Django's
+    docs/howto/*.txt, docs/topics/*.txt) has many more lines and is unaffected.
     """
     raw_nonblank = [l for l in content.splitlines() if l.strip()]
     if not raw_nonblank:
         return True
+
+    # UPG-15.5: language-aware short-prose rule for HTML/TXT doc languages.
+    # Checked on raw_nonblank (not _meaningful_lines) so RST heading underlines
+    # (===, ---) and HTML tags count as non-blank content.  Any real doc chunk
+    # has far more than TRIVIAL_DOC_MAX_LINES non-blank lines; only stub fixtures
+    # fall at or below the threshold.
+    lang_lower = (language or "").lower()
+    if lang_lower in _TRIVIAL_DOC_LANGUAGES and len(raw_nonblank) <= _TRIVIAL_DOC_MAX_LINES:
+        return True
+
     lines = _meaningful_lines(content)
     if not lines:
         # Only comments/headings, no code/text payload. Trivial only when tiny —
@@ -319,6 +337,14 @@ def is_doc_intent_query(query: str) -> bool:
 # highly against natural-language queries. A mild demotion lets near-tied code edge
 # ahead while leaving docs on top when nothing else competes (UPG-2.1).
 _DOC_LANGUAGES = {"markdown", "md", "html", "htm", "rst", "text", "txt", "mdx"}
+
+# Languages for which a very short chunk (≤ TRIVIAL_DOC_MAX_LINES non-blank lines)
+# is classified as trivial (UPG-15.5). Covers test-fixture HTML templates and
+# egg-info / requirements TXT stubs that flood short natural-language queries.
+# Markdown is intentionally excluded: is_markdown_heading_only() handles its
+# trivial sub-cases already (a 1-line markdown heading is caught there, and a
+# single prose sentence has real retrieval value).
+_TRIVIAL_DOC_LANGUAGES = {"html", "htm", "text", "txt"}
 
 
 def is_doc_language(language: str) -> bool:

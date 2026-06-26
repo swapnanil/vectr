@@ -155,6 +155,16 @@ ranking:
     # Bare stub chunks with almost no content (single-line import, lone brace, etc.)
     trivial: 0.15
 
+    # Maximum number of non-blank lines a HTML/markup or plain-text chunk may contain
+    # and still be classified as trivial by is_trivial_chunk() (UPG-15.5).
+    # 1-line and 2-line test-fixture templates ("Logged out", "{{ form }}", top_level.txt)
+    # are trivial; any real doc prose chunk has many more lines than this.
+    # Must be a small integer (≥1) so that multi-line .txt/.rst documentation
+    # (Django docs/howto/*.txt, docs/topics/*.txt) are NOT classified trivial.
+    # Conservative default: 2 — catches single-line HTML templates and 1–2-line
+    # TXT fixtures without risk of demoting substantive documentation.
+    trivial_doc_max_lines: 2
+
     # Re-export / import-only "navigational" chunks (no implementation substance)
     navigational: 0.35
 
@@ -184,6 +194,18 @@ ranking:
     # real implementation chunks fall outside it (audit: extractor.py / chunk_file never
     # fetched). Fetch a deeper pool in that case so the quality prior has code to surface.
     top_k_unfiltered: 60
+
+    # Over-fetch depth for the pool-entry trivial filter (UPG-15.7).
+    # Before trimming to top_k_unfiltered, the hybrid retrieval fetches this many raw
+    # candidates, drops any that are trivial (is_trivial_chunk == True) and not
+    # forced-inclusion candidates, THEN trims to top_k_unfiltered.  This ensures the
+    # rerank pool of ~60 is filled with real code even on fixture-heavy corpora (e.g.
+    # Django's ~161 1–2-line HTML/TXT templates that otherwise crowd out code).
+    # Rule: pre_filter_fetch_k must be >= top_k_unfiltered.  Setting it to ~200
+    # covers Django's 161 fixture chunks while remaining <0.5% of the 41k-chunk corpus.
+    # The cross-encoder reranker only sees ~top_k_unfiltered (~60) candidates, so latency
+    # is unaffected by this wider initial fetch.
+    pre_filter_fetch_k: 200
 
 indexing:
   # hard cap — prevents single huge chunks diluting embeddings

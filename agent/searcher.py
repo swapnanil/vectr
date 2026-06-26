@@ -14,6 +14,7 @@ from agent.chunk_quality import (
     quality_score,
     query_wants_tests,
     is_doc_intent_query,
+    is_trivial_chunk,
     symbol_identity_boost,
     extract_class_from_content,
     _query_symbol_tokens,
@@ -28,6 +29,7 @@ from agent.config import (
     FORCED_INCLUSION_SHORT_VERB_ALLOWLIST as _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST,
     RERANK_TOP_K as _RERANK_TOP_K,
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
+    RERANK_PRE_FILTER_FETCH_K as _RERANK_PRE_FILTER_FETCH_K,
     DOC_INTENT_SUPPRESS_FORCED_INCLUSION as _DOC_INTENT_SUPPRESS_FORCED_INCLUSION,
 )
 from agent.indexer import CodeIndexer
@@ -204,9 +206,17 @@ class CodeSearcher:
             return [], 0
 
         # Fetch extra candidates when reranking so the reranker has room to reorder.
-        # Go deeper when unfiltered, where doc prose otherwise crowds code out of the pool.
+        # UPG-15.7: for unfiltered queries, over-fetch up to pre_filter_fetch_k raw
+        # candidates, drop trivial chunks at pool-entry (before the cross-encoder runs),
+        # then trim to top_k_unfiltered.  This keeps the rerank pool small (~60) while
+        # ensuring trivial HTML/TXT fixture chunks don't consume the pool slots that
+        # real code needs.  The cross-encoder only ever sees ~top_k_unfiltered candidates.
         if rerank and self._reranker:
-            top_k = _RERANK_TOP_K_UNFILTERED if language is None else _RERANK_TOP_K
+            if language is None:
+                # Over-fetch for the trivial pre-filter; reranker sees ≤ top_k_unfiltered.
+                top_k = _RERANK_PRE_FILTER_FETCH_K
+            else:
+                top_k = _RERANK_TOP_K
         else:
             top_k = n_results * 2
         fetch_n = min(top_k, self._indexer.total_chunks)
@@ -249,6 +259,61 @@ class CodeSearcher:
             merged[cid] = semantic_weight * v + (1.0 - semantic_weight) * b
 
         sorted_ids = sorted(merged, key=lambda x: merged[x], reverse=True)[:fetch_n]
+
+        # Build the content/language lookup from already-fetched data.
+        # Used by the pool-entry trivial filter below and later for result objects.
+        # No extra ChromaDB round-trips: both sources (vec and BM25) were fetched above.
+        id_to_doc: dict[str, str] = dict(zip(vec_ids, vec_docs))
+        id_to_meta: dict[str, dict] = dict(zip(vec_ids, vec_metas))
+        for idx, cid in enumerate(self._bm25_ids):
+            if cid not in id_to_doc:
+                id_to_doc[cid] = self._bm25_docs[idx]
+                id_to_meta[cid] = self._bm25_metas[idx]
+
+        # --- UPG-15.7 (revised): Union-of-signals pool selection with trivial filter ---
+        # Build the rerank pool as the UNION of:
+        #   • the first _RERANK_TOP_K_UNFILTERED non-trivial chunks from the vec-similarity
+        #     ranking (vec-strong/bm25-weak docs like prose howto pages land here), AND
+        #   • the first _RERANK_TOP_K_UNFILTERED non-trivial chunks from the bm25 ranking
+        #     (keyword-exact hits land here).
+        #
+        # Using merged-score order as the sole trim criterion (the previous approach) caused
+        # F2/F18 regressions: a prose doc that is strong on vector but weak on BM25 would be
+        # outranked by keyword-heavy fixture chunks on the blended score and fall outside the
+        # top-60 window before any boost was applied.  The union restores bf223bf semantics
+        # (separate-signal top-K lists) while still dropping trivial fixture chunks.
+        #
+        # Forced-inclusion candidates (added after this point) are never subject to this
+        # filter — they are inserted deliberately.  Only fires for unfiltered queries
+        # (language is None); filtered queries already use the smaller top_k pool.
+        if language is None and rerank and self._reranker:
+            # Vec-signal: iterate vec_ids in descending similarity order
+            vec_non_trivial: list[str] = []
+            for cid in vec_ids:  # already in descending vec-similarity order
+                doc = id_to_doc.get(cid, "")
+                lang = (id_to_meta.get(cid) or {}).get("language", "")
+                if is_trivial_chunk(doc, lang):
+                    continue
+                vec_non_trivial.append(cid)
+                if len(vec_non_trivial) >= _RERANK_TOP_K_UNFILTERED:
+                    break
+
+            # BM25-signal: iterate bm25_scores in descending bm25 order
+            bm25_non_trivial: list[str] = []
+            for cid in sorted(bm25_scores, key=lambda x: bm25_scores[x], reverse=True):
+                doc = id_to_doc.get(cid, "")
+                lang = (id_to_meta.get(cid) or {}).get("language", "")
+                if is_trivial_chunk(doc, lang):
+                    continue
+                bm25_non_trivial.append(cid)
+                if len(bm25_non_trivial) >= _RERANK_TOP_K_UNFILTERED:
+                    break
+
+            # Union the two sets; preserve merged-score order within the union so
+            # downstream code that relies on sorted_ids ordering is unaffected.
+            union_ids = set(vec_non_trivial) | set(bm25_non_trivial)
+            sorted_ids = [cid for cid in sorted_ids if cid in union_ids]
+
         forced_cids: set[str] = set()  # UPG-11.7: chunks added by forced-inclusion
 
         # --- UPG-11.7: Forced-inclusion of exact symbol-name matches ---
@@ -448,13 +513,6 @@ class CodeSearcher:
                         forced_cids.add(cid)
 
         # Build result objects
-        id_to_doc: dict[str, str] = dict(zip(vec_ids, vec_docs))
-        id_to_meta: dict[str, dict] = dict(zip(vec_ids, vec_metas))
-        for idx, cid in enumerate(self._bm25_ids):
-            if cid not in id_to_doc:
-                id_to_doc[cid] = self._bm25_docs[idx]
-                id_to_meta[cid] = self._bm25_metas[idx]
-
         candidates: list[SearchResult] = []
         for cid in sorted_ids:
             doc = id_to_doc.get(cid, "")

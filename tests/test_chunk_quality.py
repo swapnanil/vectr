@@ -651,3 +651,221 @@ class TestDocIntentQueryClassifier:
         assert doc_score > code_score, (
             "Doc prose must score HIGHER on a doc-intent query than a code-intent query."
         )
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.6 — plural prose nouns stopword additions (F20)
+# ---------------------------------------------------------------------------
+
+class TestPluralProseNounStopWords:
+    """UPG-15.6: plural forms of prose nouns already in prog_stopwords.txt must be
+    in SYMBOL_STOP_WORDS when their plural is >=7 chars (passing forced-inclusion
+    min_identifier_len guard) and the plural is a natural-language query noun that
+    also names Django method/property groups.
+
+    F20: 'configure Django settings for production deployment' — 'settings' (8 chars)
+    was not in the stopword list, causing forced-inclusion to promote all .settings
+    properties (MailersHandler.settings, BaseConnectionHandler.settings) to rank 1-2.
+    """
+
+    # Each plural whose singular is already in prog_stopwords.txt and whose
+    # plural passes the min_identifier_len=7 guard.
+    _EXPECTED_PLURAL_STOPWORDS = [
+        "settings",   # plural of 'setting' (already listed); .settings property overload
+        "responses",  # plural of 'response'; prose: "HTTP responses"
+        "processes",  # plural of 'process'; prose: "OS processes"
+        "handlers",   # plural of 'handler'; prose: "event handlers"
+        "backends",   # plural of 'backend'; prose: "database backends"
+    ]
+
+    @pytest.mark.parametrize("word", _EXPECTED_PLURAL_STOPWORDS)
+    def test_plural_is_in_symbol_stop_words(self, word: str) -> None:
+        """Each UPG-15.6 plural must be present in the loaded SYMBOL_STOP_WORDS frozenset."""
+        from agent.config import SYMBOL_STOP_WORDS
+        assert word in SYMBOL_STOP_WORDS, (
+            f"UPG-15.6: '{word}' must be in SYMBOL_STOP_WORDS after prog_stopwords.txt update. "
+            f"Plural prose nouns >=7 chars whose singular is stopworded must also be stopworded "
+            f"to prevent forced-inclusion false positives."
+        )
+
+    @pytest.mark.parametrize("word", _EXPECTED_PLURAL_STOPWORDS)
+    def test_plural_leaf_receives_no_boost(self, word: str) -> None:
+        """UPG-15.6: bare plural leaf must get zero symbol_identity_boost for a
+        natural-language query that names it as a prose noun."""
+        query = f"configure Django {word} for production deployment"
+        tokens = _query_symbol_tokens(query)
+        boost = symbol_identity_boost(word, tokens)
+        assert boost == 0.0, (
+            f"UPG-15.6: symbol_identity_boost('{word}', ...) returned {boost} != 0.0 "
+            f"for query {query!r}. Plural prose-noun stopwords must not be boosted."
+        )
+
+    def test_f20_settings_no_boost_for_prose_query(self) -> None:
+        """F20 acceptance: leaf='settings' must have zero boost for the F20 query."""
+        from agent.config import SYMBOL_STOP_WORDS
+        assert "settings" in SYMBOL_STOP_WORDS, (
+            "UPG-15.6: 'settings' must be in SYMBOL_STOP_WORDS — add it to prog_stopwords.txt"
+        )
+        tokens = _query_symbol_tokens("configure Django settings for production deployment")
+        assert symbol_identity_boost("settings", tokens) == 0.0, (
+            "UPG-15.6/F20: 'settings' leaf must get zero boost on a prose settings query; "
+            "MailersHandler.settings / BaseConnectionHandler.settings must not reach rank 1-2."
+        )
+
+    def test_qualified_settings_still_boosted(self) -> None:
+        """UPG-15.6: qualified 'LazySettings.configure' must still be boosted because
+        the stop-word guard applies only to bare unqualified leaves."""
+        # 'lazysettings' or 'configure' — neither is a stopword, qualified form should boost
+        tokens = _query_symbol_tokens("LazySettings configure production")
+        boost = symbol_identity_boost("LazySettings.configure", tokens)
+        assert boost > 0.0, (
+            "UPG-15.6: qualified 'LazySettings.configure' must still get a positive boost. "
+            "The stopword guard only suppresses bare unqualified leaves like 'settings'."
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.5 — trivial HTML/TXT short-prose classification (F19)
+# ---------------------------------------------------------------------------
+
+class TestTrivialDocChunks:
+    """UPG-15.5 (F19): 1–2-line HTML template fixtures and TXT stubs must be
+    classified as trivial so they stop flooding short natural-language queries
+    (e.g. "session expired logout" was returning "Logged out" at rank 3).
+
+    The fix: is_trivial_chunk() now has a language-aware rule for HTML/markup
+    and plain-text chunks — if the chunk has ≤ TRIVIAL_DOC_MAX_LINES non-blank
+    lines, it is trivial regardless of content.
+    """
+
+    # --- Positive cases: 1–2-line HTML/TXT fixtures ARE trivial ---
+
+    @pytest.mark.parametrize("content,language", [
+        # 1-line bare text HTML template (Django test fixture)
+        ("Logged out", "html"),
+        # 1-line Django template variable
+        ("{{ form }}", "html"),
+        ("{{ user }}", "html"),
+        ("{{ result }}", "html"),
+        # 1-line tag-wrapped HTML
+        ("<h1>Oh no, an error occurred!</h1>", "html"),
+        ("<h1>Archive for {{ week }}.</h1>", "html"),
+        # 1-line TXT stub (Django.egg-info/top_level.txt)
+        ("django", "txt"),
+        # 1-line TXT test fixture
+        ("from-my-custom-list", "txt"),
+        ("file1 in the app dir", "txt"),
+        ("File in otherdir.", "txt"),
+        ("test", "txt"),
+        ("Prefix!", "txt"),
+        # 2-line TXT stub (also trivial — within TRIVIAL_DOC_MAX_LINES=2)
+        ("django\ndjango_extensions", "txt"),
+        # htm alias
+        ("Logged out", "htm"),
+        # text alias (language="text")
+        ("django", "text"),
+        # case-insensitive language normalisation
+        ("Logged out", "HTML"),
+        ("django", "TXT"),
+    ])
+    def test_trivial_html_txt_fixture(self, content: str, language: str) -> None:
+        assert is_trivial_chunk(content, language) is True, (
+            f"UPG-15.5: 1–2-line {language!r} fixture should be trivial but "
+            f"is_trivial_chunk returned False.\nContent: {content!r}"
+        )
+
+    # --- Negative cases: multi-line .txt doc prose is NOT trivial ---
+
+    def test_multiline_txt_doc_not_trivial(self) -> None:
+        """A multi-line RST doc chunk (≥3 non-blank lines) must NOT be trivial.
+
+        This is the critical doc non-regression guard: Django's docs/howto/*.txt
+        and docs/topics/*.txt are chunked into multi-line windows and must stay
+        fully ranked (F2/F18 non-regression).
+        """
+        doc = (
+            "Writing custom model fields\n"
+            "===========================\n"
+            "\n"
+            "Django ships with many built-in model field types.\n"
+            "If those fields don't meet your needs you can write custom model fields.\n"
+            "You need to implement deconstruct() and from_db_value() methods.\n"
+        )
+        assert is_trivial_chunk(doc, "txt") is False, (
+            "UPG-15.5 doc non-regression: multi-line .txt RST doc must NOT be trivial. "
+            "Django docs/howto/custom-model-fields.txt must stay ranked (F2/F18)."
+        )
+
+    def test_multiline_rst_doc_not_trivial(self) -> None:
+        """An RST doc chunk (language='rst') with ≥3 lines is not trivial.
+
+        rst is not in _TRIVIAL_DOC_LANGUAGES so the UPG-15.5 rule doesn't fire;
+        this is an explicit guard to confirm rst docs are unaffected.
+        """
+        doc = (
+            "Sessions\n"
+            "========\n"
+            "Django provides session support, enabling you to store and retrieve\n"
+            "arbitrary data on a per-site-visitor basis.\n"
+        )
+        assert is_trivial_chunk(doc, "rst") is False, (
+            "UPG-15.5: rst doc chunks must remain non-trivial — rst is not in "
+            "_TRIVIAL_DOC_LANGUAGES and must be unaffected by the UPG-15.5 rule."
+        )
+
+    def test_multiline_html_not_trivial(self) -> None:
+        """A 3+-line HTML chunk (e.g. a real template with structure) is not trivial."""
+        html = (
+            "<section>\n"
+            "  <p>A full description paragraph of a Django concept.</p>\n"
+            "  <p>Second paragraph with more detail about the implementation.</p>\n"
+            "</section>\n"
+        )
+        assert is_trivial_chunk(html, "html") is False, (
+            "UPG-15.5: an HTML chunk with > TRIVIAL_DOC_MAX_LINES non-blank lines "
+            "must NOT be trivial."
+        )
+
+    def test_real_code_unaffected(self) -> None:
+        """Python/Rust code chunks are unaffected by the UPG-15.5 rule."""
+        py = "def clear_expired(cls):\n    Session.objects.filter(expire_date__lt=Now()).delete()"
+        assert is_trivial_chunk(py, "python") is False, (
+            "UPG-15.5: real code chunks must NOT be classified trivial."
+        )
+
+    def test_quality_score_trivial_for_1line_html(self) -> None:
+        """quality_score() must return _Q_TRIVIAL for a 1-line HTML fixture."""
+        from agent.config import QUALITY_TRIVIAL
+        score = quality_score("Logged out", file_path="/tests/auth_tests/templates/registration/logged_out.html", language="html")
+        assert score == pytest.approx(QUALITY_TRIVIAL, abs=0.01), (
+            f"UPG-15.5: 1-line HTML fixture quality_score must equal QUALITY_TRIVIAL="
+            f"{QUALITY_TRIVIAL}, got {score}"
+        )
+
+    def test_quality_score_trivial_for_1line_txt(self) -> None:
+        """quality_score() must return _Q_TRIVIAL for a 1-line TXT stub."""
+        from agent.config import QUALITY_TRIVIAL
+        score = quality_score("django", file_path="/Django.egg-info/top_level.txt", language="txt")
+        assert score == pytest.approx(QUALITY_TRIVIAL, abs=0.01), (
+            f"UPG-15.5: 1-line TXT stub quality_score must equal QUALITY_TRIVIAL="
+            f"{QUALITY_TRIVIAL}, got {score}"
+        )
+
+    def test_quality_score_nontrivial_for_multiline_txt_doc(self) -> None:
+        """quality_score() must NOT return _Q_TRIVIAL for multi-line .txt doc."""
+        from agent.config import QUALITY_TRIVIAL
+        doc = (
+            "Writing custom model fields\n"
+            "===========================\n"
+            "Django ships with many built-in model field types.\n"
+            "If those fields don't meet your needs you can write custom model fields.\n"
+        )
+        score = quality_score(doc, file_path="/docs/howto/custom-model-fields.txt", language="txt")
+        assert score != pytest.approx(QUALITY_TRIVIAL, abs=0.01), (
+            f"UPG-15.5 doc non-regression: multi-line .txt doc quality_score must NOT "
+            f"equal QUALITY_TRIVIAL={QUALITY_TRIVIAL}. Docs must stay ranked."
+        )
+        # It should get the doc_prose multiplier, not trivial
+        assert score > QUALITY_TRIVIAL, (
+            "Multi-line .txt doc must score above QUALITY_TRIVIAL."
+        )
