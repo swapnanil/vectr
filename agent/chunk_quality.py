@@ -141,12 +141,19 @@ _CLASS_HEADER_RE = re.compile(r"^[\s]*class\s+\w+[^:]*:\s*$")
 _ATTR_ASSIGN_RE = re.compile(r"^[\s]*\w+\s*(?::[^=]+)?\s*=\s*(.+)$")
 
 # _COMPLEX_RHS_RE: the right-hand side of an assignment is "complex" (carries
-# real semantic signal) when it contains a function call ``(`` or a dotted
-# attribute access ``.``.  An assignment like ``username = forms.CharField(...)``
-# defines a field with a specific type — real code with retrieval value.
-# A "simple" assignment like ``model = Writer`` or ``fields = '__all__'`` is a
-# bare config option that is trivial on its own.
-_COMPLEX_RHS_RE = re.compile(r"[.(]")
+# real semantic signal) when it contains a function CALL or a dotted ATTRIBUTE
+# access.  An assignment like ``username = forms.CharField(...)`` defines a field
+# with a specific type — real code with retrieval value.  A "simple" assignment
+# like ``model = Writer``, ``fields = '__all__'``, or a bare tuple/list literal
+# ``fields = ()`` / ``fields = ('name', 'age')`` is a config option, trivial on
+# its own.  Two signals (either makes the RHS complex):
+#   * a call:  a name/closing-bracket immediately followed by ``(``
+#     (``CharField(``, ``foo()``) — but NOT a grouping/tuple paren ``= (`` where
+#     ``(`` is preceded by whitespace/operator, so ``fields = ('a','b')`` stays
+#     simple.
+#   * dotted attribute access:  an identifier followed by ``.`` (``forms.``,
+#     ``models.CASCADE``) — but NOT a numeric literal like ``1.5`` (digit-led).
+_COMPLEX_RHS_RE = re.compile(r"[\w\]\)]\s*\(|[A-Za-z_]\w*\.")
 
 # Lines that signal real logic in a class body — if any of these appear in the
 # body, the chunk is NOT an attribute-only stub.

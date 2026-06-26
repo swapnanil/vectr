@@ -14,6 +14,7 @@ from agent.chunk_quality import (
     quality_score,
     query_wants_tests,
     is_doc_intent_query,
+    is_doc_language,
     is_trivial_chunk,
     symbol_identity_boost,
     extract_class_from_content,
@@ -33,6 +34,7 @@ from agent.config import (
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
     RERANK_PRE_FILTER_FETCH_K as _RERANK_PRE_FILTER_FETCH_K,
     DOC_INTENT_SUPPRESS_FORCED_INCLUSION as _DOC_INTENT_SUPPRESS_FORCED_INCLUSION,
+    DOC_INTENT_POOL_RESERVE as _DOC_INTENT_POOL_RESERVE,
 )
 from agent.indexer import CodeIndexer
 
@@ -315,6 +317,37 @@ class CodeSearcher:
             # downstream code that relies on sorted_ids ordering is unaffected.
             union_ids = set(vec_non_trivial) | set(bm25_non_trivial)
             sorted_ids = [cid for cid in sorted_ids if cid in union_ids]
+
+            # --- UPG-15.11 / F24,F25: doc-intent pool reservation ---
+            # On a doc-intent query ("how to…", "what is…") the authoritative
+            # documentation file is frequently outranked in BOTH vec and bm25 by a
+            # large population of code/test chunks that lexically match the query's
+            # nouns (e.g. ~40 management-command *.py files for "custom management
+            # command", or 200+ inner ``class Meta:`` test stubs for "model Meta
+            # class").  The doc then never enters the top-_RERANK_TOP_K_UNFILTERED
+            # union above, so the doc-prose multiplier (which only re-weights chunks
+            # already in the pool) cannot reach it.  Reserve up to
+            # _DOC_INTENT_POOL_RESERVE slots for the highest vec-similarity
+            # NON-TRIVIAL documentation-prose chunks not already in the union, so
+            # they reach the cross-encoder and the multiplier can rank them.  Gated
+            # on _is_doc_intent so code queries are unaffected; bounded by the vec
+            # fetch depth (a doc beyond pre_filter_fetch_k cannot be reserved).
+            if _is_doc_intent and _DOC_INTENT_POOL_RESERVE > 0:
+                reserved: list[str] = []
+                for cid in vec_ids:  # descending vec similarity, up to fetch_n
+                    if cid in union_ids:
+                        continue
+                    lang = (id_to_meta.get(cid) or {}).get("language", "")
+                    if not is_doc_language(lang):
+                        continue
+                    if is_trivial_chunk(id_to_doc.get(cid, ""), lang):
+                        continue
+                    reserved.append(cid)
+                    if len(reserved) >= _DOC_INTENT_POOL_RESERVE:
+                        break
+                if reserved:
+                    existing = set(sorted_ids)
+                    sorted_ids = sorted_ids + [c for c in reserved if c not in existing]
 
         forced_cids: set[str] = set()  # UPG-11.7: chunks added by forced-inclusion
 

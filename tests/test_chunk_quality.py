@@ -989,6 +989,12 @@ class TestAttrOnlyClassStub:
         "class Meta:\n    model = Writer\n    fields = '__all__'",
         "class Meta:\n    model = Author\n    fields = '__all__'",
         "class Meta:\n    model = Article\n    fields = '__all__'",
+        # F25 regression: tuple/empty-tuple field literals previously ESCAPED
+        # triviality because the old _COMPLEX_RHS_RE flagged any '(' as a call.
+        # A grouping/tuple paren is NOT a function call → these are stubs.
+        "class Meta:\n    model = StumpJoke\n    fields = ()",
+        "class Meta:\n    model = Writer\n    fields = ('name', 'age')",
+        "class Meta:\n    model = Author\n    exclude = ('id',)",
         # Other simple two-attr stubs
         "class Meta:\n    abstract = True\n    verbose_name = 'Item'",
         "class Meta:\n    ordering = ['-created']\n    verbose_name = 'Post'",

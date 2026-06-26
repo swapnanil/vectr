@@ -128,6 +128,21 @@ ranking:
     # is_doc_intent_query fires; tuned against the django acceptance corpus (F2).
     doc_prose_multiplier: 1.2
 
+    # UPG-15.11 / F24,F25: doc-intent pool reservation depth.  On a doc-intent
+    # query the authoritative documentation file is frequently outranked in BOTH
+    # vector and BM25 by a large population of code/test chunks that lexically
+    # match the query's nouns (e.g. ~40 management-command *.py files for "custom
+    # management command", or 200+ inner `class Meta:` test stubs for "model Meta
+    # class").  The doc then never enters the top_k_unfiltered union, so the
+    # doc_prose_multiplier (which only re-weights chunks already in the pool)
+    # cannot reach it.  Reserve up to this many candidate-pool slots for the
+    # highest vec-similarity NON-TRIVIAL documentation-prose chunks not already in
+    # the union, so they reach the cross-encoder and the multiplier can rank them.
+    # Only fires when is_doc_intent_query() is True, so code queries are
+    # unaffected.  Set 0 to disable.  Bounded by pre_filter_fetch_k (the vec fetch
+    # depth) — a doc beyond that depth still cannot be reserved.
+    pool_reserve: 12
+
     # Anchored-prefix phrases: a query is doc-intent when its lowercased,
     # stripped form STARTS WITH any of these. These mark a question/explanation
     # request, so symbol names in the query describe a topic rather than a
