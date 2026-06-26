@@ -36,6 +36,8 @@ from agent.config import (
     DOC_INTENT_PREFIXES,
     DOC_INTENT_ANY_SUBSTRINGS,
     TRIVIAL_DOC_MAX_LINES as _TRIVIAL_DOC_MAX_LINES,
+    TRIVIAL_ATTR_CLASS_MAX_ATTRS as _TRIVIAL_ATTR_CLASS_MAX_ATTRS,
+    INDEXING_BUILD_ARTIFACT_DIR_SUFFIXES as _BUILD_ARTIFACT_DIR_SUFFIXES,
 )
 
 # A synthetic node_type stamped on re-export / import-only chunks so the ranker
@@ -122,6 +124,45 @@ _DECL_HEADER_RE = re.compile(
     r")\s*$"
 )
 
+# Attribute-assignment-only class body detection (UPG-15.9 / F25).
+# A class header whose body consists ONLY of simple attribute assignments
+# (e.g. ``class Meta:\n    model = Writer\n    fields = '__all__'``) is a
+# configuration stub with no standalone retrieval value.  Guarded to ONLY fire
+# when there is no ``def`` / nested ``class`` / control flow — real small library
+# classes (e.g. ``class Meta`` with a custom method) must survive.
+#
+# _CLASS_HEADER_RE: first meaningful line is a class declaration header.
+_CLASS_HEADER_RE = re.compile(r"^[\s]*class\s+\w+[^:]*:\s*$")
+
+# _ATTR_ASSIGN_RE: a line is an attribute assignment of the form
+# ``identifier = <value>`` or ``identifier: type = <value>`` (Django/dataclass
+# style).  Matches any assignment; combined with _COMPLEX_RHS_RE to detect
+# whether the RHS is a "simple" value (not a function call or dotted access).
+_ATTR_ASSIGN_RE = re.compile(r"^[\s]*\w+\s*(?::[^=]+)?\s*=\s*(.+)$")
+
+# _COMPLEX_RHS_RE: the right-hand side of an assignment is "complex" (carries
+# real semantic signal) when it contains a function call ``(`` or a dotted
+# attribute access ``.``.  An assignment like ``username = forms.CharField(...)``
+# defines a field with a specific type — real code with retrieval value.
+# A "simple" assignment like ``model = Writer`` or ``fields = '__all__'`` is a
+# bare config option that is trivial on its own.
+_COMPLEX_RHS_RE = re.compile(r"[.(]")
+
+# Lines that signal real logic in a class body — if any of these appear in the
+# body, the chunk is NOT an attribute-only stub.
+_HAS_DEF_OR_LOGIC_RE = re.compile(
+    r"""^[\s]*(
+        (async\s+)?def\s          # method definition
+        | class\s                 # nested class
+        | (if|elif|else|for|while|try|except|finally|with|raise|return|yield|assert)\b
+    )""",
+    re.VERBOSE,
+)
+
+# _TRIVIAL_ATTR_CLASS_MAX_ATTRS is imported from agent.config (via config.yaml
+# ranking.quality_priors.trivial_attr_class_max_attrs).  No inline literal here —
+# the config import at the top of this file already binds the name.
+
 
 def _meaningful_lines(content: str) -> list[str]:
     """Lines that are neither blank nor comment/context-prefix lines."""
@@ -190,6 +231,44 @@ def is_trivial_chunk(content: str, language: str = "") -> bool:
         # keeps the chunk alive.
         if _DECL_HEADER_RE.match(lines[0]) and _STUB_BODY_RE.match(lines[1]):
             return True
+
+    # UPG-15.9 / F25: attribute-assignment-only class body with SIMPLE values.
+    # A class whose body is ONLY attribute assignments with no method definitions,
+    # nested classes, control flow, OR complex RHS (function calls, dotted access)
+    # is a configuration stub (e.g. Django's inner ``class Meta:`` with
+    # ``model=X, fields='__all__'``).  200+ such 3-line chunks exist in Django
+    # test files and flood doc-intent queries with zero educational content.
+    #
+    # Guard conditions (ALL must hold to classify as trivial):
+    #   1. First meaningful line is a class declaration header (not a def).
+    #   2. The class body has ≤ _TRIVIAL_ATTR_CLASS_MAX_ATTRS meaningful body lines.
+    #   3. Every body line is an attribute assignment (matches _ATTR_ASSIGN_RE).
+    #   4. NO body line has a complex RHS: no function call ``(`` or dotted ``.``.
+    #      This preserves real Django form/model classes like
+    #      ``username = forms.CharField(...)`` (dotted + parens → complex → kept).
+    #   5. NO body line contains a method def, nested class, or control-flow keyword.
+    #
+    # A class with any method, complex field declaration, or more body lines than
+    # _TRIVIAL_ATTR_CLASS_MAX_ATTRS is NOT trivial — it may be a real form,
+    # dataclass, NamedTuple, or library class.
+    if len(lines) >= 2 and _CLASS_HEADER_RE.match(lines[0]):
+        body_lines = lines[1:]
+        # Require at least 2 body lines: a single-attr-assignment class like
+        # ``class Foo:\n    x = 1`` is kept by the UPG-15.1 invariant (the
+        # two-line stub rule only fires for pass/... stubs; a real assignment
+        # body keeps the chunk alive).  The UPG-15.9 rule targets the
+        # multi-attribute config stubs (class Meta: model=X; fields='__all__').
+        if 1 < len(body_lines) <= _TRIVIAL_ATTR_CLASS_MAX_ATTRS:
+            # Reject immediately if any line has def/class/control flow
+            if not any(_HAS_DEF_OR_LOGIC_RE.match(bl) for bl in body_lines):
+                # Accept only if every body line is a simple attribute assignment
+                # (RHS has no function call parens or dotted attribute access).
+                if all(
+                    (m := _ATTR_ASSIGN_RE.match(bl)) and not _COMPLEX_RHS_RE.search(m.group(1))
+                    for bl in body_lines
+                ):
+                    return True
+
     return False
 
 
@@ -267,6 +346,36 @@ def is_generated_file(file_path: str) -> bool:
     if any(rx.match(name) for rx in _GENERATED_NAME_RES):
         return True
     return any(part.lower() in _GENERATED_DIR_PARTS for part in p.parts)
+
+
+def is_build_artifact_file(file_path: str) -> bool:
+    """True for files inside build-artifact directories (UPG-15.9).
+
+    Detects files whose path contains a directory component that ends with one of
+    the configured build-artifact dir suffixes (e.g. ``.egg-info``, ``.dist-info``).
+    These directories are entirely machine-generated (Python packaging metadata,
+    file-path manifests, PKG-INFO) and contain no educational content — they flood
+    BM25 on module/command identifiers.
+
+    Examples that return True:
+      ``/project/Django.egg-info/SOURCES.txt``
+      ``/project/myapp.egg-info/PKG-INFO``
+      ``/project/mylib-1.0.dist-info/RECORD``
+
+    Real documentation (``docs/howto/*.txt``) is unaffected — ``docs`` does not
+    end with any of the configured suffixes.
+
+    Suffixes are sourced from ``indexing.build_artifact_dir_suffixes`` in
+    ``agent/config.yaml`` via ``config.INDEXING_BUILD_ARTIFACT_DIR_SUFFIXES``.
+    """
+    p = PurePosixPath(file_path.replace("\\", "/"))
+    # Check every directory component (not the filename itself).
+    for part in p.parts[:-1]:
+        part_lower = part.lower()
+        for suffix in _BUILD_ARTIFACT_DIR_SUFFIXES:
+            if part_lower.endswith(suffix):
+                return True
+    return False
 
 
 def is_test_file(file_path: str) -> bool:

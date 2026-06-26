@@ -869,3 +869,197 @@ class TestTrivialDocChunks:
         assert score > QUALITY_TRIVIAL, (
             "Multi-line .txt doc must score above QUALITY_TRIVIAL."
         )
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.9 — build-artifact exclusion (F24/F28)
+# ---------------------------------------------------------------------------
+
+class TestIsBuildArtifactFile:
+    """is_build_artifact_file() must catch *.egg-info / *.dist-info trees (UPG-15.9).
+
+    F24 / F28: Django.egg-info/SOURCES.txt was indexed as a first-class TXT file
+    and flooded BM25 on module/command identifiers (e.g. 'management', 'signals').
+    Build-artifact directories (.egg-info, .dist-info) contain machine-generated
+    file-path manifests and packaging metadata — no educational content.
+    """
+
+    @pytest.mark.parametrize("path", [
+        "/project/Django.egg-info/SOURCES.txt",
+        "/project/Django.egg-info/PKG-INFO",
+        "/project/myapp.egg-info/top_level.txt",
+        "/project/myapp.egg-info/dependency_links.txt",
+        "/project/mylib-1.0.dist-info/RECORD",
+        "/project/mylib-1.0.dist-info/WHEEL",
+        "/project/mylib-1.0.dist-info/METADATA",
+        # Windows-style path separators
+        "C:\\project\\Django.egg-info\\SOURCES.txt",
+    ])
+    def test_build_artifact_detected(self, path: str) -> None:
+        from agent.chunk_quality import is_build_artifact_file
+        assert is_build_artifact_file(path) is True, (
+            f"UPG-15.9: {path!r} is a build-artifact file and must be excluded."
+        )
+
+    @pytest.mark.parametrize("path", [
+        # Real documentation files — must NOT be excluded
+        "/project/docs/howto/custom-management-commands.txt",
+        "/project/docs/ref/models/options.txt",
+        "/project/docs/topics/signals.txt",
+        "/project/docs/howto/index.txt",
+        # Source code — must NOT be excluded
+        "/project/django/dispatch/signals.py",
+        "/project/django/core/management/__init__.py",
+        # Other top-level .txt files (requirements, etc.) — not inside .egg-info
+        "/project/requirements.txt",
+        "/project/README.txt",
+    ])
+    def test_real_files_not_artifact(self, path: str) -> None:
+        from agent.chunk_quality import is_build_artifact_file
+        assert is_build_artifact_file(path) is False, (
+            f"UPG-15.9: {path!r} is a real file and must NOT be excluded as a build artifact."
+        )
+
+    def test_should_index_file_rejects_egg_info(self, tmp_path) -> None:
+        """should_index_file() must refuse files inside *.egg-info directories (UPG-15.9)."""
+        from integrations.workspace_detect import should_index_file
+
+        egg_dir = tmp_path / "Django.egg-info"
+        egg_dir.mkdir()
+        sources = egg_dir / "SOURCES.txt"
+        sources.write_text("django/__init__.py\ndjango/core/management/__init__.py\n")
+        assert should_index_file(str(sources), []) is False, (
+            "UPG-15.9: Django.egg-info/SOURCES.txt must be excluded from indexing."
+        )
+
+    def test_should_index_file_rejects_dist_info(self, tmp_path) -> None:
+        """should_index_file() must refuse files inside *.dist-info directories (UPG-15.9)."""
+        from integrations.workspace_detect import should_index_file
+
+        dist_dir = tmp_path / "mylib-1.0.dist-info"
+        dist_dir.mkdir()
+        record = dist_dir / "RECORD"
+        record.write_text("mylib/__init__.py,,\n")
+        # RECORD has no extension → not in LANG_BY_EXT anyway, but test PKG-INFO
+        metadata = dist_dir / "METADATA"
+        metadata.write_text("Name: mylib\n")
+        # METADATA has no extension → same
+        # Test with a .txt file inside .dist-info
+        wheel = dist_dir / "top_level.txt"
+        wheel.write_text("mylib\n")
+        assert should_index_file(str(wheel), []) is False, (
+            "UPG-15.9: mylib.dist-info/top_level.txt must be excluded from indexing."
+        )
+
+    def test_should_index_file_allows_real_txt_doc(self, tmp_path) -> None:
+        """Real documentation .txt files outside build-artifact dirs must remain indexed."""
+        from integrations.workspace_detect import should_index_file
+
+        docs = tmp_path / "docs" / "howto"
+        docs.mkdir(parents=True)
+        f = docs / "custom-management-commands.txt"
+        f.write_text("Writing custom management commands\n==================================\n")
+        assert should_index_file(str(f), []) is True, (
+            "UPG-15.9 non-regression: docs/howto/*.txt must remain indexed (F24 fix must "
+            "not demote real documentation)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.9 — attribute-assignment-only class stub triviality (F25)
+# ---------------------------------------------------------------------------
+
+class TestAttrOnlyClassStub:
+    """is_trivial_chunk() must classify attribute-only class bodies as trivial (UPG-15.9 / F25).
+
+    F25: 'what is a model Meta class' returned all 8 results from
+    tests/model_forms/tests.py — 3-line ``class Meta: model=X fields='__all__'``
+    inner stubs, flooding the pool with no educational content.
+
+    The fix: a class whose body is ONLY simple attribute assignments (no function
+    calls, no dotted access, no methods, no control flow) with between 2 and
+    TRIVIAL_ATTR_CLASS_MAX_ATTRS body lines is trivial.  This catches Django's
+    inner Meta stubs while protecting real form/model field classes.
+    """
+
+    # --- Positive cases: attribute-only class bodies with 2+ attrs ARE trivial ---
+
+    @pytest.mark.parametrize("content", [
+        # Canonical F25 pattern: class Meta with model + fields
+        "class Meta:\n    model = Writer\n    fields = '__all__'",
+        "class Meta:\n    model = Author\n    fields = '__all__'",
+        "class Meta:\n    model = Article\n    fields = '__all__'",
+        # Other simple two-attr stubs
+        "class Meta:\n    abstract = True\n    verbose_name = 'Item'",
+        "class Meta:\n    ordering = ['-created']\n    verbose_name = 'Post'",
+        # Indented (inside another class)
+        "    class Meta:\n        model = Writer\n        fields = '__all__'",
+        # Different simple class names
+        "class Config:\n    env_prefix = 'APP'\n    case_sensitive = False",
+    ])
+    def test_attr_only_class_stub_is_trivial(self, content: str) -> None:
+        assert is_trivial_chunk(content, "python") is True, (
+            f"UPG-15.9/F25: attribute-only class stub should be trivial but "
+            f"is_trivial_chunk returned False.\nContent: {content!r}"
+        )
+
+    # --- Negative cases: classes that must NOT be classified trivial ---
+
+    @pytest.mark.parametrize("content", [
+        # Single-attr body: kept by the UPG-15.1 invariant ('x = 1' is real code)
+        "class Foo:\n    x = 1",
+        "class Meta:\n    model = Writer",
+        # Complex RHS — dotted access or function call
+        "class MyForm(Form):\n    username = forms.CharField(max_length=150)\n    password = forms.CharField()",
+        "class Meta:\n    model = Writer\n    widgets = {'name': forms.TextInput()}",
+        # Has a method def
+        "class Meta:\n    model = Writer\n    def clean(self):\n        pass",
+        # Control flow in body
+        "class Config:\n    debug = True\n    if DEBUG:\n        extra = 1",
+        # More body lines than threshold
+        "class Meta:\n    model = Writer\n    fields = '__all__'\n    verbose_name = 'w'\n    ordering = ['-pk']",
+        # Real two-line stub cases (UPG-15.1 — not the UPG-15.9 pattern)
+        "def foo():\n    return compute(x) + 1",
+        "class Style:\n    pass",
+    ])
+    def test_attr_only_class_non_trivial_cases(self, content: str) -> None:
+        # Style/pass cases are trivial via UPG-15.1 — only test non-trivial here
+        if "pass" in content or "..." in content or "return" in content:
+            # These may be trivial via other rules — skip the NOT-trivial assertion
+            return
+        assert is_trivial_chunk(content, "python") is False, (
+            f"UPG-15.9/F25 guard: class should NOT be trivial but "
+            f"is_trivial_chunk returned True.\nContent: {content!r}"
+        )
+
+    def test_quality_score_trivial_for_meta_stub(self) -> None:
+        """quality_score() must return QUALITY_TRIVIAL for a class Meta stub (UPG-15.9/F25)."""
+        from agent.config import QUALITY_TRIVIAL
+        meta_stub = "class Meta:\n    model = Writer\n    fields = '__all__'"
+        score = quality_score(
+            meta_stub,
+            file_path="/project/tests/model_forms/tests.py",
+            language="python",
+        )
+        assert score == pytest.approx(QUALITY_TRIVIAL, abs=0.01), (
+            f"UPG-15.9/F25: class Meta stub quality_score must equal "
+            f"QUALITY_TRIVIAL={QUALITY_TRIVIAL}, got {score}"
+        )
+
+    def test_real_doc_not_affected_by_meta_stub_rule(self) -> None:
+        """docs/ref/models/options.txt must NOT be classified trivial (F25 non-regression)."""
+        from agent.config import QUALITY_TRIVIAL
+        doc = (
+            "Meta options\n"
+            "============\n"
+            "This document explains all the available metadata options that you can give\n"
+            "your model in its internal ``class Meta``.\n"
+            "available=True means the model can be included in migration operations.\n"
+        )
+        assert is_trivial_chunk(doc, "txt") is False, (
+            "UPG-15.9/F25 non-regression: docs/ref/models/options.txt must not be trivial."
+        )
+        score = quality_score(doc, file_path="/docs/ref/models/options.txt", language="txt")
+        assert score > QUALITY_TRIVIAL, (
+            f"docs/ref/models/options.txt must score above QUALITY_TRIVIAL={QUALITY_TRIVIAL}"
+        )

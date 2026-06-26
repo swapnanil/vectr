@@ -4,7 +4,7 @@ from __future__ import annotations
 import fnmatch
 from pathlib import Path
 
-from agent.chunk_quality import is_generated_file, is_vectr_config_file
+from agent.chunk_quality import is_generated_file, is_vectr_config_file, is_build_artifact_file
 from agent.indexer import LANG_BY_EXT
 
 _SUPPORTED_EXTS = set(LANG_BY_EXT.keys())
@@ -90,7 +90,10 @@ def should_index_file(
 
     # UPG-1.3: never index vectr's own injected IDE-config files, nor
     # machine-generated/vendored files (lookup tables, protobuf, minified).
-    if is_vectr_config_file(file_path) or is_generated_file(file_path):
+    # UPG-15.9: never index files inside build-artifact directories (*.egg-info,
+    # *.dist-info) — they contain only file-path manifests and packaging metadata
+    # with no educational content (SOURCES.txt, PKG-INFO flood BM25 on identifiers).
+    if is_vectr_config_file(file_path) or is_generated_file(file_path) or is_build_artifact_file(file_path):
         return False
 
     excluded = _ALWAYS_SKIP | (extra_excluded_dirs or set())
