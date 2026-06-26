@@ -81,6 +81,30 @@ ranking:
       - delete
       - update
 
+    # UPG-15.8 / F22/F23/F26: Per-token cap on same-leaf forced-inclusion candidates
+    # injected by a single short-verb allowlist token.  Without this cap, a query
+    # containing 'delete', 'get', 'create', or 'update' can inject 50+ same-leaf
+    # chunks (cache backends, session backends, storage adapters …) that all pass
+    # vec_sim_floor=0.52 due to structural resemblance, flooding the rerank pool and
+    # burying the canonical ORM/DB method (QuerySet.delete, QuerySet.get, etc.).
+    # A small cap (default 3) allows the top-scoring forced candidates through (the
+    # ones the sym_boost and cross-encoder will most likely promote) while preventing
+    # the flood.  Set to 0 to disable the per-token cap (reverts to old behaviour).
+    # Applies only to short-verb tokens; compound identifiers (with "_") are not
+    # capped because they are unconditional and already specific.
+    short_verb_max_per_token: 3
+
+    # UPG-15.8 / F27: Exclude all-uppercase short-verb query tokens from triggering
+    # forced-inclusion.  HTTP method names (GET, POST, PUT, DELETE, PATCH) are
+    # conventionally written in ALL-CAPS in natural-language queries and documentation.
+    # When 'GET' appears in a query like 'request.GET POST data', it names an HTTP
+    # method, not a Python .get() call — but FI lowercases it to 'get' and floods
+    # the pool with cache-backend .get() methods.  Setting this to true prevents
+    # any short-verb token from triggering FI when the user wrote it exclusively in
+    # ALL-CAPS (i.e. the token appears nowhere in the query in lowercase or mixed
+    # case).  Lowercase 'get' in "get object by primary key" still triggers normally.
+    short_verb_allcaps_excluded: true
+
   doc_intent:
     # When the query is doc-intent (starts with "how to", "what is", "explain",
     # "tutorial", or has a why/how question shape), suppress forced-inclusion so
@@ -186,6 +210,34 @@ ranking:
     # bodies with very few meaningful lines
     short_penalty: 0.80
 
+    # Maximum number of attribute-assignment body lines for an attribute-only
+    # class body to be classified as trivial by is_trivial_chunk() (UPG-15.9 / F25).
+    # A ``class Meta:`` inner stub with ≤ this many attribute-assignment body lines
+    # and NO method definitions / control flow is trivial — it is a configuration
+    # stub, not a real class definition.  Django test files have 200+ such 3-line
+    # stubs (class Meta: / model = X / fields = '__all__') that flood doc-intent
+    # queries.  Real small library classes with more attributes or any method body
+    # are unaffected.  Conservative default 3: catches the dominant Meta stub
+    # pattern without risk of demoting real dataclass-style classes.
+    trivial_attr_class_max_attrs: 3
+
+  locate_ranking:
+    # UPG-15.10: scope-depth + line-span signals for locate ranking.
+    # These penalise class/function definitions that are buried inside function
+    # bodies (inner test-scope defs) and reward large, substantive definitions.
+
+    # Line-span threshold (in lines) above which a symbol definition is considered
+    # "large" — typically a canonical library class or function.  Symbols with
+    # end_line - start_line >= this value get the best span bucket (0).
+    # Django's Model base class has ~1400 lines; real functions are ≥10 lines.
+    # Test-inner stubs are typically 2–5 lines.
+    large_span_threshold: 50
+
+    # Line-span threshold below which a symbol definition is considered "tiny" —
+    # a stub or inner test class.  Symbols with span < this value get the worst
+    # span bucket (2); spans in [small, large) get bucket 1.
+    small_span_threshold: 10
+
   rerank:
     # rerank this many hybrid candidates before trimming to n_results
     top_k: 40
@@ -213,6 +265,19 @@ indexing:
 
   # lines kept for class-level chunk (sig + docstring + attrs)
   class_header_lines: 40
+
+  # Build-artifact directories excluded from indexing at file-walk time (UPG-15.9).
+  # Any path component that ENDS WITH one of these suffixes is treated as a build
+  # artifact directory and every file inside it is excluded.  This catches Python
+  # egg-info directories (e.g. Django.egg-info/, mypackage.egg-info/) whose
+  # SOURCES.txt / PKG-INFO / *.txt files are plain file-path listings with no
+  # educational content but high BM25 IDF on module/command identifiers.
+  # Rule: suffix match on each path part — "Django.egg-info" ends with ".egg-info".
+  # Do NOT widen to cover real documentation dirs (docs/, howto/) — only build
+  # artifacts whose entire directory is machine-generated have no index value.
+  build_artifact_dir_suffixes:
+    - ".egg-info"
+    - ".dist-info"
 
 output:
   # Number of lines returned as a snippet with each symbol location.

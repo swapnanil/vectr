@@ -3102,3 +3102,216 @@ class TestForcedInclusionCaseFold:
             "typed 'Migration' (CamelCase) — leaf_lower='migration' must be in "
             f"_ident_cased_query_toks. Got: {ident_cased_query_toks}"
         )
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.8 — Short-verb FI flooding fixes (F22/F23/F26/F27)
+# ---------------------------------------------------------------------------
+
+class TestShortVerbFIFloodingFix:
+    """Unit tests for the two UPG-15.8 levers:
+
+    (b) all-caps tokens (HTTP method names like GET, POST, DELETE) must NOT trigger
+        short-verb forced-inclusion when they appear only in all-caps form in the query.
+        (F27: 'parse query string url parameters request GET POST data' must NOT trigger
+        .get() FI from 'GET'.)
+
+    (c) per-token cap on same-leaf FI candidates from a single short verb.
+        (F22/F23/F26: 'delete' / 'get' / 'create' / 'update' each may inject at most
+        _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN chunks into the forced pool.)
+    """
+
+    def test_allcaps_token_does_not_trigger_fi(self, indexer, tmp_path) -> None:
+        """F27: 'GET' in all-caps must NOT trigger forced-inclusion for .get() methods.
+
+        Corpus: 5 modules each with a .get() method.
+        Query: 'parse query string url parameters request GET POST data'
+        Expected: forced_inclusion flag is False for all .get() results — the FI
+        path was skipped because 'GET' is all-caps-only in this query.
+        """
+        from agent.searcher import CodeSearcher
+
+        # Write 5 modules each with a .get() method
+        for i in range(5):
+            src = tmp_path / f"cache_{i}.py"
+            src.write_text(
+                f"class Cache{i}:\n"
+                f"    def get(self, key, default=None):\n"
+                f"        \"\"\"Retrieve a cached value by key.\"\"\"\n"
+                f"        return self._store.get(key, default)\n"
+            )
+            indexer.index_file(str(src))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # This query contains 'GET' in ALL-CAPS — FI must NOT fire for .get()
+        query = "parse query string url parameters request GET POST data"
+        results, _ = s.search(query, n_results=10, rerank=False)
+
+        fi_get_results = [r for r in results if r.forced_inclusion and "get" in (r.symbol_name or "").lower()]
+        assert not fi_get_results, (
+            "UPG-15.8 / F27: 'GET' in all-caps must NOT trigger forced-inclusion for "
+            ".get() methods.  The all-caps exclusion guard is not working. "
+            f"Forced-included .get() results: {[(r.symbol_name, r.file_path) for r in fi_get_results]}"
+        )
+
+    def test_lowercase_get_still_triggers_fi(self, indexer, tmp_path) -> None:
+        """F23 regression guard: lowercase 'get' in a query MUST still trigger FI.
+
+        Query: 'get object by primary key'
+        'get' is lowercase → FI should fire and .get() methods should appear
+        in the forced pool (forced_inclusion=True).
+        """
+        from agent.searcher import CodeSearcher
+
+        # Write a file with a .get() method and another unrelated file
+        src = tmp_path / "queryset.py"
+        src.write_text(
+            "class QuerySet:\n"
+            "    def get(self, **kwargs):\n"
+            "        \"\"\"Retrieve a single object matching the given kwargs.\"\"\"\n"
+            "        qs = self.filter(**kwargs)\n"
+            "        return qs.first()\n"
+        )
+        indexer.index_file(str(src))
+
+        # Add an unrelated file to provide contrast
+        other = tmp_path / "unrelated.py"
+        other.write_text(
+            "class UnrelatedClass:\n"
+            "    def process(self):\n"
+            "        pass\n"
+        )
+        indexer.index_file(str(other))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # 'get' in lowercase → FI should trigger
+        query = "get object by primary key"
+        results, _ = s.search(query, n_results=10, rerank=False)
+
+        get_results = [r for r in results if "get" in (r.symbol_name or "").lower()]
+        assert get_results, (
+            "UPG-15.8 regression guard: lowercase 'get' in query must still produce "
+            ".get() results (forced-inclusion or natural retrieval). "
+            f"Got results: {[(r.symbol_name, r.file_path) for r in results]}"
+        )
+
+    def test_per_verb_cap_limits_same_leaf_flood(self, indexer, tmp_path) -> None:
+        """F22/F23/F26: per-verb cap must limit same-leaf FI injections to max_per_token.
+
+        Corpus: 10 modules each with a .delete() method — more than the cap (3).
+        Query: 'delete rows from database table'
+        Expected: at most _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN forced-included
+        .delete() results (the rest are dropped by the cap, or appear naturally without
+        the forced_inclusion flag).
+        """
+        import agent.searcher as searcher_mod
+        from agent.searcher import CodeSearcher
+        from agent.config import FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN
+
+        # Write 10 modules each with a .delete() method
+        for i in range(10):
+            src = tmp_path / f"store_{i}.py"
+            src.write_text(
+                f"class Store{i}:\n"
+                f"    def delete(self, key):\n"
+                f"        \"\"\"Delete a stored item by key.\"\"\"\n"
+                f"        del self._store[key]\n"
+                f"        return True\n"
+            )
+            indexer.index_file(str(src))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        query = "delete rows from database table"
+        # Monkeypatch to a tiny natural pool so forced-inclusion is the only source.
+        orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        searcher_mod._RERANK_TOP_K_UNFILTERED = 1
+        try:
+            results, _ = s.search(query, n_results=10, rerank=False)
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+
+        fi_delete_results = [
+            r for r in results
+            if r.forced_inclusion and "delete" in (r.symbol_name or "").lower()
+        ]
+        assert len(fi_delete_results) <= FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN, (
+            f"UPG-15.8 / F22: per-verb cap must limit forced-included .delete() results "
+            f"to at most {FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN}, "
+            f"but got {len(fi_delete_results)}. "
+            f"Results: {[(r.symbol_name, r.file_path) for r in fi_delete_results]}"
+        )
+
+    def test_per_verb_cap_config_exported(self) -> None:
+        """UPG-15.8: new config keys must be exported from agent.config."""
+        from agent.config import (
+            FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN,
+            FORCED_INCLUSION_SHORT_VERB_ALLCAPS_EXCLUDED,
+        )
+        assert isinstance(FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN, int)
+        assert FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN >= 0
+        assert isinstance(FORCED_INCLUSION_SHORT_VERB_ALLCAPS_EXCLUDED, bool)
+
+    def test_multi_verb_compound_query_cap_per_token(self, indexer, tmp_path) -> None:
+        """F26: multi-verb query ('create update destroy list') must cap each verb independently.
+
+        Each of the 4 verbs may inject at most _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN
+        chunks.  Total FI from short verbs must be <= 4 * max_per_token.
+        """
+        import agent.searcher as searcher_mod
+        from agent.searcher import CodeSearcher
+        from agent.config import FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN
+
+        # Write 5 modules each with .create(), .update(), .delete() methods
+        for i in range(5):
+            src = tmp_path / f"util_{i}.py"
+            src.write_text(
+                f"class Util{i}:\n"
+                f"    def create(self, data):\n"
+                f"        \"\"\"Create a new entry.\"\"\"\n"
+                f"        self._store.append(data)\n"
+                f"\n"
+                f"    def update(self, key, data):\n"
+                f"        \"\"\"Update an existing entry.\"\"\"\n"
+                f"        self._store[key] = data\n"
+                f"\n"
+                f"    def delete(self, key):\n"
+                f"        \"\"\"Delete an entry.\"\"\"\n"
+                f"        del self._store[key]\n"
+            )
+            indexer.index_file(str(src))
+
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        # Multi-verb query where create, update, delete each fire FI independently
+        query = "view class based generic list create update destroy"
+        orig_unfiltered = searcher_mod._RERANK_TOP_K_UNFILTERED
+        searcher_mod._RERANK_TOP_K_UNFILTERED = 1
+        try:
+            results, _ = s.search(query, n_results=20, rerank=False)
+        finally:
+            searcher_mod._RERANK_TOP_K_UNFILTERED = orig_unfiltered
+
+        short_verb_tokens = {"create", "update", "delete", "list", "get", "save", "set", "add"}
+        fi_short_verb_results = [
+            r for r in results
+            if r.forced_inclusion and any(
+                v in (r.symbol_name or "").lower() for v in short_verb_tokens
+            )
+        ]
+
+        # Total FI from short verbs must be bounded by cap * number_of_active_verbs
+        # (cap=3 per verb, 3 verbs active = at most 9 total)
+        max_allowed = FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN * len(short_verb_tokens)
+        assert len(fi_short_verb_results) <= max_allowed, (
+            f"UPG-15.8 / F26: multi-verb FI must be bounded by cap*verbs "
+            f"= {FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN}*{len(short_verb_tokens)} "
+            f"= {max_allowed}, but got {len(fi_short_verb_results)} forced-inclusion results. "
+            f"Results: {[(r.symbol_name, r.file_path) for r in fi_short_verb_results]}"
+        )

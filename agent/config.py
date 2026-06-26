@@ -40,6 +40,19 @@ FORCED_INCLUSION_SHORT_VERB_ALLOWLIST : frozenset[str]
     "create", "delete", "update" commonly name ORM/API methods that a user's
     natural-language query genuinely targets.
 
+FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN : int
+    Per-token cap on same-leaf forced-inclusion candidates injected by a single
+    short-verb allowlist token (UPG-15.8 / F22/F23/F26).  Prevents a single verb
+    ("delete", "get", "create") from flooding the rerank pool with dozens of
+    same-named methods from unrelated subsystems (cache backends, session adapters).
+    Set to 0 to disable. Default 3.
+
+FORCED_INCLUSION_SHORT_VERB_ALLCAPS_EXCLUDED : bool
+    When True, all-uppercase query tokens (e.g. "GET", "POST", "DELETE") do NOT
+    trigger short-verb forced-inclusion (UPG-15.8 / F27).  HTTP method names are
+    conventionally written ALL-CAPS and should not be confused with Python method
+    calls. Default True.
+
 QUALITY_TRIVIAL : float
     Quality prior for bare stub chunks (UPG-12.1).
 
@@ -101,6 +114,17 @@ EVICTION_RETRIEVED_TOKEN_GATE : int
     Minimum accumulated retrieved-token estimate since the last auto-eviction hint
     before auto_eviction_hint() will emit. Suppresses the hint on bursts of tiny
     searches that contribute negligible context pressure (UPG-11.15).
+
+LOCATE_LARGE_SPAN_THRESHOLD : int
+    Line-span (end_line - start_line) at or above which a located symbol is
+    considered "large" — typically a canonical library class or function (UPG-15.10).
+    Symbols with span >= this value get the best (lowest) span bucket in locate
+    ranking, so canonical 1000+ line base classes rank before tiny test stubs.
+
+LOCATE_SMALL_SPAN_THRESHOLD : int
+    Line-span below which a located symbol is considered "tiny" — a stub or inner
+    test class (UPG-15.10). Symbols with span < this value get the worst (highest)
+    span bucket in locate ranking, penalising 2–5-line test-inner stub classes.
 
 DOC_INTENT_SUPPRESS_FORCED_INCLUSION : bool
     When True (default), suppress forced-inclusion for doc-intent queries so that
@@ -192,6 +216,8 @@ FORCED_INCLUSION_VEC_SIM_FLOOR: float = float(_fi_cfg["vec_sim_floor"])
 FORCED_INCLUSION_SHORT_VERB_ALLOWLIST: frozenset[str] = frozenset(
     str(v).lower() for v in _fi_cfg["short_verb_allowlist"]
 )
+FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN: int = int(_fi_cfg["short_verb_max_per_token"])
+FORCED_INCLUSION_SHORT_VERB_ALLCAPS_EXCLUDED: bool = bool(_fi_cfg["short_verb_allcaps_excluded"])
 
 # ---------------------------------------------------------------------------
 # Doc-intent query classification (UPG-11.11)
@@ -219,6 +245,16 @@ QUALITY_TEST_DEPRIORITISED: float = float(_qp_cfg["test_deprioritised"])
 QUALITY_DOC_PROSE: float = float(_qp_cfg["doc_prose"])
 QUALITY_SHORT_PENALTY: float = float(_qp_cfg["short_penalty"])
 TRIVIAL_DOC_MAX_LINES: int = int(_qp_cfg["trivial_doc_max_lines"])
+TRIVIAL_ATTR_CLASS_MAX_ATTRS: int = int(_qp_cfg["trivial_attr_class_max_attrs"])
+
+# ---------------------------------------------------------------------------
+# Locate ranking tunables (UPG-15.10)
+# ---------------------------------------------------------------------------
+
+_lr_cfg: dict[str, Any] = _cfg["ranking"]["locate_ranking"]
+
+LOCATE_LARGE_SPAN_THRESHOLD: int = int(_lr_cfg["large_span_threshold"])
+LOCATE_SMALL_SPAN_THRESHOLD: int = int(_lr_cfg["small_span_threshold"])
 
 # ---------------------------------------------------------------------------
 # Rerank pool sizes (UPG-12.1)
@@ -238,6 +274,9 @@ _idx_cfg: dict[str, Any] = _cfg["indexing"]
 
 INDEXING_MAX_CHUNK_LINES: int = int(_idx_cfg["max_chunk_lines"])
 INDEXING_CLASS_HEADER_LINES: int = int(_idx_cfg["class_header_lines"])
+INDEXING_BUILD_ARTIFACT_DIR_SUFFIXES: tuple[str, ...] = tuple(
+    str(s).lower() for s in _idx_cfg["build_artifact_dir_suffixes"]
+)
 
 # ---------------------------------------------------------------------------
 # Output tunables (UPG-12.1)

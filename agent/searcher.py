@@ -27,6 +27,8 @@ from agent.config import (
     FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR as _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR,
     FORCED_INCLUSION_VEC_SIM_FLOOR as _FORCED_INCLUSION_VEC_SIM_FLOOR,
     FORCED_INCLUSION_SHORT_VERB_ALLOWLIST as _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST,
+    FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN as _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN,
+    FORCED_INCLUSION_SHORT_VERB_ALLCAPS_EXCLUDED as _FORCED_INCLUSION_SHORT_VERB_ALLCAPS_EXCLUDED,
     RERANK_TOP_K as _RERANK_TOP_K,
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
     RERANK_PRE_FILTER_FETCH_K as _RERANK_PRE_FILTER_FETCH_K,
@@ -389,10 +391,29 @@ class CodeSearcher:
                 for tok in re.split(r"[^a-zA-Z0-9_]+", query)
                 if len(tok) >= 2 and ("_" in tok or any(c.isupper() for c in tok))
             }
+            # UPG-15.8 / F27: Build the set of query tokens that appear EXCLUSIVELY in
+            # ALL-CAPS.  HTTP method names (GET, POST, PUT, DELETE, PATCH) are written
+            # ALL-CAPS in natural language ("request GET POST data") and should not be
+            # confused with Python method calls .get() / .delete().  A token is "all-caps
+            # only" when: (a) it exists as all-uppercase in the raw query, AND (b) it
+            # does NOT appear as lowercase (or mixed-case) anywhere in the raw query.
+            # This way "GET" in F27 is excluded, but "get" in F23 is not.
+            _raw_query_words = re.split(r"[^a-zA-Z0-9_]+", query)
+            _allcaps_only_lower: set[str] = set()
+            if _FORCED_INCLUSION_SHORT_VERB_ALLCAPS_EXCLUDED:
+                _has_lowercase = {
+                    tok.lower()
+                    for tok in _raw_query_words
+                    if len(tok) >= 2 and not tok.isupper()
+                }
+                for tok in _raw_query_words:
+                    if len(tok) >= 2 and tok.isupper() and tok.lower() not in _has_lowercase:
+                        _allcaps_only_lower.add(tok.lower())
             for tok in _all_query_sym_toks:
                 if (
                     tok in _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST
                     and tok in _standalone_query_words
+                    and tok not in _allcaps_only_lower  # UPG-15.8 / F27: skip all-caps HTTP verbs
                 ):
                     sym_tokens_for_inclusion.add(tok)
             if sym_tokens_for_inclusion:
@@ -423,7 +444,9 @@ class CodeSearcher:
                 # (which need the relevance gate) from compound (unconditional).
                 # raw_non_compound: list of (idx, cid, leaf) for gate checking.
                 raw_non_compound: list[tuple[int, str, str]] = []
-                confirmed_forced: list[tuple[float, str]] = []  # (pseudo_score, cid)
+                # confirmed_forced: (pseudo_score, cid, leaf_lower)
+                # leaf_lower is used for per-verb cap in commit step (UPG-15.8 / F22/F23/F26).
+                confirmed_forced: list[tuple[float, str, str]] = []
 
                 for idx, meta in enumerate(self._bm25_metas):
                     if len(raw_non_compound) + len(confirmed_forced) >= _FORCED_INCLUSION_MAX:
@@ -457,7 +480,7 @@ class CodeSearcher:
                             class_ctx = extract_class_from_content(doc)
                             if class_ctx:
                                 eff_sym = f"{class_ctx}.{eff_sym}"
-                        confirmed_forced.append((symbol_identity_boost(eff_sym, all_query_sym_tokens), cid))
+                        confirmed_forced.append((symbol_identity_boost(eff_sym, all_query_sym_tokens), cid, leaf_lower))
                     else:
                         # Non-compound identifier: apply BM25-without-trigger as a
                         # fast-reject filter.  Chunks with near-zero BM25 score for
@@ -500,17 +523,35 @@ class CodeSearcher:
                             class_ctx = extract_class_from_content(doc)
                             if class_ctx:
                                 eff_sym = f"{class_ctx}.{eff_sym}"
-                        confirmed_forced.append((symbol_identity_boost(eff_sym, all_query_sym_tokens), cid))
+                        leaf_lower_nc = leaf.lower()
+                        confirmed_forced.append((symbol_identity_boost(eff_sym, all_query_sym_tokens), cid, leaf_lower_nc))
 
                 # Sort and commit all confirmed forced candidates.
+                # UPG-15.8 / F22/F23/F26: Apply per-token cap for short-verb triggered
+                # candidates.  After sorting by pseudo_score desc, allow at most
+                # _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN chunks per short-verb leaf.
+                # Compound identifiers (with "_") are not capped — they are already
+                # specific enough that flooding is not a concern.
                 forced_candidates = confirmed_forced
                 forced_candidates.sort(key=lambda t: t[0], reverse=True)
-                for pseudo_score, cid in forced_candidates:
-                    if cid not in sorted_set:
-                        merged[cid] = pseudo_score
-                        sorted_ids.append(cid)
-                        sorted_set.add(cid)
-                        forced_cids.add(cid)
+                _short_verb_token_counts: dict[str, int] = {}
+                for pseudo_score, cid, leaf_lower_c in forced_candidates:
+                    if cid in sorted_set:
+                        continue
+                    # Apply per-token cap only to short-verb tokens (no underscore).
+                    if (
+                        "_" not in leaf_lower_c
+                        and leaf_lower_c in _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST
+                        and _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN > 0
+                    ):
+                        count = _short_verb_token_counts.get(leaf_lower_c, 0)
+                        if count >= _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN:
+                            continue  # cap reached for this short-verb token
+                        _short_verb_token_counts[leaf_lower_c] = count + 1
+                    merged[cid] = pseudo_score
+                    sorted_ids.append(cid)
+                    sorted_set.add(cid)
+                    forced_cids.add(cid)
 
         # Build result objects
         candidates: list[SearchResult] = []
