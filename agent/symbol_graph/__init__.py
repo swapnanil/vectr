@@ -70,6 +70,8 @@ from agent.symbol_graph._graph import (
     _levenshtein,
     _get_imported_files,
     _partial_match_key,
+    _locate_scope_depth_from_lines,
+    _locate_scope_depth_batch,
 )
 
 __all__ = [
@@ -90,6 +92,8 @@ __all__ = [
     # Private names accessed by tests / internal callers
     "_levenshtein",
     "_partial_match_key",
+    "_locate_scope_depth_from_lines",
+    "_locate_scope_depth_batch",
     "_extract_routes",
     "_get_imported_files",
     "_get_parser",

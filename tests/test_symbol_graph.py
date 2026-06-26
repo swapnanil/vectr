@@ -32,6 +32,8 @@ from agent.symbol_graph import (
     extract_symbols_from_file,
     _levenshtein,
     _partial_match_key,
+    _locate_scope_depth_from_lines,
+    _locate_scope_depth_batch,
 )
 import agent.symbol_graph as _sgmod
 from tests.conftest import make_py
@@ -1650,3 +1652,190 @@ class TestQualifiedLocateUPG1110b:
         text = g.format_locate_l2_for_llm(result)
         assert "Field.deconstruct" in text, \
             f"Qualified name not in formatted output:\n{text}"
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.10 — locate: canonical library defs rank before inner test-scope stubs
+#
+# Acceptance case (F29): vectr_locate('Model') must return the canonical
+# top-level library definition (e.g. django/db/models/base.py:Model, ~1400 lines)
+# in the top-5, not only inner `class Model(models.Model):` stubs defined inside
+# test method bodies in test files.
+#
+# Ranking signals added (in order of discrimination power, after kind):
+#   1. scope_depth  — 0 = top-level, 1+ = inside a function body
+#   2. span_bucket  — 0 = large (≥50 lines), 1 = medium, 2 = tiny (<10 lines)
+# Both signals penalise inner test-scope stubs relative to canonical defs.
+# ---------------------------------------------------------------------------
+
+class TestLocateRankingUPG1510:
+    """Locate canonical library defs before inner test-scope stubs (UPG-15.10)."""
+
+    # --- scope depth unit tests ---
+
+    def test_scope_depth_top_level_class(self, tmp_path) -> None:
+        """A class at module level has scope_depth=0."""
+        lines = [
+            "class Model:",
+            "    pass",
+        ]
+        depth = _locate_scope_depth_from_lines(lines, start_line=1)
+        assert depth == 0, f"Top-level class must have scope_depth=0, got {depth}"
+
+    def test_scope_depth_class_inside_method(self, tmp_path) -> None:
+        """A class defined inside a method body has scope_depth=1."""
+        lines = [
+            "class TestModelChecks:",
+            "    def test_invalid_model(self):",
+            "        class Model(models.Model):",
+            "            pass",
+        ]
+        # 'class Model' starts at line 3 (1-indexed)
+        depth = _locate_scope_depth_from_lines(lines, start_line=3)
+        assert depth == 1, f"Class inside a method must have scope_depth=1, got {depth}"
+
+    def test_scope_depth_class_inside_nested_functions(self, tmp_path) -> None:
+        """A class inside two nested function calls has scope_depth=2."""
+        lines = [
+            "def outer():",
+            "    def inner():",
+            "        class Stub:",
+            "            pass",
+        ]
+        depth = _locate_scope_depth_from_lines(lines, start_line=3)
+        assert depth == 2, f"Class inside two defs must have scope_depth=2, got {depth}"
+
+    def test_scope_depth_top_level_fast_path(self) -> None:
+        """Symbols at indent=0 return 0 without scanning (fast path)."""
+        lines = ["class TopLevel:", "    x = 1"]
+        depth = _locate_scope_depth_from_lines(lines, start_line=1)
+        assert depth == 0
+
+    def test_scope_depth_empty_lines(self) -> None:
+        """Empty lines list or out-of-range start_line returns 0."""
+        assert _locate_scope_depth_from_lines([], 1) == 0
+        assert _locate_scope_depth_from_lines(["class A: pass"], 0) == 0
+
+    # --- partial_match_key unit tests with scope_depth signal ---
+
+    def test_partial_match_key_scope_depth_penalised(self) -> None:
+        """A row with scope_depth=1 ranks below scope_depth=0 all else equal."""
+        row_canonical = {
+            "name": "Model", "kind": "class",
+            "file_path": "django/db/models/base.py",
+            "start_line": 1, "end_line": 100,
+        }
+        row_inner = {
+            "name": "Model", "kind": "class",
+            "file_path": "tests/check_framework/test_model_checks.py",
+            "start_line": 20, "end_line": 22,
+        }
+        key_canonical = _partial_match_key(row_canonical, "model", scope_depth=0)
+        key_inner = _partial_match_key(row_inner, "model", scope_depth=1)
+        assert key_canonical < key_inner, (
+            f"Canonical (scope_depth=0) must rank before inner stub (scope_depth=1); "
+            f"canonical key={key_canonical}, inner key={key_inner}"
+        )
+
+    def test_partial_match_key_large_span_beats_tiny_span(self) -> None:
+        """A row with a large line span ranks before a tiny-span row (all else equal)."""
+        row_large = {
+            "name": "Model", "kind": "class",
+            "file_path": "lib/base.py",
+            "start_line": 1, "end_line": 1400,
+        }
+        row_tiny = {
+            "name": "Model", "kind": "class",
+            "file_path": "lib/other.py",
+            "start_line": 100, "end_line": 103,
+        }
+        key_large = _partial_match_key(row_large, "model", scope_depth=0)
+        key_tiny = _partial_match_key(row_tiny, "model", scope_depth=0)
+        assert key_large < key_tiny, (
+            f"Large-span (canonical) must rank before tiny-span (stub); "
+            f"large={key_large}, tiny={key_tiny}"
+        )
+
+    # --- end-to-end locate_l2 test ---
+
+    def _make_canonical_lib(self, tmp_path) -> str:
+        """Write a canonical library file with a large top-level Model class."""
+        lib_dir = tmp_path / "django" / "db" / "models"
+        lib_dir.mkdir(parents=True)
+        # Build a ~60-line class to exceed LOCATE_LARGE_SPAN_THRESHOLD (50 lines)
+        body = "\n".join(f"    attr_{i} = None" for i in range(58))
+        src = f"class Model:\n{body}\n"
+        fp = lib_dir / "base.py"
+        fp.write_text(src)
+        return str(fp)
+
+    def _make_test_file_with_inner_models(self, tmp_path) -> str:
+        """Write a test file with many inner `class Model` stubs inside test methods."""
+        test_dir = tmp_path / "tests" / "check_framework"
+        test_dir.mkdir(parents=True)
+        # 12 inner classes inside test methods — more than the default locate limit=10
+        methods = []
+        for i in range(12):
+            methods.append(textwrap.dedent(f"""\
+                def test_invalid_model_{i}(self):
+                    class Model(models.Model):
+                        pass
+            """))
+        src = "class TestModelChecks:\n" + textwrap.indent("".join(methods), "    ")
+        fp = test_dir / "test_model_checks.py"
+        fp.write_text(src)
+        return str(fp)
+
+    def test_canonical_model_ranks_in_top5_over_test_inner_stubs(self, tmp_path) -> None:
+        """F29 acceptance: locate_l2('Model') returns the canonical library class
+        in top-5 even when the same-named inner test-scope stubs outnumber the limit."""
+        lib_fp = self._make_canonical_lib(tmp_path)
+        test_fp = self._make_test_file_with_inner_models(tmp_path)
+
+        g = SymbolGraph(str(tmp_path))
+        # Index the test file first so its rows have lower rowids (indexed earlier),
+        # which mimics the live Django situation where test files appear before the
+        # canonical in alphabetical indexing order.
+        g.index_file(str(tmp_path), test_fp)
+        g.index_file(str(tmp_path), lib_fp)
+
+        result = g.locate_l2(str(tmp_path), "Model", limit=10)
+        assert result.resolution_strategy == "exact"
+        names_and_files = [(s.name, s.file_path) for s in result.symbols]
+        # The canonical library definition must appear in the top-5 results
+        canonical_rank = next(
+            (i for i, (_, fp) in enumerate(names_and_files) if "base.py" in fp),
+            None,
+        )
+        assert canonical_rank is not None, (
+            f"Canonical django/db/models/base.py:Model not found in results at all.\n"
+            f"Got: {names_and_files}"
+        )
+        assert canonical_rank < 5, (
+            f"Canonical library Model must rank in top-5 (got rank {canonical_rank}).\n"
+            f"Top results: {names_and_files}"
+        )
+        # The top result must NOT be an inner test-scope stub
+        top_file = names_and_files[0][1]
+        assert "test" not in top_file.replace("\\", "/").split("/")[-1], (
+            f"Rank-1 result must not be a test file; got {top_file}"
+        )
+
+    def test_scope_depth_batch_caches_per_file(self, tmp_path) -> None:
+        """_locate_scope_depth_batch reads each file at most once (returns correct values)."""
+        src = textwrap.dedent("""\
+            class Outer:
+                def method(self):
+                    class Inner:
+                        pass
+        """)
+        fp = tmp_path / "m.py"
+        fp.write_text(src)
+        # Simulate two rows from the same file: Outer at line 1, Inner at line 3
+        rows = [
+            {"file_path": str(fp), "start_line": 1},
+            {"file_path": str(fp), "start_line": 3},
+        ]
+        depths = _locate_scope_depth_batch(rows)
+        assert depths[0] == 0, f"Outer class (top-level) must be depth 0, got {depths[0]}"
+        assert depths[1] == 1, f"Inner class (inside method) must be depth 1, got {depths[1]}"

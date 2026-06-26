@@ -19,6 +19,7 @@ from agent.symbol_graph._constants import (
     _BUILTINS,
     graph_toolchain_fingerprint,
 )
+from agent.config import LOCATE_LARGE_SPAN_THRESHOLD, LOCATE_SMALL_SPAN_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,76 @@ def _get_imported_files(caller_file: str, workspace: str) -> list[str]:
 
 _CLASS_DEF_RE = re.compile(r"^class\s+(\w+)")
 
+# UPG-15.10: detect enclosing function/method scopes for locate scope-depth ranking.
+# Matches `def ` and `async def ` at the start of a stripped line so indented
+# method defs inside a class are correctly identified as function scopes.
+_DEF_LINE_RE = re.compile(r"^(def |async def )")
+
+
+def _locate_scope_depth_from_lines(lines: list[str], start_line: int) -> int:
+    """Count how many enclosing function/method (def) scopes surround the symbol
+    at *start_line* (1-indexed) within a pre-read *lines* list.
+
+    A top-level class definition has scope_depth=0; a class defined inside a test
+    method body (e.g. ``def test_invalid_model(self): class Model(...): ...``) has
+    scope_depth=1; a class inside a nested function has scope_depth=2; etc.
+
+    Algorithm: walk backward from the symbol's line, collecting the set of distinct
+    indentation levels at which a ``def``/``async def`` appears.  Each distinct
+    indent level that is strictly less than the symbol's indent level and was not
+    yet "consumed" by a shallower ancestor counts as one enclosing function scope.
+    The fast path for indent=0 avoids any scanning (top-level symbols can never be
+    inside a function).
+
+    This function is called once per unique (file_path, start_line) pair per
+    locate_l2 call via ``_locate_scope_depth_batch`` — not once per sort comparison.
+    """
+    if not lines or start_line < 1:
+        return 0
+    sym_idx = min(start_line - 1, len(lines) - 1)
+    sym_line = lines[sym_idx]
+    sym_indent = len(sym_line) - len(sym_line.lstrip())
+    if sym_indent == 0:
+        return 0  # top-level: fast path, cannot be inside any function
+
+    # Collect distinct def-indentation levels that are strictly less than sym_indent
+    # and appear before the symbol in the file.  Each distinct level represents one
+    # enclosing function scope (e.g. a class method at indent=4 + a module-level
+    # def at indent=0 → two distinct enclosing def levels → depth=2).
+    enclosing_def_indents: set[int] = set()
+    for idx in range(sym_idx - 1, -1, -1):
+        line = lines[idx]
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        indent = len(line) - len(stripped)
+        if indent < sym_indent and _DEF_LINE_RE.match(stripped):
+            enclosing_def_indents.add(indent)
+    return len(enclosing_def_indents)
+
+
+def _locate_scope_depth_batch(rows: list) -> list[int]:
+    """Pre-compute scope depths for all rows in one pass, caching file reads.
+
+    Returns a list of integers parallel to *rows*: ``depths[i]`` is the scope
+    depth (number of enclosing function scopes) of ``rows[i]``.  Each source file
+    is read at most once so the cost is O(unique_files × file_size), not
+    O(rows × file_size).  Unreadable files silently return depth 0.
+    """
+    file_lines: dict[str, list[str]] = {}
+    depths: list[int] = []
+    for r in rows:
+        fp = r["file_path"]
+        if fp not in file_lines:
+            try:
+                file_lines[fp] = Path(fp).read_text(
+                    encoding="utf-8", errors="ignore"
+                ).splitlines()
+            except OSError:
+                file_lines[fp] = []
+        depths.append(_locate_scope_depth_from_lines(file_lines[fp], r["start_line"]))
+    return depths
+
 
 def _enclosing_class_from_file(file_path: str, start_line: int) -> str:
     """Scan backward from *start_line* (1-indexed) in *file_path* to find the
@@ -124,15 +195,19 @@ def _enclosing_class_from_file(file_path: str, start_line: int) -> str:
     return ""
 
 
-def _partial_match_key(row, query_lower: str) -> tuple:
-    """Sort key for partial (substring) `locate` matches.
+def _partial_match_key(row, query_lower: str, scope_depth: int = 0) -> tuple:
+    """Sort key for `locate` matches (used in every strategy via ``_ranked_result``).
 
-    Ordering, most→least preferred:
+    Ordering, most→least preferred (lower tuple = better rank):
       1. match position — exact (case-insensitive) > prefix > interior substring
       2. canonical kind — def > impl/alias (see _KIND_RANK)
       3. not a test/private file
-      4. shorter name (closer to the query)
-      5. file_path (stable tiebreak)
+      4. fewer enclosing function scopes — top-level (0) beats inner test class (1+)
+         (UPG-15.10: discriminates inner test-scope stubs from canonical library defs)
+      5. larger line span bucket — large (0) > medium (1) > tiny stub (2)
+         (UPG-15.10: canonical 1400-line base class beats 3-line test stub)
+      6. shorter name (closer to the query)
+      7. file_path (stable tiebreak)
     """
     name = row["name"]
     nl = name.lower()
@@ -158,7 +233,22 @@ def _partial_match_key(row, query_lower: str) -> tuple:
     )
     is_private = base.startswith("_")
     test_penalty = 1 if (is_test or is_private) else 0
-    return (pos, kind_rank, test_penalty, len(name), fp)
+    # UPG-15.10: line-span bucket — larger is more canonical.
+    # ``row`` may be a sqlite3.Row (no .get()) or a plain dict; handle both.
+    try:
+        span = max(0, int(row["end_line"] or 0) - int(row["start_line"] or 0))
+    except (KeyError, TypeError, IndexError):
+        span = 0  # row missing line fields (synthetic test rows) → treat as tiny
+    if span >= LOCATE_LARGE_SPAN_THRESHOLD:
+        span_bucket = 0   # large canonical definition
+    elif span >= LOCATE_SMALL_SPAN_THRESHOLD:
+        span_bucket = 1   # medium
+    else:
+        span_bucket = 2   # tiny stub (inner test class, single-line function, etc.)
+    # UPG-15.10: scope_depth — 0 = top-level, 1+ = nested inside function body.
+    # Capped at 3 so deeply-nested test utilities don't dominate the key ordering.
+    scope_penalty = min(scope_depth, 3)
+    return (pos, kind_rank, test_penalty, scope_penalty, span_bucket, len(name), fp)
 
 
 # ---------------------------------------------------------------------------
@@ -533,11 +623,17 @@ class SymbolGraph:
         leaf_lower = _leaf.lower()
 
         def _ranked_result(rows: list, strategy: str) -> LocateResult:
-            # Canonical-first ordering (UPG-4.5): even within an exact-name hit,
-            # lead with the type/fn definition and bury impl blocks / aliases that
-            # share the name. _partial_match_key handles prefix/kind/test ordering.
-            ranked = sorted(rows, key=lambda r: _partial_match_key(r, leaf_lower))
-            syms = _with_snippets(ranked[:limit])
+            # Canonical-first ordering (UPG-4.5 + UPG-15.10): even within an exact-name
+            # hit, lead with the type/fn definition and bury impl blocks / aliases that
+            # share the name.  Pre-compute scope depths (file read, cached per file) so
+            # the sort key includes the enclosing-scope signal without re-reading files.
+            scope_depths = _locate_scope_depth_batch(rows)
+            ranked = sorted(
+                range(len(rows)),
+                key=lambda i: _partial_match_key(rows[i], leaf_lower, scope_depths[i]),
+            )
+            top_rows = [rows[i] for i in ranked[:limit]]
+            syms = _with_snippets(top_rows)
             filtered = _filter_by_class(syms)
             # When the qualifier is active and all results were filtered out,
             # fall through (return None so the caller tries the next strategy).
