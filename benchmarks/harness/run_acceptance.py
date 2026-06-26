@@ -5,8 +5,10 @@ Usage:
     python3 run_acceptance.py [--port PORT] [--corpus CORPUS_FILTER]
 
 Reads benchmarks/acceptance/product_cases.jsonl. For each case with a
-matching corpus (or all cases if no filter), issues a /v1/search call and
-evaluates the 'expect' assertions.
+matching corpus (or all cases if no filter), issues a /v1/search call (or
+/v1/locate when the case sets "tool": "locate") and evaluates the 'expect'
+assertions. Locate results are normalized to the same {file, symbol} shape
+as search results, so the same assertion helpers apply to either tool.
 
 Assertion rules
 ---------------
@@ -153,6 +155,7 @@ def run_case(case: dict, base: str) -> tuple[bool, list[str]]:
     language = case.get("language")
     n_results = case.get("n_results", 5)
     expect = case.get("expect", {})
+    tool = case.get("tool", "search")
 
     all_pass = True
 
@@ -164,17 +167,38 @@ def run_case(case: dict, base: str) -> tuple[bool, list[str]]:
             messages.append(f"  ERROR fetching /v1/status: {exc}")
             return False, messages
 
-    # Fetch search results
-    try:
-        resp = _post(base, "/v1/search", {
-            "query": query,
-            "language": language,
-            "n_results": n_results,
-        })
-        results = resp.get("results", [])
-    except Exception as exc:
-        messages.append(f"  ERROR fetching /v1/search: {exc}")
-        return False, messages
+    # Fetch results from the tool under test. Both /v1/search and /v1/locate
+    # are normalized to a common {file, symbol, score, symbol_start_line}
+    # shape so the same assertion helpers apply to either tool.
+    if tool == "locate":
+        try:
+            resp = _post(base, "/v1/locate", {
+                "name": query,
+                "limit": n_results,
+            })
+            results = [
+                {
+                    "file": r.get("file_path") or "",
+                    "symbol": r.get("name") or "",
+                    "score": 0.0,
+                    "symbol_start_line": r.get("start_line", 0),
+                }
+                for r in resp.get("results", [])
+            ]
+        except Exception as exc:
+            messages.append(f"  ERROR fetching /v1/locate: {exc}")
+            return False, messages
+    else:
+        try:
+            resp = _post(base, "/v1/search", {
+                "query": query,
+                "language": language,
+                "n_results": n_results,
+            })
+            results = resp.get("results", [])
+        except Exception as exc:
+            messages.append(f"  ERROR fetching /v1/search: {exc}")
+            return False, messages
 
     # --- top_k_contains ---
     if "top_k_contains" in expect:
