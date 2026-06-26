@@ -469,6 +469,31 @@ class CodeSearcher:
                 for tok in _raw_query_words:
                     if len(tok) >= 2 and tok.isupper() and tok.lower() not in _has_lowercase:
                         _allcaps_only_lower.add(tok.lower())
+            # UPG-15.14 / F28: single-token concept query.  When the query reduces
+            # to ONE content word (after stripping symbol stop-words) it is a direct
+            # concept/symbol lookup, not prose — so force-include symbols whose leaf
+            # EXACTLY matches that word OR its singular/plural form, bypassing the
+            # length, stop-word, and case-discipline guards that exist only to
+            # prevent prose flooding.  e.g. "signals" -> class Signal
+            # (django/dispatch/dispatcher.py).  Exact-leaf (not substring) matching
+            # keeps this tight: leaf "signal" matches one symbol, not SignalTests.
+            # These are treated as UNCONDITIONAL (like compound identifiers) because
+            # a one-word query naming a symbol is an unambiguous high-intent request.
+            _single_token_force: set[str] = set()
+            _content_words = [
+                w.lower() for w in _raw_query_words
+                if len(w) >= 2 and w.lower() not in _SYM_STOP_WORDS_VAL
+            ]
+            if len(_content_words) == 1:
+                w = _content_words[0]
+                variants = {w}
+                if w.endswith("s") and len(w) > 3:
+                    variants.add(w[:-1])   # signals -> signal
+                else:
+                    variants.add(w + "s")  # signal -> signals
+                _single_token_force = variants
+                sym_tokens_for_inclusion |= variants
+                _ident_cased_query_toks |= variants  # allow CamelCase leaf (Signal)
             for tok in _all_query_sym_toks:
                 if (
                     tok in _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST
@@ -532,8 +557,9 @@ class CodeSearcher:
                     if leaf != leaf_lower and leaf_lower not in _ident_cased_query_toks:
                         continue
 
-                    if "_" in leaf:
-                        # Compound identifier → unconditional forced-inclusion.
+                    if "_" in leaf or leaf_lower in _single_token_force:
+                        # Compound identifier, or an exact-leaf match for a
+                        # single-token concept query (UPG-15.14) → unconditional.
                         doc = self._bm25_docs[idx]
                         eff_sym = sym
                         if eff_sym and "." not in eff_sym and "::" not in eff_sym:
