@@ -15,6 +15,7 @@ from agent.chunk_quality import (
     query_wants_tests,
     is_doc_intent_query,
     is_doc_language,
+    _DOC_LANGUAGES,
     is_trivial_chunk,
     symbol_identity_boost,
     extract_class_from_content,
@@ -333,21 +334,47 @@ class CodeSearcher:
             # on _is_doc_intent so code queries are unaffected; bounded by the vec
             # fetch depth (a doc beyond pre_filter_fetch_k cannot be reserved).
             if _is_doc_intent and _DOC_INTENT_POOL_RESERVE > 0:
+                # UPG-15.13 / F25: dedicated documentation retrieval.  The
+                # authoritative doc frequently embeds BELOW the unfiltered vec
+                # fetch entirely — e.g. docs/ref/models/options.txt is absent
+                # from the top-200 for "what is a model Meta class" (code chunks
+                # dominate) yet ranks #3 when the query is restricted to
+                # doc-language chunks.  Iterating the main vec pool (the old
+                # approach) therefore could not reach it.  Run a SEPARATE vector
+                # query filtered to doc languages so the best documentation
+                # always reaches the candidate pool, then reserve up to
+                # _DOC_INTENT_POOL_RESERVE non-trivial chunks not already present.
+                # These are inserted as regular (non-forced) candidates so the
+                # cross-encoder + doc_prose_multiplier rank them on merit.
+                doc_res = self._indexer.query_vector(
+                    query_embedding,
+                    n_results=_DOC_INTENT_POOL_RESERVE * 3,
+                    languages=list(_DOC_LANGUAGES),
+                )
+                doc_ids = doc_res["ids"][0] if doc_res["ids"] else []
+                doc_docs = doc_res["documents"][0] if doc_res["documents"] else []
+                doc_metas = doc_res["metadatas"][0] if doc_res["metadatas"] else []
+                doc_dists = doc_res["distances"][0] if doc_res["distances"] else []
+                existing = set(sorted_ids)
                 reserved: list[str] = []
-                for cid in vec_ids:  # descending vec similarity, up to fetch_n
-                    if cid in union_ids:
+                for cid, dtext, dmeta, dist in zip(doc_ids, doc_docs, doc_metas, doc_dists):
+                    if cid in existing or cid in union_ids:
                         continue
-                    lang = (id_to_meta.get(cid) or {}).get("language", "")
-                    if not is_doc_language(lang):
+                    lang = (dmeta or {}).get("language", "")
+                    if is_trivial_chunk(dtext, lang):
                         continue
-                    if is_trivial_chunk(id_to_doc.get(cid, ""), lang):
-                        continue
+                    # The reserved chunk may be outside the main vec/bm25 fetch,
+                    # so populate the lookups + score map the result-builder needs.
+                    if cid not in id_to_doc:
+                        id_to_doc[cid] = dtext
+                        id_to_meta[cid] = dmeta
+                    if cid not in merged:
+                        merged[cid] = max(0.0, 1.0 - dist)
                     reserved.append(cid)
                     if len(reserved) >= _DOC_INTENT_POOL_RESERVE:
                         break
                 if reserved:
-                    existing = set(sorted_ids)
-                    sorted_ids = sorted_ids + [c for c in reserved if c not in existing]
+                    sorted_ids = sorted_ids + reserved
 
         forced_cids: set[str] = set()  # UPG-11.7: chunks added by forced-inclusion
 

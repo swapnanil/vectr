@@ -481,8 +481,18 @@ class CodeIndexer:
         query_embedding: list[float],
         n_results: int = 10,
         language: str | None = None,
+        languages: list[str] | None = None,
     ) -> dict:
-        where = {"language": language} if language else None
+        # `languages` (a set/list) takes precedence over a single `language`:
+        # restricts the vector search to any of the given languages via an $in
+        # filter. Used by the doc-intent pool reservation (UPG-15.13) to fetch
+        # documentation-prose chunks that embed below the unfiltered fetch depth.
+        if languages:
+            where = {"language": {"$in": list(languages)}}
+        elif language:
+            where = {"language": language}
+        else:
+            where = None
         return self._collection.query(
             query_embeddings=[query_embedding],
             n_results=min(n_results, max(1, self._collection.count())),

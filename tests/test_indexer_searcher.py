@@ -143,6 +143,26 @@ class TestCodeIndexer:
         metas = result["metadatas"][0]
         assert all(m["language"] == "python" for m in metas)
 
+    def test_query_vector_languages_in_filter(self, indexer, tmp_path) -> None:
+        # UPG-15.13: the `languages` (set) param restricts results to any of the
+        # given languages via an $in filter, and takes precedence over `language`.
+        py_file = make_py(tmp_path, "app.py", "def process(): pass")
+        js_file = tmp_path / "app.js"
+        js_file.write_text("function process() {}")
+        txt_file = tmp_path / "notes.txt"
+        txt_file.write_text("process function documentation prose here")
+        indexer.index_file(py_file)
+        indexer.index_file(str(js_file))
+        indexer.index_file(str(txt_file))
+        embedding = indexer.embed_query("process function")
+        result = indexer.query_vector(
+            embedding, n_results=10, languages=["javascript", "text", "txt"]
+        )
+        metas = result["metadatas"][0]
+        assert metas, "expected at least one non-python match"
+        assert all(m["language"] in {"javascript", "text", "txt"} for m in metas)
+        assert all(m["language"] != "python" for m in metas)
+
     def test_total_chunks_property(self, indexer, tmp_path) -> None:
         assert indexer.total_chunks == 0
         make_py(tmp_path, "x.py", "def f(): pass")

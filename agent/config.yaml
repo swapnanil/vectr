@@ -80,6 +80,9 @@ ranking:
       - create
       - delete
       - update
+      - send  # UPG-15.12 / F16: "...send message..." names EmailMessage.send /
+              # BaseEmailBackend.send_messages; len 4 < min_identifier_len so it
+              # needs the allowlist. Gate (vec_sim_floor) rejects non-email .send().
 
     # UPG-15.8 / F22/F23/F26: Per-token cap on same-leaf forced-inclusion candidates
     # injected by a single short-verb allowlist token.  Without this cap, a query
