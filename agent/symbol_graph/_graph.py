@@ -335,6 +335,13 @@ class SymbolGraph:
                     value        TEXT,
                     PRIMARY KEY (workspace, key)
                 );
+
+                CREATE TABLE IF NOT EXISTS symbol_importance (
+                    workspace   TEXT NOT NULL,
+                    file_path   TEXT NOT NULL,
+                    score       REAL NOT NULL,
+                    PRIMARY KEY (workspace, file_path)
+                );
             """)
 
     # ------------------------------------------------------------------
@@ -398,6 +405,10 @@ class SymbolGraph:
                 "DELETE FROM edges WHERE workspace = ? AND from_file = ?",
                 (workspace, file_path),
             )
+            conn.execute(
+                "DELETE FROM symbol_importance WHERE workspace = ? AND file_path = ?",
+                (workspace, file_path),
+            )
 
     def build_for_workspace(
         self, workspace: str, file_paths: list[str], embed_model: str = "",
@@ -427,6 +438,9 @@ class SymbolGraph:
             edge_count = conn.execute(
                 "SELECT COUNT(*) FROM edges WHERE workspace = ?", (workspace,)
             ).fetchone()[0]
+
+        # ARCH-1a: compute file-level PageRank importance and persist it.
+        self._compute_and_store_importance(workspace)
 
         if failed:
             logger.warning(
@@ -482,6 +496,147 @@ class SymbolGraph:
         if meta.get("complete") != "1":
             return True
         return meta.get("fingerprint") != graph_toolchain_fingerprint(embed_model)
+
+    # ------------------------------------------------------------------
+    # ARCH-1a: file-level PageRank importance
+    # ------------------------------------------------------------------
+
+    def _compute_and_store_importance(self, workspace: str) -> None:
+        """Compute file-level PageRank over the def<->ref graph and persist scores.
+
+        Algorithm (mirrors pagerank_spike.py):
+          1. Build a leaf-name -> set(defining file_path) map from symbols.
+          2. For each edge, look up the leaf of to_symbol; distribute weight
+             1/|defs| to each defining file (skip self-edges).
+          3. Run power-iteration PageRank (damping=0.85, 60 iterations).
+          4. Normalize scores to [0,1] by dividing by the max score.
+          5. Bulk-insert into symbol_importance (delete-first for idempotency).
+
+        Pure stdlib — no numpy/networkx/scipy.
+        """
+        import collections
+
+        with self._conn() as conn:
+            # 1. leaf name -> set of defining file_paths
+            name_to_files: dict[str, set[str]] = collections.defaultdict(set)
+            for name, fp in conn.execute(
+                "SELECT name, file_path FROM symbols WHERE workspace = ?", (workspace,)
+            ):
+                leaf = name.split(".")[-1]
+                name_to_files[leaf].add(fp)
+
+            # All distinct files that have at least one symbol
+            files: set[str] = set(
+                fp for (fp,) in conn.execute(
+                    "SELECT DISTINCT file_path FROM symbols WHERE workspace = ?", (workspace,)
+                )
+            )
+
+            if not files:
+                # No symbols → nothing to compute; clear any stale rows.
+                conn.execute(
+                    "DELETE FROM symbol_importance WHERE workspace = ?", (workspace,)
+                )
+                return
+
+            # 2. Build weighted file->file adjacency: out[from_file][to_file] += weight
+            out: dict[str, dict[str, float]] = collections.defaultdict(
+                lambda: collections.defaultdict(float)
+            )
+            for from_file, to_symbol in conn.execute(
+                "SELECT from_file, to_symbol FROM edges WHERE workspace = ?", (workspace,)
+            ):
+                leaf = to_symbol.split(".")[-1]
+                defs = name_to_files.get(leaf)
+                if not defs:
+                    continue
+                w = 1.0 / len(defs)
+                for df in defs:
+                    if df == from_file:
+                        continue  # skip self-edges
+                    out[from_file][df] += w
+
+        # 3. Power-iteration PageRank (damping=0.85, 60 iterations)
+        nodes = list(files)
+        N = len(nodes)
+        d = 0.85
+
+        # Pre-compute total out-weight per node
+        outw: dict[str, float] = {f: sum(t.values()) for f, t in out.items()}
+
+        # Initialize uniform PageRank
+        pr: dict[str, float] = {f: 1.0 / N for f in nodes}
+
+        for _ in range(60):
+            new: dict[str, float] = {f: (1.0 - d) / N for f in nodes}
+
+            # Dangling nodes: files with no outgoing edges contribute their PR
+            # mass redistributed uniformly (standard dangling-node handling).
+            dangling = 0.0
+            for f in nodes:
+                if outw.get(f, 0.0) == 0.0:
+                    dangling += pr[f]
+            dshare = d * dangling / N
+
+            for f, targets in out.items():
+                if f not in pr:
+                    # from_file has no symbols (not in the nodes set) — skip
+                    continue
+                base = d * pr[f] / outw[f]
+                for tf, w in targets.items():
+                    if tf in new:
+                        new[tf] += base * w
+
+            for f in nodes:
+                new[f] += dshare
+
+            # Re-normalize to sum=1 to keep numerical stability
+            s = sum(new.values())
+            pr = {f: v / s for f, v in new.items()}
+
+        # 4. Normalize to [0,1] by dividing by max score
+        max_score = max(pr.values()) if pr else 0.0
+        if max_score <= 0.0:
+            # Degenerate: uniform graph or single node — store nothing meaningful
+            with self._conn() as conn:
+                conn.execute(
+                    "DELETE FROM symbol_importance WHERE workspace = ?", (workspace,)
+                )
+            return
+
+        normalized: dict[str, float] = {f: v / max_score for f, v in pr.items()}
+
+        # 5. Persist: delete old rows first, then bulk-insert in one transaction.
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM symbol_importance WHERE workspace = ?", (workspace,)
+            )
+            conn.executemany(
+                "INSERT INTO symbol_importance (workspace, file_path, score) VALUES (?, ?, ?)",
+                ((workspace, fp, score) for fp, score in normalized.items()),
+            )
+
+        logger.debug(
+            "ARCH-1a importance: workspace=%s files=%d max_raw=%.6f",
+            workspace, N, max_score,
+        )
+
+    def file_importance(self, workspace: str) -> dict[str, float]:
+        """Return {file_path: score} for all files in *workspace* where score is
+        the normalized (0,1] file-level PageRank importance computed at index time.
+
+        Returns an empty dict if importance has not been computed yet (e.g. the
+        workspace was indexed before ARCH-1a, or contains no symbols).
+
+        This is the read API consumed by ARCH-1b (searcher reranking) — do not
+        wire into the searcher here; expose only.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT file_path, score FROM symbol_importance WHERE workspace = ?",
+                (workspace,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
 
     def symbol_count(self, workspace: str) -> int:
         with self._conn() as conn:

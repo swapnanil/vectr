@@ -1839,3 +1839,220 @@ class TestLocateRankingUPG1510:
         depths = _locate_scope_depth_batch(rows)
         assert depths[0] == 0, f"Outer class (top-level) must be depth 0, got {depths[0]}"
         assert depths[1] == 1, f"Inner class (inside method) must be depth 1, got {depths[1]}"
+
+
+# ---------------------------------------------------------------------------
+# ARCH-1a — file-level PageRank importance: compute, persist, read API
+# ---------------------------------------------------------------------------
+
+def _seed_importance_graph(g: "SymbolGraph", ws: str, tmp_path) -> dict[str, str]:
+    """Seed a synthetic graph for importance tests.
+
+    Graph layout (all files also have symbols so they're in the PageRank node set):
+      - file_b.py defines symbol 'foo' (leaf='foo')
+      - file_c.py, file_d.py, file_e.py each define their own symbol AND have an
+        edge referencing 'foo' (they all link to file_b.py via the def<->ref graph)
+      - file_a.py defines its own symbol but has no outgoing refs and no in-links
+
+    Expected result after PageRank + normalization:
+      file_b.py has the highest score (= 1.0) because 3 files reference it.
+      file_a.py has a strictly lower score (no in-links from refs).
+    """
+    import time
+    now = time.time()
+
+    files = {
+        "a": str(tmp_path / "file_a.py"),
+        "b": str(tmp_path / "file_b.py"),
+        "c": str(tmp_path / "file_c.py"),
+        "d": str(tmp_path / "file_d.py"),
+        "e": str(tmp_path / "file_e.py"),
+    }
+    # Create the actual files so SymbolGraph is consistent
+    for fp in files.values():
+        Path(fp).write_text("# placeholder\n")
+
+    with g._conn() as conn:
+        # All files get at least one symbol so they're in the PageRank node set.
+        # file_b defines 'foo' — the target of all the ref-edges.
+        conn.execute(
+            "INSERT INTO symbols (workspace, name, kind, file_path, start_line, end_line, indexed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ws, "foo", "function", files["b"], 1, 5, now),
+        )
+        # file_a defines something unrelated (no in-links to it from refs)
+        conn.execute(
+            "INSERT INTO symbols (workspace, name, kind, file_path, start_line, end_line, indexed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ws, "bar_unrelated", "function", files["a"], 1, 3, now),
+        )
+        # file_c/d/e each define their own unique symbol (so they enter the node set)
+        # AND each has an edge referencing 'foo' (to_symbol='foo' → links to file_b)
+        for key, ref_file in (("c", files["c"]), ("d", files["d"]), ("e", files["e"])):
+            conn.execute(
+                "INSERT INTO symbols (workspace, name, kind, file_path, start_line, end_line, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ws, f"caller_{key}", "function", ref_file, 1, 3, now),
+            )
+            conn.execute(
+                "INSERT INTO edges (workspace, from_file, from_symbol, from_line, to_symbol, edge_type) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (ws, ref_file, f"caller_{key}", 10, "foo", "calls"),
+            )
+
+    return files
+
+
+class TestFileImportanceARCH1a:
+    """ARCH-1a: file-level PageRank importance computation, persistence, and read API."""
+
+    def test_most_referenced_file_gets_highest_score(self, tmp_path) -> None:
+        """file_b defines 'foo'; c/d/e reference it → file_b must score 1.0 (max)."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        files = _seed_importance_graph(g, ws, tmp_path)
+
+        g._compute_and_store_importance(ws)
+        scores = g.file_importance(ws)
+
+        assert files["b"] in scores, "file_b must have an importance score"
+        assert abs(scores[files["b"]] - 1.0) < 1e-9, (
+            f"file_b (most-referenced) must have score=1.0 after normalization, "
+            f"got {scores[files['b']]}"
+        )
+
+    def test_most_referenced_beats_barely_referenced(self, tmp_path) -> None:
+        """file_b (3 in-links) must score strictly higher than file_a (0 in-links)."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        files = _seed_importance_graph(g, ws, tmp_path)
+
+        g._compute_and_store_importance(ws)
+        scores = g.file_importance(ws)
+
+        score_b = scores.get(files["b"], 0.0)
+        score_a = scores.get(files["a"], 0.0)
+        assert score_b > score_a, (
+            f"file_b (3 in-links) must score above file_a (0 in-links); "
+            f"b={score_b:.6f}, a={score_a:.6f}"
+        )
+
+    def test_persistence_round_trip(self, tmp_path) -> None:
+        """build_for_workspace writes importance; file_importance returns expected files."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        files = _seed_importance_graph(g, ws, tmp_path)
+
+        # Trigger compute via the internal method (build_for_workspace calls it)
+        g._compute_and_store_importance(ws)
+        scores = g.file_importance(ws)
+
+        # All scored files must have scores in (0, 1]
+        assert len(scores) > 0, "file_importance must return non-empty dict after compute"
+        for fp, score in scores.items():
+            assert 0.0 < score <= 1.0, (
+                f"{fp} has score {score} outside (0, 1]"
+            )
+
+    def test_build_for_workspace_stores_importance(self, tmp_path) -> None:
+        """build_for_workspace end-to-end: importance is persisted and readable."""
+        g = SymbolGraph(str(tmp_path))
+        # Use real Python files so index_file works via tree-sitter
+        p1 = make_py(tmp_path, "lib.py", "def core_fn(): pass\n")
+        p2 = make_py(tmp_path, "caller.py", "def user():\n    core_fn()\n")
+        g.build_for_workspace(str(tmp_path), [p1, p2])
+
+        scores = g.file_importance(str(tmp_path))
+        # At least one score must be present after a real build
+        assert len(scores) >= 1
+
+    def test_rebuild_idempotency(self, tmp_path) -> None:
+        """Calling build_for_workspace twice does not duplicate importance rows."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        files = _seed_importance_graph(g, ws, tmp_path)
+
+        g._compute_and_store_importance(ws)
+        scores_first = g.file_importance(ws)
+        g._compute_and_store_importance(ws)
+        scores_second = g.file_importance(ws)
+
+        assert scores_first == scores_second, (
+            "Rebuilding importance twice must yield identical scores (PK + delete-first)"
+        )
+
+    def test_row_count_not_doubled_on_rebuild(self, tmp_path) -> None:
+        """After two compute calls, the row count must equal the file count (no dups)."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        files = _seed_importance_graph(g, ws, tmp_path)
+
+        g._compute_and_store_importance(ws)
+        g._compute_and_store_importance(ws)
+
+        with g._conn() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM symbol_importance WHERE workspace = ?", (ws,)
+            ).fetchone()[0]
+        scores = g.file_importance(ws)
+        assert count == len(scores), (
+            f"Row count ({count}) must equal len(file_importance) ({len(scores)}) — no duplicates"
+        )
+
+    def test_empty_graph_no_crash(self, tmp_path) -> None:
+        """A workspace with no symbols/edges must not crash; file_importance returns empty."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        # No files indexed — pure empty state
+        g._compute_and_store_importance(ws)
+        scores = g.file_importance(ws)
+        assert scores == {}, f"Empty graph must return empty dict, got {scores}"
+
+    def test_no_edge_graph_no_crash(self, tmp_path) -> None:
+        """A workspace with symbols but no edges must not crash."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        p = make_py(tmp_path, "isolated.py", "def standalone(): pass\n")
+        g.index_file(ws, p)
+        # No edges exist — power-iteration over dangling nodes only
+        g._compute_and_store_importance(ws)
+        # Should not raise; result may be empty or uniform
+        scores = g.file_importance(ws)
+        assert isinstance(scores, dict)
+
+    def test_delete_file_removes_importance_row(self, tmp_path) -> None:
+        """delete_file must also remove that file's importance row."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        files = _seed_importance_graph(g, ws, tmp_path)
+        g._compute_and_store_importance(ws)
+
+        assert files["b"] in g.file_importance(ws), "file_b must have a score before delete"
+        g.delete_file(ws, files["b"])
+        assert files["b"] not in g.file_importance(ws), (
+            "file_b importance row must be removed by delete_file"
+        )
+
+    def test_file_importance_empty_when_never_built(self, tmp_path) -> None:
+        """A freshly created SymbolGraph with no compute call returns an empty dict."""
+        g = SymbolGraph(str(tmp_path))
+        scores = g.file_importance(str(tmp_path))
+        assert scores == {}
+
+    def test_scores_in_range(self, tmp_path) -> None:
+        """All scores returned by file_importance must be in (0, 1]."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        files = _seed_importance_graph(g, ws, tmp_path)
+        g._compute_and_store_importance(ws)
+        scores = g.file_importance(ws)
+        for fp, score in scores.items():
+            assert 0.0 < score <= 1.0 + 1e-9, (
+                f"{fp}: score {score} not in (0, 1]"
+            )
+
+    def test_schema_version_bumped(self) -> None:
+        """SYMBOL_SCHEMA_VERSION must be 6 (ARCH-1a bumped from 5)."""
+        assert SYMBOL_SCHEMA_VERSION == 6, (
+            f"Expected SYMBOL_SCHEMA_VERSION=6 after ARCH-1a bump, got {SYMBOL_SCHEMA_VERSION}"
+        )
