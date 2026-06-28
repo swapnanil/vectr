@@ -12,30 +12,13 @@ from rank_bm25 import BM25Plus
 from agent.chunk_quality import (
     normalized_content,
     quality_score,
-    query_wants_tests,
-    is_doc_intent_query,
-    is_doc_language,
-    _DOC_LANGUAGES,
     is_trivial_chunk,
-    symbol_identity_boost,
     extract_class_from_content,
-    _query_symbol_tokens,
 )
 from agent.config import (
-    SYMBOL_STOP_WORDS as _SYM_STOP_WORDS_VAL,
-    SYMBOL_MIN_LEAF_LEN as _SYM_MIN_LEAF_LEN_VAL,
-    FORCED_INCLUSION_MAX as _FORCED_INCLUSION_MAX,
-    FORCED_INCLUSION_MIN_IDENTIFIER_LEN as _FORCED_INCLUSION_MIN_IDENTIFIER_LEN,
-    FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR as _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR,
-    FORCED_INCLUSION_VEC_SIM_FLOOR as _FORCED_INCLUSION_VEC_SIM_FLOOR,
-    FORCED_INCLUSION_SHORT_VERB_ALLOWLIST as _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST,
-    FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN as _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN,
-    FORCED_INCLUSION_SHORT_VERB_ALLCAPS_EXCLUDED as _FORCED_INCLUSION_SHORT_VERB_ALLCAPS_EXCLUDED,
     RERANK_TOP_K as _RERANK_TOP_K,
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
     RERANK_PRE_FILTER_FETCH_K as _RERANK_PRE_FILTER_FETCH_K,
-    DOC_INTENT_SUPPRESS_FORCED_INCLUSION as _DOC_INTENT_SUPPRESS_FORCED_INCLUSION,
-    DOC_INTENT_POOL_RESERVE as _DOC_INTENT_POOL_RESERVE,
 )
 from agent.indexer import CodeIndexer
 
@@ -86,21 +69,6 @@ def _code_tokenize(text: str) -> list[str]:
 # _RERANK_TOP_K / _RERANK_TOP_K_UNFILTERED.  The alias names are kept so all
 # existing call sites and tests work without change.
 
-# UPG-11.7 / UPG-11.12: forced-inclusion tunables — sourced from agent/config.yaml
-# (ranking.forced_inclusion block) via agent/config.py.  See config.yaml for the
-# full rationale comments.  The names below are thin aliases kept for readability
-# at the call sites; all four values are imported from config at module load.
-#
-# Summary of what each controls:
-#   _FORCED_INCLUSION_MAX               — safety cap on pool additions (default 200)
-#   _FORCED_INCLUSION_MIN_IDENTIFIER_LEN — min bare-token length to trigger (default 7)
-#   _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR — BM25 fast-reject floor for non-compound
-#                                             tokens, 5% of max-raw (default 0.05)
-#   _FORCED_INCLUSION_VEC_SIM_FLOOR     — cosine similarity gate for non-compound
-#                                         tokens (default 0.52)
-#
-# (imported above from agent.config)
-
 
 class _Reranker:
     """Lazy-loads a cross-encoder; gracefully disabled if model unavailable."""
@@ -150,7 +118,6 @@ class SearchResult:
     content: str
     node_type: str = ""
     dup_count: int = 0   # number of identical chunks collapsed into this one (UPG-2.2)
-    forced_inclusion: bool = False  # UPG-11.7: chunk was forced into pool by symbol-name match
     # UPG-11.2: monotonic displayed score — updated after final ranking in _apply_quality_and_dedup
     # to guarantee non-increasing values down the returned list.
     # (score above holds the pre-quality hybrid score; this replaces it post-sort.)
@@ -202,10 +169,6 @@ class CodeSearcher:
         # blank string degrades to "no filter" consistently for every caller.
         if language is not None:
             language = language.strip().lower() or None
-
-        # UPG-11.11: classify query intent once so both forced-inclusion suppression
-        # and quality-score adjustment are consistent within a single search call.
-        _is_doc_intent = is_doc_intent_query(query)
 
         if self._indexer.total_chunks == 0:
             return [], 0
@@ -287,10 +250,6 @@ class CodeSearcher:
         # outranked by keyword-heavy fixture chunks on the blended score and fall outside the
         # top-60 window before any boost was applied.  The union restores bf223bf semantics
         # (separate-signal top-K lists) while still dropping trivial fixture chunks.
-        #
-        # Forced-inclusion candidates (added after this point) are never subject to this
-        # filter — they are inserted deliberately.  Only fires for unfiltered queries
-        # (language is None); filtered queries already use the smaller top_k pool.
         if language is None and rerank and self._reranker:
             # Vec-signal: iterate vec_ids in descending similarity order
             vec_non_trivial: list[str] = []
@@ -319,331 +278,6 @@ class CodeSearcher:
             union_ids = set(vec_non_trivial) | set(bm25_non_trivial)
             sorted_ids = [cid for cid in sorted_ids if cid in union_ids]
 
-            # --- UPG-15.11 / F24,F25: doc-intent pool reservation ---
-            # On a doc-intent query ("how to…", "what is…") the authoritative
-            # documentation file is frequently outranked in BOTH vec and bm25 by a
-            # large population of code/test chunks that lexically match the query's
-            # nouns — true for any codebase with substantial docs alongside code.
-            # (django benchmark witnesses: ~40 management-command *.py files for
-            # "custom management command", or 200+ inner ``class Meta:`` test stubs
-            # for "model Meta class".)  The doc then never enters the top-_RERANK_TOP_K_UNFILTERED
-            # union above, so the doc-prose multiplier (which only re-weights chunks
-            # already in the pool) cannot reach it.  Reserve up to
-            # _DOC_INTENT_POOL_RESERVE slots for the highest vec-similarity
-            # NON-TRIVIAL documentation-prose chunks not already in the union, so
-            # they reach the cross-encoder and the multiplier can rank them.  Gated
-            # on _is_doc_intent so code queries are unaffected; bounded by the vec
-            # fetch depth (a doc beyond pre_filter_fetch_k cannot be reserved).
-            if _is_doc_intent and _DOC_INTENT_POOL_RESERVE > 0:
-                # UPG-15.13 / F25: dedicated documentation retrieval.  The
-                # authoritative doc frequently embeds BELOW the unfiltered vec
-                # fetch entirely in a code-dominated corpus — its prose simply
-                # doesn't out-embed the surrounding code for the query.  (django
-                # benchmark witness: docs/ref/models/options.txt is absent from
-                # the top-200 for "what is a model Meta class" yet ranks #3 when
-                # the query is restricted to doc-language chunks.)  Iterating the
-                # main vec pool (the old
-                # approach) therefore could not reach it.  Run a SEPARATE vector
-                # query filtered to doc languages so the best documentation
-                # always reaches the candidate pool, then reserve up to
-                # _DOC_INTENT_POOL_RESERVE non-trivial chunks not already present.
-                # These are inserted as regular (non-forced) candidates so the
-                # cross-encoder + doc_prose_multiplier rank them on merit.
-                doc_res = self._indexer.query_vector(
-                    query_embedding,
-                    n_results=_DOC_INTENT_POOL_RESERVE * 3,
-                    languages=list(_DOC_LANGUAGES),
-                )
-                doc_ids = doc_res["ids"][0] if doc_res["ids"] else []
-                doc_docs = doc_res["documents"][0] if doc_res["documents"] else []
-                doc_metas = doc_res["metadatas"][0] if doc_res["metadatas"] else []
-                doc_dists = doc_res["distances"][0] if doc_res["distances"] else []
-                existing = set(sorted_ids)
-                reserved: list[str] = []
-                for cid, dtext, dmeta, dist in zip(doc_ids, doc_docs, doc_metas, doc_dists):
-                    if cid in existing or cid in union_ids:
-                        continue
-                    lang = (dmeta or {}).get("language", "")
-                    if is_trivial_chunk(dtext, lang):
-                        continue
-                    # The reserved chunk may be outside the main vec/bm25 fetch,
-                    # so populate the lookups + score map the result-builder needs.
-                    if cid not in id_to_doc:
-                        id_to_doc[cid] = dtext
-                        id_to_meta[cid] = dmeta
-                    if cid not in merged:
-                        merged[cid] = max(0.0, 1.0 - dist)
-                    reserved.append(cid)
-                    if len(reserved) >= _DOC_INTENT_POOL_RESERVE:
-                        break
-                if reserved:
-                    sorted_ids = sorted_ids + reserved
-
-        forced_cids: set[str] = set()  # UPG-11.7: chunks added by forced-inclusion
-
-        # --- UPG-11.7: Forced-inclusion of exact symbol-name matches ---
-        # When the query names a specific symbol (e.g. "Field deconstruct …" or
-        # "from_db_value …"), the canonical base-class definition may have a long
-        # docstring that dilutes both embedding similarity AND BM25 keyword density,
-        # causing it to fall outside the top-fetch_n slice.  The UPG-11.1 ranking
-        # boost is applied POST-retrieval and cannot rescue a chunk that never entered
-        # the pool.  Solution: union ALL chunks whose stored symbol_name leaf exactly
-        # matches a guarded query token into sorted_ids BEFORE the candidate list is
-        # built, so the reranker + quality prior can place the right one at the top.
-        #
-        # Guard: stricter than UPG-11.1 (which guards ranking boost at min_leaf_len=4).
-        # Forced-inclusion directly adds chunks to the pool, so we require tokens to
-        # look like explicit identifier references — either compound (containing "_",
-        # e.g. from_db_value) or long enough to be specific (≥ _FORCED_INCLUSION_MIN_IDENTIFIER_LEN).
-        # Short prose words like "name", "path", "args", "field" (≤6 chars, no underscore)
-        # are excluded so common Python attribute names don't flood the candidate pool
-        # and overpower real results via the UPG-11.1 sym_boost they'd inherit.
-        # Additionally: case-SENSITIVE leaf match avoids matching class names like
-        # "Migration" against the lowercase token "migration" from the query prose.
-        # Safety cap: _FORCED_INCLUSION_MAX total additional chunks prevents flooding
-        # on pathological corpora where a common method name appears in thousands of
-        # files (a real-world codebase typically has ≤100 same-named methods).
-        #
-        # UPG-11.11: Doc-intent queries (e.g. "how to …", "explain …", "tutorial")
-        # suppress forced-inclusion entirely.  On a doc-intent query, symbol names
-        # appearing in the query describe the *topic* — not a request for the symbol
-        # implementation — so flooding the pool with 80+ same-named code chunks would
-        # bury the documentation the user is actually asking for (F2).
-        if self._bm25 is not None and not (_is_doc_intent and _DOC_INTENT_SUPPRESS_FORCED_INCLUSION):
-            _all_query_sym_toks = _query_symbol_tokens(query)
-            sym_tokens_for_inclusion = {
-                tok for tok in _all_query_sym_toks
-                if (
-                    "_" in tok  # compound identifier: from_db_value, get_queryset …
-                    or len(tok) >= _FORCED_INCLUSION_MIN_IDENTIFIER_LEN  # long specific word
-                )
-                and tok not in _SYM_STOP_WORDS_VAL
-            }
-            # UPG-11.14 / F13: short-verb allowlist bypass.
-            # Verbs like "save", "get", "create" are below min_identifier_len AND in
-            # prog_stopwords.txt (so they are excluded by both guards above).  But when
-            # they appear in the query they frequently name the exact ORM/API method the
-            # user wants (e.g. "save a model instance to the database" → Model.save).
-            # The allowlist reinstates forced-inclusion for these verbs ONLY; they are
-            # treated as NON-COMPOUND candidates so the BM25 floor + vec_sim_floor
-            # relevance gate still applies — irrelevant overrides are rejected by the gate.
-            #
-            # UPG-15.3 / F17: sub-token guard.
-            # _query_symbol_tokens expands compound identifiers like "on_delete" into
-            # sub-tokens {"on_delete", "on", "delete"}.  The allowlist must only fire
-            # for a short verb that the user typed as a STANDALONE word in the query,
-            # not for one that appears only as a sub-token of a longer compound already
-            # present.  Otherwise "on_delete" → sub-token "delete" → forced-inclusion of
-            # every cache/storage .delete() method, burying the actual ForeignKey code.
-            # _standalone_query_words splits on non-identifier boundaries without any
-            # subsequent underscore/camelCase expansion — so "on_delete" is one token
-            # and the bare "delete" sub-token is absent from the standalone set.
-            _standalone_query_words = {
-                tok.lower()
-                for tok in re.split(r"[^a-zA-Z0-9_]+", query)
-                if len(tok) >= 2
-            }
-            # UPG-15.4: tokens the user typed with identifier casing — i.e. tokens
-            # containing an underscore OR at least one uppercase letter.  Used below to
-            # guard CamelCase leaf matches: a CamelCase symbol leaf is force-included
-            # only when the user wrote that identifier with identifier casing in the
-            # query (e.g. "ForeignKey"), not when they used it as lowercase prose
-            # (e.g. "migration" must not force-include class Migration).
-            _ident_cased_query_toks = {
-                tok.lower()
-                for tok in re.split(r"[^a-zA-Z0-9_]+", query)
-                if len(tok) >= 2 and ("_" in tok or any(c.isupper() for c in tok))
-            }
-            # UPG-15.8 / F27: Build the set of query tokens that appear EXCLUSIVELY in
-            # ALL-CAPS.  HTTP method names (GET, POST, PUT, DELETE, PATCH) are written
-            # ALL-CAPS in natural language ("request GET POST data") and should not be
-            # confused with Python method calls .get() / .delete().  A token is "all-caps
-            # only" when: (a) it exists as all-uppercase in the raw query, AND (b) it
-            # does NOT appear as lowercase (or mixed-case) anywhere in the raw query.
-            # This way "GET" in F27 is excluded, but "get" in F23 is not.
-            _raw_query_words = re.split(r"[^a-zA-Z0-9_]+", query)
-            _allcaps_only_lower: set[str] = set()
-            if _FORCED_INCLUSION_SHORT_VERB_ALLCAPS_EXCLUDED:
-                _has_lowercase = {
-                    tok.lower()
-                    for tok in _raw_query_words
-                    if len(tok) >= 2 and not tok.isupper()
-                }
-                for tok in _raw_query_words:
-                    if len(tok) >= 2 and tok.isupper() and tok.lower() not in _has_lowercase:
-                        _allcaps_only_lower.add(tok.lower())
-            # UPG-15.14 / F28: single-token concept query.  When the query reduces
-            # to ONE content word (after stripping symbol stop-words) it is a direct
-            # concept/symbol lookup, not prose — so force-include symbols whose leaf
-            # EXACTLY matches that word OR its singular/plural form, bypassing the
-            # length, stop-word, and case-discipline guards that exist only to
-            # prevent prose flooding.  Exact-leaf (not substring) matching keeps
-            # this tight: a leaf matches the few symbols actually named that, not
-            # every identifier containing it.  (django benchmark witness: "signals"
-            # -> the singular leaf "signal" matches the one Signal class, not the
-            # many SignalTests/SignalHandler classes a substring match would pull.)
-            # These are treated as UNCONDITIONAL (like compound identifiers) because
-            # a one-word query naming a symbol is an unambiguous high-intent request.
-            _single_token_force: set[str] = set()
-            _content_words = [
-                w.lower() for w in _raw_query_words
-                if len(w) >= 2 and w.lower() not in _SYM_STOP_WORDS_VAL
-            ]
-            if len(_content_words) == 1:
-                w = _content_words[0]
-                variants = {w}
-                if w.endswith("s") and len(w) > 3:
-                    variants.add(w[:-1])   # signals -> signal
-                else:
-                    variants.add(w + "s")  # signal -> signals
-                _single_token_force = variants
-                sym_tokens_for_inclusion |= variants
-                _ident_cased_query_toks |= variants  # allow CamelCase leaf (Signal)
-            for tok in _all_query_sym_toks:
-                if (
-                    tok in _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST
-                    and tok in _standalone_query_words
-                    and tok not in _allcaps_only_lower  # UPG-15.8 / F27: skip all-caps HTTP verbs
-                ):
-                    sym_tokens_for_inclusion.add(tok)
-            if sym_tokens_for_inclusion:
-                sorted_set = set(sorted_ids)
-                # Use the already-computed full query symbol tokens for the qualified
-                # boost check (class-name prefix matching, e.g. "field" from
-                # "Field deconstruct …" to qualify Field.deconstruct).
-                all_query_sym_tokens = _all_query_sym_toks
-
-                # UPG-11.12: relevance gate for NON-COMPOUND forced candidates.
-                # Precompute BM25-without-trigger scores for each non-compound token.
-                # Compound tokens (containing "_") keep firing unconditionally.
-                non_compound_bm25_without: dict[str, list[float]] = {}
-                for tok in sym_tokens_for_inclusion:
-                    if "_" in tok:
-                        continue
-                    tokens_without = [t for t in query_tokens if t != tok]
-                    if not tokens_without:
-                        continue  # query was only the trigger token — no constraint
-                    raw_without = self._bm25.get_scores(tokens_without)
-                    max_raw_without = max(raw_without) if len(raw_without) > 0 else 0.0
-                    if max_raw_without > 0:
-                        non_compound_bm25_without[tok] = [s / max_raw_without for s in raw_without]
-                    else:
-                        non_compound_bm25_without[tok] = [0.0] * len(raw_without)
-
-                # Pass 1: collect raw forced candidates, separating non-compound
-                # (which need the relevance gate) from compound (unconditional).
-                # raw_non_compound: list of (idx, cid, leaf) for gate checking.
-                raw_non_compound: list[tuple[int, str, str]] = []
-                # confirmed_forced: (pseudo_score, cid, leaf_lower)
-                # leaf_lower is used for per-verb cap in commit step (UPG-15.8 / F22/F23/F26).
-                confirmed_forced: list[tuple[float, str, str]] = []
-
-                for idx, meta in enumerate(self._bm25_metas):
-                    if len(raw_non_compound) + len(confirmed_forced) >= _FORCED_INCLUSION_MAX:
-                        break
-                    cid = self._bm25_ids[idx]
-                    if cid in sorted_set:
-                        continue
-                    if language and meta.get("language") != language:
-                        continue
-                    sym = meta.get("symbol_name", "") or ""
-                    # Case-insensitive bare leaf comparison (UPG-15.4).
-                    leaf = sym.split(".")[-1].split("::")[-1]
-                    leaf_lower = leaf.lower()
-                    if not leaf or leaf_lower not in sym_tokens_for_inclusion:
-                        continue
-                    # Case discipline: a leaf with uppercase characters is a CamelCase /
-                    # Pascal class symbol.  Force-include it only when the user typed that
-                    # identifier with identifier casing (CamelCase or underscore) in the
-                    # query — not when it appears only as lowercase prose.  This preserves
-                    # the UPG-11 guard: the word "migration" (no uppercase, no underscore)
-                    # must NOT force-include class Migration, while a query that literally
-                    # names "ForeignKey" (CamelCase) should surface class ForeignKey.
-                    if leaf != leaf_lower and leaf_lower not in _ident_cased_query_toks:
-                        continue
-
-                    if "_" in leaf or leaf_lower in _single_token_force:
-                        # Compound identifier, or an exact-leaf match for a
-                        # single-token concept query (UPG-15.14) → unconditional.
-                        doc = self._bm25_docs[idx]
-                        eff_sym = sym
-                        if eff_sym and "." not in eff_sym and "::" not in eff_sym:
-                            class_ctx = extract_class_from_content(doc)
-                            if class_ctx:
-                                eff_sym = f"{class_ctx}.{eff_sym}"
-                        confirmed_forced.append((symbol_identity_boost(eff_sym, all_query_sym_tokens), cid, leaf_lower))
-                    else:
-                        # Non-compound identifier: apply BM25-without-trigger as a
-                        # fast-reject filter.  Chunks with near-zero BM25 score for
-                        # the full query minus the trigger token (e.g.
-                        # LinearGeometryMixin.project for "…migrations for a project"
-                        # where removing "project" leaves migration/database terms
-                        # absent from the geometry chunk) are immediately rejected.
-                        # Chunks with any non-trivial BM25 overlap are deferred to
-                        # the vector cosine check (pass 2).
-                        if leaf_lower in non_compound_bm25_without:
-                            scores_arr = non_compound_bm25_without[leaf_lower]
-                            bm25_without = scores_arr[idx] if idx < len(scores_arr) else 0.0
-                        else:
-                            bm25_without = 1.0  # no constraint → defer to vector check
-                        if bm25_without < _FORCED_INCLUSION_NONTRIGGER_BM25_FLOOR:
-                            continue  # fast-reject: zero relevant keyword overlap
-                        # Non-trivial BM25 OR unconstrained → defer to vector check.
-                        raw_non_compound.append((idx, cid, leaf))
-
-                # Pass 2: batch-fetch vector cosine similarities for all non-compound
-                # candidates that survived the BM25 fast-reject.
-                # One ChromaDB call covers all of them (capped at _FORCED_INCLUSION_MAX).
-                # The vector check is the primary gate: a forced candidate must be
-                # semantically relevant to the FULL query — not just share a symbol
-                # name with one query token.
-                if raw_non_compound:
-                    deferred_ids = [cid for _, cid, _ in raw_non_compound]
-                    vec_sims = self._indexer.get_chunk_cosine_similarities(
-                        query_embedding, deferred_ids
-                    )
-                    for idx, cid, leaf in raw_non_compound:
-                        sim = vec_sims.get(cid, 0.0)
-                        if sim < _FORCED_INCLUSION_VEC_SIM_FLOOR:
-                            continue  # vector gate: not semantically relevant to full query
-                        # Passes both gates — include in forced pool.
-                        sym = self._bm25_metas[idx].get("symbol_name", "") or ""
-                        doc = self._bm25_docs[idx]
-                        eff_sym = sym
-                        if eff_sym and "." not in eff_sym and "::" not in eff_sym:
-                            class_ctx = extract_class_from_content(doc)
-                            if class_ctx:
-                                eff_sym = f"{class_ctx}.{eff_sym}"
-                        leaf_lower_nc = leaf.lower()
-                        confirmed_forced.append((symbol_identity_boost(eff_sym, all_query_sym_tokens), cid, leaf_lower_nc))
-
-                # Sort and commit all confirmed forced candidates.
-                # UPG-15.8 / F22/F23/F26: Apply per-token cap for short-verb triggered
-                # candidates.  After sorting by pseudo_score desc, allow at most
-                # _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN chunks per short-verb leaf.
-                # Compound identifiers (with "_") are not capped — they are already
-                # specific enough that flooding is not a concern.
-                forced_candidates = confirmed_forced
-                forced_candidates.sort(key=lambda t: t[0], reverse=True)
-                _short_verb_token_counts: dict[str, int] = {}
-                for pseudo_score, cid, leaf_lower_c in forced_candidates:
-                    if cid in sorted_set:
-                        continue
-                    # Apply per-token cap only to short-verb tokens (no underscore).
-                    if (
-                        "_" not in leaf_lower_c
-                        and leaf_lower_c in _FORCED_INCLUSION_SHORT_VERB_ALLOWLIST
-                        and _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN > 0
-                    ):
-                        count = _short_verb_token_counts.get(leaf_lower_c, 0)
-                        if count >= _FORCED_INCLUSION_SHORT_VERB_MAX_PER_TOKEN:
-                            continue  # cap reached for this short-verb token
-                        _short_verb_token_counts[leaf_lower_c] = count + 1
-                    merged[cid] = pseudo_score
-                    sorted_ids.append(cid)
-                    sorted_set.add(cid)
-                    forced_cids.add(cid)
-
         # Build result objects
         candidates: list[SearchResult] = []
         for cid in sorted_ids:
@@ -659,7 +293,6 @@ class CodeSearcher:
                 score=round(merged[cid], 4),
                 content=doc[:2000],
                 node_type=meta.get("node_type", ""),
-                forced_inclusion=cid in forced_cids,
                 # UPG-11.4: carry the exact line range of the indexed symbol so
                 # callers can expand to the full definition without a blind re-read.
                 symbol_start_line=start_line,
@@ -667,85 +300,51 @@ class CodeSearcher:
             ))
 
         # --- Cross-encoder rerank ---
-        # UPG-11.7: separate forced-inclusion candidates so the cross-encoder
-        # does not bury them.  Forced chunks often have long docstrings that
-        # dilute cross-encoder similarity despite being the canonical definition.
-        # We cross-encode only the naturally-retrieved pool; forced chunks are
-        # inserted BEFORE the cross-encoded results so _apply_quality_and_dedup
-        # sees them at early rank positions where the +0.20 qualified sym_boost
-        # can lift them above overrides (which get +0.10).
         if rerank and self._reranker and len(candidates) > 1:
-            forced_results = [r for r in candidates if r.forced_inclusion]
-            regular_results = [r for r in candidates if not r.forced_inclusion]
-            if regular_results:
-                doc_candidate_pairs = [(r.content, r) for r in regular_results]
-                regular_results = self._reranker.rerank(query, doc_candidate_pairs)
-            # Prepend forced results so they get high rank-based relevance in
-            # _apply_quality_and_dedup. The sym_boost will further separate
-            # qualified forced matches (Field.deconstruct, +0.20) from leaf-only
-            # forced matches (CharField.deconstruct, +0.10).
-            candidates = forced_results + regular_results
+            doc_candidate_pairs = [(r.content, r) for r in candidates]
+            candidates = self._reranker.rerank(query, doc_candidate_pairs)
 
         # --- Quality prior + dedup + deterministic tiebreaker (UPG-2.1/2.2/2.3) ---
-        candidates = self._apply_quality_and_dedup(query, candidates, is_doc_intent=_is_doc_intent)
+        candidates = self._apply_quality_and_dedup(query, candidates)
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         return candidates[:n_results], elapsed_ms
 
     def _apply_quality_and_dedup(
         self, query: str, candidates: list[SearchResult],
-        *, is_doc_intent: bool = False,
     ) -> list[SearchResult]:
         """Re-rank by relevance×quality, collapse duplicates, break ties deterministically.
 
+        Pipeline: final_score = base_rerank_score * quality_score(chunk).
+        Keeps exact-duplicate dedup and the quality_score call (with trivial/navigational/
+        doc-language demotion intact).
+
         Relevance is taken from the candidates' current (post-rerank) order; a
         per-chunk quality prior then demotes trivial / navigational / generated /
-        heading-only / (off-topic) test chunks (UPG-2.1, 2.3). Byte-identical
-        chunks collapse to a single representative with a duplicate count so
-        boilerplate can't flood the top-N (UPG-2.2).
-
-        Args:
-            is_doc_intent: When True, documentation prose chunks are scored with
-                the elevated ``DOC_INTENT_DOC_PROSE_MULTIPLIER`` (default 1.0) so
-                they can compete with code on how-to/explain queries (UPG-11.11).
+        heading-only / test chunks (UPG-2.1, 2.3). Byte-identical chunks collapse
+        to a single representative with a duplicate count so boilerplate can't flood
+        the top-N (UPG-2.2).
         """
         if not candidates:
             return candidates
-        targets_tests = query_wants_tests(query)
-        # Precompute query tokens once for symbol-identity scoring (UPG-11.1).
-        sym_tokens = _query_symbol_tokens(query)
         n = len(candidates)
         scored: list[tuple[float, float, int, SearchResult]] = []
         for i, r in enumerate(candidates):
             base = 1.0 - (i / n)  # rank-based relevance, best-first
             q = quality_score(
                 r.content, r.file_path, r.language, r.node_type,
-                query_targets_tests=targets_tests,
-                query_is_doc_intent=is_doc_intent,
             )
-            # Symbol-identity bonus: additive boost when the candidate's symbol
-            # name matches the query's symbol intent (UPG-11.1).
-            #
-            # F4 (UPG-11.1-fix): the indexer stores symbol_name as the bare leaf
-            # (e.g. "deconstruct"), never "Class.leaf".  The qualified-match path
-            # (+0.20) was therefore dead code.  Fix: when the stored symbol_name
-            # has no dot/colon qualifier, extract the class name from the indexer-
-            # injected "# class: X" prefix in the chunk content and pass the
-            # reconstructed "X.leaf" form to symbol_identity_boost.  This works
-            # for already-indexed corpora with no reindex required.
-            effective_symbol = r.symbol_name
-            if effective_symbol and "." not in effective_symbol and "::" not in effective_symbol:
+            # UPG-11.10: promote symbol_name to the qualified "Class.leaf" form when
+            # class context can be extracted from the indexer-injected "# class: X"
+            # prefix in the chunk content.  Presentational only — it makes the
+            # REST/MCP `symbol` field show "Field.deconstruct" instead of the bare
+            # "deconstruct" so callers see which class owns the chunk.  Does not
+            # affect ranking.
+            if r.symbol_name and "." not in r.symbol_name and "::" not in r.symbol_name:
                 class_ctx = extract_class_from_content(r.content)
                 if class_ctx:
-                    effective_symbol = f"{class_ctx}.{effective_symbol}"
-            sym_boost = symbol_identity_boost(effective_symbol, sym_tokens)
-            # UPG-11.10: promote symbol_name to the qualified "Class.leaf" form when
-            # class context was successfully extracted from the indexer-injected prefix.
-            # This makes the REST/MCP `symbol` field show "Field.deconstruct" instead
-            # of the bare "deconstruct", helping callers understand which class owns the chunk.
-            if effective_symbol and effective_symbol != r.symbol_name:
-                r.symbol_name = effective_symbol
-            scored.append((base * q + sym_boost, q, i, r))
+                    r.symbol_name = f"{class_ctx}.{r.symbol_name}"
+            scored.append((base * q, q, i, r))
 
         # Deterministic order: final score desc, quality desc, length desc, then
         # original rank, then path — so equal-scoring boilerplate never wins by
@@ -763,10 +362,8 @@ class CodeSearcher:
             r.dup_count = 0
             # UPG-11.2: replace the stale pre-rerank hybrid score with the actual
             # composite ranking key so displayed scores are non-increasing with rank.
-            # UPG-11.13: clamp to [0, 1] so callers with a confidence gate (score > 0.8)
-            # don't get false positives from sym_boost (which can push the raw composite
-            # above 1.0, e.g. base*quality=1.0 + qualified_boost=0.20 → 1.2).
-            # The sort above uses final_score (unclamped) so rank order is preserved.
+            # base ∈ [0, 1] and quality_score is a ≤1.0 multiplier, so final_score is
+            # already in [0, 1]; clamp defensively for callers with a confidence gate.
             r.score = round(min(1.0, final_score), 4)
             out.append(r)
         return out

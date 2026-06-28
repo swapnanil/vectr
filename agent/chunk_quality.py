@@ -20,10 +20,6 @@ import re
 from pathlib import PurePosixPath
 
 from agent.config import (
-    SYMBOL_QUALIFIED_BOOST as _SYM_QUALIFIED_BOOST,
-    SYMBOL_LEAF_BOOST as _SYM_LEAF_BOOST,
-    SYMBOL_STOP_WORDS as _SYM_STOP_WORDS,
-    SYMBOL_MIN_LEAF_LEN as _SYM_MIN_LEAF_LEN,
     QUALITY_TRIVIAL as _Q_TRIVIAL,
     QUALITY_NAVIGATIONAL as _Q_NAVIGATIONAL,
     QUALITY_HEADING_ONLY as _Q_HEADING_ONLY,
@@ -32,9 +28,6 @@ from agent.config import (
     QUALITY_TEST_DEPRIORITISED as _Q_TEST_DEPRIORITISED,
     QUALITY_DOC_PROSE as _Q_DOC_PROSE,
     QUALITY_SHORT_PENALTY as _Q_SHORT_PENALTY,
-    DOC_INTENT_DOC_PROSE_MULTIPLIER as _Q_DOC_PROSE_DOC_INTENT,
-    DOC_INTENT_PREFIXES,
-    DOC_INTENT_ANY_SUBSTRINGS,
     TRIVIAL_DOC_MAX_LINES as _TRIVIAL_DOC_MAX_LINES,
     TRIVIAL_ATTR_CLASS_MAX_ATTRS as _TRIVIAL_ATTR_CLASS_MAX_ATTRS,
     INDEXING_BUILD_ARTIFACT_DIR_SUFFIXES as _BUILD_ARTIFACT_DIR_SUFFIXES,
@@ -397,52 +390,6 @@ def is_test_file(file_path: str) -> bool:
     return bool(parts & {"test", "tests", "__tests__", "spec", "testing"})
 
 
-def query_wants_tests(query: str) -> bool:
-    """True if the query explicitly asks about tests/fixtures/scenarios (UPG-2.3)."""
-    q = query.lower()
-    return any(kw in q for kw in ("test", "fixture", "scenario", "spec ", "unittest", "pytest", "assertion"))
-
-
-# Doc-intent query patterns are sourced from agent/config.yaml
-# (ranking.doc_intent.prefixes / .any_substrings) via agent/config.py.
-# A query is doc-intent when the user is asking about a *topic* or *concept*,
-# not looking for a specific symbol implementation — symbol names in the query
-# are context/description, not forced-inclusion targets (UPG-11.11 / F2).
-# The _DOC_INTENT_* aliases preserve the in-module call sites below.
-_DOC_INTENT_PREFIXES: tuple[str, ...] = DOC_INTENT_PREFIXES
-_DOC_INTENT_ANY: tuple[str, ...] = DOC_INTENT_ANY_SUBSTRINGS
-
-
-def is_doc_intent_query(query: str) -> bool:
-    """True when the query describes a topic or asks for documentation/tutorial.
-
-    Doc-intent queries are distinguished from code-intent queries by the presence
-    of natural-language question/topic phrases.  When a query is doc-intent, forced-
-    inclusion of exact symbol-name matches is suppressed (UPG-11.11): symbol names
-    in the query describe the *topic* (e.g. "how to use deconstruct") rather than
-    requesting a specific symbol implementation.
-
-    Design notes:
-    - Anchored-prefix patterns ("how to …", "what is …") are the primary signal —
-      they indicate the query is a question/explanation request.
-    - Substring patterns (" tutorial", " guide") are secondary, anchored to avoid
-      false hits on identifiers like "tutorial_mode" or "guided_setup".
-    - The check is intentionally simple and cheap (string matching) — no regex, no
-      NLP — consistent with vectr's zero-LLM-call constraint.
-    - Compound queries that START with a doc phrase are classified as doc-intent even
-      if they also name specific symbols: "how to write a custom field with deconstruct"
-      is doc-intent because the user wants documentation, not the deconstruct method.
-    """
-    q = query.lower().strip()
-    for prefix in _DOC_INTENT_PREFIXES:
-        if q.startswith(prefix):
-            return True
-    for phrase in _DOC_INTENT_ANY:
-        if phrase in q:
-            return True
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Quality prior (UPG-2.1)
 # ---------------------------------------------------------------------------
@@ -479,21 +426,12 @@ def quality_score(
     file_path: str = "",
     language: str = "",
     node_type: str = "",
-    *,
-    query_targets_tests: bool = False,
-    query_is_doc_intent: bool = False,
 ) -> float:
     """A per-chunk usefulness prior in (0, 1], folded into ranking as a multiplier.
 
     Relevance × usefulness: similarity already models relevance; this models
     "is this chunk a good answer at all, regardless of similarity". Cheap and
     language-agnostic. Lower = worse answer.
-
-    Args:
-        query_is_doc_intent: When True, documentation prose chunks receive
-            ``_Q_DOC_PROSE_DOC_INTENT`` (default 1.0 = no penalty) instead of
-            ``_Q_DOC_PROSE`` (0.70), so they can compete with code on how-to /
-            explain / tutorial queries (UPG-11.11).
     """
     if file_path and is_vectr_config_file(file_path):
         return _Q_VECTR_CONFIG
@@ -507,12 +445,10 @@ def quality_score(
     score = 1.0
     if file_path and is_generated_file(file_path):
         score *= _Q_GENERATED
-    if file_path and is_test_file(file_path) and not query_targets_tests:
+    if file_path and is_test_file(file_path):
         score *= _Q_TEST_DEPRIORITISED
     if is_doc_language(language):
-        # UPG-11.11: on doc-intent queries use the elevated multiplier so doc
-        # prose is not knocked below code by the normal 0.70 demote.
-        score *= _Q_DOC_PROSE_DOC_INTENT if query_is_doc_intent else _Q_DOC_PROSE
+        score *= _Q_DOC_PROSE
 
     n_lines = len(_meaningful_lines(content))
     if n_lines <= 2:
@@ -521,50 +457,14 @@ def quality_score(
 
 
 # ---------------------------------------------------------------------------
-# Symbol identity boost (UPG-11.1)
+# Class-context extraction (UPG-F4)
 # ---------------------------------------------------------------------------
-
-# Symbol-boost tunables and stop-word set are loaded from agent/config.yaml via
-# agent/config.py (importlib.resources — works for both repo and installed binary).
-# The private aliases (_SYM_*) are kept so the rest of this module and the
-# existing test suite can still reference them without change.
-# _SYM_QUALIFIED_BOOST, _SYM_LEAF_BOOST, _SYM_STOP_WORDS, _SYM_MIN_LEAF_LEN
-# are all imported at the top of this file from agent.config.
 
 # Regex to detect a CLASS-prefix line injected by the indexer (UPG-F4).
 # The indexer prepends "# class: ClassName\n" to method chunks so the embedding
 # has class context.  We extract this at query time to reconstruct the qualified
 # name when symbol_name is a bare leaf.
 _CLASS_PREFIX_RE = re.compile(r"^#\s*class:\s*(\w+)", re.MULTILINE)
-
-
-def _query_symbol_tokens(query: str) -> set[str]:
-    """Extract identifier-like tokens from the query (lowercased).
-
-    Splits on non-alphanumeric boundaries AND camelCase so that a query like
-    "Field deconstruct" yields {"field", "deconstruct"} and a query like
-    "from_db_value convert ..." yields {"from", "db", "value", "from_db_value"}.
-    The full snake_case identifier is also kept so exact leaf matches work even
-    when the name contains underscores.
-    """
-    # Keep whole snake_case tokens as-is (for leaf matching)
-    raw_tokens = re.split(r"[^a-zA-Z0-9_]+", query)
-    tokens: set[str] = set()
-    for tok in raw_tokens:
-        if len(tok) < 2:
-            continue
-        tokens.add(tok.lower())
-        # Also split on underscores and camelCase sub-words
-        sub = re.split(r"_+", tok)
-        for part in sub:
-            if len(part) >= 2:
-                tokens.add(part.lower())
-        # camelCase split
-        expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", tok)
-        for part in expanded.split():
-            if len(part) >= 2:
-                tokens.add(part.lower())
-    return tokens
 
 
 def extract_class_from_content(content: str) -> str:
@@ -580,113 +480,6 @@ def extract_class_from_content(content: str) -> str:
     """
     m = _CLASS_PREFIX_RE.search(content)
     return m.group(1) if m else ""
-
-
-def symbol_identity_boost(symbol_name: str, query_tokens: set[str]) -> float:
-    """Return an additive ranking boost when the symbol name matches the query intent.
-
-    A *qualified match* (both class and leaf parts appear in the query tokens)
-    earns a higher boost than a *leaf-only match* (only the final component
-    appears).  No match → zero boost.  This is a general signal — it rewards
-    whichever candidate's symbol name best aligns with the query vocabulary,
-    without hard-coding any language or codebase specifics.
-
-    **Matching strategy** (to avoid rewarding accidental sub-token overlap):
-
-    1. *Exact leaf match*: the full leaf identifier (e.g. ``from_db_value``,
-       ``deconstruct``) appears verbatim in ``query_tokens``.  This is the
-       primary signal — the user explicitly named the method.
-    2. *Sub-word leaf match*: when the leaf is a single word (no underscores /
-       camelCase parts), every meaningful sub-token of it must appear together.
-       We do NOT boost on partial sub-word overlaps for compound names because
-       common sub-words (``value``, ``db``, ``get``) pollute too many symbols.
-    3. *Qualified boost*: if a leaf match is found AND at least one prefix part
-       also appears in the query tokens (exact or as a single sub-word), the
-       boost is upgraded from ``_SYM_LEAF_BOOST`` to ``_SYM_QUALIFIED_BOOST``.
-    4. *Stop-word guard* (F6): a bare single-word leaf that is a common English
-       word (in ``_SYM_STOP_WORDS``) or is very short (< ``_SYM_MIN_LEAF_LEN``
-       chars) receives NO boost, even if it appears in the query, because such
-       words appear casually in prose and the overlap is accidental.
-
-    Args:
-        symbol_name: The chunk's symbol name.  May be a qualified name already
-                     (e.g. ``"Field.deconstruct"``, ``"RemoveField.deconstruct"``)
-                     or a bare leaf stored by the indexer (e.g. ``"deconstruct"``).
-                     If the caller has already reconstructed a qualified form
-                     (via ``extract_class_from_content``), pass that in.
-        query_tokens: The lowercased identifier tokens extracted from the query
-                      via ``_query_symbol_tokens``.
-    """
-    if not symbol_name or not query_tokens:
-        return 0.0
-
-    # Split on dots / :: (Python, C++, Ruby qualified names).
-    # Preserve original casing for camelCase splitting; lowercase at use sites.
-    parts = re.split(r"[.:]+", symbol_name)
-    # Leaf = last component (original case for camelCase split); prefix = rest.
-    leaf_orig = parts[-1]
-    leaf = leaf_orig.lower()
-    prefix_orig_parts = parts[:-1]
-
-    # --- Stop-word / length guard (F6) ---
-    # Only applied when there is NO class prefix in the symbol_name — a qualified
-    # name like "Field.all" is specific enough that the class context disambiguates.
-    if not prefix_orig_parts:
-        if leaf in _SYM_STOP_WORDS:
-            return 0.0
-        if len(leaf) < _SYM_MIN_LEAF_LEN:
-            return 0.0
-
-    # --- Leaf match ---
-    # Primary: exact full identifier (lowercased) is in query tokens.
-    exact_leaf_hit = leaf in query_tokens
-
-    if not exact_leaf_hit:
-        # Fallback for simple single-word leaves: all camelCase / snake sub-words
-        # present in query.  This handles queries like "deconstruct" where the leaf
-        # is a plain word (no compound parts) and also appears as-is in tokens.
-        # For compound names like get_db_prep_value we require the full identifier,
-        # NOT just any sub-word overlap (too noisy).
-        leaf_sub: set[str] = set()
-        leaf_sub.update(t.lower() for t in re.split(r"_+", leaf_orig) if len(t) >= 2)
-        expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", leaf_orig)
-        leaf_sub.update(t.lower() for t in expanded.split() if len(t) >= 2)
-        # Only trust sub-word split when the leaf itself has no compound parts
-        # (i.e. single-word identifiers).  For compound leaves require exact.
-        is_compound = "_" in leaf or (leaf_orig != leaf_orig.lower() and "_" not in leaf_orig)
-        if is_compound:
-            # compound identifier — require exact match only
-            return 0.0
-        # simple single-word leaf: check if it appears as a whole word in query
-        if not leaf_sub.issubset(query_tokens):
-            return 0.0
-
-    # --- Qualified match: does any prefix part also appear in the query? ---
-    prefix_hit = False
-    for p in prefix_orig_parts:
-        p_lower = p.lower()
-        if p_lower in query_tokens:
-            prefix_hit = True
-            break
-        # Single-word camelCase class names: split "RemoveField" → "remove", "field"
-        expanded_p = re.sub(r"([a-z])([A-Z])", r"\1 \2", p)
-        sub_p = {t.lower() for t in expanded_p.split() if len(t) >= 2}
-        # Only count as a prefix hit when the EXACT class name or its
-        # sub-words appear in the query — but avoid false positives from
-        # coincidental shared sub-words (e.g. "field" in a long prose query).
-        # Require that the whole class identifier appears, OR that ALL its
-        # sub-words appear together.
-        # UPG-11.9: skip the subset-check when sub_p is empty — a single-char
-        # class name like "Q" produces no sub-parts, and set().issubset(...)
-        # is vacuously True, firing +0.20 unconditionally.
-        if p_lower in query_tokens or (sub_p and sub_p.issubset(query_tokens)):
-            prefix_hit = True
-            break
-
-    if prefix_orig_parts and prefix_hit:
-        return _SYM_QUALIFIED_BOOST
-
-    return _SYM_LEAF_BOOST
 
 
 # ---------------------------------------------------------------------------
