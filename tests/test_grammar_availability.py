@@ -504,3 +504,175 @@ class TestMCPStatusGrammarWarning:
         )
         assert "c" in text
         assert "cpp" in text
+
+
+# ---------------------------------------------------------------------------
+# _preflight_grammars: auto-install missing grammars at vectr start
+# ---------------------------------------------------------------------------
+
+class TestPreflightGrammars:
+    """_preflight_grammars must auto-install missing grammars or warn and continue."""
+
+    def _make_fake_parser(self, missing_langs):
+        """Return a fake _get_parser that returns None for missing_langs."""
+        import agent.indexer as _idx
+        original = _idx._get_parser
+
+        def _fake(lang):
+            if lang in missing_langs:
+                return None
+            return original(lang)
+
+        return _fake
+
+    def test_no_op_when_all_grammars_present(self, monkeypatch, capsys) -> None:
+        """When all grammars are present, _preflight_grammars does nothing."""
+        # No monkeypatching of _get_parser — all grammars are present.
+        pip_calls: list[str] = []
+
+        def _fake_pip(req: str):
+            pip_calls.append(req)
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        from main import _preflight_grammars
+        _preflight_grammars(_run_pip=_fake_pip)
+
+        assert pip_calls == [], f"Expected no pip call when all grammars present, got {pip_calls}"
+        captured = capsys.readouterr()
+        assert captured.err == "" or "grammar" not in captured.err.lower(), (
+            f"Expected no grammar output when all present, got: {captured.err}"
+        )
+
+    def test_installs_missing_grammar_on_success(self, monkeypatch, capsys) -> None:
+        """When 'c' grammar is missing and pip succeeds, it is installed and verified."""
+        import agent.indexer as _idx
+
+        original_parser = _idx._get_parser
+        # Track whether install was called; after install, fake that 'c' loads.
+        installed: list[str] = []
+
+        def _fake_parser(lang):
+            if lang == "c" and lang not in installed:
+                return None
+            return original_parser(lang)
+
+        monkeypatch.setattr(_idx, "_get_parser", _fake_parser)
+        monkeypatch.setattr(_sgmod, "_get_parser", _fake_parser)
+
+        def _fake_pip(req: str):
+            installed.append("c")  # mark as installed
+            class R:
+                returncode = 0
+                stdout = "Successfully installed"
+                stderr = ""
+            return R()
+
+        from main import _preflight_grammars
+        _preflight_grammars(_run_pip=_fake_pip)
+
+        assert len(installed) > 0, "Expected pip install to be attempted"
+        captured = capsys.readouterr()
+        # Should show install attempt
+        assert "c" in captured.err or "tree-sitter" in captured.err, (
+            f"Expected install message for 'c', got: {captured.err}"
+        )
+
+    def test_warns_and_continues_on_install_failure(self, monkeypatch, capsys) -> None:
+        """When pip install fails, _preflight_grammars prints a warning and returns (no crash)."""
+        import agent.indexer as _idx
+
+        original_parser = _idx._get_parser
+
+        def _fake_parser(lang):
+            if lang == "c":
+                return None
+            return original_parser(lang)
+
+        monkeypatch.setattr(_idx, "_get_parser", _fake_parser)
+        monkeypatch.setattr(_sgmod, "_get_parser", _fake_parser)
+
+        def _failing_pip(req: str):
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = "error: externally-managed-environment"
+            return R()
+
+        from main import _preflight_grammars
+        # Must not raise or exit
+        _preflight_grammars(_run_pip=_failing_pip)
+
+        captured = capsys.readouterr()
+        # Should print the remediation message
+        assert "WARNING" in captured.err or "could not" in captured.err.lower(), (
+            f"Expected warning on install failure, got: {captured.err}"
+        )
+        assert "pip install" in captured.err, (
+            f"Expected pip install remediation in output, got: {captured.err}"
+        )
+        assert "c" in captured.err
+
+    def test_remediation_message_mentions_externally_managed(self, monkeypatch, capsys) -> None:
+        """Failure message must mention externally-managed environments."""
+        import agent.indexer as _idx
+
+        original_parser = _idx._get_parser
+
+        def _fake_parser(lang):
+            if lang == "c":
+                return None
+            return original_parser(lang)
+
+        monkeypatch.setattr(_idx, "_get_parser", _fake_parser)
+        monkeypatch.setattr(_sgmod, "_get_parser", _fake_parser)
+
+        def _failing_pip(req: str):
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = "error"
+            return R()
+
+        from main import _preflight_grammars
+        _preflight_grammars(_run_pip=_failing_pip)
+
+        captured = capsys.readouterr()
+        assert "externally-managed" in captured.err or "virtualenv" in captured.err or "venv" in captured.err, (
+            f"Expected externally-managed environment note in failure message, got: {captured.err}"
+        )
+
+    def test_does_not_add_break_system_packages_automatically(self, monkeypatch, capsys) -> None:
+        """The preflight must NEVER pass --break-system-packages to pip itself."""
+        import agent.indexer as _idx
+
+        original_parser = _idx._get_parser
+
+        def _fake_parser(lang):
+            if lang == "c":
+                return None
+            return original_parser(lang)
+
+        monkeypatch.setattr(_idx, "_get_parser", _fake_parser)
+        monkeypatch.setattr(_sgmod, "_get_parser", _fake_parser)
+
+        pip_args: list[str] = []
+
+        def _capture_pip(req: str):
+            pip_args.append(req)
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = "error"
+            return R()
+
+        from main import _preflight_grammars
+        _preflight_grammars(_run_pip=_capture_pip)
+
+        for arg in pip_args:
+            assert "--break-system-packages" not in arg, (
+                f"_preflight_grammars must not add --break-system-packages: {arg}"
+            )

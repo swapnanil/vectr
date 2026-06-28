@@ -421,6 +421,136 @@ def _resolve_workspace_roots(args: argparse.Namespace) -> list[str]:
     return [str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())]
 
 
+
+# Map from normalised language key to the Python module name of its grammar
+# (used to derive the pip package name — module_name.replace("_", "-")).
+# Only languages declared in SYMBOL_LANGUAGES are relevant; this covers all of them.
+_GRAMMAR_MODULE: dict[str, str] = {
+    "python":     "tree_sitter_python",
+    "javascript": "tree_sitter_javascript",
+    "typescript": "tree_sitter_typescript",
+    "go":         "tree_sitter_go",
+    "rust":       "tree_sitter_rust",
+    "java":       "tree_sitter_java",
+    "zig":        "tree_sitter_zig",
+    "c":          "tree_sitter_c",
+    "cpp":        "tree_sitter_cpp",
+}
+
+
+def _preflight_install_grammar(
+    lang: str,
+    pinned_req: str,
+    *,
+    _run_pip=None,
+) -> bool:
+    """Attempt to install one missing grammar package. Returns True on success.
+
+    `pinned_req` is the requirement string (e.g. 'tree-sitter-c==0.24.2').
+    `_run_pip` is injectable for tests (defaults to subprocess.run on sys.executable).
+    """
+    if _run_pip is None:
+        def _run_pip(req: str):
+            return subprocess.run(
+                [sys.executable, "-m", "pip", "install", req],
+                capture_output=True, text=True,
+            )
+
+    result = _run_pip(pinned_req)
+    if result.returncode == 0:
+        # Re-verify: clear parser cache so the re-import picks up the newly installed module.
+        try:
+            from agent.indexer._chunking import _PARSER_CACHE
+            _PARSER_CACHE.clear()
+        except Exception:
+            pass
+        from agent.symbol_graph import grammar_available
+        if grammar_available(lang):
+            print(f"  [vectr] grammar installed: {pinned_req}", file=sys.stderr)
+            return True
+    return False
+
+
+def _preflight_grammars(*, _run_pip=None) -> None:
+    """Check declared tree-sitter grammars and auto-install any that are missing.
+
+    Called before starting the daemon (cmd_start) and before indexing (cmd_watch)
+    so a missing grammar is repaired before the symbol graph is first built.
+
+    Strategy:
+    1. Compute missing = SYMBOL_LANGUAGES - available_symbol_languages().
+    2. For each missing language, derive the pinned requirement from the installed
+       vectr package metadata (importlib.metadata.requires("vectr")). Falls back
+       to an unpinned package name if metadata lookup fails.
+    3. Attempt pip install. On success, re-verify via grammar_available().
+    4. On failure (offline / externally-managed env / permissions): print a clear
+       remediation message and CONTINUE — the language is search-only for this run.
+       Never crash, never silently add --break-system-packages.
+    """
+    from agent.symbol_graph import SYMBOL_LANGUAGES, available_symbol_languages
+
+    missing_langs = sorted(SYMBOL_LANGUAGES - available_symbol_languages())
+    if not missing_langs:
+        return  # all grammars present — nothing to do
+
+    # Derive pinned requirements from installed package metadata.
+    pinned: dict[str, str] = {}
+    try:
+        import importlib.metadata as _meta
+        reqs = _meta.requires("vectr") or []
+        for req in reqs:
+            # req looks like 'tree-sitter-c>=0.24.2' or 'tree-sitter-c==0.24.2'
+            # We want the whole string (including the version constraint).
+            req_name = req.split(";")[0].strip()  # strip environment markers
+            if req_name.lower().startswith("tree-sitter-"):
+                # Normalise: tree-sitter-cpp -> tree_sitter_cpp
+                module = req_name.split(">=")[0].split("==")[0].split("!=")[0].strip()
+                module_key = module.replace("-", "_").lower()
+                pinned[module_key] = req_name  # e.g. "tree_sitter_c" -> "tree-sitter-c>=0.24.2"
+    except Exception:
+        pass  # metadata unavailable — will fall back to bare package names below
+
+    failed: list[str] = []
+    for lang in missing_langs:
+        module_name = _GRAMMAR_MODULE.get(lang, f"tree_sitter_{lang}")
+        pip_name = module_name.replace("_", "-")
+        # Use pinned requirement if found, otherwise bare package name.
+        req = pinned.get(module_name, pip_name)
+
+        print(
+            f"  [vectr] tree-sitter grammar missing for '{lang}' — installing {req!r} ...",
+            file=sys.stderr,
+        )
+        success = _preflight_install_grammar(lang, req, _run_pip=_run_pip)
+        if not success:
+            failed.append((lang, req))
+
+    if failed:
+        lang_list = ", ".join(l for l, _ in failed)
+        pip_cmd = " ".join(r for _, r in failed)
+        print(
+            f"\n[vectr] WARNING: could not auto-install grammar(s) for: {lang_list}",
+            file=sys.stderr,
+        )
+        print(
+            f"  locate/trace will be DISABLED for these languages in this session.",
+            file=sys.stderr,
+        )
+        print(
+            f"  To fix, run:  pip install {pip_cmd}",
+            file=sys.stderr,
+        )
+        print(
+            "  Note: externally-managed environments (Homebrew/system Python) may need "
+            "--break-system-packages or use a virtualenv.",
+            file=sys.stderr,
+        )
+        print(
+            "  Continuing startup — affected languages are search-only.\n",
+            file=sys.stderr,
+        )
+
+
 def _do_start(workspace: str, port: int, ws_hash: str, extra_roots: list[str] | None = None) -> None:
     log_dir = Path.home() / ".vectr" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -489,6 +619,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     port = registry.find_free_port(ws_hash, preferred_port)
     for root in roots:
         _write_workspace_config(root, port)
+    _preflight_grammars()
     _do_start(workspace, port, ws_hash, extra_roots=extra_roots)
 
 
@@ -903,6 +1034,8 @@ def cmd_watch(args: argparse.Namespace) -> None:
     from agent.indexer import CodeIndexer
     from agent.watcher import CodeWatcher
     from integrations.workspace_detect import find_workspace_root
+
+    _preflight_grammars()
 
     roots = _resolve_workspace_roots(args)
     workspace = find_workspace_root(roots[0])
