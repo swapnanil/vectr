@@ -80,6 +80,12 @@ LOCATE_SMALL_SPAN_THRESHOLD : int
     Line-span below which a located symbol is considered "tiny" — a stub or inner
     test class (UPG-15.10). Symbols with span < this value get the worst (highest)
     span bucket in locate ranking, penalising 2–5-line test-inner stub classes.
+
+IMPORTANCE_PRIOR_LAMBDA : float
+    Blend weight for the file-level PageRank importance prior in the final search
+    sort (ARCH-1b): final_score = base_rerank_score * quality_score * (1 + lambda *
+    importance). 0 disables (pre-ARCH-1b behaviour). Relevance-gated by the multiply
+    against base_rerank_score.
 """
 from __future__ import annotations
 
@@ -147,6 +153,14 @@ _lr_cfg: dict[str, Any] = _cfg["ranking"]["locate_ranking"]
 
 LOCATE_LARGE_SPAN_THRESHOLD: int = int(_lr_cfg["large_span_threshold"])
 LOCATE_SMALL_SPAN_THRESHOLD: int = int(_lr_cfg["small_span_threshold"])
+
+# ---------------------------------------------------------------------------
+# Importance prior — file-level PageRank blend (ARCH-1b)
+# ---------------------------------------------------------------------------
+
+_imp_cfg: dict[str, Any] = _cfg["ranking"]["importance_prior"]
+
+IMPORTANCE_PRIOR_LAMBDA: float = float(_imp_cfg["lambda"])
 
 # ---------------------------------------------------------------------------
 # Rerank pool sizes (UPG-12.1)

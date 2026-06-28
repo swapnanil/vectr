@@ -1090,6 +1090,45 @@ class TestRankingQuality:
         assert searcher._apply_quality_and_dedup("q", []) == []
 
 
+class TestImportancePrior:
+    """ARCH-1b: file-level PageRank importance blended as a relevance-gated
+    multiplicative prior into the final search sort."""
+
+    def _ten(self):
+        # Ten equal-quality real-code candidates across distinct files; A and B are
+        # the two leaders (rank 0 and 1), then eight fillers.
+        a = _sr("def alpha():\n    return compute()\n    # impl body\n    x=1", path="/p/a.py")
+        b = _sr("def beta():\n    return compute()\n    # impl body\n    y=2", path="/p/b.py")
+        filler = [_sr(f"def helper{i}():\n    return compute()\n    # body\n    z={i}",
+                      path=f"/p/f{i}.py") for i in range(8)]
+        return a, b, [a, b] + filler
+
+    def test_prior_lifts_near_tie(self, searcher) -> None:
+        # Without importance, A (rank 0) leads B (rank 1). High importance on B's
+        # file overtakes the one-rank base gap (lambda default 0.25).
+        a, b, cands = self._ten()
+        searcher.set_file_importance({"/p/b.py": 1.0})
+        out = searcher._apply_quality_and_dedup("compute impl", cands)
+        assert out[0] is b, f"high-importance B should lead; got {out[0].file_path}"
+        assert out.index(b) < out.index(a)
+
+    def test_prior_absent_preserves_base_order(self, searcher) -> None:
+        # Empty importance map → no-op; base-rank order (A before B) is preserved.
+        a, b, cands = self._ten()
+        searcher.set_file_importance({})
+        out = searcher._apply_quality_and_dedup("compute impl", cands)
+        assert out[0] is a
+        assert out.index(a) < out.index(b)
+
+    def test_prior_does_not_override_clear_relevance(self, searcher) -> None:
+        # A low-relevance chunk (last rank) with max importance must NOT jump the
+        # clearly-relevant rank-0 chunk: the prior is gated by base_rerank_score.
+        a, b, cands = self._ten()
+        searcher.set_file_importance({"/p/f7.py": 1.0})
+        out = searcher._apply_quality_and_dedup("compute impl", cands)
+        assert out[0] is a, f"clear top relevance must hold; got {out[0].file_path}"
+
+
 class TestChunkerHygiene:
     def test_navigational_window_tagged(self, tmp_path) -> None:
         from agent.indexer import chunk_file

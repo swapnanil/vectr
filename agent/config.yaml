@@ -56,6 +56,20 @@ ranking:
     # pattern without risk of demoting real dataclass-style classes.
     trivial_attr_class_max_attrs: 3
 
+  importance_prior:
+    # ARCH-1b: file-level PageRank importance (computed at index time by ARCH-1a,
+    # stored in the symbol_importance table) is blended into the FINAL search sort
+    # as a relevance-gated multiplicative prior:
+    #     final_score = base_rerank_score * quality_score * (1 + lambda * importance)
+    # where importance ∈ [0,1] is the normalized file-level PageRank of the chunk's
+    # file (0 when unknown). The multiply by base_rerank_score keeps it relevance-
+    # gated — an irrelevant high-importance file (base ≈ 0) is not lifted. A global
+    # standing prior (canonical = most-referenced), NOT a query-keyword heuristic.
+    # lambda=0 disables it (behaviour identical to pre-ARCH-1b). Conservative default
+    # 0.25: reorders near-ties toward canonical files without overriding clear
+    # relevance. Live F22/F23 tuning is tracked in tasks.md ARCH-1b.
+    lambda: 0.25
+
   locate_ranking:
     # UPG-15.10: scope-depth + line-span signals for locate ranking.
     # These penalise class/function definitions that are buried inside function

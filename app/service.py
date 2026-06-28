@@ -62,6 +62,12 @@ class VectrService:
 
         # L2 — symbol graph
         self._symbol_graph = SymbolGraph(db_dir)
+        # ARCH-1b: seed the searcher's importance prior from the persisted
+        # symbol_importance table so a restart over an already-indexed workspace
+        # ranks with importance immediately (empty until ARCH-1a has run once).
+        self._searcher.set_file_importance(
+            self._symbol_graph.file_importance(self._workspace_root)
+        )
 
         # Memory layer — semantic recall enabled via the same embedder + ChromaDB client
         # used by the code index, so no extra model load or second DB process.
@@ -171,6 +177,11 @@ class VectrService:
                 "Symbol graph: %d symbols, %d edges across %d files (%d failed, complete=%s)",
                 stats["symbols"], stats["edges"], stats["files"],
                 stats["failed"], stats["complete"],
+            )
+            # ARCH-1b: hand the freshly-computed file-level importance (ARCH-1a) to
+            # the searcher so the ranking prior reflects the current graph.
+            self._searcher.set_file_importance(
+                self._symbol_graph.file_importance(self._workspace_root)
             )
         except Exception:
             logger.exception("Symbol graph build failed (non-fatal)")

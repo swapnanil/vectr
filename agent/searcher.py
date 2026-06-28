@@ -19,6 +19,7 @@ from agent.config import (
     RERANK_TOP_K as _RERANK_TOP_K,
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
     RERANK_PRE_FILTER_FETCH_K as _RERANK_PRE_FILTER_FETCH_K,
+    IMPORTANCE_PRIOR_LAMBDA as _IMPORTANCE_PRIOR_LAMBDA,
 )
 from agent.indexer import CodeIndexer
 
@@ -137,9 +138,19 @@ class CodeSearcher:
         self._bm25_ids: list[str] = []
         self._bm25_docs: list[str] = []
         self._bm25_metas: list[dict] = []
+        # ARCH-1b: file_path -> normalized file-level PageRank importance ∈ [0,1].
+        # Injected by the service after each symbol-graph build via set_file_importance().
+        # Empty until then → the importance prior is a no-op (pre-ARCH-1b behaviour).
+        self._file_importance: dict[str, float] = {}
         # Read at instantiation so test fixtures can override via os.environ before creating searcher
         reranker_model = os.getenv("VECTR_RERANKER_MODEL", "BAAI/bge-reranker-base")
         self._reranker = _Reranker(reranker_model) if reranker_model else None
+
+    def set_file_importance(self, importance: dict[str, float]) -> None:
+        """Install the file-level importance map consumed by the ARCH-1b ranking
+        prior. Called by the service after (re)building the symbol graph. Passing an
+        empty dict disables the prior (the searcher falls back to base × quality)."""
+        self._file_importance = importance or {}
 
     def refresh_bm25(self) -> None:
         """Rebuild the BM25 index from the current ChromaDB collection."""
@@ -315,7 +326,12 @@ class CodeSearcher:
     ) -> list[SearchResult]:
         """Re-rank by relevance×quality, collapse duplicates, break ties deterministically.
 
-        Pipeline: final_score = base_rerank_score * quality_score(chunk).
+        Pipeline: final_score = base_rerank_score * quality_score(chunk) *
+        (1 + lambda * file_importance) (ARCH-1b). The importance factor is a
+        relevance-gated multiplicative prior — multiplying by base_rerank_score
+        means an irrelevant high-importance file (base ≈ 0) is never lifted. When no
+        importance map is installed (or lambda = 0) the factor is 1.0 and the score
+        reduces to base × quality.
         Keeps exact-duplicate dedup and the quality_score call (with trivial/navigational/
         doc-language demotion intact).
 
@@ -344,7 +360,11 @@ class CodeSearcher:
                 class_ctx = extract_class_from_content(r.content)
                 if class_ctx:
                     r.symbol_name = f"{class_ctx}.{r.symbol_name}"
-            scored.append((base * q, q, i, r))
+            # ARCH-1b: relevance-gated file-importance prior. importance ∈ [0,1];
+            # factor ∈ [1, 1+lambda]. No-op when no map installed or lambda = 0.
+            imp = self._file_importance.get(r.file_path, 0.0) if self._file_importance else 0.0
+            importance_factor = 1.0 + _IMPORTANCE_PRIOR_LAMBDA * imp
+            scored.append((base * q * importance_factor, q, i, r))
 
         # Deterministic order: final score desc, quality desc, length desc, then
         # original rank, then path — so equal-scoring boilerplate never wins by
