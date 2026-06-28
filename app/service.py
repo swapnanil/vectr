@@ -161,6 +161,17 @@ class VectrService:
     def _build_symbol_graph(self) -> None:
         """Rebuild the symbol graph from the files the indexer already walked."""
         try:
+            from agent.symbol_graph import SYMBOL_LANGUAGES, available_symbol_languages
+            # Warn loudly when a declared grammar is not importable in this
+            # environment so the degraded state is never silent.
+            missing = sorted(SYMBOL_LANGUAGES - available_symbol_languages())
+            if missing:
+                logger.warning(
+                    "tree-sitter grammar(s) not importable: %s — locate/trace disabled for "
+                    "these; reinstall vectr deps (pip install -e .) to enable",
+                    ", ".join(missing),
+                )
+
             # Reuse the indexer's file list — avoids a second expensive walk and
             # guarantees the symbol graph covers exactly the same files as the
             # vector index (same filters, same exclusions).
@@ -316,6 +327,7 @@ class VectrService:
         return results, query_ms, decision, aug_symbols, aug_trace
 
     def status(self) -> dict:
+        from agent.symbol_graph import SYMBOL_LANGUAGES, available_symbol_languages
         last_ts = self._indexer.last_indexed_ts
         last_str = (
             datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -331,6 +343,7 @@ class VectrService:
                 "recommended_embed_model": self._strategy.recommended_embed_model,
                 "strategy_rationale": self._strategy.rationale,
             }
+        missing = sorted(SYMBOL_LANGUAGES - available_symbol_languages())
         return {
             "indexed_files": self._indexer.indexed_file_count,
             "total_chunks": self._indexer.total_chunks,
@@ -340,6 +353,7 @@ class VectrService:
             "symbol_count": self._symbol_graph.symbol_count(self._workspace_root),
             "languages": self._language_coverage(),
             "notes_count": self._context_store.count_notes(self._workspace_root),
+            "grammars_unavailable": missing,
             **self._symbol_graph_status(),
             **strategy_info,
         }
@@ -361,16 +375,20 @@ class VectrService:
         """Per-language coverage + symbol availability for `status` (UPG-3.3).
 
         Lets the caller LLM route: `symbols=True` languages support locate/trace;
-        the rest are search-only. Ordered by file count (dominant language first).
+        the rest are search-only. A language declared in SYMBOL_LANGUAGES is only
+        marked symbols=True when its tree-sitter grammar actually loads in this
+        environment (grammar_available check) — prevents advertising locate/trace
+        for a language whose grammar package is missing.
+        Ordered by file count (dominant language first).
         """
-        from agent.symbol_graph import supports_symbols
+        from agent.symbol_graph import supports_symbols, grammar_available
         stats = self._indexer.indexed_language_stats()
         return [
             {
                 "language": lang,
                 "files": s["files"],
                 "chunks": s["chunks"],
-                "symbols": supports_symbols(lang),
+                "symbols": supports_symbols(lang) and grammar_available(lang),
             }
             for lang, s in sorted(
                 stats.items(), key=lambda kv: (-kv[1]["files"], kv[0])

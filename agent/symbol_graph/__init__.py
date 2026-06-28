@@ -33,6 +33,8 @@ from agent.symbol_graph._constants import (
     SYMBOL_LANGUAGES,
     graph_toolchain_fingerprint,
     supports_symbols,
+    grammar_available,
+    available_symbol_languages,
     # Internal names imported by tests — re-exported so `from agent.symbol_graph
     # import _extract_routes` (test) and `import agent.symbol_graph as _sgmod`
     # (module-level attribute access) continue to resolve.
@@ -86,6 +88,8 @@ __all__ = [
     # Public functions
     "graph_toolchain_fingerprint",
     "supports_symbols",
+    "grammar_available",
+    "available_symbol_languages",
     "extract_symbols_from_file",
     # Public class
     "SymbolGraph",

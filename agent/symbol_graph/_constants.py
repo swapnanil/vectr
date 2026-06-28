@@ -103,6 +103,42 @@ SYMBOL_LANGUAGES: frozenset[str] = frozenset(_SYMBOL_TYPES)
 SYMBOL_SCHEMA_VERSION = 6  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4) · 4: module-level constants (UPG-10.3) · 5: .txt/.rst prose docs indexed (UPG-11.3) · 6: symbol_importance table added (ARCH-1a)
 
 
+def grammar_available(language: str) -> bool:
+    """True iff the tree-sitter grammar for `language` actually loads in this environment.
+
+    Probes by calling agent.indexer._get_parser(language) — function-level import
+    to avoid import cycles. Normalises display names the same way supports_symbols
+    does so either form ("C++", "cpp") works.
+
+    A False result means the grammar package is declared in pyproject.toml but not
+    installed (e.g. an editable install predating a grammar being added). In that
+    case locate/trace must be advertised as unavailable for that language and the
+    toolchain fingerprint must exclude it so installing the grammar later triggers
+    a full graph rebuild.
+    """
+    if not language:
+        return False
+    norm = language.strip().lower()
+    norm = {"c++": "cpp", "cplusplus": "cpp", "objective-c": "c"}.get(norm, norm)
+    if norm not in SYMBOL_LANGUAGES:
+        return False
+    # Function-level import to avoid circular dependency (agent.indexer imports
+    # from agent.symbol_graph via _extraction; we access it at call-time only).
+    from agent.indexer import _get_parser  # noqa: PLC0415
+    return _get_parser(norm) is not None
+
+
+def available_symbol_languages() -> frozenset:
+    """Subset of SYMBOL_LANGUAGES whose tree-sitter grammar successfully loads.
+
+    Returns a frozenset[str] of normalised language keys. Languages declared in
+    SYMBOL_LANGUAGES but whose grammar package is missing from the environment
+    are excluded. Used by graph_toolchain_fingerprint so that installing or
+    removing a grammar changes the fingerprint and triggers a graph rebuild.
+    """
+    return frozenset(lang for lang in SYMBOL_LANGUAGES if grammar_available(lang))
+
+
 def graph_toolchain_fingerprint(embed_model: str = "") -> str:
     """Identity of the toolchain that builds the symbol graph.
 
@@ -111,15 +147,21 @@ def graph_toolchain_fingerprint(embed_model: str = "") -> str:
     rebuilt — otherwise locate/trace silently serve stale or partial results
     after an upgrade. See UPG-8.7.
 
-    Reads SYMBOL_SCHEMA_VERSION through the package namespace so that test-time
-    monkeypatching of agent.symbol_graph.SYMBOL_SCHEMA_VERSION is reflected in
-    the fingerprint (identical to the original flat-module behaviour).
+    The `parsers=` part now reflects ACTUALLY-LOADABLE grammars (via
+    available_symbol_languages()) rather than statically-declared ones. This
+    means installing or removing a tree-sitter grammar package changes the
+    fingerprint and triggers is_stale → rebuild, so a previously grammar-blind
+    graph is never silently served after the grammar is installed.
+
+    Reads SYMBOL_SCHEMA_VERSION and available_symbol_languages through the
+    package namespace so that test-time monkeypatching of those names on
+    agent.symbol_graph is reflected in the fingerprint.
     """
     import hashlib
     import agent.symbol_graph as _sg
     parts = [
         f"schema={_sg.SYMBOL_SCHEMA_VERSION}",
-        "parsers=" + ",".join(sorted(SYMBOL_LANGUAGES)),
+        "parsers=" + ",".join(sorted(_sg.available_symbol_languages())),
         f"embed={embed_model}",
     ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]

@@ -195,6 +195,14 @@ def handle_tools_call(
                     f"  → Primary language ({top['language']}) has no symbol graph — "
                     "prefer vectr_search; locate/trace will be empty here."
                 )
+        # Warn when declared grammars are not importable in this environment.
+        grammars_unavailable = status.get("grammars_unavailable") or []
+        if grammars_unavailable:
+            lines.append(
+                f"  WARNING        : tree-sitter grammar(s) not importable: "
+                f"{', '.join(grammars_unavailable)} — locate/trace disabled for these; "
+                "reinstall vectr deps (pip install -e .) to enable"
+            )
         if status.get("semantic_weight") is not None:
             lines.append(
                 f"  Retrieval      : semantic={status['semantic_weight']:.0%}  "
