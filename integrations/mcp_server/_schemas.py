@@ -213,6 +213,15 @@ _MEMORY_WRITE_TOOLS = [
                     "default": "finding",
                     "enum": ["directive", "task", "gotcha", "finding", "reference"],
                 },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Short label for index-tier display (optional, max ~80 chars). "
+                        "If omitted, the first non-empty line of content is used as the title. "
+                        "Shown in vectr_recall() index output so you can identify notes without reading their bodies."
+                    ),
+                    "default": "",
+                },
             },
             "required": ["content"],
         },
@@ -239,11 +248,14 @@ _MEMORY_TOOLS = [
         "name": "vectr_recall",
         "description": (
             "Retrieve notes stored earlier in this session or in prior sessions. "
+            "TWO-TIER RECALL (UPG-RECALL-HIERARCHY): "
+            "By default returns a crisp one-line index per note (id + kind/priority + title + age) — "
+            "token-bounded, safe to call broadly. "
+            "To read a note body: pass note_id=N (expand one note, full body) or detail='full' (all bodies). "
             "Use when vectr_status() confirmed notes_count > 0 — notes may have been stored this session "
             "or in a previous one; either way they are immediately useful. "
             "Pass a targeted query to retrieve only the notes relevant to your current task — "
-            "do NOT call with no query unless you need everything (a broad recall inflates context unnecessarily). "
-            "Do NOT call if vectr_status() returned notes_count == 0."
+            "do NOT call with no query unless you need everything."
         ),
         "inputSchema": {
             "type": "object",
@@ -256,6 +268,25 @@ _MEMORY_TOOLS = [
                         "Omit only when you need all stored notes."
                     ),
                     "nullable": True,
+                },
+                "note_id": {
+                    "type": "integer",
+                    "description": (
+                        "Expand a single note by ID — returns the full body of that note, ignoring query. "
+                        "Use after seeing the index output to read the note you care about. "
+                        "Get IDs from the [#N] prefix in index output."
+                    ),
+                    "nullable": True,
+                },
+                "detail": {
+                    "type": "string",
+                    "description": (
+                        "Detail level: "
+                        "'index' (default) = one-line summary per note (id, kind/priority, title, age) — token-bounded; "
+                        "'full' = full note bodies (use when you need to read all matching notes)."
+                    ),
+                    "default": "index",
+                    "enum": ["index", "full"],
                 },
                 "tags": {
                     "type": "array",
@@ -272,6 +303,20 @@ _MEMORY_TOOLS = [
                     "description": "Filter to one memory kind: 'directive' | 'task' | 'gotcha' | 'finding' | 'reference'",
                     "nullable": True,
                     "enum": ["directive", "task", "gotcha", "finding", "reference"],
+                },
+                "sort_by": {
+                    "type": "string",
+                    "description": (
+                        "Sort order: 'relevance' (semantic/trust order, default), "
+                        "'recency' (newest first), 'priority' (high→medium→low then newest)."
+                    ),
+                    "default": "relevance",
+                    "enum": ["relevance", "recency", "priority"],
+                },
+                "max_age_days": {
+                    "type": "number",
+                    "description": "Time filter: only return notes created within this many days.",
+                    "nullable": True,
                 },
                 "boot": {
                     "type": "boolean",

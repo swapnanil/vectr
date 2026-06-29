@@ -319,7 +319,8 @@ def handle_tools_call(
         if priority not in ("high", "medium", "low"):
             priority = "medium"
         kind = arguments.get("kind", "finding")
-        note_id = service.remember(content=content, tags=tags, priority=priority, kind=kind)
+        title = arguments.get("title", "") or ""
+        note_id = service.remember(content=content, tags=tags, priority=priority, kind=kind, title=title)
         # reset the turn-count nudge and enable memory tools for this session
         _reset_calls_since_save(session_id)
         enable_memory_for_session(session_id)
@@ -336,7 +337,24 @@ def handle_tools_call(
         kind = arguments.get("kind") or None
         boot = bool(arguments.get("boot", False))
         limit = int(arguments.get("limit", 10))
-        text = service.recall(query=query, tags=tags, priority=priority, limit=limit, kind=kind, boot=boot)
+        detail = arguments.get("detail", "index") or "index"
+        sort_by = arguments.get("sort_by", "relevance") or "relevance"
+        max_age_days = arguments.get("max_age_days") or None
+        if max_age_days is not None:
+            try:
+                max_age_days = float(max_age_days)
+            except (TypeError, ValueError):
+                max_age_days = None
+        note_id_arg = arguments.get("note_id") or None
+        if note_id_arg is not None:
+            try:
+                note_id_arg = int(note_id_arg)
+            except (TypeError, ValueError):
+                note_id_arg = None
+        text = service.recall(
+            query=query, tags=tags, priority=priority, limit=limit, kind=kind, boot=boot,
+            detail=detail, sort_by=sort_by, max_age_days=max_age_days, note_id=note_id_arg,
+        )
         hint = service.auto_eviction_hint()  # UPG-7.1: gated, not every response
         if hint:
             text += f"\n\n─── Context management hint ───\n{hint}"

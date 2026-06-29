@@ -491,6 +491,7 @@ class VectrService:
         priority: str = "medium",
         session_id: str | None = None,
         kind: str = "finding",
+        title: str = "",
     ) -> int:
         return self._context_store.remember(
             workspace=self._workspace_root,
@@ -499,7 +500,12 @@ class VectrService:
             priority=priority,
             session_id=session_id,
             kind=kind,
+            title=title,
         )
+
+    def get_note(self, note_id: int):
+        """Fetch a single note by ID (UPG-RECALL-HIERARCHY expand path)."""
+        return self._context_store.get_note(self._workspace_root, note_id)
 
     def recall(
         self,
@@ -511,17 +517,41 @@ class VectrService:
         boot: bool = False,
         min_similarity: float | None = None,
         file_path: str | None = None,
+        max_age_days: float | None = None,
+        sort_by: str = "relevance",
+        detail: str = "index",
+        note_id: int | None = None,
     ) -> str:
+        # Single-note expand: note_id overrides everything else (UPG-RECALL-HIERARCHY).
+        if note_id is not None:
+            note = self._context_store.get_note(self._workspace_root, note_id)
+            if note is None:
+                return f"Note #{note_id} not found."
+            stale = self._context_store.check_staleness([note], self._workspace_root)
+            return self._context_store.format_notes_for_llm([note], stale_warnings=stale, detail="full")
+
         # Boot mode (UPG-9.2): unconditional directive + high-task set for
         # harness-injected recall. Ignores query/tags/priority/kind/limit and
         # returns "" (never the "no notes" placeholder) so a SessionStart hook
         # injects nothing on a fresh workspace rather than noise.
+        # Boot always renders index tier (directives at full, tasks at index) — see below.
         if boot:
             notes = self._context_store.boot_recall(self._workspace_root)
             if not notes:
                 return ""
             stale = self._context_store.check_staleness(notes, self._workspace_root)
-            return self._context_store.format_notes_for_llm(notes, stale_warnings=stale)
+            # Directives carry imperative text that matters verbatim — render full.
+            # High-priority tasks and others render as index (token-bounded).
+            directive_notes = [n for n in notes if n.kind == "directive"]
+            other_notes = [n for n in notes if n.kind != "directive"]
+            parts: list[str] = []
+            if directive_notes:
+                parts.append(self._context_store.format_notes_for_llm(
+                    directive_notes, stale_warnings=stale, detail="full"))
+            if other_notes:
+                parts.append(self._context_store.format_notes_for_llm(
+                    other_notes, stale_warnings=stale, detail="index"))
+            return "\n".join(parts)
 
         # Path-anchored mode (UPG-9.6): notes recorded against a specific file,
         # for the PreToolUse gotcha hook. Returns "" when none, so editing a file
@@ -532,7 +562,7 @@ class VectrService:
             if not notes:
                 return ""
             stale = self._context_store.check_staleness(notes, self._workspace_root)
-            return self._context_store.format_notes_for_llm(notes, stale_warnings=stale)
+            return self._context_store.format_notes_for_llm(notes, stale_warnings=stale, detail=detail)
 
         notes = self._context_store.recall(
             workspace=self._workspace_root,
@@ -542,9 +572,11 @@ class VectrService:
             limit=limit,
             kind=kind,
             min_similarity=min_similarity,
+            max_age_days=max_age_days,
+            sort_by=sort_by,
         )
         stale = self._context_store.check_staleness(notes, self._workspace_root)
-        return self._context_store.format_notes_for_llm(notes, stale_warnings=stale)
+        return self._context_store.format_notes_for_llm(notes, stale_warnings=stale, detail=detail)
 
     def forget_note(self, note_id: int) -> bool:
         return self._context_store.forget(self._workspace_root, note_id)

@@ -206,6 +206,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         priority=body.priority,
         session_id=body.session_id,
         kind=body.kind,
+        title=body.title,
     )
     return RememberResponse(
         note_id=note_id,
@@ -227,6 +228,10 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
         boot=body.boot,
         min_similarity=body.min_similarity,
         file_path=body.file_path,
+        max_age_days=body.max_age_days,
+        sort_by=body.sort_by,
+        detail=body.detail,
+        note_id=body.note_id,
     )
     return RecallResponse(
         notes=notes_text,

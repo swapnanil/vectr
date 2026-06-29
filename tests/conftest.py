@@ -222,19 +222,39 @@ def client_real_memory(tmp_path):
     real_store = WorkingContextStore(str(tmp_path))
     ws = str(tmp_path)
 
-    svc.remember.side_effect = lambda content, tags=None, priority="medium", session_id=None, kind="finding": \
-        real_store.remember(ws, content, tags, priority, session_id, kind=kind)
+    svc.remember.side_effect = lambda content, tags=None, priority="medium", session_id=None, kind="finding", title="": \
+        real_store.remember(ws, content, tags, priority, session_id, kind=kind, title=title)
 
     def _recall(query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-                min_similarity=None, file_path=None):
+                min_similarity=None, file_path=None, max_age_days=None, sort_by="relevance",
+                detail="index", note_id=None):
+        if note_id is not None:
+            note = real_store.get_note(ws, note_id)
+            if note is None:
+                return f"Note #{note_id} not found."
+            stale = real_store.check_staleness([note], ws)
+            return real_store.format_notes_for_llm([note], stale_warnings=stale, detail="full")
         if boot:
             boot_notes = real_store.boot_recall(ws)
-            return real_store.format_notes_for_llm(boot_notes) if boot_notes else ""
+            if not boot_notes:
+                return ""
+            stale = real_store.check_staleness(boot_notes, ws)
+            directive_notes = [n for n in boot_notes if n.kind == "directive"]
+            other_notes = [n for n in boot_notes if n.kind != "directive"]
+            parts = []
+            if directive_notes:
+                parts.append(real_store.format_notes_for_llm(directive_notes, stale_warnings=stale, detail="full"))
+            if other_notes:
+                parts.append(real_store.format_notes_for_llm(other_notes, stale_warnings=stale, detail="index"))
+            return "\n".join(parts)
         if file_path:
             path_notes = real_store.recall_for_path(ws, file_path, kind=kind, limit=limit)
-            return real_store.format_notes_for_llm(path_notes) if path_notes else ""
+            return real_store.format_notes_for_llm(path_notes, detail=detail) if path_notes else ""
         return real_store.format_notes_for_llm(
-            real_store.recall(ws, query, tags, priority, limit, kind=kind, min_similarity=min_similarity))
+            real_store.recall(ws, query, tags, priority, limit, kind=kind, min_similarity=min_similarity,
+                              max_age_days=max_age_days, sort_by=sort_by),
+            detail=detail,
+        )
 
     svc.recall.side_effect = _recall
     svc.snapshot_session.side_effect = lambda label, session_id=None: \

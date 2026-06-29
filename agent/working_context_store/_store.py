@@ -109,6 +109,8 @@ class WorkingContextStore:
                 "superseded_at":      "REAL",
                 # UPG-9.3: memory kind dimension — existing rows default to 'finding'.
                 "kind":               "TEXT NOT NULL DEFAULT 'finding'",
+                # UPG-RECALL-HIERARCHY: per-note title for index-tier display.
+                "title":              "TEXT NOT NULL DEFAULT ''",
             }
             for col, typedef in p4_cols.items():
                 if col not in existing_cols:
@@ -133,6 +135,7 @@ class WorkingContextStore:
         author_id: str = "",
         code_hash: str = "",
         kind: str = DEFAULT_KIND,
+        title: str = "",
     ) -> int:
         """Store a working note. Returns the note_id.
 
@@ -142,11 +145,22 @@ class WorkingContextStore:
 
         `kind` is one of VALID_KINDS (directive|task|gotcha|finding|reference);
         an unrecognised value falls back to DEFAULT_KIND.
+
+        `title` is a short label for index-tier display (UPG-RECALL-HIERARCHY).
+        When empty, a fallback is derived from the first non-empty line of content,
+        stripped and truncated to 80 characters.
         """
         now = time.time()
         tags_json = json.dumps(tags or [])
         if kind not in VALID_KINDS:
             kind = DEFAULT_KIND
+        # Derive title fallback from first non-empty content line (80-char cap).
+        if not title:
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped:
+                    title = stripped[:80]
+                    break
         stored_content = self._encryptor.encrypt(content) if self._encryptor else content
 
         with self._conn() as conn:
@@ -170,11 +184,11 @@ class WorkingContextStore:
                 INSERT INTO notes (workspace, content, tags, priority, kind, created_at,
                                    last_accessed, session_id, decay_score,
                                    author_id, author_trust_score, valid_from,
-                                   valid_until, code_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?)
+                                   valid_until, code_hash, title)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?)
                 """,
                 (workspace, stored_content, tags_json, priority, kind, now, now, session_id,
-                 author_id, now, code_hash),
+                 author_id, now, code_hash, title),
             )
             note_id = cur.lastrowid
 
@@ -213,6 +227,8 @@ class WorkingContextStore:
         include_superseded: bool = False,
         kind: str | None = None,
         min_similarity: float | None = None,
+        max_age_days: float | None = None,
+        sort_by: str = "relevance",
     ) -> list[WorkingNote]:
         """Retrieve working notes.
 
@@ -224,13 +240,21 @@ class WorkingContextStore:
         to see the full history including notes marked as superseded.
         Without a query, results are ordered by author_trust_score DESC, decay_score DESC,
         last_accessed DESC so the highest-trust contributor's notes surface first.
+
+        max_age_days: when set, only notes created within the last max_age_days days
+        are returned (UPG-RECALL-HIERARCHY time filter).
+
+        sort_by: one of 'relevance' (semantic/default SQL order), 'recency'
+        (created_at DESC), or 'priority' (high>medium>low, then created_at DESC).
+        In the semantic path, recency/priority are applied as a re-sort after
+        candidate fetch (relevance = semantic order is unchanged).
         """
         # Semantic path: embed the query, find cosine-nearest notes, then fetch from SQLite.
         if query and self._notes_col is not None and self._embed_fn is not None:
             try:
                 notes = self._semantic_recall(
                     workspace, query, tags, priority, limit, include_superseded, kind,
-                    min_similarity,
+                    min_similarity, max_age_days, sort_by,
                 )
                 audit("RECALL", workspace=workspace, query=query, notes_returned=len(notes),
                       method="semantic")
@@ -262,7 +286,22 @@ class WorkingContextStore:
             sql += " AND content LIKE ?"
             params.append(f"%{query}%")
 
-        sql += " ORDER BY author_trust_score DESC, decay_score DESC, last_accessed DESC LIMIT ?"
+        if max_age_days is not None:
+            cutoff = time.time() - max_age_days * 86400
+            sql += " AND created_at >= ?"
+            params.append(cutoff)
+
+        # sort_by applies to the SQL path's ORDER BY clause.
+        if sort_by == "recency":
+            sql += " ORDER BY created_at DESC LIMIT ?"
+        elif sort_by == "priority":
+            sql += (
+                " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,"
+                " created_at DESC LIMIT ?"
+            )
+        else:
+            # relevance (default): trust/decay/last_accessed ordering
+            sql += " ORDER BY author_trust_score DESC, decay_score DESC, last_accessed DESC LIMIT ?"
         params.append(limit)
 
         with self._conn() as conn:
@@ -292,6 +331,8 @@ class WorkingContextStore:
         include_superseded: bool,
         kind: str | None = None,
         min_similarity: float | None = None,
+        max_age_days: float | None = None,
+        sort_by: str = "relevance",
     ) -> list[WorkingNote]:
         """Find the most relevant notes by cosine similarity, then fetch from SQLite.
 
@@ -299,6 +340,10 @@ class WorkingContextStore:
         falls below the floor are dropped, so an off-topic query recalls nothing
         instead of the nearest-but-irrelevant note. ChromaDB cosine distance is
         `1 - cosine_similarity`, so similarity = `1 - distance`.
+
+        max_age_days: applied as a SQL filter after candidate fetch (UPG-RECALL-HIERARCHY).
+        sort_by: 'relevance' preserves semantic order; 'recency'/'priority' re-sorts
+        the candidate set after fetch (UPG-RECALL-HIERARCHY).
         """
         # Cap n_results at collection size to avoid ChromaDB errors on small collections
         col_count = self._notes_col.count()
@@ -347,13 +392,28 @@ class WorkingContextStore:
             sql += f" AND ({tag_clauses})"
             params.extend([f'%"{t}"%' for t in tags])
 
+        if max_age_days is not None:
+            cutoff = time.time() - max_age_days * 86400
+            sql += " AND created_at >= ?"
+            params.append(cutoff)
+
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
 
-        # Preserve semantic rank order (ChromaDB returns by ascending distance)
+        # Preserve semantic rank order by default (ChromaDB returns by ascending distance)
         id_to_row = {r["note_id"]: r for r in rows}
-        ordered = [id_to_row[nid] for nid in candidate_ids if nid in id_to_row][:limit]
-        notes = [self._row_to_note(r) for r in ordered]
+        if sort_by == "relevance":
+            ordered = [id_to_row[nid] for nid in candidate_ids if nid in id_to_row][:limit]
+            notes = [self._row_to_note(r) for r in ordered]
+        else:
+            # Convert all candidates to notes, then re-sort.
+            all_notes = [self._row_to_note(r) for r in rows]
+            if sort_by == "recency":
+                all_notes.sort(key=lambda n: n.created_at, reverse=True)
+            elif sort_by == "priority":
+                _prio_rank = {"high": 0, "medium": 1, "low": 2}
+                all_notes.sort(key=lambda n: (_prio_rank.get(n.priority, 1), -n.created_at))
+            notes = all_notes[:limit]
 
         if notes:
             ids = [n.note_id for n in notes]
@@ -391,6 +451,18 @@ class WorkingContextStore:
         notes = [self._row_to_note(r) for r in rows]
         audit("RECALL", workspace=workspace, query="", notes_returned=len(notes), method="boot")
         return notes
+
+    def get_note(self, workspace: str, note_id: int) -> "WorkingNote | None":
+        """Fetch a single note by ID for the expand path (UPG-RECALL-HIERARCHY).
+
+        Returns None if the note does not exist or belongs to a different workspace.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM notes WHERE workspace = ? AND note_id = ?",
+                (workspace, note_id),
+            ).fetchone()
+        return self._row_to_note(row) if row is not None else None
 
     def recall_for_path(
         self,
@@ -720,23 +792,49 @@ class WorkingContextStore:
             code_hash=row["code_hash"] if "code_hash" in keys else "",
             superseded_by=row["superseded_by"] if "superseded_by" in keys else None,
             superseded_at=row["superseded_at"] if "superseded_at" in keys else None,
+            title=row["title"] if "title" in keys else "",
         )
 
     def format_notes_for_llm(
         self,
         notes: list[WorkingNote],
         stale_warnings: dict[int, list[str]] | None = None,
+        detail: str = "index",
     ) -> str:
         """Format recalled notes into a clean LLM-readable string.
 
-        If stale_warnings is provided, notes whose referenced files have changed
-        since the note was written are flagged with a [STALE] marker and a warning
-        listing which files changed.
+        detail='index' (default, UPG-RECALL-HIERARCHY): renders ONE crisp line per note:
+            [#<note_id>] <kind>/<priority> · <title>  (<relative age>)
+          No body is included. Token-bounded for hook injection and default recall.
+
+        detail='full': renders the full body format (pre-existing behaviour).
+          Use for explicit vectr_recall(detail='full') or single-note expand (note_id path).
+
+        If stale_warnings is provided (full detail only), notes whose referenced files
+        have changed are flagged with a [STALE] marker and a warning.
         """
         if not notes:
             return "No working notes found."
 
         stale_warnings = stale_warnings or {}
+
+        def _age_str(created_at: float) -> str:
+            age_h = (time.time() - created_at) / 3600
+            return f"{age_h:.0f}h" if age_h < 48 else f"{age_h / 24:.0f}d"
+
+        if detail == "index":
+            header = f"# Working Notes — index ({len(notes)} entries; use vectr_recall(note_id=N) to expand)\n"
+            lines = [header]
+            for n in notes:
+                kind_label = n.kind if n.kind else DEFAULT_KIND
+                title = n.title or (n.content.strip().splitlines()[0][:80] if n.content.strip() else "(no title)")
+                stale_marker = " [STALE]" if n.note_id in stale_warnings else ""
+                lines.append(
+                    f"[#{n.note_id}] {kind_label}/{n.priority} · {title}  ({_age_str(n.created_at)}){stale_marker}"
+                )
+            return "\n".join(lines)
+
+        # detail == "full" (original behaviour, with stale warnings)
         stale_count = len(stale_warnings)
         header = f"# Working Notes ({len(notes)} entries"
         if stale_count:
@@ -745,8 +843,7 @@ class WorkingContextStore:
 
         lines = [header]
         for n in notes:
-            age_h = (time.time() - n.created_at) / 3600
-            age_str = f"{age_h:.0f}h ago" if age_h < 48 else f"{age_h / 24:.0f}d ago"
+            age_str = _age_str(n.created_at) + " ago"
             tag_str = f"  [{', '.join(n.tags)}]" if n.tags else ""
             author_str = f"  @{n.author_id}" if n.author_id else ""
             stale_files = stale_warnings.get(n.note_id, [])

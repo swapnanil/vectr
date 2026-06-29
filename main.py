@@ -701,6 +701,8 @@ def cmd_remember(args: argparse.Namespace) -> None:
         payload["kind"] = args.kind
     if args.tags:
         payload["tags"] = args.tags
+    if getattr(args, "title", None):
+        payload["title"] = args.title
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/remember", json=payload, timeout=30)
         resp.raise_for_status()
@@ -727,16 +729,26 @@ def cmd_recall(args: argparse.Namespace) -> None:
         # Boot mode ignores all filters server-side; send only the flag.
         payload = {"boot": True}
     else:
-        if args.query:
-            payload["query"] = args.query
-        if args.tags:
-            payload["tags"] = args.tags
-        if args.priority:
-            payload["priority"] = args.priority
-        if getattr(args, "kind", None):
-            payload["kind"] = args.kind
-        if getattr(args, "min_similarity", None) is not None:
-            payload["min_similarity"] = args.min_similarity
+        if getattr(args, "note_id", None) is not None:
+            # Single-note expand path — send only the note_id, detail=full.
+            payload = {"note_id": args.note_id, "detail": "full"}
+        else:
+            if args.query:
+                payload["query"] = args.query
+            if args.tags:
+                payload["tags"] = args.tags
+            if args.priority:
+                payload["priority"] = args.priority
+            if getattr(args, "kind", None):
+                payload["kind"] = args.kind
+            if getattr(args, "min_similarity", None) is not None:
+                payload["min_similarity"] = args.min_similarity
+            if getattr(args, "max_age_days", None) is not None:
+                payload["max_age_days"] = args.max_age_days
+            if getattr(args, "sort_by", None):
+                payload["sort_by"] = args.sort_by
+            detail = getattr(args, "detail", "index") or "index"
+            payload["detail"] = detail
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/recall", json=payload, timeout=30)
         resp.raise_for_status()
@@ -840,6 +852,8 @@ def cmd_hook(args: argparse.Namespace) -> None:
         if args.hook_event == "session-start":
             # Unconditional boot set: directives + high-priority tasks (UPG-9.2),
             # the MEMORY.md equivalent — present before turn 1, zero model agency.
+            # detail is NOT sent for boot=True because the service renders directives
+            # at full and tasks at index automatically in the boot path.
             notes = _fetch_recall(port, {"boot": True})
             _emit_hook_context("SessionStart", notes)
 
@@ -847,12 +861,15 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # Per-turn semantic recall (UPG-9.5): recall notes keyed to THIS prompt
             # and inject them before the model sees it. The relevance cutoff
             # (UPG-5.1) keeps an off-topic prompt from injecting anything.
+            # detail="index" keeps the injected context token-bounded (UPG-RECALL-HIERARCHY).
             prompt = (event.get("prompt") or "").strip()
             if not prompt:
                 return
             limit = int(os.getenv("VECTR_HOOK_RECALL_LIMIT", str(_HOOK_RECALL_LIMIT)))
             min_sim = float(os.getenv("VECTR_HOOK_MIN_SIMILARITY", str(_HOOK_MIN_SIMILARITY)))
-            notes = _fetch_recall(port, {"query": prompt, "limit": limit, "min_similarity": min_sim})
+            notes = _fetch_recall(port, {
+                "query": prompt, "limit": limit, "min_similarity": min_sim, "detail": "index",
+            })
             _emit_hook_context("UserPromptSubmit", notes)
 
         elif args.hook_event == "pre-tool-use":
@@ -1212,6 +1229,7 @@ def main() -> None:
     p_remember.add_argument("--priority", choices=["high", "medium", "low"], default="medium")
     p_remember.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference"],
                             default="finding", help="Memory kind (controls injection policy)")
+    p_remember.add_argument("--title", default="", help="Short label for index-tier display (optional; derived from first content line if empty)")
     p_remember.add_argument("--path", default=_default_path)
     p_remember.add_argument("--port", type=int, default=_default_port)
 
@@ -1225,6 +1243,14 @@ def main() -> None:
                           help="Boot mode: unconditional directives + high-priority tasks (for SessionStart hooks)")
     p_recall.add_argument("--min-similarity", type=float, default=None, dest="min_similarity",
                           help="Relevance cutoff [0..1]: drop semantic matches below this cosine similarity")
+    p_recall.add_argument("--max-age-days", type=float, default=None, dest="max_age_days",
+                          help="Time filter: only return notes created within this many days")
+    p_recall.add_argument("--sort-by", choices=["relevance", "recency", "priority"], default="relevance",
+                          dest="sort_by", help="Sort order: relevance | recency | priority")
+    p_recall.add_argument("--detail", choices=["index", "full"], default="index",
+                          help="Detail level: 'index' = one-line summaries (default); 'full' = bodies")
+    p_recall.add_argument("--id", type=int, default=None, dest="note_id",
+                          help="Expand a single note by ID (returns full body)")
     p_recall.add_argument("--limit", type=int, default=10)
     p_recall.add_argument("--path", default=_default_path)
     p_recall.add_argument("--port", type=int, default=_default_port)

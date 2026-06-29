@@ -248,7 +248,8 @@ class TestKindDimensionUPG93:
         store = _store(tmp_path)
         store.remember("/repo", "never push to main", kind="directive")
         store.remember("/repo", "a plain finding")
-        text = store.format_notes_for_llm(store.recall("/repo"))
+        # detail="full" is required to see [DIRECTIVE] in the per-note header line
+        text = store.format_notes_for_llm(store.recall("/repo"), detail="full")
         assert "[DIRECTIVE]" in text
         assert "[FINDING]" not in text  # default kind stays implicit
 
@@ -392,14 +393,16 @@ class TestFormatNotesForLlm:
         store = _store(tmp_path)
         store.remember("/repo", "important finding", priority="high")
         notes = store.recall("/repo")
-        text = store.format_notes_for_llm(notes)
+        # detail="full" renders the [HIGH] badge in the note header
+        text = store.format_notes_for_llm(notes, detail="full")
         assert "HIGH" in text
 
     def test_formatted_shows_tags(self, tmp_path) -> None:
         store = _store(tmp_path)
         store.remember("/repo", "tagged note", tags=["middleware", "async"])
         notes = store.recall("/repo")
-        text = store.format_notes_for_llm(notes)
+        # detail="full" includes the [tag, ...] block in the note header
+        text = store.format_notes_for_llm(notes, detail="full")
         assert "middleware" in text
 
     def test_multiple_notes_all_present(self, tmp_path) -> None:
@@ -619,10 +622,20 @@ class TestFormatNotesWithStaleness:
         store = _store(tmp_path)
         note_id = store.remember(str(tmp_path), "Key file: src/auth.py")
         notes = store.recall(str(tmp_path))
-        output = store.format_notes_for_llm(notes, stale_warnings={note_id: ["src/auth.py"]})
+        # [STALE] appears in both index and full; WARNING text only in full
+        output = store.format_notes_for_llm(notes, stale_warnings={note_id: ["src/auth.py"]}, detail="full")
         assert "[STALE]" in output
         assert "src/auth.py" in output
         assert "WARNING" in output
+
+    def test_stale_marker_in_index_output(self, tmp_path):
+        """[STALE] marker appears in the index tier too — but without the WARNING body."""
+        store = _store(tmp_path)
+        note_id = store.remember(str(tmp_path), "Key file: src/auth.py")
+        notes = store.recall(str(tmp_path))
+        output = store.format_notes_for_llm(notes, stale_warnings={note_id: ["src/auth.py"]}, detail="index")
+        assert "[STALE]" in output
+        assert "WARNING" not in output  # detailed warning only in full tier
 
     def test_clean_note_has_no_stale_marker(self, tmp_path):
         store = _store(tmp_path)
@@ -636,7 +649,8 @@ class TestFormatNotesWithStaleness:
         store = _store(tmp_path)
         note_id = store.remember(str(tmp_path), "Key file: src/auth.py")
         notes = store.recall(str(tmp_path))
-        output = store.format_notes_for_llm(notes, stale_warnings={note_id: ["src/auth.py"]})
+        # "may be stale" is in the full-tier header only
+        output = store.format_notes_for_llm(notes, stale_warnings={note_id: ["src/auth.py"]}, detail="full")
         assert "may be stale" in output
 
     def test_no_stale_warnings_unchanged_output(self, tmp_path):
@@ -978,7 +992,8 @@ class TestP4TeamNotes:
 
         all_notes = store.recall(ws, include_superseded=True)
         stale = store.check_staleness(all_notes, ws)
-        formatted = store.format_notes_for_llm(all_notes, stale_warnings=stale)
+        # superseded badge appears in the full-tier header (not the one-line index)
+        formatted = store.format_notes_for_llm(all_notes, stale_warnings=stale, detail="full")
         assert "superseded by @bob" in formatted
 
     # P4-3: composite staleness with code_hash

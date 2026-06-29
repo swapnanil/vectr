@@ -133,6 +133,7 @@ class RememberRequest(BaseModel):
     priority: str = Field(default="medium", description="high | medium | low")
     kind: str = Field(default="finding", description="directive | task | gotcha | finding | reference")
     session_id: str | None = Field(default=None)
+    title: str = Field(default="", description="Short label for index-tier display (optional; derived from first content line if empty)")
 
     @field_validator("priority")
     @classmethod
@@ -164,6 +165,10 @@ class RecallRequest(BaseModel):
     boot: bool = Field(default=False, description="Boot mode (UPG-9.2): unconditional directives + high-priority tasks; ignores query/tags/priority/kind/limit")
     min_similarity: float | None = Field(default=None, ge=0.0, le=1.0, description="Relevance cutoff (UPG-5.1): drop semantic matches below this cosine similarity; only applies with a query")
     file_path: str | None = Field(default=None, description="Path-anchored recall (UPG-9.6): notes recorded against this file (basename/relpath match); for the PreToolUse gotcha hook")
+    max_age_days: float | None = Field(default=None, gt=0.0, description="Time filter (UPG-RECALL-HIERARCHY): only return notes created within this many days")
+    sort_by: str = Field(default="relevance", description="Sort order (UPG-RECALL-HIERARCHY): relevance | recency | priority")
+    detail: str = Field(default="index", description="Detail level (UPG-RECALL-HIERARCHY): 'index' = one-line summary per note (default, token-bounded); 'full' = full bodies")
+    note_id: int | None = Field(default=None, description="Expand a single note by ID (UPG-RECALL-HIERARCHY): returns full body, ignores query")
 
     @field_validator("kind")
     @classmethod

@@ -37,6 +37,7 @@ class WorkingNote:
     code_hash: str = ""              # sha256[:16] of the anchored code block at write time
     superseded_by: str | None = None  # author_id that superseded this note
     superseded_at: float | None = None
+    title: str = ""                    # short label for index-tier display (UPG-RECALL-HIERARCHY)
 
 
 @dataclass

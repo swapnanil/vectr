@@ -616,7 +616,7 @@ class TestVectrRemember:
     def test_remember_calls_service(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "Found auth bug"}, svc)
-        svc.remember.assert_called_once_with(content="Found auth bug", tags=None, priority="medium", kind="finding")
+        svc.remember.assert_called_once_with(content="Found auth bug", tags=None, priority="medium", kind="finding", title="")
 
     def test_remember_returns_note_id(self) -> None:
         svc = _mock_service()
@@ -636,6 +636,7 @@ class TestVectrRemember:
             tags=["wip", "rate-limit"],
             priority="high",
             kind="finding",
+            title="",
         )
 
     def test_remember_missing_content_returns_error(self) -> None:
@@ -646,14 +647,25 @@ class TestVectrRemember:
     def test_remember_invalid_priority_clamps_to_medium(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "note", "priority": "urgent"}, svc)
-        svc.remember.assert_called_once_with(content="note", tags=None, priority="medium", kind="finding")
+        svc.remember.assert_called_once_with(content="note", tags=None, priority="medium", kind="finding", title="")
 
     def test_remember_passes_kind_through(self) -> None:
         """UPG-9.3: an explicit kind reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "never push to main", "kind": "directive"}, svc)
         svc.remember.assert_called_once_with(content="never push to main", tags=None,
-                                             priority="medium", kind="directive")
+                                             priority="medium", kind="directive", title="")
+
+    def test_remember_passes_title_through(self) -> None:
+        """UPG-RECALL-HIERARCHY: explicit title reaches the service."""
+        svc = _mock_service()
+        handle_tools_call("vectr_remember", {
+            "content": "def acquire_lock(): ...", "title": "workspace lock acquisition",
+        }, svc)
+        svc.remember.assert_called_once_with(
+            content="def acquire_lock(): ...", tags=None, priority="medium",
+            kind="finding", title="workspace lock acquisition",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -759,18 +771,54 @@ class TestVectrRecall:
     def test_recall_calls_service(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_recall", {}, svc)
-        svc.recall.assert_called_once_with(query=None, tags=None, priority=None, limit=10, kind=None, boot=False)
+        svc.recall.assert_called_once_with(
+            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
+            detail="index", sort_by="relevance", max_age_days=None, note_id=None,
+        )
 
     def test_recall_with_filters(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"query": "auth", "tags": ["wip"], "priority": "high", "limit": 5}, svc)
-        svc.recall.assert_called_once_with(query="auth", tags=["wip"], priority="high", limit=5, kind=None, boot=False)
+        svc.recall.assert_called_once_with(
+            query="auth", tags=["wip"], priority="high", limit=5, kind=None, boot=False,
+            detail="index", sort_by="relevance", max_age_days=None, note_id=None,
+        )
 
     def test_recall_passes_kind_filter(self) -> None:
         """UPG-9.3: a kind filter reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"kind": "directive"}, svc)
-        svc.recall.assert_called_once_with(query=None, tags=None, priority=None, limit=10, kind="directive", boot=False)
+        svc.recall.assert_called_once_with(
+            query=None, tags=None, priority=None, limit=10, kind="directive", boot=False,
+            detail="index", sort_by="relevance", max_age_days=None, note_id=None,
+        )
+
+    def test_recall_passes_detail_full(self) -> None:
+        """UPG-RECALL-HIERARCHY: detail='full' reaches the service."""
+        svc = _mock_service()
+        handle_tools_call("vectr_recall", {"detail": "full"}, svc)
+        svc.recall.assert_called_once_with(
+            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
+            detail="full", sort_by="relevance", max_age_days=None, note_id=None,
+        )
+
+    def test_recall_passes_note_id(self) -> None:
+        """UPG-RECALL-HIERARCHY: note_id expand path reaches the service."""
+        svc = _mock_service()
+        handle_tools_call("vectr_recall", {"note_id": 7}, svc)
+        svc.recall.assert_called_once_with(
+            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
+            detail="index", sort_by="relevance", max_age_days=None, note_id=7,
+        )
+
+    def test_recall_passes_sort_by_and_max_age(self) -> None:
+        """UPG-RECALL-HIERARCHY: sort_by and max_age_days reach the service."""
+        svc = _mock_service()
+        handle_tools_call("vectr_recall", {"sort_by": "recency", "max_age_days": 7.0}, svc)
+        svc.recall.assert_called_once_with(
+            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
+            detail="index", sort_by="recency", max_age_days=7.0, note_id=None,
+        )
 
     def test_recall_returns_notes_text(self) -> None:
         svc = _mock_service()
