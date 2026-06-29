@@ -80,6 +80,7 @@ def _mock_service():
     svc.should_evict.return_value = False
     svc.snapshot_session.return_value = "snap_xyz"
     svc.list_snapshots.return_value = []
+    svc.memory_only = False
     return svc
 
 

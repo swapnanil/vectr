@@ -28,7 +28,8 @@ async def lifespan(application: FastAPI):
     workspace = os.getenv("VECTR_WORKSPACE", ".")
     port = int(os.getenv("VECTR_PORT", "8765"))
     extra_roots = _json.loads(os.getenv("VECTR_EXTRA_ROOTS", "[]"))
-    svc = VectrService(workspace_root=workspace, port=port, extra_roots=extra_roots)
+    memory_only = os.getenv("VECTR_MEMORY_ONLY", "") == "1"
+    svc = VectrService(workspace_root=workspace, port=port, extra_roots=extra_roots, memory_only=memory_only)
     svc.start_background_index()
     application.state.service = svc
     # No internal LLM call at startup. The AI editor calls vectr_map on first use;

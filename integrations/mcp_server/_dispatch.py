@@ -81,6 +81,11 @@ def handle_tools_call(
         if not query:
             return _mcp_error("query is required")
 
+        # Memory-only mode: search is disabled for this workspace
+        if getattr(service, "memory_only", False):
+            from app.service import _MEMORY_ONLY_MSG
+            return {"content": [{"type": "text", "text": _MEMORY_ONLY_MSG}], "isError": False}
+
         if service.total_chunks == 0:
             return {
                 "content": [{"type": "text", "text": "Vectr is still indexing the codebase. Try again in a few moments."}],
@@ -168,8 +173,10 @@ def handle_tools_call(
             if notes_count > 0
             else "  → no prior notes; skip vectr_recall"
         )
+        mode = status.get("mode", "full")
         lines = [
             "Vectr status",
+            f"  Mode           : {mode}",
             f"  Indexed files  : {status['indexed_files']}",
             f"  Total chunks   : {status['total_chunks']}",
             f"  Symbols indexed: {status.get('symbol_count', 'n/a')}",
@@ -178,6 +185,11 @@ def handle_tools_call(
             f"  Embed model    : {status['embed_model']}",
             f"  Workspace      : {status['workspace_root']}",
         ]
+        if mode == "memory-only":
+            lines.append(
+                "  → memory-only mode: search/locate/trace are disabled; "
+                "memory tools (remember/recall/snapshot) and hooks are active"
+            )
 
         # Per-language coverage + symbol availability (UPG-3.3). Tells the agent
         # where locate/trace will work (symbol graph) vs. where to use search only.
@@ -253,6 +265,12 @@ def handle_tools_call(
         name = arguments.get("name", "").strip()
         if not name:
             return _mcp_error("name is required")
+
+        # Memory-only mode: locate is disabled for this workspace
+        if getattr(service, "memory_only", False):
+            from app.service import _MEMORY_ONLY_MSG
+            return {"content": [{"type": "text", "text": _MEMORY_ONLY_MSG}], "isError": False}
+
         limit = int(arguments.get("limit", 10))
         caller_file = arguments.get("caller_file", "").strip() or None
         symbols = service.locate_with_snippets(name, limit=limit, caller_file=caller_file)
@@ -269,6 +287,12 @@ def handle_tools_call(
         name = arguments.get("name", "").strip()
         if not name:
             return _mcp_error("name is required")
+
+        # Memory-only mode: trace is disabled for this workspace
+        if getattr(service, "memory_only", False):
+            from app.service import _MEMORY_ONLY_MSG
+            return {"content": [{"type": "text", "text": _MEMORY_ONLY_MSG}], "isError": False}
+
         direction = arguments.get("direction", "both")
         if direction not in ("callers", "callees", "both"):
             direction = "both"

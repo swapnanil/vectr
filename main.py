@@ -551,7 +551,13 @@ def _preflight_grammars(*, _run_pip=None) -> None:
         )
 
 
-def _do_start(workspace: str, port: int, ws_hash: str, extra_roots: list[str] | None = None) -> None:
+def _do_start(
+    workspace: str,
+    port: int,
+    ws_hash: str,
+    extra_roots: list[str] | None = None,
+    memory_only: bool = False,
+) -> None:
     log_dir = Path.home() / ".vectr" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{ws_hash}.log"
@@ -562,6 +568,8 @@ def _do_start(workspace: str, port: int, ws_hash: str, extra_roots: list[str] | 
         "VECTR_PORT": str(port),
         "VECTR_EXTRA_ROOTS": json.dumps(extra_roots or []),
     }
+    if memory_only:
+        env["VECTR_MEMORY_ONLY"] = "1"
     vectr_dir = Path(__file__).resolve().parent
     with open(log_path, "a") as log_file:
         proc = subprocess.Popen(
@@ -576,14 +584,21 @@ def _do_start(workspace: str, port: int, ws_hash: str, extra_roots: list[str] | 
 
     _migrate_legacy_files()
     InstanceRegistry().register(ws_hash, workspace, port, proc.pid)
-    print(f"Vectr started (PID {proc.pid}) on port {port}", file=sys.stderr)
+    mode_tag = " [memory-only]" if memory_only else ""
+    print(f"Vectr started{mode_tag} (PID {proc.pid}) on port {port}", file=sys.stderr)
     print(f"Workspace : {workspace}", file=sys.stderr)
     if extra_roots:
         for r in extra_roots:
             print(f"          + {r}", file=sys.stderr)
     print(f"MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
     print(f"Logs      : {log_path}", file=sys.stderr)
-    print(f"Check indexing progress: vectr status --path {workspace}", file=sys.stderr)
+    if memory_only:
+        print(
+            f"Mode      : memory-only (no code indexing/watcher; memory tools + hooks active)",
+            file=sys.stderr,
+        )
+    else:
+        print(f"Check indexing progress: vectr status --path {workspace}", file=sys.stderr)
 
 
 def _get_port_for_workspace(workspace: str, fallback: int) -> int:
@@ -619,8 +634,10 @@ def cmd_start(args: argparse.Namespace) -> None:
     port = registry.find_free_port(ws_hash, preferred_port)
     for root in roots:
         _write_workspace_config(root, port)
-    _preflight_grammars()
-    _do_start(workspace, port, ws_hash, extra_roots=extra_roots)
+    memory_only = getattr(args, "memory_only", False)
+    if not memory_only:
+        _preflight_grammars()
+    _do_start(workspace, port, ws_hash, extra_roots=extra_roots, memory_only=memory_only)
 
 
 def cmd_index(args: argparse.Namespace) -> None:
@@ -949,7 +966,8 @@ def cmd_restart(args: argparse.Namespace) -> None:
     port = registry.find_free_port(ws_hash, preferred_port)
     for root in roots:
         _write_workspace_config(root, port)
-    _do_start(workspace, port, ws_hash, extra_roots=extra_roots)
+    memory_only = getattr(args, "memory_only", False)
+    _do_start(workspace, port, ws_hash, extra_roots=extra_roots, memory_only=memory_only)
 
 
 def cmd_forget(args: argparse.Namespace) -> None:
@@ -1095,6 +1113,19 @@ def main() -> None:
              "Example: vectr start --path dir1 --path dir2",
     )
     p_start.add_argument("--port", type=int, default=_default_port)
+    p_start.add_argument(
+        "--memory-only",
+        action="store_true",
+        default=False,
+        dest="memory_only",
+        help=(
+            "Run the daemon for working memory + Claude Code hooks WITHOUT "
+            "indexing, embedding, or watching the codebase. "
+            "Memory tools (remember/recall/snapshot) and hooks remain active; "
+            "search/locate/trace are disabled. Useful on actively-edited projects "
+            "where the full code index + watcher cause performance issues."
+        ),
+    )
 
     p_stop = sub.add_parser("stop", help="Stop the daemon for a workspace")
     p_stop.add_argument("--path", default=_default_path)
@@ -1107,6 +1138,13 @@ def main() -> None:
     )
     p_restart.add_argument("--path", action="append", dest="paths", metavar="DIR")
     p_restart.add_argument("--port", type=int, default=_default_port)
+    p_restart.add_argument(
+        "--memory-only",
+        action="store_true",
+        default=False,
+        dest="memory_only",
+        help="Restart in memory-only mode (no indexing/watcher; see vectr start --memory-only).",
+    )
 
     p_forget = sub.add_parser("forget", help="Delete working-memory notes for a workspace")
     p_forget.add_argument("--path", default=_default_path)

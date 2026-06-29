@@ -97,6 +97,8 @@ class StatusResponse(BaseModel):
     graph_first: bool | None = None
     recommended_embed_model: str | None = None
     strategy_rationale: str | None = None
+    # Daemon mode: "full" (default) or "memory-only" (no indexing/watcher)
+    mode: str = "full"
 
 
 class HealthResponse(BaseModel):

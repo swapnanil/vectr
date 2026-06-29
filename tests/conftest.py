@@ -192,6 +192,8 @@ def _base_mock_service():
     svc.recall.return_value = "# Working Notes (1 entries)\n\n[1] [HIGH] test content\n"
     svc.snapshot_session.return_value = "snap_abc123"
     svc.list_snapshots.return_value = [{"snapshot_id": "snap_abc123", "label": "test", "created_at": 0.0}]
+    # Default mode is full (not memory-only); must be an explicit bool, not a MagicMock.
+    svc.memory_only = False
     return svc
 
 

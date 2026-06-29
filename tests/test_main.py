@@ -77,7 +77,7 @@ class TestCmdStart:
              patch("main._do_start") as mock_do_start:
             m.cmd_start(_make_args(paths=[ws], port=8765))
 
-        mock_do_start.assert_called_once_with(ws, 8765, wh, extra_roots=[])
+        mock_do_start.assert_called_once_with(ws, 8765, wh, extra_roots=[], memory_only=False)
 
     def test_prunes_dead_entries_before_starting(self, tmp_path):
         ws = "/project/a"
@@ -1175,4 +1175,4 @@ class TestMultiRoot:
              patch("main._do_start") as mock_do_start:
             m.cmd_start(_make_args(paths=[ws_a, ws_b], port=8765))
 
-        mock_do_start.assert_called_once_with(ws_a, 8765, wh, extra_roots=[ws_b])
+        mock_do_start.assert_called_once_with(ws_a, 8765, wh, extra_roots=[ws_b], memory_only=False)

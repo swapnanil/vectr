@@ -74,6 +74,9 @@ async def index(body: IndexRequest, request: Request) -> IndexResponse:
 async def search(body: SearchRequest, request: Request) -> SearchResponse:
     t0 = time.monotonic()
     svc = _service(request)
+    if getattr(svc, "memory_only", False):
+        from app.service import _MEMORY_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
     try:
         results, query_ms = svc.search(body.query, n_results=body.n_results, language=body.language)
     except Exception as exc:
@@ -151,6 +154,9 @@ async def map_save(body: MapSaveRequest, request: Request) -> MapSaveResponse:
 async def locate(body: LocateRequest, request: Request) -> LocateResponse:
     t0 = time.monotonic()
     svc = _service(request)
+    if getattr(svc, "memory_only", False):
+        from app.service import _MEMORY_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
     result = svc.locate_with_snippets(body.name, limit=body.limit)
     return LocateResponse(
         results=[
@@ -173,6 +179,9 @@ async def locate(body: LocateRequest, request: Request) -> LocateResponse:
 async def trace(body: TraceRequest, request: Request) -> TraceResponse:
     t0 = time.monotonic()
     svc = _service(request)
+    if getattr(svc, "memory_only", False):
+        from app.service import _MEMORY_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
     trace_result = svc.trace_with_snippets(
         body.name, direction=body.direction, limit=body.limit,
         include_builtins=body.include_builtins,

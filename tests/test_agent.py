@@ -386,6 +386,7 @@ class TestMcpServer:
     def test_tools_call_locate(self) -> None:
         from integrations.mcp_server import handle_tools_call
         mock_svc = MagicMock()
+        mock_svc.memory_only = False  # full mode — locate must run, not short-circuit
         mock_svc.locate_with_snippets.return_value = []
         mock_svc.format_locate.return_value = "No results."
         result = handle_tools_call("vectr_locate", {"name": "MyClass"}, mock_svc)

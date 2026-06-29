@@ -22,10 +22,23 @@ def _default_db_dir(workspace_root: str) -> str:
     return str(db_dir)
 
 
+_MEMORY_ONLY_MSG = (
+    "vectr is in memory-only mode for this workspace — semantic search and the "
+    "symbol graph are disabled; memory tools (remember/recall/snapshot) and hooks "
+    "are active."
+)
+
+
 class VectrService:
     """Singleton-style service. Create once at startup; shared via FastAPI app state."""
 
-    def __init__(self, workspace_root: str, port: int = 8765, extra_roots: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        workspace_root: str,
+        port: int = 8765,
+        extra_roots: list[str] | None = None,
+        memory_only: bool = False,
+    ) -> None:
         from agent.indexer import CodeIndexer
         from agent.searcher import CodeSearcher
         from agent.watcher import CodeWatcher
@@ -40,6 +53,9 @@ class VectrService:
         self._extra_roots: list[str] = list(extra_roots or [])
         self._port = port
         self._embed_model = os.getenv("VECTR_EMBED_MODEL", "Snowflake/snowflake-arctic-embed-m-v1.5")
+        # Memory-only mode: code indexing + file watcher are disabled.
+        # Reads from env (propagated by _do_start) or from the constructor arg.
+        self._memory_only: bool = memory_only or (os.getenv("VECTR_MEMORY_ONLY", "") == "1")
 
         db_dir = os.getenv(_DB_DIR_ENV) or _default_db_dir(self._workspace_root)
         self._db_dir = db_dir
@@ -102,8 +118,18 @@ class VectrService:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @property
+    def memory_only(self) -> bool:
+        """True when this daemon runs in memory-only mode (no indexing/watcher)."""
+        return self._memory_only
+
     def start_background_index(self) -> None:
-        """Kick off workspace indexing in a background thread."""
+        """Kick off workspace indexing in a background thread.
+
+        In memory-only mode, the index thread and file watcher are skipped.
+        The notes-TTL purge still runs so expired notes are cleaned up at
+        startup regardless of mode.
+        """
         if self._indexing:
             return
         self._indexing = True
@@ -118,6 +144,14 @@ class VectrService:
                     logger.info("purged %d expired notes (TTL=%.1f days)", deleted, ttl)
             except (ValueError, Exception):
                 logger.warning("VECTR_NOTES_TTL_DAYS is not a valid float: %r", ttl_days_str)
+
+        if self._memory_only:
+            logger.info(
+                "memory-only mode: code indexing + file watcher disabled; "
+                "working-memory tools + hooks active"
+            )
+            self._indexing = False
+            return
 
         self._index_thread = threading.Thread(target=self._do_index, daemon=True)
         self._index_thread.start()
@@ -354,6 +388,7 @@ class VectrService:
             "languages": self._language_coverage(),
             "notes_count": self._context_store.count_notes(self._workspace_root),
             "grammars_unavailable": missing,
+            "mode": "memory-only" if self._memory_only else "full",
             **self._symbol_graph_status(),
             **strategy_info,
         }

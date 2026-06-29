@@ -79,6 +79,8 @@ def _make_service():
     svc.format_trace.return_value = "No trace."
     svc.should_evict.return_value = False
     svc.eviction_hint.return_value = ""
+    # Default mode is full (not memory-only); must be an explicit bool, not a MagicMock.
+    svc.memory_only = False
     return svc
 
 
