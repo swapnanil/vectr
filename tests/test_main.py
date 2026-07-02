@@ -524,6 +524,18 @@ class TestCmdHookSessionStart:
         assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
         assert "never push to main" in payload["hookSpecificOutput"]["additionalContext"]
 
+    def test_announces_no_double_recall_upg115(self, monkeypatch, capsys):
+        """UPG-11.5 — SessionStart injection must tell the model not to also
+        self-call vectr_recall for the same notes (the double-dip found in the
+        eval v2 N=1 audit)."""
+        out = self._run('{"cwd": "/project/a", "source": "startup"}',
+                        "[1] [DIRECTIVE] never push to main", monkeypatch, capsys)
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert "vectr_recall" in ctx
+        assert ctx.index(m._HOOK_NO_DOUBLE_RECALL_LINE) < ctx.index("never push to main"), (
+            "no-double-recall notice must come before the injected notes"
+        )
+
     def test_uses_boot_payload(self, monkeypatch, capsys):
         """The SessionStart hook must request the unconditional boot set."""
         import argparse
@@ -583,6 +595,18 @@ class TestCmdHookUserPromptSubmit:
         assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
         assert "resolver.rs:214" in payload["hookSpecificOutput"]["additionalContext"]
 
+    def test_announces_no_double_recall_upg115(self, monkeypatch, capsys):
+        """UPG-11.5 — same notice on UserPromptSubmit's per-turn injection."""
+        out, _ = self._run('{"cwd": "/p", "prompt": "fix the workspace lock"}',
+                           "[1] lock_workspace() at resolver.rs:214", monkeypatch, capsys)
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert m._HOOK_NO_DOUBLE_RECALL_LINE in ctx
+
+    def test_no_announce_when_no_notes(self, monkeypatch, capsys):
+        """Empty injection stays empty — the notice is not tacked onto nothing."""
+        out, _ = self._run('{"cwd": "/p", "prompt": "unrelated"}', "", monkeypatch, capsys)
+        assert out.strip() == ""
+
     def test_recalls_with_prompt_as_query_and_cutoff(self, monkeypatch, capsys):
         _, mock_fetch = self._run('{"cwd": "/p", "prompt": "lock flow"}', "x", monkeypatch, capsys)
         payload = mock_fetch.call_args[0][1]
@@ -621,6 +645,14 @@ class TestCmdHookPreToolUse:
         sent = mock_fetch.call_args[0][1]
         assert sent["file_path"] == "/p/agent/symbol_graph.py"
         assert sent["kind"] == "gotcha"
+
+    def test_no_double_recall_notice_on_pretooluse(self, monkeypatch, capsys):
+        """UPG-11.5's notice is scoped to SessionStart/UserPromptSubmit only —
+        PreToolUse gotcha injection is targeted, not a recall substitute."""
+        stdin = '{"cwd": "/p", "tool_name": "Edit", "tool_input": {"file_path": "/p/agent/symbol_graph.py"}}'
+        out, _ = self._run(stdin, "[1] [GOTCHA] index_file takes workspace first", monkeypatch, capsys)
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert m._HOOK_NO_DOUBLE_RECALL_LINE not in ctx
 
     def test_no_file_path_injects_nothing(self, monkeypatch, capsys):
         out, mock_fetch = self._run('{"cwd": "/p", "tool_name": "Bash", "tool_input": {}}', "x", monkeypatch, capsys)
@@ -780,6 +812,82 @@ class TestInitHooks:
         assert data["enableAllProjectMcpServers"] is True
         cmds = [h["command"] for g in data["hooks"]["SessionStart"] for h in g["hooks"]]
         assert cmds == ["my-own-hook"]
+
+
+# ---------------------------------------------------------------------------
+# CLAUDE.md hook-aware session-start guidance (UPG-11.5)
+# ---------------------------------------------------------------------------
+
+class TestClaudeMdHookAwareGuidance:
+    """When Claude Code hooks are installed, CLAUDE.md must stop telling the
+    model to self-call vectr_recall at session start — the hook already
+    injects notes automatically (UPG-11.5). Without hooks, unchanged."""
+
+    def test_without_hooks_default_guidance_unchanged(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert 'call `vectr_recall(query="<your task>")`' in content
+        assert "auto-injected" not in content
+
+    def test_with_hooks_installed_uses_hook_aware_guidance(self, tmp_path):
+        m._write_claude_hooks(str(tmp_path))          # hooks installed first
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "auto-injected" in content
+        assert 'call `vectr_recall(query="<your task>")`' not in content
+        # vectr_recall is still documented — just redirected to on-demand use.
+        assert "on-demand deep-dive" in content
+        assert "note_id" in content
+
+    def test_init_hooks_single_run_produces_hook_aware_config(self, tmp_path):
+        """`vectr init --hooks` writes hooks AND config in one run — ordering
+        inside cmd_init must not race so CLAUDE.md still reflects hooks."""
+        with patch("main.InstanceRegistry") as MockReg:
+            MockReg.return_value.get.return_value = None
+            m.cmd_init(_make_args(path=str(tmp_path), hooks=True))
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "auto-injected" in content
+        assert 'call `vectr_recall(query="<your task>")`' not in content
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert "SessionStart" in settings["hooks"]
+
+    def test_init_hooks_single_run_preserves_mcp_flag(self, tmp_path):
+        """UPG-11.5 reordered hooks-then-config; settings.json must still end
+        up with enableAllProjectMcpServers even though hooks wrote the file
+        first (regression guard for the reorder)."""
+        with patch("main.InstanceRegistry") as MockReg:
+            MockReg.return_value.get.return_value = None
+            m.cmd_init(_make_args(path=str(tmp_path), hooks=True))
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert settings["enableAllProjectMcpServers"] is True
+        assert "SessionStart" in settings["hooks"]
+
+    def test_init_without_hooks_flag_unchanged(self, tmp_path):
+        with patch("main.InstanceRegistry") as MockReg:
+            MockReg.return_value.get.return_value = None
+            m.cmd_init(_make_args(path=str(tmp_path), hooks=False))
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert 'call `vectr_recall(query="<your task>")`' in content
+        assert not (tmp_path / ".claude" / "settings.json").exists() or \
+            "hooks" not in json.loads((tmp_path / ".claude" / "settings.json").read_text())
+
+    def test_other_ide_files_stay_default_even_with_hooks(self, tmp_path):
+        """Claude Code hooks don't reach other editors — AGENTS.md/cursor rules
+        keep the self-recall guidance regardless of hook installation."""
+        (tmp_path / "AGENTS.md").write_text("Existing\n")
+        m._write_claude_hooks(str(tmp_path))
+        m._write_workspace_config(str(tmp_path), 8765)
+        agents_content = (tmp_path / "AGENTS.md").read_text()
+        assert 'call `vectr_recall(query="<your task>")`' in agents_content
+        cursor_content = (tmp_path / ".cursor" / "rules" / "vectr.mdc").read_text()
+        assert 'call `vectr_recall(query="<your task>")`' in cursor_content
+
+    def test_render_claude_md_hooks_installed_helper(self, tmp_path):
+        """Unit-level: _hooks_installed reads back the settings written by
+        _write_claude_hooks, no config generation needed to exercise it."""
+        assert m._hooks_installed(str(tmp_path)) is False
+        m._write_claude_hooks(str(tmp_path))
+        assert m._hooks_installed(str(tmp_path)) is True
 
 
 # ---------------------------------------------------------------------------
