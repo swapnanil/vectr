@@ -43,17 +43,73 @@ def get_gitignore_patterns(workspace_root: str) -> list[str]:
     return _read_ignore_lines(Path(workspace_root) / ".gitignore")
 
 
+def _is_glob_pattern(entry: str) -> bool:
+    """True if a .vectrignore entry is a file glob rather than a bare dir name.
+
+    Bare directory names (e.g. "vendor") are handled by get_vectrignore_dirs.
+    Entries containing glob metacharacters (e.g. "*.generated.py") are handled
+    by get_vectrignore_file_globs (UPG-13.3) — additive, so existing dir-name
+    behaviour is unchanged for every entry that isn't a glob.
+    """
+    return any(ch in entry for ch in "*?[")
+
+
 def get_vectrignore_dirs(workspace_root: str) -> set[str]:
     """Read .vectrignore and return a set of directory names to exclude.
 
-    .vectrignore format: one directory name per line, # comments supported.
+    .vectrignore format: one directory name (or file glob, see
+    get_vectrignore_file_globs) per line, # comments supported.
     Example:
         # exclude vendor and generated code
         vendor
         generated
         proto-gen
     """
-    return set(_read_ignore_lines(Path(workspace_root) / ".vectrignore"))
+    return {
+        line for line in _read_ignore_lines(Path(workspace_root) / ".vectrignore")
+        if not _is_glob_pattern(line)
+    }
+
+
+def get_vectrignore_file_globs(workspace_root: str) -> list[str]:
+    """Read .vectrignore and return file glob patterns (UPG-13.3).
+
+    An entry is treated as a glob when it contains a glob metacharacter
+    (*, ?, or [) — e.g. "*.generated.py" — rather than a bare directory name.
+    Additive layer on top of get_vectrignore_dirs: dir-name entries keep their
+    existing directory-exclusion semantics unchanged; globs are matched against
+    individual file names by callers (agent.watcher.CodeWatcher, should_index_file).
+    """
+    return [
+        line for line in _read_ignore_lines(Path(workspace_root) / ".vectrignore")
+        if _is_glob_pattern(line)
+    ]
+
+
+def write_default_vectrignore(workspace_root: str) -> bool:
+    """Seed a fresh .vectrignore with the standard non-indexable dirs (UPG-13.2).
+
+    Only writes when no .vectrignore exists yet for this workspace_root — an
+    existing file (even an empty one, or one with unrelated content) is never
+    touched, so a user's hand-authored exclusions are never clobbered.
+    Returns True if a file was written, False if one already existed.
+    """
+    from agent.config import WORKSPACE_DEFAULT_VECTRIGNORE_DIRS
+
+    vectrignore = Path(workspace_root) / ".vectrignore"
+    if vectrignore.exists():
+        return False
+
+    lines = [
+        "# vectr default excludes — generated on first `vectr start`/`vectr init`.",
+        "# vectr never overwrites this file once it exists; edit freely.",
+        "# One directory name or file glob (e.g. *.generated.py) per line.",
+        "",
+        *WORKSPACE_DEFAULT_VECTRIGNORE_DIRS,
+        "",
+    ]
+    vectrignore.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return True
 
 
 def write_vectrignore(workspace_root: str, dirs: list[str]) -> None:

@@ -214,3 +214,33 @@ class TestConfigLoaderBehavior:
         )
         assert _REMEMBER_NUDGE_THRESHOLD is cfg.BEHAVIOR_REMEMBER_NUDGE_THRESHOLD
         assert _REMEMBER_NUDGE_COOLDOWN is cfg.BEHAVIOR_REMEMBER_NUDGE_COOLDOWN
+
+
+class TestConfigLoaderWorkspaceAndWatcher:
+    """workspace.* / watcher.* values must load correctly from config.yaml (UPG-13.1/13.2)."""
+
+    def test_default_vectrignore_dirs_is_nonempty_tuple(self) -> None:
+        assert isinstance(cfg.WORKSPACE_DEFAULT_VECTRIGNORE_DIRS, tuple)
+        assert len(cfg.WORKSPACE_DEFAULT_VECTRIGNORE_DIRS) > 0
+
+    def test_default_vectrignore_dirs_covers_common_excludes(self) -> None:
+        expected = {
+            "node_modules", ".venv", "venv", "env", "__pycache__", ".git",
+            "dist", "build", "target", ".mypy_cache", ".pytest_cache",
+            ".ruff_cache", "htmlcov", "coverage", ".tox", ".cache", "tmp",
+            "vendor", ".next", ".nuxt", "out",
+        }
+        assert expected <= set(cfg.WORKSPACE_DEFAULT_VECTRIGNORE_DIRS)
+
+    def test_default_vectrignore_dirs_entries_are_strings(self) -> None:
+        for d in cfg.WORKSPACE_DEFAULT_VECTRIGNORE_DIRS:
+            assert isinstance(d, str)
+
+    def test_top_level_rescan_interval_is_positive_float(self) -> None:
+        assert isinstance(cfg.WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S, float)
+        assert cfg.WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S > 0
+
+    def test_watcher_aliases_from_config(self) -> None:
+        """watcher.py must import the rescan interval from config, not hardcode it."""
+        from agent.watcher import WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S
+        assert WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S is cfg.WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S

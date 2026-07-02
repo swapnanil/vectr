@@ -101,6 +101,16 @@ SYMBOL_GRAPH_RESERVED_KEYWORDS : dict[str, frozenset[str]]
     Per-language keyword sets that must never be minted as a symbol name or
     call-edge target — guards against a desynced/ERROR-node parse misattributing
     a keyword token as an identifier (UPG-JSFLOW-SYMBOLS).
+
+WORKSPACE_DEFAULT_VECTRIGNORE_DIRS : tuple[str, ...]
+    Directory names seeded into a fresh .vectrignore on first `vectr start`/`vectr
+    init` when the workspace has none yet (UPG-13.2). Never overwrites an existing
+    .vectrignore.
+
+WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S : float
+    Seconds between CodeWatcher's shallow top-level-only rescans, used to pick up
+    new top-level directories/files since the watcher never watches the workspace
+    root itself (UPG-13.1/13.3).
 """
 from __future__ import annotations
 
@@ -243,3 +253,17 @@ SYMBOL_GRAPH_RESERVED_KEYWORDS: dict[str, frozenset[str]] = {
     str(lang): frozenset(str(kw) for kw in kws)
     for lang, kws in _sg_cfg["reserved_keywords"].items()
 }
+
+# ---------------------------------------------------------------------------
+# Workspace / watcher tunables (UPG-13.1/13.2/13.3)
+# ---------------------------------------------------------------------------
+
+_ws_cfg: dict[str, Any] = _cfg["workspace"]
+
+WORKSPACE_DEFAULT_VECTRIGNORE_DIRS: tuple[str, ...] = tuple(
+    str(d) for d in _ws_cfg["default_vectrignore_dirs"]
+)
+
+_watcher_cfg: dict[str, Any] = _cfg["watcher"]
+
+WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S: float = float(_watcher_cfg["top_level_rescan_interval_s"])

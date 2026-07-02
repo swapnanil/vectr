@@ -313,6 +313,13 @@ def _write_workspace_config(workspace: str, port: int) -> None:
     root = Path(workspace)
     hooks_installed = _hooks_installed(workspace)
 
+    # UPG-13.2: seed a default .vectrignore on first start/init so users get
+    # sensible excludes (node_modules, .venv, __pycache__, ...) without hand-
+    # authoring them. No-op (never overwrites) if one already exists.
+    from integrations.workspace_detect import write_default_vectrignore
+    if write_default_vectrignore(workspace):
+        print(f"  Created {root / '.vectrignore'} (default excludes)", file=sys.stderr)
+
     _write_ide_config_merge_safe(root / "CLAUDE.md", create_if_missing=True, hooks_installed=hooks_installed)
     for _rel in _IDE_CONFIG_APPEND_ONLY:
         _write_ide_config_merge_safe(root / _rel, create_if_missing=False)

@@ -480,3 +480,49 @@ symbol_graph:
       - protected
       - virtual
       - using
+
+workspace:
+  # Directory names written into a FRESH .vectrignore on first `vectr start` /
+  # `vectr init` when the workspace has none yet (UPG-13.2). An existing
+  # .vectrignore is never overwritten. These mirror the built-in indexing
+  # excludes (agent.indexer.EXCLUDED_DIRS) plus common ecosystem cache/build
+  # dirs, so a new user sees sensible excludes without hand-authoring them.
+  default_vectrignore_dirs:
+    - node_modules
+    - .venv
+    - venv
+    - env
+    - __pycache__
+    - .git
+    - dist
+    - build
+    - target
+    - .mypy_cache
+    - .pytest_cache
+    - .ruff_cache
+    - htmlcov
+    - coverage
+    - .tox
+    - .cache
+    - tmp
+    - vendor
+    - .next
+    - .nuxt
+    - out
+
+watcher:
+  # How often (seconds) CodeWatcher shallow-scans each workspace root's
+  # TOP-LEVEL entries only (UPG-13.1/13.3). The watcher never schedules a
+  # native OS watch on the workspace root itself — on macOS, FSEvents
+  # delivers every event under a watched path's *entire* subtree to the
+  # Python emitter regardless of the `recursive` flag passed to watchdog, so
+  # watching the root non-recursively gives zero protection against a large
+  # excluded sibling directory (confirmed empirically: churn inside an
+  # unwatched excluded dir produces zero native events; churn inside the
+  # same dir under a "non-recursive" root watch delivers 100% of events).
+  # Only per-included-top-level-directory watches actually stop the flood.
+  # This interval is how quickly a brand-new top-level directory, or an edit
+  # to a top-level loose file, is picked up instead — the shallow scan stats
+  # only the root's direct children, never the whole tree, so it stays cheap
+  # regardless of repo size.
+  top_level_rescan_interval_s: 5.0

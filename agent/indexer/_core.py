@@ -94,6 +94,7 @@ class CodeIndexer:
         """
         from integrations.workspace_detect import (
             should_index_file, get_gitignore_patterns, get_vectrignore_dirs,
+            get_vectrignore_file_globs,
         )
 
         # Collect candidate files across all roots; each root gets its own
@@ -101,6 +102,10 @@ class CodeIndexer:
         all_files: list[Path] = []
         for root in self.all_roots:
             root_patterns = gitignore_patterns or get_gitignore_patterns(str(root))
+            # UPG-13.3: .vectrignore file-glob entries (e.g. "*.generated.py") are
+            # matched the same way as gitignore patterns — additive, on top of the
+            # existing bare directory-name exclusions below.
+            root_patterns = [*root_patterns, *get_vectrignore_file_globs(str(root))]
             vectrignore_dirs = get_vectrignore_dirs(str(root))
             all_excluded = EXCLUDED_DIRS | vectrignore_dirs
             for dirpath, dirnames, filenames in os.walk(root):

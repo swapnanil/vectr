@@ -343,6 +343,30 @@ class TestWriteWorkspaceConfig:
         data = json.loads(settings.read_text())
         assert data.get("enableAllProjectMcpServers") is True
 
+    def test_seeds_default_vectrignore_when_missing(self, tmp_path):
+        # UPG-13.2: a fresh workspace gets a .vectrignore pre-populated with
+        # the standard non-indexable dirs on `vectr start`/`vectr init`.
+        m._write_workspace_config(str(tmp_path), 8765)
+        vectrignore = tmp_path / ".vectrignore"
+        assert vectrignore.exists()
+        content = vectrignore.read_text(encoding="utf-8")
+        for expected_dir in ("node_modules", ".venv", "__pycache__", ".git", "dist"):
+            assert expected_dir in content
+
+    def test_never_overwrites_existing_vectrignore(self, tmp_path):
+        (tmp_path / ".vectrignore").write_text("my_custom_exclude\n", encoding="utf-8")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        assert content == "my_custom_exclude\n"
+        assert "node_modules" not in content
+
+    def test_rerunning_start_does_not_touch_seeded_vectrignore(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        first = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        m._write_workspace_config(str(tmp_path), 8999)  # e.g. a port change re-run
+        second = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        assert first == second
+
 
 # ---------------------------------------------------------------------------
 # cmd_forget

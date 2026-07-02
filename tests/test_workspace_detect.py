@@ -309,3 +309,87 @@ class TestVectrignore:
         dirs = get_vectrignore_dirs(str(tmp_path))
         assert "*.pyc" in patterns
         assert "vendor" in dirs
+
+
+# ---------------------------------------------------------------------------
+# UPG-13.3: .vectrignore file glob patterns (additive over bare dir names)
+# ---------------------------------------------------------------------------
+
+class TestVectrignoreFileGlobs:
+    def test_get_vectrignore_file_globs_reads_glob_entries(self, tmp_path) -> None:
+        from integrations.workspace_detect import get_vectrignore_file_globs
+        (tmp_path / ".vectrignore").write_text("*.generated.py\nvendor\n", encoding="utf-8")
+        assert get_vectrignore_file_globs(str(tmp_path)) == ["*.generated.py"]
+
+    def test_get_vectrignore_file_globs_empty_when_no_globs(self, tmp_path) -> None:
+        from integrations.workspace_detect import get_vectrignore_file_globs
+        (tmp_path / ".vectrignore").write_text("vendor\ngenerated\n", encoding="utf-8")
+        assert get_vectrignore_file_globs(str(tmp_path)) == []
+
+    def test_get_vectrignore_dirs_excludes_glob_entries(self, tmp_path) -> None:
+        # Backward compatibility: glob entries must not leak into the bare
+        # dir-name set (they're handled by get_vectrignore_file_globs instead).
+        from integrations.workspace_detect import get_vectrignore_dirs
+        (tmp_path / ".vectrignore").write_text("*.generated.py\nvendor\n", encoding="utf-8")
+        assert get_vectrignore_dirs(str(tmp_path)) == {"vendor"}
+
+    def test_get_vectrignore_dirs_unchanged_with_no_globs(self, tmp_path) -> None:
+        # Pre-UPG-13.3 behaviour is untouched when there are no glob entries.
+        from integrations.workspace_detect import get_vectrignore_dirs
+        (tmp_path / ".vectrignore").write_text("vendor\ngenerated\n", encoding="utf-8")
+        assert get_vectrignore_dirs(str(tmp_path)) == {"vendor", "generated"}
+
+    def test_question_mark_and_bracket_treated_as_glob(self, tmp_path) -> None:
+        from integrations.workspace_detect import get_vectrignore_file_globs, get_vectrignore_dirs
+        (tmp_path / ".vectrignore").write_text("file?.py\n[abc].py\nplain_dir\n", encoding="utf-8")
+        assert set(get_vectrignore_file_globs(str(tmp_path))) == {"file?.py", "[abc].py"}
+        assert get_vectrignore_dirs(str(tmp_path)) == {"plain_dir"}
+
+
+# ---------------------------------------------------------------------------
+# UPG-13.2: default .vectrignore seeding on fresh workspaces
+# ---------------------------------------------------------------------------
+
+class TestWriteDefaultVectrignore:
+    def test_writes_default_dirs_when_missing(self, tmp_path) -> None:
+        from integrations.workspace_detect import write_default_vectrignore, get_vectrignore_dirs
+        import agent.config as cfg
+
+        written = write_default_vectrignore(str(tmp_path))
+        assert written is True
+        assert (tmp_path / ".vectrignore").exists()
+        dirs = get_vectrignore_dirs(str(tmp_path))
+        assert set(cfg.WORKSPACE_DEFAULT_VECTRIGNORE_DIRS) <= dirs
+
+    def test_never_overwrites_existing_vectrignore(self, tmp_path) -> None:
+        from integrations.workspace_detect import write_default_vectrignore
+
+        (tmp_path / ".vectrignore").write_text("custom_only\n", encoding="utf-8")
+        written = write_default_vectrignore(str(tmp_path))
+        assert written is False
+        content = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        assert content == "custom_only\n"
+
+    def test_never_overwrites_empty_existing_vectrignore(self, tmp_path) -> None:
+        from integrations.workspace_detect import write_default_vectrignore
+
+        (tmp_path / ".vectrignore").write_text("", encoding="utf-8")
+        written = write_default_vectrignore(str(tmp_path))
+        assert written is False
+        assert (tmp_path / ".vectrignore").read_text(encoding="utf-8") == ""
+
+    def test_written_file_has_explanatory_comment_header(self, tmp_path) -> None:
+        from integrations.workspace_detect import write_default_vectrignore
+
+        write_default_vectrignore(str(tmp_path))
+        content = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        assert content.startswith("#")
+
+    def test_second_call_is_noop(self, tmp_path) -> None:
+        from integrations.workspace_detect import write_default_vectrignore
+
+        write_default_vectrignore(str(tmp_path))
+        first = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        write_default_vectrignore(str(tmp_path))
+        second = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        assert first == second
