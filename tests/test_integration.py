@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import make_py
+from tests.conftest import _DummyEmbedProvider, make_py
 
 
 def _jsonrpc(method: str, params: dict | None = None, id: int = 1) -> dict:
@@ -210,6 +211,43 @@ class TestFullPipelineFast:
         client, _, _ = real_service_client
         resp = client.post("/v1/search", json={})
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Regression guard — `real_service_client` fixture isolation
+# ---------------------------------------------------------------------------
+
+class TestRealServiceClientFixtureIsolation:
+    """`real_service_client` is session-scoped and, during TestClient startup,
+    patches `app.service.VectrService` so the FastAPI lifespan handler returns
+    the fixture's pre-built `svc` instead of constructing a fresh one against
+    the real repo. That patch must be scoped to startup only — if it leaked for
+    the rest of the session (e.g. via a `with patch(...), TestClient(...) as c:
+    yield` construction, where the `with` block only exits at fixture teardown),
+    every later, unrelated `VectrService(...)` call anywhere in the suite would
+    silently be redirected to this ONE shared instance — corrupting workspace
+    isolation for any test that constructs its own VectrService directly rather
+    than via the `client` fixture (which mocks the whole service)."""
+
+    def test_vectr_service_class_not_patched_after_fixture_use(self, real_service_client) -> None:
+        import app.service as _svc_mod
+        from tests.conftest import _RealVectrService
+        assert _svc_mod.VectrService is _RealVectrService
+
+    def test_fresh_vectr_service_construction_is_independent(self, real_service_client, tmp_path, monkeypatch) -> None:
+        """A VectrService built directly (as test_service.py's fixtures do) after
+        `real_service_client` has already run must be its own fresh instance —
+        not the fixture's shared `svc` — with zero notes for its own workspace."""
+        _client, shared_svc, _ws = real_service_client
+        from agent import indexer as idx_module
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            fresh_svc = VectrService(workspace_root=str(tmp_path))
+        assert fresh_svc is not shared_svc
+        assert fresh_svc.count_notes() == 0
 
 
 # ---------------------------------------------------------------------------

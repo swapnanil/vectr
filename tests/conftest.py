@@ -111,9 +111,21 @@ def real_service_client(tmp_path_factory):
 
         svc = VectrService(workspace_root=str(tmp))
 
-        with patch("app.service.VectrService", return_value=svc), \
-             TestClient(app, raise_server_exceptions=True) as c:
+        # Patch `app.service.VectrService` only across TestClient startup, where the
+        # `lifespan` handler's own `VectrService(...)` call must be intercepted to
+        # return our pre-built `svc` instead of constructing a fresh one pointed at
+        # the real repo. Scoping the patch to just __enter__() (rather than wrapping
+        # it around the whole `with` block, which — for a session-scoped generator
+        # fixture — would keep the patch active for the REST OF THE TEST SESSION)
+        # prevents every later test's unrelated `VectrService(...)` construction
+        # from silently being redirected to this one shared, ever-growing instance.
+        c = TestClient(app, raise_server_exceptions=True)
+        with patch("app.service.VectrService", return_value=svc):
+            c.__enter__()
+        try:
             yield c, svc, str(tmp)
+        finally:
+            c.__exit__(None, None, None)
 
 
 # ---------------------------------------------------------------------------
