@@ -32,6 +32,18 @@ _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 _HOOK_RECALL_LIMIT = 3
 _HOOK_MIN_SIMILARITY = 0.35
 
+# UPG-11.5 — hook-injected notes announce themselves so the model doesn't also
+# self-call vectr_recall for the same purpose. Without this, SessionStart/
+# UserPromptSubmit injection and the model's own recall both fire and pay for
+# the same memory twice (found in the eval v2 N=1 audit: arm C self-recalled
+# on top of its hook injection). Prepended only to the events that duplicate
+# what CLAUDE.md's session-start guidance already tells the model to fetch.
+_HOOK_NO_DOUBLE_RECALL_LINE = (
+    "Your working-memory notes are auto-injected below — do not call vectr_recall "
+    "to re-fetch them; call it only for something not shown here."
+)
+_HOOK_EVENTS_ANNOUNCE_INJECTION = ("SessionStart", "UserPromptSubmit")
+
 _CLAUDE_MD = """\
 # Vectr — semantic search + reliable working memory
 
@@ -81,9 +93,7 @@ A note stored with `vectr_remember` is the only finding that survives three thin
 
 **Before calling `vectr_search` on a well-known API or framework:** write out what you already know — function signatures, key types, parameter names — and only call `vectr_search` if genuine gaps remain after that verbalization. Reduces unnecessary search calls 26–40% on familiar codebases.
 
-**At session start (always):** call `vectr_status()` first.
-- `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task>")` before opening any files.
-- `notes_count == 0` → skip recall and proceed.
+__SESSION_START_GUIDANCE__
 
 **The moment you find a key definition, pattern, or non-obvious detail:** call `vectr_remember(content, tags=[...], priority="high"|"medium"|"low")` — store the actual code block or finding, not a file pointer. Treat every `vectr_search` or `vectr_locate` call as a **pair**: search, then immediately save the key finding before your next retrieval. If `/compact` runs later, the conversation summary loses exact details — your note does not. If a new session starts, your note is the only thing that carries forward. One note now = no re-discovery later.
 
@@ -93,6 +103,29 @@ A note stored with `vectr_remember` is the only finding that survives three thin
 
 **If recalled notes already contain what you need:** work from them directly. Use `vectr_search` or Read only to fill genuine gaps.
 """
+
+# Default session-start guidance: no hooks installed, so the model must
+# self-call vectr_status/vectr_recall to ever see prior notes.
+_SESSION_START_GUIDANCE_DEFAULT = """\
+**At session start (always):** call `vectr_status()` first.
+- `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task>")` before opening any files.
+- `notes_count == 0` → skip recall and proceed."""
+
+# UPG-11.5 — hook-aware variant: when Claude Code hooks are installed for this
+# workspace, SessionStart/UserPromptSubmit already inject recalled notes
+# automatically (see `_emit_hook_context`), so repeating "call vectr_recall at
+# session start" pays for the same memory twice. Redirect vectr_recall to the
+# genuinely on-demand cases instead.
+_SESSION_START_GUIDANCE_HOOKS_AWARE = """\
+**At session start:** your working-memory notes are auto-injected automatically (on session start and again per prompt) — you don't need to call `vectr_status`/`vectr_recall` just to see them. Call `vectr_recall` only for an on-demand deep-dive: expanding a specific note (`note_id=`), or a targeted query the automatic injection didn't cover."""
+
+
+def _render_claude_md(hooks_installed: bool) -> str:
+    """Render `_CLAUDE_MD` with the session-start guidance matching whether
+    Claude Code hooks are installed for this workspace (UPG-11.5)."""
+    guidance = _SESSION_START_GUIDANCE_HOOKS_AWARE if hooks_installed else _SESSION_START_GUIDANCE_DEFAULT
+    return _CLAUDE_MD.replace("__SESSION_START_GUIDANCE__", guidance)
+
 
 _MCP_JSON = """\
 {{
@@ -145,11 +178,14 @@ _IDE_CONFIG_APPEND_ONLY: tuple[str, ...] = (
 )
 
 
-def _make_vectr_block() -> str:
-    return f"{_VECTR_BLOCK_START}\n{_CLAUDE_MD.rstrip()}\n{_VECTR_BLOCK_END}\n"
+def _make_vectr_block(*, hooks_installed: bool = False) -> str:
+    """`hooks_installed` selects the session-start guidance variant (UPG-11.5) —
+    only meaningful for CLAUDE.md, since Claude Code hooks are the only
+    injection path today; other IDE config files always get the default."""
+    return f"{_VECTR_BLOCK_START}\n{_render_claude_md(hooks_installed).rstrip()}\n{_VECTR_BLOCK_END}\n"
 
 
-def _write_ide_config_merge_safe(path: Path, *, create_if_missing: bool) -> None:
+def _write_ide_config_merge_safe(path: Path, *, create_if_missing: bool, hooks_installed: bool = False) -> None:
     """Write the vectr guidance block into an IDE config file.
 
     - File missing + create_if_missing=True  → create file containing just the block.
@@ -157,7 +193,7 @@ def _write_ide_config_merge_safe(path: Path, *, create_if_missing: bool) -> None
     - File exists, no vectr block            → append block after existing content.
     - File exists, vectr block present       → replace block in-place (idempotent).
     """
-    block = _make_vectr_block()
+    block = _make_vectr_block(hooks_installed=hooks_installed)
 
     if not path.exists():
         if not create_if_missing:
@@ -205,7 +241,7 @@ def _write_cursor_rules(workspace: str) -> None:
         "description: Vectr tool usage rules for AI-assisted development\n"
         "alwaysApply: true\n"
         "---\n\n"
-        f"{_CLAUDE_MD.rstrip()}\n"
+        f"{_render_claude_md(hooks_installed=False).rstrip()}\n"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     existed = path.exists()
@@ -266,10 +302,18 @@ def _write_or_update(path: Path, content: str, label: str) -> None:
 
 
 def _write_workspace_config(workspace: str, port: int) -> None:
-    """Write per-IDE MCP config files and IDE guidance into the workspace root."""
-    root = Path(workspace)
+    """Write per-IDE MCP config files and IDE guidance into the workspace root.
 
-    _write_ide_config_merge_safe(root / "CLAUDE.md", create_if_missing=True)
+    CLAUDE.md's session-start guidance is hook-aware (UPG-11.5): if Claude Code
+    hooks are already installed for this workspace, the injected notes make a
+    self-recall at session start redundant, so CLAUDE.md is written with the
+    hook-aware variant instead. Other IDE config files always get the default
+    variant — Claude Code hooks are the only automatic-injection path today.
+    """
+    root = Path(workspace)
+    hooks_installed = _hooks_installed(workspace)
+
+    _write_ide_config_merge_safe(root / "CLAUDE.md", create_if_missing=True, hooks_installed=hooks_installed)
     for _rel in _IDE_CONFIG_APPEND_ONLY:
         _write_ide_config_merge_safe(root / _rel, create_if_missing=False)
     _write_ide_config_merge_safe(
@@ -281,11 +325,23 @@ def _write_workspace_config(workspace: str, port: int) -> None:
     _write_or_update(root / ".cursor" / "mcp.json", _CURSOR_MCP_JSON.format(port=port), f"port {port}")
     _write_or_update(root / ".vscode" / "mcp.json", _VSCODE_MCP_JSON.format(port=port), f"port {port}")
 
+    # Merge-safe (not create-only): UPG-11.5 reordered `vectr init --hooks` to
+    # write hooks before workspace config in the same run, so settings.json can
+    # already exist (hooks-only) by the time we get here — still needs this key.
     settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
     if not settings.exists():
-        settings.parent.mkdir(exist_ok=True)
         settings.write_text('{\n  "enableAllProjectMcpServers": true\n}\n')
         print(f"  Created {settings}", file=sys.stderr)
+    else:
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        if not data.get("enableAllProjectMcpServers"):
+            data["enableAllProjectMcpServers"] = True
+            settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            print(f"  Updated {settings} (enableAllProjectMcpServers)", file=sys.stderr)
 
 
 def _is_vectr_hook_group(group: dict) -> bool:
@@ -293,6 +349,30 @@ def _is_vectr_hook_group(group: dict) -> bool:
     for h in group.get("hooks", []):
         if isinstance(h, dict) and str(h.get("command", "")).startswith("vectr hook"):
             return True
+    return False
+
+
+def _hooks_installed(workspace: str) -> bool:
+    """True if `<workspace>/.claude/settings.json` already has a vectr-managed
+    hook group (UPG-11.5) — selects CLAUDE.md's hook-aware session-start
+    guidance. Never raises: a missing/malformed settings file just means "no
+    hooks installed yet"."""
+    settings = Path(workspace) / ".claude" / "settings.json"
+    if not settings.exists():
+        return False
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if isinstance(group, dict) and _is_vectr_hook_group(group):
+                return True
     return False
 
 
@@ -802,10 +882,14 @@ def _emit_hook_context(event_name: str, text: str) -> None:
     """Print the Claude Code additionalContext envelope — only when there's text.
 
     Emitting nothing (instead of an empty envelope) means a fresh workspace
-    injects nothing rather than noise.
+    injects nothing rather than noise. SessionStart/UserPromptSubmit injections
+    are prefixed with a one-line notice (UPG-11.5) so the model doesn't also
+    self-call vectr_recall for notes it was just handed.
     """
     if not text.strip():
         return
+    if event_name in _HOOK_EVENTS_ANNOUNCE_INJECTION:
+        text = f"{_HOOK_NO_DOUBLE_RECALL_LINE}\n\n{text}"
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": event_name,
@@ -1035,11 +1119,15 @@ def cmd_init(args: argparse.Namespace) -> None:
     entry = InstanceRegistry().get(workspace_hash(workspace))
     port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", "8765"))
 
-    _write_workspace_config(workspace, port)
-
-    # write Claude Code hook entries (UPG-9.4+) — opt-in via --hooks
+    # Hooks are written BEFORE the workspace config (UPG-11.5): CLAUDE.md's
+    # session-start guidance is hook-aware, detected by reading back
+    # .claude/settings.json — so within a single `vectr init --hooks` run,
+    # the hooks must already be on disk when _write_workspace_config runs,
+    # or CLAUDE.md would ship the pre-hooks (double-recall) guidance.
     if getattr(args, "hooks", False):
         _write_claude_hooks(workspace)
+
+    _write_workspace_config(workspace, port)
 
     # write user-defined exclusions to .vectrignore
     exclude_dirs: list[str] = getattr(args, "exclude", None) or []

@@ -1,9 +1,12 @@
 """Unit tests for the eval v2 runner summary logic (no agent sessions)."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
+import eval_v2
 from eval_v2 import CompactSessionResult, PhaseUsage
 from scoring import ExecScore
-from run_eval_v2 import _summarize
+from run_eval_v2 import _summarize, _resolve_model_id
 
 
 def _result(**kw):
@@ -55,3 +58,41 @@ def test_summarize_failed_exec_and_no_compaction():
                    guardrail=False)
     assert s["compacted"] is False
     assert s["exec_ran"] is False and s["exec_success"] is False
+
+
+# ---------------------------------------------------------------------------
+# BV-MODEL-PIN — explicit model ID resolution
+# ---------------------------------------------------------------------------
+
+def test_resolve_model_id_opus_alias_pinned_to_4_8():
+    # This is also the CLI's --model default value, so "default" and
+    # "--model opus" resolve identically.
+    assert _resolve_model_id("opus") == "claude-opus-4-8"
+
+
+def test_resolve_model_id_sonnet_alias_pinned_to_4_6():
+    assert _resolve_model_id("sonnet") == "claude-sonnet-4-6"
+
+
+def test_resolve_model_id_full_claude_id_used_verbatim():
+    assert _resolve_model_id("claude-opus-4-1") == "claude-opus-4-1"
+    assert _resolve_model_id("claude-sonnet-4-6") == "claude-sonnet-4-6"
+
+
+def test_resolve_model_id_unrecognized_alias_passes_through():
+    # Not pinned here (e.g. "haiku") — Claude Code resolves it itself.
+    assert _resolve_model_id("haiku") == "haiku"
+
+
+def test_resolved_model_id_lands_in_claude_cli_invocation():
+    """The full resolved ID (not the bare alias) must reach the spawned
+    `claude -p --model ...` argv — no live claude invocation (Popen mocked
+    to fail fast, but its call args are still captured)."""
+    with patch("eval_v2.subprocess.Popen", side_effect=FileNotFoundError) as mock_popen:
+        eval_v2.run_session(
+            turns=["hello"], working_dir=".", allowed_tools=[],
+            model=_resolve_model_id("opus"),
+        )
+    cmd = mock_popen.call_args[0][0]
+    assert "--model" in cmd
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-8"

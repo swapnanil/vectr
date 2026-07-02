@@ -45,6 +45,29 @@ logger = logging.getLogger("run_eval_v2")
 _RELEVANT_MARKERS = ["MoneyField", "deconstruct", "get_prep_value", "Field",
                      "cents", "Decimal", "currency"]
 
+# BV-MODEL-PIN — Claude Code's own "opus"/"sonnet" aliases can silently point
+# at a stale snapshot as new model versions ship (confirmed live: a run with
+# `--model opus` resolved to claude-opus-4-7, not the intended 4-8, so the
+# whole "Opus" arm of a headline run was on the wrong model). Pin explicit
+# full IDs here so the transcript's `message.model` always matches intent.
+_MODEL_ALIASES = {
+    "opus": "claude-opus-4-8",
+    "sonnet": "claude-sonnet-4-6",
+}
+
+
+def _resolve_model_id(model: str) -> str:
+    """Resolve a `--model` alias to its explicit full Claude model ID.
+
+    A full ``claude-*`` ID is used verbatim (the caller already pinned it).
+    An alias in `_MODEL_ALIASES` resolves to the pinned ID. Anything else
+    (e.g. "haiku", not pinned here) passes through unchanged — Claude Code
+    resolves it itself.
+    """
+    if model.startswith("claude-"):
+        return model
+    return _MODEL_ALIASES.get(model, model)
+
 
 def _reset_repo(working_dir: str) -> None:
     """Return the corpus to a pristine checkout between arms (drops the prior
@@ -115,7 +138,10 @@ def main() -> None:
     ap.add_argument("--arms", default="C,D,A2", help="comma list from A1,A2,B,C,D")
     ap.add_argument("--task", default="custom_field", help="DJANGO_TASKS id")
     ap.add_argument("--reps", type=int, default=1)
-    ap.add_argument("--model", default="haiku", help="Claude Code model alias/id")
+    ap.add_argument("--model", default="opus",
+                    help="Claude Code model alias ('opus'/'sonnet', pinned to an explicit "
+                         "full ID — see BV-MODEL-PIN) or a full claude-* id/other alias "
+                         "used verbatim")
     ap.add_argument("--working-dir", default="/tmp/poc-django")
     ap.add_argument("--port", type=int, default=8792, help="vectr daemon port")
     ap.add_argument("--python-bin", default=sys.executable,
@@ -129,6 +155,7 @@ def main() -> None:
     ap.add_argument("--out", default="results/eval_v2.json")
     ap.add_argument("--resume", action="store_true", help="skip (arm,rep) already in --out")
     args = ap.parse_args()
+    args.model = _resolve_model_id(args.model)  # BV-MODEL-PIN
 
     task = next((t for t in DJANGO_TASKS if t.id == args.task), None)
     if task is None:
