@@ -176,7 +176,7 @@ Exposes port 8765. Docker does not auto-write IDE config files — use local ins
 | End of a long session, want a checkpoint | `vectr_snapshot("label")` |
 | Looking for a prior checkpoint | `vectr_snapshot_list()` |
 | Context is filling up | `vectr_evict_hint()` — identifies chunks vectr can re-retrieve |
-| Notes are stale after a large refactor | `vectr_forget()` |
+| Notes are stale after a large refactor | `vectr_forget(note_id=N)` per note, or `vectr_forget(all=true)` to clear |
 
 ---
 
@@ -270,7 +270,7 @@ Multi-user, authentication, and encryption at rest are out of scope for v1.
 
 ## When vectr can hurt
 
-**Stale notes after codebase churn** — notes store file paths at write time. After a large refactor, `vectr_recall` will flag changed referenced files with `[STALE]`. Re-verify before acting, or run `vectr_forget` to clear.
+**Stale notes after codebase churn** — notes store file paths at write time. After a large refactor, `vectr_recall` will flag changed referenced files with `[STALE]`. Re-verify before acting, delete the stale note with `vectr_forget(note_id=N)`, or clear everything with `vectr_forget(all=true)`.
 
 **Over-retrieval on a well-known API** — if the model already knows a framework deeply from training (React hooks, Django ORM), vectr's research overhead may exceed savings. The benchmark shows 0% improvement on `debug_descriptor_priority` — a task where the model's training knowledge was sufficient to navigate without notes.
 

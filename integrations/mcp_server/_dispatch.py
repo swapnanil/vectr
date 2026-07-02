@@ -396,11 +396,31 @@ def handle_tools_call(
 
     # ---- vectr_forget ----
     if tool_name == "vectr_forget":
-        deleted = service.forget_all()
-        return {
-            "content": [{"type": "text", "text": f"Deleted {deleted} working-memory notes. Starting fresh."}],
-            "isError": False,
-        }
+        note_id = arguments.get("note_id")
+        if note_id is not None:
+            try:
+                nid = int(note_id)
+            except (TypeError, ValueError):
+                return _mcp_error("note_id must be an integer (the [#N] id shown by vectr_recall)")
+            if service.forget_note(nid):
+                return {
+                    "content": [{"type": "text", "text": f"Deleted note #{nid}."}],
+                    "isError": False,
+                }
+            return {
+                "content": [{"type": "text", "text": f"Note #{nid} not found — nothing deleted."}],
+                "isError": False,
+            }
+        if arguments.get("all") is True:
+            deleted = service.forget_all()
+            return {
+                "content": [{"type": "text", "text": f"Deleted {deleted} working-memory notes. Starting fresh."}],
+                "isError": False,
+            }
+        # No arguments must never destroy data: require an explicit target.
+        return _mcp_error(
+            "Pass note_id=<N> to delete one note, or all=true to clear every note for this workspace."
+        )
 
     # ---- vectr_ingest_traces ----
     if tool_name == "vectr_ingest_traces":

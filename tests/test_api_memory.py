@@ -256,3 +256,47 @@ class TestMemoryCrossRequest:
         assert "never push to main" in notes
         assert "sprint goal" in notes
         assert "an ordinary finding" not in notes
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/forget
+# ---------------------------------------------------------------------------
+
+class TestForgetRoute:
+    def test_forget_note_id_deletes_only_that_note(self, client_real_memory) -> None:
+        r1 = client_real_memory.post("/v1/remember", json={"content": "note to delete"})
+        r2 = client_real_memory.post("/v1/remember", json={"content": "note to keep"})
+        nid1, nid2 = r1.json()["note_id"], r2.json()["note_id"]
+
+        resp = client_real_memory.post("/v1/forget", json={"note_id": nid1})
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 1
+        assert resp.json()["found"] is True
+
+        remaining = client_real_memory.post(
+            "/v1/recall", json={"detail": "full"}).json()["notes"]
+        assert "note to keep" in remaining
+        assert "note to delete" not in remaining
+
+    def test_forget_note_id_not_found(self, client_real_memory) -> None:
+        resp = client_real_memory.post("/v1/forget", json={"note_id": 99999})
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 0
+        assert resp.json()["found"] is False
+
+    def test_forget_all_true_clears_workspace(self, client_real_memory) -> None:
+        client_real_memory.post("/v1/remember", json={"content": "a"})
+        client_real_memory.post("/v1/remember", json={"content": "b"})
+        resp = client_real_memory.post("/v1/forget", json={"all": True})
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] >= 2
+
+    def test_forget_no_arguments_is_422_and_deletes_nothing(self, client_real_memory) -> None:
+        # Data-loss regression guard (2026-07-02): bare forget must never wipe the store.
+        r = client_real_memory.post("/v1/remember", json={"content": "survivor note"})
+        assert r.status_code == 200
+        resp = client_real_memory.post("/v1/forget", json={})
+        assert resp.status_code == 422
+        remaining = client_real_memory.post(
+            "/v1/recall", json={"detail": "full"}).json()["notes"]
+        assert "survivor note" in remaining

@@ -183,6 +183,11 @@ class RecallResponse(BaseModel):
     processing_ms: int
 
 
+class ForgetRequest(BaseModel):
+    note_id: int | None = Field(default=None, description="Delete this one note (the [#N] id from recall)")
+    all: bool = Field(default=False, description="Delete ALL notes for this workspace. Irreversible.")
+
+
 class SnapshotRequest(BaseModel):
     label: str = Field(..., min_length=1)
     session_id: str | None = Field(default=None)

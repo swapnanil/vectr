@@ -7,6 +7,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 
 from agent.llm_client import get_model
 from app.models import (
+    ForgetRequest,
     HealthResponse,
     IndexRequest,
     IndexResponse,
@@ -257,6 +258,21 @@ async def memory_clear(request: Request) -> dict:
     svc = _service(request)
     deleted = svc.forget_all()
     return {"deleted": deleted}
+
+
+@router.post("/v1/forget")
+async def forget(body: ForgetRequest, request: Request) -> dict:
+    """Delete one note by id, or all notes when all=true. No arguments deletes nothing."""
+    svc = _service(request)
+    if body.note_id is not None:
+        deleted = svc.forget_note(body.note_id)
+        return {"deleted": 1 if deleted else 0, "note_id": body.note_id, "found": deleted}
+    if body.all:
+        return {"deleted": svc.forget_all()}
+    raise HTTPException(
+        status_code=422,
+        detail="Pass note_id to delete one note, or all=true to clear every note.",
+    )
 
 
 @router.get("/v1/evict-hint")

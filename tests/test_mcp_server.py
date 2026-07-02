@@ -908,20 +908,52 @@ class TestVectrSnapshot:
 # ---------------------------------------------------------------------------
 
 class TestVectrForget:
-    def test_forget_calls_forget_all(self) -> None:
+    def test_forget_note_id_deletes_single_note(self) -> None:
+        svc = _mock_service()
+        svc.forget_note.return_value = True
+        result = handle_tools_call("vectr_forget", {"note_id": 12}, svc)
+        svc.forget_note.assert_called_once_with(12)
+        svc.forget_all.assert_not_called()
+        assert result["isError"] is False
+        assert "#12" in result["content"][0]["text"]
+
+    def test_forget_note_id_not_found(self) -> None:
+        svc = _mock_service()
+        svc.forget_note.return_value = False
+        result = handle_tools_call("vectr_forget", {"note_id": 999}, svc)
+        assert result["isError"] is False
+        assert "not found" in result["content"][0]["text"]
+        svc.forget_all.assert_not_called()
+
+    def test_forget_note_id_non_integer_is_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_forget", {"note_id": "abc"}, svc)
+        assert result["isError"] is True
+        svc.forget_note.assert_not_called()
+        svc.forget_all.assert_not_called()
+
+    def test_forget_all_true_clears_workspace(self) -> None:
         svc = _mock_service()
         svc.forget_all.return_value = 5
-        result = handle_tools_call("vectr_forget", {}, svc)
+        result = handle_tools_call("vectr_forget", {"all": True}, svc)
         svc.forget_all.assert_called_once()
         assert result["isError"] is False
         assert "5" in result["content"][0]["text"]
 
-    def test_forget_zero_notes(self) -> None:
+    def test_forget_no_arguments_deletes_nothing(self) -> None:
+        # Data-loss regression (2026-07-02): the handler used to call forget_all()
+        # unconditionally, wiping every note on ANY vectr_forget call.
         svc = _mock_service()
-        svc.forget_all.return_value = 0
         result = handle_tools_call("vectr_forget", {}, svc)
-        assert result["isError"] is False
-        assert "0" in result["content"][0]["text"]
+        assert result["isError"] is True
+        svc.forget_all.assert_not_called()
+        svc.forget_note.assert_not_called()
+
+    def test_forget_all_false_with_no_note_id_deletes_nothing(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_forget", {"all": False}, svc)
+        assert result["isError"] is True
+        svc.forget_all.assert_not_called()
 
     def test_forget_in_tools_list(self) -> None:
         names = {t["name"] for t in handle_tools_list()["tools"]}

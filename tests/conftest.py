@@ -257,6 +257,8 @@ def client_real_memory(tmp_path):
         )
 
     svc.recall.side_effect = _recall
+    svc.forget_note.side_effect = lambda note_id: real_store.forget(ws, note_id)
+    svc.forget_all.side_effect = lambda: real_store.forget_all(ws)
     svc.snapshot_session.side_effect = lambda label, session_id=None: \
         real_store.snapshot(ws, label=label)
     svc.list_snapshots.side_effect = lambda: real_store.list_snapshots(ws)

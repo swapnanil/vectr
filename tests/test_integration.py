@@ -543,15 +543,40 @@ class TestMcpSessionFull:
 
     # -- vectr_forget --
 
-    def test_mcp_forget_clears_all_notes(self, real_service_client) -> None:
+    def test_mcp_forget_all_clears_all_notes(self, real_service_client) -> None:
         client, svc, ws = real_service_client
         unique = "INTEG_FORGET_TOKEN_5543"
         client.post("/mcp", json=_tool_call("vectr_remember", {"content": unique}))
-        client.post("/mcp", json=_tool_call("vectr_forget"))
+        client.post("/mcp", json=_tool_call("vectr_forget", {"all": True}))
 
         resp = client.post("/mcp", json=_tool_call("vectr_recall", {}))
         text = resp.json()["result"]["content"][0]["text"]
         assert unique not in text
+
+    def test_mcp_forget_bare_call_deletes_nothing(self, real_service_client) -> None:
+        # Data-loss regression guard (2026-07-02): bare vectr_forget used to wipe the store.
+        client, svc, ws = real_service_client
+        unique = "INTEG_FORGET_SURVIVOR_7789"
+        client.post("/mcp", json=_tool_call("vectr_remember", {"content": unique}))
+        resp = client.post("/mcp", json=_tool_call("vectr_forget"))
+        assert resp.json()["result"]["isError"] is True
+
+        resp = client.post("/mcp", json=_tool_call("vectr_recall", {"detail": "full"}))
+        text = resp.json()["result"]["content"][0]["text"]
+        assert unique in text
+
+    def test_mcp_forget_note_id_deletes_one(self, real_service_client) -> None:
+        client, svc, ws = real_service_client
+        keep, drop = "INTEG_FORGET_KEEP_1111", "INTEG_FORGET_DROP_2222"
+        client.post("/mcp", json=_tool_call("vectr_remember", {"content": keep}))
+        r = client.post("/mcp", json=_tool_call("vectr_remember", {"content": drop}))
+        drop_id = int(r.json()["result"]["content"][0]["text"].split("#")[1].split(".")[0].split()[0])
+
+        client.post("/mcp", json=_tool_call("vectr_forget", {"note_id": drop_id}))
+        resp = client.post("/mcp", json=_tool_call("vectr_recall", {"detail": "full"}))
+        text = resp.json()["result"]["content"][0]["text"]
+        assert keep in text
+        assert drop not in text
 
     # -- vectr_evict_hint --
 

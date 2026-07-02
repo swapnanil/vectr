@@ -372,12 +372,26 @@ _MEMORY_TOOLS = [
     {
         "name": "vectr_forget",
         "description": (
-            "Delete all working-memory notes for this workspace. "
-            "Use when notes are stale after a large refactor, when you want a clean slate, "
-            "or when vectr_recall returns notes that are consistently wrong. "
-            "Snapshots are preserved — only active notes are removed. This is irreversible."
+            "Delete working-memory notes. Pass note_id to delete ONE note — the usual case, "
+            "when a note is stale or superseded (ids are the [#N] shown by vectr_recall). "
+            "Pass all=true to irreversibly clear EVERY note for this workspace (e.g. after a "
+            "large refactor). Calling with no arguments deletes nothing. "
+            "Snapshots are preserved — only active notes are removed."
         ),
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "integer",
+                    "description": "ID of the single note to delete (the [#N] id from vectr_recall)",
+                },
+                "all": {
+                    "type": "boolean",
+                    "description": "Set true to delete ALL notes for this workspace. Irreversible.",
+                },
+            },
+            "required": [],
+        },
     },
 ]  # end _MEMORY_TOOLS
 
