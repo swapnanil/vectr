@@ -66,6 +66,13 @@ def _mock_service():
         "workspace_root": "/repo",
         "symbol_count": 25,
         "notes_count": 4,
+        # UPG-8.2: retrieval weights + strategy fields are always present in
+        # the real service.status() output (config defaults before the first
+        # fingerprint, fingerprint-derived after) — mock the real shape.
+        "semantic_weight": 0.70,
+        "bm25_weight": 0.30,
+        "graph_first": False,
+        "strategy_rationale": "default weights — no workspace fingerprint yet, index the workspace to compute one",
     }
     svc.get_map.return_value = "# Passport\nA FastAPI service."
     svc.save_map.return_value = None
@@ -458,10 +465,15 @@ class TestVectrStatus:
         assert "bm25=25%" in text
         assert "large codebase" in text
 
-    def test_strategy_omitted_when_not_set(self) -> None:
+    def test_strategy_always_shown_even_with_default_weights(self) -> None:
+        # UPG-8.2: retrieval weights + strategy fields must always render —
+        # previously the Retrieval line was omitted whenever the service
+        # hadn't computed a fingerprint-derived strategy yet. service.status()
+        # now always populates these (falling back to config defaults), so
+        # the line must always be present, not conditionally shown.
         svc = _mock_service()
         result = handle_tools_call("vectr_status", {}, svc)
-        assert "semantic=" not in result["content"][0]["text"]
+        assert "semantic=" in result["content"][0]["text"]
 
     def test_notes_count_shown_in_output(self) -> None:
         svc = _mock_service()

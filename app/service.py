@@ -8,6 +8,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent.config import STRATEGY_DEFAULT_BM25_WEIGHT, STRATEGY_DEFAULT_SEMANTIC_WEIGHT
+
 logger = logging.getLogger(__name__)
 
 _DB_DIR_ENV = "VECTR_DB_DIR"
@@ -288,7 +290,7 @@ class VectrService:
         self, query: str, n_results: int = 10, language: str | None = None
     ) -> tuple[list, int]:
         """Returns (SearchResult list, query_time_ms). Also records for eviction tracking."""
-        sem_w = self._strategy.semantic_weight if self._strategy else 0.70
+        sem_w = self._strategy.semantic_weight if self._strategy else STRATEGY_DEFAULT_SEMANTIC_WEIGHT
         results, query_ms = self._searcher.search(
             query, n_results=n_results, language=language, semantic_weight=sem_w
         )
@@ -302,7 +304,7 @@ class VectrService:
     def route_query(self, query: str):
         """Classify a query and return a RoutingDecision."""
         from agent.query_router import route
-        base_sem = self._strategy.semantic_weight if self._strategy else 0.70
+        base_sem = self._strategy.semantic_weight if self._strategy else STRATEGY_DEFAULT_SEMANTIC_WEIGHT
         return route(query, base_semantic_weight=base_sem)
 
     def search_routed(
@@ -360,15 +362,27 @@ class VectrService:
 
         return results, query_ms, decision, aug_symbols, aug_trace
 
-    def status(self) -> dict:
-        from agent.symbol_graph import SYMBOL_LANGUAGES, available_symbol_languages
+    @property
+    def last_indexed(self) -> str:
+        """Single source of truth for the last-indexed timestamp string.
+
+        Used by both `status()` and the `/v1/health` route so the two
+        endpoints never disagree on freshness (UPG-8.2).
+        """
         last_ts = self._indexer.last_indexed_ts
-        last_str = (
+        return (
             datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             if last_ts
             else "never"
         )
-        strategy_info = {}
+
+    def status(self) -> dict:
+        from agent.symbol_graph import SYMBOL_LANGUAGES, available_symbol_languages
+        # Retrieval weights + strategy fields are always present (UPG-8.2) —
+        # before the first index-time fingerprint (`self._strategy`) has run,
+        # fall back to the config-declared defaults rather than omitting the
+        # fields. This keeps `status` output deterministic in shape from the
+        # very first call, across both REST and MCP.
         if self._strategy:
             strategy_info = {
                 "semantic_weight": self._strategy.semantic_weight,
@@ -377,11 +391,19 @@ class VectrService:
                 "recommended_embed_model": self._strategy.recommended_embed_model,
                 "strategy_rationale": self._strategy.rationale,
             }
+        else:
+            strategy_info = {
+                "semantic_weight": STRATEGY_DEFAULT_SEMANTIC_WEIGHT,
+                "bm25_weight": STRATEGY_DEFAULT_BM25_WEIGHT,
+                "graph_first": False,
+                "recommended_embed_model": self._embed_model,
+                "strategy_rationale": "default weights — no workspace fingerprint yet, index the workspace to compute one",
+            }
         missing = sorted(SYMBOL_LANGUAGES - available_symbol_languages())
         return {
             "indexed_files": self._indexer.indexed_file_count,
             "total_chunks": self._indexer.total_chunks,
-            "last_indexed": last_str,
+            "last_indexed": self.last_indexed,
             "embed_model": self._embed_model,
             "workspace_root": self._workspace_root,
             "symbol_count": self._symbol_graph.symbol_count(self._workspace_root),

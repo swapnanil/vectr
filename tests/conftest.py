@@ -162,6 +162,9 @@ def _base_mock_service():
     svc = MagicMock()
     svc._embed_model = "BAAI/bge-base-en-v1.5"
     svc.total_chunks = 100
+    # UPG-8.2: /v1/health sources last_indexed from the same VectrService
+    # property that populates svc.status()["last_indexed"] below.
+    svc.last_indexed = "2026-01-01T00:00:00Z"
 
     _result = SearchResult(
         file_path="src/auth.py", lines="10-30", symbol_name="verify_token",

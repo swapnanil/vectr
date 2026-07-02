@@ -91,7 +91,10 @@ class StatusResponse(BaseModel):
     symbol_graph_failed_files: int = 0
     processing_ms: int
     model: str
-    # Adaptive retrieval strategy (populated after first index)
+    # Adaptive retrieval strategy. Always populated by VectrService.status()
+    # (UPG-8.2): the config-declared defaults before the first index-time
+    # fingerprint, the fingerprint-derived values after. Optional here only
+    # so a stale/partial mock in a test doesn't fail response validation.
     semantic_weight: float | None = None
     bm25_weight: float | None = None
     graph_first: bool | None = None
@@ -105,6 +108,9 @@ class HealthResponse(BaseModel):
     status: str
     model: str
     embed_model: str
+    # Sourced from the same VectrService.last_indexed property as
+    # /v1/status so the two endpoints never disagree on freshness (UPG-8.2).
+    last_indexed: str
 
 
 # ---------------------------------------------------------------------------

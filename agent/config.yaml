@@ -108,6 +108,16 @@ ranking:
     # is unaffected by this wider initial fetch.
     pre_filter_fetch_k: 200
 
+strategy:
+  # Fallback hybrid-search weights used before the first index-time codebase
+  # fingerprint has run (agent.strategy_selector.select_strategy). Once a
+  # workspace is indexed these are superseded by the fingerprint-derived
+  # RetrievalStrategy; until then `status` and `search` use this pair so
+  # retrieval behaviour — and its reporting — is deterministic from the very
+  # first call rather than silently absent (UPG-8.2). Must sum to 1.0.
+  default_semantic_weight: 0.70
+  default_bm25_weight: 0.30
+
 indexing:
   # hard cap — prevents single huge chunks diluting embeddings
   max_chunk_lines: 150

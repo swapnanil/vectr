@@ -17,6 +17,9 @@ def _make_service():
     svc = MagicMock()
     svc._embed_model = "BAAI/bge-base-en-v1.5"
     svc.total_chunks = 500
+    # UPG-8.2: /v1/health sources last_indexed from the same VectrService
+    # property that populates svc.status()["last_indexed"] below.
+    svc.last_indexed = "2026-01-01T00:00:00Z"
 
     _result = SearchResult(
         file_path="src/auth/middleware.py",
@@ -108,6 +111,14 @@ def test_health(client) -> None:
     data = resp.json()
     assert data["status"] == "ok"
     assert "embed_model" in data
+
+
+def test_health_last_indexed_agrees_with_status(client) -> None:
+    """UPG-8.2: /v1/health and /v1/status must report the same last_indexed —
+    both source it from VectrService.last_indexed, the single source of truth."""
+    health_data = client.get("/v1/health").json()
+    status_data = client.get("/v1/status").json()
+    assert health_data["last_indexed"] == status_data["last_indexed"]
 
 
 # ---------------------------------------------------------------------------

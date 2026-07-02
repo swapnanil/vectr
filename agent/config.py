@@ -111,6 +111,12 @@ WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S : float
     Seconds between CodeWatcher's shallow top-level-only rescans, used to pick up
     new top-level directories/files since the watcher never watches the workspace
     root itself (UPG-13.1/13.3).
+
+STRATEGY_DEFAULT_SEMANTIC_WEIGHT : float
+STRATEGY_DEFAULT_BM25_WEIGHT : float
+    Fallback hybrid-search weights used before the first index-time codebase
+    fingerprint has run (UPG-8.2). Keeps `search` and `status` deterministic
+    from the first call instead of the weight fields being silently absent.
 """
 from __future__ import annotations
 
@@ -267,3 +273,12 @@ WORKSPACE_DEFAULT_VECTRIGNORE_DIRS: tuple[str, ...] = tuple(
 _watcher_cfg: dict[str, Any] = _cfg["watcher"]
 
 WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S: float = float(_watcher_cfg["top_level_rescan_interval_s"])
+
+# ---------------------------------------------------------------------------
+# Retrieval strategy fallback (UPG-8.2)
+# ---------------------------------------------------------------------------
+
+_strat_cfg: dict[str, Any] = _cfg["strategy"]
+
+STRATEGY_DEFAULT_SEMANTIC_WEIGHT: float = float(_strat_cfg["default_semantic_weight"])
+STRATEGY_DEFAULT_BM25_WEIGHT: float = float(_strat_cfg["default_bm25_weight"])

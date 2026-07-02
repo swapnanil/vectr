@@ -153,6 +153,57 @@ class TestStrategyIntegration:
 
 
 # ---------------------------------------------------------------------------
+# UPG-8.2: status output is deterministic — retrieval weights + strategy
+# fields are always present (not conditional on a strategy having been
+# computed yet), and last_indexed agrees between /v1/status and /v1/health.
+# ---------------------------------------------------------------------------
+
+class TestStatusDeterminismUPG82:
+    def _make_service(self, tmp_path, monkeypatch):
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "a.py", "def foo(): pass\n")
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+        return svc
+
+    def test_status_includes_strategy_fields_before_any_index(self, tmp_path, monkeypatch) -> None:
+        """Before the first index() call, self._strategy is None — status()
+        must still populate the retrieval-weight fields from config defaults
+        rather than omitting them."""
+        from agent.config import STRATEGY_DEFAULT_BM25_WEIGHT, STRATEGY_DEFAULT_SEMANTIC_WEIGHT
+        svc = self._make_service(tmp_path, monkeypatch)
+        assert svc._strategy is None
+        data = svc.status()
+        assert data["semantic_weight"] == STRATEGY_DEFAULT_SEMANTIC_WEIGHT
+        assert data["bm25_weight"] == STRATEGY_DEFAULT_BM25_WEIGHT
+        assert data["graph_first"] is False
+        assert data["strategy_rationale"]
+
+    def test_status_includes_strategy_fields_after_index(self, tmp_path, monkeypatch) -> None:
+        """Once a fingerprint-derived strategy exists, status() reports its
+        real values (same fields, same shape, different source)."""
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        data = svc.status()
+        assert isinstance(data["semantic_weight"], float)
+        assert isinstance(data["bm25_weight"], float)
+        assert data["strategy_rationale"]
+
+    def test_health_and_status_agree_on_last_indexed(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        assert svc.last_indexed == svc.status()["last_indexed"]
+        assert svc.last_indexed != "never"
+
+
+# ---------------------------------------------------------------------------
 # T14: suggest_instruction_style
 # ---------------------------------------------------------------------------
 

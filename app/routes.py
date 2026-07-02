@@ -53,6 +53,7 @@ async def health(request: Request) -> HealthResponse:
         status="ok",
         model=get_model(),
         embed_model=svc._embed_model,
+        last_indexed=svc.last_indexed,
     )
 
 
