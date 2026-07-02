@@ -439,12 +439,28 @@ def handle_tools_call(
         if not isinstance(events, list):
             return _mcp_error("events must be a list of trace event dicts")
         result = service.ingest_traces(events)
+        text = (
+            f"Ingested {result['ingested']} dynamic call edges into the symbol graph. "
+            f"({result['skipped_invalid']} events skipped — missing caller or callee field.) "
+            "Dynamic edges now appear in vectr_trace results (marked \"(dynamic)\") "
+            "alongside static edges."
+        )
+        # UPG-7.3: an unresolved caller/callee is not an error (the target may be
+        # external, runtime-only, or a symbol kind the static extractor doesn't
+        # capture) but is worth surfacing — it may also be a typo'd trace event.
+        unresolved_callers = result.get("unresolved_callers", 0)
+        unresolved_callees = result.get("unresolved_callees", 0)
+        if unresolved_callers or unresolved_callees:
+            text += (
+                f"\n\nWarning: {unresolved_callers} caller name(s) and "
+                f"{unresolved_callees} callee name(s) did not match any symbol in "
+                "the indexed graph — edges were still ingested, but double-check "
+                "these aren't typos:"
+            )
+            for example in result.get("unresolved_examples", []):
+                text += f"\n  {example}"
         return {
-            "content": [{"type": "text", "text": (
-                f"Ingested {result['ingested']} dynamic call edges into the symbol graph. "
-                f"({result['skipped_invalid']} events skipped — missing caller or callee field.) "
-                "Dynamic edges now appear in vectr_trace results alongside static edges."
-            )}],
+            "content": [{"type": "text", "text": text}],
             "isError": False,
         }
 

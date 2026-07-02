@@ -19,7 +19,11 @@ from agent.symbol_graph._constants import (
     _BUILTINS,
     graph_toolchain_fingerprint,
 )
-from agent.config import LOCATE_LARGE_SPAN_THRESHOLD, LOCATE_SMALL_SPAN_THRESHOLD
+from agent.config import (
+    LOCATE_LARGE_SPAN_THRESHOLD,
+    LOCATE_SMALL_SPAN_THRESHOLD,
+    INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -715,22 +719,40 @@ class SymbolGraph:
         __getattr__, decorators, dependency injection, etc. that static analysis
         misses are captured here.
 
-        Returns {"ingested": int, "skipped_invalid": int}.
+        A caller or callee that doesn't match any symbol the static extractor
+        found in this workspace (UPG-7.3) is common and NOT an error — the
+        target may be an external library, a runtime-only name, or a symbol
+        kind the extractor doesn't capture — so the edge is still ingested.
+        It is, however, reported back as `unresolved_callers` / `unresolved_callees`
+        (with a capped list of example pairs) so the caller can tell a typo'd
+        trace event apart from a genuinely dynamic edge.
+
+        Returns {"ingested": int, "skipped_invalid": int, "unresolved_callers": int,
+        "unresolved_callees": int, "unresolved_examples": list[str]}.
         """
         ingested = 0
         skipped = 0
+        valid_events: list[tuple[str, str, str, int]] = []
+
+        for ev in trace_events:
+            caller = str(ev.get("caller", "")).strip()
+            callee = str(ev.get("callee", "")).strip()
+            if not caller or not callee:
+                skipped += 1
+                continue
+            caller_file = str(ev.get("caller_file", "")).strip()
+            caller_line = int(ev.get("caller_line", 0))
+            valid_events.append((caller, callee, caller_file, caller_line))
+
+        names = {n for pair in valid_events for n in (pair[0], pair[1])}
+        known = self._known_symbol_names(workspace, list(names))
+
+        unresolved_callers = 0
+        unresolved_callees = 0
+        unresolved_examples: list[str] = []
 
         with self._conn() as conn:
-            for ev in trace_events:
-                caller = str(ev.get("caller", "")).strip()
-                callee = str(ev.get("callee", "")).strip()
-                if not caller or not callee:
-                    skipped += 1
-                    continue
-
-                caller_file = str(ev.get("caller_file", "")).strip()
-                caller_line = int(ev.get("caller_line", 0))
-
+            for caller, callee, caller_file, caller_line in valid_events:
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO edges
@@ -741,11 +763,34 @@ class SymbolGraph:
                 )
                 ingested += 1
 
+                caller_unknown = caller not in known
+                callee_unknown = callee not in known
+                if caller_unknown:
+                    unresolved_callers += 1
+                if callee_unknown:
+                    unresolved_callees += 1
+                if (caller_unknown or callee_unknown) and (
+                    len(unresolved_examples) < INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES
+                ):
+                    reason = (
+                        "both unresolved" if caller_unknown and callee_unknown
+                        else "caller unresolved" if caller_unknown
+                        else "callee unresolved"
+                    )
+                    unresolved_examples.append(f"{caller} -> {callee} ({reason})")
+
         logger.info(
-            "ingest_traces: %d edges added, %d skipped (workspace=%s)",
-            ingested, skipped, workspace,
+            "ingest_traces: %d edges added, %d skipped, %d unresolved callers, "
+            "%d unresolved callees (workspace=%s)",
+            ingested, skipped, unresolved_callers, unresolved_callees, workspace,
         )
-        return {"ingested": ingested, "skipped_invalid": skipped}
+        return {
+            "ingested": ingested,
+            "skipped_invalid": skipped,
+            "unresolved_callers": unresolved_callers,
+            "unresolved_callees": unresolved_callees,
+            "unresolved_examples": unresolved_examples,
+        }
 
     # ------------------------------------------------------------------
     # Query: locate
@@ -1288,6 +1333,14 @@ class SymbolGraph:
         return f"  ×{edge.call_count}" if edge.call_count > 1 else ""
 
     @staticmethod
+    def _dynamic_marker(edge: CallEdge) -> str:
+        """' (dynamic)' for an edge ingested via vectr_ingest_traces rather than
+        found by static analysis (UPG-7.3) — tells the LLM the edge came from
+        runtime observation (e.g. __getattr__, decorators, dependency injection)
+        and may not be visible by reading the source around the call site."""
+        return "  (dynamic)" if getattr(edge, "edge_type", "calls") == "dynamic" else ""
+
+    @staticmethod
     def _caller_verb(callers: list) -> str:
         """'Used by' when every reference is a type-usage edge (UPG-4.4) — e.g.
         tracing a Rust struct that's only passed/returned, never free-called;
@@ -1327,7 +1380,7 @@ class SymbolGraph:
                 lines.append(f"[{d.kind}] {symbol_name} @ {mod}:{d.start_line} — calls ({len(cs)}):")
                 if cs:
                     for e in cs:
-                        lines.append(f"    {e.to_symbol}{self._count_suffix(e)}")
+                        lines.append(f"    {e.to_symbol}{self._count_suffix(e)}{self._dynamic_marker(e)}")
                 else:
                     lines.append("    (none found in index)")
                 note = self._hidden_builtins_note(entry.get("hidden_builtins", 0))
@@ -1339,7 +1392,10 @@ class SymbolGraph:
                 if callers:
                     lines.append(f"{self._caller_verb(callers)} — any '{symbol_name}' ({len(callers)}):")
                     for e in callers:
-                        lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}{self._count_suffix(e)}")
+                        lines.append(
+                            f"  {e.from_symbol}  in {e.from_file}:{e.from_line}"
+                            f"{self._count_suffix(e)}{self._dynamic_marker(e)}"
+                        )
                 else:
                     lines.append(f"Called by — any '{symbol_name}': (none found in index)")
             return "\n".join(lines)
@@ -1349,7 +1405,10 @@ class SymbolGraph:
             if callers:
                 lines.append(f"{self._caller_verb(callers)} ({len(callers)}):")
                 for e in callers:
-                    lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}{self._count_suffix(e)}")
+                    lines.append(
+                        f"  {e.from_symbol}  in {e.from_file}:{e.from_line}"
+                        f"{self._count_suffix(e)}{self._dynamic_marker(e)}"
+                    )
             else:
                 lines.append("Called by: (none found in index)")
 
@@ -1358,7 +1417,7 @@ class SymbolGraph:
             if callees:
                 lines.append(f"\nCalls ({len(callees)}):")
                 for e in callees:
-                    lines.append(f"  {e.to_symbol}{self._count_suffix(e)}")
+                    lines.append(f"  {e.to_symbol}{self._count_suffix(e)}{self._dynamic_marker(e)}")
             else:
                 lines.append("\nCalls: (none found in index)")
             note = self._hidden_builtins_note(trace_result.get("hidden_builtins", 0))

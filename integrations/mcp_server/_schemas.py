@@ -412,7 +412,10 @@ _UTILITY_TOOLS = [
             "that reveals dynamic dispatch patterns the static analyser cannot see: decorators, "
             "__getattr__, dependency injection, monkey-patching, etc. "
             "Pass a list of trace events: [{caller, callee, caller_file?, caller_line?}, ...]. "
-            "Dynamic edges are stored with edge_type='dynamic' and appear in vectr_trace results. "
+            "Dynamic edges are stored with edge_type='dynamic' and appear in vectr_trace results "
+            "marked \"(dynamic)\" so you can tell them apart from statically-discovered calls. "
+            "A caller/callee name that matches no indexed symbol is still ingested (it may be "
+            "external or runtime-only) but is reported back as a warning — check for typos. "
             "NOT needed if static analysis (vectr_trace) already shows the call relationships."
         ),
         "inputSchema": {

@@ -758,7 +758,11 @@ class TestIngestTraces:
         from unittest.mock import MagicMock
         from integrations.mcp_server import handle_tools_call
         svc = MagicMock()
-        svc.ingest_traces.return_value = {"ingested": 3, "skipped_invalid": 0}
+        # Mock the real ingest_trace_data() return shape (UPG-7.3).
+        svc.ingest_traces.return_value = {
+            "ingested": 3, "skipped_invalid": 0,
+            "unresolved_callers": 0, "unresolved_callees": 0, "unresolved_examples": [],
+        }
         events = [{"caller": "a", "callee": "b"}]
         result = handle_tools_call("vectr_ingest_traces", {"events": events}, svc)
         assert result["isError"] is False
@@ -775,6 +779,103 @@ class TestIngestTraces:
         from integrations.mcp_server import MCP_TOOLS
         names = {t["name"] for t in MCP_TOOLS}
         assert "vectr_ingest_traces" in names
+
+
+# ---------------------------------------------------------------------------
+# UPG-7.3 — ingest_traces unresolved caller/callee warning + dynamic marker
+# ---------------------------------------------------------------------------
+
+class TestIngestTracesUnresolvedWarningUPG73:
+    def _graph(self, tmp_path) -> "SymbolGraph":
+        from agent.symbol_graph import SymbolGraph
+        return SymbolGraph(str(tmp_path))
+
+    def test_unresolved_caller_and_callee_still_ingested_but_flagged(self, tmp_path) -> None:
+        g = self._graph(tmp_path)
+        result = g.ingest_trace_data("/ws", [
+            {"caller": "totally_unknown_caller", "callee": "totally_unknown_callee"}
+        ])
+        assert result["ingested"] == 1
+        assert result["unresolved_callers"] == 1
+        assert result["unresolved_callees"] == 1
+        assert len(result["unresolved_examples"]) == 1
+        assert "totally_unknown_caller" in result["unresolved_examples"][0]
+        assert "totally_unknown_callee" in result["unresolved_examples"][0]
+
+    def test_known_symbols_do_not_warn(self, tmp_path, monkeypatch) -> None:
+        g = self._graph(tmp_path)
+        # index a real symbol so the graph has a known "caller" name
+        from tests.conftest import make_py
+        f = make_py(tmp_path, "views.py", "def view_cart():\n    pass\n")
+        g.index_file(str(tmp_path), str(f))
+        result = g.ingest_trace_data(str(tmp_path), [
+            {"caller": "view_cart", "callee": "view_cart", "caller_file": str(f)}
+        ])
+        assert result["ingested"] == 1
+        assert result["unresolved_callers"] == 0
+        assert result["unresolved_callees"] == 0
+        assert result["unresolved_examples"] == []
+
+    def test_unresolved_examples_capped(self, tmp_path) -> None:
+        from agent.config import INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES
+        g = self._graph(tmp_path)
+        events = [
+            {"caller": f"unknown_caller_{i}", "callee": f"unknown_callee_{i}"}
+            for i in range(INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES + 5)
+        ]
+        result = g.ingest_trace_data("/ws", events)
+        assert result["ingested"] == len(events)
+        assert result["unresolved_callers"] == len(events)
+        assert len(result["unresolved_examples"]) == INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES
+
+    def test_mcp_ingest_traces_surfaces_unresolved_warning(self) -> None:
+        from unittest.mock import MagicMock
+        from integrations.mcp_server import handle_tools_call
+        svc = MagicMock()
+        svc.ingest_traces.return_value = {
+            "ingested": 1, "skipped_invalid": 0,
+            "unresolved_callers": 1, "unresolved_callees": 1,
+            "unresolved_examples": ["mystery_caller -> mystery_callee (both unresolved)"],
+        }
+        result = handle_tools_call(
+            "vectr_ingest_traces", {"events": [{"caller": "mystery_caller", "callee": "mystery_callee"}]}, svc
+        )
+        text = result["content"][0]["text"]
+        assert "Warning" in text
+        assert "mystery_caller -> mystery_callee" in text
+
+    def test_mcp_ingest_traces_no_warning_when_all_resolved(self) -> None:
+        from unittest.mock import MagicMock
+        from integrations.mcp_server import handle_tools_call
+        svc = MagicMock()
+        svc.ingest_traces.return_value = {
+            "ingested": 1, "skipped_invalid": 0,
+            "unresolved_callers": 0, "unresolved_callees": 0, "unresolved_examples": [],
+        }
+        result = handle_tools_call("vectr_ingest_traces", {"events": [{"caller": "a", "callee": "b"}]}, svc)
+        text = result["content"][0]["text"]
+        assert "Warning" not in text
+
+    def test_dynamic_edge_marked_in_trace_output(self, tmp_path) -> None:
+        g = self._graph(tmp_path)
+        g.ingest_trace_data("/ws", [
+            {"caller": "handler", "callee": "dispatch_dynamic", "caller_file": "router.py"}
+        ])
+        trace_result = g.trace("/ws", "dispatch_dynamic", direction="callers")
+        text = g.format_trace_for_llm(trace_result, "dispatch_dynamic")
+        assert "(dynamic)" in text
+
+    def test_static_edge_not_marked_dynamic(self, tmp_path) -> None:
+        from tests.conftest import make_py
+        g = self._graph(tmp_path)
+        f = make_py(
+            tmp_path, "mod.py",
+            "def helper():\n    pass\n\ndef caller():\n    helper()\n",
+        )
+        g.index_file(str(tmp_path), str(f))
+        trace_result = g.trace(str(tmp_path), "helper", direction="callers")
+        text = g.format_trace_for_llm(trace_result, "helper")
+        assert "(dynamic)" not in text
 
 
 # ---------------------------------------------------------------------------

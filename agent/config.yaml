@@ -183,6 +183,15 @@ behavior:
     # and /v1/evict endpoint remain ungated.
     retrieved_token_gate: 4000
 
+  ingest_traces:
+    # Maximum number of "caller/callee not found in the indexed symbol graph"
+    # example strings surfaced in the vectr_ingest_traces response text (UPG-7.3).
+    # The edge is still ingested — an unresolved name is common and expected
+    # (external library, dynamic dispatch target added at runtime, or a symbol
+    # kind the static extractor doesn't capture) — this only bounds how many
+    # examples are echoed back so a large trace batch doesn't flood the response.
+    max_unresolved_examples: 10
+
 symbol_graph:
   # UPG-JSFLOW-SYMBOLS: language keywords that must never be minted as a
   # symbol name or call-edge target. A desynced parse (e.g. Flow syntax

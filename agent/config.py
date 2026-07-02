@@ -70,6 +70,11 @@ EVICTION_RETRIEVED_TOKEN_GATE : int
     before auto_eviction_hint() will emit. Suppresses the hint on bursts of tiny
     searches that contribute negligible context pressure (UPG-11.15).
 
+INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES : int
+    Maximum unresolved caller/callee example strings surfaced in the
+    vectr_ingest_traces response (UPG-7.3). Edges are ingested regardless;
+    this only bounds the warning text length.
+
 LOCATE_LARGE_SPAN_THRESHOLD : int
     Line-span (end_line - start_line) at or above which a located symbol is
     considered "large" — typically a canonical library class or function (UPG-15.10).
@@ -273,6 +278,14 @@ WORKSPACE_DEFAULT_VECTRIGNORE_DIRS: tuple[str, ...] = tuple(
 _watcher_cfg: dict[str, Any] = _cfg["watcher"]
 
 WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S: float = float(_watcher_cfg["top_level_rescan_interval_s"])
+
+# ---------------------------------------------------------------------------
+# ingest_traces unresolved-caller/callee warning cap (UPG-7.3)
+# ---------------------------------------------------------------------------
+
+_ingest_cfg: dict[str, Any] = _cfg["behavior"]["ingest_traces"]
+
+INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES: int = int(_ingest_cfg["max_unresolved_examples"])
 
 # ---------------------------------------------------------------------------
 # Retrieval strategy fallback (UPG-8.2)
