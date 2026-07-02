@@ -20,6 +20,9 @@ from agent.config import (
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
     RERANK_PRE_FILTER_FETCH_K as _RERANK_PRE_FILTER_FETCH_K,
     IMPORTANCE_PRIOR_LAMBDA as _IMPORTANCE_PRIOR_LAMBDA,
+    DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED,
+    DUAL_VECTOR_BLEND_MODE as _DUAL_VECTOR_BLEND_MODE,
+    DUAL_VECTOR_BLEND_WEIGHT as _DUAL_VECTOR_BLEND_WEIGHT,
 )
 from agent.indexer import CodeIndexer
 
@@ -200,7 +203,7 @@ class CodeSearcher:
             top_k = n_results * 2
         fetch_n = min(top_k, self._indexer.total_chunks)
 
-        # --- Vector search ---
+        # --- Vector search (body) ---
         query_embedding = self._indexer.embed_query(query)
         vec_result = self._indexer.query_vector(query_embedding, n_results=fetch_n, language=language)
 
@@ -214,6 +217,46 @@ class CodeSearcher:
             cid: max(0.0, 1.0 - dist)
             for cid, dist in zip(vec_ids, vec_distances)
         }
+
+        # --- Vector search (purpose) — ARCH-4 dual-vector pool entry ---
+        # A mechanical, long chunk body dilutes the intent-bearing signature/docstring
+        # tokens when mean-pooled into a single embedding; a documented symbol can miss
+        # dense pool entry entirely even though its own docstring paraphrases the query.
+        # Querying a second, body-stripped "purpose" vector space and merging the two
+        # similarity scores (uniformly, for every query — no keyword gating) lets such
+        # chunks re-enter the pool. Old workspaces with an empty purpose collection get
+        # {} back from query_vector_purpose and fall through to body-only behaviour.
+        purpose_scores: dict[str, float] = {}
+        if _DUAL_VECTOR_ENABLED:
+            purpose_result = self._indexer.query_vector_purpose(
+                query_embedding, n_results=fetch_n, language=language,
+            )
+            purpose_ids: list[str] = purpose_result["ids"][0] if purpose_result["ids"] else []
+            purpose_distances: list[float] = purpose_result["distances"][0] if purpose_result["distances"] else []
+            purpose_scores = {
+                cid: max(0.0, 1.0 - dist)
+                for cid, dist in zip(purpose_ids, purpose_distances)
+            }
+
+        # A chunk's dense score is the merge of its body and purpose similarities.
+        # "max" (default, config: retrieval.dual_vector.blend_mode) takes whichever
+        # vector space best captures the chunk for this query — averaging ("weighted")
+        # would re-introduce the dilution the mechanism exists to defeat.
+        if purpose_scores:
+            dense_ids = set(vec_scores) | set(purpose_scores)
+            if _DUAL_VECTOR_BLEND_MODE == "weighted":
+                w = _DUAL_VECTOR_BLEND_WEIGHT
+                dense_scores: dict[str, float] = {
+                    cid: (1.0 - w) * vec_scores.get(cid, 0.0) + w * purpose_scores.get(cid, 0.0)
+                    for cid in dense_ids
+                }
+            else:  # "max" — default
+                dense_scores = {
+                    cid: max(vec_scores.get(cid, 0.0), purpose_scores.get(cid, 0.0))
+                    for cid in dense_ids
+                }
+        else:
+            dense_scores = dict(vec_scores)
 
         # --- BM25 search ---
         bm25_scores: dict[str, float] = {}
@@ -230,10 +273,10 @@ class CodeSearcher:
                         bm25_scores[self._bm25_ids[idx]] = score / max_raw
 
         # --- Hybrid merge ---
-        all_ids = set(vec_scores) | set(bm25_scores)
+        all_ids = set(dense_scores) | set(bm25_scores)
         merged: dict[str, float] = {}
         for cid in all_ids:
-            v = vec_scores.get(cid, 0.0)
+            v = dense_scores.get(cid, 0.0)
             b = bm25_scores.get(cid, 0.0)
             merged[cid] = semantic_weight * v + (1.0 - semantic_weight) * b
 
@@ -241,13 +284,22 @@ class CodeSearcher:
 
         # Build the content/language lookup from already-fetched data.
         # Used by the pool-entry trivial filter below and later for result objects.
-        # No extra ChromaDB round-trips: both sources (vec and BM25) were fetched above.
+        # No extra ChromaDB round-trips for the body query/BM25 sources; a purpose-only
+        # id (rescued into the pool solely by its purpose-vector similarity) has no
+        # document in either, so its body content/metadata are backfilled with one
+        # batched get_chunk_documents() lookup against the body collection.
         id_to_doc: dict[str, str] = dict(zip(vec_ids, vec_docs))
         id_to_meta: dict[str, dict] = dict(zip(vec_ids, vec_metas))
         for idx, cid in enumerate(self._bm25_ids):
             if cid not in id_to_doc:
                 id_to_doc[cid] = self._bm25_docs[idx]
                 id_to_meta[cid] = self._bm25_metas[idx]
+        purpose_only_ids = [cid for cid in purpose_scores if cid not in id_to_doc]
+        if purpose_only_ids:
+            backfill = self._indexer.get_chunk_documents(purpose_only_ids)
+            for cid, (doc, meta) in backfill.items():
+                id_to_doc[cid] = doc
+                id_to_meta[cid] = meta
 
         # --- UPG-15.7 (revised): Union-of-signals pool selection with trivial filter ---
         # Build the rerank pool as the UNION of:
@@ -262,9 +314,13 @@ class CodeSearcher:
         # top-60 window before any boost was applied.  The union restores bf223bf semantics
         # (separate-signal top-K lists) while still dropping trivial fixture chunks.
         if language is None and rerank and self._reranker:
-            # Vec-signal: iterate vec_ids in descending similarity order
+            # Vec-signal: iterate the dense (body ⊔ purpose) score in descending order.
+            # Using dense_scores rather than raw vec_ids is what lets a purpose-vector-
+            # only rescue (a chunk absent from the body-only vec_ids list but present via
+            # its purpose vector) actually reach the rerank pool (ARCH-4).
+            dense_order = sorted(dense_scores, key=lambda x: dense_scores[x], reverse=True)
             vec_non_trivial: list[str] = []
-            for cid in vec_ids:  # already in descending vec-similarity order
+            for cid in dense_order:
                 doc = id_to_doc.get(cid, "")
                 lang = (id_to_meta.get(cid) or {}).get("language", "")
                 if is_trivial_chunk(doc, lang):
