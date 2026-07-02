@@ -149,25 +149,18 @@ def _locate_scope_depth_batch(rows: list) -> list[int]:
     return depths
 
 
-def _enclosing_class_from_file(file_path: str, start_line: int) -> str:
-    """Scan backward from *start_line* (1-indexed) in *file_path* to find the
-    immediately enclosing class definition.
+def _enclosing_class_from_lines(lines: list[str], start_line: int) -> str:
+    """Scan backward from *start_line* (1-indexed) in a pre-read *lines* list to
+    find the immediately enclosing class definition.
 
     Returns the class name string, or ``""`` when the symbol is not inside a
     class (e.g. a module-level function).  Only examines lines that are at a
     *lesser indentation level* than the symbol's first line, so nested methods
     are correctly attributed to their direct parent class rather than a grandparent.
 
-    This complements ``extract_class_from_content`` (which reads the
-    ``# class: X`` prefix that the *indexer* injects into ChromaDB chunks).
-    For the symbol-graph locate surface, snippets come directly from raw file
-    content and carry no such prefix — hence the file-scan path here.
+    Split from ``_enclosing_class_from_file`` (UPG-15.10x/F49) so a batch caller
+    can supply already-read lines once per file rather than re-reading it.
     """
-    try:
-        lines = Path(file_path).read_text(encoding="utf-8", errors="ignore").splitlines()
-    except OSError:
-        return ""
-
     if not lines or start_line < 1:
         return ""
 
@@ -195,6 +188,55 @@ def _enclosing_class_from_file(file_path: str, start_line: int) -> str:
     return ""
 
 
+def _enclosing_class_from_file(file_path: str, start_line: int) -> str:
+    """Scan *file_path* for the class immediately enclosing the symbol at
+    *start_line* (1-indexed).  See ``_enclosing_class_from_lines`` for the
+    scanning algorithm; this wrapper reads the file for one-off callers.
+
+    This complements ``extract_class_from_content`` (which reads the
+    ``# class: X`` prefix that the *indexer* injects into ChromaDB chunks).
+    For the symbol-graph locate surface, snippets come directly from raw file
+    content and carry no such prefix — hence the file-scan path here.
+    """
+    try:
+        lines = Path(file_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return ""
+    return _enclosing_class_from_lines(lines, start_line)
+
+
+def _locate_class_enclosed_batch(rows: list) -> list[bool]:
+    """Pre-compute, for each row, whether the symbol's IMMEDIATE enclosing scope
+    is a class body (used by the F49 locate ranking signal below). Each source
+    file is read at most once — mirrors ``_locate_scope_depth_batch``'s caching.
+
+    A method directly inside a class (e.g. ``class ForNode: def render(self):``)
+    returns True; a module-level function (e.g. ``def render(request, ...):``)
+    returns False. A symbol whose immediate enclosing scope is a function body
+    (e.g. a class defined inside a test method, per UPG-15.10/F29) also returns
+    False here — that case is already penalised by ``scope_depth`` and
+    ``test_penalty``; this signal targets the orthogonal "bare function vs.
+    class method" collision that scope_depth alone does not discriminate,
+    because Python's tree-sitter grammar assigns both the same symbol kind
+    (`function`), and even languages with a distinct `method` kind rank it
+    equal to `function` in `_KIND_RANK` (a method is a legitimate top-level
+    result, e.g. `locate('save')` on a single canonical model).
+    """
+    file_lines: dict[str, list[str]] = {}
+    result: list[bool] = []
+    for r in rows:
+        fp = r["file_path"]
+        if fp not in file_lines:
+            try:
+                file_lines[fp] = Path(fp).read_text(
+                    encoding="utf-8", errors="ignore"
+                ).splitlines()
+            except OSError:
+                file_lines[fp] = []
+        result.append(bool(_enclosing_class_from_lines(file_lines[fp], r["start_line"])))
+    return result
+
+
 # UPG-15.16: SQL pre-ranking order applied BEFORE the exact/suffix LIMIT cap so
 # the canonical definition of a frequently-defined name enters the candidate pool
 # that _partial_match_key then ranks. In any large codebase a common class or
@@ -214,7 +256,9 @@ _CANONICAL_FETCH_ORDER = (
 )
 
 
-def _partial_match_key(row, query_lower: str, scope_depth: int = 0) -> tuple:
+def _partial_match_key(
+    row, query_lower: str, scope_depth: int = 0, class_enclosed: bool = False,
+) -> tuple:
     """Sort key for `locate` matches (used in every strategy via ``_ranked_result``).
 
     Ordering, most→least preferred (lower tuple = better rank):
@@ -223,10 +267,17 @@ def _partial_match_key(row, query_lower: str, scope_depth: int = 0) -> tuple:
       3. not a test/private file
       4. fewer enclosing function scopes — top-level (0) beats inner test class (1+)
          (UPG-15.10: discriminates inner test-scope stubs from canonical library defs)
-      5. larger line span bucket — large (0) > medium (1) > tiny stub (2)
+      5. not enclosed in a class — a bare module-level definition beats a
+         same-named class method (UPG-15.10x/F49: `shortcuts.render` — a short,
+         module-level function — must beat `ForNode.render`, a same-named method
+         whose larger body would otherwise win on span alone; placed BEFORE span
+         so a small canonical function is never outranked by a bigger method
+         look-alike). A no-op when every same-name candidate is a method (e.g.
+         `locate('save')` across many model classes) — falls through to span_bucket.
+      6. larger line span bucket — large (0) > medium (1) > tiny stub (2)
          (UPG-15.10: canonical 1400-line base class beats 3-line test stub)
-      6. shorter name (closer to the query)
-      7. file_path (stable tiebreak)
+      7. shorter name (closer to the query)
+      8. file_path (stable tiebreak)
     """
     name = row["name"]
     nl = name.lower()
@@ -267,7 +318,9 @@ def _partial_match_key(row, query_lower: str, scope_depth: int = 0) -> tuple:
     # UPG-15.10: scope_depth — 0 = top-level, 1+ = nested inside function body.
     # Capped at 3 so deeply-nested test utilities don't dominate the key ordering.
     scope_penalty = min(scope_depth, 3)
-    return (pos, kind_rank, test_penalty, scope_penalty, span_bucket, len(name), fp)
+    # UPG-15.10x/F49: class_enclosed — 0 = bare module-level def, 1 = class method.
+    class_penalty = 1 if class_enclosed else 0
+    return (pos, kind_rank, test_penalty, scope_penalty, class_penalty, span_bucket, len(name), fp)
 
 
 # ---------------------------------------------------------------------------
@@ -797,14 +850,19 @@ class SymbolGraph:
         leaf_lower = _leaf.lower()
 
         def _ranked_result(rows: list, strategy: str) -> LocateResult:
-            # Canonical-first ordering (UPG-4.5 + UPG-15.10): even within an exact-name
-            # hit, lead with the type/fn definition and bury impl blocks / aliases that
-            # share the name.  Pre-compute scope depths (file read, cached per file) so
-            # the sort key includes the enclosing-scope signal without re-reading files.
+            # Canonical-first ordering (UPG-4.5 + UPG-15.10 + UPG-15.10x/F49): even
+            # within an exact-name hit, lead with the type/fn definition and bury
+            # impl blocks / aliases / class-method look-alikes that share the name.
+            # Pre-compute scope depths and class-enclosure (each a file read, cached
+            # per file) so the sort key includes both signals without re-reading files
+            # per comparison.
             scope_depths = _locate_scope_depth_batch(rows)
+            class_enclosed = _locate_class_enclosed_batch(rows)
             ranked = sorted(
                 range(len(rows)),
-                key=lambda i: _partial_match_key(rows[i], leaf_lower, scope_depths[i]),
+                key=lambda i: _partial_match_key(
+                    rows[i], leaf_lower, scope_depths[i], class_enclosed[i],
+                ),
             )
             top_rows = [rows[i] for i in ranked[:limit]]
             syms = _with_snippets(top_rows)
