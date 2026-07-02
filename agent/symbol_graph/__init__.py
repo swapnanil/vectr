@@ -74,6 +74,9 @@ from agent.symbol_graph._graph import (
     _partial_match_key,
     _locate_scope_depth_from_lines,
     _locate_scope_depth_batch,
+    _locate_class_enclosed_batch,
+    _enclosing_class_from_lines,
+    _enclosing_class_from_file,
 )
 
 __all__ = [
@@ -98,6 +101,9 @@ __all__ = [
     "_partial_match_key",
     "_locate_scope_depth_from_lines",
     "_locate_scope_depth_batch",
+    "_locate_class_enclosed_batch",
+    "_enclosing_class_from_lines",
+    "_enclosing_class_from_file",
     "_extract_routes",
     "_get_imported_files",
     "_get_parser",

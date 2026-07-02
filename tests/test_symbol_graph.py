@@ -34,6 +34,8 @@ from agent.symbol_graph import (
     _partial_match_key,
     _locate_scope_depth_from_lines,
     _locate_scope_depth_batch,
+    _locate_class_enclosed_batch,
+    _enclosing_class_from_lines,
 )
 import agent.symbol_graph as _sgmod
 from tests.conftest import make_py
@@ -1839,6 +1841,207 @@ class TestLocateRankingUPG1510:
         depths = _locate_scope_depth_batch(rows)
         assert depths[0] == 0, f"Outer class (top-level) must be depth 0, got {depths[0]}"
         assert depths[1] == 1, f"Inner class (inside method) must be depth 1, got {depths[1]}"
+
+
+# ---------------------------------------------------------------------------
+# UPG-15.10x / F49 — locate: bare module-level defs rank before same-named
+# class methods (the "common leaf" collision).
+#
+# `_partial_match_key`'s existing span_bucket signal assumes canonical == large,
+# which correctly demotes tiny inner test-scope stubs (UPG-15.10/F29) but
+# backfires when the canonical answer is itself a SHORT module-level function
+# (e.g. a thin delegating wrapper) competing against a same-named, LARGER
+# method on some unrelated class. The class_enclosed signal targets that
+# orthogonal collision directly and is ranked ahead of span_bucket so a small
+# canonical function is never outranked by a bigger method look-alike.
+# ---------------------------------------------------------------------------
+
+class TestLocateRankingClassEnclosedF49:
+    """Bare module-level definitions outrank same-named class methods (F49)."""
+
+    # --- _enclosing_class_from_lines / _locate_class_enclosed_batch unit tests ---
+
+    def test_enclosing_class_from_lines_module_level_function(self) -> None:
+        """A module-level function has no enclosing class."""
+        lines = ["def render(request, template_name):", "    return None"]
+        cls = _enclosing_class_from_lines(lines, start_line=1)
+        assert cls == "", f"Module-level function must have no enclosing class, got {cls!r}"
+
+    def test_enclosing_class_from_lines_method(self) -> None:
+        """A method's immediate enclosing scope is its class."""
+        lines = [
+            "class ForNode:",
+            "    def render(self, context):",
+            "        return None",
+        ]
+        cls = _enclosing_class_from_lines(lines, start_line=2)
+        assert cls == "ForNode", f"Method must resolve its enclosing class, got {cls!r}"
+
+    def test_enclosing_class_from_lines_class_nested_in_function_not_class(self) -> None:
+        """A class defined inside a function body (UPG-15.10/F29 shape) has NO
+        enclosing CLASS — its immediate enclosing scope is the function, so this
+        signal must not double-penalise the inner-test-stub case (that's scope_depth's
+        job); class_enclosed only targets the bare-function-vs-method collision."""
+        lines = [
+            "class TestSuite:",
+            "    def test_it(self):",
+            "        class Widget:",
+            "            pass",
+        ]
+        cls = _enclosing_class_from_lines(lines, start_line=3)
+        assert cls == "", (
+            f"A class immediately nested in a function must report no enclosing "
+            f"class (its immediate parent is the function, not TestSuite); got {cls!r}"
+        )
+
+    def test_locate_class_enclosed_batch(self, tmp_path) -> None:
+        """_locate_class_enclosed_batch reads each file once and reports True only
+        for symbols whose immediate enclosing scope is a class."""
+        src = textwrap.dedent("""\
+            def render(request, template_name):
+                return None
+
+            class ForNode:
+                def render(self, context):
+                    return None
+        """)
+        fp = tmp_path / "m.py"
+        fp.write_text(src)
+        rows = [
+            {"file_path": str(fp), "start_line": 1},  # module-level render
+            {"file_path": str(fp), "start_line": 5},  # ForNode.render
+        ]
+        flags = _locate_class_enclosed_batch(rows)
+        assert flags[0] is False, "Module-level render must not be class_enclosed"
+        assert flags[1] is True, "ForNode.render must be class_enclosed"
+
+    # --- _partial_match_key unit tests ---
+
+    def test_partial_match_key_class_enclosed_penalised(self) -> None:
+        """A class-enclosed candidate ranks below a module-level candidate,
+        all else equal."""
+        row_module_level = {
+            "name": "render", "kind": "function",
+            "file_path": "lib/shortcuts.py", "start_line": 1, "end_line": 5,
+        }
+        row_method = {
+            "name": "render", "kind": "function",
+            "file_path": "lib/nodes.py", "start_line": 1, "end_line": 5,
+        }
+        key_module = _partial_match_key(
+            row_module_level, "render", scope_depth=0, class_enclosed=False,
+        )
+        key_method = _partial_match_key(
+            row_method, "render", scope_depth=0, class_enclosed=True,
+        )
+        assert key_module < key_method, (
+            f"Module-level def must rank before a same-named class method; "
+            f"module key={key_module}, method key={key_method}"
+        )
+
+    def test_partial_match_key_class_enclosed_beats_larger_span(self) -> None:
+        """Regression for the exact F49 bug: a SHORT module-level function must
+        outrank a LARGER same-named class method — span_bucket alone got this
+        backwards (larger span looked more 'canonical') until class_enclosed was
+        placed ahead of it in the sort key."""
+        row_short_module_level = {
+            "name": "render", "kind": "function",
+            "file_path": "lib/shortcuts.py", "start_line": 1, "end_line": 8,   # tiny span
+        }
+        row_large_method = {
+            "name": "render", "kind": "function",
+            "file_path": "lib/nodes.py", "start_line": 1, "end_line": 65,      # medium/large span
+        }
+        key_short = _partial_match_key(
+            row_short_module_level, "render", scope_depth=0, class_enclosed=False,
+        )
+        key_large = _partial_match_key(
+            row_large_method, "render", scope_depth=0, class_enclosed=True,
+        )
+        assert key_short < key_large, (
+            f"Short module-level def must beat a larger class-method look-alike; "
+            f"short={key_short}, large={key_large}"
+        )
+
+    def test_partial_match_key_no_regression_when_all_candidates_are_methods(self) -> None:
+        """When every same-name candidate is a class method (no bare module-level
+        def exists — e.g. locate('save') across several model classes), the
+        class_enclosed tier is a no-op tie and span_bucket still decides, exactly
+        as before this change (UPG-15.10 behaviour preserved)."""
+        row_large_method = {
+            "name": "save", "kind": "function",
+            "file_path": "lib/models.py", "start_line": 1, "end_line": 60,
+        }
+        row_tiny_method = {
+            "name": "save", "kind": "function",
+            "file_path": "lib/other.py", "start_line": 1, "end_line": 4,
+        }
+        key_large = _partial_match_key(
+            row_large_method, "save", scope_depth=0, class_enclosed=True,
+        )
+        key_tiny = _partial_match_key(
+            row_tiny_method, "save", scope_depth=0, class_enclosed=True,
+        )
+        assert key_large < key_tiny, (
+            "With class_enclosed tied (both methods), the larger span must still "
+            f"win as before; large={key_large}, tiny={key_tiny}"
+        )
+
+    # --- end-to-end locate_l2 test (F49 acceptance witness, neutral names) ---
+
+    def _make_lib_with_canonical_render(self, tmp_path) -> str:
+        """A short, module-level canonical `render` — the library's public API
+        entry point, e.g. a thin dispatcher over a templating backend."""
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir(parents=True)
+        src = textwrap.dedent("""\
+            def render(request, template_name, context=None):
+                content = _render_to_string(template_name, context, request)
+                return content
+        """)
+        fp = lib_dir / "shortcuts.py"
+        fp.write_text(src)
+        return str(fp)
+
+    def _make_lib_with_render_methods(self, tmp_path) -> str:
+        """Several unrelated node classes each define a larger `render` method —
+        common-leaf look-alikes competing with the canonical function above."""
+        lib_dir = tmp_path / "lib"
+        classes = []
+        for i in range(8):
+            body_lines = "\n".join(f"        step_{j} = {j}" for j in range(20))
+            classes.append(textwrap.dedent(f"""\
+                class Node{i}:
+                    def render(self, context):
+                {body_lines}
+                        return context
+            """))
+        fp = lib_dir / "nodes.py"
+        fp.write_text("\n".join(classes))
+        return str(fp)
+
+    def test_canonical_render_ranks_first_over_class_method_lookalikes(self, tmp_path) -> None:
+        """F49 acceptance: locate_l2('render') returns the canonical module-level
+        function first, ahead of larger same-named methods on unrelated classes."""
+        lib_fp = self._make_lib_with_canonical_render(tmp_path)
+        nodes_fp = self._make_lib_with_render_methods(tmp_path)
+
+        g = SymbolGraph(str(tmp_path))
+        # Index the method-heavy file first so its rows have lower rowids —
+        # mirrors the live django situation where defaulttags.py sorts before
+        # shortcuts.py alphabetically.
+        g.index_file(str(tmp_path), nodes_fp)
+        g.index_file(str(tmp_path), lib_fp)
+
+        result = g.locate_l2(str(tmp_path), "render", limit=5)
+        assert result.resolution_strategy == "exact"
+        names_and_files = [(s.name, s.file_path) for s in result.symbols]
+        assert names_and_files, "locate_l2('render') returned no results"
+        top_name, top_file = names_and_files[0]
+        assert "shortcuts.py" in top_file and "." not in top_name, (
+            f"Rank-1 result must be the bare module-level canonical render, "
+            f"got {names_and_files[0]}.\nFull top-5: {names_and_files}"
+        )
 
 
 # ---------------------------------------------------------------------------
