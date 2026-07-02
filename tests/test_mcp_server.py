@@ -75,7 +75,8 @@ def _mock_service():
         "strategy_rationale": "default weights — no workspace fingerprint yet, index the workspace to compute one",
     }
     svc.get_map.return_value = "# Passport\nA FastAPI service."
-    svc.save_map.return_value = None
+    # UPG-6.2: save_map returns a shaped result, not None — real shape.
+    svc.save_map.return_value = {"saved": True, "existing_summary": None}
     svc.locate_with_snippets.return_value = []
     svc.format_locate.return_value = "No symbols found."
     svc.trace_with_snippets.return_value = {}
@@ -511,8 +512,26 @@ class TestVectrMap:
         svc = _mock_service()
         result = handle_tools_call("vectr_map_save", {"summary": "This is a FastAPI service."}, svc)
         assert result["isError"] is False
-        svc.save_map.assert_called_once_with("This is a FastAPI service.")
+        # UPG-6.2: overwrite defaults to False and is always forwarded explicitly.
+        svc.save_map.assert_called_once_with("This is a FastAPI service.", overwrite=False)
         assert "saved" in result["content"][0]["text"].lower()
+
+    def test_map_save_overwrite_true_forwarded(self) -> None:
+        svc = _mock_service()
+        handle_tools_call(
+            "vectr_map_save", {"summary": "Updated summary.", "overwrite": True}, svc
+        )
+        svc.save_map.assert_called_once_with("Updated summary.", overwrite=True)
+
+    def test_map_save_blocked_when_passport_exists_and_not_overwrite(self) -> None:
+        svc = _mock_service()
+        svc.save_map.return_value = {"saved": False, "existing_summary": "Old passport summary."}
+        result = handle_tools_call("vectr_map_save", {"summary": "New summary."}, svc)
+        assert result["isError"] is False
+        text = result["content"][0]["text"]
+        assert "already exists" in text.lower()
+        assert "Old passport summary." in text
+        assert "overwrite" in text.lower()
 
     def test_map_save_missing_summary_returns_error(self) -> None:
         svc = _mock_service()

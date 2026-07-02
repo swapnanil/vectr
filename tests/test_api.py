@@ -58,6 +58,8 @@ def _make_service():
         "symbol_graph_failed_files": 0,
     }
     svc.get_map.return_value = "# Codebase Passport\nFastAPI service."
+    # UPG-6.2: save_map returns a shaped result — real shape.
+    svc.save_map.return_value = {"saved": True, "existing_summary": None}
     # locate_with_snippets returns a LocateResult wrapper (not a bare list) —
     # the REST route must unwrap .symbols. Mock the real shape so the route
     # contract is actually exercised.
@@ -212,6 +214,37 @@ def test_trace_happy_path(client) -> None:
 # ---------------------------------------------------------------------------
 # Index
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Map save (UPG-6.2) — every REST route gets its own test, not just MCP
+# ---------------------------------------------------------------------------
+
+def test_map_save_happy_path(client) -> None:
+    resp = client.post("/v1/map", json={"summary": "Python FastAPI service."})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["saved"] is True
+    assert "saved" in data["message"].lower()
+
+
+def test_map_save_blocked_when_passport_exists_and_not_overwrite(client) -> None:
+    app.state.service.save_map.return_value = {
+        "saved": False, "existing_summary": "Existing passport summary.",
+    }
+    resp = client.post("/v1/map", json={"summary": "New summary."})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["saved"] is False
+    assert "already exists" in data["message"].lower()
+    assert "Existing passport summary." in data["message"]
+    app.state.service.save_map.assert_called_once_with("New summary.", overwrite=False)
+
+
+def test_map_save_overwrite_true_forwarded_to_service(client) -> None:
+    resp = client.post("/v1/map", json={"summary": "New summary.", "overwrite": True})
+    assert resp.status_code == 200
+    app.state.service.save_map.assert_called_once_with("New summary.", overwrite=True)
+
 
 def test_index_happy_path(client) -> None:
     resp = client.post("/v1/index", json={"path": ".", "force": False})

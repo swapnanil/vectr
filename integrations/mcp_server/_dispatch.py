@@ -251,7 +251,18 @@ def handle_tools_call(
         summary = arguments.get("summary", "").strip()
         if not summary:
             return _mcp_error("summary is required")
-        service.save_map(summary)
+        overwrite = bool(arguments.get("overwrite", False))
+        result = service.save_map(summary, overwrite=overwrite)
+        if not result["saved"]:
+            return {
+                "content": [{"type": "text", "text": (
+                    "A passport already exists for this workspace — not overwritten. "
+                    "Call vectr_map_save again with overwrite=true to replace it. "
+                    "Existing summary:\n\n"
+                    f"{result['existing_summary']}"
+                )}],
+                "isError": False,
+            }
         return {
             "content": [{"type": "text", "text": (
                 f"Passport saved ({len(summary)} chars). "

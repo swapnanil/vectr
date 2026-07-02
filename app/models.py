@@ -119,11 +119,17 @@ class HealthResponse(BaseModel):
 
 class MapSaveRequest(BaseModel):
     summary: str = Field(..., min_length=1, description="AI-written plain-English codebase summary")
+    # UPG-6.2: vectr_map_save must not silently clobber an existing passport —
+    # the caller must explicitly opt in to replace it.
+    overwrite: bool = False
 
 
 class MapSaveResponse(BaseModel):
     message: str
     processing_ms: int
+    # False when a passport already existed and overwrite was not set — the
+    # request was a no-op and `message` carries the existing summary (UPG-6.2).
+    saved: bool = True
 
 
 # ---------------------------------------------------------------------------

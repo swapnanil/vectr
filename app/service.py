@@ -233,14 +233,26 @@ class VectrService:
         except Exception:
             logger.exception("Symbol graph build failed (non-fatal)")
 
-    def save_map(self, summary: str) -> None:
+    def save_map(self, summary: str, overwrite: bool = False) -> dict:
         """
         Persist an AI-written codebase passport.
         Called via vectr_map_save — the AI editor has synthesised the summary
         after reading the raw metadata returned by vectr_map on first call.
+
+        Does NOT silently overwrite an existing passport (UPG-6.2): if one is
+        already saved and `overwrite` is not set, the write is a no-op and the
+        existing summary is returned so the caller can decide whether to
+        retry with `overwrite=True`.
+
+        Returns {"saved": bool, "existing_summary": str | None}.
         """
+        existing = self._passport_store.load()
+        if existing and existing.get("summary") and not overwrite:
+            logger.info("Passport save skipped — one already exists and overwrite was not set")
+            return {"saved": False, "existing_summary": existing["summary"]}
         self._passport_store.save_summary(summary, self._workspace_root)
         logger.info("Passport saved by AI editor (%d chars)", len(summary))
+        return {"saved": True, "existing_summary": None}
 
     def shutdown(self) -> None:
         self._watcher.stop()
@@ -465,8 +477,13 @@ class VectrService:
         Return codebase passport for AI consumption.
         If cached: instant ~300-token summary.
         If not: raw structural metadata + instruction to call vectr_map_save.
+
+        Raw-metadata language detection uses the indexer's real per-language
+        coverage (UPG-6.1) rather than a directory-walk extension guess.
         """
-        return self._passport_store.format_for_llm(self._workspace_root)
+        return self._passport_store.format_for_llm(
+            self._workspace_root, language_stats=self._indexer.indexed_language_stats()
+        )
 
     # ------------------------------------------------------------------
     # L2 — symbol graph

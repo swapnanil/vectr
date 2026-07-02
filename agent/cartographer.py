@@ -62,8 +62,36 @@ def _read_readme_snippet(workspace_root: str, max_chars: int = 1500) -> str:
     return ""
 
 
+# Display names for the lowercase language keys the indexer stores in chunk
+# metadata (agent/indexer/_constants.py LANG_BY_EXT) — used to render
+# `indexed_language_stats()` results as human-readable passport text.
+_LANG_DISPLAY_NAMES: dict[str, str] = {
+    "python": "Python", "javascript": "JavaScript", "typescript": "TypeScript",
+    "go": "Go", "rust": "Rust", "java": "Java", "zig": "Zig", "c": "C",
+    "cpp": "C++", "markdown": "Markdown", "html": "HTML", "txt": "Text",
+    "rst": "reStructuredText",
+}
+
+
+def _languages_from_index(language_stats: dict[str, dict[str, int]]) -> list[str]:
+    """Derive display-name languages from the indexer's real per-language
+    coverage (`CodeIndexer.indexed_language_stats()`), ordered by file count
+    descending. This is the ground truth for what vectr actually indexed —
+    it already applies .vectrignore/.gitignore/EXCLUDED_DIRS and every other
+    indexing-time exclusion, so it can only diverge from a raw directory walk
+    by being MORE accurate (UPG-6.1)."""
+    ordered = sorted(language_stats.items(), key=lambda kv: -kv[1]["files"])
+    return [_LANG_DISPLAY_NAMES.get(lang, lang) for lang, _ in ordered]
+
+
 def _detect_languages(structure: dict[str, list[str]]) -> list[str]:
-    """Infer languages from file extensions in the directory sketch."""
+    """Infer languages from file extensions in the directory sketch.
+
+    Fallback only — used when the workspace has not been indexed yet (no
+    real coverage data available), e.g. the very first `vectr_map` call
+    before background indexing completes. Once real index data exists,
+    `_languages_from_index` is authoritative (UPG-6.1).
+    """
     ext_map = {
         ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript",
         ".js": "JavaScript", ".jsx": "JavaScript", ".go": "Go",
@@ -229,16 +257,28 @@ def detect_module_communities(
         return []
 
 
-def collect_raw_metadata(workspace_root: str, indexed_files: list[str] | None = None) -> dict:
+def collect_raw_metadata(
+    workspace_root: str,
+    indexed_files: list[str] | None = None,
+    language_stats: dict[str, dict[str, int]] | None = None,
+) -> dict:
     """
     Collect raw structural metadata about the workspace.
     No LLM call — pure file system inspection.
     Returns a dict the AI can read and summarise into a passport.
+
+    `language_stats` (from `CodeIndexer.indexed_language_stats()`) is the real
+    per-language coverage of what vectr actually indexed. When provided and
+    non-empty it is authoritative for the `languages` field (UPG-6.1); the
+    directory-walk extension guess (`_detect_languages`) is only a fallback
+    for the pre-index case.
     """
     logger.info("Cartographer: collecting raw metadata for %s", workspace_root)
     structure = _build_directory_sketch(workspace_root)
     readme = _read_readme_snippet(workspace_root)
-    languages = _detect_languages(structure)
+    languages = (
+        _languages_from_index(language_stats) if language_stats else _detect_languages(structure)
+    )
     frameworks = _detect_frameworks(workspace_root, structure)
 
     # auto-cluster modules via Louvain community detection
@@ -348,19 +388,41 @@ class PassportStore:
     def exists(self) -> bool:
         return self._path.exists()
 
-    def format_for_llm(self, workspace_root: str) -> str:
+    def format_for_llm(
+        self,
+        workspace_root: str,
+        language_stats: dict[str, dict[str, int]] | None = None,
+    ) -> str:
         """
         Return passport for AI consumption.
         If cached: return the stored summary.
         If not: collect raw metadata and prompt the AI to call vectr_map_save.
+
+        `language_stats` (real indexer coverage) is forwarded to
+        `collect_raw_metadata` so the raw-metadata path reports the languages
+        vectr actually indexed rather than a directory-walk guess (UPG-6.1).
         """
         p = self.load()
         if p and p.get("summary"):
             summary = p["summary"]
             logger.debug("PassportStore: returning cached passport (%d chars)", len(summary))
-            return f"# Codebase Passport — {Path(p.get('_workspace', workspace_root)).name}\n\n{summary}"
+            name = Path(p.get("_workspace", workspace_root)).name
+            # UPG-6.2: only a passport written via vectr_map_save (an AI editor
+            # that actually read and synthesised the codebase) is trusted at
+            # face value. Anything else — e.g. a passport written through the
+            # PassportStore.save() backward-compat path by a non-editor caller —
+            # is labelled unverified so the reading AI applies appropriate
+            # scepticism instead of treating it as reviewed ground truth.
+            if p.get("_source") == "ai_editor":
+                header = f"# Codebase Passport — {name}"
+            else:
+                header = (
+                    f"# Codebase Passport — {name} [UNVERIFIED — machine-generated, "
+                    "not reviewed by an AI editor]"
+                )
+            return f"{header}\n\n{summary}"
 
         # No passport yet — return raw metadata so the AI can synthesise one
         logger.info("PassportStore: no passport found, returning raw metadata for %s", workspace_root)
-        metadata = collect_raw_metadata(workspace_root)
+        metadata = collect_raw_metadata(workspace_root, language_stats=language_stats)
         return format_raw_metadata_for_llm(metadata)

@@ -64,6 +64,36 @@ class TestCollectRawMetadata:
         assert meta["languages"] == []
         assert isinstance(meta["structure"], dict)
 
+    def test_language_stats_from_real_index_is_authoritative(self, tmp_path) -> None:
+        """UPG-6.1: when the indexer's real per-language coverage is supplied,
+        it drives `languages` — not a fresh directory-walk extension guess.
+        A workspace on disk with .go files but an index that only ever saw
+        .py files (because .go was excluded, generated, or added after the
+        last index run) must report what was actually indexed."""
+        (tmp_path / "main.go").write_text("package main")
+        from agent.cartographer import collect_raw_metadata
+        real_stats = {"python": {"files": 3, "chunks": 12}}
+        meta = collect_raw_metadata(str(tmp_path), language_stats=real_stats)
+        assert meta["languages"] == ["Python"]
+        assert "Go" not in meta["languages"]
+
+    def test_language_stats_ordered_by_file_count(self, tmp_path) -> None:
+        from agent.cartographer import collect_raw_metadata
+        real_stats = {
+            "javascript": {"files": 2, "chunks": 5},
+            "python": {"files": 10, "chunks": 40},
+        }
+        meta = collect_raw_metadata(str(tmp_path), language_stats=real_stats)
+        assert meta["languages"] == ["Python", "JavaScript"]
+
+    def test_no_language_stats_falls_back_to_directory_walk(self, tmp_path) -> None:
+        """Before the first index (no real coverage data yet), fall back to the
+        directory-walk extension guess rather than reporting no languages."""
+        (tmp_path / "main.py").write_text("")
+        from agent.cartographer import collect_raw_metadata
+        meta = collect_raw_metadata(str(tmp_path), language_stats={})
+        assert "Python" in meta["languages"]
+
 
 # ---------------------------------------------------------------------------
 # format_raw_metadata_for_llm
@@ -118,6 +148,35 @@ class TestPassportStore:
         store = self._store(tmp_path)
         assert store.exists() is False
 
+    def test_format_for_llm_passes_language_stats_through(self, tmp_path) -> None:
+        """UPG-6.1: PassportStore forwards language_stats to collect_raw_metadata
+        for the no-passport-yet raw-metadata path."""
+        (tmp_path / "main.go").write_text("package main")
+        store = self._store(tmp_path)
+        text = store.format_for_llm(str(tmp_path), language_stats={"python": {"files": 1, "chunks": 3}})
+        assert "Python" in text
+        assert "Go" not in text
+
+    def test_cached_ai_editor_passport_carries_no_unverified_label(self, tmp_path) -> None:
+        store = self._store(tmp_path)
+        store.save_summary("My codebase summary.", str(tmp_path))
+        text = store.format_for_llm(str(tmp_path))
+        assert "UNVERIFIED" not in text
+
+    def test_machine_generated_passport_carries_unverified_label(self, tmp_path) -> None:
+        """UPG-6.2: a passport written via the PassportStore.save() backward-
+        compat path (not through vectr_map_save / save_summary) has no
+        `_source: "ai_editor"` marker and must be labelled unverified so the
+        reading AI does not treat it as a reviewed, trustworthy summary."""
+        store = self._store(tmp_path)
+        store.save({
+            "summary": "Auto-collected summary, never reviewed.",
+            "_workspace": str(tmp_path),
+        })
+        text = store.format_for_llm(str(tmp_path))
+        assert "UNVERIFIED" in text
+        assert "Auto-collected summary, never reviewed." in text
+
     def test_exists_true_after_save(self, tmp_path) -> None:
         store = self._store(tmp_path)
         store.save_summary("summary", str(tmp_path))
@@ -130,12 +189,59 @@ class TestPassportStore:
         assert data["_workspace"] == str(tmp_path)
 
     def test_overwrite_summary(self, tmp_path) -> None:
+        """PassportStore.save_summary() itself always overwrites — the
+        no-clobber guard lives one layer up in VectrService.save_map()
+        (see TestPassportOverwriteGuard below), which checks for an existing
+        passport before calling save_summary() at all."""
         store = self._store(tmp_path)
         store.save_summary("first summary", str(tmp_path))
         store.save_summary("updated summary", str(tmp_path))
         text = store.format_for_llm(str(tmp_path))
         assert "updated summary" in text
         assert "first summary" not in text
+
+
+# ---------------------------------------------------------------------------
+# VectrService.save_map — vectr_map_save overwrite guard (UPG-6.2)
+# ---------------------------------------------------------------------------
+
+class TestPassportOverwriteGuard:
+    def _service(self, tmp_path, monkeypatch):
+        from agent import indexer as idx_module
+        from unittest.mock import patch
+        from tests.conftest import _DummyEmbedProvider, make_py
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "a.py", "def foo(): pass\n")
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+        return svc
+
+    def test_first_save_succeeds(self, tmp_path, monkeypatch) -> None:
+        svc = self._service(tmp_path, monkeypatch)
+        result = svc.save_map("First summary.")
+        assert result == {"saved": True, "existing_summary": None}
+
+    def test_second_save_without_overwrite_is_blocked(self, tmp_path, monkeypatch) -> None:
+        svc = self._service(tmp_path, monkeypatch)
+        svc.save_map("First summary.")
+        result = svc.save_map("Second summary.")
+        assert result["saved"] is False
+        assert result["existing_summary"] == "First summary."
+        # the passport on disk is unchanged
+        assert svc.get_map().count("First summary.") == 1
+        assert "Second summary." not in svc.get_map()
+
+    def test_second_save_with_overwrite_true_replaces(self, tmp_path, monkeypatch) -> None:
+        svc = self._service(tmp_path, monkeypatch)
+        svc.save_map("First summary.")
+        result = svc.save_map("Second summary.", overwrite=True)
+        assert result["saved"] is True
+        assert "Second summary." in svc.get_map()
 
 
 # ---------------------------------------------------------------------------

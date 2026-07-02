@@ -374,9 +374,11 @@ class TestMcpServer:
     def test_tools_call_map_save(self) -> None:
         from integrations.mcp_server import handle_tools_call
         mock_svc = MagicMock()
+        # UPG-6.2: save_map returns a shaped result; mock the real shape.
+        mock_svc.save_map.return_value = {"saved": True, "existing_summary": None}
         result = handle_tools_call("vectr_map_save", {"summary": "Python FastAPI service."}, mock_svc)
         assert result["isError"] is False
-        mock_svc.save_map.assert_called_once_with("Python FastAPI service.")
+        mock_svc.save_map.assert_called_once_with("Python FastAPI service.", overwrite=False)
 
     def test_tools_call_map_save_missing_summary(self) -> None:
         from integrations.mcp_server import handle_tools_call

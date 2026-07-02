@@ -76,7 +76,9 @@ _EXPLORATION_TOOLS = [
             "Call this ONLY after vectr_map returned raw metadata — i.e. on your first visit to a codebase. "
             "NOT when vectr_map already returned a saved summary (passport already exists). "
             "Write a concise plain-English summary: what the codebase does, tech stack, "
-            "key modules, entry points, domain terms. Aim for ~200-350 tokens."
+            "key modules, entry points, domain terms. Aim for ~200-350 tokens. "
+            "Does NOT overwrite an existing passport by default — if one is already saved, the call "
+            "is a no-op and returns the existing summary; pass overwrite=true to replace it."
         ),
         "inputSchema": {
             "type": "object",
@@ -84,6 +86,11 @@ _EXPLORATION_TOOLS = [
                 "summary": {
                     "type": "string",
                     "description": "Your plain-English codebase summary (~200-350 tokens)",
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "Set true to replace an already-saved passport. Default false.",
+                    "default": False,
                 },
             },
             "required": ["summary"],

@@ -141,10 +141,21 @@ async def map_workspace(request: Request) -> dict:
 async def map_save(body: MapSaveRequest, request: Request) -> MapSaveResponse:
     t0 = time.monotonic()
     svc = _service(request)
-    svc.save_map(body.summary)
+    result = svc.save_map(body.summary, overwrite=body.overwrite)
+    if not result["saved"]:
+        return MapSaveResponse(
+            message=(
+                "A passport already exists for this workspace — not overwritten. "
+                "Pass overwrite=true to replace it. Existing summary:\n\n"
+                f"{result['existing_summary']}"
+            ),
+            processing_ms=int((time.monotonic() - t0) * 1000),
+            saved=False,
+        )
     return MapSaveResponse(
         message=f"Passport saved ({len(body.summary)} chars). Future vectr_map calls return this instantly.",
         processing_ms=int((time.monotonic() - t0) * 1000),
+        saved=True,
     )
 
 
