@@ -108,6 +108,52 @@ ranking:
     # is unaffected by this wider initial fetch.
     pre_filter_fetch_k: 200
 
+retrieval:
+  dual_vector:
+    # ARCH-4: per-symbol dual-vector pool entry. STEP-0 spike proved a mechanical
+    # implementation body dilutes the intent-bearing signature/docstring tokens
+    # when mean-pooled into a single embedding — a documented method can miss
+    # dense pool entry entirely even though its own docstring paraphrases the
+    # query. Fix: embed a second, body-stripped "purpose" text (qualified
+    # signature + docstring/leading comment) per symbol-bearing chunk and query
+    # both vector spaces; the two are merged uniformly for every query, never
+    # gated on query content. Non-symbol chunks (docs/markdown/config) are
+    # unaffected — no purpose vector is stored for them.
+    enabled: true
+
+    # How a chunk's two similarity scores (body, purpose) combine into the one
+    # dense score consumed by pool entry and the hybrid merge:
+    #   "max"      — dense_score = max(body_sim, purpose_sim). A chunk enters the
+    #                pool if EITHER vector matches; never scores worse than a
+    #                body-only search would. This is the evidence-gated choice:
+    #                the spike showed purpose_sim clears pool-entry threshold
+    #                while body_sim does not (0.601 vs 0.706 for one phrasing),
+    #                so averaging the two would still leave the chunk short —
+    #                only a non-averaging max recovers pool entry.
+    #   "weighted" — dense_score = (1 - blend_weight) * body_sim + blend_weight *
+    #                purpose_sim. Kept as an evaluated alternative for future
+    #                tuning; not the default because averaging re-introduces the
+    #                dilution the mechanism exists to defeat.
+    blend_mode: "max"
+
+    # Purpose-vector weight when blend_mode is "weighted" (ignored under "max").
+    blend_weight: 0.5
+
+    # Maximum lines captured as a chunk's "signature" when distilling the
+    # purpose text — the declaration line(s) up to (and including) the line that
+    # opens the body (python ':' / brace-block '{'). Bounds pathologically long
+    # multi-line parameter lists.
+    max_signature_lines: 8
+
+    # Maximum lines captured from a Python docstring (or a non-Python leading
+    # doc-comment block) when building the purpose text.
+    max_docstring_lines: 12
+
+    # Maximum characters kept from the captured docstring/leading-comment text —
+    # a hard cap so a very long module-style docstring doesn't itself dilute the
+    # purpose embedding the same way a long body would.
+    max_docstring_chars: 600
+
 indexing:
   # hard cap — prevents single huge chunks diluting embeddings
   max_chunk_lines: 150
