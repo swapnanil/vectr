@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from agent.config import SYMBOL_GRAPH_RESERVED_KEYWORDS
 from agent.symbol_graph._constants import (
     _SYMBOL_TYPES,
     _MODULE_BINDING_TYPES,
@@ -21,6 +22,18 @@ from agent.symbol_graph._constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_reserved_keyword(name: str, language: str) -> bool:
+    """True when `name` is a language keyword for `language` (UPG-JSFLOW-SYMBOLS).
+
+    A desynced/ERROR-node parse (Flow syntax hitting the plain javascript
+    grammar, or any other grammar's error-recovery path) can misattribute a
+    keyword token — `if`, `for`, `return`, ... — as an identifier. Keyword
+    sets are per-language (config.yaml `symbol_graph.reserved_keywords`),
+    not a single global list, since keywords differ across language families.
+    """
+    return name in SYMBOL_GRAPH_RESERVED_KEYWORDS.get(language, frozenset())
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +148,11 @@ def _collect_symbols_and_calls(
         kind = symbol_types[node.type]
         start = node.start_point[0] + 1
         end = node.end_point[0] + 1
-        if name:  # skip anonymous nodes (e.g. C anonymous struct inside a typedef)
+        # UPG-JSFLOW-SYMBOLS: skip anonymous nodes (e.g. C anonymous struct inside
+        # a typedef), language keywords misattributed as identifiers, and any node
+        # whose own subtree contains a parse error — a corrupted/desynced parse
+        # (e.g. Flow syntax hitting the wrong grammar) must not mint a symbol.
+        if name and not _is_reserved_keyword(name, language) and not node.has_error:
             symbols.append({
                 "name": name,
                 "kind": kind,
@@ -172,7 +189,10 @@ def _collect_symbols_and_calls(
 
     if node.type in call_types and current_symbol:
         callee = _get_call_name(node, code_bytes)
-        if callee and callee not in {"if", "for", "while", "return", "print"}:
+        # UPG-JSFLOW-SYMBOLS: same reserved-keyword guard as symbol emission —
+        # a keyword token misattributed as a call name (desynced/ERROR-node
+        # parse) must not mint a call edge either.
+        if callee and not _is_reserved_keyword(callee, language):
             edges.append({
                 "from_file": file_path,
                 "from_symbol": current_symbol,
@@ -225,19 +245,24 @@ def extract_symbols_from_file(file_path: str) -> tuple[list[dict], list[dict]]:
     Symbols: list of {name, kind, file_path, start_line, end_line}
     Edges:   list of {from_file, from_symbol, from_line, to_symbol, edge_type}
     """
-    from agent.indexer import LANG_BY_EXT
+    from agent.indexer import LANG_BY_EXT, _parser_language_for
     path = Path(file_path)
     language = LANG_BY_EXT.get(path.suffix.lower(), "")
     if not language:
         return [], []
 
-    parser = _get_parser(language)
-    if parser is None:
-        return [], []
-
     try:
         code = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        return [], []
+
+    # UPG-JSFLOW-SYMBOLS: the grammar we PARSE with may differ from `language`
+    # (the dict-lookup key used below for _SYMBOL_TYPES/_CALL_TYPES, kept
+    # stable so the desugared node types resolve the same way) — a
+    # Flow-typed .js routes to the tsx grammar, which parses type
+    # annotations instead of desyncing into ERROR nodes.
+    parser = _get_parser(_parser_language_for(language, code))
+    if parser is None:
         return [], []
 
     code_bytes = code.encode("utf-8")

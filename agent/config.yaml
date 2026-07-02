@@ -128,6 +128,24 @@ indexing:
     - ".egg-info"
     - ".dist-info"
 
+  # UPG-JSFLOW-SYMBOLS: Flow-typed `.js` detection. tree-sitter-javascript
+  # treats Flow type syntax (`@flow` pragma, `import type {...}`, `: Type`
+  # annotations, generics) as ERROR nodes and desyncs the symbol walk —
+  # canonical functions go missing and keyword tokens get misattributed as
+  # symbol names. Files that signal Flow are parsed with the typescript/tsx
+  # grammar instead (which understands type annotations); plain `.js` is
+  # unaffected. Detection is a cheap header scan (first `scan_head_bytes`
+  # bytes), done once per file parse — never per AST node.
+  flow_detection:
+    # Bytes scanned from the start of the file when looking for a Flow signal.
+    scan_head_bytes: 2000
+    # Primary signal: the `@flow` pragma, conventionally in the file's leading comment.
+    pragma: "@flow"
+    # Secondary signal: Flow-only import syntax, checked within the same head window.
+    secondary_markers:
+      - "import type "
+      - "export type "
+
 output:
   # Number of lines returned as a snippet with each symbol location.
   # Enough for the AI to understand signature + first few lines of the body.
@@ -154,3 +172,311 @@ behavior:
     # small methods or 2-3 medium functions.  The explicit vectr_evict_hint tool
     # and /v1/evict endpoint remain ungated.
     retrieved_token_gate: 4000
+
+symbol_graph:
+  # UPG-JSFLOW-SYMBOLS: language keywords that must never be minted as a
+  # symbol name or call-edge target. A desynced parse (e.g. Flow syntax
+  # hitting the plain javascript grammar, or any other ERROR-node recovery)
+  # can misattribute a keyword token as an identifier — these sets are the
+  # global reject-list, checked alongside the per-node ERROR-ancestor guard.
+  # Grouped per language (most C-descended languages share a keyword core,
+  # but each set is kept explicit rather than merged so a language's grammar
+  # can evolve independently).
+  reserved_keywords:
+    python:
+      - if
+      - elif
+      - else
+      - for
+      - while
+      - return
+      - def
+      - class
+      - import
+      - from
+      - try
+      - except
+      - finally
+      - with
+      - as
+      - pass
+      - break
+      - continue
+      - lambda
+      - yield
+      - global
+      - nonlocal
+      - assert
+      - raise
+      - del
+      - in
+      - is
+      - not
+      - and
+      - or
+      - async
+      - await
+      - None
+      - True
+      - False
+      # Not a real keyword, but a pre-existing noise guard: `print(...)` call
+      # sites were already suppressed as call-edge targets before this list
+      # existed — kept here so the exclusion stays config-driven.
+      - print
+    javascript:
+      - if
+      - else
+      - for
+      - while
+      - do
+      - switch
+      - case
+      - default
+      - break
+      - continue
+      - return
+      - function
+      - class
+      - const
+      - let
+      - var
+      - new
+      - typeof
+      - instanceof
+      - in
+      - of
+      - void
+      - delete
+      - yield
+      - async
+      - await
+      - export
+      - import
+      - extends
+      - super
+      - this
+      - static
+      - get
+      - set
+      - try
+      - catch
+      - finally
+      - throw
+    typescript:
+      - if
+      - else
+      - for
+      - while
+      - do
+      - switch
+      - case
+      - default
+      - break
+      - continue
+      - return
+      - function
+      - class
+      - const
+      - let
+      - var
+      - new
+      - typeof
+      - instanceof
+      - in
+      - of
+      - void
+      - delete
+      - yield
+      - async
+      - await
+      - export
+      - import
+      - extends
+      - super
+      - this
+      - static
+      - get
+      - set
+      - try
+      - catch
+      - finally
+      - throw
+      - interface
+      - type
+      - enum
+      - implements
+      - namespace
+      - declare
+      - as
+    go:
+      - if
+      - else
+      - for
+      - switch
+      - case
+      - default
+      - break
+      - continue
+      - return
+      - func
+      - package
+      - import
+      - defer
+      - go
+      - select
+      - chan
+      - range
+      - var
+      - const
+      - type
+      - struct
+      - interface
+      - map
+      - goto
+      - fallthrough
+    rust:
+      - if
+      - else
+      - for
+      - while
+      - loop
+      - match
+      - break
+      - continue
+      - return
+      - fn
+      - let
+      - mut
+      - struct
+      - enum
+      - impl
+      - trait
+      - use
+      - mod
+      - pub
+      - self
+      - Self
+      - in
+      - unsafe
+      - async
+      - await
+      - move
+      - ref
+      - where
+      - dyn
+      - static
+      - const
+      - type
+    java:
+      - if
+      - else
+      - for
+      - while
+      - do
+      - switch
+      - case
+      - default
+      - break
+      - continue
+      - return
+      - class
+      - interface
+      - extends
+      - implements
+      - public
+      - private
+      - protected
+      - static
+      - void
+      - this
+      - super
+      - new
+      - try
+      - catch
+      - finally
+      - throw
+      - throws
+      - import
+      - package
+      - enum
+    zig:
+      - if
+      - else
+      - for
+      - while
+      - switch
+      - break
+      - continue
+      - return
+      - fn
+      - const
+      - var
+      - pub
+      - struct
+      - enum
+      - union
+      - defer
+      - errdefer
+      - try
+      - catch
+      - comptime
+      - async
+      - await
+      - orelse
+    c:
+      - if
+      - else
+      - for
+      - while
+      - do
+      - switch
+      - case
+      - default
+      - break
+      - continue
+      - return
+      - goto
+      - sizeof
+      - typedef
+      - struct
+      - union
+      - enum
+      - static
+      - const
+      - void
+      - extern
+      - volatile
+    cpp:
+      - if
+      - else
+      - for
+      - while
+      - do
+      - switch
+      - case
+      - default
+      - break
+      - continue
+      - return
+      - goto
+      - sizeof
+      - typedef
+      - struct
+      - union
+      - enum
+      - class
+      - namespace
+      - template
+      - static
+      - const
+      - void
+      - new
+      - delete
+      - try
+      - catch
+      - throw
+      - public
+      - private
+      - protected
+      - virtual
+      - using

@@ -86,6 +86,21 @@ IMPORTANCE_PRIOR_LAMBDA : float
     sort (ARCH-1b): final_score = base_rerank_score * quality_score * (1 + lambda *
     importance). 0 disables (pre-ARCH-1b behaviour). Relevance-gated by the multiply
     against base_rerank_score.
+
+INDEXING_FLOW_SCAN_HEAD_BYTES : int
+    Bytes scanned from the start of a `.js` file when detecting Flow type syntax
+    (UPG-JSFLOW-SYMBOLS). A header scan, not a full-file walk.
+
+INDEXING_FLOW_PRAGMA : str
+    Primary Flow-detection signal — the `@flow` pragma (UPG-JSFLOW-SYMBOLS).
+
+INDEXING_FLOW_SECONDARY_MARKERS : tuple[str, ...]
+    Secondary Flow-detection signals — Flow-only import syntax (UPG-JSFLOW-SYMBOLS).
+
+SYMBOL_GRAPH_RESERVED_KEYWORDS : dict[str, frozenset[str]]
+    Per-language keyword sets that must never be minted as a symbol name or
+    call-edge target — guards against a desynced/ERROR-node parse misattributing
+    a keyword token as an identifier (UPG-JSFLOW-SYMBOLS).
 """
 from __future__ import annotations
 
@@ -184,6 +199,15 @@ INDEXING_BUILD_ARTIFACT_DIR_SUFFIXES: tuple[str, ...] = tuple(
     str(s).lower() for s in _idx_cfg["build_artifact_dir_suffixes"]
 )
 
+# UPG-JSFLOW-SYMBOLS: Flow-typed .js detection (routes to the typescript/tsx grammar).
+_flow_cfg: dict[str, Any] = _idx_cfg["flow_detection"]
+
+INDEXING_FLOW_SCAN_HEAD_BYTES: int = int(_flow_cfg["scan_head_bytes"])
+INDEXING_FLOW_PRAGMA: str = str(_flow_cfg["pragma"])
+INDEXING_FLOW_SECONDARY_MARKERS: tuple[str, ...] = tuple(
+    str(m) for m in _flow_cfg["secondary_markers"]
+)
+
 # ---------------------------------------------------------------------------
 # Output tunables (UPG-12.1)
 # ---------------------------------------------------------------------------
@@ -208,3 +232,14 @@ BEHAVIOR_REMEMBER_NUDGE_COOLDOWN: int = int(_beh_cfg["cooldown"])
 _evict_cfg: dict[str, Any] = _cfg["behavior"]["eviction"]
 
 EVICTION_RETRIEVED_TOKEN_GATE: int = int(_evict_cfg["retrieved_token_gate"])
+
+# ---------------------------------------------------------------------------
+# Symbol graph — reserved keywords (UPG-JSFLOW-SYMBOLS)
+# ---------------------------------------------------------------------------
+
+_sg_cfg: dict[str, Any] = _cfg["symbol_graph"]
+
+SYMBOL_GRAPH_RESERVED_KEYWORDS: dict[str, frozenset[str]] = {
+    str(lang): frozenset(str(kw) for kw in kws)
+    for lang, kws in _sg_cfg["reserved_keywords"].items()
+}

@@ -692,6 +692,208 @@ private:
         assert ("render", "paint") in {(e["from_symbol"], e["to_symbol"]) for e in edges}
 
 
+class TestFlowJavaScriptSupport:
+    """UPG-JSFLOW-SYMBOLS: Flow-typed .js must route to the tsx/typescript
+    grammar (which parses type annotations) instead of the plain javascript
+    grammar (which treats Flow syntax as ERROR nodes and desyncs the symbol
+    walk — canonical functions go missing, keyword tokens can be
+    misattributed as symbol names). Fixtures are minimal synthetic Flow
+    snippets — no benchmark-corpus source is referenced or copied.
+    """
+
+    # @flow pragma + `import type` + typed function signatures + a generic
+    # function — the shape that desyncs the plain javascript grammar.
+    _FLOW_JS = """\
+// @flow
+import type {Foo} from "./types";
+
+function beginWork(current: Foo | null, workInProgress: Foo, lanes: number): Foo | null {
+  if (current !== null) {
+    return current;
+  }
+  return workInProgress;
+}
+
+function push<T>(cursor: T, value: T, fiber: Foo): void {
+  cursor.current = value;
+}
+
+export function completeWork(a: Foo): void {
+  return;
+}
+"""
+
+    _PLAIN_JS = """\
+function greet(name) {
+  return "hello " + name;
+}
+
+class Widget {
+  render() {
+    return null;
+  }
+}
+"""
+
+    def _write_flow(self, tmp_path, name="flow_sample.js") -> str:
+        p = tmp_path / name
+        p.write_text(self._FLOW_JS)
+        return str(p)
+
+    def _write_plain(self, tmp_path, name="plain_sample.js") -> str:
+        p = tmp_path / name
+        p.write_text(self._PLAIN_JS)
+        return str(p)
+
+    # -- detection helper -----------------------------------------------
+
+    def test_flow_pragma_detected(self) -> None:
+        from agent.indexer import is_flow_javascript
+        assert is_flow_javascript(self._FLOW_JS) is True
+
+    def test_plain_js_not_detected_as_flow(self) -> None:
+        from agent.indexer import is_flow_javascript
+        assert is_flow_javascript(self._PLAIN_JS) is False
+
+    def test_secondary_marker_detected_without_pragma(self) -> None:
+        from agent.indexer import is_flow_javascript
+        code = 'import type {Bar} from "./b";\nfunction f(a) { return a; }\n'
+        assert is_flow_javascript(code) is True
+
+    def test_parser_language_routes_flow_js_to_tsx(self) -> None:
+        from agent.indexer import _parser_language_for
+        assert _parser_language_for("javascript", self._FLOW_JS) == "tsx"
+
+    def test_parser_language_leaves_plain_js_untouched(self) -> None:
+        from agent.indexer import _parser_language_for
+        assert _parser_language_for("javascript", self._PLAIN_JS) == "javascript"
+
+    def test_parser_language_noop_for_other_languages(self) -> None:
+        from agent.indexer import _parser_language_for
+        # Flow-looking content in a non-.js language key must not be rerouted.
+        assert _parser_language_for("python", self._FLOW_JS) == "python"
+
+    # -- symbol extraction on a Flow-typed file --------------------------
+
+    def test_flow_file_yields_canonical_function_symbols(self, tmp_path) -> None:
+        from agent.symbol_graph import extract_symbols_from_file
+        syms, _ = extract_symbols_from_file(self._write_flow(tmp_path))
+        names = {s["name"] for s in syms}
+        assert "beginWork" in names
+        assert "push" in names
+        assert "completeWork" in names
+
+    def test_flow_file_yields_no_keyword_symbols(self, tmp_path) -> None:
+        from agent.symbol_graph import extract_symbols_from_file
+        syms, _ = extract_symbols_from_file(self._write_flow(tmp_path))
+        names = {s["name"] for s in syms}
+        assert "if" not in names
+        assert "return" not in names
+
+    def test_flow_file_chunks_are_ast_aware_under_javascript_label(self, tmp_path) -> None:
+        # Parsed with the tsx grammar, but chunk/symbol metadata still reports
+        # "javascript" (the extension-derived language bucket) so downstream
+        # filters/dict lookups keyed on "javascript" keep working.
+        from agent.indexer import chunk_file
+        chunks = chunk_file(self._write_flow(tmp_path))
+        symbol_names = {c.symbol_name for c in chunks}
+        assert "beginWork" in symbol_names
+        assert "push" in symbol_names
+        assert all(c.language == "javascript" for c in chunks)
+
+    def test_flow_file_locate_resolves_canonical_functions(self, tmp_path) -> None:
+        from agent.symbol_graph import SymbolGraph
+        db = tmp_path / "sg"; db.mkdir()
+        sg = SymbolGraph(str(db))
+        path = self._write_flow(tmp_path)
+        ws = str(tmp_path)
+        sg.index_file(ws, path)
+        for name in ("beginWork", "push", "completeWork"):
+            hits = sg.locate(ws, name)
+            assert hits and hits[0].name == name, f"locate({name!r}) failed to resolve"
+
+    # -- plain (non-Flow) .js is unaffected -------------------------------
+
+    def test_plain_js_still_parses_via_javascript_grammar(self, tmp_path) -> None:
+        from agent.symbol_graph import extract_symbols_from_file
+        syms, _ = extract_symbols_from_file(self._write_plain(tmp_path))
+        by_name = {s["name"]: s["kind"] for s in syms}
+        assert by_name.get("greet") == "function"
+        assert by_name.get("Widget") == "class"
+        assert by_name.get("render") == "method"
+
+    # -- deliberately broken file: keyword-junk rejection ----------------
+
+    def test_broken_typed_js_yields_no_keyword_symbols(self, tmp_path) -> None:
+        # Type annotations WITHOUT an @flow pragma or `import type` — not
+        # detected as Flow, so it stays on the plain javascript grammar and
+        # desyncs into ERROR nodes. The keyword/ERROR-node guard must still
+        # prevent any keyword-named symbol from being minted, even though the
+        # routing fix does not apply here.
+        broken = """\
+function beginWork(current: Foo | null, workInProgress: Foo): Foo | null {
+  if (current !== null) {
+    return current;
+  }
+  return workInProgress;
+}
+"""
+        from agent.symbol_graph import extract_symbols_from_file
+        p = tmp_path / "broken.js"
+        p.write_text(broken)
+        syms, edges = extract_symbols_from_file(str(p))
+        names = {s["name"] for s in syms}
+        for kw in ("if", "for", "while", "return", "switch", "case"):
+            assert kw not in names
+        edge_targets = {e["to_symbol"] for e in edges}
+        for kw in ("if", "for", "while", "return", "switch", "case"):
+            assert kw not in edge_targets
+
+
+class TestReservedKeywordRejection:
+    """UPG-JSFLOW-SYMBOLS: symbol names must never be a language keyword,
+    across every symbol-graph language (config-driven, not JS-specific)."""
+
+    @pytest.mark.parametrize("language,keyword", [
+        ("python", "if"),
+        ("python", "return"),
+        ("javascript", "if"),
+        ("javascript", "function"),
+        ("typescript", "interface"),
+        ("go", "func"),
+        ("rust", "fn"),
+        ("java", "class"),
+        ("zig", "fn"),
+        ("c", "typedef"),
+        ("cpp", "namespace"),
+    ])
+    def test_keyword_rejected_per_language(self, language, keyword) -> None:
+        from agent.symbol_graph._extraction import _is_reserved_keyword
+        assert _is_reserved_keyword(keyword, language) is True
+
+    @pytest.mark.parametrize("language,name", [
+        ("python", "verify_token"),
+        ("javascript", "beginWork"),
+        ("typescript", "renderWithHooks"),
+        ("go", "HandleRequest"),
+        ("rust", "resolve_package"),
+        ("java", "processOrder"),
+        ("zig", "allocBuffer"),
+        ("c", "PyDict_New"),
+        ("cpp", "render"),
+    ])
+    def test_real_symbol_name_not_rejected(self, language, name) -> None:
+        from agent.symbol_graph._extraction import _is_reserved_keyword
+        assert _is_reserved_keyword(name, language) is False
+
+    def test_every_symbol_language_has_a_reserved_keyword_set(self) -> None:
+        from agent.config import SYMBOL_GRAPH_RESERVED_KEYWORDS
+        from agent.symbol_graph import SYMBOL_LANGUAGES
+        for lang in SYMBOL_LANGUAGES:
+            assert lang in SYMBOL_GRAPH_RESERVED_KEYWORDS
+            assert len(SYMBOL_GRAPH_RESERVED_KEYWORDS[lang]) > 0
+
+
 class TestMarkdownSupport:
     """chunk_file() produces heading-aware section chunks for .md files."""
 

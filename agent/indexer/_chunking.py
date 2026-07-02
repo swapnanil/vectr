@@ -12,6 +12,9 @@ from agent.chunk_quality import (
 from agent.config import (
     INDEXING_MAX_CHUNK_LINES as _MAX_CHUNK_LINES,
     INDEXING_CLASS_HEADER_LINES as _CLASS_HEADER_LINES,
+    INDEXING_FLOW_SCAN_HEAD_BYTES as _FLOW_SCAN_HEAD_BYTES,
+    INDEXING_FLOW_PRAGMA as _FLOW_PRAGMA,
+    INDEXING_FLOW_SECONDARY_MARKERS as _FLOW_SECONDARY_MARKERS,
 )
 from agent.indexer._constants import LANG_BY_EXT
 from agent.indexer._types import CodeChunk
@@ -38,6 +41,14 @@ def _get_parser(language: str):
             parser = Parser(Language(ts_lang.language_typescript()))
             _PARSER_CACHE[language] = parser
             return parser
+        elif language == "tsx":
+            # UPG-JSFLOW-SYMBOLS: used to parse Flow-typed `.js` — tsx is the
+            # widest JS-family grammar (JSX + type syntax) so it also covers
+            # Flow-typed React components, not just plain type annotations.
+            import tree_sitter_typescript as ts_lang
+            parser = Parser(Language(ts_lang.language_tsx()))
+            _PARSER_CACHE[language] = parser
+            return parser
         elif language == "go":
             import tree_sitter_go as ts_lang
         elif language == "rust":
@@ -57,6 +68,41 @@ def _get_parser(language: str):
         return parser
     except Exception:
         return None
+
+
+# UPG-JSFLOW-SYMBOLS: grammar used to parse Flow-typed `.js` — see `_get_parser`
+# and `_parser_language_for` below.
+_FLOW_JS_GRAMMAR = "tsx"
+
+
+def is_flow_javascript(code: str) -> bool:
+    """Cheap Flow-type-syntax detector for `.js` source.
+
+    tree-sitter-javascript treats Flow syntax (`@flow` pragma, `import type
+    {...}`, `: Type` annotations, generics) as ERROR nodes, which desyncs the
+    symbol walk — canonical functions go missing and keyword tokens can be
+    misattributed as symbol names (UPG-JSFLOW-SYMBOLS). Detection scans only
+    the first `INDEXING_FLOW_SCAN_HEAD_BYTES` bytes — O(1) per file, checked
+    once at parse time, never per AST node.
+    """
+    head = code[:_FLOW_SCAN_HEAD_BYTES]
+    if _FLOW_PRAGMA in head:
+        return True
+    return any(marker in head for marker in _FLOW_SECONDARY_MARKERS)
+
+
+def _parser_language_for(language: str, code: str) -> str:
+    """Grammar key to parse `code` with — may differ from `language`, the
+    extension-derived key used for chunk/symbol node-type lookups (which stays
+    unchanged so results still land under the "javascript" bucket). A `.js`
+    file signalling Flow parses with the typescript/tsx grammar instead of the
+    plain javascript grammar (UPG-JSFLOW-SYMBOLS); every other language is a
+    no-op passthrough. Falls back to `language` itself if grammar loading
+    later fails (handled by `_get_parser`'s own try/except).
+    """
+    if language == "javascript" and is_flow_javascript(code):
+        return _FLOW_JS_GRAMMAR
+    return language
 
 
 # UPG-12.1: _MAX_CHUNK_LINES / _CLASS_HEADER_LINES are sourced from
@@ -336,7 +382,10 @@ def chunk_file(file_path: str) -> list[CodeChunk]:
         return _postprocess_chunks(_chunk_markdown(lines, file_path))
 
     if language:
-        parser = _get_parser(language)
+        # UPG-JSFLOW-SYMBOLS: the grammar we PARSE with may differ from `language`
+        # (the dict-lookup key below, kept stable so node types resolve the same
+        # way) — a Flow-typed .js routes to the tsx grammar.
+        parser = _get_parser(_parser_language_for(language, code))
         if parser:
             code_bytes = code.encode("utf-8")
             tree = parser.parse(code_bytes)

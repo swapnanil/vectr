@@ -100,7 +100,7 @@ SYMBOL_LANGUAGES: frozenset[str] = frozenset(_SYMBOL_TYPES)
 # name resolution). Combined with the parser-language set + embed model into the
 # toolchain fingerprint (UPG-8.7) so a vectr upgrade is detectable and the graph
 # is rebuilt rather than silently serving partial/old results.
-SYMBOL_SCHEMA_VERSION = 6  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4) · 4: module-level constants (UPG-10.3) · 5: .txt/.rst prose docs indexed (UPG-11.3) · 6: symbol_importance table added (ARCH-1a)
+SYMBOL_SCHEMA_VERSION = 7  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4) · 4: module-level constants (UPG-10.3) · 5: .txt/.rst prose docs indexed (UPG-11.3) · 6: symbol_importance table added (ARCH-1a) · 7: Flow-typed .js routed to tsx grammar + keyword/ERROR-node symbol rejection (UPG-JSFLOW-SYMBOLS)
 
 
 def grammar_available(language: str) -> bool:

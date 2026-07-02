@@ -15,6 +15,7 @@ so every existing import site keeps working unchanged:
   from agent.indexer import get_embed_provider (tests — patched at this namespace)
   from agent.indexer import c_symbol_name      (symbol_graph)
   from agent.indexer import _get_parser        (symbol_graph)
+  from agent.indexer import _parser_language_for (symbol_graph — UPG-JSFLOW-SYMBOLS)
 """
 from __future__ import annotations
 
@@ -63,6 +64,8 @@ from agent.indexer._chunking import (
     _fallback_window_chunks,
     _chunk_markdown,
     _postprocess_chunks,
+    is_flow_javascript,
+    _parser_language_for,
 )
 
 # Public indexer class
@@ -102,6 +105,8 @@ __all__ = [
     "_fallback_window_chunks",
     "_chunk_markdown",
     "_postprocess_chunks",
+    "is_flow_javascript",
+    "_parser_language_for",
     # Core
     "CodeIndexer",
 ]

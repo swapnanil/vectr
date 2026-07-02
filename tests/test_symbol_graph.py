@@ -2052,7 +2052,7 @@ class TestFileImportanceARCH1a:
             )
 
     def test_schema_version_bumped(self) -> None:
-        """SYMBOL_SCHEMA_VERSION must be 6 (ARCH-1a bumped from 5)."""
-        assert SYMBOL_SCHEMA_VERSION == 6, (
-            f"Expected SYMBOL_SCHEMA_VERSION=6 after ARCH-1a bump, got {SYMBOL_SCHEMA_VERSION}"
+        """SYMBOL_SCHEMA_VERSION must be 7 (UPG-JSFLOW-SYMBOLS bumped from 6)."""
+        assert SYMBOL_SCHEMA_VERSION == 7, (
+            f"Expected SYMBOL_SCHEMA_VERSION=7 after UPG-JSFLOW-SYMBOLS bump, got {SYMBOL_SCHEMA_VERSION}"
         )
