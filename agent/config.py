@@ -122,6 +122,28 @@ STRATEGY_DEFAULT_BM25_WEIGHT : float
     Fallback hybrid-search weights used before the first index-time codebase
     fingerprint has run (UPG-8.2). Keeps `search` and `status` deterministic
     from the first call instead of the weight fields being silently absent.
+DUAL_VECTOR_ENABLED : bool
+    Master switch for the ARCH-4 per-symbol purpose-vector pool-entry mechanism.
+    True stores + queries a second body-stripped "purpose" embedding (qualified
+    signature + docstring) per symbol chunk. False reduces to pre-ARCH-4
+    body-only behaviour.
+
+DUAL_VECTOR_BLEND_MODE : str
+    How a chunk's body and purpose similarity scores combine into one dense
+    score: "max" (default, non-averaging pool-entry rescue) or "weighted".
+
+DUAL_VECTOR_BLEND_WEIGHT : float
+    Purpose-vector weight when DUAL_VECTOR_BLEND_MODE == "weighted".
+
+DUAL_VECTOR_MAX_SIGNATURE_LINES : int
+    Maximum declaration lines captured when distilling a chunk's purpose text.
+
+DUAL_VECTOR_MAX_DOCSTRING_LINES : int
+    Maximum docstring/leading-comment lines captured when distilling a chunk's
+    purpose text.
+
+DUAL_VECTOR_MAX_DOCSTRING_CHARS : int
+    Maximum characters kept from the captured docstring/leading-comment text.
 """
 from __future__ import annotations
 
@@ -295,3 +317,14 @@ _strat_cfg: dict[str, Any] = _cfg["strategy"]
 
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT: float = float(_strat_cfg["default_semantic_weight"])
 STRATEGY_DEFAULT_BM25_WEIGHT: float = float(_strat_cfg["default_bm25_weight"])
+# Dual-vector pool entry — purpose (signature+docstring) vector (ARCH-4)
+# ---------------------------------------------------------------------------
+
+_dv_cfg: dict[str, Any] = _cfg["retrieval"]["dual_vector"]
+
+DUAL_VECTOR_ENABLED: bool = bool(_dv_cfg["enabled"])
+DUAL_VECTOR_BLEND_MODE: str = str(_dv_cfg["blend_mode"])
+DUAL_VECTOR_BLEND_WEIGHT: float = float(_dv_cfg["blend_weight"])
+DUAL_VECTOR_MAX_SIGNATURE_LINES: int = int(_dv_cfg["max_signature_lines"])
+DUAL_VECTOR_MAX_DOCSTRING_LINES: int = int(_dv_cfg["max_docstring_lines"])
+DUAL_VECTOR_MAX_DOCSTRING_CHARS: int = int(_dv_cfg["max_docstring_chars"])

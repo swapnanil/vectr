@@ -12,12 +12,16 @@ from pathlib import Path
 import chromadb
 import numpy as np
 
+from agent.chunk_quality import build_purpose_text
+from agent.config import DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED
 from agent.indexer._constants import (
     EXCLUDED_DIRS,
     _FILE_BATCH_SIZE,
     _EMBED_BATCH_SIZE,
     _UPSERT_BATCH_SIZE,
     _CHUNK_WORKERS,
+    _MTIME_CACHE_SCHEMA_KEY,
+    INDEXING_SCHEMA_VERSION,
 )
 from agent.indexer._chunking import chunk_file
 from agent.indexer._types import CodeChunk
@@ -49,6 +53,22 @@ class CodeIndexer:
                 "hnsw:construction_ef": 200,  # default 100 — denser graph, better recall
                 "hnsw:search_ef": 100,         # default 10 — wider beam search at query time
                 "hnsw:M": 32,                  # default 16 — more neighbours per node
+            },
+        )
+        # ARCH-4: second collection holding the body-stripped "purpose" vector
+        # (qualified signature + docstring) for symbol-bearing chunks only —
+        # keyed by the SAME chunk_id as `self._collection`. get_or_create_collection
+        # means an existing (pre-ARCH-4) workspace transparently gets an empty
+        # purpose collection rather than an error; queries against it then return
+        # no candidates until the workspace is (re)indexed, which is exactly the
+        # graceful body-only fallback the spec calls for.
+        self._purpose_collection = self._client.get_or_create_collection(
+            name="code_chunks_purpose",
+            metadata={
+                "hnsw:space": "cosine",
+                "hnsw:construction_ef": 200,
+                "hnsw:search_ef": 100,
+                "hnsw:M": 32,
             },
         )
         self._last_indexed: float = 0.0
@@ -188,13 +208,21 @@ class CodeIndexer:
 
         # Phase 2: delete stale chunks for re-indexed files (no-op for brand-new files).
         # Under force, mtime_cache is empty, so delete by file_path unconditionally
-        # to avoid leaving stale chunks whose ids no longer match (UPG-8.6).
+        # to avoid leaving stale chunks whose ids no longer match (UPG-8.6). The
+        # purpose collection (ARCH-4) is keyed by the same file_path metadata, so
+        # its stale entries are dropped alongside the body collection's.
         for fpath_str in new_mtimes:
             if force or fpath_str in mtime_cache:  # previously indexed → delete old chunks
                 try:
                     existing = self._collection.get(where={"file_path": fpath_str})
                     if existing["ids"]:
                         self._collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
+                try:
+                    existing_p = self._purpose_collection.get(where={"file_path": fpath_str})
+                    if existing_p["ids"]:
+                        self._purpose_collection.delete(ids=existing_p["ids"])
                 except Exception:
                     pass
 
@@ -230,6 +258,8 @@ class CodeIndexer:
                 metadatas=metadatas[i: i + _UPSERT_BATCH_SIZE],
                 embeddings=all_embeddings[i: i + _UPSERT_BATCH_SIZE],
             )
+
+        self._upsert_purpose_vectors(all_chunks)
 
         logger.info("Indexed %d chunks from %d files", total, len(to_index))
 
@@ -290,11 +320,13 @@ class CodeIndexer:
                 embeddings=all_embeddings[i: i + _FILE_BATCH_SIZE],
             )
 
+        self._upsert_purpose_vectors(chunks)
+
         self._indexed_files.add(file_path)
         return len(chunks)
 
     def delete_file(self, file_path: str) -> None:
-        """Remove all chunks belonging to a file."""
+        """Remove all chunks belonging to a file (body + purpose collections)."""
         try:
             existing = self._collection.get(where={"file_path": file_path})
             if existing["ids"]:
@@ -302,6 +334,59 @@ class CodeIndexer:
             self._indexed_files.discard(file_path)
         except Exception:
             pass
+        try:
+            existing_p = self._purpose_collection.get(where={"file_path": file_path})
+            if existing_p["ids"]:
+                self._purpose_collection.delete(ids=existing_p["ids"])
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Purpose vectors (ARCH-4 dual-vector pool entry)
+    # ------------------------------------------------------------------
+
+    def _upsert_purpose_vectors(self, chunks: list[CodeChunk]) -> None:
+        """Embed + upsert the body-stripped purpose text for symbol chunks.
+
+        Skipped entirely when `DUAL_VECTOR_ENABLED` is False (config, default
+        on) — reduces to the pre-ARCH-4 body-only index. Non-symbol chunks
+        (`build_purpose_text` returns None) are not written — the purpose
+        collection stays a strict subset of the body collection's ids.
+        """
+        if not _DUAL_VECTOR_ENABLED or not chunks:
+            return
+        ids: list[str] = []
+        documents: list[str] = []
+        metadatas: list[dict] = []
+        for c in chunks:
+            purpose_text = build_purpose_text(c.content, c.symbol_name, c.node_type, c.language)
+            if purpose_text is None:
+                continue
+            ids.append(c.chunk_id)
+            documents.append(purpose_text)
+            metadatas.append({
+                "file_path": c.file_path,
+                "language": c.language,
+                "node_type": c.node_type,
+                "start_line": c.start_line,
+                "end_line": c.end_line,
+                "symbol_name": c.symbol_name,
+            })
+        if not ids:
+            return
+
+        total = len(ids)
+        all_embeddings: list[list[float]] = []
+        for i in range(0, total, _EMBED_BATCH_SIZE):
+            all_embeddings.extend(self._embed_provider.embed(documents[i: i + _EMBED_BATCH_SIZE]))
+
+        for i in range(0, total, _UPSERT_BATCH_SIZE):
+            self._purpose_collection.upsert(
+                ids=ids[i: i + _UPSERT_BATCH_SIZE],
+                documents=documents[i: i + _UPSERT_BATCH_SIZE],
+                metadatas=metadatas[i: i + _UPSERT_BATCH_SIZE],
+                embeddings=all_embeddings[i: i + _UPSERT_BATCH_SIZE],
+            )
 
     # ------------------------------------------------------------------
     # mtime cache — tracks file modification times for incremental indexing
@@ -319,15 +404,29 @@ class CodeIndexer:
     def _load_mtime_cache(self) -> dict[str, float]:
         path = self._mtime_cache_path()
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            cache = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
+        # Schema-version gate: a cache written by an older INDEXING_SCHEMA_VERSION
+        # (e.g. before ARCH-4's purpose vector existed) is treated as a cold
+        # cache — every file falls into `to_index` on the next index_workspace()
+        # and is fully re-chunked/re-embedded, the same recovery path force=True
+        # uses. This is what makes a pipeline change (new derived vector, new
+        # chunk content) reach an already-indexed workspace without a manual
+        # cache wipe. A cache with no version key at all (pre-ARCH-4, unversioned)
+        # is also treated as stale.
+        stored_version = cache.pop(_MTIME_CACHE_SCHEMA_KEY, None)
+        if stored_version != INDEXING_SCHEMA_VERSION:
+            return {}
+        return cache
 
     def _save_mtime_cache(self, cache: dict[str, float]) -> None:
         path = self._mtime_cache_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(cache), encoding="utf-8")
+            payload = dict(cache)
+            payload[_MTIME_CACHE_SCHEMA_KEY] = INDEXING_SCHEMA_VERSION
+            path.write_text(json.dumps(payload), encoding="utf-8")
         except OSError:
             pass
 
@@ -548,3 +647,56 @@ class CodeIndexer:
                 continue
             result[cid] = dot / (q_norm * e_norm)
         return result
+
+    def query_vector_purpose(
+        self,
+        query_embedding: list[float],
+        n_results: int = 10,
+        language: str | None = None,
+        languages: list[str] | None = None,
+    ) -> dict:
+        """Query the purpose-vector collection (ARCH-4 dual-vector pool entry).
+
+        Mirrors `query_vector` but against `self._purpose_collection`, which only
+        holds symbol-bearing chunks (see `_upsert_purpose_vectors`). A workspace
+        indexed before ARCH-4 shipped has an empty purpose collection — `count()`
+        guards against ChromaDB raising on a query against zero rows, so old
+        indexes degrade gracefully to body-only results until reindexed.
+        """
+        count = self._purpose_collection.count()
+        if count == 0:
+            return {"ids": [[]], "distances": [[]], "documents": [[]], "metadatas": [[]]}
+        if languages:
+            where = {"language": {"$in": list(languages)}}
+        elif language:
+            where = {"language": language}
+        else:
+            where = None
+        return self._purpose_collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(n_results, max(1, count)),
+            where=where,
+            include=["documents", "metadatas", "distances"],
+        )
+
+    def get_chunk_documents(self, chunk_ids: list[str]) -> dict[str, tuple[str, dict]]:
+        """Batch-fetch (document, metadata) from the body collection for given ids.
+
+        Used to backfill body content/metadata for chunk ids that were only
+        discovered via the purpose-vector query (ARCH-4) and therefore did not
+        come back from the body `query_vector` call in the same search pass.
+        Ids not found in the body collection are absent from the result.
+        """
+        if not chunk_ids:
+            return {}
+        try:
+            batch = self._collection.get(ids=chunk_ids, include=["documents", "metadatas"])
+        except Exception:
+            return {}
+        ids_raw = batch.get("ids") or []
+        docs_raw = batch.get("documents") or []
+        metas_raw = batch.get("metadatas") or []
+        return {
+            cid: (doc, meta)
+            for cid, doc, meta in zip(ids_raw, docs_raw, metas_raw)
+        }

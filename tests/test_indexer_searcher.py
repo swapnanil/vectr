@@ -6,6 +6,8 @@ Tests verify the real ChromaDB storage and hybrid BM25+vector search pipeline.
 """
 from __future__ import annotations
 
+import math
+import re
 import textwrap
 from pathlib import Path
 
@@ -1227,6 +1229,249 @@ class TestIndexingHygiene:
         n = indexer.total_chunks
         indexer.index_workspace(force=True)
         assert indexer.total_chunks == n, "force must replace, not duplicate, chunks"
+
+
+# ---------------------------------------------------------------------------
+# ARCH-4 — dual-vector purpose collection (pool-entry mechanism)
+# ---------------------------------------------------------------------------
+
+class TestDualVectorPurposeCollection:
+    def test_purpose_collection_populated_for_symbol_chunks(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "svc.py", """
+            def process_payment(order_id: str) -> bool:
+                \"\"\"Charge the customer for the given order and record the result.\"\"\"
+                return True
+        """)
+        indexer.index_file(path)
+        assert indexer._purpose_collection.count() > 0
+        docs = indexer._purpose_collection.get(include=["documents"])["documents"]
+        assert any("process_payment" in d for d in docs)
+        assert any("Charge the customer" in d for d in docs)
+
+    def test_purpose_collection_excludes_non_symbol_chunks(self, indexer, tmp_path) -> None:
+        (tmp_path / "notes.md").write_text(
+            "# Title\n\nSome prose that is not a symbol at all, just documentation.\n"
+        )
+        indexer.index_file(str(tmp_path / "notes.md"))
+        body_ids, _, _ = indexer.get_all_documents()
+        assert len(body_ids) > 0
+        assert indexer._purpose_collection.count() == 0
+
+    def test_purpose_collection_is_subset_of_body_ids(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "mix.py", """
+            def with_symbol():
+                pass
+        """)
+        indexer.index_file(path)
+        body_ids, _, _ = indexer.get_all_documents()
+        purpose_ids = indexer._purpose_collection.get()["ids"]
+        assert set(purpose_ids) <= set(body_ids)
+
+    def test_delete_file_removes_purpose_collection_chunks(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "temp.py", """
+            def to_remove():
+                x = 1
+        """)
+        indexer.index_file(path)
+        assert indexer._purpose_collection.count() > 0
+        indexer.delete_file(path)
+        assert indexer._purpose_collection.count() == 0
+
+    def test_reindex_prunes_stale_purpose_chunks(self, indexer, tmp_path) -> None:
+        path = Path(make_py(tmp_path, "evolving.py", "def v1(): pass"))
+        indexer.index_workspace()
+        first_purpose_ids = set(indexer._purpose_collection.get()["ids"])
+        assert first_purpose_ids
+
+        path.write_text("def v2(): pass\n")
+        import os as _os
+        _os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 1))
+        indexer.index_workspace()
+
+        purpose_docs = indexer._purpose_collection.get(include=["documents"])["documents"]
+        assert any("v2" in d for d in purpose_docs)
+        assert not any("v1" in d for d in purpose_docs)
+
+    def test_query_vector_purpose_empty_collection_is_graceful(self, indexer) -> None:
+        """A fresh/old-schema workspace has an empty purpose collection — must not raise."""
+        embedding = indexer.embed_query("anything")
+        result = indexer.query_vector_purpose(embedding, n_results=5)
+        assert result["ids"] == [[]]
+
+    def test_query_vector_purpose_returns_results_after_index(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "search_me.py", """
+            def rate_limit_check(ip: str) -> bool:
+                \"\"\"Check whether the given IP has exceeded its rate limit.\"\"\"
+                return True
+        """)
+        indexer.index_file(path)
+        embedding = indexer.embed_query("rate limit check function")
+        result = indexer.query_vector_purpose(embedding, n_results=5)
+        assert len(result["ids"][0]) >= 1
+
+    def test_get_chunk_documents_returns_body_content(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "svc.py", """
+            def known_function():
+                return 42
+        """)
+        indexer.index_file(path)
+        body_ids, body_docs, _ = indexer.get_all_documents()
+        result = indexer.get_chunk_documents(body_ids)
+        assert set(result.keys()) == set(body_ids)
+        for cid, doc in zip(body_ids, body_docs):
+            assert result[cid][0] == doc
+
+    def test_get_chunk_documents_missing_ids_absent_from_result(self, indexer) -> None:
+        assert indexer.get_chunk_documents(["does-not-exist"]) == {}
+
+    def test_dual_vector_disabled_skips_purpose_collection(self, tmp_path, monkeypatch) -> None:
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        monkeypatch.setattr("agent.indexer._core._DUAL_VECTOR_ENABLED", False)
+        from agent.indexer import CodeIndexer
+        idx = CodeIndexer(workspace_root=str(tmp_path), db_path=str(tmp_path / "chroma"))
+        path = make_py(tmp_path, "a.py", "def with_symbol(): pass")
+        idx.index_file(path)
+        assert idx.total_chunks > 0
+        assert idx._purpose_collection.count() == 0
+
+
+class TestSchemaVersionRebuildTrigger:
+    """A bump to INDEXING_SCHEMA_VERSION must invalidate the mtime cache (ARCH-4)."""
+
+    def test_stale_schema_version_forces_full_reindex(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        cache_path = indexer._mtime_cache_path()
+
+        import json
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        raw["__vectr_index_schema_version__"] = -1  # simulate an older schema
+        cache_path.write_text(json.dumps(raw), encoding="utf-8")
+
+        # An old-schema cache is treated as cold: nothing survives the load.
+        assert indexer._load_mtime_cache() == {}
+
+    def test_current_schema_version_cache_round_trips(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        loaded = indexer._load_mtime_cache()
+        assert loaded  # non-empty: current-schema cache is preserved as-is
+        assert "__vectr_index_schema_version__" not in loaded  # sentinel stripped from the dict
+
+
+# ---------------------------------------------------------------------------
+# ARCH-4 — dilution evidence gate: dual-vector pool entry, end-to-end
+# through index -> search.
+#
+# A deterministic bag-of-words embedder (NOT the random-hash _DummyEmbedProvider
+# used elsewhere) is used here specifically because it reproduces the dilution
+# failure mode: cosine similarity of a normalized word-count vector shrinks as
+# query-irrelevant filler tokens are added, exactly like a real embedding model
+# mean-pooling a long mechanical function body.
+# ---------------------------------------------------------------------------
+
+_DILUTION_VOCAB = ["charge", "customer", "order", "payment", "temp", "step", "value"]
+
+
+def _bow_vector(text: str, vocab: list[str] = _DILUTION_VOCAB) -> list[float]:
+    tokens = re.findall(r"[a-zA-Z]+", text.lower())
+    counts = [float(tokens.count(w)) for w in vocab]
+    norm = math.sqrt(sum(c * c for c in counts)) or 1.0
+    return [c / norm for c in counts]
+
+
+class _DilutionEmbedProvider:
+    """Deterministic bag-of-words embedder for the dilution evidence gate."""
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [_bow_vector(t) for t in texts]
+
+
+class TestDualVectorPoolEntryEvidenceGate:
+    """Proves the ARCH-4 mechanism, not just that code paths run without error:
+
+    a documented symbol whose body dilutes its docstring must enter the search
+    pool under dual-vector search but NOT under body-only search, on the SAME
+    index (only the query-time merge is toggled) — i.e. the fix works end-to-end
+    through index -> search, not just at the embedding-comparison level.
+    """
+
+    def _build_dilution_corpus(self, indexer, tmp_path) -> None:
+        # Target: a documented method whose docstring paraphrases the query, but
+        # whose mechanical body (repeated filler statements) dilutes a mean-pooled
+        # single-vector embedding.
+        target_body = (
+            "def process_payment(amount):\n"
+            '    """Charge the customer for the given order and record the result."""\n'
+            "    temp = 0\n"
+            "    step = 1\n"
+            + ("    temp = temp + step\n" * 40)
+            + "    return temp\n"
+        )
+        make_py(tmp_path, "target.py", target_body)
+
+        # Decoys: undocumented functions whose body happens to repeat a query
+        # keyword ("order") densely with no filler — the exact keyword-coincidence
+        # scenario that lets a decoy outrank the diluted target on body vectors
+        # alone, and that a purpose (signature-only) vector does not fall for.
+        for i in range(5):
+            decoy_body = (
+                f"def get_order_list_{i}():\n"
+                "    order = order_value = order\n"
+                "    return order\n"
+            )
+            make_py(tmp_path, f"decoy_{i}.py", decoy_body)
+
+        indexer.index_workspace()
+
+    def test_documented_symbol_enters_pool_under_dual_vector_not_body_only(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        indexer._embed_provider = _DilutionEmbedProvider()
+        self._build_dilution_corpus(indexer, tmp_path)
+
+        from agent.searcher import CodeSearcher
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        query = "charge the customer for their order"
+
+        # Dual-vector ON (default): target's purpose vector (signature+docstring,
+        # body-stripped) is undiluted and wins pool entry.
+        dual_results, _ = s.search(query, n_results=1, semantic_weight=1.0, rerank=False)
+        assert dual_results, "dual-vector search returned nothing"
+        assert dual_results[0].file_path.endswith("target.py"), (
+            "documented symbol did not win pool entry under dual-vector search"
+        )
+
+        # Body-only (query-time flag off, same index, same embeddings already
+        # stored): the diluted body vector loses to keyword-coincidence decoys —
+        # this is the exact wall ARCH-4 exists to break.
+        monkeypatch.setattr("agent.searcher._DUAL_VECTOR_ENABLED", False)
+        body_only_results, _ = s.search(query, n_results=1, semantic_weight=1.0, rerank=False)
+        assert body_only_results, "body-only search returned nothing"
+        assert not body_only_results[0].file_path.endswith("target.py"), (
+            "target should NOT win pool entry under body-only search — "
+            "if it does, the dilution fixture no longer reproduces the failure "
+            "mode and this test is not exercising the ARCH-4 mechanism"
+        )
+
+    def test_non_symbol_chunks_unaffected_by_dual_vector(self, indexer, tmp_path) -> None:
+        indexer._embed_provider = _DilutionEmbedProvider()
+        (tmp_path / "readme.md").write_text(
+            "# Payment charges\n\nSome prose about charging a customer for an order.\n"
+        )
+        indexer.index_workspace()
+        assert indexer._purpose_collection.count() == 0
+
+        from agent.searcher import CodeSearcher
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+        results, _ = s.search("charge the customer for their order", n_results=1, rerank=False)
+        assert results
+        assert results[0].file_path.endswith("readme.md")
 
 
 # ---------------------------------------------------------------------------

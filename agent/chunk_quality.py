@@ -31,6 +31,9 @@ from agent.config import (
     TRIVIAL_DOC_MAX_LINES as _TRIVIAL_DOC_MAX_LINES,
     TRIVIAL_ATTR_CLASS_MAX_ATTRS as _TRIVIAL_ATTR_CLASS_MAX_ATTRS,
     INDEXING_BUILD_ARTIFACT_DIR_SUFFIXES as _BUILD_ARTIFACT_DIR_SUFFIXES,
+    DUAL_VECTOR_MAX_SIGNATURE_LINES as _DV_MAX_SIGNATURE_LINES,
+    DUAL_VECTOR_MAX_DOCSTRING_LINES as _DV_MAX_DOCSTRING_LINES,
+    DUAL_VECTOR_MAX_DOCSTRING_CHARS as _DV_MAX_DOCSTRING_CHARS,
 )
 
 # A synthetic node_type stamped on re-export / import-only chunks so the ranker
@@ -480,6 +483,147 @@ def extract_class_from_content(content: str) -> str:
     """
     m = _CLASS_PREFIX_RE.search(content)
     return m.group(1) if m else ""
+
+
+# ---------------------------------------------------------------------------
+# Purpose-text distillation (ARCH-4 dual-vector pool entry)
+# ---------------------------------------------------------------------------
+
+# node_types the chunker stamps that are never symbol definitions — a purpose
+# vector (qualified signature + docstring) only makes sense for a chunk that
+# actually declares a function/method/class/type. Markdown sections, sliding-
+# window fallback chunks, and re-export blocks carry no signature to distil.
+_NON_SYMBOL_NODE_TYPES = {NAVIGATIONAL_NODE_TYPE, "window", "section"}
+
+# The "# class: X" context line the indexer prepends to method chunks (see
+# extract_class_from_content) — excluded from the leading-doc scan below so it
+# doesn't get embedded twice (once as the qualified name, once as raw text).
+_CLASS_PREFIX_LINE_RE = re.compile(r"^#\s*class:\s*\w+\s*$")
+
+# A declaration line's block-opening terminator: python's trailing ':' or a
+# C-family/Rust/Go/Java/Zig trailing '{'. Trailing whitespace/comment-safe.
+_SIGNATURE_END_RE = re.compile(r"[:{]\s*(//.*|#.*)?$")
+
+# First statement of a Python function/class body is a string literal — the
+# docstring convention. Matches from the very start of the (stripped) body
+# text; DOTALL so a multi-line triple-quoted docstring is captured whole.
+_PY_DOCSTRING_RE = re.compile(
+    r'^[rRbBuU]{0,2}(?P<q>"""|\'\'\')(?P<body>.*?)(?P=q)', re.DOTALL,
+)
+# One-line plain-quoted docstring (less common but valid Python).
+_PY_DOCSTRING_ONELINE_RE = re.compile(
+    r"^[rRbBuU]{0,2}(?P<q>['\"])(?P<body>(?:(?!(?P=q)).)*)(?P=q)\s*$"
+)
+
+
+def is_symbol_bearing_chunk(symbol_name: str, node_type: str) -> bool:
+    """True if a chunk declares a real symbol worth a purpose vector.
+
+    A symbol chunk has a non-empty `symbol_name` AND a node_type that is an
+    actual AST definition node — not a navigational/window/markdown-section
+    chunk (those have no signature to distil).
+    """
+    return bool(symbol_name) and node_type not in _NON_SYMBOL_NODE_TYPES
+
+
+def _leading_doc_and_code(lines: list[str]) -> tuple[list[str], list[str]]:
+    """Split a chunk's lines into (leading doc/decorator lines, remaining code).
+
+    "Leading" comments/decorators (JSDoc, rustdoc, godoc, `@decorator`) precede
+    the declaration for most languages — already prepended to chunk content by
+    the chunker's `_get_leading_comments`. The injected "# class: X" context
+    line is skipped (it is not documentation prose).
+    """
+    doc: list[str] = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped:
+            i += 1
+            continue
+        if _CLASS_PREFIX_LINE_RE.match(stripped):
+            i += 1
+            continue
+        if stripped.startswith(_COMMENT_PREFIXES) or stripped.startswith("@"):
+            doc.append(stripped)
+            i += 1
+            continue
+        break
+    return doc, lines[i:]
+
+
+def _extract_signature(code_lines: list[str]) -> tuple[list[str], int]:
+    """Return (signature lines, index of first body line) from a declaration.
+
+    Accumulates lines from the start of `code_lines` until one ends the block
+    opener (python ':' / brace-family '{'), or `_DV_MAX_SIGNATURE_LINES` is
+    reached — bounds pathological multi-line parameter lists.
+    """
+    sig: list[str] = []
+    for i, line in enumerate(code_lines[:_DV_MAX_SIGNATURE_LINES]):
+        sig.append(line.strip())
+        if _SIGNATURE_END_RE.search(line.rstrip()):
+            return sig, i + 1
+    return sig, min(len(code_lines), _DV_MAX_SIGNATURE_LINES)
+
+
+def _extract_python_docstring(body_lines: list[str]) -> str:
+    """First-statement docstring from a Python function/class body, if any."""
+    body_text = "\n".join(body_lines).strip()
+    if not body_text:
+        return ""
+    m = _PY_DOCSTRING_RE.match(body_text) or _PY_DOCSTRING_ONELINE_RE.match(
+        body_text.splitlines()[0].strip() if body_text.splitlines() else ""
+    )
+    if not m:
+        return ""
+    doc = m.group("body").strip()
+    doc_lines = doc.splitlines()[:_DV_MAX_DOCSTRING_LINES]
+    return "\n".join(doc_lines)[:_DV_MAX_DOCSTRING_CHARS]
+
+
+def build_purpose_text(
+    content: str, symbol_name: str, node_type: str, language: str = "",
+) -> str | None:
+    """Distil a symbol-bearing chunk down to qualified signature + docstring.
+
+    ARCH-4: the STEP-0 spike proved a mechanical implementation body dilutes
+    the intent-bearing tokens (signature + docstring) when mean-pooled into a
+    single body embedding — the canonical chunk can miss dense pool entry
+    entirely even though its own docstring already paraphrases the query. This
+    builds the body-stripped text embedded as the chunk's second "purpose"
+    vector: `ClassName.symbol_name` (class-qualified when the indexer recorded
+    class context) + the raw declaration line(s) (which carry the parameter
+    list) + the docstring (Python: first body statement) or leading
+    comment/decorator block (other languages' pre-declaration doc convention).
+
+    Returns None for non-symbol chunks (`is_symbol_bearing_chunk` False) — no
+    purpose vector is stored for markdown/navigational/window chunks. An
+    undocumented symbol still returns a non-None signature-only text (graceful
+    degradation — no docstring found is not an error).
+    """
+    if not is_symbol_bearing_chunk(symbol_name, node_type):
+        return None
+
+    lines = content.splitlines()
+    class_ctx = extract_class_from_content(content)
+    qualified_name = f"{class_ctx}.{symbol_name}" if class_ctx else symbol_name
+
+    leading_doc, code_lines = _leading_doc_and_code(lines)
+    signature, body_start = _extract_signature(code_lines)
+
+    docstring = ""
+    if (language or "").lower() == "python":
+        docstring = _extract_python_docstring(code_lines[body_start:])
+
+    parts = [qualified_name]
+    if signature:
+        parts.append("\n".join(signature))
+    if leading_doc:
+        parts.append("\n".join(leading_doc))
+    if docstring:
+        parts.append(docstring)
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

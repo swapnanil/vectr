@@ -15,6 +15,8 @@ from agent.chunk_quality import (
     quality_score,
     normalized_content,
     extract_class_from_content,
+    is_symbol_bearing_chunk,
+    build_purpose_text,
 )
 
 
@@ -305,6 +307,85 @@ class TestExtractClassFromContent:
         # Leading comments before the class prefix line should not confuse extraction
         content = "# some other comment\n# class: JSONField\ndef from_db_value(self, value, expression, connection):\n    pass\n"
         assert extract_class_from_content(content) == "JSONField"
+
+
+# ---------------------------------------------------------------------------
+# ARCH-4 — purpose-text distillation (dual-vector pool entry)
+# ---------------------------------------------------------------------------
+
+class TestIsSymbolBearingChunk:
+    def test_symbol_with_regular_node_type_is_bearing(self) -> None:
+        assert is_symbol_bearing_chunk("deconstruct", "function_definition") is True
+
+    def test_empty_symbol_name_is_not_bearing(self) -> None:
+        assert is_symbol_bearing_chunk("", "function_definition") is False
+
+    def test_navigational_node_type_is_not_bearing(self) -> None:
+        assert is_symbol_bearing_chunk("reexport", NAVIGATIONAL_NODE_TYPE) is False
+
+    def test_window_node_type_is_not_bearing(self) -> None:
+        assert is_symbol_bearing_chunk("chunk_0", "window") is False
+
+    def test_section_node_type_is_not_bearing(self) -> None:
+        assert is_symbol_bearing_chunk("Intro", "section") is False
+
+
+class TestBuildPurposeText:
+    """build_purpose_text distills a body-stripped 'purpose' doc (ARCH-4)."""
+
+    def test_non_symbol_chunk_returns_none(self) -> None:
+        assert build_purpose_text("some prose", "", "window", "markdown") is None
+        assert build_purpose_text("stuff", "reexport", NAVIGATIONAL_NODE_TYPE, "python") is None
+
+    def test_documented_python_method_includes_qualified_name_and_docstring(self) -> None:
+        content = (
+            "# class: QuerySet\n"
+            "def get(self, *args, **kwargs):\n"
+            '    """Perform the query and return a single object matching the given\n'
+            "    keyword arguments.\"\"\"\n"
+            "    clone = self.filter(*args, **kwargs)\n"
+            "    num = len(clone)\n"
+            "    if num == 1:\n"
+            "        return clone._result_cache[0]\n"
+        )
+        purpose = build_purpose_text(content, "get", "function_definition", "python")
+        assert purpose is not None
+        assert "QuerySet.get" in purpose
+        assert "def get(self, *args, **kwargs):" in purpose
+        assert "Perform the query and return a single object" in purpose
+        # The mechanical body must NOT be pulled into the purpose text.
+        assert "_result_cache" not in purpose
+
+    def test_undocumented_python_function_is_signature_only(self) -> None:
+        content = "def helper(a, b):\n    return a + b\n"
+        purpose = build_purpose_text(content, "helper", "function_definition", "python")
+        assert purpose is not None
+        assert "helper" in purpose
+        assert "def helper(a, b):" in purpose
+        assert "return a + b" not in purpose
+
+    def test_leading_doc_comment_captured_for_non_python(self) -> None:
+        content = (
+            "/// Registry client for talking to PyPI.\n"
+            "/// Retries on transient failures.\n"
+            "pub fn build(&self) -> Result<Client, Error> {\n"
+            "    let inner = self.inner.clone();\n"
+            "    Ok(Client { inner })\n"
+            "}\n"
+        )
+        purpose = build_purpose_text(content, "build", "function_item", "rust")
+        assert purpose is not None
+        assert "build" in purpose
+        assert "Registry client for talking to PyPI." in purpose
+        assert "let inner" not in purpose
+
+    def test_class_prefix_line_not_leaked_into_purpose_text_as_doc(self) -> None:
+        content = "# class: Widget\ndef render(self):\n    return html\n"
+        purpose = build_purpose_text(content, "render", "function_definition", "python")
+        assert purpose is not None
+        assert "Widget.render" in purpose
+        # The injected "# class: X" context line itself must not appear verbatim.
+        assert "# class:" not in purpose
 
 
 # ---------------------------------------------------------------------------
