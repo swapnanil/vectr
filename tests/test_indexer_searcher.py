@@ -2301,11 +2301,12 @@ class TestNotFoundFloor:
         assert results
         assert results.low_confidence is False
 
-    def test_config_zero_floor_is_exact_noop(self, indexer, tmp_path, monkeypatch) -> None:
-        """dense_score_floor: 0.0 (the documented alternate disable path) never
-        fires either — every cosine similarity is >= 0.0."""
+    def test_config_high_min_zero_df_tokens_is_exact_noop(self, indexer, tmp_path, monkeypatch) -> None:
+        """min_zero_df_tokens set arbitrarily high (the documented alternate
+        disable path) never fires either — no query can have that many
+        zero-document-frequency content tokens."""
         import agent.searcher as searcher_module
-        monkeypatch.setattr(searcher_module, "_NOTFOUND_FLOOR_DENSE_SCORE", 0.0)
+        monkeypatch.setattr(searcher_module, "_NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS", 999)
         s = self._indexed_searcher(
             indexer, tmp_path,
             "def parse_json_payload(data):\n    return json.loads(data)\n",
@@ -2315,6 +2316,70 @@ class TestNotFoundFloor:
         )
         assert results
         assert results.low_confidence is False
+
+    def test_zero_document_frequency_token_is_the_trigger(self, indexer, tmp_path) -> None:
+        """UPG-NOTFOUND-FLOOR-2: the signal is a corpus-wide vocabulary check, not
+        a cosine floor — a query built entirely from words that DO appear
+        somewhere in the indexed corpus must not flag low_confidence even when
+        none of those words co-occur in any single chunk (a real absent-topic
+        query instead contains a word absent from the WHOLE corpus)."""
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n",
+        )
+        # "parse" and "payload" both appear somewhere in the tiny indexed corpus
+        # (in parse_json_payload) even though this exact 2-word phrase doesn't.
+        results, _ = s.search("parse payload", n_results=5, rerank=False)
+        assert results
+        assert results.low_confidence is False, (
+            "every content word in the query has nonzero corpus-wide document "
+            "frequency, so this must not be flagged low_confidence"
+        )
+
+        # Swap in one word absent from the ENTIRE corpus vocabulary (not just this
+        # query's fetched pool) and the same mechanism must now fire.
+        results2, _ = s.search("parse zzyxquiggle", n_results=5, rerank=False)
+        assert results2
+        assert results2.low_confidence is True, (
+            "'zzyxquiggle' has zero document frequency across the whole corpus; "
+            "this is exactly the lexical-vocabulary-anchor signal firing"
+        )
+
+    def test_stopword_zero_df_does_not_trigger(self, indexer, tmp_path, monkeypatch) -> None:
+        """A configured stopword with zero document frequency must not, by
+        itself, flag low_confidence — stopwords are excluded from the
+        zero-document-frequency content-token check entirely."""
+        import agent.searcher as searcher_module
+        monkeypatch.setattr(searcher_module, "_NOTFOUND_FLOOR_STOPWORDS", frozenset({"zzyxquiggle"}))
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n",
+        )
+        results, _ = s.search("parse zzyxquiggle", n_results=5, rerank=False)
+        assert results
+        assert results.low_confidence is False, (
+            "zzyxquiggle is configured as a stopword, so its zero document "
+            "frequency must be ignored by the check"
+        )
+
+    def test_short_token_below_min_length_does_not_trigger(self, indexer, tmp_path, monkeypatch) -> None:
+        """A zero-document-frequency token shorter than min_content_token_length
+        must not, by itself, flag low_confidence — short tokens are excluded
+        from the check as unreliable vocabulary anchors."""
+        import agent.searcher as searcher_module
+        monkeypatch.setattr(searcher_module, "_NOTFOUND_FLOOR_MIN_TOKEN_LEN", 10)
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n",
+        )
+        # "zz" (len 2) has zero document frequency but is below the raised
+        # min-length threshold, so it must be excluded from the check.
+        results, _ = s.search("parse zz", n_results=5, rerank=False)
+        assert results
+        assert results.low_confidence is False, (
+            "'zz' is shorter than the configured min_content_token_length and "
+            "must be excluded from the zero-document-frequency check"
+        )
 
     def test_empty_results_never_flagged(self, indexer) -> None:
         """An empty index returns an empty (not low_confidence) result set — the

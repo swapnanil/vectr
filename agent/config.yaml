@@ -162,29 +162,81 @@ ranking:
     # rank-based composite (searcher._apply_quality_and_dedup: base = 1 -
     # rank/n, then quality/importance multipliers) — it is re-derived from
     # each query's own candidate ORDER, so the top result of any query always
-    # displays close to 1.0 even when every candidate is irrelevant (an
-    # absent topic like CORS in a Django corpus still returns 5 hits at
-    # 0.77-1.0). The one score in the pipeline that is NOT re-normalized per
-    # query is the raw vector-search cosine similarity (dense_scores in
-    # searcher.search — max(0, 1 - cosine_distance) against the body and, if
-    # ARCH-4 dual-vector is enabled, purpose embeddings) computed BEFORE the
-    # cross-encoder rerank and BEFORE the quality/importance blend. Gating on
-    # that raw cosine — the best value across the whole fetched candidate
-    # pool — is a uniform, corpus-position-independent floor: it does not
-    # look at the query text or result content, only at how close the
-    # embedding model itself thinks the best candidate is.
+    # displays close to 1.0 even when every candidate is irrelevant. A signal
+    # independent of that per-query rescaling is needed to tell the caller
+    # the whole result set may be a guess.
+    #
+    # UPG-NOTFOUND-FLOOR-2: the first version of this signal gated on the raw
+    # pre-rerank vector-search cosine similarity (the one score in the
+    # pipeline NOT re-normalized per query) against an absolute constant
+    # (dense_score_floor). Measured against the production embedder on a
+    # large real corpus, that constant never fires: an absent-topic query's
+    # best pool cosine and a genuinely on-topic query's best pool cosine
+    # overlap the same ~0.60-0.86 band (one nonsense string measured HIGHER
+    # than several real on-topic queries) — every sentence embedding this
+    # model produces lands close to the corpus centroid regardless of
+    # relevance, so no absolute cosine constant can separate the two
+    # classes. (One parenthetical data point from the django benchmark
+    # corpus: the query "CORS handling implementation" — a protocol
+    # Django's own source never touches — still measured a pool-max cosine
+    # of 0.75, comfortably inside the on-topic band.) The defect was the
+    # signal, not the threshold.
+    #
+    # The replacement is distributional rather than absolute: does every
+    # content word in the query occur, even once, anywhere in the corpus's
+    # indexed vocabulary? A query naming a concept the codebase genuinely
+    # does not contain is built from at least one word that has literally
+    # zero document frequency across the whole corpus (not just the
+    # query's fetched candidate pool); a query about something the
+    # codebase does contain, however badly it is then ranked, is built
+    # entirely from words that really do appear in it. This generalizes
+    # past absolute-cosine floors to any embedder vectr ships, because it
+    # never looks at a cosine value at all — only at whether the corpus's
+    # own vocabulary contains the query's words.
     enabled: true
 
-    # Minimum pre-rerank cosine similarity (best candidate in the fetched
-    # pool) below which the returned result set is flagged low_confidence.
-    # Rationale: with the sentence-embedding models vectr ships (BAAI/bge-*,
-    # Snowflake/snowflake-arctic-embed-*), unrelated code/query pairs
-    # typically land below ~0.3 cosine and genuinely relevant pairs land
-    # above ~0.45; 0.35 sits in the gap with margin on both sides. Set to
-    # 0.0 (or enabled: false) to disable — the floor never fires and
-    # low_confidence is always false, i.e. an exact no-op restoring
-    # pre-UPG-NOTFOUND-FLOOR behaviour.
-    dense_score_floor: 0.35
+    # A query token shorter than this is excluded from the zero-document-
+    # frequency check — very short tokens (2-letter abbreviations, stray
+    # punctuation fragments) are too ambiguous to serve as a reliable
+    # vocabulary anchor in either direction.
+    min_content_token_length: 3
+
+    # Generic English/query-scaffolding words excluded from the zero-
+    # document-frequency check. These are near-universal across any real
+    # codebase's comments and docstrings (so they would essentially never
+    # have zero document frequency) — excluding them only avoids wasted
+    # per-query token lookups, it does not change which queries get
+    # flagged.
+    stopwords:
+      - the
+      - a
+      - an
+      - of
+      - to
+      - in
+      - on
+      - for
+      - and
+      - or
+      - is
+      - are
+      - how
+      - what
+      - does
+      - do
+      - implementation
+      - code
+      - framework
+      - using
+      - use
+
+    # Minimum number of query content tokens with zero corpus-wide document
+    # frequency required to flag the result set low_confidence. 1 (default)
+    # flags as soon as a single content word never appears anywhere in the
+    # indexed corpus. Set arbitrarily high (or set enabled: false) to
+    # disable — the floor never fires and low_confidence is always false,
+    # i.e. an exact no-op restoring pre-UPG-NOTFOUND-FLOOR behaviour.
+    min_zero_df_tokens: 1
 
     # Text prepended to the MCP vectr_search response when the floor fires.
     # Results are still shown in full below it — the caller LLM may still

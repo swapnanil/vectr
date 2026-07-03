@@ -26,7 +26,9 @@ from agent.config import (
     DUAL_VECTOR_BLEND_MODE as _DUAL_VECTOR_BLEND_MODE,
     DUAL_VECTOR_BLEND_WEIGHT as _DUAL_VECTOR_BLEND_WEIGHT,
     NOTFOUND_FLOOR_ENABLED as _NOTFOUND_FLOOR_ENABLED,
-    NOTFOUND_FLOOR_DENSE_SCORE as _NOTFOUND_FLOOR_DENSE_SCORE,
+    NOTFOUND_FLOOR_MIN_TOKEN_LEN as _NOTFOUND_FLOOR_MIN_TOKEN_LEN,
+    NOTFOUND_FLOOR_STOPWORDS as _NOTFOUND_FLOOR_STOPWORDS,
+    NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS as _NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS,
 )
 from agent.indexer import CodeIndexer
 
@@ -167,6 +169,12 @@ class CodeSearcher:
         self._bm25_ids: list[str] = []
         self._bm25_docs: list[str] = []
         self._bm25_metas: list[dict] = []
+        # UPG-NOTFOUND-FLOOR-2: token -> number of indexed chunks containing that
+        # token at least once, across the WHOLE corpus (not just a query's fetched
+        # pool). Built alongside the BM25 index in refresh_bm25() from the same
+        # tokenization pass. Powers the lexical-vocabulary-anchor low-confidence
+        # signal (see search()).
+        self._vocab_df: dict[str, int] = {}
         # ARCH-1b: file_path -> normalized file-level PageRank importance ∈ [0,1].
         # Injected by the service after each symbol-graph build via set_file_importance().
         # Empty until then → the importance prior is a no-op (pre-ARCH-1b behaviour).
@@ -200,11 +208,20 @@ class CodeSearcher:
         ids, docs, metas = self._indexer.get_all_documents()
         if not docs:
             self._bm25 = None
+            self._vocab_df = {}
             return
         self._bm25_ids = ids
         self._bm25_docs = docs
         self._bm25_metas = metas
-        self._bm25 = BM25Plus([_code_tokenize(d) for d in docs])
+        tokenized_docs = [_code_tokenize(d) for d in docs]
+        self._bm25 = BM25Plus(tokenized_docs)
+        # Reuse the same tokenization pass to build the corpus-wide document-
+        # frequency table (UPG-NOTFOUND-FLOOR-2) — no extra tokenization cost.
+        vocab_df: dict[str, int] = {}
+        for toks in tokenized_docs:
+            for t in set(toks):
+                vocab_df[t] = vocab_df.get(t, 0) + 1
+        self._vocab_df = vocab_df
 
     def search(
         self,
@@ -298,19 +315,34 @@ class CodeSearcher:
         else:
             dense_scores = dict(vec_scores)
 
-        # UPG-NOTFOUND-FLOOR (F46): the best raw cosine similarity across the whole
-        # fetched pool (body + purpose vector spaces), captured BEFORE the hybrid
-        # merge, the cross-encoder rerank, and the quality/importance blend — none
-        # of which are absolute (the final displayed score is rank-derived and
-        # always lands near 1.0 for the top result of any query, relevant or not).
-        # A pool whose single best cosine match is still weak means the whole
-        # result set is a guess, regardless of how confidently it later gets sorted.
-        pool_max_dense_score = max(dense_scores.values()) if dense_scores else 0.0
+        # UPG-NOTFOUND-FLOOR-2 (F46/F52): a raw pool cosine similarity is NOT a
+        # usable absolute floor — measured against the production embedder, the
+        # best pre-rerank cosine for a query naming a concept genuinely absent
+        # from the corpus overlaps the same range as (and sometimes exceeds) the
+        # best cosine for a real on-topic query; every sentence embedding lands
+        # in a narrow band near the corpus centroid regardless of relevance, so
+        # no absolute constant separates them (see config.yaml for the measured
+        # evidence). A distributional, vocabulary-based question separates them
+        # instead: does every content word IN THE QUERY occur, even once,
+        # anywhere in the indexed corpus? A query naming something the codebase
+        # truly does not contain is built from at least one word with zero
+        # document frequency across the WHOLE corpus (not just this query's
+        # fetched pool); a query about something the codebase does contain,
+        # however badly it then gets ranked, is built entirely from words that
+        # really do appear in it. query_tokens is also reused by BM25 below.
+        query_tokens = _code_tokenize(query)
+        zero_df_tokens: list[str] = []
+        if _NOTFOUND_FLOOR_ENABLED and self._vocab_df:
+            content_tokens = {
+                t for t in query_tokens
+                if len(t) >= _NOTFOUND_FLOOR_MIN_TOKEN_LEN
+                and t not in _NOTFOUND_FLOOR_STOPWORDS
+            }
+            zero_df_tokens = [t for t in content_tokens if self._vocab_df.get(t, 0) == 0]
 
         # --- BM25 search ---
         bm25_scores: dict[str, float] = {}
         if self._bm25 is not None:
-            query_tokens = _code_tokenize(query)
             raw = self._bm25.get_scores(query_tokens)
             if len(raw) > 0:
                 max_raw = max(raw) or 1.0
@@ -433,7 +465,7 @@ class CodeSearcher:
         final.low_confidence = (
             _NOTFOUND_FLOOR_ENABLED
             and bool(final)
-            and pool_max_dense_score < _NOTFOUND_FLOOR_DENSE_SCORE
+            and len(zero_df_tokens) >= _NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS
         )
         return final, elapsed_ms
 

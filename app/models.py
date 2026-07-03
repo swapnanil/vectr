@@ -55,13 +55,15 @@ class SearchResponse(BaseModel):
     chunks_searched: int
     processing_ms: int
     model: str
-    # UPG-NOTFOUND-FLOOR (F46): true when even the best pre-rerank cosine match
-    # in the candidate pool was below the configured absolute-relevance floor
-    # (ranking.notfound_floor.dense_score_floor) — the displayed per-result
-    # `score` is a per-query rank-derived value that always looks confident
-    # near the top, so this field is the caller's only signal that the whole
-    # result set may be a weak/unrelated guess. Results are still returned in
-    # full; this never suppresses them.
+    # UPG-NOTFOUND-FLOOR (F46/F52): true when the query names a concept that
+    # has no lexical anchor anywhere in the indexed corpus — at least
+    # `ranking.notfound_floor.min_zero_df_tokens` of its content words have
+    # zero document frequency across the whole corpus, not just the query's
+    # candidate pool. The displayed per-result `score` is a per-query
+    # rank-derived value that always looks confident near the top, so this
+    # field is the caller's only signal that the whole result set may be a
+    # weak/unrelated guess. Results are still returned in full; this never
+    # suppresses them.
     low_confidence: bool = False
 
 

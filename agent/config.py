@@ -167,12 +167,22 @@ NOTFOUND_FLOOR_ENABLED : bool
     False is an exact no-op: low_confidence is always False, restoring
     pre-UPG-NOTFOUND-FLOOR behaviour.
 
-NOTFOUND_FLOOR_DENSE_SCORE : float
-    Minimum pre-rerank cosine similarity (best candidate across the whole
-    fetched pool, body + purpose vector spaces) below which a search's
-    result set is flagged low_confidence. Non-normalized — unlike the
-    displayed rank-based final score, this is not rescaled to ~1.0 for the
-    top result of every query.
+NOTFOUND_FLOOR_MIN_TOKEN_LEN : int
+    Minimum length (chars) for a query token to be considered a content word
+    in the zero-document-frequency check (UPG-NOTFOUND-FLOOR-2).
+
+NOTFOUND_FLOOR_STOPWORDS : frozenset[str]
+    Generic English/query-scaffolding words excluded from the zero-document-
+    frequency check.
+
+NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS : int
+    Minimum number of query content tokens with zero corpus-wide document
+    frequency (i.e. the token never appears in ANY indexed chunk, not just
+    the query's fetched candidate pool) required to flag a search's result
+    set low_confidence. Replaces the absolute-cosine floor (dense_score_floor)
+    of the first UPG-NOTFOUND-FLOOR iteration, which measurement showed
+    cannot separate absent-topic from on-topic queries against the
+    production embedder — see config.yaml for the evidence.
 
 NOTFOUND_FLOOR_BANNER : str
     Low-confidence banner text prepended to the MCP vectr_search response
@@ -379,11 +389,14 @@ DUAL_VECTOR_MAX_DOCSTRING_LINES: int = int(_dv_cfg["max_docstring_lines"])
 DUAL_VECTOR_MAX_DOCSTRING_CHARS: int = int(_dv_cfg["max_docstring_chars"])
 
 # ---------------------------------------------------------------------------
-# Not-found floor — absolute-relevance low-confidence signal (UPG-NOTFOUND-FLOOR)
+# Not-found floor — lexical-vocabulary-anchor low-confidence signal
+# (UPG-NOTFOUND-FLOOR, UPG-NOTFOUND-FLOOR-2)
 # ---------------------------------------------------------------------------
 
 _nff_cfg: dict[str, Any] = _cfg["ranking"]["notfound_floor"]
 
 NOTFOUND_FLOOR_ENABLED: bool = bool(_nff_cfg["enabled"])
-NOTFOUND_FLOOR_DENSE_SCORE: float = float(_nff_cfg["dense_score_floor"])
+NOTFOUND_FLOOR_MIN_TOKEN_LEN: int = int(_nff_cfg["min_content_token_length"])
+NOTFOUND_FLOOR_STOPWORDS: frozenset[str] = frozenset(_nff_cfg["stopwords"])
+NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS: int = int(_nff_cfg["min_zero_df_tokens"])
 NOTFOUND_FLOOR_BANNER: str = str(_nff_cfg["banner"])

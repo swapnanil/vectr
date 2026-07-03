@@ -104,12 +104,12 @@ def handle_tools_call(
 
         sections: list[str] = []
 
-        # UPG-NOTFOUND-FLOOR (F46): lead with a low-confidence banner when even the
-        # best pre-rerank cosine match in the pool was below the absolute-relevance
-        # floor — the per-result score below is a per-query rank-derived value that
-        # always looks confident near the top, so this is the caller's only signal
-        # that the whole result set may be a weak/unrelated guess. Results are still
-        # shown in full below it; nothing is suppressed.
+        # UPG-NOTFOUND-FLOOR (F46/F52): lead with a low-confidence banner when the
+        # query names a concept with no lexical anchor anywhere in the indexed
+        # corpus — the per-result score below is a per-query rank-derived value
+        # that always looks confident near the top, so this is the caller's only
+        # signal that the whole result set may be a weak/unrelated guess. Results
+        # are still shown in full below it; nothing is suppressed.
         if getattr(results, "low_confidence", False):
             from agent.config import NOTFOUND_FLOOR_BANNER
             sections.append(f"─── Low confidence ───\n{NOTFOUND_FLOOR_BANNER}")
