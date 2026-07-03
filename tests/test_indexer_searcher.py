@@ -55,9 +55,45 @@ class TestCodeTokenize:
         assert "arg2" in tokens
         assert "(" not in tokens
 
-    def test_no_duplicates(self) -> None:
+    def test_term_frequency_preserved(self) -> None:
+        """UPG-BM25-TF: `_code_tokenize` (used to build BM25 documents) must NOT
+        dedupe — BM25Plus needs real per-document term frequency, not IDF-weighted
+        set-overlap. A chunk mentioning a token 3x is a stronger signal than one
+        mentioning it once, and only survives if the tokenizer keeps all 3."""
         tokens = self._tok("foo foo foo")
+        assert tokens.count("foo") == 3
+
+    def test_query_tokenize_dedupes(self) -> None:
+        """`_code_tokenize_query` (used to tokenize the caller's query string)
+        DOES dedupe — a query repeating a content word is a phrasing accident,
+        not evidence the caller wants that term weighted higher, so it must not
+        double-count against BM25Plus.get_scores (which sums per token seen,
+        duplicates included)."""
+        from agent.searcher import _code_tokenize_query
+        tokens = _code_tokenize_query("foo foo foo")
         assert tokens.count("foo") == 1
+
+    def test_repeated_token_chunk_outranks_single_mention_bm25(self) -> None:
+        """UPG-BM25-TF regression, at the BM25Plus scoring level (no indexer/
+        searcher needed): a chunk that mentions a distinctive token 5x must score
+        strictly higher than one mentioning it only once. Before the fix, per-
+        document dedupe in `_code_tokenize` forced every term frequency to 1,
+        collapsing this into an IDF-weighted set-overlap tie."""
+        from agent.searcher import _code_tokenize
+        from rank_bm25 import BM25Plus
+
+        repeated_doc = "widget widget widget widget widget among other filler prose"
+        single_doc = "widget appears here only once among other filler prose"
+        # Padding docs so avgdl/IDF are computed over a non-trivial corpus.
+        padding = ["completely unrelated filler prose about something else"] * 5
+
+        corpus = [repeated_doc, single_doc, *padding]
+        bm25 = BM25Plus([_code_tokenize(d) for d in corpus])
+        scores = bm25.get_scores(_code_tokenize("widget"))
+        assert scores[0] > scores[1], (
+            f"repeated-mention doc ({scores[0]}) must outrank single-mention "
+            f"doc ({scores[1]}) once term frequency survives tokenization"
+        )
 
 
 # ---------------------------------------------------------------------------

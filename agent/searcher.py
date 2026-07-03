@@ -51,20 +51,52 @@ def _code_tokenize(text: str) -> list[str]:
     a searchable token.
 
     Examples:
-      "RateLimitMiddleware"   → ["ratelimitmiddleware", "rate", "limit", "middleware"]
+      "RateLimitMiddleware"   → ["rate", "limit", "middleware"]
       "send_signal_dispatch"  → ["send", "signal", "dispatch"]
       "get_or_create"         → ["get", "or", "create"]
+
+    This is the RAW token stream — every occurrence is kept, including
+    repeats. A document/chunk that mentions a concept five times (its focus)
+    must produce a five-times-higher term frequency than one that mentions
+    it once (a passing reference); BM25Plus needs that per-document term
+    frequency to do anything more than IDF-weighted set-overlap, so this
+    function must NOT deduplicate. Building the corpus-wide document-
+    frequency table (how many DOCUMENTS contain a term, as opposed to how
+    many times) is a different, per-document-deduped statistic — that
+    dedupe happens once at the call site that builds it (refresh_bm25),
+    not here. Query-side scoring, which has different requirements (a
+    caller's sentence repeating a word is a phrasing accident, not a
+    relevance signal), dedupes separately via `_code_tokenize_query` below.
     """
     # Insert space at camelCase boundaries first
     expanded = _CAMEL_RE.sub(r"\1 \2", text)
     # Split on everything non-alphanumeric
     raw_tokens = _SPLIT_RE.split(expanded.lower())
-    # Keep tokens of length ≥ 2; also keep the original unsplit identifier
-    # so "ratelimitmiddleware" stays searchable as a whole
+    # Keep tokens of length >= 2; every occurrence is preserved (see docstring).
+    return [t for t in raw_tokens if len(t) >= 2]
+
+
+def _code_tokenize_query(text: str) -> list[str]:
+    """
+    Tokenize a QUERY string for BM25 scoring.
+
+    Uses the same identifier-aware splitting as `_code_tokenize`, but
+    collapses repeated tokens (order preserved) before they reach BM25Plus.
+    `BM25Plus.get_scores` sums an IDF-weighted contribution for every token
+    it is given, including exact duplicates — so a query that happens to
+    repeat a content word (e.g. an AI caller's sentence structure, not
+    intentional emphasis) would silently double that term's weight relative
+    to an equally-relevant query that said it once. Document term frequency
+    (kept, uncapped, in `_code_tokenize`) measures how heavily a matched
+    CHUNK uses a concept — a real relevance signal. Query term frequency
+    mostly measures how the caller's sentence was worded, not the
+    underlying concept, so it is neutralized here rather than left to
+    accumulate.
+    """
     seen: set[str] = set()
     out: list[str] = []
-    for t in raw_tokens:
-        if len(t) >= 2 and t not in seen:
+    for t in _code_tokenize(text):
+        if t not in seen:
             seen.add(t)
             out.append(t)
     return out
@@ -213,10 +245,14 @@ class CodeSearcher:
         self._bm25_ids = ids
         self._bm25_docs = docs
         self._bm25_metas = metas
+        # _code_tokenize keeps every occurrence (repeats included) — real term
+        # frequency BM25Plus needs. Reuse the same tokenization pass to build the
+        # corpus-wide document-frequency table (UPG-NOTFOUND-FLOOR-2), which is a
+        # different statistic (documents-containing-term, not occurrence count)
+        # and so dedupes per document via set(toks) below — no extra tokenization
+        # cost either way.
         tokenized_docs = [_code_tokenize(d) for d in docs]
         self._bm25 = BM25Plus(tokenized_docs)
-        # Reuse the same tokenization pass to build the corpus-wide document-
-        # frequency table (UPG-NOTFOUND-FLOOR-2) — no extra tokenization cost.
         vocab_df: dict[str, int] = {}
         for toks in tokenized_docs:
             for t in set(toks):
@@ -330,7 +366,10 @@ class CodeSearcher:
         # fetched pool); a query about something the codebase does contain,
         # however badly it then gets ranked, is built entirely from words that
         # really do appear in it. query_tokens is also reused by BM25 below.
-        query_tokens = _code_tokenize(query)
+        # _code_tokenize_query dedupes (unlike the corpus-side tokenizer used
+        # for BM25 documents) — see its docstring for why query-side repeats
+        # should not double-count.
+        query_tokens = _code_tokenize_query(query)
         zero_df_tokens: list[str] = []
         if _NOTFOUND_FLOOR_ENABLED and self._vocab_df:
             content_tokens = {
