@@ -104,6 +104,35 @@ __SESSION_START_GUIDANCE__
 **If recalled notes already contain what you need:** work from them directly. Use `vectr_search` or Read only to fill genuine gaps.
 """
 
+# UPG-SEARCH-ONLY-MODE — this workspace's daemon runs with working memory
+# disabled (no notes DB exists). Only the search/locate/trace/map tools are
+# documented; there is no working-memory section, no session-start recall
+# instructions, and no mention of vectr_remember/vectr_recall.
+_CLAUDE_MD_SEARCH_ONLY = """\
+# Vectr — semantic search
+
+Vectr gives you fast semantic search over this codebase.
+
+- **Semantic search**: find any symbol, pattern, or concept by describing it in plain English — faster than grep, without knowing where to look.
+
+> **Loading the tools first.** Vectr's tools may be deferred behind a tool-search step. If `vectr_search` / `vectr_locate` are not directly callable yet, load them once with `ToolSearch("select:mcp__vectr__vectr_search,mcp__vectr__vectr_locate,mcp__vectr__vectr_status")`, then call them **as tools**. Never run an `mcp__vectr__*` name as a shell/bash command — that is not an executable and always fails.
+
+> **This workspace runs in search-only mode.** Working-memory tools (`vectr_remember`/`vectr_recall`/`vectr_forget`/`vectr_snapshot`) are disabled for this daemon — there is no notes database to write to. Use scratch notes or the conversation itself for anything you need to remember across turns.
+
+## Semantic search — 4 tools
+
+The codebase is fully indexed. One `vectr_search` call returns ranked, relevant code chunks — no grep loops across hundreds of files, no wasted turns reading the wrong files. Use these for all exploration; use Read only to read a specific file that vectr has already pointed you to.
+
+| Tool | Purpose | Example |
+|---|---|---|
+| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. | `vectr_search("workspace lock acquisition and release")` |
+| `vectr_locate("SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate("WorkspaceLock")` → `resolver.rs:214` |
+| `vectr_trace("symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace("acquire_lock")` |
+| `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
+
+**Before calling `vectr_search` on a well-known API or framework:** write out what you already know — function signatures, key types, parameter names — and only call `vectr_search` if genuine gaps remain after that verbalization. Reduces unnecessary search calls 26–40% on familiar codebases.
+"""
+
 # Default session-start guidance: no hooks installed, so the model must
 # self-call vectr_status/vectr_recall to ever see prior notes.
 _SESSION_START_GUIDANCE_DEFAULT = """\
@@ -120,9 +149,16 @@ _SESSION_START_GUIDANCE_HOOKS_AWARE = """\
 **At session start:** your working-memory notes are auto-injected automatically (on session start and again per prompt) — you don't need to call `vectr_status`/`vectr_recall` just to see them. Call `vectr_recall` only for an on-demand deep-dive: expanding a specific note (`note_id=`), or a targeted query the automatic injection didn't cover."""
 
 
-def _render_claude_md(hooks_installed: bool) -> str:
-    """Render `_CLAUDE_MD` with the session-start guidance matching whether
-    Claude Code hooks are installed for this workspace (UPG-11.5)."""
+def _render_claude_md(hooks_installed: bool, search_only: bool = False) -> str:
+    """Render the CLAUDE.md guidance block.
+
+    `search_only` selects the search-only variant (UPG-SEARCH-ONLY-MODE) — no
+    working-memory section, no session-start recall instructions, since this
+    daemon has no notes DB. Otherwise `hooks_installed` selects the
+    session-start guidance matching whether Claude Code hooks are installed
+    for this workspace (UPG-11.5)."""
+    if search_only:
+        return _CLAUDE_MD_SEARCH_ONLY
     guidance = _SESSION_START_GUIDANCE_HOOKS_AWARE if hooks_installed else _SESSION_START_GUIDANCE_DEFAULT
     return _CLAUDE_MD.replace("__SESSION_START_GUIDANCE__", guidance)
 
@@ -178,14 +214,18 @@ _IDE_CONFIG_APPEND_ONLY: tuple[str, ...] = (
 )
 
 
-def _make_vectr_block(*, hooks_installed: bool = False) -> str:
+def _make_vectr_block(*, hooks_installed: bool = False, search_only: bool = False) -> str:
     """`hooks_installed` selects the session-start guidance variant (UPG-11.5) —
     only meaningful for CLAUDE.md, since Claude Code hooks are the only
-    injection path today; other IDE config files always get the default."""
-    return f"{_VECTR_BLOCK_START}\n{_render_claude_md(hooks_installed).rstrip()}\n{_VECTR_BLOCK_END}\n"
+    injection path today; other IDE config files always get the default.
+    `search_only` selects the no-working-memory variant (UPG-SEARCH-ONLY-MODE)
+    and takes precedence over `hooks_installed`."""
+    return f"{_VECTR_BLOCK_START}\n{_render_claude_md(hooks_installed, search_only=search_only).rstrip()}\n{_VECTR_BLOCK_END}\n"
 
 
-def _write_ide_config_merge_safe(path: Path, *, create_if_missing: bool, hooks_installed: bool = False) -> None:
+def _write_ide_config_merge_safe(
+    path: Path, *, create_if_missing: bool, hooks_installed: bool = False, search_only: bool = False,
+) -> None:
     """Write the vectr guidance block into an IDE config file.
 
     - File missing + create_if_missing=True  → create file containing just the block.
@@ -193,7 +233,7 @@ def _write_ide_config_merge_safe(path: Path, *, create_if_missing: bool, hooks_i
     - File exists, no vectr block            → append block after existing content.
     - File exists, vectr block present       → replace block in-place (idempotent).
     """
-    block = _make_vectr_block(hooks_installed=hooks_installed)
+    block = _make_vectr_block(hooks_installed=hooks_installed, search_only=search_only)
 
     if not path.exists():
         if not create_if_missing:
@@ -233,7 +273,7 @@ def _remove_vectr_block(path: Path) -> None:
         print(f"  Deleted {path} (was vectr-only)", file=sys.stderr)
 
 
-def _write_cursor_rules(workspace: str) -> None:
+def _write_cursor_rules(workspace: str, *, search_only: bool = False) -> None:
     """Write .cursor/rules/vectr.mdc for Cursor IDE (vectr-owned file, always current)."""
     path = Path(workspace) / ".cursor" / "rules" / "vectr.mdc"
     content = (
@@ -241,7 +281,7 @@ def _write_cursor_rules(workspace: str) -> None:
         "description: Vectr tool usage rules for AI-assisted development\n"
         "alwaysApply: true\n"
         "---\n\n"
-        f"{_render_claude_md(hooks_installed=False).rstrip()}\n"
+        f"{_render_claude_md(hooks_installed=False, search_only=search_only).rstrip()}\n"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     existed = path.exists()
@@ -263,6 +303,21 @@ def _is_server_alive(port: int, timeout: float = 2.0) -> tuple[bool, str | None]
         return True, resp.json().get("workspace_root")
     except Exception:
         return False, None
+
+
+def _get_daemon_mode(port: int, timeout: float = 2.0) -> str | None:
+    """Return the live daemon's mode ("full" / "memory-only" / "search-only"),
+    or None if the daemon isn't reachable. Used by `vectr init` to decide
+    whether hooks make sense (search-only has no working-memory layer to
+    inject) — queried live rather than persisted, since mode is a daemon
+    property, not workspace-static state."""
+    try:
+        import httpx
+        resp = httpx.get(f"{_api_base(port)}/v1/status", timeout=timeout)
+        resp.raise_for_status()
+        return resp.json().get("mode")
+    except Exception:
+        return None
 
 
 def _stop_server(pid: int, timeout_s: int = 8) -> bool:
@@ -301,7 +356,7 @@ def _write_or_update(path: Path, content: str, label: str) -> None:
         print(f"  Updated {path} ({label})", file=sys.stderr)
 
 
-def _write_workspace_config(workspace: str, port: int) -> None:
+def _write_workspace_config(workspace: str, port: int, *, search_only: bool = False) -> None:
     """Write per-IDE MCP config files and IDE guidance into the workspace root.
 
     CLAUDE.md's session-start guidance is hook-aware (UPG-11.5): if Claude Code
@@ -309,6 +364,10 @@ def _write_workspace_config(workspace: str, port: int) -> None:
     self-recall at session start redundant, so CLAUDE.md is written with the
     hook-aware variant instead. Other IDE config files always get the default
     variant — Claude Code hooks are the only automatic-injection path today.
+
+    `search_only` (UPG-SEARCH-ONLY-MODE) takes precedence over the hook-aware
+    variant: this daemon has no working-memory layer, so every IDE config file
+    gets the search-only guidance (search tools only, no memory section).
     """
     root = Path(workspace)
     hooks_installed = _hooks_installed(workspace)
@@ -320,13 +379,15 @@ def _write_workspace_config(workspace: str, port: int) -> None:
     if write_default_vectrignore(workspace):
         print(f"  Created {root / '.vectrignore'} (default excludes)", file=sys.stderr)
 
-    _write_ide_config_merge_safe(root / "CLAUDE.md", create_if_missing=True, hooks_installed=hooks_installed)
-    for _rel in _IDE_CONFIG_APPEND_ONLY:
-        _write_ide_config_merge_safe(root / _rel, create_if_missing=False)
     _write_ide_config_merge_safe(
-        root / ".github" / "copilot-instructions.md", create_if_missing=False
+        root / "CLAUDE.md", create_if_missing=True, hooks_installed=hooks_installed, search_only=search_only,
     )
-    _write_cursor_rules(workspace)
+    for _rel in _IDE_CONFIG_APPEND_ONLY:
+        _write_ide_config_merge_safe(root / _rel, create_if_missing=False, search_only=search_only)
+    _write_ide_config_merge_safe(
+        root / ".github" / "copilot-instructions.md", create_if_missing=False, search_only=search_only,
+    )
+    _write_cursor_rules(workspace, search_only=search_only)
 
     _write_or_update(root / ".mcp.json", _MCP_JSON.format(port=port), f"port {port}")
     _write_or_update(root / ".cursor" / "mcp.json", _CURSOR_MCP_JSON.format(port=port), f"port {port}")
@@ -644,7 +705,11 @@ def _do_start(
     ws_hash: str,
     extra_roots: list[str] | None = None,
     memory_only: bool = False,
+    search_only: bool = False,
 ) -> None:
+    if memory_only and search_only:
+        raise ValueError("Cannot start vectr in both --memory-only and --search-only mode simultaneously")
+
     log_dir = Path.home() / ".vectr" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{ws_hash}.log"
@@ -657,6 +722,8 @@ def _do_start(
     }
     if memory_only:
         env["VECTR_MEMORY_ONLY"] = "1"
+    if search_only:
+        env["VECTR_SEARCH_ONLY"] = "1"
     vectr_dir = Path(__file__).resolve().parent
     with open(log_path, "a") as log_file:
         proc = subprocess.Popen(
@@ -671,7 +738,7 @@ def _do_start(
 
     _migrate_legacy_files()
     InstanceRegistry().register(ws_hash, workspace, port, proc.pid)
-    mode_tag = " [memory-only]" if memory_only else ""
+    mode_tag = " [memory-only]" if memory_only else (" [search-only]" if search_only else "")
     print(f"Vectr started{mode_tag} (PID {proc.pid}) on port {port}", file=sys.stderr)
     print(f"Workspace : {workspace}", file=sys.stderr)
     if extra_roots:
@@ -682,6 +749,11 @@ def _do_start(
     if memory_only:
         print(
             f"Mode      : memory-only (no code indexing/watcher; memory tools + hooks active)",
+            file=sys.stderr,
+        )
+    elif search_only:
+        print(
+            f"Mode      : search-only (no working-memory layer; search/locate/trace/map active)",
             file=sys.stderr,
         )
     else:
@@ -698,6 +770,12 @@ def _get_port_for_workspace(workspace: str, fallback: int) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_start(args: argparse.Namespace) -> None:
+    memory_only = getattr(args, "memory_only", False)
+    search_only = getattr(args, "search_only", False)
+    if memory_only and search_only:
+        print("Error: --memory-only and --search-only are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+
     roots = _resolve_workspace_roots(args)
     workspace = roots[0]
     extra_roots = roots[1:]
@@ -711,7 +789,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     if entry is not None and _is_pid_alive(entry["pid"]):
         port = entry["port"]
         for root in roots:
-            _write_workspace_config(root, port)
+            _write_workspace_config(root, port, search_only=search_only)
         print("Vectr is already running for this workspace.", file=sys.stderr)
         print(f"  Workspace : {workspace}", file=sys.stderr)
         print(f"  Port      : {port}", file=sys.stderr)
@@ -720,11 +798,10 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     port = registry.find_free_port(ws_hash, preferred_port)
     for root in roots:
-        _write_workspace_config(root, port)
-    memory_only = getattr(args, "memory_only", False)
+        _write_workspace_config(root, port, search_only=search_only)
     if not memory_only:
         _preflight_grammars()
-    _do_start(workspace, port, ws_hash, extra_roots=extra_roots, memory_only=memory_only)
+    _do_start(workspace, port, ws_hash, extra_roots=extra_roots, memory_only=memory_only, search_only=search_only)
 
 
 def cmd_index(args: argparse.Namespace) -> None:
@@ -1057,6 +1134,12 @@ def cmd_stop(args: argparse.Namespace) -> None:
 
 
 def cmd_restart(args: argparse.Namespace) -> None:
+    memory_only = getattr(args, "memory_only", False)
+    search_only = getattr(args, "search_only", False)
+    if memory_only and search_only:
+        print("Error: --memory-only and --search-only are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+
     roots = _resolve_workspace_roots(args)
     workspace = roots[0]
     extra_roots = roots[1:]
@@ -1073,9 +1156,8 @@ def cmd_restart(args: argparse.Namespace) -> None:
 
     port = registry.find_free_port(ws_hash, preferred_port)
     for root in roots:
-        _write_workspace_config(root, port)
-    memory_only = getattr(args, "memory_only", False)
-    _do_start(workspace, port, ws_hash, extra_roots=extra_roots, memory_only=memory_only)
+        _write_workspace_config(root, port, search_only=search_only)
+    _do_start(workspace, port, ws_hash, extra_roots=extra_roots, memory_only=memory_only, search_only=search_only)
 
 
 def cmd_forget(args: argparse.Namespace) -> None:
@@ -1126,15 +1208,28 @@ def cmd_init(args: argparse.Namespace) -> None:
     entry = InstanceRegistry().get(workspace_hash(workspace))
     port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", "8765"))
 
+    # Search-only mode (UPG-SEARCH-ONLY-MODE) has no working-memory layer to
+    # inject — detected live from the running daemon (mode is a daemon
+    # property, not a static workspace marker) rather than a CLI flag on init.
+    search_only = _get_daemon_mode(port) == "search-only"
+
     # Hooks are written BEFORE the workspace config (UPG-11.5): CLAUDE.md's
     # session-start guidance is hook-aware, detected by reading back
     # .claude/settings.json — so within a single `vectr init --hooks` run,
     # the hooks must already be on disk when _write_workspace_config runs,
     # or CLAUDE.md would ship the pre-hooks (double-recall) guidance.
     if getattr(args, "hooks", False):
-        _write_claude_hooks(workspace)
+        if search_only:
+            print(
+                "Warning: this workspace's vectr daemon runs in search-only mode — "
+                "there is no working-memory layer for hooks to inject notes from. "
+                "Skipping hook installation. Restart without --search-only to use hooks.",
+                file=sys.stderr,
+            )
+        else:
+            _write_claude_hooks(workspace)
 
-    _write_workspace_config(workspace, port)
+    _write_workspace_config(workspace, port, search_only=search_only)
 
     # write user-defined exclusions to .vectrignore
     exclude_dirs: list[str] = getattr(args, "exclude", None) or []
@@ -1238,6 +1333,21 @@ def main() -> None:
             "where the full code index + watcher cause performance issues."
         ),
     )
+    p_start.add_argument(
+        "--search-only",
+        action="store_true",
+        default=False,
+        dest="search_only",
+        help=(
+            "Run the daemon for semantic search + symbol graph + codebase map "
+            "WITHOUT the working-memory layer — no notes DB is created for this "
+            "workspace, and remember/recall/forget/snapshot are disabled. "
+            "Indexing and the file watcher run normally. Useful for read-only "
+            "consumers of an indexed codebase (reviewers, CI, a shared search "
+            "server) where nothing should be written to a per-workspace note "
+            "store. Mutually exclusive with --memory-only."
+        ),
+    )
 
     p_stop = sub.add_parser("stop", help="Stop the daemon for a workspace")
     p_stop.add_argument("--path", default=_default_path)
@@ -1256,6 +1366,13 @@ def main() -> None:
         default=False,
         dest="memory_only",
         help="Restart in memory-only mode (no indexing/watcher; see vectr start --memory-only).",
+    )
+    p_restart.add_argument(
+        "--search-only",
+        action="store_true",
+        default=False,
+        dest="search_only",
+        help="Restart in search-only mode (no working-memory layer; see vectr start --search-only).",
     )
 
     p_forget = sub.add_parser("forget", help="Delete working-memory notes for a workspace")

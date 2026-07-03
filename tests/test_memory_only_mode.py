@@ -198,6 +198,7 @@ class TestMcpDispatchMemoryOnly:
         svc = MagicMock()
         svc.total_chunks = 0
         svc.memory_only = memory_only
+        svc.search_only = False
 
         _result = SearchResult(
             file_path="auth.py", lines="1-10", symbol_name="verify_token",

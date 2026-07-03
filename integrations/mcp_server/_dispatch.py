@@ -190,6 +190,11 @@ def handle_tools_call(
                 "  → memory-only mode: search/locate/trace are disabled; "
                 "memory tools (remember/recall/snapshot) and hooks are active"
             )
+        elif mode == "search-only":
+            lines.append(
+                "  → search-only mode: working-memory tools (remember/recall/forget/"
+                "snapshot) are disabled; search, locate, trace and map are active"
+            )
 
         # Per-language coverage + symbol availability (UPG-3.3). Tells the agent
         # where locate/trace will work (symbol graph) vs. where to use search only.
@@ -325,6 +330,12 @@ def handle_tools_call(
         content = arguments.get("content", "").strip()
         if not content:
             return _mcp_error("content is required")
+
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
         tags = arguments.get("tags") or None
         priority = arguments.get("priority", "medium")
         if priority not in ("high", "medium", "low"):
@@ -342,6 +353,11 @@ def handle_tools_call(
 
     # ---- vectr_recall ----
     if tool_name == "vectr_recall":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
         query = arguments.get("query") or None
         tags = arguments.get("tags") or None
         priority = arguments.get("priority") or None
@@ -383,6 +399,12 @@ def handle_tools_call(
         label = arguments.get("label", "").strip()
         if not label:
             return _mcp_error("label is required")
+
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
         session_id = arguments.get("session_id") or None
         snapshot_id = service.snapshot_session(label=label, session_id=session_id)
         return {
@@ -392,6 +414,11 @@ def handle_tools_call(
 
     # ---- vectr_snapshot_list ----
     if tool_name == "vectr_snapshot_list":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
         snapshots = service.list_snapshots()
         if not snapshots:
             text = "No snapshots saved for this workspace yet. Use vectr_snapshot to save one."
@@ -407,6 +434,11 @@ def handle_tools_call(
 
     # ---- vectr_forget ----
     if tool_name == "vectr_forget":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
         note_id = arguments.get("note_id")
         if note_id is not None:
             try:

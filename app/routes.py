@@ -213,6 +213,9 @@ async def trace(body: TraceRequest, request: Request) -> TraceResponse:
 async def remember(body: RememberRequest, request: Request) -> RememberResponse:
     t0 = time.monotonic()
     svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
     note_id = svc.remember(
         content=body.content,
         tags=body.tags,
@@ -232,6 +235,9 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
 async def recall(body: RecallRequest, request: Request) -> RecallResponse:
     t0 = time.monotonic()
     svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
     notes_text = svc.recall(
         query=body.query,
         tags=body.tags,
@@ -256,6 +262,9 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
 async def snapshot(body: SnapshotRequest, request: Request) -> SnapshotResponse:
     t0 = time.monotonic()
     svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
     snapshot_id = svc.snapshot_session(label=body.label, session_id=body.session_id)
     return SnapshotResponse(
         snapshot_id=snapshot_id,
@@ -268,6 +277,9 @@ async def snapshot(body: SnapshotRequest, request: Request) -> SnapshotResponse:
 async def memory_clear(request: Request) -> dict:
     """Delete all working-memory notes and snapshots for the current workspace."""
     svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
     deleted = svc.forget_all()
     return {"deleted": deleted}
 
@@ -276,6 +288,9 @@ async def memory_clear(request: Request) -> dict:
 async def forget(body: ForgetRequest, request: Request) -> dict:
     """Delete one note by id, or all notes when all=true. No arguments deletes nothing."""
     svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
     if body.note_id is not None:
         deleted = svc.forget_note(body.note_id)
         return {"deleted": 1 if deleted else 0, "note_id": body.note_id, "found": deleted}

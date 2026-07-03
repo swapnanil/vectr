@@ -30,6 +30,12 @@ _MEMORY_ONLY_MSG = (
     "are active."
 )
 
+_SEARCH_ONLY_MSG = (
+    "vectr is in search-only mode for this workspace — working-memory tools "
+    "(remember/recall/forget/snapshot) are disabled; semantic search, locate, "
+    "trace and map are active."
+)
+
 
 class VectrService:
     """Singleton-style service. Create once at startup; shared via FastAPI app state."""
@@ -40,6 +46,7 @@ class VectrService:
         port: int = 8765,
         extra_roots: list[str] | None = None,
         memory_only: bool = False,
+        search_only: bool = False,
     ) -> None:
         from agent.indexer import CodeIndexer
         from agent.searcher import CodeSearcher
@@ -58,6 +65,14 @@ class VectrService:
         # Memory-only mode: code indexing + file watcher are disabled.
         # Reads from env (propagated by _do_start) or from the constructor arg.
         self._memory_only: bool = memory_only or (os.getenv("VECTR_MEMORY_ONLY", "") == "1")
+        # Search-only mode: the dual of memory-only — indexing/watcher run normally,
+        # but the working-memory layer is disabled (no notes DB is created).
+        # Reads from env (propagated by _do_start) or from the constructor arg.
+        self._search_only: bool = search_only or (os.getenv("VECTR_SEARCH_ONLY", "") == "1")
+        if self._memory_only and self._search_only:
+            raise ValueError(
+                "VectrService cannot run in both memory_only and search_only mode simultaneously"
+            )
 
         db_dir = os.getenv(_DB_DIR_ENV) or _default_db_dir(self._workspace_root)
         self._db_dir = db_dir
@@ -89,11 +104,16 @@ class VectrService:
 
         # Memory layer — semantic recall enabled via the same embedder + ChromaDB client
         # used by the code index, so no extra model load or second DB process.
-        self._context_store = WorkingContextStore(
-            db_dir,
-            embed_fn=self._indexer.embed_texts,
-            notes_chroma_client=self._indexer.chroma_client,
-        )
+        # In search-only mode the store is never constructed at all (UPG-SEARCH-ONLY-MODE):
+        # no notes DB file and no 'working_memory' Chroma collection are created for a
+        # workspace that never writes a note.
+        self._context_store: WorkingContextStore | None = None
+        if not self._search_only:
+            self._context_store = WorkingContextStore(
+                db_dir,
+                embed_fn=self._indexer.embed_texts,
+                notes_chroma_client=self._indexer.chroma_client,
+            )
 
         # Session eviction advisor
         self._eviction_advisor = EvictionAdvisor(
@@ -125,20 +145,28 @@ class VectrService:
         """True when this daemon runs in memory-only mode (no indexing/watcher)."""
         return self._memory_only
 
+    @property
+    def search_only(self) -> bool:
+        """True when this daemon runs in search-only mode (no working-memory layer)."""
+        return self._search_only
+
     def start_background_index(self) -> None:
         """Kick off workspace indexing in a background thread.
 
         In memory-only mode, the index thread and file watcher are skipped.
-        The notes-TTL purge still runs so expired notes are cleaned up at
-        startup regardless of mode.
+        In search-only mode, indexing and the watcher run normally, but the
+        notes-TTL purge is skipped — there is no context store to purge.
+        Otherwise, the notes-TTL purge runs so expired notes are cleaned up at
+        startup.
         """
         if self._indexing:
             return
         self._indexing = True
 
-        # apply TTL to working notes at startup if VECTR_NOTES_TTL_DAYS is set
+        # apply TTL to working notes at startup if VECTR_NOTES_TTL_DAYS is set.
+        # Search-only mode has no context store — nothing to purge.
         ttl_days_str = os.getenv("VECTR_NOTES_TTL_DAYS", "")
-        if ttl_days_str:
+        if ttl_days_str and self._context_store is not None:
             try:
                 ttl = float(ttl_days_str)
                 deleted = self._context_store.purge_expired_notes(self._workspace_root, ttl)
@@ -412,6 +440,12 @@ class VectrService:
                 "strategy_rationale": "default weights — no workspace fingerprint yet, index the workspace to compute one",
             }
         missing = sorted(SYMBOL_LANGUAGES - available_symbol_languages())
+        if self._memory_only:
+            mode = "memory-only"
+        elif self._search_only:
+            mode = "search-only"
+        else:
+            mode = "full"
         return {
             "indexed_files": self._indexer.indexed_file_count,
             "total_chunks": self._indexer.total_chunks,
@@ -420,9 +454,9 @@ class VectrService:
             "workspace_root": self._workspace_root,
             "symbol_count": self._symbol_graph.symbol_count(self._workspace_root),
             "languages": self._language_coverage(),
-            "notes_count": self._context_store.count_notes(self._workspace_root),
+            "notes_count": self.count_notes(),
             "grammars_unavailable": missing,
-            "mode": "memory-only" if self._memory_only else "full",
+            "mode": mode,
             **self._symbol_graph_status(),
             **strategy_info,
         }
@@ -523,6 +557,15 @@ class VectrService:
     # Memory — working context store
     # ------------------------------------------------------------------
 
+    def _require_memory_layer(self) -> None:
+        """Guard for every memory-facing method (UPG-SEARCH-ONLY-MODE): in
+        search-only mode there is no context store — raise rather than hit an
+        AttributeError on `self._context_store is None`. The MCP dispatch and
+        REST layers intercept these calls earlier with a friendlier message;
+        this is the root-cause guard for any other caller."""
+        if self._search_only:
+            raise RuntimeError(_SEARCH_ONLY_MSG)
+
     def remember(
         self,
         content: str,
@@ -532,6 +575,7 @@ class VectrService:
         kind: str = "finding",
         title: str = "",
     ) -> int:
+        self._require_memory_layer()
         return self._context_store.remember(
             workspace=self._workspace_root,
             content=content,
@@ -544,6 +588,7 @@ class VectrService:
 
     def get_note(self, note_id: int):
         """Fetch a single note by ID (UPG-RECALL-HIERARCHY expand path)."""
+        self._require_memory_layer()
         return self._context_store.get_note(self._workspace_root, note_id)
 
     def recall(
@@ -561,6 +606,7 @@ class VectrService:
         detail: str = "index",
         note_id: int | None = None,
     ) -> str:
+        self._require_memory_layer()
         # Single-note expand: note_id overrides everything else (UPG-RECALL-HIERARCHY).
         if note_id is not None:
             note = self._context_store.get_note(self._workspace_root, note_id)
@@ -618,12 +664,15 @@ class VectrService:
         return self._context_store.format_notes_for_llm(notes, stale_warnings=stale, detail=detail)
 
     def forget_note(self, note_id: int) -> bool:
+        self._require_memory_layer()
         return self._context_store.forget(self._workspace_root, note_id)
 
     def forget_all(self) -> int:
+        self._require_memory_layer()
         return self._context_store.forget_all(self._workspace_root)
 
     def snapshot_session(self, label: str, session_id: str | None = None) -> str:
+        self._require_memory_layer()
         return self._context_store.snapshot(
             workspace=self._workspace_root,
             label=label,
@@ -632,9 +681,11 @@ class VectrService:
         )
 
     def list_snapshots(self) -> list[dict]:
+        self._require_memory_layer()
         return self._context_store.list_snapshots(self._workspace_root)
 
     def restore_snapshot(self, snapshot_id: str) -> dict | None:
+        self._require_memory_layer()
         return self._context_store.restore_snapshot(snapshot_id)
 
     # ------------------------------------------------------------------
@@ -654,7 +705,13 @@ class VectrService:
         return self._eviction_advisor.should_evict()
 
     def count_notes(self) -> int:
-        """Return number of active working-memory notes for this workspace."""
+        """Return number of active working-memory notes for this workspace.
+
+        Search-only mode has no context store — always 0, never an error, so
+        `status()` and `suggest_instruction_style()` stay usable unconditionally.
+        """
+        if self._context_store is None:
+            return 0
         return self._context_store.count_notes(self._workspace_root)
 
     # ------------------------------------------------------------------
@@ -683,7 +740,7 @@ class VectrService:
         if override in ("additive", "directed", "memory-only"):
             return override
 
-        notes_count = self._context_store.count_notes(self._workspace_root)
+        notes_count = self.count_notes()
         fp = None
         if self._strategy is not None:
             try:

@@ -100,7 +100,8 @@ class StatusResponse(BaseModel):
     graph_first: bool | None = None
     recommended_embed_model: str | None = None
     strategy_rationale: str | None = None
-    # Daemon mode: "full" (default) or "memory-only" (no indexing/watcher)
+    # Daemon mode: "full" (default), "memory-only" (no indexing/watcher), or
+    # "search-only" (no working-memory layer — see UPG-SEARCH-ONLY-MODE)
     mode: str = "full"
 
 

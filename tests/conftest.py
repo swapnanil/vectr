@@ -170,6 +170,7 @@ def _base_mock_service():
     """Mock VectrService with sensible defaults for API route tests."""
     from agent.searcher import SearchResult
     from agent.query_router import RoutingDecision, QueryType
+    from agent.symbol_graph import LocateResult
 
     svc = MagicMock()
     svc._embed_model = "BAAI/bge-base-en-v1.5"
@@ -197,7 +198,11 @@ def _base_mock_service():
         "workspace_root": "/repo", "symbol_count": 20,
     }
     svc.get_map.return_value = "# Passport\nPython FastAPI service."
-    svc.locate_with_snippets.return_value = []
+    # Real locate_with_snippets() returns a LocateResult, not a bare list —
+    # a mock returning [] made /v1/locate 500 on `result.symbols` for any
+    # test that actually asserted a 200 (caught while adding search-only
+    # REST coverage; conftest mock was the lone type mismatch here).
+    svc.locate_with_snippets.return_value = LocateResult(symbols=[], resolution_strategy="none", query="")
     svc.format_locate.return_value = "No results."
     svc.trace_with_snippets.return_value = {}
     svc.format_trace.return_value = "No trace."
@@ -207,8 +212,10 @@ def _base_mock_service():
     svc.recall.return_value = "# Working Notes (1 entries)\n\n[1] [HIGH] test content\n"
     svc.snapshot_session.return_value = "snap_abc123"
     svc.list_snapshots.return_value = [{"snapshot_id": "snap_abc123", "label": "test", "created_at": 0.0}]
-    # Default mode is full (not memory-only); must be an explicit bool, not a MagicMock.
+    # Default mode is full (not memory-only / not search-only); must be an
+    # explicit bool, not a MagicMock (bare MagicMock attrs are truthy by default).
     svc.memory_only = False
+    svc.search_only = False
     return svc
 
 

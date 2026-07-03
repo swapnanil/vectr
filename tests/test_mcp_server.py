@@ -89,6 +89,7 @@ def _mock_service():
     svc.snapshot_session.return_value = "snap_xyz"
     svc.list_snapshots.return_value = []
     svc.memory_only = False
+    svc.search_only = False
     return svc
 
 
@@ -303,6 +304,7 @@ class TestAdaptiveToolRegistration:
         sid = "sess-remember-005"
         svc = MagicMock()
         svc.remember.return_value = 1
+        svc.search_only = False
 
         assert not is_memory_enabled(sid)
         handle_tools_call("vectr_remember", {"content": "stub code here"}, svc, session_id=sid)
