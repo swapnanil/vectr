@@ -86,6 +86,11 @@ class VectrService:
         self._searcher.set_file_importance(
             self._symbol_graph.file_importance(self._workspace_root)
         )
+        # ARCH-2: seed the searcher's class-importance prior from the persisted
+        # class_importance table the same way (empty until ARCH-2 has run once).
+        self._searcher.set_class_importance(
+            self._symbol_graph.class_importance(self._workspace_root)
+        )
 
         # Memory layer — semantic recall enabled via the same embedder + ChromaDB client
         # used by the code index, so no extra model load or second DB process.
@@ -229,6 +234,10 @@ class VectrService:
             # the searcher so the ranking prior reflects the current graph.
             self._searcher.set_file_importance(
                 self._symbol_graph.file_importance(self._workspace_root)
+            )
+            # ARCH-2: same for the freshly-computed class-level importance.
+            self._searcher.set_class_importance(
+                self._symbol_graph.class_importance(self._workspace_root)
             )
         except Exception:
             logger.exception("Symbol graph build failed (non-fatal)")
