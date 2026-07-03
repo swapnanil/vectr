@@ -567,6 +567,23 @@ def _extract_signature(code_lines: list[str]) -> tuple[list[str], int]:
     return sig, min(len(code_lines), _DV_MAX_SIGNATURE_LINES)
 
 
+def _first_paragraph(text: str) -> str:
+    """The text up to (not including) the first blank line, else the whole text.
+
+    PEP 257 convention (mirrored by Google/NumPy docstring styles): a
+    multi-line docstring is a one-line summary, a blank line, then an
+    elaborated description — often a structured block (``Args:``, attribute
+    lists, examples). The summary line alone already carries the purpose;
+    everything after the first blank line is detail for a human reader, not
+    additional intent signal. Keeping it anyway measurably dilutes the
+    embedding (see ARCH-4-DEBUG spike evidence), the same class of problem the
+    purpose vector exists to defeat — just recurring one level down inside the
+    docstring itself for structured multi-paragraph text.
+    """
+    m = re.search(r"\n[ \t]*\n", text)
+    return text[: m.start()] if m else text
+
+
 def _extract_python_docstring(body_lines: list[str]) -> str:
     """First-statement docstring from a Python function/class body, if any."""
     body_text = "\n".join(body_lines).strip()
@@ -577,7 +594,7 @@ def _extract_python_docstring(body_lines: list[str]) -> str:
     )
     if not m:
         return ""
-    doc = m.group("body").strip()
+    doc = _first_paragraph(m.group("body").strip())
     doc_lines = doc.splitlines()[:_DV_MAX_DOCSTRING_LINES]
     return "\n".join(doc_lines)[:_DV_MAX_DOCSTRING_CHARS]
 
@@ -620,7 +637,12 @@ def build_purpose_text(
     if signature:
         parts.append("\n".join(signature))
     if leading_doc:
-        parts.append("\n".join(leading_doc))
+        # Same size caps as the Python docstring branch (max_docstring_lines /
+        # max_docstring_chars) — a long JSDoc/rustdoc/godoc header block dilutes
+        # the purpose embedding exactly like an untruncated Python docstring
+        # would; this branch was previously uncapped.
+        capped_doc = leading_doc[:_DV_MAX_DOCSTRING_LINES]
+        parts.append("\n".join(capped_doc)[:_DV_MAX_DOCSTRING_CHARS])
     if docstring:
         parts.append(docstring)
     return "\n".join(parts)

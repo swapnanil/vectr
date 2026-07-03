@@ -49,6 +49,24 @@ class TestClassify:
     def test_semantic_error_handling(self) -> None:
         assert classify("error handling in the bid pipeline") == QueryType.SEMANTIC
 
+    # F50: bare "implementation(s)" noun is not a call-graph signal on its own —
+    # only structural phrasings ("implementations of X", "implements the
+    # interface", "who implements") should route to CALL_GRAPH.
+    def test_semantic_bare_implementation_noun(self) -> None:
+        assert classify("caching framework implementation") == QueryType.SEMANTIC
+
+    def test_semantic_bare_implementation_noun_variant(self) -> None:
+        assert classify("dispatcher implementation") == QueryType.SEMANTIC
+
+    def test_call_graph_implementations_of(self) -> None:
+        assert classify("implementations of PaymentProcessor") == QueryType.CALL_GRAPH
+
+    def test_call_graph_implements_the_interface(self) -> None:
+        assert classify("implements the interface") == QueryType.CALL_GRAPH
+
+    def test_call_graph_who_implements(self) -> None:
+        assert classify("who implements the Comparable interface") == QueryType.CALL_GRAPH
+
 
 # ---------------------------------------------------------------------------
 # route()

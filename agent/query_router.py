@@ -68,11 +68,21 @@ _SYMBOL = [
 
 _CALL_GRAPH = [
     r"\bwhat (calls?|invokes?|uses?|calls into)\b",
-    r"\bwho (calls?|uses?|invokes?)\b",
+    r"\bwho (calls?|uses?|invokes?|implements?)\b",
     r"\bcall(er|graph|chain|stack|tree)s?\b",
     r"\bwhat does .{0,30} (depend on|call|use|import)\b",
     r"\b(dependenc(y|ies)|downstream|upstream)\b",
-    r"\b(implement(ors?|ations?)|extend(s|ed by)|subclass(es)?|override)\b",
+    # F50: "implementations? of X" / "implements the interface" are genuinely
+    # structural (asking the graph for all implementers of an interface/type) —
+    # kept. A BARE "implementation(s)" noun (e.g. "caching framework
+    # implementation") is NOT a call-graph signal on its own and previously
+    # misrouted ordinary conceptual queries to CALL_GRAPH; removed rather than
+    # narrowed further (heuristic-removal, not a compensating keyword).
+    r"\bimplementations? of\b",
+    r"\bimplements? the interface\b",
+    r"\bextend(s|ed by)\b",
+    r"\bsubclass(es)?\b",
+    r"\boverride\b",
     r"\bwhat (imports?|requires?|needs?|includes?) .{0,30}\b",
 ]
 
