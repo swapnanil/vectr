@@ -102,6 +102,7 @@ async def search(body: SearchRequest, request: Request) -> SearchResponse:
         chunks_searched=svc.total_chunks,
         processing_ms=int((time.monotonic() - t0) * 1000),
         model=get_model(),
+        low_confidence=getattr(results, "low_confidence", False),
     )
 
 
