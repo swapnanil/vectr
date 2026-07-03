@@ -137,8 +137,15 @@ def should_index_file(
     file_path: str,
     gitignore_patterns: list[str],
     extra_excluded_dirs: set[str] | None = None,
+    workspace_root: str | None = None,
 ) -> bool:
-    """Return True if the file should be indexed."""
+    """Return True if the file should be indexed.
+
+    Excluded directory NAMES are matched only against path components below
+    workspace_root (when given) — a workspace that itself lives under an
+    excluded-sounding prefix (e.g. /tmp/myproject or repo/tmp/fixture) must
+    not have every one of its files excluded by its own absolute path.
+    """
     path = Path(file_path)
 
     if path.suffix.lower() not in _SUPPORTED_EXTS:
@@ -154,7 +161,14 @@ def should_index_file(
 
     excluded = _ALWAYS_SKIP | (extra_excluded_dirs or set())
 
-    for part in path.parts:
+    parts = path.parts
+    if workspace_root:
+        try:
+            parts = path.resolve().relative_to(Path(workspace_root).resolve()).parts
+        except ValueError:
+            pass  # file outside the root — fall back to full-path parts
+
+    for part in parts:
         if part in excluded:
             return False
 

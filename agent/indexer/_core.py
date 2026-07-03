@@ -132,7 +132,8 @@ class CodeIndexer:
                 dirnames[:] = [d for d in dirnames if d not in all_excluded and not d.startswith(".")]
                 for fname in filenames:
                     fpath = Path(dirpath) / fname
-                    if should_index_file(str(fpath), root_patterns, extra_excluded_dirs=vectrignore_dirs):
+                    if should_index_file(str(fpath), root_patterns, extra_excluded_dirs=vectrignore_dirs,
+                                         workspace_root=str(root)):
                         all_files.append(fpath)
 
         should_index_paths = {str(f) for f in all_files}

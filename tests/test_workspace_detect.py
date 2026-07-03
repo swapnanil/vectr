@@ -393,3 +393,41 @@ class TestWriteDefaultVectrignore:
         write_default_vectrignore(str(tmp_path))
         second = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
         assert first == second
+
+
+class TestShouldIndexFileWorkspaceUnderExcludedPrefix:
+    """Regression (2026-07-03): a workspace living under an excluded-sounding
+    absolute prefix (e.g. repo/tmp/fixture, /tmp/myproject) had EVERY file
+    excluded because excluded dir names were matched against the full absolute
+    path parts. With workspace_root given, only components below the root count.
+    Live symptom: the acceptance fixture indexed 0 of 3212 files after a
+    default .vectrignore (containing 'tmp') was seeded into it.
+    """
+
+    def test_workspace_under_tmp_prefix_is_indexable(self, tmp_path) -> None:
+        from integrations.workspace_detect import should_index_file
+        ws = tmp_path / "tmp" / "fixture-project"
+        ws.mkdir(parents=True)
+        f = ws / "module.py"
+        f.write_text("def fn():\n    return 1\n")
+        assert should_index_file(
+            str(f), [], extra_excluded_dirs={"tmp"}, workspace_root=str(ws)
+        ) is True
+
+    def test_excluded_dir_below_root_still_excluded(self, tmp_path) -> None:
+        from integrations.workspace_detect import should_index_file
+        ws = tmp_path / "tmp" / "fixture-project"
+        sub = ws / "tmp"
+        sub.mkdir(parents=True)
+        f = sub / "scratch.py"
+        f.write_text("x = 1\n")
+        assert should_index_file(
+            str(f), [], extra_excluded_dirs={"tmp"}, workspace_root=str(ws)
+        ) is False
+
+    def test_no_workspace_root_keeps_old_behavior(self, tmp_path) -> None:
+        from integrations.workspace_detect import should_index_file
+        f = tmp_path / "tmp" / "proj" / "a.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("x = 1\n")
+        assert should_index_file(str(f), [], extra_excluded_dirs={"tmp"}) is False
