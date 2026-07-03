@@ -21,6 +21,7 @@ from agent.config import (
     RERANK_PRE_FILTER_FETCH_K as _RERANK_PRE_FILTER_FETCH_K,
     IMPORTANCE_PRIOR_LAMBDA as _IMPORTANCE_PRIOR_LAMBDA,
     CLASS_IMPORTANCE_PRIOR_LAMBDA as _CLASS_IMPORTANCE_PRIOR_LAMBDA,
+    PURPOSE_RANK_PRIOR_LAMBDA as _PURPOSE_RANK_PRIOR_LAMBDA,
     DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED,
     DUAL_VECTOR_BLEND_MODE as _DUAL_VECTOR_BLEND_MODE,
     DUAL_VECTOR_BLEND_WEIGHT as _DUAL_VECTOR_BLEND_WEIGHT,
@@ -129,6 +130,15 @@ class SearchResult:
     # UPG-11.4: symbol line-range affordance — populated from indexed metadata at search time.
     symbol_start_line: int = 0
     symbol_end_line: int = 0
+    # ARCH-4b: the chunk's own body-vs-purpose cosine similarity to the query,
+    # already normalized to [0,1] (query_vector_purpose distances are clamped at
+    # 0 the same way body vec_scores are). Defaults to 0.0 — an exact no-op —
+    # for chunks with no purpose vector (dual_vector disabled, or a non-symbol
+    # chunk that never got one) and for any candidate built outside search()
+    # (e.g. test fixtures). Consumed by _apply_quality_and_dedup's final-sort
+    # blend; never affects pool entry, which ARCH-4's dense_scores merge already
+    # handles upstream.
+    purpose_sim: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +389,9 @@ class CodeSearcher:
                 # callers can expand to the full definition without a blind re-read.
                 symbol_start_line=start_line,
                 symbol_end_line=end_line,
+                # ARCH-4b: thread the chunk's purpose-vector similarity through to
+                # the final sort (0.0 when the chunk never had a purpose vector).
+                purpose_sim=purpose_scores.get(cid, 0.0),
             ))
 
         # --- Cross-encoder rerank ---
@@ -399,11 +412,14 @@ class CodeSearcher:
 
         Pipeline: final_score = base_rerank_score * quality_score(chunk) *
         (1 + lambda_file * file_importance) (ARCH-1b) * (1 + lambda_class *
-        class_importance) (ARCH-2). Both importance factors are relevance-gated
-        multiplicative priors — multiplying by base_rerank_score means an
-        irrelevant high-importance file/class (base ≈ 0) is never lifted. When no
-        importance map is installed (or its lambda = 0) that factor is 1.0 and the
-        score falls back accordingly (both absent → base × quality, pre-ARCH-1b).
+        class_importance) (ARCH-2) * (1 + lambda_purpose * purpose_sim) (ARCH-4b).
+        All three are relevance-gated multiplicative priors — multiplying by
+        base_rerank_score means an irrelevant high-importance/high-purpose-sim
+        chunk (base ≈ 0) is never lifted. When no importance map is installed (or
+        a lambda = 0) that factor is 1.0 and the score falls back accordingly (all
+        three absent → base × quality, pre-ARCH-1b). purpose_sim defaults to 0.0
+        on every SearchResult built outside a purpose-vector pool-entry rescue, so
+        the ARCH-4b factor is an exact no-op for chunks with no purpose vector.
         Keeps exact-duplicate dedup and the quality_score call (with trivial/navigational/
         doc-language demotion intact).
 
@@ -444,7 +460,14 @@ class CodeSearcher:
             # context, no map is installed, or lambda = 0.
             imp_class = self._class_importance.get(class_ctx, 0.0) if class_ctx and self._class_importance else 0.0
             class_factor = 1.0 + _CLASS_IMPORTANCE_PRIOR_LAMBDA * imp_class
-            scored.append((base * q * file_factor * class_factor, q, i, r))
+            # ARCH-4b: relevance-gated purpose-similarity prior — carries the
+            # ARCH-4 dual-vector pool-entry signal into the FINAL sort, which the
+            # body-only cross-encoder rerank cannot see. purpose_sim is already
+            # normalized to [0,1] (query_vector_purpose distances are clamped the
+            # same way body vec_scores are) and defaults to 0.0 for any chunk with
+            # no purpose vector, making the factor an exact no-op (1.0) for it.
+            purpose_factor = 1.0 + _PURPOSE_RANK_PRIOR_LAMBDA * r.purpose_sim
+            scored.append((base * q * file_factor * class_factor * purpose_factor, q, i, r))
 
         # Deterministic order: final score desc, quality desc, length desc, then
         # original rank, then path — so equal-scoring boilerplate never wins by

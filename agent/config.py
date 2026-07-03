@@ -99,6 +99,16 @@ CLASS_IMPORTANCE_PRIOR_LAMBDA : float
     * (1 + lambda_class * class_imp). 0 disables (pre-ARCH-2 behaviour). The lever
     that discriminates same-leaf method collisions file-level importance cannot.
 
+PURPOSE_RANK_PRIOR_LAMBDA : float
+    Blend weight for the ARCH-4 dual-vector purpose-similarity prior in the final
+    search sort (ARCH-4b), composed with the two priors above: final_score =
+    base_rerank_score * quality_score * (1 + lambda_file * file_imp) * (1 +
+    lambda_class * class_imp) * (1 + lambda_purpose * purpose_sim). purpose_sim is
+    the chunk's own body-vs-purpose cosine similarity (0 when no purpose vector
+    exists for the chunk). 0 disables (pre-ARCH-4b behaviour). Carries the ARCH-4
+    pool-entry signal into the final rank, which the body-only cross-encoder
+    rerank cannot see.
+
 INDEXING_FLOW_SCAN_HEAD_BYTES : int
     Bytes scanned from the start of a `.js` file when detecting Flow type syntax
     (UPG-JSFLOW-SYMBOLS). A header scan, not a full-file walk.
@@ -234,6 +244,14 @@ IMPORTANCE_PRIOR_LAMBDA: float = float(_imp_cfg["lambda"])
 _cimp_cfg: dict[str, Any] = _cfg["ranking"]["class_importance"]
 
 CLASS_IMPORTANCE_PRIOR_LAMBDA: float = float(_cimp_cfg["lambda"])
+
+# ---------------------------------------------------------------------------
+# Purpose-rank prior — dual-vector purpose-similarity blend into final sort (ARCH-4b)
+# ---------------------------------------------------------------------------
+
+_prp_cfg: dict[str, Any] = _cfg["ranking"]["purpose_rank"]
+
+PURPOSE_RANK_PRIOR_LAMBDA: float = float(_prp_cfg["lambda"])
 
 # ---------------------------------------------------------------------------
 # Rerank pool sizes (UPG-12.1)
