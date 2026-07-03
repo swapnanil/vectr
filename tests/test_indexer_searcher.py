@@ -1388,6 +1388,9 @@ class _DilutionEmbedProvider:
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [_bow_vector(t) for t in texts]
 
+    def embed_query(self, texts: list[str]) -> list[list[float]]:
+        return self.embed(texts)
+
 
 class TestDualVectorPoolEntryEvidenceGate:
     """Proves the ARCH-4 mechanism, not just that code paths run without error:

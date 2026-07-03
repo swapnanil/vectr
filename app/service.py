@@ -61,6 +61,9 @@ class VectrService:
         self._workspace_root = find_workspace_root(workspace_root)
         self._extra_roots: list[str] = list(extra_roots or [])
         self._port = port
+        # Default is an asymmetric embedding model — search queries must be embedded
+        # via the provider's embed_query (registered "query" prompt), never embed().
+        # See agent/indexer/_types.py:LocalEmbedProvider for the query/document split.
         self._embed_model = os.getenv("VECTR_EMBED_MODEL", "Snowflake/snowflake-arctic-embed-m-v1.5")
         # Memory-only mode: code indexing + file watcher are disabled.
         # Reads from env (propagated by _do_start) or from the constructor arg.
@@ -117,6 +120,7 @@ class VectrService:
             self._context_store = WorkingContextStore(
                 db_dir,
                 embed_fn=self._indexer.embed_texts,
+                embed_query_fn=self._indexer.embed_query_batch,
                 notes_chroma_client=self._indexer.chroma_client,
             )
 

@@ -29,6 +29,15 @@ class CodeChunk:
 class EmbedProvider(Protocol):
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 
+    def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Embed search-query text. Distinct from `embed()` (document/indexing side)
+        because asymmetric embedding models (e.g. the default Snowflake arctic-embed
+        model) require a different, model-registered prompt for queries than for the
+        passages they're matched against. Providers with no such distinction may just
+        delegate to `embed()`.
+        """
+        ...
+
 
 class LocalEmbedProvider:
     """Uses sentence-transformers (no API key). Default: Snowflake/snowflake-arctic-embed-m-v1.5."""
@@ -43,10 +52,28 @@ class LocalEmbedProvider:
             trust_remote_code=True,
             device="cpu",
         )
+        # Asymmetric embedding models (arctic-embed and others) register a "query"
+        # prompt in their sentence-transformers config that must be prepended to
+        # search queries but NOT to the documents/chunks being indexed. Detected from
+        # the loaded model itself (never hardcoded) so symmetric models — which
+        # register no such prompt — embed queries and documents identically, unchanged.
+        self._has_query_prompt = "query" in getattr(self._model, "prompts", {})
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         embeddings = self._model.encode(
             texts,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        return embeddings.tolist()
+
+    def embed_query(self, texts: list[str]) -> list[list[float]]:
+        if not self._has_query_prompt:
+            return self.embed(texts)
+        embeddings = self._model.encode(
+            texts,
+            prompt_name="query",
             convert_to_numpy=True,
             normalize_embeddings=True,
             show_progress_bar=False,
@@ -66,6 +93,9 @@ class VoyageEmbedProvider:
         result = self._client.embed(texts, model=self._model)
         return result.embeddings
 
+    def embed_query(self, texts: list[str]) -> list[list[float]]:
+        return self.embed(texts)
+
 
 class OpenAIEmbedProvider:
     """Uses OpenAI embedding model (requires OPENAI_API_KEY)."""
@@ -78,6 +108,9 @@ class OpenAIEmbedProvider:
     def embed(self, texts: list[str]) -> list[list[float]]:
         response = self._client.embeddings.create(input=texts, model=self._model)
         return [item.embedding for item in response.data]
+
+    def embed_query(self, texts: list[str]) -> list[list[float]]:
+        return self.embed(texts)
 
 
 def get_embed_provider(model_spec: str) -> EmbedProvider:
