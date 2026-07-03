@@ -20,6 +20,7 @@ from agent.config import (
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
     RERANK_PRE_FILTER_FETCH_K as _RERANK_PRE_FILTER_FETCH_K,
     IMPORTANCE_PRIOR_LAMBDA as _IMPORTANCE_PRIOR_LAMBDA,
+    CLASS_IMPORTANCE_PRIOR_LAMBDA as _CLASS_IMPORTANCE_PRIOR_LAMBDA,
     DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED,
     DUAL_VECTOR_BLEND_MODE as _DUAL_VECTOR_BLEND_MODE,
     DUAL_VECTOR_BLEND_WEIGHT as _DUAL_VECTOR_BLEND_WEIGHT,
@@ -145,6 +146,13 @@ class CodeSearcher:
         # Injected by the service after each symbol-graph build via set_file_importance().
         # Empty until then → the importance prior is a no-op (pre-ARCH-1b behaviour).
         self._file_importance: dict[str, float] = {}
+        # ARCH-2: class_name -> normalized class-level reference-frequency
+        # importance ∈ [0,1]. Injected by the service after each symbol-graph
+        # build via set_class_importance(). Empty until then → the class-importance
+        # prior is a no-op (pre-ARCH-2 behaviour). Discriminates same-leaf method
+        # collisions (two unrelated classes defining a same-named method) that the
+        # file-level prior above cannot.
+        self._class_importance: dict[str, float] = {}
         # Read at instantiation so test fixtures can override via os.environ before creating searcher
         reranker_model = os.getenv("VECTR_RERANKER_MODEL", "BAAI/bge-reranker-base")
         self._reranker = _Reranker(reranker_model) if reranker_model else None
@@ -154,6 +162,13 @@ class CodeSearcher:
         prior. Called by the service after (re)building the symbol graph. Passing an
         empty dict disables the prior (the searcher falls back to base × quality)."""
         self._file_importance = importance or {}
+
+    def set_class_importance(self, importance: dict[str, float]) -> None:
+        """Install the class-level importance map consumed by the ARCH-2 ranking
+        prior. Called by the service after (re)building the symbol graph. Passing an
+        empty dict disables the prior (the searcher falls back to whatever the
+        file-level prior and base × quality already produce)."""
+        self._class_importance = importance or {}
 
     def refresh_bm25(self) -> None:
         """Rebuild the BM25 index from the current ChromaDB collection."""
@@ -383,11 +398,12 @@ class CodeSearcher:
         """Re-rank by relevance×quality, collapse duplicates, break ties deterministically.
 
         Pipeline: final_score = base_rerank_score * quality_score(chunk) *
-        (1 + lambda * file_importance) (ARCH-1b). The importance factor is a
-        relevance-gated multiplicative prior — multiplying by base_rerank_score
-        means an irrelevant high-importance file (base ≈ 0) is never lifted. When no
-        importance map is installed (or lambda = 0) the factor is 1.0 and the score
-        reduces to base × quality.
+        (1 + lambda_file * file_importance) (ARCH-1b) * (1 + lambda_class *
+        class_importance) (ARCH-2). Both importance factors are relevance-gated
+        multiplicative priors — multiplying by base_rerank_score means an
+        irrelevant high-importance file/class (base ≈ 0) is never lifted. When no
+        importance map is installed (or its lambda = 0) that factor is 1.0 and the
+        score falls back accordingly (both absent → base × quality, pre-ARCH-1b).
         Keeps exact-duplicate dedup and the quality_score call (with trivial/navigational/
         doc-language demotion intact).
 
@@ -406,21 +422,29 @@ class CodeSearcher:
             q = quality_score(
                 r.content, r.file_path, r.language, r.node_type,
             )
-            # UPG-11.10: promote symbol_name to the qualified "Class.leaf" form when
-            # class context can be extracted from the indexer-injected "# class: X"
-            # prefix in the chunk content.  Presentational only — it makes the
-            # REST/MCP `symbol` field show "Field.deconstruct" instead of the bare
-            # "deconstruct" so callers see which class owns the chunk.  Does not
-            # affect ranking.
-            if r.symbol_name and "." not in r.symbol_name and "::" not in r.symbol_name:
-                class_ctx = extract_class_from_content(r.content)
-                if class_ctx:
-                    r.symbol_name = f"{class_ctx}.{r.symbol_name}"
+            # Class context recovered from the indexer-injected "# class: X" prefix
+            # in the chunk content (chunk_quality.extract_class_from_content) — the
+            # AST-based chunker derives this from actual span containment (UPG-F4),
+            # so no separate containment computation is needed here. Used both to
+            # promote symbol_name (UPG-11.10, presentational) and to look up the
+            # chunk's owning-class importance below (ARCH-2, affects ranking).
+            class_ctx = extract_class_from_content(r.content)
+            # UPG-11.10: promote symbol_name to the qualified "Class.leaf" form.
+            # Presentational only — it makes the REST/MCP `symbol` field show
+            # "Field.deconstruct" instead of the bare "deconstruct" so callers see
+            # which class owns the chunk. Does not affect ranking.
+            if class_ctx and r.symbol_name and "." not in r.symbol_name and "::" not in r.symbol_name:
+                r.symbol_name = f"{class_ctx}.{r.symbol_name}"
             # ARCH-1b: relevance-gated file-importance prior. importance ∈ [0,1];
             # factor ∈ [1, 1+lambda]. No-op when no map installed or lambda = 0.
-            imp = self._file_importance.get(r.file_path, 0.0) if self._file_importance else 0.0
-            importance_factor = 1.0 + _IMPORTANCE_PRIOR_LAMBDA * imp
-            scored.append((base * q * importance_factor, q, i, r))
+            imp_file = self._file_importance.get(r.file_path, 0.0) if self._file_importance else 0.0
+            file_factor = 1.0 + _IMPORTANCE_PRIOR_LAMBDA * imp_file
+            # ARCH-2: relevance-gated class-importance prior — same shape as
+            # ARCH-1b, at class granularity. No-op when the chunk has no class
+            # context, no map is installed, or lambda = 0.
+            imp_class = self._class_importance.get(class_ctx, 0.0) if class_ctx and self._class_importance else 0.0
+            class_factor = 1.0 + _CLASS_IMPORTANCE_PRIOR_LAMBDA * imp_class
+            scored.append((base * q * file_factor * class_factor, q, i, r))
 
         # Deterministic order: final score desc, quality desc, length desc, then
         # original rank, then path — so equal-scoring boilerplate never wins by

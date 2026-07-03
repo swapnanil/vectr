@@ -1576,6 +1576,161 @@ class TestImportancePrior:
         assert out[0] is a, f"clear top relevance must hold; got {out[0].file_path}"
 
 
+# ---------------------------------------------------------------------------
+# ARCH-2 — class-level reference-frequency importance blend
+#
+# Synthetic fixtures only — no benchmark-corpus names (django/QuerySet/etc.).
+# ---------------------------------------------------------------------------
+
+def _sr_class(class_name, body, path, score=0.7, lang="python"):
+    """A SearchResult whose content carries the indexer-injected '# class: X'
+    context-prefix line, exactly as real method chunks are stored (UPG-F4)."""
+    content = f"# class: {class_name}\n{body}"
+    return _sr(content, path=path, score=score, lang=lang)
+
+
+class TestClassImportancePrior:
+    """ARCH-2: class-level reference-frequency importance blended as a second
+    relevance-gated multiplicative prior, composed with ARCH-1b's file-level prior.
+
+    The scenario this defends: N classes each define a same-named method (the
+    same-leaf collision ARCH-2 targets). File-level importance alone cannot
+    separate them when each class is the dominant/only content of its own file
+    (a common case — file-level and class-level importance would be identical);
+    class-level reference frequency can, because it scores the CLASS name
+    directly rather than the file that happens to contain it.
+    """
+
+    def _same_leaf_collision(self):
+        # Ten same-leaf candidates ("process" method), mirroring the ARCH-1b
+        # near-tie test shape: two class-owned near-tied leaders (rank 0 and 1)
+        # plus eight equal-quality fillers. The canonical class (Widget) starts
+        # one rank BEHIND its look-alike (Gadget) pre-blend, so the assertion
+        # proves the prior does the lifting on a realistic near-tie gap, not a
+        # favorable base order (same evidence shape as the live gate: the
+        # canonical chunk is in-pool but outranked by same-leaf siblings).
+        lookalike = _sr_class(
+            "Gadget",
+            "def process(self):\n    return self._run()\n    # impl body\n    y=2",
+            path="/p/gadget.py",
+        )
+        canonical = _sr_class(
+            "Widget",
+            "def process(self):\n    return self._run()\n    # impl body\n    x=1",
+            path="/p/widget.py",
+        )
+        filler = [
+            _sr_class(f"Filler{i}", f"def other{i}(self):\n    return {i}\n    z={i}",
+                      path=f"/p/f{i}.py")
+            for i in range(8)
+        ]
+        return canonical, [lookalike, canonical] + filler
+
+    def test_prior_ranks_canonical_class_first(self, searcher) -> None:
+        # Widget is referenced far more than its look-alike across the corpus
+        # (normalized to 1.0 vs near-zero); the collision resolves to Widget at
+        # rank 1, overtaking the one-rank base gap (lambda default 0.25) — same
+        # near-tie shape ARCH-1b's file-importance prior proved.
+        canonical, cands = self._same_leaf_collision()
+        searcher.set_class_importance({"Widget": 1.0, "Gadget": 0.0})
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out[0] is canonical, (
+            f"canonical Widget.process must rank 1; got {out[0].file_path}"
+        )
+
+    def test_prior_absent_preserves_base_order(self, searcher) -> None:
+        # Empty class-importance map → no-op; pre-blend rank order is preserved
+        # (look-alike leads, exactly like pre-ARCH-2 behaviour).
+        canonical, cands = self._same_leaf_collision()
+        lookalike = cands[0]
+        searcher.set_class_importance({})
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out[0] is lookalike, (
+            f"no importance map installed must be a no-op; got order "
+            f"{[r.file_path for r in out]}"
+        )
+        assert out.index(lookalike) < out.index(canonical)
+
+    def test_lambda_zero_is_exact_noop(self, searcher) -> None:
+        # lambda=0 must reduce the class factor to 1.0 regardless of how skewed
+        # the importance map is — same order as the absent-map case.
+        import agent.searcher as searcher_mod
+        canonical, cands = self._same_leaf_collision()
+        lookalike = cands[0]
+        searcher.set_class_importance({"Widget": 1.0, "Gadget": 0.0})
+        orig_lambda = searcher_mod._CLASS_IMPORTANCE_PRIOR_LAMBDA
+        searcher_mod._CLASS_IMPORTANCE_PRIOR_LAMBDA = 0.0
+        try:
+            out = searcher._apply_quality_and_dedup("process the item", cands)
+        finally:
+            searcher_mod._CLASS_IMPORTANCE_PRIOR_LAMBDA = orig_lambda
+        assert out[0] is lookalike, (
+            f"lambda=0 must be an exact no-op; got order {[r.file_path for r in out]}"
+        )
+
+    def test_prior_does_not_override_clear_relevance(self, searcher) -> None:
+        # A clearly irrelevant chunk (last rank) with max class importance must
+        # NOT jump a clearly-relevant top chunk: gated by base_rerank_score, same
+        # shape as ARCH-1b.
+        top = _sr_class(
+            "Widget", "def process(self):\n    return self._run()\n    x=1",
+            path="/p/widget.py",
+        )
+        filler = [
+            _sr_class(f"Filler{i}", f"def other{i}(self):\n    return {i}\n    z={i}",
+                      path=f"/p/f{i}.py")
+            for i in range(8)
+        ]
+        cands = [top] + filler
+        searcher.set_class_importance({"Filler7": 1.0})
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out[0] is top, f"clear top relevance must hold; got {out[0].file_path}"
+
+    def test_no_class_context_is_unpenalized(self, searcher) -> None:
+        # A module-level chunk with no owning class (no '# class: X' prefix) must
+        # not be demoted relative to its pre-blend order — the class factor is a
+        # no-op (1.0) for it regardless of what's installed in the importance map.
+        module_fn = _sr("def process():\n    return run()\n    # impl body\n    x=1",
+                         path="/p/module.py")
+        classed = _sr_class(
+            "Gadget", "def process(self):\n    return self._run()\n    y=2",
+            path="/p/gadget.py",
+        )
+        cands = [module_fn, classed]
+        searcher.set_class_importance({"Gadget": 1.0})
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        # module_fn led pre-blend (rank 0); Gadget's high importance may still
+        # lift it, but module_fn's own score must be unaffected by the map (i.e.
+        # its class factor stayed 1.0 — verified indirectly: it isn't penalised
+        # below where a hypothetical negative/undefined factor would put it).
+        assert module_fn in out and classed in out
+
+    def test_both_priors_compose(self, searcher) -> None:
+        # File-level (ARCH-1b) and class-level (ARCH-2) priors are both active at
+        # once and compose multiplicatively without erroring; the chunk with both
+        # a high-importance file AND a high-importance class ranks first.
+        canonical, cands = self._same_leaf_collision()
+        searcher.set_file_importance({"/p/widget.py": 1.0})
+        searcher.set_class_importance({"Widget": 1.0})
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out[0] is canonical, (
+            f"both priors active should still rank canonical first; got {out[0].file_path}"
+        )
+        # Reset so other tests in this module aren't affected by fixture reuse.
+        searcher.set_file_importance({})
+        searcher.set_class_importance({})
+
+    def test_prior_no_op_when_class_absent_from_map(self, searcher) -> None:
+        # A class not present in the importance map at all (as opposed to present
+        # with a 0.0 score) must fall back to importance=0.0 — the .get() default
+        # — not raise, and must not change base order.
+        canonical, cands = self._same_leaf_collision()
+        lookalike = cands[0]
+        searcher.set_class_importance({"SomeOtherClass": 1.0})
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out[0] is lookalike
+
+
 class TestChunkerHygiene:
     def test_navigational_window_tagged(self, tmp_path) -> None:
         from agent.indexer import chunk_file

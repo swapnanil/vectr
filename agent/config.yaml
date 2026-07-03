@@ -70,6 +70,27 @@ ranking:
     # relevance. Live F22/F23 tuning is tracked in tasks.md ARCH-1b.
     lambda: 0.25
 
+  class_importance:
+    # ARCH-2: class-level "canonical = most-referenced" importance (whole-word
+    # reference frequency of the class name across the corpus, computed at index
+    # time by SymbolGraph._compute_and_store_class_importance and stored in the
+    # class_importance table) is blended into the FINAL search sort as a second
+    # relevance-gated multiplicative prior, alongside ARCH-1b's file-level prior:
+    #     final_score = base_rerank_score * quality_score
+    #                    * (1 + lambda_file * file_importance)
+    #                    * (1 + lambda_class * class_importance)
+    # where class_importance ∈ [0,1] is the normalized reference frequency of the
+    # chunk's owning class (0 when the chunk has no class context, e.g. a
+    # module-level function). This is the lever for same-leaf method collisions
+    # (two unrelated classes that both define a method with the same name) that
+    # file-level importance cannot discriminate — a class's own body often IS the
+    # file, so file-level PageRank has no separating signal. lambda=0 disables it
+    # (behaviour identical to pre-ARCH-2). Conservative default 0.25, matching
+    # ARCH-1b's default: reorders same-leaf look-alikes toward the canonical class
+    # without overriding clear relevance. Live F22/F23 tuning is tracked in
+    # tasks.md ARCH-2.
+    lambda: 0.25
+
   locate_ranking:
     # UPG-15.10: scope-depth + line-span signals for locate ranking.
     # These penalise class/function definitions that are buried inside function

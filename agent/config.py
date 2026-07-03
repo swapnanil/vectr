@@ -92,6 +92,13 @@ IMPORTANCE_PRIOR_LAMBDA : float
     importance). 0 disables (pre-ARCH-1b behaviour). Relevance-gated by the multiply
     against base_rerank_score.
 
+CLASS_IMPORTANCE_PRIOR_LAMBDA : float
+    Blend weight for the class-level reference-frequency importance prior in the
+    final search sort (ARCH-2), composed with IMPORTANCE_PRIOR_LAMBDA:
+    final_score = base_rerank_score * quality_score * (1 + lambda_file * file_imp)
+    * (1 + lambda_class * class_imp). 0 disables (pre-ARCH-2 behaviour). The lever
+    that discriminates same-leaf method collisions file-level importance cannot.
+
 INDEXING_FLOW_SCAN_HEAD_BYTES : int
     Bytes scanned from the start of a `.js` file when detecting Flow type syntax
     (UPG-JSFLOW-SYMBOLS). A header scan, not a full-file walk.
@@ -219,6 +226,14 @@ LOCATE_SMALL_SPAN_THRESHOLD: int = int(_lr_cfg["small_span_threshold"])
 _imp_cfg: dict[str, Any] = _cfg["ranking"]["importance_prior"]
 
 IMPORTANCE_PRIOR_LAMBDA: float = float(_imp_cfg["lambda"])
+
+# ---------------------------------------------------------------------------
+# Class importance prior — class-level reference-frequency blend (ARCH-2)
+# ---------------------------------------------------------------------------
+
+_cimp_cfg: dict[str, Any] = _cfg["ranking"]["class_importance"]
+
+CLASS_IMPORTANCE_PRIOR_LAMBDA: float = float(_cimp_cfg["lambda"])
 
 # ---------------------------------------------------------------------------
 # Rerank pool sizes (UPG-12.1)

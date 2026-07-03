@@ -82,6 +82,11 @@ def _get_imported_files(caller_file: str, workspace: str) -> list[str]:
 
 _CLASS_DEF_RE = re.compile(r"^class\s+(\w+)")
 
+# ARCH-2: whole-word identifier tokenizer used to count class-name reference
+# frequency across the corpus (locate_scope-independent — a single pass over
+# every file's text, not a per-class regex search).
+_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
 # UPG-15.10: detect enclosing function/method scopes for locate scope-depth ranking.
 # Matches `def ` and `async def ` at the start of a stripped line so indented
 # method defs inside a class are correctly identified as function scopes.
@@ -399,6 +404,13 @@ class SymbolGraph:
                     score       REAL NOT NULL,
                     PRIMARY KEY (workspace, file_path)
                 );
+
+                CREATE TABLE IF NOT EXISTS class_importance (
+                    workspace       TEXT NOT NULL,
+                    qualified_class TEXT NOT NULL,
+                    score           REAL NOT NULL,
+                    PRIMARY KEY (workspace, qualified_class)
+                );
             """)
 
     # ------------------------------------------------------------------
@@ -466,6 +478,11 @@ class SymbolGraph:
                 "DELETE FROM symbol_importance WHERE workspace = ? AND file_path = ?",
                 (workspace, file_path),
             )
+            # class_importance (ARCH-2) is keyed by class name, not file_path — a
+            # class's reference count spans the whole corpus, not one file, so a
+            # single-file delete can't correct it in isolation. It is recomputed
+            # wholesale on the next build_for_workspace() (single-file index_file()
+            # calls, used for incremental watcher updates, leave it stale until then).
 
     def build_for_workspace(
         self, workspace: str, file_paths: list[str], embed_model: str = "",
@@ -498,6 +515,11 @@ class SymbolGraph:
 
         # ARCH-1a: compute file-level PageRank importance and persist it.
         self._compute_and_store_importance(workspace)
+
+        # ARCH-2: compute class-level reference-frequency importance and persist it —
+        # the signal that discriminates same-leaf method collisions (e.g. two classes
+        # that both define a `delete` method) file-level importance cannot.
+        self._compute_and_store_class_importance(workspace, file_paths)
 
         if failed:
             logger.warning(
@@ -691,6 +713,113 @@ class SymbolGraph:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT file_path, score FROM symbol_importance WHERE workspace = ?",
+                (workspace,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    # ------------------------------------------------------------------
+    # ARCH-2: class-level "canonical = most-referenced" importance
+    # ------------------------------------------------------------------
+
+    def _compute_and_store_class_importance(
+        self, workspace: str, file_paths: list[str],
+    ) -> None:
+        """Compute class-level reference-frequency importance and persist scores.
+
+        Extends ARCH-1a's file-level importance to class granularity — the signal
+        that discriminates same-leaf METHOD collisions (two unrelated classes that
+        both define a `delete` method) which file-level importance cannot: in a
+        module with one dominant class, the class *is* the file, so file-level
+        PageRank can't separate the canonical class's methods from a same-file
+        helper's same-named method, and it can't separate two candidate classes
+        that live in different but equally-"important" files at all. Call edges are
+        leaf-only (no receiver-type resolution — `obj.delete()` edges only ever
+        record the bare `delete` target), so no edge-based signal can attribute a
+        call to one class over another; whole-word reference frequency of the
+        class's own NAME sidesteps that entirely (validated design — receiver-type
+        resolution was evaluated and rejected as the lever; see docs/tasks.md ARCH-2).
+
+        Algorithm:
+          1. Collect the distinct class names defined in this workspace (symbols
+             table, kind='class').
+          2. Single pass per file: tokenize into whole-word identifiers and count
+             occurrences of the known class names (definitions, instantiations,
+             type hints, inheritance, docs — anywhere the name appears as a whole
+             word). O(corpus size), not O(classes x corpus size).
+          3. Normalize to [0,1] by dividing by the max raw count.
+          4. Bulk-insert into class_importance (delete-first for idempotency).
+
+        A class name is intentionally NOT qualified by defining file — same-named
+        classes across files (e.g. a repeated `Meta`/`Config` inner class) share one
+        corpus-wide reference count, matching "canonical = most-referenced" rather
+        than a per-definition-site count. Owning-class attribution for a given
+        chunk happens at query time via the already-existing
+        chunk_quality.extract_class_from_content() (searcher-side); this method
+        only computes the per-class score.
+
+        Pure stdlib — no new dependency, mirrors _compute_and_store_importance.
+        """
+        with self._conn() as conn:
+            class_names: set[str] = {
+                name for (name,) in conn.execute(
+                    "SELECT DISTINCT name FROM symbols WHERE workspace = ? AND kind = 'class'",
+                    (workspace,),
+                )
+            }
+
+        if not class_names:
+            with self._conn() as conn:
+                conn.execute(
+                    "DELETE FROM class_importance WHERE workspace = ?", (workspace,)
+                )
+            return
+
+        counts: dict[str, int] = dict.fromkeys(class_names, 0)
+        for fp in file_paths:
+            try:
+                text = Path(fp).read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for m in _WORD_RE.finditer(text):
+                tok = m.group(0)
+                if tok in counts:
+                    counts[tok] += 1
+
+        max_count = max(counts.values()) if counts else 0
+
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM class_importance WHERE workspace = ?", (workspace,)
+            )
+            if max_count > 0:
+                conn.executemany(
+                    "INSERT INTO class_importance (workspace, qualified_class, score) "
+                    "VALUES (?, ?, ?)",
+                    (
+                        (workspace, name, count / max_count)
+                        for name, count in counts.items() if count > 0
+                    ),
+                )
+
+        logger.debug(
+            "ARCH-2 class importance: workspace=%s classes=%d max_raw=%d",
+            workspace, len(class_names), max_count,
+        )
+
+    def class_importance(self, workspace: str) -> dict[str, float]:
+        """Return {class_name: score} for all classes in *workspace* where score is
+        the normalized (0,1] whole-word reference-frequency importance computed at
+        index time (ARCH-2).
+
+        Returns an empty dict if importance has not been computed yet (e.g. the
+        workspace was indexed before ARCH-2, or contains no classes).
+
+        This is the read API consumed by the searcher's ranking blend — do not
+        wire into the searcher here; expose only.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT qualified_class, score FROM class_importance WHERE workspace = ?",
                 (workspace,),
             ).fetchall()
         return {r[0]: r[1] for r in rows}

@@ -2356,7 +2356,120 @@ class TestFileImportanceARCH1a:
             )
 
     def test_schema_version_bumped(self) -> None:
-        """SYMBOL_SCHEMA_VERSION must be 7 (UPG-JSFLOW-SYMBOLS bumped from 6)."""
-        assert SYMBOL_SCHEMA_VERSION == 7, (
-            f"Expected SYMBOL_SCHEMA_VERSION=7 after UPG-JSFLOW-SYMBOLS bump, got {SYMBOL_SCHEMA_VERSION}"
+        """SYMBOL_SCHEMA_VERSION must be 8 (ARCH-2 bumped from 7)."""
+        assert SYMBOL_SCHEMA_VERSION == 8, (
+            f"Expected SYMBOL_SCHEMA_VERSION=8 after ARCH-2 bump, got {SYMBOL_SCHEMA_VERSION}"
         )
+
+
+# ---------------------------------------------------------------------------
+# ARCH-2 — class-level reference-frequency importance: compute, persist, read API
+#
+# Synthetic fixtures only — no benchmark-corpus names (django/QuerySet/etc.) in
+# committed tests, matching the vectr product/benchmark separation.
+# ---------------------------------------------------------------------------
+
+class TestClassImportanceARCH2:
+    """ARCH-2: class-level reference-frequency importance computation, persistence,
+    and read API — the signal that discriminates same-leaf method collisions
+    (two unrelated classes that both define a same-named method)."""
+
+    def test_more_referenced_class_gets_highest_score(self, tmp_path) -> None:
+        """Widget is referenced (instantiated/typed) far more than Gadget across the
+        corpus → Widget must score 1.0 (max) after normalization."""
+        g = SymbolGraph(str(tmp_path))
+        ws = str(tmp_path)
+        p1 = make_py(
+            tmp_path, "widget.py",
+            "class Widget:\n"
+            "    def render(self):\n        pass\n"
+        )
+        p2 = make_py(
+            tmp_path, "gadget.py",
+            "class Gadget:\n"
+            "    def render(self):\n        pass\n"
+        )
+        # Many callers reference Widget by name (instantiation / type hints);
+        # Gadget is referenced by only its own definition.
+        referencers = [
+            make_py(tmp_path, f"caller_{i}.py", "def build():\n    return Widget()\n")
+            for i in range(5)
+        ]
+        file_paths = [p1, p2] + referencers
+        g.build_for_workspace(ws, file_paths)
+
+        scores = g.class_importance(ws)
+        assert scores.get("Widget", 0.0) == pytest.approx(1.0), (
+            f"Widget (most-referenced) must score 1.0, got {scores.get('Widget')}"
+        )
+        assert scores.get("Widget", 0.0) > scores.get("Gadget", 0.0), (
+            f"Widget must outscore Gadget: {scores}"
+        )
+
+    def test_persistence_round_trip(self, tmp_path) -> None:
+        """build_for_workspace writes class importance; class_importance() returns it."""
+        g = SymbolGraph(str(tmp_path))
+        ws = str(tmp_path)
+        p1 = make_py(tmp_path, "core.py", "class Engine:\n    def start(self):\n        pass\n")
+        p2 = make_py(tmp_path, "user.py", "def go():\n    return Engine().start()\n")
+        g.build_for_workspace(ws, [p1, p2])
+
+        scores = g.class_importance(ws)
+        assert "Engine" in scores
+        for name, score in scores.items():
+            assert 0.0 < score <= 1.0 + 1e-9, f"{name} has score {score} outside (0, 1]"
+
+    def test_rebuild_idempotency(self, tmp_path) -> None:
+        """Calling build_for_workspace twice does not duplicate class_importance rows."""
+        g = SymbolGraph(str(tmp_path))
+        ws = str(tmp_path)
+        p1 = make_py(tmp_path, "core.py", "class Engine:\n    def start(self):\n        pass\n")
+        p2 = make_py(tmp_path, "user.py", "def go():\n    return Engine().start()\n")
+        file_paths = [p1, p2]
+
+        g.build_for_workspace(ws, file_paths)
+        first = g.class_importance(ws)
+        g.build_for_workspace(ws, file_paths)
+        second = g.class_importance(ws)
+        assert first == second
+
+        with g._conn() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM class_importance WHERE workspace = ?", (ws,)
+            ).fetchone()[0]
+        assert count == len(second), (
+            f"Row count ({count}) must equal len(class_importance) ({len(second)}) — no duplicates"
+        )
+
+    def test_empty_graph_no_crash(self, tmp_path) -> None:
+        """A workspace with no symbols must not crash; class_importance returns empty."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g._compute_and_store_class_importance(ws, [])
+        assert g.class_importance(ws) == {}
+
+    def test_no_classes_no_crash(self, tmp_path) -> None:
+        """A workspace with symbols but no classes (only functions) must not crash."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        p = make_py(tmp_path, "funcs.py", "def standalone():\n    pass\n")
+        g.build_for_workspace(ws, [p])
+        assert g.class_importance(ws) == {}
+
+    def test_class_importance_empty_when_never_built(self, tmp_path) -> None:
+        """A freshly created SymbolGraph with no compute call returns an empty dict."""
+        g = SymbolGraph(str(tmp_path))
+        assert g.class_importance(str(tmp_path)) == {}
+
+    def test_shared_class_name_across_files_aggregates(self, tmp_path) -> None:
+        """Two files each defining a class named Config both contribute to (and read
+        from) the single corpus-wide 'Config' reference count — no per-file split,
+        matching the 'canonical = most-referenced' whole-word design."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        p1 = make_py(tmp_path, "app_a.py", "class Config:\n    def load(self):\n        pass\n")
+        p2 = make_py(tmp_path, "app_b.py", "class Config:\n    def load(self):\n        pass\n")
+        p3 = make_py(tmp_path, "caller.py", "def go():\n    return Config()\n")
+        g.build_for_workspace(ws, [p1, p2, p3])
+        scores = g.class_importance(ws)
+        assert "Config" in scores
