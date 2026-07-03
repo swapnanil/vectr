@@ -214,7 +214,11 @@ ranking:
       - of
       - to
       - in
-      - on
+      # Quoted: bare "on"/"off"/"yes"/"no" are YAML 1.1 boolean literals — an
+      # unquoted "on" here is parsed as the Python bool True, not the string
+      # "on", corrupting this list (agent/config.py loads with pyyaml's
+      # default YAML 1.1 resolver).
+      - "on"
       - for
       - and
       - or
