@@ -1479,11 +1479,12 @@ class TestDualVectorPoolEntryEvidenceGate:
 # (UPG-2.1 / UPG-2.2 / UPG-2.3)
 # ---------------------------------------------------------------------------
 
-def _sr(content, path="/p/a.py", node_type="", score=0.7, lang="python"):
+def _sr(content, path="/p/a.py", node_type="", score=0.7, lang="python", purpose_sim=0.0):
     from agent.searcher import SearchResult
     return SearchResult(
         file_path=path, lines="1-9", symbol_name="", language=lang,
         score=score, content=content, node_type=node_type,
+        purpose_sim=purpose_sim,
     )
 
 
@@ -1582,11 +1583,11 @@ class TestImportancePrior:
 # Synthetic fixtures only — no benchmark-corpus names (django/QuerySet/etc.).
 # ---------------------------------------------------------------------------
 
-def _sr_class(class_name, body, path, score=0.7, lang="python"):
+def _sr_class(class_name, body, path, score=0.7, lang="python", purpose_sim=0.0):
     """A SearchResult whose content carries the indexer-injected '# class: X'
     context-prefix line, exactly as real method chunks are stored (UPG-F4)."""
     content = f"# class: {class_name}\n{body}"
-    return _sr(content, path=path, score=score, lang=lang)
+    return _sr(content, path=path, score=score, lang=lang, purpose_sim=purpose_sim)
 
 
 class TestClassImportancePrior:
@@ -1729,6 +1730,177 @@ class TestClassImportancePrior:
         searcher.set_class_importance({"SomeOtherClass": 1.0})
         out = searcher._apply_quality_and_dedup("process the item", cands)
         assert out[0] is lookalike
+
+
+# ---------------------------------------------------------------------------
+# ARCH-4b — purpose-vector similarity blended into the FINAL search sort
+#
+# Synthetic fixtures only — no benchmark-corpus names (django/QuerySet/etc.).
+# purpose_sim is set directly on each SearchResult (as search() would populate
+# it from ARCH-4's purpose_scores map) rather than via a searcher-level setter,
+# since it is a per-chunk value, not a per-class/per-file map.
+# ---------------------------------------------------------------------------
+
+class TestPurposeRankPrior:
+    """ARCH-4b: the ARCH-4 dual-vector purpose-similarity score — previously
+    consumed only at POOL ENTRY (dense_score = max(body_sim, purpose_sim)) — is
+    blended as a third relevance-gated multiplicative prior into the final sort,
+    alongside ARCH-1b's file-level and ARCH-2's class-level priors. Without this,
+    a chunk whose purpose vector is the strongest match in the corpus can still
+    be buried under body-similar siblings in the final rank, because the
+    cross-encoder rerank that dominates base_rerank_score only sees BODY text.
+    """
+
+    def _same_leaf_collision(self):
+        # Same one-rank near-tie shape as ARCH-1b/ARCH-2's near-tie tests: the
+        # canonical (purpose-strong) class starts one rank BEHIND its body-similar
+        # look-alike (purpose-weak) pre-blend.
+        lookalike = _sr_class(
+            "Gadget",
+            "def process(self):\n    return self._run()\n    # impl body\n    y=2",
+            path="/p/gadget.py", purpose_sim=0.0,
+        )
+        canonical = _sr_class(
+            "Widget",
+            "def process(self):\n    return self._run()\n    # impl body\n    x=1",
+            path="/p/widget.py", purpose_sim=0.84,
+        )
+        filler = [
+            _sr_class(f"Filler{i}", f"def other{i}(self):\n    return {i}\n    z={i}",
+                      path=f"/p/f{i}.py")
+            for i in range(8)
+        ]
+        return canonical, [lookalike, canonical] + filler
+
+    def _deep_bury_shape(self):
+        # Mirrors the live gate-v2 evidence more directly than a one-rank near
+        # tie: a base class's purpose vector is the single best match in the
+        # corpus (purpose_sim=0.84) yet 14 near-duplicate subclasses (weak
+        # purpose_sim, same body shape) out-rerank it on body text alone,
+        # burying it at rank 15 of 60 — the observed live shape was purpose-rank
+        # 1 landing at final rank 16 in a ~60-candidate pool. The final-sort
+        # purpose-rank prior must recover it to rank 1.
+        canonical = _sr_class(
+            "Widget",
+            "def process(self):\n    return self._run()\n    # impl body\n    x=1",
+            path="/p/widget.py", purpose_sim=0.84,
+        )
+        subclasses = [
+            _sr_class(
+                f"WidgetSub{i}",
+                f"def process(self):\n    return self._run()\n    # impl body\n    y={i}",
+                path=f"/p/widget_sub{i}.py", purpose_sim=0.05,
+            )
+            for i in range(14)
+        ]
+        filler = [
+            _sr_class(f"Filler{i}", f"def other{i}():\n    return {i}\n    z={i}",
+                      path=f"/p/f{i}.py")
+            for i in range(45)
+        ]
+        return canonical, subclasses + [canonical] + filler
+
+    def test_purpose_strong_promoted_over_body_strong_sibling(self, searcher) -> None:
+        # Default lambda lifts the purpose-strong canonical over the one-rank
+        # base gap, same near-tie shape ARCH-1b/ARCH-2 proved.
+        canonical, cands = self._same_leaf_collision()
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out[0] is canonical, (
+            f"purpose-strong Widget.process must rank 1; got {out[0].file_path}"
+        )
+
+    def test_deep_bury_recovered_by_default_lambda(self, searcher) -> None:
+        # The deeper live-evidence shape: default lambda=0.5 must recover the
+        # canonical from rank ~15 of 60 to rank 1.
+        canonical, cands = self._deep_bury_shape()
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out[0] is canonical, (
+            f"purpose-strong canonical must recover from deep bury; got {out[0].file_path}"
+        )
+
+    def test_class_importance_default_lambda_insufficient_for_deep_bury(self, searcher) -> None:
+        # Justifies ARCH-4b's higher-than-ARCH-2 default: ARCH-1b/ARCH-2's lambda
+        # (0.25) is proven sufficient only for a one-rank near tie (n=10); at the
+        # deep-bury depth observed live (rank ~15 of 60), 0.25 does NOT clear the
+        # gap and the purpose-strong canonical stays buried — algebra, not
+        # opinion, is why ARCH-4b ships a higher default.
+        import agent.searcher as searcher_mod
+        canonical, cands = self._deep_bury_shape()
+        orig_lambda = searcher_mod._PURPOSE_RANK_PRIOR_LAMBDA
+        searcher_mod._PURPOSE_RANK_PRIOR_LAMBDA = 0.25
+        try:
+            out = searcher._apply_quality_and_dedup("process the item", cands)
+        finally:
+            searcher_mod._PURPOSE_RANK_PRIOR_LAMBDA = orig_lambda
+        assert out[0] is not canonical, (
+            "this test documents that lambda=0.25 is NOT enough for the deep-bury "
+            "shape (that's why ARCH-4b's default is 0.5); if this now fails, the "
+            "blend formula changed and the commit-message justification needs updating"
+        )
+
+    def test_lambda_zero_is_exact_noop(self, searcher) -> None:
+        # lambda=0 must reduce the purpose factor to 1.0 regardless of purpose_sim
+        # — same order as if no purpose vectors existed at all.
+        import agent.searcher as searcher_mod
+        canonical, cands = self._same_leaf_collision()
+        lookalike = cands[0]
+        orig_lambda = searcher_mod._PURPOSE_RANK_PRIOR_LAMBDA
+        searcher_mod._PURPOSE_RANK_PRIOR_LAMBDA = 0.0
+        try:
+            out = searcher._apply_quality_and_dedup("process the item", cands)
+        finally:
+            searcher_mod._PURPOSE_RANK_PRIOR_LAMBDA = orig_lambda
+        assert out[0] is lookalike, (
+            f"lambda=0 must be an exact no-op; got order {[r.file_path for r in out]}"
+        )
+
+    def test_absent_purpose_sim_is_noop(self, searcher) -> None:
+        # A candidate with no purpose vector defaults purpose_sim=0.0 (as
+        # SearchResult's dataclass default, and as search() populates it for a
+        # chunk absent from purpose_scores). The purpose factor is 1.0 for it
+        # regardless of lambda; base rank order is preserved when every
+        # candidate is in this state (pre-ARCH-4b behaviour, identical to a
+        # workspace with dual_vector disabled or not yet indexed).
+        a = _sr("def alpha():\n    return compute()\n    # impl body\n    x=1", path="/p/a.py")
+        b = _sr("def beta():\n    return compute()\n    # impl body\n    y=2", path="/p/b.py")
+        filler = [_sr(f"def helper{i}():\n    return compute()\n    # body\n    z={i}",
+                      path=f"/p/f{i}.py") for i in range(8)]
+        cands = [a, b] + filler
+        out = searcher._apply_quality_and_dedup("compute impl", cands)
+        assert out[0] is a
+        assert out.index(a) < out.index(b)
+
+    def test_prior_does_not_override_clear_relevance(self, searcher) -> None:
+        # A clearly irrelevant chunk (last rank) with max purpose_sim must NOT
+        # jump a clearly-relevant top chunk: gated by base_rerank_score, same
+        # shape as ARCH-1b/ARCH-2.
+        top = _sr_class(
+            "Widget", "def process(self):\n    return self._run()\n    x=1",
+            path="/p/widget.py",
+        )
+        filler = [
+            _sr_class(f"Filler{i}", f"def other{i}(self):\n    return {i}\n    z={i}",
+                      path=f"/p/f{i}.py", purpose_sim=(1.0 if i == 7 else 0.0))
+            for i in range(8)
+        ]
+        cands = [top] + filler
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out[0] is top, f"clear top relevance must hold; got {out[0].file_path}"
+
+    def test_both_existing_priors_compose_with_purpose(self, searcher) -> None:
+        # All three relevance-gated priors (ARCH-1b file, ARCH-2 class, ARCH-4b
+        # purpose) active at once compose multiplicatively without erroring; the
+        # chunk that is strong on all three ranks first.
+        canonical, cands = self._same_leaf_collision()
+        searcher.set_file_importance({"/p/widget.py": 1.0})
+        searcher.set_class_importance({"Widget": 1.0})
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out[0] is canonical, (
+            f"all three priors active should still rank canonical first; got {out[0].file_path}"
+        )
+        # Reset so other tests in this module aren't affected by fixture reuse.
+        searcher.set_file_importance({})
+        searcher.set_class_importance({})
 
 
 class TestChunkerHygiene:

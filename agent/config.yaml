@@ -91,6 +91,34 @@ ranking:
     # tasks.md ARCH-2.
     lambda: 0.25
 
+  purpose_rank:
+    # ARCH-4b: carries the ARCH-4 dual-vector purpose similarity (STEP-0/ARCH-4
+    # gated it into POOL ENTRY only) into the FINAL search sort as a third
+    # relevance-gated multiplicative prior, alongside ARCH-1b's file-level and
+    # ARCH-2's class-level priors:
+    #     final_score = base_rerank_score * quality_score
+    #                    * (1 + lambda_file * file_importance)
+    #                    * (1 + lambda_class * class_importance)
+    #                    * (1 + lambda_purpose * purpose_sim)
+    # where purpose_sim ∈ [0,1] is the chunk's own body-vs-purpose-vector cosine
+    # similarity to the query (0 when the chunk has no purpose vector, e.g. a
+    # doc/config chunk, or dual_vector is disabled). Without this, a symbol whose
+    # signature+docstring is the single best purpose match in the corpus can still
+    # be buried under its own subclasses/near-duplicates in the final MCP ranking,
+    # because the cross-encoder rerank that dominates base_rerank_score only sees
+    # BODY text and has no visibility into the purpose signal that got the chunk
+    # into the pool in the first place. lambda=0 disables it (behaviour identical
+    # to pre-ARCH-4b). Default 0.5 (higher than ARCH-1b/ARCH-2's 0.25): those two
+    # priors are typically fed near-binary importance scores (0 or ~1), so a
+    # one-rank near-tie gap clears at 0.25; purpose_sim is a continuous cosine
+    # similarity that rarely reaches 1.0 even for a strong match (observed ~0.84
+    # for the best-in-corpus case) and must also recover deeper rerank-pool
+    # burial (observed: purpose-rank-1 chunk landing at final rank 16 in a
+    # ~60-candidate pool) — algebra on the multiplicative gate shows 0.25 only
+    # clears a 1-of-10-rank gap, not a 15-of-60-rank gap; 0.5 clears both. See
+    # TestPurposeRankPrior in tests/test_indexer_searcher.py for the worked cases.
+    lambda: 0.5
+
   locate_ranking:
     # UPG-15.10: scope-depth + line-span signals for locate ranking.
     # These penalise class/function definitions that are buried inside function
