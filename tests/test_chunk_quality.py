@@ -387,6 +387,134 @@ class TestBuildPurposeText:
         # The injected "# class: X" context line itself must not appear verbatim.
         assert "# class:" not in purpose
 
+    # -----------------------------------------------------------------
+    # ARCH-4-DEBUG: docstring first-paragraph distillation.
+    #
+    # A PEP-257/Google/NumPy-style multi-paragraph docstring is a one-line
+    # summary, a blank line, then an elaborated/structured description. The
+    # summary alone already carries the purpose; a structured detail block
+    # after it (an attribute list, "Args:"-style section, or a cross-reference
+    # note) measurably dilutes the purpose embedding if kept — the same
+    # dilution class ARCH-4 exists to defeat, recurring one level down inside
+    # the docstring. build_purpose_text must keep only the first paragraph by
+    # default (existing max_docstring_lines/chars remain a safety-net cap on
+    # that paragraph, unaffected here since these fixtures are short).
+    # -----------------------------------------------------------------
+
+    def test_class_definition_docstring_keeps_only_first_paragraph(self) -> None:
+        """Shape: a large class-def chunk with a structured multi-paragraph
+        docstring (summary line, blank line, an "Internal attributes:" style
+        detail block) — the chunker only stores a truncated class header, but
+        the docstring inside it can still be multi-paragraph."""
+        content = (
+            "class EventBus:\n"
+            '    """\n'
+            "    Base class for publish/subscribe event routing.\n"
+            "\n"
+            "    Internal attributes:\n"
+            "\n"
+            "        subscribers:\n"
+            "            [\n"
+            "                (\n"
+            "                    (id(subscriber), id(topic)),\n"
+            "                    ref(subscriber),\n"
+            "                )\n"
+            '    """\n'
+            "\n"
+            "    def __init__(self, use_caching=False):\n"
+        )
+        purpose = build_purpose_text(content, "EventBus", "class_definition", "python")
+        assert purpose is not None
+        assert "Base class for publish/subscribe event routing." in purpose
+        # The structured detail block must NOT dilute the purpose text.
+        assert "Internal attributes" not in purpose
+        assert "subscribers" not in purpose
+
+    def test_method_in_large_class_docstring_keeps_only_first_paragraph(self) -> None:
+        """Shape: a method inside a large class, where the method's OWN
+        docstring is multi-paragraph (summary + elaboration), independent of
+        the class-def truncation issue above."""
+        content = (
+            "# class: RecordSet\n"
+            "def fetch(self, *args, **kwargs):\n"
+            '    """Perform the lookup and return a single matching record.\n'
+            "\n"
+            "    Raises DoesNotExist if no record matches, or\n"
+            "    MultipleObjectsReturned if more than one record matches.\n"
+            '    """\n'
+            "    clone = self._chain()\n"
+            "    return clone._result_cache[0]\n"
+        )
+        purpose = build_purpose_text(content, "fetch", "function_definition", "python")
+        assert purpose is not None
+        assert "RecordSet.fetch" in purpose
+        assert "Perform the lookup and return a single matching record." in purpose
+        assert "MultipleObjectsReturned" not in purpose
+        assert "_result_cache" not in purpose
+
+    def test_module_level_function_docstring_keeps_only_first_paragraph(self) -> None:
+        """Shape: a short module-level function (no class context) whose
+        docstring has a short summary followed by short elaboration
+        paragraphs — even brief elaboration measurably dilutes the summary
+        signal, so it is dropped by default."""
+        content = (
+            "def fetch_or_404(klass, *args, **kwargs):\n"
+            '    """\n'
+            "    Use fetch() to return a record, or raise NotFound if the\n"
+            "    record does not exist.\n"
+            "\n"
+            "    klass may be a Model, Manager, or RecordSet object. All other\n"
+            "    passed arguments and keyword arguments are used in the lookup.\n"
+            "\n"
+            "    Like with RecordSet.fetch(), MultipleObjectsReturned is raised\n"
+            "    if more than one record is found.\n"
+            '    """\n'
+            "    recordset = _get_recordset(klass)\n"
+        )
+        purpose = build_purpose_text(content, "fetch_or_404", "function_definition", "python")
+        assert purpose is not None
+        assert "Use fetch() to return a record, or raise NotFound if the" in purpose
+        assert "record does not exist." in purpose
+        assert "klass may be a Model" not in purpose
+        assert "Like with RecordSet.fetch()" not in purpose
+
+    def test_single_paragraph_docstring_unaffected(self) -> None:
+        """Non-regression: a docstring with no blank line (already a single
+        paragraph) is unaffected by the first-paragraph distillation — this is
+        the common case and must not be truncated any further than before."""
+        content = (
+            "# class: RecordSet\n"
+            "def get(self, *args, **kwargs):\n"
+            '    """Perform the query and return a single object matching the given\n'
+            '    keyword arguments."""\n'
+            "    clone = self.filter(*args, **kwargs)\n"
+        )
+        purpose = build_purpose_text(content, "get", "function_definition", "python")
+        assert purpose is not None
+        assert "Perform the query and return a single object matching the given" in purpose
+        assert "keyword arguments." in purpose
+
+    def test_leading_doc_comment_capped_for_non_python(self) -> None:
+        """A long non-Python leading comment/decorator block (JSDoc, rustdoc,
+        godoc) must be capped by the same max_docstring_lines/chars limits as
+        the Python docstring branch — previously unbounded, which risked the
+        same dilution a long Python docstring would cause."""
+        lines = "\n".join(f"/// Detail line {i} about this function." for i in range(1, 30))
+        content = (
+            "/// Registry client for talking to the package index.\n"
+            f"{lines}\n"
+            "pub fn build(&self) -> Result<Client, Error> {\n"
+            "    let inner = self.inner.clone();\n"
+            "    Ok(Client { inner })\n"
+            "}\n"
+        )
+        purpose = build_purpose_text(content, "build", "function_item", "rust")
+        assert purpose is not None
+        assert "Registry client for talking to the package index." in purpose
+        # Only a bounded number of lines are kept, not all ~29 detail lines.
+        assert "Detail line 20" not in purpose
+        assert "let inner" not in purpose
+
 
 # ---------------------------------------------------------------------------
 # UPG-15.5 — trivial HTML/TXT short-prose classification (F19)

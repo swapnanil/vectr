@@ -78,7 +78,7 @@ _CHUNK_WORKERS = min(8, os.cpu_count() or 4)  # parallel chunking workers
 # Bump whenever chunking or embedding changes in a way that makes
 # already-embedded chunks stale or incomplete relative to what a fresh index
 # would produce.
-INDEXING_SCHEMA_VERSION = 2  # 1: pre-ARCH-4 baseline (unversioned cache, implicit) · 2: per-symbol purpose vector added (ARCH-4) — old workspaces rebuild to populate the purpose collection
+INDEXING_SCHEMA_VERSION = 3  # 1: pre-ARCH-4 baseline (unversioned cache, implicit) · 2: per-symbol purpose vector added (ARCH-4) · 3: purpose-text docstring distillation changed to first-paragraph-only + capped non-Python leading-doc block (ARCH-4-DEBUG) — old purpose vectors are stale relative to a fresh index and must rebuild
 
 # Sentinel key inside the mtime-cache JSON that carries INDEXING_SCHEMA_VERSION.
 # Chosen to never collide with a real filesystem path (mtime-cache keys are
