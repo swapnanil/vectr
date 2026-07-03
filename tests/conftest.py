@@ -58,6 +58,11 @@ class _DummyEmbedProvider:
     def embed(self, texts: list[str]) -> list[list[float]]:
         return self.encode(texts).tolist()
 
+    def embed_query(self, texts: list[str]) -> list[list[float]]:
+        # Symmetric stand-in — no registered query prompt, so query-mode embedding
+        # is identical to document-mode embedding (matches most real embed models).
+        return self.embed(texts)
+
 
 @pytest.fixture
 def indexer(tmp_path, monkeypatch):

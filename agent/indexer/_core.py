@@ -542,11 +542,27 @@ class CodeIndexer:
         return sorted(self.indexed_language_stats())
 
     def embed_query(self, text: str) -> list[float]:
-        """Embed a single query string. Public method for external callers."""
-        return self._embed_provider.embed([text])[0]
+        """Embed a single search-query string. Public method for external callers.
+
+        Uses the embed provider's query mode (`embed_query`), not `embed` — for
+        asymmetric models (the default arctic-embed) this applies the model's
+        registered query prompt, which is required for correct dense retrieval and
+        must never be applied on the document/indexing side.
+        """
+        return self._embed_provider.embed_query([text])[0]
+
+    def embed_query_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of search-query strings using the provider's query mode.
+
+        For working-memory recall, where a query is matched against previously
+        stored note embeddings — same query/document asymmetry as code search.
+        """
+        return self._embed_provider.embed_query(texts)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of texts using the configured embed provider."""
+        """Embed a batch of texts (document/indexing side) using the configured
+        embed provider. Never applies a query prompt — for chunk/note content being
+        stored, not for search queries."""
         return self._embed_provider.embed(texts)
 
     @property

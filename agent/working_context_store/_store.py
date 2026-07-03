@@ -24,6 +24,13 @@ class WorkingContextStore:
     at remember() time and stored in a ChromaDB 'working_memory' collection.
     recall(query=...) then uses cosine similarity to find relevant notes instead
     of SQL LIKE substring matching. SQL LIKE is retained as a fallback.
+
+    embed_fn embeds document-side text (note content being stored); embed_query_fn
+    embeds the recall query. These are kept distinct because asymmetric embedding
+    models require a different prompt for queries than for the passages they're
+    matched against — reusing embed_fn for both would silently skip that prompt on
+    every recall. Callers that don't care about the distinction (e.g. tests with a
+    plain symmetric stand-in) may omit embed_query_fn; it then defaults to embed_fn.
     """
 
     def __init__(
@@ -31,11 +38,13 @@ class WorkingContextStore:
         db_dir: str,
         embed_fn=None,
         notes_chroma_client=None,
+        embed_query_fn=None,
     ) -> None:
         self._db_path = Path(db_dir) / "working_context.sqlite"
         self._encryptor: _NoteEncryptor | None = _build_encryptor()
         # Semantic recall: embed notes at write time, cosine search at recall time
         self._embed_fn = embed_fn   # Callable[[list[str]], list[list[float]]] | None
+        self._embed_query_fn = embed_query_fn or embed_fn  # query-mode embed, defaults to embed_fn
         self._notes_col = None
         if embed_fn is not None and notes_chroma_client is not None:
             try:
@@ -351,7 +360,7 @@ class WorkingContextStore:
             return []
         n_query = min(limit * 3, col_count)
 
-        q_vec = self._embed_fn([query])[0]
+        q_vec = self._embed_query_fn([query])[0]
         results = self._notes_col.query(query_embeddings=[q_vec], n_results=n_query)
 
         if not results or not results["ids"] or not results["ids"][0]:
