@@ -25,6 +25,8 @@ from agent.config import (
     DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED,
     DUAL_VECTOR_BLEND_MODE as _DUAL_VECTOR_BLEND_MODE,
     DUAL_VECTOR_BLEND_WEIGHT as _DUAL_VECTOR_BLEND_WEIGHT,
+    NOTFOUND_FLOOR_ENABLED as _NOTFOUND_FLOOR_ENABLED,
+    NOTFOUND_FLOOR_DENSE_SCORE as _NOTFOUND_FLOOR_DENSE_SCORE,
 )
 from agent.indexer import CodeIndexer
 
@@ -141,6 +143,19 @@ class SearchResult:
     purpose_sim: float = 0.0
 
 
+class SearchResultList(list):
+    """``list[SearchResult]`` carrying a ``low_confidence`` flag (UPG-NOTFOUND-FLOOR).
+
+    A plain subclass rather than widening ``search()``'s return type — every
+    existing ``results, ms = searcher.search(...)`` call site keeps working
+    unchanged (indexing, iteration, ``len()``, truthiness all behave exactly
+    like a list), while callers that care can read
+    ``getattr(results, "low_confidence", False)``.
+    """
+
+    low_confidence: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Searcher
 # ---------------------------------------------------------------------------
@@ -210,7 +225,7 @@ class CodeSearcher:
             language = language.strip().lower() or None
 
         if self._indexer.total_chunks == 0:
-            return [], 0
+            return SearchResultList(), 0
 
         # Fetch extra candidates when reranking so the reranker has room to reorder.
         # UPG-15.7: for unfiltered queries, over-fetch up to pre_filter_fetch_k raw
@@ -282,6 +297,15 @@ class CodeSearcher:
                 }
         else:
             dense_scores = dict(vec_scores)
+
+        # UPG-NOTFOUND-FLOOR (F46): the best raw cosine similarity across the whole
+        # fetched pool (body + purpose vector spaces), captured BEFORE the hybrid
+        # merge, the cross-encoder rerank, and the quality/importance blend — none
+        # of which are absolute (the final displayed score is rank-derived and
+        # always lands near 1.0 for the top result of any query, relevant or not).
+        # A pool whose single best cosine match is still weak means the whole
+        # result set is a guess, regardless of how confidently it later gets sorted.
+        pool_max_dense_score = max(dense_scores.values()) if dense_scores else 0.0
 
         # --- BM25 search ---
         bm25_scores: dict[str, float] = {}
@@ -403,7 +427,15 @@ class CodeSearcher:
         candidates = self._apply_quality_and_dedup(query, candidates)
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
-        return candidates[:n_results], elapsed_ms
+        final = SearchResultList(candidates[:n_results])
+        # low_confidence: only meaningful when there is something to lead with —
+        # an empty result set has its own "no results" message downstream.
+        final.low_confidence = (
+            _NOTFOUND_FLOOR_ENABLED
+            and bool(final)
+            and pool_max_dense_score < _NOTFOUND_FLOOR_DENSE_SCORE
+        )
+        return final, elapsed_ms
 
     def _apply_quality_and_dedup(
         self, query: str, candidates: list[SearchResult],

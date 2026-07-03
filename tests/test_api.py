@@ -177,6 +177,45 @@ def test_search_request_accepts_any_language() -> None:
 
 
 # ---------------------------------------------------------------------------
+# UPG-NOTFOUND-FLOOR (F46) — REST low_confidence field
+# ---------------------------------------------------------------------------
+
+def test_search_default_low_confidence_false(client) -> None:
+    """The default mock returns a plain list (no low_confidence attribute) —
+    the REST route must default to False rather than error or omit the field."""
+    resp = client.post("/v1/search", json={"query": "JWT token validation"})
+    assert resp.status_code == 200
+    assert resp.json()["low_confidence"] is False
+
+
+def test_search_surfaces_low_confidence_true(client) -> None:
+    """When CodeSearcher flags the result set low_confidence, /v1/search must
+    carry that through as a top-level `low_confidence: true` field — results
+    are still returned in full (isError/suppression is never involved here,
+    this is REST, but the results list must remain non-empty)."""
+    from agent.searcher import SearchResultList
+
+    svc = app.state.service
+    weak_result = SearchResult(
+        file_path="src/unrelated/module.py",
+        lines="1-3",
+        symbol_name="unrelated_fn",
+        language="python",
+        score=0.81,
+        content="def unrelated_fn():\n    pass",
+    )
+    flagged = SearchResultList([weak_result])
+    flagged.low_confidence = True
+    svc.search.return_value = (flagged, 12)
+
+    resp = client.post("/v1/search", json={"query": "CORS handling implementation"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["low_confidence"] is True
+    assert len(data["results"]) == 1  # results are never suppressed
+
+
+# ---------------------------------------------------------------------------
 # Locate (symbol graph) — route must unwrap LocateResult.symbols
 # ---------------------------------------------------------------------------
 

@@ -161,6 +161,22 @@ DUAL_VECTOR_MAX_DOCSTRING_LINES : int
 
 DUAL_VECTOR_MAX_DOCSTRING_CHARS : int
     Maximum characters kept from the captured docstring/leading-comment text.
+
+NOTFOUND_FLOOR_ENABLED : bool
+    Master switch for the UPG-NOTFOUND-FLOOR low-confidence signal (F46).
+    False is an exact no-op: low_confidence is always False, restoring
+    pre-UPG-NOTFOUND-FLOOR behaviour.
+
+NOTFOUND_FLOOR_DENSE_SCORE : float
+    Minimum pre-rerank cosine similarity (best candidate across the whole
+    fetched pool, body + purpose vector spaces) below which a search's
+    result set is flagged low_confidence. Non-normalized — unlike the
+    displayed rank-based final score, this is not rescaled to ~1.0 for the
+    top result of every query.
+
+NOTFOUND_FLOOR_BANNER : str
+    Low-confidence banner text prepended to the MCP vectr_search response
+    when the floor fires.
 """
 from __future__ import annotations
 
@@ -361,3 +377,13 @@ DUAL_VECTOR_BLEND_WEIGHT: float = float(_dv_cfg["blend_weight"])
 DUAL_VECTOR_MAX_SIGNATURE_LINES: int = int(_dv_cfg["max_signature_lines"])
 DUAL_VECTOR_MAX_DOCSTRING_LINES: int = int(_dv_cfg["max_docstring_lines"])
 DUAL_VECTOR_MAX_DOCSTRING_CHARS: int = int(_dv_cfg["max_docstring_chars"])
+
+# ---------------------------------------------------------------------------
+# Not-found floor — absolute-relevance low-confidence signal (UPG-NOTFOUND-FLOOR)
+# ---------------------------------------------------------------------------
+
+_nff_cfg: dict[str, Any] = _cfg["ranking"]["notfound_floor"]
+
+NOTFOUND_FLOOR_ENABLED: bool = bool(_nff_cfg["enabled"])
+NOTFOUND_FLOOR_DENSE_SCORE: float = float(_nff_cfg["dense_score_floor"])
+NOTFOUND_FLOOR_BANNER: str = str(_nff_cfg["banner"])

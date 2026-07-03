@@ -2238,6 +2238,107 @@ class TestMonotonicScore:
         )
 
 
+# ---------------------------------------------------------------------------
+# UPG-NOTFOUND-FLOOR (F46) — absolute-relevance low-confidence signal
+#
+# The displayed per-result `score` is a per-query rank-derived composite
+# (base = 1 - rank/n, times quality/importance multipliers) — it always looks
+# confident near the top of ANY query, relevant or not. `low_confidence` gates
+# on the raw pre-rerank cosine similarity instead (dense_scores in
+# CodeSearcher.search, before the hybrid merge/rerank/quality blend), which is
+# NOT re-normalized per query. Uses the DummyEmbedProvider's real, deterministic
+# (hash-seeded) vectors: two distinct strings land near-orthogonal (cosine ~0),
+# while an identical string against itself lands at cosine 1.0 — no mocking of
+# the flag itself, so this exercises the exact code path used in production.
+# ---------------------------------------------------------------------------
+
+class TestNotFoundFloor:
+    def _indexed_searcher(self, indexer, tmp_path, content: str, name="module.py"):
+        path = make_py(tmp_path, name, content)
+        indexer.index_file(path)
+        from agent.searcher import CodeSearcher
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+        return s
+
+    def test_low_confidence_true_for_uniformly_weak_pool(self, indexer, tmp_path) -> None:
+        """A query semantically unrelated to anything indexed flags low_confidence,
+        even though results are still returned (never suppressed)."""
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n",
+        )
+        results, _ = s.search(
+            "elephant migration patterns across the savanna", n_results=5, rerank=False,
+        )
+        assert results, "results must still be returned, never suppressed"
+        assert results.low_confidence is True
+
+    def test_low_confidence_false_for_clearly_strong_top_hit(self, indexer, tmp_path) -> None:
+        """A query that IS the indexed chunk's own content (cosine ~1.0 against
+        itself) must not be flagged — a strong top hit is not low-confidence."""
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n",
+        )
+        exact_doc_text = s._bm25_docs[0]
+        results, _ = s.search(exact_doc_text, n_results=5, rerank=False)
+        assert results
+        assert results.low_confidence is False
+
+    def test_config_disable_is_exact_noop(self, indexer, tmp_path, monkeypatch) -> None:
+        """ranking.notfound_floor.enabled: false must be a true no-op — the flag
+        never fires even for the same uniformly-weak query that trips it above."""
+        import agent.searcher as searcher_module
+        monkeypatch.setattr(searcher_module, "_NOTFOUND_FLOOR_ENABLED", False)
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n",
+        )
+        results, _ = s.search(
+            "elephant migration patterns across the savanna", n_results=5, rerank=False,
+        )
+        assert results
+        assert results.low_confidence is False
+
+    def test_config_zero_floor_is_exact_noop(self, indexer, tmp_path, monkeypatch) -> None:
+        """dense_score_floor: 0.0 (the documented alternate disable path) never
+        fires either — every cosine similarity is >= 0.0."""
+        import agent.searcher as searcher_module
+        monkeypatch.setattr(searcher_module, "_NOTFOUND_FLOOR_DENSE_SCORE", 0.0)
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n",
+        )
+        results, _ = s.search(
+            "elephant migration patterns across the savanna", n_results=5, rerank=False,
+        )
+        assert results
+        assert results.low_confidence is False
+
+    def test_empty_results_never_flagged(self, indexer) -> None:
+        """An empty index returns an empty (not low_confidence) result set — the
+        floor is meaningless with nothing to lead with; a separate 'no results'
+        message already covers that case downstream."""
+        from agent.searcher import CodeSearcher
+        s = CodeSearcher(indexer)
+        results, ms = s.search("anything")
+        assert results == []
+        assert getattr(results, "low_confidence", False) is False
+
+    def test_search_result_list_is_a_real_list(self, indexer, tmp_path) -> None:
+        """SearchResultList must behave exactly like list[SearchResult] for every
+        existing `results, ms = searcher.search(...)` call site — indexing,
+        len(), iteration, and equality with a plain list all still work."""
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n",
+        )
+        results, _ = s.search("parse json payload", n_results=5, rerank=False)
+        assert isinstance(results, list)
+        assert len(results) == len(list(results))
+        assert results[0] == list(results)[0]
+
 
 # ---------------------------------------------------------------------------
 # UPG-11.4 — Expand-to-symbol affordance (line range on results)

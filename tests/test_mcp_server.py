@@ -428,6 +428,48 @@ class TestVectrSearch:
         result = handle_tools_call("vectr_search", {"query": "verify"}, svc)
         assert "Routing:" in result["content"][0]["text"]
 
+    # -----------------------------------------------------------------
+    # UPG-NOTFOUND-FLOOR (F46) — low-confidence banner
+    # -----------------------------------------------------------------
+
+    def test_low_confidence_banner_leads_response(self) -> None:
+        """When CodeSearcher flags the pool low_confidence, the MCP response
+        must LEAD with a banner naming the config-driven message, isError stays
+        False, and results are still shown in full below it (never suppressed)."""
+        from agent.searcher import SearchResult, SearchResultList
+        from agent.query_router import RoutingDecision, QueryType
+        from agent.config import NOTFOUND_FLOOR_BANNER
+
+        svc = _mock_service()
+        weak = SearchResult(
+            file_path="unrelated/module.py", lines="1-3", symbol_name="unrelated_fn",
+            language="python", score=0.81, content="def unrelated_fn():\n    pass",
+        )
+        flagged = SearchResultList([weak])
+        flagged.low_confidence = True
+        decision = RoutingDecision(
+            query_type=QueryType.SEMANTIC, semantic_weight=0.7,
+            also_run_symbol_lookup=False, also_run_trace=False,
+            include_map_hint=False, rationale="semantic",
+        )
+        svc.search_routed.return_value = (flagged, 10, decision, [], [])
+
+        result = handle_tools_call("vectr_search", {"query": "CORS handling implementation"}, svc)
+        text = result["content"][0]["text"]
+
+        assert result["isError"] is False
+        assert NOTFOUND_FLOOR_BANNER in text
+        # banner leads the response, before the actual results section
+        assert text.index(NOTFOUND_FLOOR_BANNER) < text.index("unrelated_fn")
+
+    def test_no_banner_when_not_low_confidence(self) -> None:
+        """The default mock's plain-list search_routed result (no low_confidence
+        attribute) must not emit the banner — the common/strong-match case."""
+        from agent.config import NOTFOUND_FLOOR_BANNER
+        svc = _mock_service()
+        result = handle_tools_call("vectr_search", {"query": "verify"}, svc)
+        assert NOTFOUND_FLOOR_BANNER not in result["content"][0]["text"]
+
 
 # ---------------------------------------------------------------------------
 # vectr_status

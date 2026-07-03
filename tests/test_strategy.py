@@ -595,11 +595,23 @@ class TestFingerprintRealWorkspace:
     @classmethod
     def _collect_py_files(cls) -> list[str]:
         root = Path(__file__).parent.parent
-        skip = {".venv", "__pycache__", ".git", ".pytest_cache"}
+        # UPG-TESTFP-TMP: `tmp/` holds benchmark/acceptance fixtures (e.g. a full
+        # django checkout, 2,900+ .py files) and `.claude/` holds coder worktrees —
+        # neither reflects vectr's own repo shape, so both inflate this
+        # self-fingerprint test's file count out of the asserted size-class range.
+        #
+        # The skip check must look at path parts RELATIVE to `root`, not the
+        # absolute path: this suite itself often runs from inside a worktree
+        # physically nested under a directory named `.claude`
+        # (`.claude/worktrees/<name>/`), so checking absolute parts would make
+        # a bare `.claude` skip-entry exclude every file under `root` — an
+        # accidental match on an ancestor directory name that has nothing to
+        # do with the workspace being fingerprinted.
+        skip = {".venv", "__pycache__", ".git", ".pytest_cache", "tmp", ".claude"}
         return [
             str(f)
             for f in root.rglob("*.py")
-            if not any(part in skip for part in f.parts)
+            if not any(part in skip for part in f.relative_to(root).parts)
         ]
 
     def test_dominant_language_is_python(self) -> None:
