@@ -2407,6 +2407,126 @@ class TestFileImportanceARCH1a:
 
 
 # ---------------------------------------------------------------------------
+# UPG-TESTPATH-FRAMEWORK-MISCLASS (F58) — unambiguous corpus-wide caller
+# fan-in: compute, persist, read API.
+#
+# Synthetic fixtures only — no benchmark-corpus names (django/QuerySet/etc.) in
+# committed tests, matching the vectr product/benchmark separation.
+# ---------------------------------------------------------------------------
+
+class TestFileFanIn:
+    """UPG-TESTPATH-FRAMEWORK-MISCLASS: corpus-wide unambiguous caller-file
+    fan-in — the signal that separates a shipped, widely-used file from a
+    disposable one, independent of path."""
+
+    def test_unambiguous_target_counts_distinct_caller_files(self, tmp_path) -> None:
+        """file_b defines 'foo' (unique leaf); c/d/e each call it → fan_in[file_b] == 3."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        files = _seed_importance_graph(g, ws, tmp_path)
+
+        g._compute_and_store_file_fan_in(ws)
+        fan_in = g.file_fan_in(ws)
+
+        assert fan_in.get(files["b"], 0) == 3, (
+            f"file_b has 3 distinct unambiguous callers (c, d, e); got {fan_in.get(files['b'])}"
+        )
+
+    def test_unreferenced_file_has_no_fan_in_row(self, tmp_path) -> None:
+        """file_a has no in-links — must not appear in the fan-in map."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        files = _seed_importance_graph(g, ws, tmp_path)
+
+        g._compute_and_store_file_fan_in(ws)
+        fan_in = g.file_fan_in(ws)
+
+        assert files["a"] not in fan_in
+
+    def test_ambiguous_leaf_is_excluded_from_fan_in(self, tmp_path) -> None:
+        """A leaf name defined in TWO files is ambiguous — edges targeting it
+        must not contribute to either file's fan-in count (leaf-collision
+        noise, e.g. __init__/setUp shared across many unrelated files)."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        import time
+        now = time.time()
+        f1 = str(tmp_path / "one.py")
+        f2 = str(tmp_path / "two.py")
+        caller = str(tmp_path / "caller.py")
+        for fp in (f1, f2, caller):
+            Path(fp).write_text("# placeholder\n")
+        with g._conn() as conn:
+            # 'dup' is defined in BOTH f1 and f2 — ambiguous leaf.
+            conn.execute(
+                "INSERT INTO symbols (workspace, name, kind, file_path, start_line, end_line, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ws, "dup", "function", f1, 1, 3, now),
+            )
+            conn.execute(
+                "INSERT INTO symbols (workspace, name, kind, file_path, start_line, end_line, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ws, "dup", "function", f2, 1, 3, now),
+            )
+            conn.execute(
+                "INSERT INTO symbols (workspace, name, kind, file_path, start_line, end_line, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ws, "caller_fn", "function", caller, 1, 3, now),
+            )
+            conn.execute(
+                "INSERT INTO edges (workspace, from_file, from_symbol, from_line, to_symbol, edge_type) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (ws, caller, "caller_fn", 10, "dup", "calls"),
+            )
+
+        g._compute_and_store_file_fan_in(ws)
+        fan_in = g.file_fan_in(ws)
+
+        assert f1 not in fan_in
+        assert f2 not in fan_in
+
+    def test_rebuild_idempotency(self, tmp_path) -> None:
+        """Calling the fan-in compute twice does not duplicate rows or change values."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_importance_graph(g, ws, tmp_path)
+
+        g._compute_and_store_file_fan_in(ws)
+        first = g.file_fan_in(ws)
+        g._compute_and_store_file_fan_in(ws)
+        second = g.file_fan_in(ws)
+
+        assert first == second
+        with g._conn() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM file_fan_in WHERE workspace = ?", (ws,)
+            ).fetchone()[0]
+        assert count == len(second), (
+            f"Row count ({count}) must equal len(file_fan_in) ({len(second)}) — no duplicates"
+        )
+
+    def test_empty_graph_no_crash(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g._compute_and_store_file_fan_in(ws)
+        assert g.file_fan_in(ws) == {}
+
+    def test_file_fan_in_empty_when_never_built(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        assert g.file_fan_in(str(tmp_path)) == {}
+
+    def test_build_for_workspace_computes_fan_in(self, tmp_path) -> None:
+        """build_for_workspace end-to-end: fan-in is persisted and readable."""
+        g = SymbolGraph(str(tmp_path))
+        p1 = make_py(tmp_path, "lib.py", "def core_fn(): pass\n")
+        p2 = make_py(tmp_path, "caller.py", "def user():\n    core_fn()\n")
+        g.build_for_workspace(str(tmp_path), [p1, p2])
+
+        fan_in = g.file_fan_in(str(tmp_path))
+        assert fan_in.get(p1, 0) == 1
+
+
+# ---------------------------------------------------------------------------
 # ARCH-2 — class-level reference-frequency importance: compute, persist, read API
 #
 # Synthetic fixtures only — no benchmark-corpus names (django/QuerySet/etc.) in

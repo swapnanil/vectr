@@ -22,10 +22,12 @@ from pathlib import PurePosixPath
 from agent.config import (
     QUALITY_TRIVIAL as _Q_TRIVIAL,
     QUALITY_NAVIGATIONAL as _Q_NAVIGATIONAL,
+    QUALITY_NAV_DECLARATION_RESCUE as _Q_NAV_DECLARATION_RESCUE,
     QUALITY_HEADING_ONLY as _Q_HEADING_ONLY,
     QUALITY_GENERATED as _Q_GENERATED,
     QUALITY_VECTR_CONFIG as _Q_VECTR_CONFIG,
     QUALITY_TEST_DEPRIORITISED as _Q_TEST_DEPRIORITISED,
+    TEST_FRAMEWORK_FAN_IN_THRESHOLD as _TEST_FRAMEWORK_FAN_IN_THRESHOLD,
     QUALITY_DOC_PROSE as _Q_DOC_PROSE,
     QUALITY_SHORT_PENALTY as _Q_SHORT_PENALTY,
     TRIVIAL_DOC_MAX_LINES as _TRIVIAL_DOC_MAX_LINES,
@@ -162,6 +164,12 @@ _COMPLEX_RHS_RE = re.compile(r"[\w\]\)]\s*\(|[A-Za-z_]\w*\.")
 # consisting only of imports and such declarations is navigational, not
 # implementation (UPG-PREFIX-COMPOSE).
 _BARE_CTOR_RHS_RE = re.compile(r"^[A-Z]\w*\([^().]*\)[\s;]*$")
+
+# _DECLARED_NAME_RE: an attribute-assignment line captured as (LHS identifier,
+# RHS).  Same shape as _ATTR_ASSIGN_RE but also captures the LHS name, so a
+# bare-constructor-manifest line's declared identifier (``request_started`` in
+# ``request_started = Signal()``) can be recovered (UPG-NAV-OVERDEMOTE-DECL).
+_DECLARED_NAME_RE = re.compile(r"^[\s]*(\w+)\s*(?::[^=]+)?\s*=\s*(.+)$")
 
 # _LEADING_DOCSTRING_DELIM_RE: a line that OPENS a Python triple-quoted string
 # at its start (module/file docstring convention).  Used only to recognise a
@@ -351,6 +359,43 @@ def is_navigational_chunk(content: str, language: str = "") -> bool:
     return nav == len(body)
 
 
+def navigational_declared_identifiers(content: str) -> list[str]:
+    """Identifiers declared by bare-constructor-manifest assignment lines.
+
+    A chunk classified navigational via the bare-constructor-manifest pattern
+    (``request_started = Signal()``, UPG-PREFIX-COMPOSE) is not a pure
+    re-export — the LHS name of each such line IS the corpus-wide unique
+    declaration site of that identifier. quality_score() uses this to check
+    whether a query lexically names one of the declared identifiers before
+    applying the full navigational demotion (UPG-NAV-OVERDEMOTE-DECL / F59):
+    a manifest that IS the answer to "where is X defined" should not be
+    buried the same way a plain re-export block is. Returns [] for chunks
+    with no such lines (pure import blocks keep the full demotion).
+    """
+    out: list[str] = []
+    for line in _meaningful_lines(content):
+        m = _DECLARED_NAME_RE.match(line)
+        if m and _BARE_CTOR_RHS_RE.match(m.group(2).strip()):
+            out.append(m.group(1))
+    return out
+
+
+# Identifier sub-word tokenizer — duplicated (not imported) from
+# agent.searcher._code_tokenize's identifier-aware splitting, because
+# searcher.py already imports FROM this module (importing back would cycle).
+# Used only to compare a chunk's declared identifier names against the
+# query's own already-tokenized BM25 tokens (lexical-match-gated), never as a
+# standing query-keyword list.
+_IDENT_SPLIT_RE = re.compile(r"[^a-zA-Z0-9]+")
+_CAMEL_IDENT_RE = re.compile(r"([a-z])([A-Z])")
+
+
+def _identifier_parts(text: str) -> frozenset[str]:
+    """Lowercase sub-word tokens of an identifier (camelCase + snake_case split)."""
+    expanded = _CAMEL_IDENT_RE.sub(r"\1 \2", text)
+    return frozenset(t for t in _IDENT_SPLIT_RE.split(expanded.lower()) if len(t) >= 2)
+
+
 def is_markdown_heading_only(content: str) -> bool:
     """True if a markdown chunk is essentially just heading(s) + a scrap of body.
 
@@ -485,16 +530,31 @@ def quality_score(
     file_path: str = "",
     language: str = "",
     node_type: str = "",
+    query_tokens: frozenset[str] = frozenset(),
+    file_fan_in: int = 0,
 ) -> float:
     """A per-chunk usefulness prior in (0, 1], folded into ranking as a multiplier.
 
     Relevance × usefulness: similarity already models relevance; this models
     "is this chunk a good answer at all, regardless of similarity". Cheap and
     language-agnostic. Lower = worse answer.
+
+    ``query_tokens`` (already-tokenized BM25 query tokens, not a keyword list)
+    softens the navigational demotion when the chunk is a bare-constructor-
+    manifest whose declared identifier the query names directly
+    (UPG-NAV-OVERDEMOTE-DECL / F59). ``file_fan_in`` (corpus-wide unambiguous
+    caller-file count, see symbol_graph.file_fan_in) exempts a shipped
+    testing-framework file misclassified by its test-named path from the
+    test-file demotion (UPG-TESTPATH-FRAMEWORK-MISCLASS / F58).
     """
     if file_path and is_vectr_config_file(file_path):
         return _Q_VECTR_CONFIG
     if node_type == NAVIGATIONAL_NODE_TYPE or is_navigational_chunk(content, language):
+        if query_tokens:
+            for name in navigational_declared_identifiers(content):
+                parts = _identifier_parts(name)
+                if parts and parts <= query_tokens:
+                    return _Q_NAV_DECLARATION_RESCUE
         return _Q_NAVIGATIONAL
     if is_trivial_chunk(content, language):
         return _Q_TRIVIAL
@@ -504,7 +564,7 @@ def quality_score(
     score = 1.0
     if file_path and is_generated_file(file_path):
         score *= _Q_GENERATED
-    if file_path and is_test_file(file_path):
+    if file_path and is_test_file(file_path) and file_fan_in < _TEST_FRAMEWORK_FAN_IN_THRESHOLD:
         score *= _Q_TEST_DEPRIORITISED
     if is_doc_language(language):
         score *= _Q_DOC_PROSE

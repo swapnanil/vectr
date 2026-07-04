@@ -27,6 +27,26 @@ ranking:
     # Re-export / import-only "navigational" chunks (no implementation substance)
     navigational: 0.35
 
+    # UPG-NAV-OVERDEMOTE-DECL (F59): a bare-constructor-manifest chunk (UPG-
+    # PREFIX-COMPOSE's ``request_started = Signal()`` pattern) is ALSO the
+    # corpus-wide unique declaration site of each name it assigns. For a
+    # conceptual query ("signal dispatcher implementation") the manifest is
+    # correctly navigational-demoted to `navigational` above (F44/F53's
+    # re-export-stub-overrank fix). For a query that names one of the
+    # declared identifiers directly ("where is request_started signal
+    # defined") — a lexical match, gated on the query's own BM25 tokens, not
+    # a keyword list — the chunk IS the singular correct answer and the full
+    # navigational demotion buries it (F59: django/core/signals.py absent
+    # from top-25 despite being in the candidate pool). This softened value
+    # applies only in that lexically-gated case (chunk_quality.quality_score
+    # query_tokens argument); every other query for the same chunk still
+    # gets the full `navigational` demotion. Measured against the F59 offline
+    # replay (benchmarks/acceptance/product_cases.jsonl, django corpus,
+    # tmp/vectr-accept-django index): the pool-rank gap needs a value in this
+    # range to surface the chunk in top-10 without letting the still-nav-
+    # shaped chunk outrank undemoted real implementation code (kept < 1.0).
+    navigational_declaration_rescue: 0.75
+
     # Markdown chunks that contain only headings (no prose or code body)
     heading_only: 0.40
 
@@ -49,6 +69,28 @@ ranking:
     # only matters in combination with purpose_rank.lambda below (see there for
     # the joint tuning rationale); it does not fix anything on its own.
     test_deprioritised: 0.46
+
+    # UPG-TESTPATH-FRAMEWORK-MISCLASS (F58): is_test_file()'s path-segment
+    # heuristic (any "test"/"tests"/... directory component) cannot tell a
+    # disposable test module apart from a shipped testing-FRAMEWORK subpackage
+    # that happens to live at a test-named path (e.g. django/test/utils.py —
+    # a stable public API, not a throwaway test). Filtering by "called only
+    # from non-test files" was measured and rejected: a testing framework is,
+    # by definition, called almost exclusively from test code, so that signal
+    # never fires (0/175 measured non-test callers of override_settings on
+    # the django corpus) even though the file plainly IS shipped API surface.
+    # The signal that DOES discriminate cleanly is corpus-wide unambiguous
+    # caller BREADTH: symbol_graph.file_fan_in() counts, per file, the number
+    # of DISTINCT calling files across edges whose target symbol name
+    # resolves to exactly one defining file corpus-wide (excludes common
+    # same-leaf collisions like __init__/setUp that would otherwise dilute
+    # the count with unrelated files). Measured on the django corpus:
+    # django/test/utils.py=285, django/test/testcases.py=518,
+    # django/test/client.py=85, vs. the next-highest genuinely-disposable
+    # test file at 42 and a median near 0 — a wide, well-separated gap.
+    # A file at or above this threshold is exempted from the
+    # test_deprioritised multiplier above regardless of its path.
+    test_framework_fan_in_threshold: 60
 
     # substantive documentation prose vs implementation code
     doc_prose: 0.70

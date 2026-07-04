@@ -411,6 +411,13 @@ class SymbolGraph:
                     score           REAL NOT NULL,
                     PRIMARY KEY (workspace, qualified_class)
                 );
+
+                CREATE TABLE IF NOT EXISTS file_fan_in (
+                    workspace   TEXT NOT NULL,
+                    file_path   TEXT NOT NULL,
+                    count       INTEGER NOT NULL,
+                    PRIMARY KEY (workspace, file_path)
+                );
             """)
 
     # ------------------------------------------------------------------
@@ -520,6 +527,12 @@ class SymbolGraph:
         # the signal that discriminates same-leaf method collisions (e.g. two classes
         # that both define a `delete` method) file-level importance cannot.
         self._compute_and_store_class_importance(workspace, file_paths)
+
+        # UPG-TESTPATH-FRAMEWORK-MISCLASS (F58): compute corpus-wide unambiguous
+        # caller-file fan-in and persist it — the signal that separates a shipped
+        # testing-framework file living at a test-named path from disposable test
+        # code at the same kind of path.
+        self._compute_and_store_file_fan_in(workspace)
 
         if failed:
             logger.warning(
@@ -713,6 +726,83 @@ class SymbolGraph:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT file_path, score FROM symbol_importance WHERE workspace = ?",
+                (workspace,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    # ------------------------------------------------------------------
+    # UPG-TESTPATH-FRAMEWORK-MISCLASS: unambiguous corpus-wide fan-in
+    # ------------------------------------------------------------------
+
+    def _compute_and_store_file_fan_in(self, workspace: str) -> None:
+        """Compute, per file, the count of distinct calling files across
+        UNAMBIGUOUS edges and persist it.
+
+        The call-graph only records the bare/leaf symbol name at each edge
+        (``obj.method()`` -> ``method``), so a common method name (``__init__``,
+        ``setUp``) is shared by many unrelated definitions and dilutes any
+        raw caller count with false attribution. Restricting to edges whose
+        target leaf name resolves to EXACTLY ONE defining file corpus-wide
+        isolates genuine widespread reuse of a uniquely-named API from that
+        leaf-ambiguity noise — this is the same ``name_to_files`` map
+        ``_compute_and_store_importance`` already builds, reused here rather
+        than recomputed.
+
+        This is a general structural signal (unambiguous caller breadth), not
+        a path-based or framework-name-based one: it happens to separate a
+        shipped testing-framework file from disposable test code at a
+        test-named path (UPG-TESTPATH-FRAMEWORK-MISCLASS / F58) because a
+        framework's public API is called unambiguously from many distinct
+        files, while a throwaway test module is not called from anywhere.
+        """
+        import collections
+
+        with self._conn() as conn:
+            name_to_files: dict[str, set[str]] = collections.defaultdict(set)
+            for name, fp in conn.execute(
+                "SELECT name, file_path FROM symbols WHERE workspace = ?", (workspace,)
+            ):
+                leaf = name.split(".")[-1]
+                name_to_files[leaf].add(fp)
+
+            callers: dict[str, set[str]] = collections.defaultdict(set)
+            for from_file, to_symbol in conn.execute(
+                "SELECT from_file, to_symbol FROM edges WHERE workspace = ?", (workspace,)
+            ):
+                leaf = to_symbol.split(".")[-1]
+                defs = name_to_files.get(leaf)
+                if not defs or len(defs) != 1:
+                    continue  # ambiguous leaf (shared by >1 file) — skip
+                (target_file,) = defs
+                if target_file == from_file:
+                    continue  # skip self-edges
+                callers[target_file].add(from_file)
+
+            conn.execute(
+                "DELETE FROM file_fan_in WHERE workspace = ?", (workspace,)
+            )
+            if callers:
+                conn.executemany(
+                    "INSERT INTO file_fan_in (workspace, file_path, count) VALUES (?, ?, ?)",
+                    (
+                        (workspace, fp, len(caller_files))
+                        for fp, caller_files in callers.items()
+                    ),
+                )
+
+    def file_fan_in(self, workspace: str) -> dict[str, int]:
+        """Return {file_path: count} — corpus-wide unambiguous caller-file count
+        computed at index time.
+
+        Returns an empty dict if fan-in has not been computed yet (e.g. the
+        workspace was indexed before UPG-TESTPATH-FRAMEWORK-MISCLASS, or
+        contains no symbols). This is the read API consumed by the searcher's
+        test_deprioritised exemption — do not wire into the searcher here;
+        expose only.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT file_path, count FROM file_fan_in WHERE workspace = ?",
                 (workspace,),
             ).fetchall()
         return {r[0]: r[1] for r in rows}

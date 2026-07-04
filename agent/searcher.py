@@ -218,6 +218,12 @@ class CodeSearcher:
         # collisions (two unrelated classes defining a same-named method) that the
         # file-level prior above cannot.
         self._class_importance: dict[str, float] = {}
+        # UPG-TESTPATH-FRAMEWORK-MISCLASS (F58): file_path -> corpus-wide
+        # unambiguous caller-file count. Injected by the service after each
+        # symbol-graph build via set_file_fan_in(). Empty until then → the
+        # test-framework fan-in exemption is a no-op (every test-path file keeps
+        # the full test_deprioritised demotion, pre-F58 behaviour).
+        self._file_fan_in: dict[str, int] = {}
         # Read at instantiation so test fixtures can override via os.environ before creating searcher
         reranker_model = os.getenv("VECTR_RERANKER_MODEL", "BAAI/bge-reranker-base")
         self._reranker = _Reranker(reranker_model) if reranker_model else None
@@ -234,6 +240,14 @@ class CodeSearcher:
         empty dict disables the prior (the searcher falls back to whatever the
         file-level prior and base × quality already produce)."""
         self._class_importance = importance or {}
+
+    def set_file_fan_in(self, fan_in: dict[str, int]) -> None:
+        """Install the corpus-wide unambiguous caller-file-count map consumed by
+        the UPG-TESTPATH-FRAMEWORK-MISCLASS (F58) quality-prior exemption. Called
+        by the service after (re)building the symbol graph. Passing an empty
+        dict disables the exemption (every test-path file keeps the full
+        test_deprioritised demotion)."""
+        self._file_fan_in = fan_in or {}
 
     def refresh_bm25(self) -> None:
         """Rebuild the BM25 index from the current ChromaDB collection."""
@@ -495,7 +509,7 @@ class CodeSearcher:
             candidates = self._reranker.rerank(query, doc_candidate_pairs)
 
         # --- Quality prior + dedup + deterministic tiebreaker (UPG-2.1/2.2/2.3) ---
-        candidates = self._apply_quality_and_dedup(query, candidates)
+        candidates = self._apply_quality_and_dedup(query, candidates, frozenset(query_tokens))
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         final = SearchResultList(candidates[:n_results])
@@ -509,7 +523,10 @@ class CodeSearcher:
         return final, elapsed_ms
 
     def _apply_quality_and_dedup(
-        self, query: str, candidates: list[SearchResult],
+        self,
+        query: str,
+        candidates: list[SearchResult],
+        query_tokens: frozenset[str] = frozenset(),
     ) -> list[SearchResult]:
         """Re-rank by relevance×quality, collapse duplicates, break ties deterministically.
 
@@ -544,8 +561,10 @@ class CodeSearcher:
         scored: list[tuple[float, float, int, SearchResult]] = []
         for i, r in enumerate(candidates):
             base = 1.0 - (i / n)  # rank-based relevance, best-first
+            fan_in = self._file_fan_in.get(r.file_path, 0) if self._file_fan_in else 0
             q = quality_score(
                 r.content, r.file_path, r.language, r.node_type,
+                query_tokens=query_tokens, file_fan_in=fan_in,
             )
             # Class context recovered from the indexer-injected "# class: X" prefix
             # in the chunk content (chunk_quality.extract_class_from_content) — the

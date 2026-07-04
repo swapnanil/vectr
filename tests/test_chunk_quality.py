@@ -7,6 +7,7 @@ from agent.chunk_quality import (
     NAVIGATIONAL_NODE_TYPE,
     is_trivial_chunk,
     is_navigational_chunk,
+    navigational_declared_identifiers,
     is_markdown_heading_only,
     is_doc_language,
     is_vectr_config_file,
@@ -17,6 +18,12 @@ from agent.chunk_quality import (
     extract_class_from_content,
     is_symbol_bearing_chunk,
     build_purpose_text,
+)
+from agent.config import (
+    QUALITY_NAVIGATIONAL,
+    QUALITY_NAV_DECLARATION_RESCUE,
+    QUALITY_TEST_DEPRIORITISED,
+    TEST_FRAMEWORK_FAN_IN_THRESHOLD,
 )
 
 
@@ -182,6 +189,26 @@ class TestBareConstructorManifestIsNavigational:
         assert is_navigational_chunk(content, "python") is False
 
 
+class TestNavigationalDeclaredIdentifiers:
+    """UPG-NAV-OVERDEMOTE-DECL (F59): a bare-constructor-manifest chunk's LHS
+    names are the corpus-wide unique declaration sites of those identifiers —
+    quality_score() must be able to recover them to gate the rescue.
+    """
+
+    def test_recovers_declared_names(self) -> None:
+        content = "from django.dispatch import Signal\n\nrequest_started = Signal()\nrequest_finished = Signal()"
+        assert navigational_declared_identifiers(content) == ["request_started", "request_finished"]
+
+    def test_no_declared_names_in_pure_reexport(self) -> None:
+        content = "from django.dispatch.dispatcher import Signal, receiver\nfrom .other import Thing"
+        assert navigational_declared_identifiers(content) == []
+
+    def test_ignores_non_bare_ctor_assignments(self) -> None:
+        # Not a bare-constructor RHS (complex arg) — not a declaration manifest line.
+        content = "from x import Signal\n\ns = Signal(default=compute_default())"
+        assert navigational_declared_identifiers(content) == []
+
+
 class TestMarkdownHeadingOnly:
     def test_heading_only(self):
         assert is_markdown_heading_only("## Analysis") is True
@@ -274,6 +301,69 @@ class TestQualityScore:
     def test_navigational_node_type_short_circuits(self):
         s = quality_score("anything at all here", node_type=NAVIGATIONAL_NODE_TYPE)
         assert s == pytest.approx(0.35)
+
+    # -- UPG-NAV-OVERDEMOTE-DECL (F59) --------------------------------------
+
+    def test_manifest_rescued_when_query_names_declared_identifier(self):
+        content = "from django.dispatch import Signal\n\nrequest_started = Signal()\nrequest_finished = Signal()"
+        query_tokens = frozenset({"where", "is", "request", "started", "signal", "defined"})
+        s = quality_score(content, language="python", query_tokens=query_tokens)
+        assert s == pytest.approx(QUALITY_NAV_DECLARATION_RESCUE)
+
+    def test_manifest_not_rescued_without_lexical_match(self):
+        # F44/F53's query has no lexical overlap with signals.py's declared
+        # identifiers — the manifest keeps the full navigational demotion so
+        # the stub-overrank fix (F44/F53) is not weakened.
+        content = "from django.dispatch import Signal\n\nrequest_started = Signal()\nrequest_finished = Signal()"
+        query_tokens = frozenset({"signal", "dispatcher", "implementation"})
+        s = quality_score(content, language="python", query_tokens=query_tokens)
+        assert s == pytest.approx(QUALITY_NAVIGATIONAL)
+
+    def test_manifest_not_rescued_when_no_query_tokens_given(self):
+        content = "from django.dispatch import Signal\n\nrequest_started = Signal()\nrequest_finished = Signal()"
+        s = quality_score(content, language="python")
+        assert s == pytest.approx(QUALITY_NAVIGATIONAL)
+
+    def test_pure_reexport_not_rescued_even_with_lexical_match(self):
+        # A pure re-export block (no declared identifiers) must never be
+        # rescued — the rescue only applies to bare-constructor manifests.
+        content = "from django.dispatch.dispatcher import Signal, receiver\nfrom .other import Thing"
+        query_tokens = frozenset({"signal", "receiver"})
+        s = quality_score(content, language="python", query_tokens=query_tokens)
+        assert s == pytest.approx(QUALITY_NAVIGATIONAL)
+
+    # -- UPG-TESTPATH-FRAMEWORK-MISCLASS (F58) ------------------------------
+
+    def test_test_path_file_below_fan_in_threshold_keeps_full_demotion(self):
+        s = quality_score(
+            "def test_thing():\n    assert 1 == 1\n    x = 2\n    y = 3",
+            file_path="/proj/tests/test_a.py",
+            file_fan_in=TEST_FRAMEWORK_FAN_IN_THRESHOLD - 1,
+        )
+        base = quality_score(
+            "def test_thing():\n    assert 1 == 1\n    x = 2\n    y = 3",
+            file_path="/proj/tests/test_a.py",
+        )
+        assert s == pytest.approx(base)
+
+    def test_test_path_file_at_or_above_fan_in_threshold_is_exempted(self):
+        content = "def override_settings():\n    return 1\n    x = 2\n    y = 3"
+        demoted = quality_score(content, file_path="/proj/django/test/utils.py")
+        exempted = quality_score(
+            content,
+            file_path="/proj/django/test/utils.py",
+            file_fan_in=TEST_FRAMEWORK_FAN_IN_THRESHOLD,
+        )
+        assert exempted > demoted
+        assert exempted == pytest.approx(1.0)
+
+    def test_fan_in_exemption_is_no_op_for_non_test_path(self):
+        content = "def compute():\n    return 1\n    x = 2\n    y = 3"
+        no_fan_in = quality_score(content, file_path="/proj/agent/indexer.py")
+        with_fan_in = quality_score(
+            content, file_path="/proj/agent/indexer.py", file_fan_in=1000,
+        )
+        assert with_fan_in == pytest.approx(no_fan_in)
 
 
 class TestIsDocLanguage:
