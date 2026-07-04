@@ -1942,6 +1942,104 @@ class TestPurposeRankPrior:
         searcher.set_class_importance({})
 
 
+class TestPurposeRankPriorQualityWeighted:
+    """UPG-PREFIX-COMPOSE: purpose_sim is a query-independent textual similarity
+    between the query and a chunk's own qualified-name+docstring — it is blind
+    to the chunk's quality tier. A quality-demoted chunk (e.g. a test helper
+    whose docstring happens to restate the query in plain language) can carry
+    a HIGHER purpose_sim than the canonical production symbol it merely name-
+    echoes, so the un-weighted prior lets a demoted look-alike outrank the real
+    implementation regardless of how large lambda is scaled (raising lambda
+    amplifies both sides' boost by the same factor, never closing a gap where
+    the demoted chunk's own purpose_sim is already bigger). Weighting the prior
+    by the chunk's own quality_score fixes this without a lambda increase big
+    enough to also distort chunks that carry no purpose vector at all (e.g.
+    prose/doc chunks default purpose_sim=0 and get no boost either way).
+    """
+
+    def _demoted_lookalike_outranks_canonical_on_raw_purpose_sim(self):
+        # A quality-demoted (test file) look-alike has a HIGHER purpose_sim
+        # than the canonical (undemoted) symbol it duplicates in name — the
+        # un-weighted prior scales the demoted chunk's boost by the SAME
+        # lambda, so it can never close this gap no matter how large lambda
+        # grows; the fix must come from weighting by quality, not from lambda.
+        canonical = _sr_class(
+            "Widget",
+            "def process(self):\n    return self._run()\n    # impl body\n    x=1",
+            path="/p/widget.py", purpose_sim=0.40,
+        )
+        demoted_lookalike = _sr_class(
+            "WidgetHelper",
+            "def process(self):\n    return self._run()\n    # impl body\n    y=2",
+            path="/p/tests/widget_helper_test.py", purpose_sim=0.50,
+        )
+        filler = [
+            _sr_class(f"Filler{i}", f"def other{i}(self):\n    return {i}\n    z={i}",
+                      path=f"/p/f{i}.py")
+            for i in range(6)
+        ]
+        return canonical, demoted_lookalike, [demoted_lookalike, canonical] + filler
+
+    def test_demoted_higher_purpose_sim_no_longer_outranks_canonical(self, searcher) -> None:
+        canonical, demoted_lookalike, cands = (
+            self._demoted_lookalike_outranks_canonical_on_raw_purpose_sim()
+        )
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out.index(canonical) < out.index(demoted_lookalike), (
+            "quality-weighted purpose factor must keep the undemoted canonical "
+            f"ahead of the demoted look-alike; got order {[r.file_path for r in out]}"
+        )
+
+    def test_unweighted_formula_would_never_recover_this_shape(self, searcher) -> None:
+        # Documents WHY quality-weighting (not a lambda increase) is the fix:
+        # even at a large lambda, the un-weighted prior (1 + lambda*purpose_sim,
+        # no quality term) keeps the demoted look-alike ahead of the canonical,
+        # because its own purpose_sim is bigger and both sides scale by the
+        # same lambda. If this now fails, the un-weighted shape has changed and
+        # the quality-weighting justification needs re-checking.
+        canonical, demoted_lookalike, cands = (
+            self._demoted_lookalike_outranks_canonical_on_raw_purpose_sim()
+        )
+        n = len(cands)
+        for lam in (2.0, 10.0, 50.0):
+            unweighted = [
+                (1.0 - i / n) * (1.0 + lam * r.purpose_sim)
+                for i, r in enumerate(cands)
+            ]
+            canonical_score = unweighted[cands.index(canonical)]
+            lookalike_score = unweighted[cands.index(demoted_lookalike)]
+            assert lookalike_score > canonical_score, (
+                f"expected the un-weighted formula to still favour the "
+                f"look-alike at lambda={lam} (that's the bug this test "
+                f"documents); got canonical={canonical_score} "
+                f"lookalike={lookalike_score}"
+            )
+
+    def test_quality_weighting_is_noop_when_both_undemoted(self, searcher) -> None:
+        # Two undemoted (quality=1.0) candidates: quality-weighting the purpose
+        # factor by 1.0 must reduce to the original un-weighted prior — this is
+        # a strict refinement, not a new suppression mechanism.
+        stronger = _sr_class(
+            "Widget", "def process(self):\n    return self._run()\n    x=1",
+            path="/p/widget.py", purpose_sim=0.5,
+        )
+        weaker = _sr_class(
+            "Gadget", "def process(self):\n    return self._run()\n    y=2",
+            path="/p/gadget.py", purpose_sim=0.1,
+        )
+        filler = [
+            _sr_class(f"Filler{i}", f"def other{i}(self):\n    return {i}\n    z={i}",
+                      path=f"/p/f{i}.py")
+            for i in range(6)
+        ]
+        cands = [weaker, stronger] + filler
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out.index(stronger) < out.index(weaker), (
+            f"undemoted purpose-strong candidate must still win; got order "
+            f"{[r.file_path for r in out]}"
+        )
+
+
 class TestChunkerHygiene:
     def test_navigational_window_tagged(self, tmp_path) -> None:
         from agent.indexer import chunk_file

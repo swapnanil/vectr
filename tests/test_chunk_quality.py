@@ -130,6 +130,58 @@ class TestIsNavigationalChunk:
         assert is_navigational_chunk(content) is False
 
 
+class TestBareConstructorManifestIsNavigational:
+    """UPG-PREFIX-COMPOSE (F44/F53): a module consisting only of imports plus bare
+    module-level instantiations of an imported type (a "declare an instance of this
+    class" manifest, e.g. Django's ``request_started = Signal()`` re-export shims)
+    carries no retrieval value beyond the import that already names the type — it
+    must be classified navigational the same as a pure re-export block, not treated
+    as "real code" because it happens to contain a call expression.
+    """
+
+    @pytest.mark.parametrize("content", [
+        "from django.dispatch import Signal\n\nrequest_started = Signal()\nrequest_finished = Signal()",
+        "from django.dispatch import Signal\n\npre_init = Signal()\npost_init = Signal(use_caching=True)",
+        "import signal\n\nSIGHUP = Signal(1)\nSIGINT = Signal(2)",
+    ])
+    def test_bare_ctor_manifest_is_navigational(self, content: str) -> None:
+        assert is_navigational_chunk(content, "python") is True, (
+            f"UPG-PREFIX-COMPOSE: bare-constructor manifest should be navigational "
+            f"but is_navigational_chunk returned False.\nContent: {content!r}"
+        )
+
+    def test_module_docstring_preamble_does_not_block_navigational(self) -> None:
+        # django/dispatch/__init__.py shape: a leading module docstring followed
+        # by import-only content — the docstring must be skipped, not counted as
+        # a non-import "real" line that disqualifies the block.
+        content = (
+            '"""\n'
+            "Signal dispatch mechanism, inspired heavily by pydispatch.\n"
+            '"""\n'
+            "from django.dispatch.dispatcher import Signal, receiver\n"
+        )
+        assert is_navigational_chunk(content, "python") is True, (
+            "UPG-PREFIX-COMPOSE: leading module docstring must be skipped when "
+            "judging import-only navigational content"
+        )
+
+    def test_ctor_with_nested_call_is_not_navigational(self) -> None:
+        # RHS contains a nested call — not a "bare" constructor manifest, so the
+        # navigational rule must not fire (avoid over-broad matching).
+        content = "from x import Signal\n\ns = Signal(default=compute_default())\nt = Signal(default=compute_default())"
+        assert is_navigational_chunk(content, "python") is False
+
+    def test_ctor_with_dotted_attr_arg_is_not_navigational(self) -> None:
+        content = "from x import Signal\n\ns = Signal(owner=self.owner)\nt = Signal(owner=self.owner)"
+        assert is_navigational_chunk(content, "python") is False
+
+    def test_lowercase_callable_is_not_navigational(self) -> None:
+        # RHS callable name is not PascalCase (the class-naming convention) — do
+        # not treat an arbitrary function-call assignment as a type manifest.
+        content = "from x import make_signal\n\ns = make_signal()\nt = make_signal()"
+        assert is_navigational_chunk(content, "python") is False
+
+
 class TestMarkdownHeadingOnly:
     def test_heading_only(self):
         assert is_markdown_heading_only("## Analysis") is True

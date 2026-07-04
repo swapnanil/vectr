@@ -36,8 +36,19 @@ ranking:
     # vectr's own config files — we never want to surface our own internals
     vectr_config: 0.10
 
-    # Test files when the query does not explicitly target tests
-    test_deprioritised: 0.55
+    # Test files when the query does not explicitly target tests. UPG-PREFIX-
+    # COMPOSE: lowered from 0.55 — once the query-prefix fix (UPG-ARCTIC-QUERY-
+    # PREFIX) changed dense pool composition, a test-file symbol whose name or
+    # docstring happens to restate the query in plain language (e.g. a helper
+    # class documented as "track threads and kwargs when signals are
+    # dispatched") could out-rank the canonical production symbol it merely
+    # name-echoes, because purpose_rank's textual-similarity boost (below) is
+    # otherwise blind to quality tier. 0.46 is the largest reduction that still
+    # satisfies test_ordering's invariant (test_deprioritised > generated=0.45,
+    # tests/test_chunk_quality.py::TestQualityScore::test_ordering) — this value
+    # only matters in combination with purpose_rank.lambda below (see there for
+    # the joint tuning rationale); it does not fix anything on its own.
+    test_deprioritised: 0.46
 
     # substantive documentation prose vs implementation code
     doc_prose: 0.70
@@ -108,16 +119,43 @@ ranking:
     # because the cross-encoder rerank that dominates base_rerank_score only sees
     # BODY text and has no visibility into the purpose signal that got the chunk
     # into the pool in the first place. lambda=0 disables it (behaviour identical
-    # to pre-ARCH-4b). Default 0.5 (higher than ARCH-1b/ARCH-2's 0.25): those two
-    # priors are typically fed near-binary importance scores (0 or ~1), so a
+    # to pre-ARCH-4b). Default 0.9 (raised from ARCH-4b's original 0.5 by
+    # UPG-PREFIX-COMPOSE, see below), higher than ARCH-1b/ARCH-2's 0.25: those
+    # two priors are typically fed near-binary importance scores (0 or ~1), so a
     # one-rank near-tie gap clears at 0.25; purpose_sim is a continuous cosine
-    # similarity that rarely reaches 1.0 even for a strong match (observed ~0.84
-    # for the best-in-corpus case) and must also recover deeper rerank-pool
-    # burial (observed: purpose-rank-1 chunk landing at final rank 16 in a
-    # ~60-candidate pool) — algebra on the multiplicative gate shows 0.25 only
-    # clears a 1-of-10-rank gap, not a 15-of-60-rank gap; 0.5 clears both. See
-    # TestPurposeRankPrior in tests/test_indexer_searcher.py for the worked cases.
-    lambda: 0.5
+    # similarity that rarely reaches 1.0 even for a strong match and must also
+    # recover deeper rerank-pool burial (observed: purpose-rank-1 chunk landing
+    # at final rank 16 in a ~60-candidate pool) — algebra on the multiplicative
+    # gate shows 0.25 only clears a 1-of-10-rank gap, not a 15-of-60-rank gap.
+    # See TestPurposeRankPrior in tests/test_indexer_searcher.py for the worked
+    # cases.
+    #
+    # UPG-PREFIX-COMPOSE: purpose_sim measures textual similarity between the
+    # query and a chunk's own qualified-name+docstring independent of the
+    # chunk's quality tier, so a quality-demoted chunk (a test helper whose
+    # docstring happens to restate the query in plain language) can carry a
+    # HIGHER purpose_sim than the canonical production symbol it name-echoes —
+    # letting a shallow textual echo outrank the real implementation no matter
+    # how large lambda is scaled, since raising lambda amplifies the demoted
+    # chunk's edge by the same factor (a case witnessed on the django corpus:
+    # a test-only helper class's docstring out-scored the production Signal
+    # class's own docstring on raw cosine similarity). Raising this lambda
+    # alone (against the un-weighted prior) to clear that gap also
+    # disproportionately boosts every OTHER demoted-but-purpose-matching chunk
+    # against non-symbol content that has no purpose vector at all (prose/doc
+    # chunks default purpose_sim to 0 — see above), which was observed to
+    # invert an unrelated doc-vs-test-code ranking on the same corpus. The
+    # searcher now weights this factor by the chunk's own quality_score
+    # (1 + lambda * purpose_sim * quality_score, in
+    # agent/searcher.py._apply_quality_and_dedup) so a demoted chunk's textual
+    # echo can no longer buy back more rank than an undemoted chunk's smaller
+    # one, while an undemoted (quality=1.0) candidate keeps the full boost.
+    # With that weighting, lambda=0.9 (paired with test_deprioritised=0.46
+    # above) is stable across a lambda range of roughly [0.7, 1.1] on the
+    # verified case above — not a knife-edge value — and the full django
+    # offline acceptance replay (benchmarks/acceptance/product_cases.jsonl)
+    # shows zero other case flipped by this change.
+    lambda: 0.9
 
   locate_ranking:
     # UPG-15.10: scope-depth + line-span signals for locate ranking.

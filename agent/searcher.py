@@ -515,7 +515,8 @@ class CodeSearcher:
 
         Pipeline: final_score = base_rerank_score * quality_score(chunk) *
         (1 + lambda_file * file_importance) (ARCH-1b) * (1 + lambda_class *
-        class_importance) (ARCH-2) * (1 + lambda_purpose * purpose_sim) (ARCH-4b).
+        class_importance) (ARCH-2) * (1 + lambda_purpose * purpose_sim *
+        quality_score(chunk)) (ARCH-4b, quality-weighted by UPG-PREFIX-COMPOSE).
         All three are relevance-gated multiplicative priors — multiplying by
         base_rerank_score means an irrelevant high-importance/high-purpose-sim
         chunk (base ≈ 0) is never lifted. When no importance map is installed (or
@@ -523,6 +524,11 @@ class CodeSearcher:
         three absent → base × quality, pre-ARCH-1b). purpose_sim defaults to 0.0
         on every SearchResult built outside a purpose-vector pool-entry rescue, so
         the ARCH-4b factor is an exact no-op for chunks with no purpose vector.
+        The purpose factor is additionally weighted by the chunk's own
+        quality_score so a quality-demoted chunk's textual purpose-match (e.g. a
+        test helper whose docstring happens to restate the query) cannot buy
+        back more rank than an undemoted chunk with a smaller match — see the
+        purpose_factor comment below for the worked case.
         Keeps exact-duplicate dedup and the quality_score call (with trivial/navigational/
         doc-language demotion intact).
 
@@ -569,13 +575,43 @@ class CodeSearcher:
             # normalized to [0,1] (query_vector_purpose distances are clamped the
             # same way body vec_scores are) and defaults to 0.0 for any chunk with
             # no purpose vector, making the factor an exact no-op (1.0) for it.
-            purpose_factor = 1.0 + _PURPOSE_RANK_PRIOR_LAMBDA * r.purpose_sim
+            #
+            # UPG-PREFIX-COMPOSE: purpose_sim measures textual similarity between
+            # the query and a chunk's own qualified-name+docstring, independent of
+            # the chunk's quality tier — a demoted chunk (a test helper whose
+            # docstring happens to restate the query terms, e.g. "Helper class to
+            # track threads and kwargs when signals are dispatched") can carry a
+            # HIGHER purpose_sim than the canonical production symbol it
+            # duplicates in name, letting a purely textual echo outrank the real
+            # implementation no matter how large lambda is scaled (the deep-bury
+            # rescue this prior exists for assumes the buried candidate IS the
+            # best answer, which a test-file near-duplicate is not). Weighting by
+            # the chunk's own quality_score scales trust in that textual echo by
+            # the same quality tier the base rerank score is already gated by,
+            # so a demoted chunk's purpose match can no longer buy back more rank
+            # than an undemoted chunk with a smaller match — the prior still
+            # rescues genuinely low-ranked-but-canonical symbols (quality=1.0
+            # candidates keep the full boost) without letting quality-demoted
+            # look-alikes leapfrog them.
+            purpose_factor = 1.0 + _PURPOSE_RANK_PRIOR_LAMBDA * r.purpose_sim * q
             scored.append((base * q * file_factor * class_factor * purpose_factor, q, i, r))
 
         # Deterministic order: final score desc, quality desc, length desc, then
         # original rank, then path — so equal-scoring boilerplate never wins by
         # unstable sort order.
         scored.sort(key=lambda t: (-t[0], -t[1], -len(t[3].content), t[2], t[3].file_path))
+
+        # UPG-PREFIX-COMPOSE (F57): the importance/purpose priors are each
+        # (1 + lambda * x) with x >= 0, so their product can push the raw
+        # composite above 1.0 even though base and quality are each <= 1.0
+        # (F12-score-exceeds-unity). A bare min(1.0, ...) clamp then collapses
+        # every candidate whose raw composite exceeds 1.0 to the same displayed
+        # 1.000, widening the tie-block and hiding real score separation
+        # (observed: 17 consecutive results tied at the ceiling for one query).
+        # Normalizing by the max raw composite in THIS result set instead keeps
+        # the top result at 1.0 and scales every other result proportionally
+        # below it, preserving the sort order while staying discriminating.
+        max_final = max((t[0] for t in scored), default=0.0) or 1.0
 
         seen: dict[str, int] = {}
         out: list[SearchResult] = []
@@ -587,9 +623,10 @@ class CodeSearcher:
             seen[key] = len(out)
             r.dup_count = 0
             # UPG-11.2: replace the stale pre-rerank hybrid score with the actual
-            # composite ranking key so displayed scores are non-increasing with rank.
-            # base ∈ [0, 1] and quality_score is a ≤1.0 multiplier, so final_score is
-            # already in [0, 1]; clamp defensively for callers with a confidence gate.
-            r.score = round(min(1.0, final_score), 4)
+            # composite ranking key so displayed scores are non-increasing with
+            # rank. Normalized by the result set's own max (see above) so the
+            # top result reads 1.000 and the rest are discriminating fractions
+            # of it, rather than every over-unity candidate clamping to 1.000.
+            r.score = round(final_score / max_final, 4)
             out.append(r)
         return out

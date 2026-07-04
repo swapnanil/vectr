@@ -33,8 +33,12 @@ class TestConfigLoaderQualityPriors:
         assert cfg.QUALITY_VECTR_CONFIG == 0.10, f"QUALITY_VECTR_CONFIG should be 0.10, got {cfg.QUALITY_VECTR_CONFIG}"
 
     def test_test_deprioritised_default(self) -> None:
-        assert cfg.QUALITY_TEST_DEPRIORITISED == 0.55, (
-            f"QUALITY_TEST_DEPRIORITISED should be 0.55, got {cfg.QUALITY_TEST_DEPRIORITISED}"
+        # UPG-PREFIX-COMPOSE: lowered from 0.55 to 0.46 (still > QUALITY_GENERATED
+        # 0.45, see test_ordering in test_chunk_quality.py) — see config.yaml's
+        # ranking.quality_priors.test_deprioritised comment for the full
+        # rationale (paired with a purpose_rank.lambda change).
+        assert cfg.QUALITY_TEST_DEPRIORITISED == 0.46, (
+            f"QUALITY_TEST_DEPRIORITISED should be 0.46, got {cfg.QUALITY_TEST_DEPRIORITISED}"
         )
 
     def test_doc_prose_default(self) -> None:
