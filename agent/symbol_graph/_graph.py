@@ -265,6 +265,28 @@ _CANONICAL_FETCH_ORDER = (
 )
 
 
+def _split_class_qualifier(name: str) -> tuple[str, str]:
+    """Split a ``"Class.method"`` / ``"Class:method"`` query into
+    ``(class_name, leaf)``. Returns ``("", name)`` — i.e. unqualified — when
+    *name* has no ``.``/``:`` separator, or the left-hand side doesn't look
+    like a class name (UpperCamelCase). This avoids misreading a dotted
+    module path (``"os.path"``) as a class qualifier when the caller really
+    wants ordinary suffix-stripping.
+
+    Shared by ``locate_l2`` (UPG-11.10-b) and ``trace`` (F33): a vectr_search
+    result displays symbols as ``"QuerySet.delete"`` (Class.method), and an
+    LLM naturally copies that qualified name into a follow-up ``locate``/
+    ``trace`` call — both call sites need the identical split+match
+    convention so a qualified query resolves consistently across both tools.
+    """
+    if "." not in name and ":" not in name:
+        return "", name
+    parts = re.split(r"[.:]", name, maxsplit=1)
+    if len(parts) == 2 and parts[0] and parts[1] and parts[0][0].isupper():
+        return parts[0], parts[1]
+    return "", name
+
+
 def _partial_match_key(
     row, query_lower: str, scope_depth: int = 0, class_enclosed: bool = False,
 ) -> tuple:
@@ -1066,24 +1088,9 @@ class SymbolGraph:
         a class (parity with the searcher's qualified display).  Bare-leaf
         queries (no ``.``) are unchanged.
         """
-        # UPG-11.10-b: detect "Class.method" qualifier in the query.
-        # We re-use the same [.:] split convention used elsewhere in the codebase.
-        _class_qualifier: str = ""   # e.g. "Field"  (empty = unqualified query)
-        _leaf: str = name            # e.g. "deconstruct" (the bare DB lookup key)
-        if "." in name or ":" in name:
-            import re as _re
-            parts = _re.split(r"[.:]", name, maxsplit=1)
-            if len(parts) == 2 and parts[0] and parts[1]:
-                # Only treat as a class-qualified locate when the LHS looks like
-                # a class name (starts with uppercase) or is an explicit
-                # Class.method form (two non-empty parts).  This avoids treating
-                # dotted module paths like "os.path" as class qualifiers when
-                # the user really wants "module.Foo" suffix-stripping (strategy 1).
-                # Heuristic: if LHS is UpperCamelCase, treat as class qualifier;
-                # otherwise fall through to existing suffix-strip strategy 1.
-                if parts[0][0].isupper():
-                    _class_qualifier = parts[0]
-                    _leaf = parts[1]
+        # UPG-11.10-b: detect "Class.method" qualifier in the query (shared
+        # split convention with `trace` — see `_split_class_qualifier`).
+        _class_qualifier, _leaf = _split_class_qualifier(name)
 
         def _with_snippets(rows: list) -> list[Symbol]:
             syms = [self._row_to_symbol(r) for r in rows]
@@ -1390,11 +1397,22 @@ class SymbolGraph:
     def _exact_definitions(self, workspace: str, name: str, limit: int = 20) -> list[Symbol]:
         """Definition sites whose name matches `name` exactly. Each (file_path,
         name) is a distinct node — this is the fully-qualified identity that
-        keeps same-named symbols in different modules from merging (UPG-4.1)."""
+        keeps same-named symbols in different modules from merging (UPG-4.1).
+
+        UPG-TRACE-GRAPH-INCOMPLETE (F60): ordered by `_CANONICAL_FETCH_ORDER`
+        (non-test file first, larger line-span first) rather than plain
+        `file_path` — a common leaf name (e.g. `delete`) can have more
+        definitions than `limit` across a large codebase, and a bare
+        alphabetical-by-path order truncates on file-path spelling alone.
+        `django/db/models/query.py`'s `QuerySet.delete` sorted after
+        `django/db/models/base.py`'s `Model.delete` purely because "q" > "b",
+        silently dropping it from every trace path that reaches this method —
+        not a corpus-specific fix; any workspace with >`limit` definitions of
+        one leaf name hits the same alphabetical-accident truncation."""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM symbols WHERE workspace = ? AND name = ? "
-                "ORDER BY file_path, start_line LIMIT ?",
+                + _CANONICAL_FETCH_ORDER + " LIMIT ?",
                 (workspace, name, limit),
             ).fetchall()
         return [self._row_to_symbol(r) for r in rows]
@@ -1427,29 +1445,63 @@ class SymbolGraph:
         UPG-4.3: builtin/stdlib callees are hidden by default; the count hidden is
         recorded under `hidden_builtins` (flat) / per `by_definition` entry so the
         formatter can offer `include_builtins`.
+
+        F33 (UPG-17.1): `symbol_name` may arrive in the qualified "Class.method"
+        form — vectr_search displays symbols that way, and an LLM naturally
+        copies the displayed name into a follow-up trace call. The edge/symbol
+        tables only ever store the bare leaf (`_split_class_qualifier` is the
+        shared split also used by `locate_l2`), so a literal `name = "Class.method"`
+        match against either table is always empty. Resolution here: look up
+        callers/callees/definitions by the bare leaf, then — when a class
+        qualifier was given — filter `definitions` down to the site(s) whose
+        enclosing class matches and scope `by_definition`'s callees to exactly
+        those sites (the same per-definition attribution UPG-4.1 already does
+        for an unqualified ambiguous name), so a qualified query gets a
+        precise answer instead of the leaf's merged-across-classes one.
         """
+        class_qualifier, leaf = _split_class_qualifier(symbol_name)
+        lookup_name = leaf if class_qualifier else symbol_name
+
         result: dict = {}
         if direction in ("callers", "both"):
-            result["callers"] = self.callers(workspace, symbol_name, limit)
+            # Callers can't be attributed to one class-qualified definition —
+            # a call site never records the receiver's type — so a qualified
+            # query still returns the leaf's full (ambiguous) caller list
+            # rather than a silent empty result.
+            result["callers"] = self.callers(workspace, lookup_name, limit)
         if direction in ("callees", "both"):
             callees, hidden = self._edges(
-                workspace, "from_symbol", symbol_name, "to_symbol", limit,
+                workspace, "from_symbol", lookup_name, "to_symbol", limit,
                 rank_repo_defined=True, include_builtins=include_builtins,
                 exclude_uses=True,
             )
             result["callees"] = callees
             result["hidden_builtins"] = hidden
 
-        defs = self._exact_definitions(workspace, symbol_name)
+        defs = self._exact_definitions(workspace, lookup_name, limit=limit)
+        resolved_qualifier = False
+        if class_qualifier:
+            filtered = [
+                d for d in defs
+                if _enclosing_class_from_file(d.file_path, d.start_line) == class_qualifier
+            ]
+            if filtered:
+                defs = filtered
+                resolved_qualifier = True
+                for d in defs:
+                    d.name = f"{class_qualifier}.{d.name}"
         result["definitions"] = defs
-        if direction in ("callees", "both") and len(defs) > 1:
+        if resolved_qualifier:
+            result["qualified_class"] = class_qualifier
+
+        if direction in ("callees", "both") and (len(defs) > 1 or resolved_qualifier):
             by_def = []
             with self._conn() as conn:
                 for d in defs:
                     rows = conn.execute(
                         "SELECT * FROM edges WHERE workspace = ? AND from_symbol = ? "
                         "AND from_file = ? AND edge_type != 'uses' LIMIT ?",
-                        (workspace, symbol_name, d.file_path, self._EDGE_FETCH_CAP),
+                        (workspace, lookup_name, d.file_path, self._EDGE_FETCH_CAP),
                     ).fetchall()
                     edges = [self._row_to_edge(r) for r in rows]
                     # dedup + relevance-rank + builtin-suppress this def's callees
@@ -1617,21 +1669,39 @@ class SymbolGraph:
     def format_trace_for_llm(self, trace_result: dict, symbol_name: str) -> str:
         lines = [f"Call graph trace for '{symbol_name}':\n"]
 
-        # UPG-4.1: ambiguous symbol — show callees separated per definition so
-        # the LLM sees e.g. resolver `Lock` vs sync `Lock` as distinct, not merged.
+        # F33 (UPG-17.1): the leaf name actually matched against the edge/symbol
+        # tables — used only for the "any '<leaf>'" caller wording below so it
+        # doesn't overstate what was matched when `symbol_name` was qualified.
+        _, leaf_name = _split_class_qualifier(symbol_name)
+
+        # UPG-4.1 / F33: ambiguous symbol OR a resolved "Class.method" query —
+        # show callees separated per definition so the LLM sees e.g. resolver
+        # `Lock` vs sync `Lock` as distinct, not merged, and a qualified query
+        # gets calls scoped to the one class it named rather than every
+        # same-leaf definition's calls merged together.
         by_def = trace_result.get("by_definition")
-        if by_def and len(by_def) > 1:
-            lines.append(
-                f"⚠ '{symbol_name}' has {len(by_def)} definitions across modules — "
-                f"calls are shown per definition. (Callers below match the name only "
-                f"and can't be attributed to one definition by static analysis.)\n"
-            )
+        qualified_class = trace_result.get("qualified_class")
+        if by_def and (len(by_def) > 1 or qualified_class):
+            if qualified_class:
+                lines.append(
+                    f"Resolved '{symbol_name}' to {len(by_def)} definition"
+                    f"{'s' if len(by_def) != 1 else ''} inside class '{qualified_class}' — "
+                    f"calls are shown per definition. (Callers below match the leaf name "
+                    f"'{leaf_name}' only and can't be attributed to one class by static "
+                    f"analysis.)\n"
+                )
+            else:
+                lines.append(
+                    f"⚠ '{symbol_name}' has {len(by_def)} definitions across modules — "
+                    f"calls are shown per definition. (Callers below match the name only "
+                    f"and can't be attributed to one definition by static analysis.)\n"
+                )
             any_callees_found = False
             for entry in by_def:
                 d = entry["definition"]
                 mod = entry.get("module") or d.file_path
                 cs = entry["callees"]
-                lines.append(f"[{d.kind}] {symbol_name} @ {mod}:{d.start_line} — calls ({len(cs)}):")
+                lines.append(f"[{d.kind}] {d.name} @ {mod}:{d.start_line} — calls ({len(cs)}):")
                 if cs:
                     any_callees_found = True
                     for e in cs:
@@ -1648,14 +1718,14 @@ class SymbolGraph:
             callers_empty = callers is not None and not callers
             if callers is not None:
                 if callers:
-                    lines.append(f"{self._caller_verb(callers)} — any '{symbol_name}' ({len(callers)}):")
+                    lines.append(f"{self._caller_verb(callers)} — any '{leaf_name}' ({len(callers)}):")
                     for e in callers:
                         lines.append(
                             f"  {e.from_symbol}  in {e.from_file}:{e.from_line}"
                             f"{self._count_suffix(e)}{self._dynamic_marker(e)}"
                         )
                 else:
-                    lines.append(f"Called by — any '{symbol_name}': (none found in index)")
+                    lines.append(f"Called by — any '{leaf_name}': (none found in index)")
             if callers_empty and not any_callees_found:
                 lines.append(self._empty_trace_hint(symbol_name))
             return "\n".join(lines)

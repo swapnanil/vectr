@@ -456,6 +456,16 @@ behavior:
     # examples are echoed back so a large trace batch doesn't flood the response.
     max_unresolved_examples: 10
 
+  # UPG-TRACE-GRAPH-INCOMPLETE (F40-class, reproduced on vectr_trace): the MCP
+  # schema's required parameter is "name", but every symbol-name-bearing tool
+  # description has read like a positional example, training callers to guess
+  # a different key. Rather than rely on descriptions alone, the dispatch
+  # layer accepts these as drop-in aliases for "name" on vectr_locate and
+  # vectr_trace — a call using any of them succeeds instead of erroring.
+  symbol_name_param_aliases:
+    - symbol
+    - symbol_name
+
 symbol_graph:
   # UPG-JSFLOW-SYMBOLS: language keywords that must never be minted as a
   # symbol name or call-edge target. A desynced parse (e.g. Flow syntax

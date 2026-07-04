@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent.config import SYMBOL_NAME_PARAM_ALIASES
 from integrations.mcp_server._schemas import (
     _EXPLORATION_TOOLS,
     _MEMORY_WRITE_TOOLS,
@@ -20,6 +21,24 @@ from integrations.mcp_server._session import (
     enable_memory_for_session,
     is_memory_enabled,
 )
+
+
+def _symbol_name_arg(arguments: dict) -> str:
+    """Read the symbol-name argument for vectr_locate/vectr_trace, accepting
+    SYMBOL_NAME_PARAM_ALIASES as drop-in aliases for the schema's "name" key
+    (F40-class param ergonomics, UPG-TRACE-GRAPH-INCOMPLETE): a tool
+    description that reads as a positional example trains a caller to guess
+    a different key, and a required-arg error that never says which key is
+    correct trains them to abandon the tool rather than retry. "name" wins
+    when present alongside an alias."""
+    name = arguments.get("name")
+    if name:
+        return str(name).strip()
+    for alias in SYMBOL_NAME_PARAM_ALIASES:
+        value = arguments.get(alias)
+        if value:
+            return str(value).strip()
+    return ""
 
 
 def handle_tools_list(session_id: str | None = None, service: Any = None) -> dict:
@@ -288,7 +307,7 @@ def handle_tools_call(
 
     # ---- vectr_locate ----
     if tool_name == "vectr_locate":
-        name = arguments.get("name", "").strip()
+        name = _symbol_name_arg(arguments)
         if not name:
             return _mcp_error("name is required")
 
@@ -310,7 +329,7 @@ def handle_tools_call(
 
     # ---- vectr_trace ----
     if tool_name == "vectr_trace":
-        name = arguments.get("name", "").strip()
+        name = _symbol_name_arg(arguments)
         if not name:
             return _mcp_error("name is required")
 

@@ -1122,6 +1122,155 @@ class TestTraceCollisionUPG41:
 
 
 # ---------------------------------------------------------------------------
+# UPG-TRACE-GRAPH-INCOMPLETE (F60) — _exact_definitions must not silently
+# drop a legitimate definition of a common leaf name because of its file
+# path's alphabetical accident; canonical (non-test, larger-span) ordering
+# must survive the fetch-cap truncation instead of `ORDER BY file_path`.
+# ---------------------------------------------------------------------------
+
+class TestTraceGraphIncompleteF60:
+    def _seed_many_defs(self, g, ws: str, tmp_path, stub_count: int) -> str:
+        """Seed `stub_count` tiny 1-line 'delete' stubs in files that sort
+        alphabetically BEFORE one much larger 'delete' definition. Returns
+        the large definition's file_path — the one that must survive a
+        `limit == stub_count` truncation."""
+        import time
+        now = time.time()
+        target_fp = str(tmp_path / "zzz_target.py")
+        Path(target_fp).write_text("# placeholder\n" * 120)
+        with g._conn() as conn:
+            for i in range(stub_count):
+                fp = str(tmp_path / f"aaa_stub_{i:03d}.py")
+                Path(fp).write_text("# placeholder\n")
+                conn.execute(
+                    "INSERT INTO symbols (workspace, name, kind, file_path, start_line, end_line, indexed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (ws, "delete", "function", fp, 1, 2, now),
+                )
+            conn.execute(
+                "INSERT INTO symbols (workspace, name, kind, file_path, start_line, end_line, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ws, "delete", "function", target_fp, 1, 100, now),
+            )
+        return target_fp
+
+    def test_exact_definitions_keeps_large_def_over_alpha_truncation(self, tmp_path) -> None:
+        # 20 tiny stubs (alphabetically first) + 1 large def (alphabetically
+        # last) = 21 rows, limit=20 → exactly one must be dropped. The old
+        # `ORDER BY file_path` always dropped the large def purely because
+        # 'z' > 'a'; canonical (span DESC) ordering must keep it instead.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        target_fp = self._seed_many_defs(g, ws, tmp_path, stub_count=20)
+        defs = g._exact_definitions(ws, "delete", limit=20)
+        assert len(defs) == 20
+        assert any(d.file_path == target_fp for d in defs), (
+            "Large canonical definition dropped by alphabetical-path truncation; "
+            f"got files: {[Path(d.file_path).name for d in defs]}"
+        )
+
+    def test_trace_by_definition_includes_large_def(self, tmp_path) -> None:
+        # End-to-end: vectr_trace('delete') must surface the large definition
+        # in its per-definition breakdown, not just the internal query.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        target_fp = self._seed_many_defs(g, ws, tmp_path, stub_count=20)
+        result = g.trace(ws, "delete", direction="both", limit=20)
+        by_def_files = {e["definition"].file_path for e in result["by_definition"]}
+        assert target_fp in by_def_files, (
+            f"Large definition missing from trace by_definition dump: "
+            f"{[Path(f).name for f in by_def_files]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# F33 (UPG-17.1) — vectr_trace('Class.method') qualified-name resolution.
+#
+# vectr_search displays symbols as "Class.method"; an LLM naturally copies
+# that qualified name into a follow-up trace call. The edges/symbols tables
+# only ever store the bare leaf, so a literal name="Class.method" lookup was
+# silently empty for both callers and callees. Resolution: look up by the
+# bare leaf, then filter/scope by the named class's enclosing definition.
+# ---------------------------------------------------------------------------
+
+class TestTraceQualifiedNameF33:
+    def _fixture(self, tmp_path) -> tuple:
+        resolver = tmp_path / "resolver"
+        sync = tmp_path / "sync"
+        resolver.mkdir()
+        sync.mkdir()
+        (resolver / "models.py").write_text(textwrap.dedent("""\
+            class Alpha:
+                def helper_a(self): pass
+                def run(self):
+                    self.helper_a()
+
+            def use_alpha():
+                Alpha().run()
+        """))
+        (sync / "models.py").write_text(textwrap.dedent("""\
+            class Beta:
+                def helper_b(self): pass
+                def run(self):
+                    self.helper_b()
+        """))
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g.index_file(ws, str(resolver / "models.py"))
+        g.index_file(ws, str(sync / "models.py"))
+        return g, ws
+
+    def test_qualified_trace_not_silently_empty(self, tmp_path) -> None:
+        g, ws = self._fixture(tmp_path)
+        result = g.trace(ws, "Alpha.run", direction="both")
+        assert result["callers"], "qualified trace must not silently return empty callers"
+        assert result.get("qualified_class") == "Alpha"
+
+    def test_qualified_trace_scopes_callees_to_named_class(self, tmp_path) -> None:
+        g, ws = self._fixture(tmp_path)
+        result = g.trace(ws, "Alpha.run", direction="both")
+        by_def = result["by_definition"]
+        assert len(by_def) == 1
+        callees = {e.to_symbol for e in by_def[0]["callees"]}
+        assert "helper_a" in callees
+        assert "helper_b" not in callees
+        assert by_def[0]["definition"].name == "Alpha.run"
+
+    def test_qualified_trace_other_class_not_confused(self, tmp_path) -> None:
+        g, ws = self._fixture(tmp_path)
+        result = g.trace(ws, "Beta.run", direction="both")
+        by_def = result["by_definition"]
+        assert len(by_def) == 1
+        callees = {e.to_symbol for e in by_def[0]["callees"]}
+        assert "helper_b" in callees
+        assert "helper_a" not in callees
+
+    def test_bare_leaf_trace_unaffected(self, tmp_path) -> None:
+        """Bare 'run' still returns the ambiguous multi-definition view — no
+        regression to the existing UPG-4.1 behavior."""
+        g, ws = self._fixture(tmp_path)
+        result = g.trace(ws, "run", direction="both")
+        assert "qualified_class" not in result
+        assert len(result["definitions"]) == 2
+
+    def test_format_trace_qualified_shows_resolved_wording(self, tmp_path) -> None:
+        g, ws = self._fixture(tmp_path)
+        result = g.trace(ws, "Alpha.run", direction="both")
+        text = g.format_trace_for_llm(result, "Alpha.run")
+        assert "Resolved" in text
+        assert "helper_a" in text
+        assert "helper_b" not in text
+
+    def test_unknown_class_qualifier_falls_back_gracefully(self, tmp_path) -> None:
+        """A class qualifier matching no real definition must not silently
+        empty out — it degrades to the bare-leaf ambiguous view."""
+        g, ws = self._fixture(tmp_path)
+        result = g.trace(ws, "Ghost.run", direction="both")
+        assert "qualified_class" not in result
+        assert len(result["definitions"]) == 2
+
+
+# ---------------------------------------------------------------------------
 # UPG-4.2 — dedup edges; rank callees/callers by relevance, not alphabetically
 # ---------------------------------------------------------------------------
 

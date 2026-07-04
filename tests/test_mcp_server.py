@@ -628,6 +628,25 @@ class TestVectrLocate:
         handle_tools_call("vectr_locate", {"name": "foo", "limit": 5}, svc)
         svc.locate_with_snippets.assert_called_once_with("foo", limit=5, caller_file=None)
 
+    def test_locate_accepts_symbol_alias(self) -> None:
+        # F40-class param ergonomics: an LLM guessing "symbol" from a
+        # positional-looking tool-description example must still succeed.
+        svc = _mock_service()
+        result = handle_tools_call("vectr_locate", {"symbol": "verify_token"}, svc)
+        assert result["isError"] is False
+        svc.locate_with_snippets.assert_called_once_with("verify_token", limit=10, caller_file=None)
+
+    def test_locate_accepts_symbol_name_alias(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_locate", {"symbol_name": "verify_token"}, svc)
+        assert result["isError"] is False
+        svc.locate_with_snippets.assert_called_once_with("verify_token", limit=10, caller_file=None)
+
+    def test_locate_name_wins_over_alias_when_both_given(self) -> None:
+        svc = _mock_service()
+        handle_tools_call("vectr_locate", {"name": "real", "symbol": "ignored"}, svc)
+        svc.locate_with_snippets.assert_called_once_with("real", limit=10, caller_file=None)
+
     def test_locate_appends_eviction_hint_when_should_evict(self) -> None:
         svc = _mock_service()
         svc.auto_eviction_hint.return_value = "Drop these: auth.py"  # UPG-7.1 gated path
@@ -675,6 +694,23 @@ class TestVectrTrace:
         result = handle_tools_call("vectr_trace", {}, svc)
         assert result["isError"] is True
         assert "name is required" in result["content"][0]["text"]
+
+    def test_trace_accepts_symbol_alias(self) -> None:
+        # F40-class param ergonomics reproduced on vectr_trace: "symbol"
+        # (guessed from a positional-looking tool-description example) must
+        # succeed instead of erroring "name is required".
+        svc = _mock_service()
+        result = handle_tools_call("vectr_trace", {"symbol": "dispatch"}, svc)
+        assert result["isError"] is False
+        svc.trace_with_snippets.assert_called_once_with(
+            "dispatch", direction="both", limit=20, include_builtins=False)
+
+    def test_trace_accepts_symbol_name_alias(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_trace", {"symbol_name": "dispatch"}, svc)
+        assert result["isError"] is False
+        svc.trace_with_snippets.assert_called_once_with(
+            "dispatch", direction="both", limit=20, include_builtins=False)
 
     def test_trace_returns_text(self) -> None:
         svc = _mock_service()

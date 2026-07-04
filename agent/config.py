@@ -88,6 +88,12 @@ INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES : int
     vectr_ingest_traces response (UPG-7.3). Edges are ingested regardless;
     this only bounds the warning text length.
 
+SYMBOL_NAME_PARAM_ALIASES : tuple[str, ...]
+    Alternate argument keys accepted in place of "name" on vectr_locate and
+    vectr_trace (F40-class ergonomics). A tool-description example that reads
+    positional trains callers to guess a wrong key; the dispatch layer accepts
+    these as drop-in aliases so the call succeeds instead of erroring.
+
 LOCATE_LARGE_SPAN_THRESHOLD : int
     Line-span (end_line - start_line) at or above which a located symbol is
     considered "large" — typically a canonical library class or function (UPG-15.10).
@@ -382,6 +388,14 @@ WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S: float = float(_watcher_cfg["top_level_resca
 _ingest_cfg: dict[str, Any] = _cfg["behavior"]["ingest_traces"]
 
 INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES: int = int(_ingest_cfg["max_unresolved_examples"])
+
+# ---------------------------------------------------------------------------
+# MCP param-name aliases (F40-class ergonomics, UPG-TRACE-GRAPH-INCOMPLETE)
+# ---------------------------------------------------------------------------
+
+SYMBOL_NAME_PARAM_ALIASES: tuple[str, ...] = tuple(
+    str(a) for a in _cfg["behavior"]["symbol_name_param_aliases"]
+)
 
 # ---------------------------------------------------------------------------
 # Retrieval strategy fallback (UPG-8.2)
