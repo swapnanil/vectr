@@ -1617,6 +1617,118 @@ class TestImportancePrior:
 
 
 # ---------------------------------------------------------------------------
+# UPG-TESTPATH-FRAMEWORK-MISCLASS (F58) — searcher wiring for the
+# corpus-wide fan-in exemption from the test-file quality demotion.
+# ---------------------------------------------------------------------------
+
+class TestFileFanInExemptionWiring:
+    # Each candidate list ranks the test-path chunk (rank 0, base=1.0) against
+    # a neutral real-code filler (rank 1, base=0.5, quality=1.0 -> final=0.5).
+    # A single-candidate list always normalizes its own score to 1.0 (the
+    # final-score normalization divides by that list's own max), so an
+    # absolute `.score` assertion on one candidate can never distinguish
+    # "demoted" from "exempted" — ORDER against a fixed-quality filler is the
+    # signal that actually does: full test_deprioritised demotion drags the
+    # candidate's final score (1.0*0.46=0.46) below the filler's (0.5),
+    # flipping it to rank 1; exemption keeps it at 1.0*1.0=1.0, ahead of it.
+    _FILLER = "int add(int a, int b) {\n    return a + b;\n}\n// real impl"
+
+    def test_high_fan_in_test_path_file_not_demoted(self, searcher) -> None:
+        content = "def override_settings():\n    return 1\n    x = 2\n    y = 3"
+        cands = [
+            _sr(content, path="/p/tests/framework_lib.py"),
+            _sr(self._FILLER, path="/p/a.c", lang="c"),
+        ]
+        searcher.set_file_fan_in({"/p/tests/framework_lib.py": 1000})
+        out = searcher._apply_quality_and_dedup("q", cands)
+        assert out[0].file_path == "/p/tests/framework_lib.py", (
+            "a test-path file with fan-in far above threshold must not be "
+            "test_deprioritised — it must outrank a same-rank-1 real-code filler"
+        )
+
+    def test_low_fan_in_test_path_file_still_demoted(self, searcher) -> None:
+        content = "def override_settings():\n    return 1\n    x = 2\n    y = 3"
+        cands = [
+            _sr(content, path="/p/tests/throwaway.py"),
+            _sr(self._FILLER, path="/p/a.c", lang="c"),
+        ]
+        searcher.set_file_fan_in({"/p/tests/throwaway.py": 1})
+        out = searcher._apply_quality_and_dedup("q", cands)
+        assert out[0].file_path == "/p/a.c", (
+            "a test-path file with low fan-in must keep the full "
+            "test_deprioritised demotion — the real-code filler must outrank it"
+        )
+
+    def test_no_fan_in_map_installed_is_no_op(self, searcher) -> None:
+        # set_file_fan_in never called (default empty map) → pre-F58 behaviour.
+        content = "def override_settings():\n    return 1\n    x = 2\n    y = 3"
+        cands = [
+            _sr(content, path="/p/tests/throwaway.py"),
+            _sr(self._FILLER, path="/p/a.c", lang="c"),
+        ]
+        out = searcher._apply_quality_and_dedup("q", cands)
+        assert out[0].file_path == "/p/a.c"
+
+
+# ---------------------------------------------------------------------------
+# UPG-NAV-OVERDEMOTE-DECL (F59) — searcher wiring for the lexical-match-gated
+# navigational-declaration rescue (query_tokens threaded through search()).
+# ---------------------------------------------------------------------------
+
+class TestNavigationalDeclarationRescueWiring:
+    # Same reasoning as TestFileFanInExemptionWiring above: a single-candidate
+    # list always normalizes to 1.0, so the manifest chunk (rank 0, base=1.0)
+    # is ranked against a same-rank-1 real-code filler (base=0.5, quality=1.0
+    # -> final=0.5). Full navigational demotion (0.35) drags the manifest's
+    # final score (1.0*0.35=0.35) below the filler's (0.5), so the filler
+    # ranks first; the lexical-match rescue (0.75) keeps the manifest at
+    # 1.0*0.75=0.75, ahead of the filler.
+    _FILLER = "int add(int a, int b) {\n    return a + b;\n}\n// real impl"
+
+    def test_query_naming_declared_identifier_rescues_manifest(self, searcher) -> None:
+        content = (
+            "from x.dispatch import Signal\n\n"
+            "request_started = Signal()\nrequest_finished = Signal()"
+        )
+        cands = lambda: [
+            _sr(content, path="/p/signals.py"),
+            _sr(self._FILLER, path="/p/a.c", lang="c"),
+        ]
+        demoted = searcher._apply_quality_and_dedup(
+            "signal dispatcher implementation", cands(),
+            query_tokens=frozenset({"signal", "dispatcher", "implementation"}),
+        )
+        rescued = searcher._apply_quality_and_dedup(
+            "where is request_started signal defined", cands(),
+            query_tokens=frozenset({"where", "is", "request", "started", "signal", "defined"}),
+        )
+        assert demoted[0].file_path == "/p/a.c", (
+            "with no lexical overlap the manifest keeps the full navigational "
+            "demotion — the real-code filler must outrank it"
+        )
+        assert rescued[0].file_path == "/p/signals.py", (
+            "a query lexically naming the manifest's declared identifier must "
+            "rescue it above a same-rank-1 real-code filler"
+        )
+
+    def test_search_threads_query_tokens_end_to_end(self, indexer, tmp_path) -> None:
+        # End-to-end: search() itself must tokenize the query and pass it
+        # through — not just _apply_quality_and_dedup in isolation.
+        (tmp_path / "signals.py").write_text(
+            "from x.dispatch import Signal\n\n"
+            "request_started = Signal()\nrequest_finished = Signal()\n"
+        )
+        indexer.index_workspace()
+        from agent.searcher import CodeSearcher
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+        results, _ = s.search(
+            "where is request_started signal defined", n_results=5, rerank=False,
+        )
+        assert any(r.file_path.endswith("signals.py") for r in results)
+
+
+# ---------------------------------------------------------------------------
 # ARCH-2 — class-level reference-frequency importance blend
 #
 # Synthetic fixtures only — no benchmark-corpus names (django/QuerySet/etc.).

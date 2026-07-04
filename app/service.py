@@ -109,6 +109,12 @@ class VectrService:
         self._searcher.set_class_importance(
             self._symbol_graph.class_importance(self._workspace_root)
         )
+        # UPG-TESTPATH-FRAMEWORK-MISCLASS (F58): seed the searcher's test-framework
+        # fan-in exemption map from the persisted file_fan_in table the same way
+        # (empty until it has run once).
+        self._searcher.set_file_fan_in(
+            self._symbol_graph.file_fan_in(self._workspace_root)
+        )
 
         # Memory layer — semantic recall enabled via the same embedder + ChromaDB client
         # used by the code index, so no extra model load or second DB process.
@@ -270,6 +276,11 @@ class VectrService:
             # ARCH-2: same for the freshly-computed class-level importance.
             self._searcher.set_class_importance(
                 self._symbol_graph.class_importance(self._workspace_root)
+            )
+            # UPG-TESTPATH-FRAMEWORK-MISCLASS (F58): same for the freshly-computed
+            # test-framework fan-in exemption map.
+            self._searcher.set_file_fan_in(
+                self._symbol_graph.file_fan_in(self._workspace_root)
             )
         except Exception:
             logger.exception("Symbol graph build failed (non-fatal)")

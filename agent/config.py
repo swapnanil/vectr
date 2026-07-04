@@ -14,6 +14,13 @@ QUALITY_TRIVIAL : float
 QUALITY_NAVIGATIONAL : float
     Quality prior for re-export / import-only navigational chunks (UPG-12.1).
 
+QUALITY_NAV_DECLARATION_RESCUE : float
+    Softened quality prior for a bare-constructor-manifest navigational chunk
+    when the query lexically names one of the identifiers it declares
+    (UPG-NAV-OVERDEMOTE-DECL / F59). Applied instead of QUALITY_NAVIGATIONAL
+    only for that lexically-gated case; every other query still gets the full
+    navigational demotion.
+
 QUALITY_HEADING_ONLY : float
     Quality prior for markdown heading-only chunks (UPG-12.1).
 
@@ -25,6 +32,12 @@ QUALITY_VECTR_CONFIG : float
 
 QUALITY_TEST_DEPRIORITISED : float
     Quality prior for test files (UPG-12.1).
+
+TEST_FRAMEWORK_FAN_IN_THRESHOLD : int
+    Minimum unambiguous corpus-wide caller-file count (symbol_graph.file_fan_in())
+    above which a test-path-classified file is exempted from
+    QUALITY_TEST_DEPRIORITISED (UPG-TESTPATH-FRAMEWORK-MISCLASS / F58) — it is a
+    shipped testing-framework subpackage, not disposable test code.
 
 QUALITY_DOC_PROSE : float
     Quality prior for documentation prose chunks (UPG-12.1).
@@ -237,10 +250,12 @@ _qp_cfg: dict[str, Any] = _cfg["ranking"]["quality_priors"]
 
 QUALITY_TRIVIAL: float = float(_qp_cfg["trivial"])
 QUALITY_NAVIGATIONAL: float = float(_qp_cfg["navigational"])
+QUALITY_NAV_DECLARATION_RESCUE: float = float(_qp_cfg["navigational_declaration_rescue"])
 QUALITY_HEADING_ONLY: float = float(_qp_cfg["heading_only"])
 QUALITY_GENERATED: float = float(_qp_cfg["generated"])
 QUALITY_VECTR_CONFIG: float = float(_qp_cfg["vectr_config"])
 QUALITY_TEST_DEPRIORITISED: float = float(_qp_cfg["test_deprioritised"])
+TEST_FRAMEWORK_FAN_IN_THRESHOLD: int = int(_qp_cfg["test_framework_fan_in_threshold"])
 QUALITY_DOC_PROSE: float = float(_qp_cfg["doc_prose"])
 QUALITY_SHORT_PENALTY: float = float(_qp_cfg["short_penalty"])
 TRIVIAL_DOC_MAX_LINES: int = int(_qp_cfg["trivial_doc_max_lines"])
