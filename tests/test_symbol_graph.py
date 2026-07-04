@@ -561,6 +561,50 @@ class TestFormatting:
         text = g.format_trace_for_llm({"callers": [], "callees": []}, "fn")
         assert "none found" in text.lower()
 
+    def test_format_trace_both_empty_carries_recovery_hint(self, tmp_path) -> None:
+        # UPG-TRACE-EMPTY-HINT (F61): static analysis found no calls at all —
+        # locate-miss and search-low-confidence both hint a next step; trace
+        # must too, instead of leaving a bare dead end.
+        g = SymbolGraph(str(tmp_path))
+        text = g.format_trace_for_llm(
+            {"callers": [], "callees": [], "hidden_builtins": 0, "definitions": []},
+            "request_started",
+        )
+        assert "vectr_search" in text
+        assert "dynamic" in text.lower()
+
+    def test_format_trace_one_sided_result_has_no_recovery_hint(self, tmp_path) -> None:
+        # Hint only fires when BOTH sides are empty — a real callers hit means
+        # the symbol is genuinely resolved, no redirect needed.
+        g = SymbolGraph(str(tmp_path))
+        edge = CallEdge(from_file="svc.py", from_symbol="main", from_line=10, to_symbol="helper", edge_type="calls")
+        text = g.format_trace_for_llm(
+            {"callers": [edge], "callees": [], "hidden_builtins": 0, "definitions": []}, "helper",
+        )
+        assert "vectr_search" not in text
+
+    def test_format_trace_class_with_no_callees_notes_method_level_trace(self, tmp_path) -> None:
+        # UPG-TRACE-EMPTY-HINT: a class is never itself "called" — calls(0) on a
+        # class name must say so, rather than reading like a real miss.
+        g = SymbolGraph(str(tmp_path))
+        cls = Symbol(symbol_id=1, workspace="ws", name="CursorDebugWrapper", kind="class",
+                     file_path="dbg.py", start_line=1, end_line=20)
+        text = g.format_trace_for_llm(
+            {"callers": [], "callees": [], "hidden_builtins": 0, "definitions": [cls]},
+            "CursorDebugWrapper",
+        )
+        assert "method" in text.lower()
+        assert "vectr_trace(name=" in text
+
+    def test_format_trace_function_with_no_callees_has_no_class_note(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        fn = Symbol(symbol_id=1, workspace="ws", name="helper", kind="function",
+                    file_path="m.py", start_line=1, end_line=5)
+        text = g.format_trace_for_llm(
+            {"callers": [], "callees": [], "hidden_builtins": 0, "definitions": [fn]}, "helper",
+        )
+        assert "method" not in text.lower()
+
 
 # ---------------------------------------------------------------------------
 # T26: HTTP route extraction

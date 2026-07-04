@@ -387,6 +387,18 @@ class TestVectrSearch:
         assert search_tool["inputSchema"]["properties"]["n_results"]["default"] == 5
         assert "default: 5" in search_tool["inputSchema"]["properties"]["n_results"]["description"]
 
+    def test_locate_and_trace_descriptions_use_keyword_example_upg_trace_empty_hint(self) -> None:
+        # UPG-TRACE-EMPTY-HINT (F40-class): both `name` schema params are required
+        # keyword args, but the description's "Example:" line called them
+        # positionally (`vectr_locate('X')`) — trained a live failed tool call.
+        from integrations.mcp_server import _EXPLORATION_TOOLS
+        locate_tool = next(t for t in _EXPLORATION_TOOLS if t["name"] == "vectr_locate")
+        trace_tool = next(t for t in _EXPLORATION_TOOLS if t["name"] == "vectr_trace")
+        assert "vectr_locate(name=" in locate_tool["description"]
+        assert "vectr_locate('" not in locate_tool["description"]
+        assert "vectr_trace(name=" in trace_tool["description"]
+        assert "vectr_trace('" not in trace_tool["description"]
+
     def test_n_results_capped_at_50(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_search", {"query": "foo", "n_results": 999}, svc)
