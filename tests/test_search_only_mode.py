@@ -696,6 +696,19 @@ class TestClaudeMdSearchOnlyVariant:
         assert "Working memory" in text
         assert "vectr_remember" in text
 
+    def test_search_only_variant_also_drops_unsourced_stat_and_uses_keyword_examples(self):
+        """UPG-VERBALIZE-CONFIRM / UPG-TRACE-EMPTY-HINT apply to the search-only
+        variant too — it carries its own copy of the verbalization sentence and
+        the vectr_locate/vectr_trace example row."""
+        import main as m
+        text = m._render_claude_md(hooks_installed=False, search_only=True)
+        assert "26" not in text
+        assert "always run one cheap confirming call" in text
+        assert 'vectr_locate(name="' in text
+        assert 'vectr_trace(name="' in text
+        assert 'vectr_locate("' not in text and "vectr_locate('" not in text
+        assert 'vectr_trace("' not in text and "vectr_trace('" not in text
+
 
 class TestGetDaemonMode:
     def test_returns_mode_from_status_endpoint(self):

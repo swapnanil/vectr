@@ -104,7 +104,7 @@ _EXPLORATION_TOOLS = [
             "Returns file path + line number + kind for every matching definition. "
             "NOT when you're searching by concept or behaviour — use vectr_search instead. "
             "NOT when you want call relationships — use vectr_trace instead. "
-            "Example: vectr_locate('EvaluateSegments') → 'targeting/evaluator.go:45'"
+            "Example: vectr_locate(name='EvaluateSegments') → 'targeting/evaluator.go:45'"
         ),
         "inputSchema": {
             "type": "object",
@@ -134,7 +134,7 @@ _EXPLORATION_TOOLS = [
             "before modifying it. Traverses the call graph in both directions. "
             "NOT when you don't know the symbol name yet — use vectr_search or vectr_locate first. "
             "NOT when you just want the definition location — use vectr_locate instead. "
-            "Example: vectr_trace('EvaluateSegments') → 'Called by: RequestBid() in bidder/auction.go'"
+            "Example: vectr_trace(name='EvaluateSegments') → 'Called by: RequestBid() in bidder/auction.go'"
         ),
         "inputSchema": {
             "type": "object",

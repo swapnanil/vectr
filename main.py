@@ -63,8 +63,8 @@ The codebase is fully indexed. One `vectr_search` call returns ranked, relevant 
 | Tool | Purpose | Example |
 |---|---|---|
 | `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. | `vectr_search("workspace lock acquisition and release")` |
-| `vectr_locate("SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate("WorkspaceLock")` → `resolver.rs:214` |
-| `vectr_trace("symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace("acquire_lock")` |
+| `vectr_locate(name="SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate(name="WorkspaceLock")` → `resolver.rs:214` |
+| `vectr_trace(name="symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace(name="acquire_lock")` |
 | `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
 | `vectr_map_save(summary)` | Save a plain-English codebase summary (~200–350 tokens) as a permanent passport. Only call when `vectr_map` returned raw metadata. | `vectr_map_save("uv is a Rust-based Python package manager…")` |
 
@@ -91,7 +91,7 @@ A note stored with `vectr_remember` is the only finding that survives three thin
 
 ## When to use each capability
 
-**Before calling `vectr_search` on a well-known API or framework:** write out what you already know — function signatures, key types, parameter names — and only call `vectr_search` if genuine gaps remain after that verbalization. Reduces unnecessary search calls 26–40% on familiar codebases.
+**Before calling `vectr_search` on a well-known API or framework:** write out what you already know — function signatures, key types, parameter names — then, before citing any file:line specifics in your answer, always run one cheap confirming call: `vectr_locate(name="...")` (1 call, ~160 tokens, ~0.02s). Verbalization narrows what you're looking for; it never substitutes for confirming it against the actual code.
 
 __SESSION_START_GUIDANCE__
 
@@ -126,11 +126,11 @@ The codebase is fully indexed. One `vectr_search` call returns ranked, relevant 
 | Tool | Purpose | Example |
 |---|---|---|
 | `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. | `vectr_search("workspace lock acquisition and release")` |
-| `vectr_locate("SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate("WorkspaceLock")` → `resolver.rs:214` |
-| `vectr_trace("symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace("acquire_lock")` |
+| `vectr_locate(name="SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate(name="WorkspaceLock")` → `resolver.rs:214` |
+| `vectr_trace(name="symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace(name="acquire_lock")` |
 | `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
 
-**Before calling `vectr_search` on a well-known API or framework:** write out what you already know — function signatures, key types, parameter names — and only call `vectr_search` if genuine gaps remain after that verbalization. Reduces unnecessary search calls 26–40% on familiar codebases.
+**Before calling `vectr_search` on a well-known API or framework:** write out what you already know — function signatures, key types, parameter names — then, before citing any file:line specifics in your answer, always run one cheap confirming call: `vectr_locate(name="...")` (1 call, ~160 tokens, ~0.02s). Verbalization narrows what you're looking for; it never substitutes for confirming it against the actual code.
 """
 
 # Default session-start guidance: no hooks installed, so the model must

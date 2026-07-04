@@ -1146,6 +1146,29 @@ class TestClaudeMdFraming:
             "CLAUDE.md must include SR-RAG guidance: write out known facts before calling vectr_search"
         )
 
+    def test_verbalization_requires_bounded_confirmation(self, tmp_path):
+        """UPG-VERBALIZE-CONFIRM: verbalizing parametric knowledge must never license a
+        zero-tool-call answer — the template must always send the agent back through
+        one cheap confirming call (vectr_locate) before it cites file:line specifics."""
+        block = self._vectr_block(tmp_path)
+        assert "always run one cheap confirming call" in block
+        assert 'vectr_locate(name="' in block
+
+    def test_verbalization_drops_unsourced_stat(self, tmp_path):
+        """The unsourced '26-40%' figure justified skipping tool calls on familiar
+        frameworks entirely — must be removed, not merely reworded."""
+        block = self._vectr_block(tmp_path)
+        assert "26" not in block, "unsourced 26-40% verbalization stat must not ship in CLAUDE.md"
+
+    def test_tool_table_examples_are_keyword_explicit(self, tmp_path):
+        """vectr_locate/vectr_trace examples must use name=... — a bare positional
+        string ('SymbolName') trained a live failed tool call (F40-class)."""
+        block = self._vectr_block(tmp_path)
+        assert 'vectr_locate("' not in block and "vectr_locate('" not in block
+        assert 'vectr_trace("' not in block and "vectr_trace('" not in block
+        assert 'vectr_locate(name=' in block
+        assert 'vectr_trace(name=' in block
+
 
 # ---------------------------------------------------------------------------
 # cmd_watch

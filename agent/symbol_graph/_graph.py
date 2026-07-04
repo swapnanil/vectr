@@ -1490,6 +1490,40 @@ class SymbolGraph:
         return (f"    (+{n} builtin/stdlib call{'s' if n != 1 else ''} hidden — "
                 f"pass include_builtins=true to show)")
 
+    @staticmethod
+    def _empty_trace_hint(symbol_name: str) -> str:
+        """Recovery hint for a trace with NO callers and NO callees found
+        (UPG-TRACE-EMPTY-HINT, case F61) — mirrors the redirect other empty
+        results already give: locate-miss suggests vectr_search (`_no_match_text`
+        above), search low-confidence suggests vectr_locate (mcp_server/
+        `_dispatch.py`). A bare '(none found in index)' with no follow-up trains
+        the model to abandon `trace` silently; static call-graph analysis can't
+        see dynamic dispatch (attribute calls on an instance, decorators,
+        dependency injection), so a real call site can exist and still be
+        invisible here."""
+        return (
+            f"\nStatic call-graph analysis found no calls for '{symbol_name}'. "
+            f"If it's invoked via dynamic dispatch (e.g. an instance attribute "
+            f"call, a decorator, or dependency injection) rather than a direct "
+            f"name reference, try vectr_search(query=\"{symbol_name} usage\") "
+            f"or vectr_search(query=\"{symbol_name} call site\") to find call "
+            f"sites by content instead."
+        )
+
+    @staticmethod
+    def _class_trace_note() -> str:
+        """Note appended when the traced symbol is a class definition with no
+        callees (UPG-TRACE-EMPTY-HINT) — a class itself is never "called"; its
+        methods are. Without this, calls(0) on a class reads like a real
+        no-calls-found result rather than tracing the wrong granularity
+        (CursorDebugWrapper witness: class-level trace never aggregates its
+        methods' calls)."""
+        return (
+            "Note: this is a class — tracing the class name itself does not "
+            "aggregate its methods' calls. Trace a specific method name "
+            "(e.g. vectr_trace(name=\"MethodName\")) to see its call details."
+        )
+
     def format_trace_for_llm(self, trace_result: dict, symbol_name: str) -> str:
         lines = [f"Call graph trace for '{symbol_name}':\n"]
 
@@ -1502,21 +1536,26 @@ class SymbolGraph:
                 f"calls are shown per definition. (Callers below match the name only "
                 f"and can't be attributed to one definition by static analysis.)\n"
             )
+            any_callees_found = False
             for entry in by_def:
                 d = entry["definition"]
                 mod = entry.get("module") or d.file_path
                 cs = entry["callees"]
                 lines.append(f"[{d.kind}] {symbol_name} @ {mod}:{d.start_line} — calls ({len(cs)}):")
                 if cs:
+                    any_callees_found = True
                     for e in cs:
                         lines.append(f"    {e.to_symbol}{self._count_suffix(e)}{self._dynamic_marker(e)}")
                 else:
                     lines.append("    (none found in index)")
+                    if d.kind == "class":
+                        lines.append(f"    {self._class_trace_note()}")
                 note = self._hidden_builtins_note(entry.get("hidden_builtins", 0))
                 if note:
                     lines.append(note)
                 lines.append("")
             callers = trace_result.get("callers")
+            callers_empty = callers is not None and not callers
             if callers is not None:
                 if callers:
                     lines.append(f"{self._caller_verb(callers)} — any '{symbol_name}' ({len(callers)}):")
@@ -1527,9 +1566,12 @@ class SymbolGraph:
                         )
                 else:
                     lines.append(f"Called by — any '{symbol_name}': (none found in index)")
+            if callers_empty and not any_callees_found:
+                lines.append(self._empty_trace_hint(symbol_name))
             return "\n".join(lines)
 
         callers = trace_result.get("callers", [])
+        callers_empty = callers is not None and not callers
         if callers is not None:
             if callers:
                 lines.append(f"{self._caller_verb(callers)} ({len(callers)}):")
@@ -1542,6 +1584,7 @@ class SymbolGraph:
                 lines.append("Called by: (none found in index)")
 
         callees = trace_result.get("callees", [])
+        callees_empty = callees is not None and not callees
         if callees is not None:
             if callees:
                 lines.append(f"\nCalls ({len(callees)}):")
@@ -1549,9 +1592,15 @@ class SymbolGraph:
                     lines.append(f"  {e.to_symbol}{self._count_suffix(e)}{self._dynamic_marker(e)}")
             else:
                 lines.append("\nCalls: (none found in index)")
+                definitions = trace_result.get("definitions") or []
+                if any(d.kind == "class" for d in definitions):
+                    lines.append(self._class_trace_note())
             note = self._hidden_builtins_note(trace_result.get("hidden_builtins", 0))
             if note:
                 lines.append(note)
+
+        if callers_empty and callees_empty:
+            lines.append(self._empty_trace_hint(symbol_name))
 
         return "\n".join(lines)
 
