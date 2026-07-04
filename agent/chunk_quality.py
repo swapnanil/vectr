@@ -151,6 +151,25 @@ _ATTR_ASSIGN_RE = re.compile(r"^[\s]*\w+\s*(?::[^=]+)?\s*=\s*(.+)$")
 #     ``models.CASCADE``) — but NOT a numeric literal like ``1.5`` (digit-led).
 _COMPLEX_RHS_RE = re.compile(r"[\w\]\)]\s*\(|[A-Za-z_]\w*\.")
 
+# _BARE_CTOR_RHS_RE: the RHS captured by _ATTR_ASSIGN_RE is a bare constructor
+# call — a single call to a PascalCase-named callable (the class-naming
+# convention shared by Python/JS/TS/Java/C#/Go) with simple arguments only (no
+# nested call, no dotted attribute access inside the parens).  This is the
+# "declare a module-level instance of an imported type" pattern used by
+# re-export/manifest modules (``request_started = Signal()``,
+# ``pre_init = ModelSignal(use_caching=True)``) — the statement adds no
+# retrieval value beyond the import that already names the type, so a module
+# consisting only of imports and such declarations is navigational, not
+# implementation (UPG-PREFIX-COMPOSE).
+_BARE_CTOR_RHS_RE = re.compile(r"^[A-Z]\w*\([^().]*\)[\s;]*$")
+
+# _LEADING_DOCSTRING_DELIM_RE: a line that OPENS a Python triple-quoted string
+# at its start (module/file docstring convention).  Used only to recognise a
+# LEADING module docstring block so it can be skipped when judging whether the
+# rest of a chunk is import-only navigational content — a docstring describes
+# the file, it is not itself implementation or an import (UPG-PREFIX-COMPOSE).
+_LEADING_DOCSTRING_DELIM_RE = re.compile(r'^("""|\'\'\')')
+
 # Lines that signal real logic in a class body — if any of these appear in the
 # body, the chunk is NOT an attribute-only stub.
 _HAS_DEF_OR_LOGIC_RE = re.compile(
@@ -275,24 +294,61 @@ def is_trivial_chunk(content: str, language: str = "") -> bool:
     return False
 
 
+def _strip_leading_docstring(lines: list[str]) -> list[str]:
+    """Drop a leading Python module/file docstring block (UPG-PREFIX-COMPOSE).
+
+    A module docstring (``\"\"\"Multi-consumer multi-producer dispatching
+    mechanism...\"\"\"``) describes the file; it is not an import and not
+    implementation, so it should not by itself block an otherwise
+    import-only re-export shim (e.g. a package ``__init__.py`` that opens
+    with a docstring and then re-exports names) from being recognised as
+    navigational. Only strips a block that starts at ``lines[0]`` — a
+    triple-quoted string appearing later (e.g. inside a function body) is
+    left untouched.
+    """
+    if not lines:
+        return lines
+    m = _LEADING_DOCSTRING_DELIM_RE.match(lines[0])
+    if not m:
+        return lines
+    delim = m.group(1)
+    remainder = lines[0][len(delim):]
+    if delim in remainder:
+        return lines[1:]
+    for i in range(1, len(lines)):
+        if delim in lines[i]:
+            return lines[i + 1:]
+    return lines
+
+
 def is_navigational_chunk(content: str, language: str = "") -> bool:
-    """True if every meaningful line is an import / re-export / alias (UPG-1.2).
+    """True if every meaningful line is an import / re-export / alias, or a
+    bare module-level instantiation of an imported type (UPG-1.2, extended by
+    UPG-PREFIX-COMPOSE).
 
     These are tables of contents (Rust ``lib.rs`` re-export blocks, Python
     ``__init__`` import aggregators, JS/TS barrels) — they lexically match many
-    queries but contain no implementation.
+    queries but contain no implementation. The extension also covers Python
+    "declaration manifest" modules that do nothing but import a type and
+    declare bare module-level instances of it (``request_started = Signal()``)
+    — same lack of standalone retrieval value as a pure re-export.
     """
     lines = _meaningful_lines(content)
     if len(lines) < 2:
         # single-line imports are handled by is_trivial_chunk; require a block
         return False
+    body = _strip_leading_docstring(lines)
+    if not body:
+        return False
     nav = 0
-    for line in lines:
+    for line in body:
         if _IMPORT_LINE_RE.match(line) or _TRIVIAL_LINE_RE.match(line):
+            nav += 1
+        elif (m := _ATTR_ASSIGN_RE.match(line)) and _BARE_CTOR_RHS_RE.match(m.group(1).strip()):
             nav += 1
         else:
             return False
-    return nav == len(lines)
+    return nav == len(body)
 
 
 def is_markdown_heading_only(content: str) -> bool:
