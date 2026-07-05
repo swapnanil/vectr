@@ -148,6 +148,20 @@ SYMBOL_GRAPH_RESERVED_KEYWORDS : dict[str, frozenset[str]]
     call-edge target — guards against a desynced/ERROR-node parse misattributing
     a keyword token as an identifier (UPG-JSFLOW-SYMBOLS).
 
+SYMBOL_GRAPH_ERROR_RECOVERY_MIN_SPAN_LINES : int
+    Minimum line-span an opaque errored (non-symbol-type) node must cover before
+    an isolated reparse-recovery attempt is made on its byte range
+    (UPG-REACT-TSX-FUNCTION-DECL-DROP).
+
+SYMBOL_GRAPH_ERROR_RECOVERY_MAX_REPARSE_ATTEMPTS : int
+    Reparse-recovery attempts budget per file, bounding worst-case parse cost
+    (UPG-REACT-TSX-FUNCTION-DECL-DROP).
+
+SYMBOL_GRAPH_ERROR_RECOVERY_MAX_EXTEND_STEPS_PER_ATTEMPT : int
+    Per-attempt cap on sibling-absorption steps while growing a reparse past
+    a mid-declaration cut, so one badly-cut region can't burn the whole
+    per-file reparse budget (UPG-REACT-TSX-FUNCTION-DECL-DROP).
+
 WORKSPACE_DEFAULT_VECTRIGNORE_DIRS : tuple[str, ...]
     Directory names seeded into a fresh .vectrignore on first `vectr start`/`vectr
     init` when the workspace has none yet (UPG-13.2). Never overwrites an existing
@@ -378,6 +392,16 @@ SYMBOL_GRAPH_RESERVED_KEYWORDS: dict[str, frozenset[str]] = {
     str(lang): frozenset(str(kw) for kw in kws)
     for lang, kws in _sg_cfg["reserved_keywords"].items()
 }
+
+_sg_error_recovery_cfg: dict[str, Any] = _sg_cfg["error_recovery"]
+
+SYMBOL_GRAPH_ERROR_RECOVERY_MIN_SPAN_LINES: int = int(_sg_error_recovery_cfg["min_span_lines"])
+SYMBOL_GRAPH_ERROR_RECOVERY_MAX_REPARSE_ATTEMPTS: int = int(
+    _sg_error_recovery_cfg["max_reparse_attempts_per_file"]
+)
+SYMBOL_GRAPH_ERROR_RECOVERY_MAX_EXTEND_STEPS_PER_ATTEMPT: int = int(
+    _sg_error_recovery_cfg["max_extend_steps_per_attempt"]
+)
 
 # ---------------------------------------------------------------------------
 # Workspace / watcher tunables (UPG-13.1/13.2/13.3)

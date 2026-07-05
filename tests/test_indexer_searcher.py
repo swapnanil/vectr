@@ -888,6 +888,169 @@ function beginWork(current: Foo | null, workInProgress: Foo): Foo | null {
             assert kw not in edge_targets
 
 
+class TestFlowGrammarDesyncRecovery:
+    """UPG-REACT-TSX-FUNCTION-DECL-DROP: a Flow-only construct the tsx grammar
+    can't parse must not erase an otherwise-legitimate function declaration.
+    Two distinct failure shapes, two mechanisms:
+
+    (1) the construct is CONTAINED inside one declaration's own subtree (a bad
+        parameter/body type) — that declaration's own NAME token is still
+        clean, so it must still be extracted (name-node-scoped error check).
+    (2) the construct desyncs the grammar's error recovery badly enough that
+        an unrelated run of SIBLING declarations gets swallowed into one
+        opaque errored node — isolated reparse-in-place recovers them.
+
+    Fixtures are minimal synthetic Flow snippets — no benchmark-corpus source
+    is referenced or copied.
+    """
+
+    def _write(self, tmp_path, code: str, name="sample.js") -> str:
+        p = tmp_path / name
+        p.write_text(code)
+        return str(p)
+
+    def test_locally_erroring_signature_construct_still_extracts_function(self, tmp_path) -> None:
+        # `component(...props: any)` (Flow's component-type syntax) has no tsx
+        # equivalent — it errors within the parameter's type annotation, but
+        # the function's own name token is unaffected.
+        code = """\
+// @flow
+export function alpha(x: ?component(...props: any)): Beta {
+  return x;
+}
+"""
+        from agent.symbol_graph import extract_symbols_from_file
+        syms, _ = extract_symbols_from_file(self._write(tmp_path, code))
+        names = {s["name"] for s in syms}
+        assert "alpha" in names
+
+    def test_locally_erroring_body_construct_still_extracts_function(self, tmp_path) -> None:
+        # A bare-identifier Flow function type (`A => mixed`, no parens around
+        # the param) inside one function's body errors locally in tsx but
+        # does not desync its clean sibling.
+        code = """\
+// @flow
+function gamma(): void {
+  const bad: (A => mixed) = undefined;
+}
+function delta(): void {
+  return;
+}
+"""
+        from agent.symbol_graph import extract_symbols_from_file
+        syms, _ = extract_symbols_from_file(self._write(tmp_path, code))
+        names = {s["name"] for s in syms}
+        assert "gamma" in names
+        assert "delta" in names
+
+    def test_catastrophic_desync_recovers_swallowed_sibling_functions(self, tmp_path) -> None:
+        # The same bare-identifier Flow function type, used inside an object
+        # type's property, desyncs the grammar badly enough to swallow every
+        # following sibling declaration into one opaque errored node — no
+        # `function_declaration` node survives anywhere in the raw parse.
+        # Isolated reparse-in-place (with sibling-absorbing extension) must
+        # recover the swallowed declarations.
+        names_list = ["fnA", "fnB", "fnC", "fnD", "fnE", "fnF", "fnG", "fnH"]
+        body = "\n".join(
+            f"function {n}(): void {{\n  return;\n}}\n" for n in names_list
+        )
+        code = f"""\
+// @flow
+export type Queue<S, A> = {{
+  pending: S | null,
+  dispatch: (A => mixed) | null,
+  lastRenderedReducer: ((S, A) => S) | null,
+  lastRenderedState: S | null,
+}};
+
+{body}
+"""
+        from agent.symbol_graph import extract_symbols_from_file
+        syms, _ = extract_symbols_from_file(self._write(tmp_path, code))
+        names = {s["name"] for s in syms}
+        recovered = [n for n in names_list if n in names]
+        # The recovery mechanism is budget-bounded (UPG-REACT-TSX-FUNCTION-DECL-DROP)
+        # and not guaranteed to recover every single swallowed sibling in one
+        # pass — but it must recover the large majority instead of the zero
+        # a plain has_error-on-subtree check would yield.
+        assert len(recovered) >= len(names_list) - 2, (
+            f"expected most of {names_list} recovered, got {recovered}"
+        )
+
+    def test_catastrophic_desync_without_recovery_loses_all_siblings(self, tmp_path) -> None:
+        # Documents WHY the recovery mechanism is needed: with it disabled
+        # (reparse_budget=0), the same construct as above yields zero of the
+        # swallowed functions — the name-node-scoped check alone (UPG-REACT-
+        # TSX-FUNCTION-DECL-DROP mechanism 1) cannot help here since no
+        # `function_declaration` node exists anywhere in the raw parse tree.
+        from pathlib import Path as _Path
+        from agent.symbol_graph._extraction import _collect_symbols_and_calls, _get_parser
+        from agent.symbol_graph._constants import _SYMBOL_TYPES, _CALL_TYPES
+
+        names_list = ["fnA", "fnB"]
+        body = "\n".join(
+            f"function {n}(): void {{\n  return;\n}}\n" for n in names_list
+        )
+        code = f"""\
+export type Queue<S, A> = {{
+  dispatch: (A => mixed) | null,
+}};
+
+{body}
+"""
+        parser = _get_parser("tsx")
+        code_bytes = code.encode("utf-8")
+        tree = parser.parse(code_bytes)
+        symbols: list[dict] = []
+        edges: list[dict] = []
+        _collect_symbols_and_calls(
+            tree.root_node, code_bytes, "javascript", "f.js",
+            _SYMBOL_TYPES.get("javascript", {}), _CALL_TYPES.get("javascript", set()),
+            symbols, edges,
+            parser=parser, reparse_budget=[0],
+        )
+        names = {s["name"] for s in symbols}
+        assert not any(n in names for n in names_list)
+
+    def test_desync_recovery_never_leaks_a_keyword_symbol(self, tmp_path) -> None:
+        # A genuinely broken Flow-pragma'd file (unbalanced brace) must still
+        # never mint a keyword-token symbol, even though it now also goes
+        # through the isolated-reparse recovery path.
+        code = """\
+// @flow
+import type {Foo} from "./types";
+
+if (x) {
+
+function completeWork(a: Foo): void {
+  return;
+}
+"""
+        from agent.symbol_graph import extract_symbols_from_file
+        syms, edges = extract_symbols_from_file(self._write(tmp_path, code))
+        names = {s["name"] for s in syms}
+        assert "completeWork" in names
+        for kw in ("if", "for", "while", "return", "switch", "case"):
+            assert kw not in names
+        edge_targets = {e["to_symbol"] for e in edges}
+        for kw in ("if", "for", "while", "return", "switch", "case"):
+            assert kw not in edge_targets
+
+    def test_plain_js_unaffected_by_recovery_machinery(self, tmp_path) -> None:
+        # No has_error anywhere in a clean, plain .js file — the recovery
+        # branch's `node.has_error` guard means it never even attempts a
+        # reparse, so behavior for ordinary code is unchanged.
+        code = """\
+function greet(name) {
+  return "hello " + name;
+}
+"""
+        from agent.symbol_graph import extract_symbols_from_file
+        syms, _ = extract_symbols_from_file(self._write(tmp_path, code))
+        names = {s["name"] for s in syms}
+        assert names == {"greet"}
+
+
 class TestReservedKeywordRejection:
     """UPG-JSFLOW-SYMBOLS: symbol names must never be a language keyword,
     across every symbol-graph language (config-driven, not JS-specific)."""

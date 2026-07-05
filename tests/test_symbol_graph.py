@@ -2624,9 +2624,11 @@ class TestFileImportanceARCH1a:
             )
 
     def test_schema_version_bumped(self) -> None:
-        """SYMBOL_SCHEMA_VERSION must be 8 (ARCH-2 bumped from 7)."""
-        assert SYMBOL_SCHEMA_VERSION == 8, (
-            f"Expected SYMBOL_SCHEMA_VERSION=8 after ARCH-2 bump, got {SYMBOL_SCHEMA_VERSION}"
+        """SYMBOL_SCHEMA_VERSION must be >= 8 (ARCH-2 bumped from 7; later
+        bumps, e.g. UPG-REACT-TSX-FUNCTION-DECL-DROP's extraction-behavior
+        change, are expected to keep raising it further)."""
+        assert SYMBOL_SCHEMA_VERSION >= 8, (
+            f"Expected SYMBOL_SCHEMA_VERSION>=8 after ARCH-2 bump, got {SYMBOL_SCHEMA_VERSION}"
         )
 
 

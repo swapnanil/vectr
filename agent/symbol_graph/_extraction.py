@@ -6,7 +6,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from agent.config import SYMBOL_GRAPH_RESERVED_KEYWORDS
+from agent.config import (
+    SYMBOL_GRAPH_ERROR_RECOVERY_MAX_EXTEND_STEPS_PER_ATTEMPT,
+    SYMBOL_GRAPH_ERROR_RECOVERY_MAX_REPARSE_ATTEMPTS,
+    SYMBOL_GRAPH_ERROR_RECOVERY_MIN_SPAN_LINES,
+    SYMBOL_GRAPH_RESERVED_KEYWORDS,
+)
 from agent.symbol_graph._constants import (
     _SYMBOL_TYPES,
     _MODULE_BINDING_TYPES,
@@ -81,6 +86,23 @@ def _get_symbol_name(node, code_bytes: bytes, language: str = "") -> str:
     return ""
 
 
+def _get_symbol_name_node(node, language: str):
+    """The AST node bearing the symbol's own identifier, when the grammar
+    exposes it via tree-sitter's `name` field (UPG-REACT-TSX-FUNCTION-DECL-DROP).
+
+    Used to check parse-error status on the IDENTIFIER ITSELF rather than the
+    whole definition subtree: a locally-erroring construct elsewhere in a
+    function's signature or body (a Flow-only type the routed grammar can't
+    parse, e.g.) must not erase symbol identity when the name token is clean.
+    Returns None when the field isn't resolvable for this node type — callers
+    then fall back to the broader whole-subtree error check, unchanged from
+    before this fix.
+    """
+    if language in ("c", "cpp"):
+        return None  # C/C++ names come from a declarator chain, not this field
+    return node.child_by_field_name("name")
+
+
 def _get_call_name(node, code_bytes: bytes) -> str:
     """Extract called function name from a call node."""
     # Python: call → function(identifier | attribute)
@@ -139,20 +161,51 @@ def _collect_symbols_and_calls(
     current_line: int = 0,
     depth: int = 0,
     type_usage_nodes: set[str] = frozenset(),
+    parser=None,
+    reparse_budget: list[int] | None = None,
+    line_offset: int = 0,
+    _just_recovered: bool = False,
+    attempted_spans: set[tuple[int, int]] | None = None,
 ) -> None:
-    """Recursively walk AST collecting symbols and call edges."""
+    """Recursively walk AST collecting symbols and call edges.
+
+    `parser`/`reparse_budget`/`line_offset` support UPG-REACT-TSX-FUNCTION-DECL-DROP
+    error-recovery reparsing (see the recovery branch below); `code_bytes` is
+    whatever byte range the CURRENT frame is walking (the whole file at the
+    top level, or an isolated reparsed sub-blob when recovering), and
+    `line_offset` is the cumulative row offset from that frame back to the
+    true file so emitted `start_line`/`end_line` stay correct. `attempted_spans`
+    memoizes (absolute start line, absolute end line) pairs already sent
+    through a recovery reparse: a fragment that is genuinely incomplete on
+    its own (e.g. a mid-expression excerpt with no enclosing statement)
+    reparses into an identically-shaped, identically-errored wrapper node
+    covering the same lines — without this guard that reproduces itself
+    every recursion and burns the whole budget on one useless span.
+    """
     if depth > _MAX_DEPTH:
         return
+    if reparse_budget is None:
+        reparse_budget = [SYMBOL_GRAPH_ERROR_RECOVERY_MAX_REPARSE_ATTEMPTS]
+    if attempted_spans is None:
+        attempted_spans = set()
     if node.type in symbol_types:
         name = _get_symbol_name(node, code_bytes, language)
         kind = symbol_types[node.type]
-        start = node.start_point[0] + 1
-        end = node.end_point[0] + 1
-        # UPG-JSFLOW-SYMBOLS: skip anonymous nodes (e.g. C anonymous struct inside
-        # a typedef), language keywords misattributed as identifiers, and any node
-        # whose own subtree contains a parse error — a corrupted/desynced parse
-        # (e.g. Flow syntax hitting the wrong grammar) must not mint a symbol.
-        if name and not _is_reserved_keyword(name, language) and not node.has_error:
+        start = node.start_point[0] + 1 + line_offset
+        end = node.end_point[0] + 1 + line_offset
+        # UPG-JSFLOW-SYMBOLS / UPG-REACT-TSX-FUNCTION-DECL-DROP: skip anonymous
+        # nodes (e.g. C anonymous struct inside a typedef), language keywords
+        # misattributed as identifiers, and any node whose own NAME token comes
+        # from a parse error — a corrupted/desynced parse (e.g. Flow syntax the
+        # grammar can't parse) must not mint a symbol from a bogus identifier.
+        # A parse error CONTAINED elsewhere in the subtree (a locally-unparseable
+        # type in a parameter or the body) does not erase a legitimate
+        # declaration whose own name is clean — checked on the name node in
+        # isolation when the grammar exposes one; the previous, broader
+        # whole-subtree check remains the fallback where it doesn't.
+        name_node = _get_symbol_name_node(node, language)
+        name_is_junk = name_node.has_error if name_node is not None else node.has_error
+        if name and not _is_reserved_keyword(name, language) and not name_is_junk:
             symbols.append({
                 "name": name,
                 "kind": kind,
@@ -170,7 +223,75 @@ def _collect_symbols_and_calls(
                 symbol_types, call_types, symbols, edges,
                 current_symbol=ctx, current_line=ctx_line,
                 depth=depth + 1, type_usage_nodes=type_usage_nodes,
+                parser=parser, reparse_budget=reparse_budget, line_offset=line_offset,
+                attempted_spans=attempted_spans,
             )
+        return
+
+    # UPG-REACT-TSX-FUNCTION-DECL-DROP: a single unparseable construct can
+    # desync a grammar's error recovery badly enough that an unrelated span of
+    # SIBLING declarations gets swallowed into one opaque, mis-typed node
+    # (e.g. tree-sitter emits a bogus `member_expression`/`ERROR` covering
+    # hundreds of lines instead of the real `function_declaration` nodes
+    # within it) — not just a locally-contained error on one declaration.
+    # Reparsing that node's own byte range in isolation frequently resyncs
+    # cleanly: the parser starts fresh, no longer carrying the earlier
+    # desync's state. Language-agnostic — gated purely on node shape (opaque
+    # + errored + large), not on any language/keyword content. A fragment
+    # that ISN'T a complete top-level unit on its own (e.g. a mid-expression
+    # excerpt) reparses right back into an identically-shaped, identically-
+    # errored wrapper covering the same lines — `attempted_spans` recognizes
+    # that no-progress case and gives up on that span after one try instead
+    # of re-triggering on the lookalike wrapper every recursion.
+    span_key = (node.start_point[0] + line_offset, node.end_point[0] + line_offset)
+    if (
+        parser is not None
+        and not _just_recovered
+        and node.has_error
+        and reparse_budget[0] > 0
+        and span_key not in attempted_spans
+        and (node.end_point[0] - node.start_point[0]) >= SYMBOL_GRAPH_ERROR_RECOVERY_MIN_SPAN_LINES
+    ):
+        reparse_budget[0] -= 1
+        attempted_spans.add(span_key)
+        end_byte = node.end_byte
+        sibling = node.next_sibling
+        blob = code_bytes[node.start_byte:end_byte]
+        sub_tree = parser.parse(blob)
+        # The desync's error-recovery boundary for `node` is an arbitrary
+        # token cut, not a real statement boundary — it can land mid-
+        # declaration, leaving the isolated reparse's own trailing child
+        # errored too. Grow the reparsed range to absorb the next ORIGINAL
+        # sibling (tree-sitter's own sibling link — a structural move, no
+        # content/keyword matching) and retry until the tail clears or the
+        # shared budget runs out, so a declaration split across the cut is
+        # recovered whole.
+        # Extension steps are bounded by their own small per-attempt cap, not
+        # the shared per-file budget — otherwise one badly-cut region could
+        # spend the entire file's budget on itself and starve every other
+        # desynced region.
+        extend_steps = 0
+        while (
+            sub_tree.root_node.children
+            and sub_tree.root_node.children[-1].has_error
+            and sibling is not None
+            and extend_steps < SYMBOL_GRAPH_ERROR_RECOVERY_MAX_EXTEND_STEPS_PER_ATTEMPT
+        ):
+            extend_steps += 1
+            end_byte = sibling.end_byte
+            sibling = sibling.next_sibling
+            blob = code_bytes[node.start_byte:end_byte]
+            sub_tree = parser.parse(blob)
+        _collect_symbols_and_calls(
+            sub_tree.root_node, blob, language, file_path,
+            symbol_types, call_types, symbols, edges,
+            current_symbol=current_symbol, current_line=current_line,
+            depth=depth + 1, type_usage_nodes=type_usage_nodes,
+            parser=parser, reparse_budget=reparse_budget,
+            line_offset=line_offset + node.start_point[0],
+            _just_recovered=True,
+            attempted_spans=attempted_spans,
+        )
         return
 
     # UPG-10.3: module-level constant/variable bindings. ONLY at module scope —
@@ -183,8 +304,8 @@ def _collect_symbols_and_calls(
                 "name": nm,
                 "kind": "constant" if nm.lstrip("_").isupper() else "variable",
                 "file_path": file_path,
-                "start_line": ln,
-                "end_line": node.end_point[0] + 1,
+                "start_line": ln + line_offset,
+                "end_line": node.end_point[0] + 1 + line_offset,
             })
 
     if node.type in call_types and current_symbol:
@@ -236,6 +357,8 @@ def _collect_symbols_and_calls(
             depth=depth + 1,  # MUST increment — generic nodes dominate deep C ASTs;
                               # leaving this at `depth` let the guard never fire → RecursionError
             type_usage_nodes=type_usage_nodes,
+            parser=parser, reparse_budget=reparse_budget, line_offset=line_offset,
+            attempted_spans=attempted_spans,
         )
 
 
@@ -278,7 +401,23 @@ def extract_symbols_from_file(file_path: str) -> tuple[list[dict], list[dict]]:
         tree.root_node, code_bytes, language, file_path,
         symbol_types, call_types, symbols, edges,
         type_usage_nodes=type_usage_nodes,
+        parser=parser,
     )
+
+    # deduplicate symbols — UPG-REACT-TSX-FUNCTION-DECL-DROP's error-recovery
+    # reparse can grow its byte range across an original sibling boundary to
+    # recover a declaration split by an arbitrary parser-recovery cut; that
+    # sibling's content may then also be reached a second time via the
+    # normal walk of the (still error-free-looking) original tree, so the
+    # same symbol can be emitted twice.
+    seen_symbols = set()
+    deduped_symbols: list[dict] = []
+    for s in symbols:
+        key = (s["file_path"], s["name"], s["kind"], s["start_line"], s["end_line"])
+        if key not in seen_symbols:
+            seen_symbols.add(key)
+            deduped_symbols.append(s)
+    symbols = deduped_symbols
 
     # deduplicate edges
     seen = set()
