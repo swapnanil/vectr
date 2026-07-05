@@ -30,6 +30,7 @@ from agent.config import (
     TEST_FRAMEWORK_FAN_IN_THRESHOLD as _TEST_FRAMEWORK_FAN_IN_THRESHOLD,
     QUALITY_DOC_PROSE as _Q_DOC_PROSE,
     QUALITY_SHORT_PENALTY as _Q_SHORT_PENALTY,
+    QUALITY_PRIVATE_SYMBOL as _Q_PRIVATE_SYMBOL,
     TRIVIAL_DOC_MAX_LINES as _TRIVIAL_DOC_MAX_LINES,
     TRIVIAL_ATTR_CLASS_MAX_ATTRS as _TRIVIAL_ATTR_CLASS_MAX_ATTRS,
     INDEXING_BUILD_ARTIFACT_DIR_SUFFIXES as _BUILD_ARTIFACT_DIR_SUFFIXES,
@@ -519,6 +520,21 @@ def is_doc_language(language: str) -> bool:
     return (language or "").lower() in _DOC_LANGUAGES
 
 
+def is_private_symbol_name(symbol_name: str) -> bool:
+    """True for a symbol named by the "internal use" leading-underscore
+    convention (a single leading underscore, not a dunder).
+
+    Language-general, not query- or corpus-specific: Python's PEP 8 marks a
+    single leading underscore as "internal use only"; the same idiom appears
+    across most C-family/JS/Go/Rust codebases for a private helper that
+    supports, but is not itself, the public API. Dunder methods (``__init__``,
+    ``__str__``, ...) are excluded — they are public protocol hooks, not
+    private implementation detail.
+    """
+    name = symbol_name or ""
+    return name.startswith("_") and not name.startswith("__")
+
+
 # Multipliers applied to the hybrid similarity score — sourced from
 # agent/config.yaml (ranking.quality_priors) via agent/config.py.
 # The _Q_* aliases are imported at the top of this file so all call sites
@@ -532,6 +548,7 @@ def quality_score(
     node_type: str = "",
     query_tokens: frozenset[str] = frozenset(),
     file_fan_in: int = 0,
+    symbol_name: str = "",
 ) -> float:
     """A per-chunk usefulness prior in (0, 1], folded into ranking as a multiplier.
 
@@ -545,7 +562,9 @@ def quality_score(
     (UPG-NAV-OVERDEMOTE-DECL / F59). ``file_fan_in`` (corpus-wide unambiguous
     caller-file count, see symbol_graph.file_fan_in) exempts a shipped
     testing-framework file misclassified by its test-named path from the
-    test-file demotion (UPG-TESTPATH-FRAMEWORK-MISCLASS / F58).
+    test-file demotion (UPG-TESTPATH-FRAMEWORK-MISCLASS / F58). ``symbol_name``
+    (the chunk's bare, unqualified symbol leaf) mildly demotes a private/
+    internal helper (UPG-16.1 / F30) — see is_private_symbol_name.
     """
     if file_path and is_vectr_config_file(file_path):
         return _Q_VECTR_CONFIG
@@ -568,6 +587,8 @@ def quality_score(
         score *= _Q_TEST_DEPRIORITISED
     if is_doc_language(language):
         score *= _Q_DOC_PROSE
+    if is_private_symbol_name(symbol_name):
+        score *= _Q_PRIVATE_SYMBOL
 
     n_lines = len(_meaningful_lines(content))
     if n_lines <= 2:

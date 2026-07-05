@@ -13,6 +13,7 @@ from agent.chunk_quality import (
     is_vectr_config_file,
     is_generated_file,
     is_test_file,
+    is_private_symbol_name,
     quality_score,
     normalized_content,
     extract_class_from_content,
@@ -23,6 +24,7 @@ from agent.config import (
     QUALITY_NAVIGATIONAL,
     QUALITY_NAV_DECLARATION_RESCUE,
     QUALITY_TEST_DEPRIORITISED,
+    QUALITY_PRIVATE_SYMBOL,
     TEST_FRAMEWORK_FAN_IN_THRESHOLD,
 )
 
@@ -364,6 +366,67 @@ class TestQualityScore:
             content, file_path="/proj/agent/indexer.py", file_fan_in=1000,
         )
         assert with_fan_in == pytest.approx(no_fan_in)
+
+
+# ---------------------------------------------------------------------------
+# UPG-16.1 (F30) — private/internal symbol deprioritisation
+# ---------------------------------------------------------------------------
+
+class TestIsPrivateSymbolName:
+    """is_private_symbol_name(): single-leading-underscore "internal use" naming
+    convention (PEP 8; also idiomatic in JS/TS, Go, and Rust codebases), excluding
+    dunder methods which are public protocol hooks, not implementation detail.
+    """
+
+    @pytest.mark.parametrize("name", [
+        "_filter_prefetch_queryset",
+        "_helper",
+        "_internal_cache",
+        "_",
+    ])
+    def test_single_leading_underscore_is_private(self, name):
+        assert is_private_symbol_name(name) is True
+
+    @pytest.mark.parametrize("name", [
+        "filter",
+        "QuerySet.filter",
+        "__init__",
+        "__str__",
+        "__eq__",
+        "",
+    ])
+    def test_public_and_dunder_names_are_not_private(self, name):
+        assert is_private_symbol_name(name) is False
+
+
+class TestQualityScorePrivateSymbolDemotion:
+    """UPG-16.1 (F30): a private/internal helper's raw text can score higher on
+    cross-encoder + BM25 similarity than the public method a natural-language
+    query is actually asking about, because the helper's body happens to repeat
+    more of the query's vocabulary literally. quality_score() must apply a mild
+    demotion so the public symbol still outranks its private counterpart when
+    both are otherwise comparable (witness: django QuerySet.filter vs. the
+    private _filter_prefetch_queryset helper, gate-v6 regression).
+    """
+
+    def test_private_symbol_scores_below_public_sibling(self):
+        content = "def helper(self, *args, **kwargs):\n    return self._chain().filter(*args, **kwargs)"
+        public = quality_score(content, file_path="/p/a.py", language="python", symbol_name="filter")
+        private = quality_score(content, file_path="/p/a.py", language="python", symbol_name="_filter_prefetch_queryset")
+        assert private < public
+        assert private == pytest.approx(public * QUALITY_PRIVATE_SYMBOL)
+
+    def test_dunder_method_is_exempt_from_private_demotion(self):
+        content = "def __init__(self, *args, **kwargs):\n    self.args = args\n    self.kwargs = kwargs"
+        dunder = quality_score(content, file_path="/p/a.py", language="python", symbol_name="__init__")
+        public = quality_score(content, file_path="/p/a.py", language="python", symbol_name="init")
+        assert dunder == pytest.approx(public)
+
+    def test_no_symbol_name_is_unaffected(self):
+        content = "def f():\n    return compute(x)\n    y = 1\n    z = 2"
+        default = quality_score(content, file_path="/p/a.py", language="python")
+        explicit_empty = quality_score(content, file_path="/p/a.py", language="python", symbol_name="")
+        assert default == pytest.approx(explicit_empty)
 
 
 class TestIsDocLanguage:

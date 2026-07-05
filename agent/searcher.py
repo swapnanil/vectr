@@ -565,6 +565,7 @@ class CodeSearcher:
             q = quality_score(
                 r.content, r.file_path, r.language, r.node_type,
                 query_tokens=query_tokens, file_fan_in=fan_in,
+                symbol_name=r.symbol_name,
             )
             # Class context recovered from the indexer-injected "# class: X" prefix
             # in the chunk content (chunk_quality.extract_class_from_content) — the
