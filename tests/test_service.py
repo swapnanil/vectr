@@ -294,3 +294,127 @@ class TestSuggestInstructionStyle:
         assert isinstance(before, int)
         svc.remember("test note")
         assert svc.count_notes() == before + 1
+
+
+# ---------------------------------------------------------------------------
+# UPG-QUERYTYPE-REROUTE: additive identifier-shape symbol-graph hint —
+# replaces the deleted agent/query_router.py regex query-classification
+# layer. `identifier_hint_symbols()` must never affect `search()`'s retrieval
+# weight, must resolve only EXACT identifier-shaped tokens, and must respect
+# the configured max_identifiers/max_locations caps.
+# ---------------------------------------------------------------------------
+
+class TestIdentifierHintSymbols:
+    def _make_service(self, tmp_path, monkeypatch, files: dict[str, str]):
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        for name, content in files.items():
+            make_py(tmp_path, name, content)
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+        svc.index(str(tmp_path))
+        return svc
+
+    def test_plain_english_query_returns_no_hint_symbols(self, tmp_path, monkeypatch) -> None:
+        """An NL question containing bare nouns that used to misroute
+        (dependency/override/subclass) resolves nothing — no identifier-
+        shaped token is even attempted against the symbol graph."""
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "a.py": "def dependency(): pass\ndef override(): pass\n",
+        })
+        assert svc.identifier_hint_symbols(
+            "what are the dependencies here and can I override this"
+        ) == []
+
+    def test_semantic_weight_unaffected_by_query_content(self, tmp_path, monkeypatch) -> None:
+        """A query containing former router trigger-words must retrieve at
+        the fingerprint-derived semantic weight — no per-query override."""
+        from agent.strategy_selector import RetrievalStrategy
+        svc = self._make_service(tmp_path, monkeypatch, {"a.py": "def foo(): pass\n"})
+        svc._strategy = RetrievalStrategy(
+            semantic_weight=0.85, bm25_weight=0.15, graph_first=False,
+            recommended_embed_model="Snowflake/snowflake-arctic-embed-m-v1.5",
+            rationale="test",
+        )
+        received: dict = {}
+        _orig = svc._searcher.search
+
+        def _spy(*args, **kwargs):
+            received.update(kwargs)
+            return _orig(*args, **kwargs)
+
+        svc._searcher.search = _spy
+        svc.search("what is the dependency graph, can I override or subclass this")
+        assert received.get("semantic_weight") == 0.85
+
+    def test_camelcase_identifier_resolves_exactly(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "resolver.py": "class WorkspaceLock:\n    def acquire(self):\n        pass\n",
+        })
+        symbols = svc.identifier_hint_symbols("how does WorkspaceLock work")
+        assert any(s.name == "WorkspaceLock" for s in symbols)
+
+    def test_snake_case_identifier_resolves_exactly(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "lock.py": "def acquire_lock():\n    pass\n",
+        })
+        symbols = svc.identifier_hint_symbols("what does acquire_lock do")
+        assert any(s.name == "acquire_lock" for s in symbols)
+
+    def test_plain_word_matching_a_real_symbol_name_yields_no_hint(self, tmp_path, monkeypatch) -> None:
+        """A plain lowercase word is never identifier-SHAPED, even when a
+        real symbol of that exact name exists — shape gates the attempt,
+        not just resolution success."""
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "t.py": "def resolve():\n    pass\ndef timeout():\n    pass\n",
+        })
+        assert svc.identifier_hint_symbols("please resolve the timeout quickly") == []
+
+    def test_max_identifiers_caps_number_of_tokens_attempted(self, tmp_path, monkeypatch) -> None:
+        from agent import config as config_module
+        monkeypatch.setattr(config_module, "SEARCH_IDENTIFIER_HINT_MAX_IDENTIFIERS", 2)
+        import app.service as service_module
+        monkeypatch.setattr(service_module, "SEARCH_IDENTIFIER_HINT_MAX_IDENTIFIERS", 2)
+
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "a.py": (
+                "def AlphaLock():\n    pass\n"
+                "def beta_lock():\n    pass\n"
+                "def GammaLock():\n    pass\n"
+            ),
+        })
+        symbols = svc.identifier_hint_symbols("compare AlphaLock, beta_lock and GammaLock")
+        names = {s.name for s in symbols}
+        # Only the first 2 identifier-shaped tokens (query order) are attempted —
+        # GammaLock is the 3rd and must never be resolved.
+        assert "GammaLock" not in names
+        assert names == {"AlphaLock", "beta_lock"}
+
+    def test_max_locations_caps_resolved_symbols_per_identifier(self, tmp_path, monkeypatch) -> None:
+        from agent import config as config_module
+        monkeypatch.setattr(config_module, "SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS", 3)
+        import app.service as service_module
+        monkeypatch.setattr(service_module, "SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS", 3)
+
+        svc = self._make_service(tmp_path, monkeypatch, {
+            f"mod_{i}.py": "def duplicate_name():\n    pass\n" for i in range(5)
+        })
+        symbols = svc.identifier_hint_symbols("what does duplicate_name do")
+        assert len(symbols) <= 3
+
+    def test_disabled_via_config_returns_empty(self, tmp_path, monkeypatch) -> None:
+        from agent import config as config_module
+        monkeypatch.setattr(config_module, "SEARCH_IDENTIFIER_HINT_ENABLED", False)
+        import app.service as service_module
+        monkeypatch.setattr(service_module, "SEARCH_IDENTIFIER_HINT_ENABLED", False)
+
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "resolver.py": "class WorkspaceLock:\n    pass\n",
+        })
+        assert svc.identifier_hint_symbols("how does WorkspaceLock work") == []

@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 
 from api import app
 from agent.searcher import SearchResult
-from agent.query_router import RoutingDecision, QueryType
 from agent.symbol_graph import LocateResult, Symbol
 
 
@@ -29,17 +28,10 @@ def _make_service():
         score=0.94,
         content="def verify_jwt_token(token: str) -> dict:\n    ...",
     )
-    _decision = RoutingDecision(
-        query_type=QueryType.SEMANTIC,
-        semantic_weight=0.70,
-        also_run_symbol_lookup=False,
-        also_run_trace=False,
-        include_map_hint=False,
-        rationale="semantic query — standard adaptive hybrid weights",
-    )
 
     svc.search.return_value = ([_result], 18)
-    svc.search_routed.return_value = ([_result], 18, _decision, [], [])
+    # UPG-QUERYTYPE-REROUTE: additive symbol-graph hint — empty by default.
+    svc.identifier_hint_symbols.return_value = []
     svc.index.return_value = (12, 500, 240)
     svc.status.return_value = {
         "indexed_files": 12,
@@ -136,6 +128,20 @@ def test_search_happy_path(client) -> None:
     assert data["results"][0]["score"] == 0.94
     assert "processing_ms" in data
     assert "chunks_searched" in data
+
+
+def test_search_response_has_no_routing_fields(client) -> None:
+    """UPG-QUERYTYPE-REROUTE: the deleted regex query-classification layer's
+    RoutingDecision (query_type/routing/decision/resolution_strategy) must not
+    appear anywhere on the REST /v1/search response — the route always
+    returns a plain hybrid-retrieval result set."""
+    resp = client.post("/v1/search", json={"query": "JWT token validation"})
+    assert resp.status_code == 200
+    data = resp.json()
+    for forbidden_key in ("routing", "decision", "query_type", "resolution_strategy"):
+        assert forbidden_key not in data
+        for result in data["results"]:
+            assert forbidden_key not in result
 
 
 def test_search_missing_query(client) -> None:

@@ -339,9 +339,9 @@ class CodeSearcher:
         t0 = time.monotonic()
 
         # UPG-3.1: normalise the language filter HERE — the single point both the
-        # REST (service.search) and MCP (service.search_routed) paths funnel
-        # through — so case/whitespace ("C", " Rust ") match indexed values and a
-        # blank string degrades to "no filter" consistently for every caller.
+        # REST and MCP (service.search) paths funnel through — so case/whitespace
+        # ("C", " Rust ") match indexed values and a blank string degrades to
+        # "no filter" consistently for every caller.
         if language is not None:
             language = language.strip().lower() or None
 

@@ -442,3 +442,13 @@ NOTFOUND_FLOOR_STOPWORDS: frozenset[str] = frozenset(_nff_cfg["stopwords"])
 NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS: int = int(_nff_cfg["min_zero_df_tokens"])
 NOTFOUND_FLOOR_MIN_TOP_RELEVANCE: float = float(_nff_cfg["min_top_relevance"])
 NOTFOUND_FLOOR_BANNER: str = str(_nff_cfg["banner"])
+
+# ---------------------------------------------------------------------------
+# Search — additive identifier-shape symbol-graph hint (UPG-QUERYTYPE-REROUTE)
+# ---------------------------------------------------------------------------
+
+_id_hint_cfg: dict[str, Any] = _cfg["search"]["identifier_hint"]
+
+SEARCH_IDENTIFIER_HINT_ENABLED: bool = bool(_id_hint_cfg["enabled"])
+SEARCH_IDENTIFIER_HINT_MAX_IDENTIFIERS: int = int(_id_hint_cfg["max_identifiers"])
+SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS: int = int(_id_hint_cfg["max_locations"])

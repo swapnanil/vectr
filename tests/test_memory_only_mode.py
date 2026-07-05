@@ -193,7 +193,6 @@ class TestMemoryToolsWorkInMemoryOnlyMode:
 class TestMcpDispatchMemoryOnly:
     def _make_mock_service(self, memory_only: bool = True):
         from agent.searcher import SearchResult
-        from agent.query_router import RoutingDecision, QueryType
 
         svc = MagicMock()
         svc.total_chunks = 0
@@ -204,12 +203,9 @@ class TestMcpDispatchMemoryOnly:
             file_path="auth.py", lines="1-10", symbol_name="verify_token",
             language="python", score=0.9, content="def verify_token(): ...",
         )
-        _decision = RoutingDecision(
-            query_type=QueryType.SEMANTIC, semantic_weight=0.70,
-            also_run_symbol_lookup=False, also_run_trace=False,
-            include_map_hint=False, rationale="semantic",
-        )
-        svc.search_routed.return_value = ([_result], 15, _decision, [], [])
+        svc.search.return_value = ([_result], 15)
+        # UPG-QUERYTYPE-REROUTE: additive symbol-graph hint — empty by default.
+        svc.identifier_hint_symbols.return_value = []
         svc._eviction_advisor = MagicMock()
         svc._eviction_advisor.auto_eviction_hint.return_value = ""
         svc.auto_eviction_hint.return_value = ""

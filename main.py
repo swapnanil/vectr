@@ -62,11 +62,13 @@ The codebase is fully indexed. One `vectr_search` call returns ranked, relevant 
 
 | Tool | Purpose | Example |
 |---|---|---|
-| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. | `vectr_search("workspace lock acquisition and release")` |
+| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. An identifier written in the query (`CamelCase`, `snake_case`, or dotted `Class.method`) that exactly matches a known symbol is automatically resolved and appended below the results — no extra call needed. | `vectr_search("workspace lock acquisition and release")` |
 | `vectr_locate(name="SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate(name="WorkspaceLock")` → `resolver.rs:214` |
 | `vectr_trace(name="symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace(name="acquire_lock")` |
 | `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
 | `vectr_map_save(summary)` | Save a plain-English codebase summary (~200–350 tokens) as a permanent passport. Only call when `vectr_map` returned raw metadata. | `vectr_map_save("uv is a Rust-based Python package manager…")` |
+
+**Which tool for which question:** "where is X defined" → `vectr_locate`; "who calls X" / "what does X call" → `vectr_trace`; "what does this repo look like" → `vectr_map`; anything else (a pattern, a concept, "how does X work") → `vectr_search`.
 
 ## Working memory — 7 tools
 
@@ -125,10 +127,12 @@ The codebase is fully indexed. One `vectr_search` call returns ranked, relevant 
 
 | Tool | Purpose | Example |
 |---|---|---|
-| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. | `vectr_search("workspace lock acquisition and release")` |
+| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. An identifier written in the query (`CamelCase`, `snake_case`, or dotted `Class.method`) that exactly matches a known symbol is automatically resolved and appended below the results — no extra call needed. | `vectr_search("workspace lock acquisition and release")` |
 | `vectr_locate(name="SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate(name="WorkspaceLock")` → `resolver.rs:214` |
 | `vectr_trace(name="symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace(name="acquire_lock")` |
 | `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
+
+**Which tool for which question:** "where is X defined" → `vectr_locate`; "who calls X" / "what does X call" → `vectr_trace`; "what does this repo look like" → `vectr_map`; anything else (a pattern, a concept, "how does X work") → `vectr_search`.
 
 **Before calling `vectr_search` on a well-known API or framework:** write out what you already know — function signatures, key types, parameter names — then, before citing any file:line specifics in your answer, always run one cheap confirming call: `vectr_locate(name="...")` (1 call, ~160 tokens, ~0.02s). Verbalization narrows what you're looking for; it never substitutes for confirming it against the actual code.
 """

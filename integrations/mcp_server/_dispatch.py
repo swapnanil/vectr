@@ -111,7 +111,7 @@ def handle_tools_call(
                 "isError": False,
             }
 
-        results, query_ms, decision, aug_symbols, aug_trace = service.search_routed(
+        results, query_ms = service.search(
             query, n_results=n_results, language=language
         )
 
@@ -150,34 +150,20 @@ def handle_tools_call(
                     f"Re-run without the language filter, or use one of the above."
                 )
 
-        # L1 map hint for structural queries
-        if decision.include_map_hint:
-            map_text = service.get_map()
-            if map_text and "Set ANTHROPIC_API_KEY" not in map_text:
-                sections.append(f"─── Codebase map (structural context) ───\n{map_text}")
-
-        # L2 symbol augmentation — snippets included so AI reads code directly
-        if aug_symbols:
-            sym_lines = [f"─── Symbol locations (query type: {decision.query_type.value}) ───"]
-            for s in aug_symbols:
-                sym_lines.append(f"  [{s.kind}] {s.name}  {s.file_path}:{s.start_line}")
-                if s.snippet:
-                    for ln in s.snippet.splitlines()[:6]:  # brief preview in search results
-                        sym_lines.append(f"    {ln}")
-            sections.append("\n".join(sym_lines))
-
-        if aug_trace:
-            trace_lines = ["─── Callers ───"]
-            for e in aug_trace:
-                suffix = f"  ×{e.call_count}" if getattr(e, "call_count", 1) > 1 else ""
-                trace_lines.append(f"  {e.from_symbol}  in {e.from_file}:{e.from_line}{suffix}")
-            sections.append("\n".join(trace_lines))
-
         # L3 chunks
         sections.append(_format_search_results(results, query, query_ms, service.total_chunks))
 
-        # routing footnote
-        sections.append(f"─── Routing: {decision.rationale} ───")
+        # UPG-QUERYTYPE-REROUTE: additive, high-precision symbol-graph hint —
+        # exact identifier-shaped-token matches only (never a keyword/intent
+        # match), appended BELOW the L3 results. Nothing is prepended,
+        # reordered, or reweighted; empty when no identifier-shaped token in
+        # the query resolves exactly.
+        hint_symbols = service.identifier_hint_symbols(query)
+        if hint_symbols:
+            hint_lines = ["─── Symbol graph (exact matches for query identifiers) ───"]
+            for s in hint_symbols:
+                hint_lines.append(f"  [{s.kind}] {s.name}  {s.file_path}:{s.start_line}")
+            sections.append("\n".join(hint_lines))
 
         content_text = "\n\n".join(sections)
 

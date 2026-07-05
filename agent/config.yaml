@@ -420,6 +420,32 @@ retrieval:
     # purpose embedding the same way a long body would.
     max_docstring_chars: 600
 
+search:
+  identifier_hint:
+    # UPG-QUERYTYPE-REROUTE: additive, high-precision symbol-graph hint
+    # appended below vectr_search's L3 results. Replaces the deleted
+    # agent/query_router.py regex query-classification layer, which
+    # misrouted innocent NL questions containing bare nouns like
+    # "dependency"/"override"/"subclass" into a CALL_GRAPH intent — silently
+    # overriding the fingerprint-derived semantic weight and guessing a
+    # same-named homonym via the query's first non-stopword word, with no
+    # ranking tie to the query at all. This mechanism does no intent
+    # classification: it tokenizes the RAW query for identifier-SHAPED
+    # tokens (CamelCase, snake_case, dotted Class.method — a structural
+    # transform, never a keyword/phrase match) and appends a section only
+    # when at least one token resolves to an EXACT symbol-graph hit (no
+    # fuzzy/prefix/substring). A query with no identifier-shaped token, or
+    # one whose plain words merely coincide with a symbol name, gets no
+    # section and no weight override.
+    enabled: true
+
+    # Maximum number of distinct identifier-shaped tokens (query order,
+    # deduplicated) attempted against the symbol graph per search.
+    max_identifiers: 2
+
+    # Maximum resolved symbol locations shown per identifier.
+    max_locations: 3
+
 indexing:
   # hard cap — prevents single huge chunks diluting embeddings
   max_chunk_lines: 150
