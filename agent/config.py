@@ -45,6 +45,11 @@ QUALITY_DOC_PROSE : float
 QUALITY_SHORT_PENALTY : float
     Quality prior for chunks with very few meaningful lines (UPG-12.1).
 
+QUALITY_PRIVATE_SYMBOL : float
+    Quality prior for a private/internal symbol (single leading underscore,
+    not a dunder) — a language-general naming convention, not corpus- or
+    query-specific (UPG-16.1 / F30).
+
 TRIVIAL_DOC_MAX_LINES : int
     Maximum non-blank lines for an HTML/markup or plain-text chunk to be
     classified as trivial by is_trivial_chunk() (UPG-15.5). 1–2-line test
@@ -264,6 +269,7 @@ QUALITY_TEST_DEPRIORITISED: float = float(_qp_cfg["test_deprioritised"])
 TEST_FRAMEWORK_FAN_IN_THRESHOLD: int = int(_qp_cfg["test_framework_fan_in_threshold"])
 QUALITY_DOC_PROSE: float = float(_qp_cfg["doc_prose"])
 QUALITY_SHORT_PENALTY: float = float(_qp_cfg["short_penalty"])
+QUALITY_PRIVATE_SYMBOL: float = float(_qp_cfg["private_symbol_deprioritised"])
 TRIVIAL_DOC_MAX_LINES: int = int(_qp_cfg["trivial_doc_max_lines"])
 TRIVIAL_ATTR_CLASS_MAX_ATTRS: int = int(_qp_cfg["trivial_attr_class_max_attrs"])
 

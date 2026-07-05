@@ -98,6 +98,30 @@ ranking:
     # bodies with very few meaningful lines
     short_penalty: 0.80
 
+    # A private/internal symbol (single leading underscore, e.g. `_helper`,
+    # not a dunder like `__init__`) is a mild demotion vs. its public-API
+    # sibling. This is a language-general naming convention (Python's PEP 8
+    # "internal use" prefix; the same single-underscore-for-internal idiom
+    # appears in Go, JS/TS, and Rust codebases too), not a corpus- or query-
+    # specific rule, so it applies uniformly regardless of query text.
+    # Root cause it addresses: a keyword-dense private helper's raw text can
+    # score higher on cross-encoder + BM25 similarity than the public method
+    # a natural-language query is actually asking about, because the helper's
+    # body happens to restate more of the query's vocabulary literally (e.g.
+    # a queryset-filtering helper's body mentions "queryset"/"filter" several
+    # times while the public method it supports has a terse one-line body).
+    # The importance/purpose priors (ranking.importance_prior, ranking.
+    # purpose_rank) already favor the public symbol's file/class, but a
+    # sizeable base-rerank gap from the raw-text-similarity effect above can
+    # still outweigh them; this prior corrects the imbalance at its source
+    # (django/db/models/query.py QuerySet.filter vs. the private
+    # _filter_prefetch_queryset helper in fields/related_descriptors.py is
+    # the measured witness case, UPG-16.1/F30). Mild (comparable to
+    # short_penalty) because a private helper is still legitimate,
+    # sometimes-wanted code — just usually not the intended answer to a
+    # concept-level query naming the public operation.
+    private_symbol_deprioritised: 0.80
+
     # Maximum number of attribute-assignment body lines for an attribute-only
     # class body to be classified as trivial by is_trivial_chunk() (UPG-15.9 / F25).
     # A ``class Meta:`` inner stub with ≤ this many attribute-assignment body lines
