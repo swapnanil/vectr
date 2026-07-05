@@ -44,13 +44,25 @@ class LocalEmbedProvider:
 
     def __init__(self, model_name: str = "Snowflake/snowflake-arctic-embed-m-v1.5") -> None:
         from sentence_transformers import SentenceTransformer
+        from agent.model_cache import load_with_offline_preference
         cache_dir = Path.home() / ".cache" / "vectr" / "models"
         cache_dir.mkdir(parents=True, exist_ok=True)
-        self._model = SentenceTransformer(
+        # UPG-RERANKER-HF-NETWORK: prefer an offline (local_files_only) load
+        # when this model is already fully cached, so a warm daemon start
+        # never makes live huggingface.co calls (HEAD/GET on config.json,
+        # tokenizer_config.json, repo tree listings, ...) just to re-confirm
+        # a cache it already has. Falls back to a network-enabled load on a
+        # genuine cache miss (first run) so that UX is unchanged.
+        self._model = load_with_offline_preference(
+            lambda local_only: SentenceTransformer(
+                model_name,
+                cache_folder=str(cache_dir),
+                trust_remote_code=True,
+                device="cpu",
+                local_files_only=local_only,
+            ),
             model_name,
-            cache_folder=str(cache_dir),
-            trust_remote_code=True,
-            device="cpu",
+            str(cache_dir),
         )
         # Asymmetric embedding models (arctic-embed and others) register a "query"
         # prompt in their sentence-transformers config that must be prepended to

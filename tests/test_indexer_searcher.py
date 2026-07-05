@@ -10,6 +10,7 @@ import math
 import re
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -2804,6 +2805,118 @@ class TestRerankerCeRelevance:
         out = reranker.rerank("q", [(r.content, r)])
         assert out == [r]
         assert r.ce_relevance is None
+
+
+# ---------------------------------------------------------------------------
+# _Reranker._load() — offline-when-cached model loading (UPG-RERANKER-HF-NETWORK)
+#
+# Mocks sentence_transformers.CrossEncoder itself (never a real download) to
+# assert on the local_files_only kwarg _load() passes through, and mocks
+# agent.model_cache.is_model_cached to control the cached/uncached branch
+# without touching a real Hugging Face cache directory.
+# ---------------------------------------------------------------------------
+
+class TestRerankerOfflineLoading:
+    def test_cached_model_loads_with_local_files_only_no_network_path(self) -> None:
+        """When the reranker model is already cached, CrossEncoder must be
+        constructed with local_files_only=True — no live huggingface.co call
+        path is exercised."""
+        from agent.searcher import _Reranker
+
+        calls: list[dict] = []
+
+        class _FakeCrossEncoder:
+            def __init__(self, model_name, **kwargs):
+                calls.append(kwargs)
+
+        with patch("agent.model_cache.is_model_cached", return_value=True), \
+             patch("sentence_transformers.CrossEncoder", _FakeCrossEncoder):
+            reranker = _Reranker("fake/model")
+            reranker._load()
+
+        assert reranker._failed is False
+        assert reranker._model is not None
+        assert len(calls) == 1
+        assert calls[0]["local_files_only"] is True
+
+    def test_uncached_model_falls_back_to_network_enabled_load(self) -> None:
+        """When the reranker model is NOT cached, CrossEncoder must be
+        constructed with local_files_only=False — a normal network-enabled
+        download, preserving first-run UX."""
+        from agent.searcher import _Reranker
+
+        calls: list[dict] = []
+
+        class _FakeCrossEncoder:
+            def __init__(self, model_name, **kwargs):
+                calls.append(kwargs)
+
+        with patch("agent.model_cache.is_model_cached", return_value=False), \
+             patch("sentence_transformers.CrossEncoder", _FakeCrossEncoder):
+            reranker = _Reranker("fake/model")
+            reranker._load()
+
+        assert reranker._failed is False
+        assert len(calls) == 1
+        assert calls[0]["local_files_only"] is False
+
+    def test_load_failure_still_degrades_gracefully(self) -> None:
+        """A load failure (offline AND not cached — e.g. an air-gapped machine
+        with an incomplete cache) must leave _failed=True and _model=None,
+        exactly as before this change — search continues without a reranker."""
+        from agent.searcher import _Reranker
+
+        class _RaisingCrossEncoder:
+            def __init__(self, model_name, **kwargs):
+                raise OSError("no network, no cache")
+
+        with patch("agent.model_cache.is_model_cached", return_value=False), \
+             patch("sentence_transformers.CrossEncoder", _RaisingCrossEncoder):
+            reranker = _Reranker("fake/model")
+            reranker._load()
+
+        assert reranker._failed is True
+        assert reranker._model is None
+        # rerank() must still degrade gracefully (pass-through, no crash)
+        r = _sr("def a(): pass")
+        out = reranker.rerank("q", [(r.content, r)])
+        assert out == [r]
+        assert r.ce_relevance is None
+
+
+# ---------------------------------------------------------------------------
+# CodeSearcher.warm_reranker() — eager startup load (UPG-RERANKER-HF-NETWORK)
+# ---------------------------------------------------------------------------
+
+class TestWarmReranker:
+    def test_warm_reranker_triggers_load(self, indexer) -> None:
+        """warm_reranker() must eagerly call the reranker's _load() so the
+        model-load cost lands at daemon startup, not inside the first search."""
+        from agent.searcher import CodeSearcher
+
+        s = CodeSearcher(indexer)
+
+        class _StubReranker:
+            def __init__(self):
+                self.load_called = False
+
+            def _load(self):
+                self.load_called = True
+
+        stub = _StubReranker()
+        s._reranker = stub
+        s.warm_reranker()
+        assert stub.load_called is True
+
+    def test_warm_reranker_noop_when_reranker_disabled(self, indexer) -> None:
+        """When reranking is disabled (VECTR_RERANKER_MODEL="", the default in
+        this test suite), self._reranker is None and warm_reranker() must be a
+        pure no-op — no AttributeError, nothing to load."""
+        from agent.searcher import CodeSearcher
+
+        s = CodeSearcher(indexer)
+        assert s._reranker is None
+        s.warm_reranker()  # must not raise
 
 
 # ---------------------------------------------------------------------------

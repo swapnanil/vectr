@@ -100,6 +100,14 @@ class VectrService:
         )
         self._searcher = CodeSearcher(self._indexer)
         self._watcher = CodeWatcher(self._indexer, searcher_refresh_fn=self._searcher.refresh_bm25)
+        # UPG-RERANKER-HF-NETWORK: warm the reranker at startup, alongside the
+        # embedder already loaded synchronously above (CodeIndexer's constructor
+        # instantiates the embed provider). This moves the cross-encoder's
+        # model-load cost out of the first vectr_search call. Skipped in
+        # memory-only mode: there is no code index, search is disabled, and
+        # there is nothing to rerank.
+        if not self._memory_only:
+            self._searcher.warm_reranker()
 
         # L1 — codebase passport (AI-written, stored by vectr_map_save)
         self._passport_store = PassportStore(db_dir)
