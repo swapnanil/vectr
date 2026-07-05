@@ -346,10 +346,24 @@ ranking:
     # i.e. an exact no-op restoring pre-UPG-NOTFOUND-FLOOR behaviour.
     min_zero_df_tokens: 1
 
+    # UPG-SCORE-DISPLAY-FLAT: a second, independent low-confidence sub-signal —
+    # the top result's own displayed relevance is below this absolute floor.
+    # Gated on the cross-encoder relevance score specifically (ce_relevance),
+    # never on the raw dense-cosine fallback: the UPG-NOTFOUND-FLOOR-2
+    # measurement above already showed a bi-encoder cosine cannot separate
+    # absent-topic from on-topic queries, so flooring on it here would
+    # reintroduce that same defect. A cross-encoder score is a different,
+    # calibrated relevance judgment (trained to predict query-doc relevance
+    # directly), so it is safe to floor on. A no-op (this sub-signal never
+    # fires) whenever reranking didn't run (rerank=False, or the reranker
+    # model failed to load) — low_confidence then falls back to the
+    # zero-document-frequency check above alone.
+    min_top_relevance: 0.30
+
     # Text prepended to the MCP vectr_search response when the floor fires.
     # Results are still shown in full below it — the caller LLM may still
     # salvage a lead; this only adds a signal it currently has no way to see.
-    banner: "No strong match for this query — the results below scored low on absolute relevance and may be unrelated. Consider rephrasing, or use vectr_locate for an exact symbol name."
+    banner: "No strong match for this query — the results below scored low on absolute relevance and may be unrelated. Try vectr_locate with the exact symbol name, rephrase the query, or fall back to grep/reading the file directly."
 
 strategy:
   # Fallback hybrid-search weights used before the first index-time codebase

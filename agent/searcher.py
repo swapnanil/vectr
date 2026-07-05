@@ -1,6 +1,7 @@
 """Hybrid BM25 + vector search over the indexed codebase."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
@@ -29,6 +30,7 @@ from agent.config import (
     NOTFOUND_FLOOR_MIN_TOKEN_LEN as _NOTFOUND_FLOOR_MIN_TOKEN_LEN,
     NOTFOUND_FLOOR_STOPWORDS as _NOTFOUND_FLOOR_STOPWORDS,
     NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS as _NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS,
+    NOTFOUND_FLOOR_MIN_TOP_RELEVANCE as _NOTFOUND_FLOOR_MIN_TOP_RELEVANCE,
 )
 from agent.indexer import CodeIndexer
 
@@ -136,14 +138,45 @@ class _Reranker:
             self._failed = True
 
     def rerank(self, query: str, candidates: list[tuple[str, object]]) -> list[object]:
-        """Score (query, doc) pairs and return candidates sorted by cross-encoder score."""
+        """Score (query, doc) pairs, stamp each candidate's ``ce_relevance`` with
+        the absolute cross-encoder relevance score, and return candidates sorted
+        by that score (highest first).
+
+        UPG-SCORE-DISPLAY-FLAT: this cross-encoder score is the one absolute,
+        per-(query, doc) relevance signal in the pipeline — unlike the
+        rank-based composite ``_apply_quality_and_dedup`` builds for ordering,
+        it does not get re-derived from this result set's own rank order, so
+        it is safe to display verbatim. Previously it was used only to sort
+        and then discarded.
+        """
         self._load()
         if self._model is None or not candidates:
             return [c for _, c in candidates]
         pairs = [(query, doc) for doc, _ in candidates]
-        scores = self._model.predict(pairs)
+        raw_scores = self._model.predict(pairs)
+        scores = self._normalize_scores(raw_scores)
+        for score, (_, c) in zip(scores, candidates):
+            c.ce_relevance = score
         ranked = sorted(zip(scores, [c for _, c in candidates]), key=lambda x: x[0], reverse=True)
         return [c for _, c in ranked]
+
+    @staticmethod
+    def _normalize_scores(raw_scores) -> list[float]:
+        """Clamp cross-encoder output to [0, 1] so a displayed relevance score
+        is never a raw, unbounded logit.
+
+        A ``sentence_transformers.CrossEncoder`` configured with
+        ``num_labels == 1`` (the expected shape for a relevance-scoring model)
+        applies a sigmoid activation by default, so ``predict()`` already
+        returns values in [0, 1] in the common case. This is a defensive
+        fallback for a differently-configured model checkpoint that returns
+        raw logits instead: if ANY score in the batch falls outside [0, 1],
+        apply a sigmoid to the whole batch before it reaches a SearchResult.
+        """
+        values = [float(s) for s in raw_scores]
+        if any(v < 0.0 or v > 1.0 for v in values):
+            return [1.0 / (1.0 + math.exp(-v)) for v in values]
+        return values
 
 
 # ---------------------------------------------------------------------------
@@ -160,12 +193,33 @@ class SearchResult:
     content: str
     node_type: str = ""
     dup_count: int = 0   # number of identical chunks collapsed into this one (UPG-2.2)
-    # UPG-11.2: monotonic displayed score — updated after final ranking in _apply_quality_and_dedup
-    # to guarantee non-increasing values down the returned list.
-    # (score above holds the pre-quality hybrid score; this replaces it post-sort.)
+    # UPG-SCORE-DISPLAY-FLAT: `score` is an ABSOLUTE query-doc relevance value
+    # (the cross-encoder relevance when reranked, else the dense cosine
+    # similarity — see ce_relevance/dense_sim below), set by
+    # _apply_quality_and_dedup as the very last step before a result is
+    # returned. It is NOT the ordering key: ordering is decided by a separate
+    # rank/quality/importance composite that is intentionally never displayed
+    # (see _apply_quality_and_dedup's docstring). Consequently displayed
+    # scores down a result list are not guaranteed to be monotonic — a
+    # quality/importance prior can legitimately promote a candidate with a
+    # lower absolute relevance above one with a higher absolute relevance;
+    # this is disagreement-as-information, not a bug (formerly UPG-11.2's
+    # "monotonic displayed score", superseded here).
     # UPG-11.4: symbol line-range affordance — populated from indexed metadata at search time.
     symbol_start_line: int = 0
     symbol_end_line: int = 0
+    # UPG-SCORE-DISPLAY-FLAT: absolute cross-encoder relevance for this exact
+    # (query, chunk) pair, in [0, 1] — set by _Reranker.rerank for every
+    # candidate the cross-encoder actually scored. None when reranking was
+    # skipped/disabled/unavailable, or for candidates the reranker never saw.
+    ce_relevance: float | None = None
+    # UPG-SCORE-DISPLAY-FLAT: the chunk's dense (body ⊔ purpose) cosine
+    # similarity to the query — already absolute (max(0, 1-distance), never
+    # re-normalized per result set). Used as the displayed score when no
+    # ce_relevance is available (rerank=False, reranker unavailable, or a
+    # candidate outside the reranked pool). Defaults to 0.0 for SearchResults
+    # built outside search() (e.g. test fixtures), an exact no-op fallback.
+    dense_sim: float = 0.0
     # ARCH-4b: the chunk's own body-vs-purpose cosine similarity to the query,
     # already normalized to [0,1] (query_vector_purpose distances are clamped at
     # 0 the same way body vec_scores are). Defaults to 0.0 — an exact no-op —
@@ -491,6 +545,10 @@ class CodeSearcher:
                 lines=f"{start_line}-{end_line}",
                 symbol_name=meta.get("symbol_name", ""),
                 language=meta.get("language", ""),
+                # Placeholder — _apply_quality_and_dedup overwrites this with the
+                # absolute relevance value (ce_relevance, else dense_sim) before
+                # the result is returned (UPG-SCORE-DISPLAY-FLAT). Kept here only
+                # so the field is never uninitialized if that step is skipped.
                 score=round(merged[cid], 4),
                 content=doc[:2000],
                 node_type=meta.get("node_type", ""),
@@ -501,6 +559,10 @@ class CodeSearcher:
                 # ARCH-4b: thread the chunk's purpose-vector similarity through to
                 # the final sort (0.0 when the chunk never had a purpose vector).
                 purpose_sim=purpose_scores.get(cid, 0.0),
+                # UPG-SCORE-DISPLAY-FLAT: the chunk's own absolute dense cosine
+                # similarity (body ⊔ purpose merge) — the displayed-score
+                # fallback for candidates the cross-encoder never scores.
+                dense_sim=dense_scores.get(cid, 0.0),
             ))
 
         # --- Cross-encoder rerank ---
@@ -513,12 +575,37 @@ class CodeSearcher:
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         final = SearchResultList(candidates[:n_results])
+
+        # UPG-SCORE-DISPLAY-FLAT: a second, independent low-confidence signal —
+        # the top result's own displayed relevance is below an absolute floor.
+        # This is gated on ce_relevance specifically (NOT the dense_sim
+        # fallback): config.yaml's UPG-NOTFOUND-FLOOR-2 rationale already
+        # established, with measurement against the production embedder, that
+        # a raw bi-encoder cosine cannot separate absent-topic from on-topic
+        # queries (both land in the same band near the corpus centroid) — so
+        # reusing that same cosine here, when no reranker ran, would
+        # reintroduce the exact defect that evidence ruled out. A
+        # cross-encoder relevance score is a different, calibrated judgment
+        # (trained to predict query-doc relevance directly rather than
+        # measure embedding proximity), so it is safe to floor on. When no
+        # reranker ran (rerank=False, or the model failed to load), this
+        # sub-signal is simply absent and low_confidence falls back to the
+        # zero-DF vocabulary floor alone (pre-UPG-SCORE-DISPLAY-FLAT behaviour).
+        top_ce_relevance = final[0].ce_relevance if final else None
+        low_top_relevance = (
+            top_ce_relevance is not None
+            and top_ce_relevance < _NOTFOUND_FLOOR_MIN_TOP_RELEVANCE
+        )
+
         # low_confidence: only meaningful when there is something to lead with —
         # an empty result set has its own "no results" message downstream.
         final.low_confidence = (
             _NOTFOUND_FLOOR_ENABLED
             and bool(final)
-            and len(zero_df_tokens) >= _NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS
+            and (
+                len(zero_df_tokens) >= _NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS
+                or low_top_relevance
+            )
         )
         return final, elapsed_ms
 
@@ -554,6 +641,21 @@ class CodeSearcher:
         heading-only / test chunks (UPG-2.1, 2.3). Byte-identical chunks collapse
         to a single representative with a duplicate count so boilerplate can't flood
         the top-N (UPG-2.2).
+
+        UPG-SCORE-DISPLAY-FLAT: `final_score` (the composite above) is an
+        ORDERING KEY ONLY — it decides sort order and dedup precedence and is
+        never displayed. The displayed `r.score` is instead set here, as the
+        very last step, to an absolute per-(query, chunk) relevance value
+        (r.ce_relevance when the cross-encoder scored this chunk, else
+        r.dense_sim, the chunk's own dense cosine similarity) — see
+        SearchResult's field docstrings. This ordering/display split is
+        intentional: the composite blends quality and importance priors that
+        deliberately move a chunk up or down from its raw relevance, so the
+        displayed score is no longer guaranteed non-increasing down the
+        returned list (a quality-demoted chunk can rank below a promoted one
+        despite a higher absolute relevance) — that disagreement is honest
+        information about why the ordering differs from a pure-relevance sort,
+        not a defect.
         """
         if not candidates:
             return candidates
@@ -624,29 +726,27 @@ class CodeSearcher:
         # UPG-PREFIX-COMPOSE (F57): the importance/purpose priors are each
         # (1 + lambda * x) with x >= 0, so their product can push the raw
         # composite above 1.0 even though base and quality are each <= 1.0
-        # (F12-score-exceeds-unity). A bare min(1.0, ...) clamp then collapses
-        # every candidate whose raw composite exceeds 1.0 to the same displayed
-        # 1.000, widening the tie-block and hiding real score separation
-        # (observed: 17 consecutive results tied at the ceiling for one query).
-        # Normalizing by the max raw composite in THIS result set instead keeps
-        # the top result at 1.0 and scales every other result proportionally
-        # below it, preserving the sort order while staying discriminating.
-        max_final = max((t[0] for t in scored), default=0.0) or 1.0
+        # (F12-score-exceeds-unity). This is harmless now that the composite
+        # is used purely as an ordering/dedup key and is never displayed
+        # (UPG-SCORE-DISPLAY-FLAT) — no clamp or per-result-set normalization
+        # is needed; `scored` below is consumed only for its sort order.
 
         seen: dict[str, int] = {}
         out: list[SearchResult] = []
-        for final_score, _, _, r in scored:
+        for _final_score, _, _, r in scored:
             key = normalized_content(r.content)
             if key in seen:
                 out[seen[key]].dup_count += 1
                 continue
             seen[key] = len(out)
             r.dup_count = 0
-            # UPG-11.2: replace the stale pre-rerank hybrid score with the actual
-            # composite ranking key so displayed scores are non-increasing with
-            # rank. Normalized by the result set's own max (see above) so the
-            # top result reads 1.000 and the rest are discriminating fractions
-            # of it, rather than every over-unity candidate clamping to 1.000.
-            r.score = round(final_score / max_final, 4)
+            # UPG-SCORE-DISPLAY-FLAT: the displayed score is the absolute
+            # per-(query, chunk) relevance — the cross-encoder's judgment when
+            # this chunk was reranked, else its dense cosine similarity. Both
+            # are already in [0, 1] and already absolute (never re-derived
+            # from this result set's own rank/composite), so no further
+            # normalization is applied here.
+            absolute_relevance = r.ce_relevance if r.ce_relevance is not None else r.dense_sim
+            r.score = round(absolute_relevance, 4)
             out.append(r)
         return out

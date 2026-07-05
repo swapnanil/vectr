@@ -1518,12 +1518,15 @@ class TestDualVectorPoolEntryEvidenceGate:
 # (UPG-2.1 / UPG-2.2 / UPG-2.3)
 # ---------------------------------------------------------------------------
 
-def _sr(content, path="/p/a.py", node_type="", score=0.7, lang="python", purpose_sim=0.0):
+def _sr(
+    content, path="/p/a.py", node_type="", score=0.7, lang="python", purpose_sim=0.0,
+    dense_sim=0.0, ce_relevance=None,
+):
     from agent.searcher import SearchResult
     return SearchResult(
         file_path=path, lines="1-9", symbol_name="", language=lang,
         score=score, content=content, node_type=node_type,
-        purpose_sim=purpose_sim,
+        purpose_sim=purpose_sim, dense_sim=dense_sim, ce_relevance=ce_relevance,
     )
 
 
@@ -2435,19 +2438,25 @@ class AnotherField(ModelField):
 
 
 # ---------------------------------------------------------------------------
-# UPG-11.2 — Monotonic displayed score (F1c)
+# UPG-SCORE-DISPLAY-FLAT — absolute relevance score (supersedes UPG-11.2)
+#
+# Formerly `score` was set to the rank/quality composite ranking key,
+# re-normalized by this result set's own max — every query's rank-1 result
+# displayed exactly 1.000 regardless of true relevance (a positional
+# pseudo-score). `score` is now an ABSOLUTE per-(query, chunk) relevance value
+# (the cross-encoder's judgment when reranked, else the chunk's own dense
+# cosine similarity), and the rank/quality composite is retained ONLY as an
+# internal ordering key — it is never displayed. Displayed scores are
+# consequently no longer guaranteed non-increasing down the list (ordering can
+# promote a lower-relevance-but-higher-quality/importance chunk above a
+# higher-relevance one); this is deliberate.
 # ---------------------------------------------------------------------------
 
-class TestMonotonicScore:
-    """UPG-11.2: scores in the returned list must be non-increasing.
-
-    Before UPG-11.2, score= was set to the stale pre-rerank hybrid score
-    (set before quality re-sort), so rank1 could have a lower score than rank5.
-    Now _apply_quality_and_dedup replaces score with the composite ranking key.
-    """
-
-    def test_scores_non_increasing(self, searcher) -> None:
-        """Returned scores must be non-increasing (sorted_by_score: true)."""
+class TestAbsoluteRelevanceScore:
+    def test_order_unchanged_and_deterministic(self, searcher) -> None:
+        """The rank/quality composite ordering key is untouched by this change:
+        the same candidate set must sort identically on repeated calls, and
+        every displayed score must be a valid [0, 1] value."""
         content_templates = [
             "def alpha(self):\n    # method body here\n    return self.x\n    # impl",
             "def beta(self):\n    # another body\n    return self.y\n    # different",
@@ -2455,50 +2464,201 @@ class TestMonotonicScore:
             "def delta(self):\n    # fourth method\n    return self.w\n    # more",
         ]
         cands = [
-            _sr(c, path=f"/p/mod{i}.py", score=0.5)
+            _sr(c, path=f"/p/mod{i}.py", score=0.5, dense_sim=0.5)
             for i, c in enumerate(content_templates)
         ]
-        out = searcher._apply_quality_and_dedup("alpha beta gamma delta method", cands)
-        scores = [r.score for r in out]
-        assert scores == sorted(scores, reverse=True), (
-            f"UPG-11.2: scores must be non-increasing. Got: {scores}"
+        out1 = searcher._apply_quality_and_dedup("alpha beta gamma delta method", list(cands))
+        out2 = searcher._apply_quality_and_dedup("alpha beta gamma delta method", list(cands))
+        assert [r.file_path for r in out1] == [r.file_path for r in out2], (
+            "ordering must be deterministic across repeated calls on the same candidates"
+        )
+        for r in out1:
+            assert 0.0 <= r.score <= 1.0, f"displayed score out of range: {r.score}"
+
+    def test_score_no_longer_tracks_quality_ordering(self, searcher) -> None:
+        """A higher-quality chunk still OUTRANKS a lower-quality one (ordering
+        unchanged), but its displayed score is now its own absolute relevance
+        (dense_sim here, no reranker) — not the composite that decided the
+        order. Giving the lower-quality chunk a higher dense_sim demonstrates
+        the two are now independent: order still favors quality, score
+        reflects the chunk's own dense_sim regardless."""
+        from agent.chunk_quality import NAVIGATIONAL_NODE_TYPE
+        high_quality_low_relevance = _sr(
+            "def process_request(request):\n    return self.dispatch(request)\n    # impl\n    x=1",
+            path="/p/impl.py", dense_sim=0.20,
+        )
+        low_quality_high_relevance = _sr(
+            "pub use a::A;\npub use b::B;\npub use c::C;",
+            path="/p/lib.rs", node_type=NAVIGATIONAL_NODE_TYPE, lang="rust", dense_sim=0.90,
+        )
+        out = searcher._apply_quality_and_dedup(
+            "process dispatch request", [high_quality_low_relevance, low_quality_high_relevance],
+        )
+        assert len(out) == 2
+        # Ordering: the navigational/low-quality chunk is still demoted below
+        # the real-code chunk, regardless of its higher dense_sim.
+        assert out[0].file_path == "/p/impl.py"
+        assert out[1].file_path == "/p/lib.rs"
+        # Score: each result's displayed score is its OWN absolute relevance —
+        # the rank-1 (higher-quality) result can legitimately show a LOWER
+        # score than rank-2, since score no longer tracks the ordering key.
+        assert out[0].score == pytest.approx(0.20)
+        assert out[1].score == pytest.approx(0.90)
+
+    def test_ce_relevance_displayed_when_present(self, searcher) -> None:
+        """When a candidate carries a cross-encoder relevance score, that exact
+        value is displayed (rounded to 4dp) — the dense_sim fallback is unused."""
+        r = _sr("def f(): pass", dense_sim=0.10, ce_relevance=0.834567)
+        out = searcher._apply_quality_and_dedup("f", [r])
+        assert out[0].score == pytest.approx(0.8346)
+
+    def test_dense_sim_used_when_unreranked(self, searcher) -> None:
+        """When a candidate was never scored by the cross-encoder (ce_relevance
+        is None — rerank=False or reranker unavailable), the displayed score
+        falls back to the chunk's own dense cosine similarity."""
+        r = _sr("def f(): pass", dense_sim=0.55, ce_relevance=None)
+        out = searcher._apply_quality_and_dedup("f", [r])
+        assert out[0].score == pytest.approx(0.55)
+
+    def test_rank1_score_not_flat_across_differing_queries(self, indexer, tmp_path) -> None:
+        """Two different queries against the same corpus, with a mocked
+        cross-encoder returning distinct relevance judgments, must show
+        DIFFERENT rank-1 scores — not both pinned to 1.000 by per-query
+        self-normalization (the defect this change fixes)."""
+        from agent.searcher import CodeSearcher
+
+        path = make_py(
+            tmp_path, "module.py",
+            "def parse_json_payload(data):\n    return json.loads(data)\n\n"
+            "def serialize_response(obj):\n    return json.dumps(obj)\n",
+        )
+        indexer.index_file(path)
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        class _FixedScoreReranker:
+            """Stub matching the real _Reranker.rerank contract: takes
+            [(doc, candidate), ...] and returns candidates with ce_relevance
+            stamped, sorted by that score."""
+            def __init__(self, score: float):
+                self._score = score
+
+            def rerank(self, query, candidates):
+                for _, c in candidates:
+                    c.ce_relevance = self._score
+                return [c for _, c in candidates]
+
+        s._reranker = _FixedScoreReranker(0.91)
+        strong_results, _ = s.search("parse json payload", n_results=5)
+        s._reranker = _FixedScoreReranker(0.22)
+        weak_results, _ = s.search("completely unrelated elephant query", n_results=5)
+
+        assert strong_results and weak_results
+        assert strong_results[0].score == pytest.approx(0.91)
+        assert weak_results[0].score == pytest.approx(0.22)
+        assert strong_results[0].score != weak_results[0].score, (
+            "rank-1 scores must reflect the cross-encoder's actual judgment, "
+            "not both collapse to 1.000 via per-query self-normalization"
         )
 
-    def test_score_reflects_composite_not_hybrid(self, searcher) -> None:
-        """A chunk with higher quality should have a higher score than one with lower quality
-        even if both started at the same raw hybrid score."""
-        from agent.chunk_quality import NAVIGATIONAL_NODE_TYPE
-        # High quality: real code
-        high = _sr(
-            "def process_request(request):\n    return self.dispatch(request)\n    # impl\n    x=1",
-            path="/p/impl.py", score=0.7,
-        )
-        # Low quality: navigational (gets quality multiplier 0.35)
-        low = _sr(
-            "pub use a::A;\npub use b::B;\npub use c::C;",
-            path="/p/lib.rs", node_type=NAVIGATIONAL_NODE_TYPE, lang="rust", score=0.7,
-        )
-        # Even though both have same raw hybrid score=0.7, high quality chunk
-        # should end up with a higher final score.
-        out = searcher._apply_quality_and_dedup("process dispatch request", [high, low])
-        assert len(out) == 2
-        assert out[0].score >= out[1].score, (
-            f"UPG-11.2: expected non-increasing scores, got {[r.score for r in out]}"
-        )
+
+# ---------------------------------------------------------------------------
+# _Reranker — cross-encoder scoring + ce_relevance stamping (UPG-SCORE-DISPLAY-FLAT)
+#
+# Mocks the CrossEncoder model itself (not the whole _Reranker), so both
+# rerank()'s ce_relevance-stamping and its defensive sigmoid normalization
+# run for real against a realistically-shaped `.predict()` return value
+# (a numpy-like array of floats, matching what sentence-transformers returns).
+# ---------------------------------------------------------------------------
+
+class _FakeCrossEncoderModel:
+    """Stands in for sentence_transformers.CrossEncoder — same predict() shape:
+    takes a list of (query, doc) pairs, returns one float score per pair."""
+    def __init__(self, scores: list[float]):
+        self._scores = scores
+
+    def predict(self, pairs):
+        assert len(pairs) == len(self._scores)
+        return list(self._scores)
+
+
+class TestRerankerCeRelevance:
+    def _reranker_with_model(self, model):
+        from agent.searcher import _Reranker
+        r = _Reranker("fake/model")
+        r._model = model  # bypass _load(): no real model download in tests
+        return r
+
+    def test_ce_relevance_stamped_on_every_candidate(self) -> None:
+        """rerank() must set ce_relevance on each candidate to the model's own
+        (already sigmoid-scale) score — not just use it to sort and discard."""
+        r = _sr("def a(): pass")
+        s = _sr("def b(): pass")
+        reranker = self._reranker_with_model(_FakeCrossEncoderModel([0.30, 0.90]))
+        ranked = reranker.rerank("q", [(r.content, r), (s.content, s)])
+        assert r.ce_relevance == pytest.approx(0.30)
+        assert s.ce_relevance == pytest.approx(0.90)
+        # Sorted by score descending — s (0.90) first.
+        assert ranked[0] is s
+        assert ranked[1] is r
+
+    def test_sigmoid_scale_scores_passed_through_unchanged(self) -> None:
+        """A model already returning [0, 1] (the sentence-transformers default
+        for num_labels==1, which applies sigmoid internally) is NOT
+        re-transformed — the defensive sigmoid must be a no-op here."""
+        r = _sr("def a(): pass")
+        reranker = self._reranker_with_model(_FakeCrossEncoderModel([0.75]))
+        reranker.rerank("q", [(r.content, r)])
+        assert r.ce_relevance == pytest.approx(0.75)
+
+    def test_out_of_range_logit_scores_get_sigmoid_applied(self) -> None:
+        """A differently-configured checkpoint returning raw logits (outside
+        [0, 1]) must be sigmoid-normalized before it ever reaches a
+        SearchResult — a displayed score must never be an unbounded logit."""
+        r = _sr("def a(): pass")
+        s = _sr("def b(): pass")
+        raw_logits = [3.5, -2.0]  # clearly outside [0, 1]
+        reranker = self._reranker_with_model(_FakeCrossEncoderModel(raw_logits))
+        reranker.rerank("q", [(r.content, r), (s.content, s)])
+        expected = [1.0 / (1.0 + math.exp(-v)) for v in raw_logits]
+        assert r.ce_relevance == pytest.approx(expected[0])
+        assert s.ce_relevance == pytest.approx(expected[1])
+        assert 0.0 <= r.ce_relevance <= 1.0
+        assert 0.0 <= s.ce_relevance <= 1.0
+
+    def test_no_candidates_returns_empty(self) -> None:
+        reranker = self._reranker_with_model(_FakeCrossEncoderModel([]))
+        assert reranker.rerank("q", []) == []
+
+    def test_model_unavailable_leaves_ce_relevance_none(self) -> None:
+        """When the model failed to load (self._model is None), candidates
+        pass through untouched — ce_relevance stays at its default None so
+        the display fallback (dense_sim) is used instead."""
+        from agent.searcher import _Reranker
+        reranker = _Reranker("fake/model")
+        reranker._failed = True  # _load() becomes a no-op, self._model stays None
+        r = _sr("def a(): pass")
+        out = reranker.rerank("q", [(r.content, r)])
+        assert out == [r]
+        assert r.ce_relevance is None
 
 
 # ---------------------------------------------------------------------------
 # UPG-NOTFOUND-FLOOR (F46) — absolute-relevance low-confidence signal
 #
-# The displayed per-result `score` is a per-query rank-derived composite
-# (base = 1 - rank/n, times quality/importance multipliers) — it always looks
-# confident near the top of ANY query, relevant or not. `low_confidence` gates
-# on the raw pre-rerank cosine similarity instead (dense_scores in
-# CodeSearcher.search, before the hybrid merge/rerank/quality blend), which is
-# NOT re-normalized per query. Uses the DummyEmbedProvider's real, deterministic
+# `low_confidence` gates on a corpus-wide zero-document-frequency vocabulary
+# check (see config.yaml's UPG-NOTFOUND-FLOOR-2 rationale) — independent of
+# any per-query score. Uses the DummyEmbedProvider's real, deterministic
 # (hash-seeded) vectors: two distinct strings land near-orthogonal (cosine ~0),
 # while an identical string against itself lands at cosine 1.0 — no mocking of
 # the flag itself, so this exercises the exact code path used in production.
+#
+# UPG-SCORE-DISPLAY-FLAT added a second, independent sub-signal — the top
+# result's cross-encoder relevance (ce_relevance) below an absolute floor —
+# gated specifically on ce_relevance, never on the raw dense-cosine fallback
+# (see TestNotFoundFloorTopRelevance below); every test in THIS class below
+# uses rerank=False, so ce_relevance is never set and that sub-signal never
+# fires — these tests are unaffected by the addition.
 # ---------------------------------------------------------------------------
 
 class TestNotFoundFloor:
@@ -2652,6 +2812,95 @@ class TestNotFoundFloor:
         assert isinstance(results, list)
         assert len(results) == len(list(results))
         assert results[0] == list(results)[0]
+
+
+# ---------------------------------------------------------------------------
+# UPG-SCORE-DISPLAY-FLAT — top-cross-encoder-relevance low-confidence sub-signal
+#
+# A second, independent low_confidence trigger: the top result's own
+# cross-encoder relevance (ce_relevance) below ranking.notfound_floor.
+# min_top_relevance, even when the zero-document-frequency vocabulary check
+# does not trip. Uses a mocked reranker (matching the real _Reranker.rerank
+# contract) so the exact ce_relevance value is deterministic and controlled.
+# ---------------------------------------------------------------------------
+
+class _StubReranker:
+    """Matches the real _Reranker.rerank contract: takes
+    [(doc, candidate), ...], stamps ce_relevance, returns candidates
+    sorted by that score (highest first)."""
+    def __init__(self, score: float):
+        self._score = score
+
+    def rerank(self, query, candidates):
+        for _, c in candidates:
+            c.ce_relevance = self._score
+        return [c for _, c in candidates]
+
+
+class TestNotFoundFloorTopRelevance:
+    def _indexed_searcher(self, indexer, tmp_path, content: str, name="module.py"):
+        path = make_py(tmp_path, name, content)
+        indexer.index_file(path)
+        from agent.searcher import CodeSearcher
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+        return s
+
+    def test_low_top_relevance_trips_even_without_zero_df(self, indexer, tmp_path) -> None:
+        """A query built entirely from words present in the corpus (the
+        zero-DF check does not trip) must still flag low_confidence when the
+        cross-encoder itself judges the top result weakly relevant."""
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n\n"
+            "def serialize_response(obj):\n    return json.dumps(obj)\n",
+        )
+        s._reranker = _StubReranker(0.10)  # below the configured 0.30 floor
+        # "parse payload": both words appear in the tiny indexed corpus, so
+        # the zero-DF sub-signal alone would not fire (see TestNotFoundFloor).
+        results, _ = s.search("parse payload", n_results=5)
+        assert results
+        assert results[0].ce_relevance == pytest.approx(0.10)
+        assert results.low_confidence is True, (
+            "top cross-encoder relevance (0.10) is below min_top_relevance "
+            "(0.30); low_confidence must fire even though no query token has "
+            "zero corpus-wide document frequency"
+        )
+
+    def test_high_top_relevance_does_not_trip(self, indexer, tmp_path) -> None:
+        """The same query with a confident cross-encoder judgment must NOT be
+        flagged."""
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n\n"
+            "def serialize_response(obj):\n    return json.dumps(obj)\n",
+        )
+        s._reranker = _StubReranker(0.85)
+        results, _ = s.search("parse payload", n_results=5)
+        assert results
+        assert results[0].ce_relevance == pytest.approx(0.85)
+        assert results.low_confidence is False
+
+    def test_unreranked_search_never_gated_on_dense_sim(self, indexer, tmp_path) -> None:
+        """rerank=False (no cross-encoder ran) must NOT gate low_confidence on
+        the dense-cosine fallback score — config.yaml's UPG-NOTFOUND-FLOOR-2
+        evidence already showed a raw bi-encoder cosine can't separate
+        absent-topic from on-topic queries, so this sub-signal must stay
+        silent (not just falsely-quiet) whenever no real cross-encoder
+        judgment backs the top result."""
+        s = self._indexed_searcher(
+            indexer, tmp_path,
+            "def parse_json_payload(data):\n    return json.loads(data)\n",
+        )
+        # "parse payload" vs the DummyEmbedProvider's hash-seeded vectors: a
+        # non-exact-match query lands near-orthogonal (dense_sim ~0, well
+        # below the 0.30 floor) even though every query word DOES appear in
+        # the corpus — exactly the scenario the dense-cosine floor was
+        # already proven unreliable for.
+        results, _ = s.search("parse payload", n_results=5, rerank=False)
+        assert results
+        assert results[0].ce_relevance is None
+        assert results.low_confidence is False
 
 
 # ---------------------------------------------------------------------------
