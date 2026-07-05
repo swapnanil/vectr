@@ -127,12 +127,23 @@ class _Reranker:
             return
         try:
             from sentence_transformers import CrossEncoder
+            from agent.model_cache import load_with_offline_preference
             cache_dir = str(Path.home() / ".cache" / "vectr" / "models")
-            self._model = CrossEncoder(
+            # UPG-RERANKER-HF-NETWORK: prefer an offline (local_files_only)
+            # load when this model is already fully cached, so search never
+            # makes live huggingface.co calls just to re-confirm a cache it
+            # already has. Falls back to a network-enabled load on a genuine
+            # cache miss (first run) so first-run UX is unchanged.
+            self._model = load_with_offline_preference(
+                lambda local_only: CrossEncoder(
+                    self._model_name,
+                    max_length=512,
+                    automodel_args={"ignore_mismatched_sizes": True},
+                    cache_folder=cache_dir,
+                    local_files_only=local_only,
+                ),
                 self._model_name,
-                max_length=512,
-                automodel_args={"ignore_mismatched_sizes": True},
-                cache_folder=cache_dir,
+                cache_dir,
             )
         except Exception:
             self._failed = True
@@ -281,6 +292,22 @@ class CodeSearcher:
         # Read at instantiation so test fixtures can override via os.environ before creating searcher
         reranker_model = os.getenv("VECTR_RERANKER_MODEL", "BAAI/bge-reranker-base")
         self._reranker = _Reranker(reranker_model) if reranker_model else None
+
+    def warm_reranker(self) -> None:
+        """Eagerly load the cross-encoder reranker (UPG-RERANKER-HF-NETWORK) so
+        its model-load cost lands at daemon startup instead of inside the first
+        ``vectr_search`` call after a restart. Called by the service at startup
+        (skipped in memory-only mode, where search is disabled and there is
+        nothing to rerank). A no-op if reranking is disabled
+        (``VECTR_RERANKER_MODEL=""`` → ``self._reranker is None``); safe to call
+        even if the load fails — ``_Reranker._load()`` already degrades to
+        ``_failed = True`` and search continues without a reranker exactly as
+        before. The lazy call inside ``rerank()`` remains as a safety net for
+        the case where warm-up itself never ran (e.g. an older embedded caller
+        that doesn't invoke this method).
+        """
+        if self._reranker is not None:
+            self._reranker._load()
 
     def set_file_importance(self, importance: dict[str, float]) -> None:
         """Install the file-level importance map consumed by the ARCH-1b ranking

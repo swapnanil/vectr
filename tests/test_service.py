@@ -88,6 +88,49 @@ class TestConcurrentIndexing:
 
 
 # ---------------------------------------------------------------------------
+# Eager reranker warm-up at startup (UPG-RERANKER-HF-NETWORK)
+#
+# Moves the cross-encoder's model-load cost out of the first vectr_search
+# call; must run in full/search-only mode but be skipped in memory-only mode,
+# where there is no code index and search is disabled.
+# ---------------------------------------------------------------------------
+
+class TestEagerRerankerWarmup:
+    def test_warm_reranker_called_in_full_mode(self, tmp_path, monkeypatch) -> None:
+        from agent import indexer as idx_module
+        from agent.searcher import CodeSearcher
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "a.py", "def foo(): pass\n")
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}), \
+             patch.object(CodeSearcher, "warm_reranker", autospec=True) as warm_mock:
+            from app.service import VectrService
+            VectrService(workspace_root=str(tmp_path))
+
+        warm_mock.assert_called_once()
+
+    def test_warm_reranker_skipped_in_memory_only_mode(self, tmp_path, monkeypatch) -> None:
+        from agent import indexer as idx_module
+        from agent.searcher import CodeSearcher
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}), \
+             patch.object(CodeSearcher, "warm_reranker", autospec=True) as warm_mock:
+            from app.service import VectrService
+            VectrService(workspace_root=str(tmp_path), memory_only=True)
+
+        warm_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Strategy integration — weights flow through to searcher.search()
 # ---------------------------------------------------------------------------
 
