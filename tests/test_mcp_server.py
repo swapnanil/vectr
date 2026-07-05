@@ -40,7 +40,6 @@ from integrations.mcp_server import (
 
 def _mock_service():
     from agent.searcher import SearchResult
-    from agent.query_router import RoutingDecision, QueryType
 
     svc = MagicMock()
     svc.total_chunks = 100
@@ -49,15 +48,10 @@ def _mock_service():
         file_path="auth.py", lines="1-10", symbol_name="verify_token",
         language="python", score=0.9, content="def verify_token(): ...",
     )
-    decision = RoutingDecision(
-        query_type=QueryType.SEMANTIC,
-        semantic_weight=0.7,
-        also_run_symbol_lookup=False,
-        also_run_trace=False,
-        include_map_hint=False,
-        rationale="semantic",
-    )
-    svc.search_routed.return_value = ([result], 10, decision, [], [])
+    svc.search.return_value = ([result], 10)
+    # UPG-QUERYTYPE-REROUTE: additive symbol-graph hint — empty by default so
+    # the common-case response has no exact-identifier-match section.
+    svc.identifier_hint_symbols.return_value = []
     svc.status.return_value = {
         "indexed_files": 3,
         "total_chunks": 100,
@@ -367,7 +361,7 @@ class TestVectrSearch:
     def test_n_results_defaults_to_5(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_search", {"query": "foo"}, svc)
-        call_kwargs = svc.search_routed.call_args[1]
+        call_kwargs = svc.search.call_args[1]
         assert call_kwargs["n_results"] == 5, (
             "default n_results must be 5 to limit token accumulation per search call"
         )
@@ -375,7 +369,7 @@ class TestVectrSearch:
     def test_explicit_n_results_overrides_default(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_search", {"query": "foo", "n_results": 10}, svc)
-        call_kwargs = svc.search_routed.call_args[1]
+        call_kwargs = svc.search.call_args[1]
         assert call_kwargs["n_results"] == 10
 
     def test_search_schema_default_matches_handler_upg83(self) -> None:
@@ -402,13 +396,13 @@ class TestVectrSearch:
     def test_n_results_capped_at_50(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_search", {"query": "foo", "n_results": 999}, svc)
-        call_kwargs = svc.search_routed.call_args[1]
+        call_kwargs = svc.search.call_args[1]
         assert call_kwargs["n_results"] <= 50
 
     def test_language_filter_passed_through(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_search", {"query": "fn", "language": "python"}, svc)
-        call_kwargs = svc.search_routed.call_args[1]
+        call_kwargs = svc.search.call_args[1]
         assert call_kwargs.get("language") == "python"
 
     def test_eviction_hint_appended_when_should_evict(self) -> None:
@@ -417,28 +411,14 @@ class TestVectrSearch:
         result = handle_tools_call("vectr_search", {"query": "auth"}, svc)
         assert "Drop these chunks" in result["content"][0]["text"]
 
-    def test_map_hint_appended_when_include_map_hint(self) -> None:
-        from agent.query_router import RoutingDecision, QueryType
-        svc = _mock_service()
-        from agent.searcher import SearchResult
-        decision = RoutingDecision(
-            query_type=QueryType.STRUCTURAL,
-            semantic_weight=0.3,
-            also_run_symbol_lookup=False,
-            also_run_trace=False,
-            include_map_hint=True,
-            rationale="structural",
-        )
-        svc.search_routed.return_value = ([], 5, decision, [], [])
-        result = handle_tools_call("vectr_search", {"query": "overview"}, svc)
-        assert result["isError"] is False
-        # get_map called for the hint
-        svc.get_map.assert_called()
-
-    def test_routing_footnote_in_output(self) -> None:
+    def test_no_routing_footnote_in_output(self) -> None:
+        # UPG-QUERYTYPE-REROUTE: the regex query-classification layer (and its
+        # "─── Routing: ... ───" footnote) is deleted outright — vectr_search
+        # always runs hybrid semantic retrieval at the fingerprint-derived
+        # weight, with no per-query classification artifact in the output.
         svc = _mock_service()
         result = handle_tools_call("vectr_search", {"query": "verify"}, svc)
-        assert "Routing:" in result["content"][0]["text"]
+        assert "Routing:" not in result["content"][0]["text"]
 
     # -----------------------------------------------------------------
     # UPG-NOTFOUND-FLOOR (F46) — low-confidence banner
@@ -449,7 +429,6 @@ class TestVectrSearch:
         must LEAD with a banner naming the config-driven message, isError stays
         False, and results are still shown in full below it (never suppressed)."""
         from agent.searcher import SearchResult, SearchResultList
-        from agent.query_router import RoutingDecision, QueryType
         from agent.config import NOTFOUND_FLOOR_BANNER
 
         svc = _mock_service()
@@ -459,12 +438,7 @@ class TestVectrSearch:
         )
         flagged = SearchResultList([weak])
         flagged.low_confidence = True
-        decision = RoutingDecision(
-            query_type=QueryType.SEMANTIC, semantic_weight=0.7,
-            also_run_symbol_lookup=False, also_run_trace=False,
-            include_map_hint=False, rationale="semantic",
-        )
-        svc.search_routed.return_value = (flagged, 10, decision, [], [])
+        svc.search.return_value = (flagged, 10)
 
         result = handle_tools_call("vectr_search", {"query": "CORS handling implementation"}, svc)
         text = result["content"][0]["text"]
@@ -475,12 +449,45 @@ class TestVectrSearch:
         assert text.index(NOTFOUND_FLOOR_BANNER) < text.index("unrelated_fn")
 
     def test_no_banner_when_not_low_confidence(self) -> None:
-        """The default mock's plain-list search_routed result (no low_confidence
+        """The default mock's plain-list search result (no low_confidence
         attribute) must not emit the banner — the common/strong-match case."""
         from agent.config import NOTFOUND_FLOOR_BANNER
         svc = _mock_service()
         result = handle_tools_call("vectr_search", {"query": "verify"}, svc)
         assert NOTFOUND_FLOOR_BANNER not in result["content"][0]["text"]
+
+    # -----------------------------------------------------------------
+    # UPG-QUERYTYPE-REROUTE — additive symbol-graph identifier hint
+    # -----------------------------------------------------------------
+
+    def test_identifier_hint_section_appended_below_results(self) -> None:
+        """When service.identifier_hint_symbols() resolves at least one exact
+        match, the MCP dispatch layer appends a hint section BELOW the L3
+        results — never prepended, reordered, or reweighted."""
+        from agent.symbol_graph import Symbol
+
+        svc = _mock_service()
+        svc.identifier_hint_symbols.return_value = [
+            Symbol(
+                symbol_id=1, workspace="/repo", name="WorkspaceLock", kind="class",
+                file_path="resolver.py", start_line=214, end_line=240,
+            ),
+        ]
+        result = handle_tools_call("vectr_search", {"query": "WorkspaceLock acquisition"}, svc)
+        text = result["content"][0]["text"]
+
+        assert result["isError"] is False
+        assert "Symbol graph (exact matches for query identifiers)" in text
+        assert "[class] WorkspaceLock  resolver.py:214" in text
+        # appended BELOW the L3 result section, not prepended above it
+        assert text.index("auth.py") < text.index("Symbol graph (exact matches")
+
+    def test_no_identifier_hint_section_when_nothing_resolves(self) -> None:
+        """The common case — no identifier-shaped token, or none resolves —
+        must not emit the section at all."""
+        svc = _mock_service()  # identifier_hint_symbols() defaults to []
+        result = handle_tools_call("vectr_search", {"query": "what are the dependencies here"}, svc)
+        assert "Symbol graph (exact matches" not in result["content"][0]["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -1312,17 +1319,11 @@ class TestEvictionAdvisorIntegration:
         # should_evict() may be True but empty results → no chunks → hint must not fire.
         # retrieved_token_gate=0 disables the UPG-11.15 gate so suppression is due
         # to the empty-chunk path in eviction_hint(), not the token accumulation gate.
-        from agent.query_router import RoutingDecision, QueryType
         svc, _ = self._service_with_real_advisor(
             retrieval_call_threshold=0,
             time_threshold_seconds=100_000,
             retrieved_token_gate=0,
         )
-        empty_decision = RoutingDecision(
-            query_type=QueryType.SEMANTIC, semantic_weight=0.7,
-            also_run_symbol_lookup=False, also_run_trace=False,
-            include_map_hint=False, rationale="semantic",
-        )
-        svc.search_routed.return_value = ([], 5, empty_decision, [], [])
+        svc.search.return_value = ([], 5)
         result = handle_tools_call("vectr_search", {"query": "nothing"}, svc)
         assert "Context management hint" not in result["content"][0]["text"]

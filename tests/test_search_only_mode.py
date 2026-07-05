@@ -315,7 +315,6 @@ class TestMcpDispatchSearchOnly:
     def test_search_not_blocked_in_search_only_mode(self):
         """vectr_search must always work regardless of mode."""
         from agent.searcher import SearchResult
-        from agent.query_router import RoutingDecision, QueryType
         from integrations.mcp_server import handle_tools_call
 
         svc = self._make_mock_service(search_only=True)
@@ -323,12 +322,8 @@ class TestMcpDispatchSearchOnly:
             file_path="auth.py", lines="1-10", symbol_name="verify_token",
             language="python", score=0.9, content="def verify_token(): ...",
         )
-        _decision = RoutingDecision(
-            query_type=QueryType.SEMANTIC, semantic_weight=0.70,
-            also_run_symbol_lookup=False, also_run_trace=False,
-            include_map_hint=False, rationale="semantic",
-        )
-        svc.search_routed.return_value = ([_result], 15, _decision, [], [])
+        svc.search.return_value = ([_result], 15)
+        svc.identifier_hint_symbols.return_value = []
 
         result = handle_tools_call("vectr_search", {"query": "auth flow"}, svc)
         assert result["isError"] is False

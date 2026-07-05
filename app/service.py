@@ -8,7 +8,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent.config import STRATEGY_DEFAULT_BM25_WEIGHT, STRATEGY_DEFAULT_SEMANTIC_WEIGHT
+from agent.config import (
+    STRATEGY_DEFAULT_BM25_WEIGHT,
+    STRATEGY_DEFAULT_SEMANTIC_WEIGHT,
+    SEARCH_IDENTIFIER_HINT_ENABLED,
+    SEARCH_IDENTIFIER_HINT_MAX_IDENTIFIERS,
+    SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -365,66 +371,41 @@ class VectrService:
         """Distinct languages actually present in the index (UPG-3.1)."""
         return self._indexer.indexed_languages()
 
-    def route_query(self, query: str):
-        """Classify a query and return a RoutingDecision."""
-        from agent.query_router import route
-        base_sem = self._strategy.semantic_weight if self._strategy else STRATEGY_DEFAULT_SEMANTIC_WEIGHT
-        return route(query, base_semantic_weight=base_sem)
+    def identifier_hint_symbols(self, query: str) -> list:
+        """Additive, high-precision symbol-graph hint (UPG-QUERYTYPE-REROUTE).
 
-    def search_routed(
-        self, query: str, n_results: int = 10, language: str | None = None
-    ) -> tuple[list, int, object, list, list]:
+        Scans the RAW query for identifier-SHAPED tokens (CamelCase,
+        snake_case, dotted `Class.method` — a structural transform, never a
+        keyword/intent classification) and attempts EXACT symbol-graph
+        resolution for each, capped at `search.identifier_hint.max_identifiers`
+        candidate tokens. No fuzzy/edit-distance/prefix matching — only an
+        exact-name (or exact class-qualified) hit counts, the same exactness
+        `locate` uses for a full-name hit. Returns a flat, deduplicated list of
+        resolved `Symbol` objects in query order, each capped to
+        `search.identifier_hint.max_locations` — empty when the query has no
+        identifier-shaped token or none resolves exactly. This never adjusts
+        search weights or reorders/prepends anything; it is a pure addition
+        appended below the L3 results by the MCP dispatch layer.
         """
-        Returns (results, query_ms, routing_decision, augmented_symbols, trace_results).
-        Uses QueryRouter to classify the query and blend in L2 results when appropriate.
-        """
-        decision = self.route_query(query)
+        if not SEARCH_IDENTIFIER_HINT_ENABLED:
+            return []
+        from agent.identifier_hint import extract_identifier_tokens
 
-        results, query_ms = self._searcher.search(
-            query, n_results=n_results, language=language,
-            semantic_weight=decision.semantic_weight,
-        )
-        self._eviction_advisor.record_results(results)
-
-        aug_symbols: list = []
-        aug_trace: list = []
-
-        if decision.also_run_symbol_lookup:
-            import re as _re
-            _STOPWORDS = {
-                "where", "what", "which", "find", "show", "locate", "define",
-                "defined", "implement", "implemented", "used", "using", "with",
-                "the", "this", "that", "from", "into", "does", "call", "calls",
-                "have", "look", "like", "how", "when", "about", "does",
-            }
-            # Collect candidate terms: CamelCase identifiers, snake_case, and
-            # plain words ≥4 chars that aren't stopwords — try each until we get hits
-            terms: list[str] = []
-            for m in _re.finditer(r'\b([A-Z][a-zA-Z0-9]{2,}|[a-z_][a-z_0-9]{3,})\b', query):
-                t = m.group(1)
-                if t.lower() not in _STOPWORDS:
-                    terms.append(t)
-            # also try individual meaningful words as a fallback
-            for w in query.split():
-                w = w.strip("?.,!").lower()
-                if len(w) >= 4 and w not in _STOPWORDS and w not in [t.lower() for t in terms]:
-                    terms.append(w)
-
-            aug_symbols = []
-            for term in terms:
-                candidates = self._symbol_graph.locate(self._workspace_root, term, limit=5)
-                if candidates:
-                    aug_symbols = candidates
-                    break
-            # snippets are already populated by locate() — no LLM call needed
-
-            if decision.also_run_trace and aug_symbols:
-                trace_result = self._symbol_graph.trace(
-                    self._workspace_root, aug_symbols[0].name, direction="callers", limit=10
-                )
-                aug_trace = trace_result.get("callers", [])
-
-        return results, query_ms, decision, aug_symbols, aug_trace
+        tokens = extract_identifier_tokens(query)[:SEARCH_IDENTIFIER_HINT_MAX_IDENTIFIERS]
+        resolved: list = []
+        seen_ids: set[int] = set()
+        for token in tokens:
+            result = self._symbol_graph.locate_l2(
+                self._workspace_root, token, limit=SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS
+            )
+            if result.resolution_strategy != "exact":
+                continue
+            for sym in result.symbols[:SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS]:
+                if sym.symbol_id in seen_ids:
+                    continue
+                seen_ids.add(sym.symbol_id)
+                resolved.append(sym)
+        return resolved
 
     @property
     def last_indexed(self) -> str:

@@ -174,7 +174,6 @@ def make_py(tmp_path: Path, name: str, content: str) -> str:
 def _base_mock_service():
     """Mock VectrService with sensible defaults for API route tests."""
     from agent.searcher import SearchResult
-    from agent.query_router import RoutingDecision, QueryType
     from agent.symbol_graph import LocateResult
 
     svc = MagicMock()
@@ -188,13 +187,10 @@ def _base_mock_service():
         file_path="src/auth.py", lines="10-30", symbol_name="verify_token",
         language="python", score=0.91, content="def verify_token(): ...",
     )
-    _decision = RoutingDecision(
-        query_type=QueryType.SEMANTIC, semantic_weight=0.70,
-        also_run_symbol_lookup=False, also_run_trace=False,
-        include_map_hint=False, rationale="semantic",
-    )
     svc.search.return_value = ([_result], 15)
-    svc.search_routed.return_value = ([_result], 15, _decision, [], [])
+    # UPG-QUERYTYPE-REROUTE: additive symbol-graph hint — no exact identifier
+    # match by default, so no hint section is appended in the common case.
+    svc.identifier_hint_symbols.return_value = []
     svc.index.return_value = (5, 100, 120)
     svc.status.return_value = {
         "indexed_files": 5, "total_chunks": 100,
