@@ -208,6 +208,12 @@ NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS : int
     cannot separate absent-topic from on-topic queries against the
     production embedder — see config.yaml for the evidence.
 
+NOTFOUND_FLOOR_MIN_TOP_RELEVANCE : float
+    Absolute floor (UPG-SCORE-DISPLAY-FLAT) on the top result's cross-encoder
+    relevance score (ce_relevance): below this, low_confidence is flagged
+    even if the zero-document-frequency check above doesn't trip. Never
+    applied to the raw dense-cosine fallback score — see config.yaml for why.
+
 NOTFOUND_FLOOR_BANNER : str
     Low-confidence banner text prepended to the MCP vectr_search response
     when the floor fires.
@@ -434,4 +440,5 @@ NOTFOUND_FLOOR_ENABLED: bool = bool(_nff_cfg["enabled"])
 NOTFOUND_FLOOR_MIN_TOKEN_LEN: int = int(_nff_cfg["min_content_token_length"])
 NOTFOUND_FLOOR_STOPWORDS: frozenset[str] = frozenset(_nff_cfg["stopwords"])
 NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS: int = int(_nff_cfg["min_zero_df_tokens"])
+NOTFOUND_FLOOR_MIN_TOP_RELEVANCE: float = float(_nff_cfg["min_top_relevance"])
 NOTFOUND_FLOOR_BANNER: str = str(_nff_cfg["banner"])
