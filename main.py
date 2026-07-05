@@ -62,7 +62,7 @@ The codebase is fully indexed. One `vectr_search` call returns ranked, relevant 
 
 | Tool | Purpose | Example |
 |---|---|---|
-| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. An identifier written in the query (`CamelCase`, `snake_case`, or dotted `Class.method`) that exactly matches a known symbol is automatically resolved and appended below the results — no extra call needed. | `vectr_search("workspace lock acquisition and release")` |
+| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. An identifier written in the query (`CamelCase`, `lowerCamelCase`, `snake_case`, or dotted `Class.method`) that exactly matches a known symbol is automatically resolved and appended below the results — no extra call needed; a near-miss (a misremembered name) surfaces the nearest real symbol names instead, clearly labeled as inexact. | `vectr_search("workspace lock acquisition and release")` |
 | `vectr_locate(name="SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate(name="WorkspaceLock")` → `resolver.rs:214` |
 | `vectr_trace(name="symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace(name="acquire_lock")` |
 | `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
@@ -127,7 +127,7 @@ The codebase is fully indexed. One `vectr_search` call returns ranked, relevant 
 
 | Tool | Purpose | Example |
 |---|---|---|
-| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. An identifier written in the query (`CamelCase`, `snake_case`, or dotted `Class.method`) that exactly matches a known symbol is automatically resolved and appended below the results — no extra call needed. | `vectr_search("workspace lock acquisition and release")` |
+| `vectr_search("query")` | Semantic search — describe what you're looking for, get ranked code chunks back. Replaces grep + blind file reads. An identifier written in the query (`CamelCase`, `lowerCamelCase`, `snake_case`, or dotted `Class.method`) that exactly matches a known symbol is automatically resolved and appended below the results — no extra call needed; a near-miss (a misremembered name) surfaces the nearest real symbol names instead, clearly labeled as inexact. | `vectr_search("workspace lock acquisition and release")` |
 | `vectr_locate(name="SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate(name="WorkspaceLock")` → `resolver.rs:214` |
 | `vectr_trace(name="symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace(name="acquire_lock")` |
 | `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |

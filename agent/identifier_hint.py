@@ -30,12 +30,23 @@ import re
 #                              internal lower-then-upper transition — this
 #                              excludes an ordinary capitalised sentence word
 #                              like "Where", which has no internal transition)
-#   3. snake_case              e.g. "acquire_lock" (contains an underscore)
+#   3. lowerCamelCase          e.g. "scheduleUpdateOnFiber" (leading
+#                              lowercase, at least two lower/digit chars, then
+#                              an internal lower-then-upper transition — the
+#                              two-char minimum before the transition is what
+#                              excludes a single-letter-prefix brand word like
+#                              "iPhone"/"eBay", not shape detection of any
+#                              particular word)
+#   4. snake_case              e.g. "acquire_lock" (contains an underscore)
 # Order matters: the dotted alternative is tried first so "Class.method" is
-# captured as one token rather than splitting at the dot.
+# captured as one token rather than splitting at the dot. ALLCAPS tokens
+# ("HTML", "API") match none of these — the CamelCase/lowerCamelCase
+# alternatives both require an internal LOWERCASE run before the case
+# transition, which an all-uppercase run never has.
 _IDENTIFIER_TOKEN_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*"
     r"|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*"
+    r"|[a-z][a-z0-9]+[A-Z][A-Za-z0-9]*"
     r"|[A-Za-z_][A-Za-z0-9]*_[A-Za-z0-9_]*"
 )
 

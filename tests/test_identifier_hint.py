@@ -56,3 +56,52 @@ class TestExtractIdentifierTokens:
     def test_no_identifier_shaped_words_in_query_returns_empty_list(self) -> None:
         assert extract_identifier_tokens("") == []
         assert extract_identifier_tokens("just plain english words here") == []
+
+
+# ---------------------------------------------------------------------------
+# UPG-HINT-LOWERCAMEL: the CamelCase alternative required a leading capital,
+# so lowerCamelCase — the dominant function-naming convention in JS/TS/Java/
+# Kotlin/Swift — was never detected. These tests pin the added shape
+# alternative and its exclusions (still shape-only, no word list).
+# ---------------------------------------------------------------------------
+
+class TestLowerCamelCaseTokens:
+    def test_lower_camelcase_token_extracted(self) -> None:
+        assert extract_identifier_tokens(
+            "why does scheduleUpdateOnFiber run twice"
+        ) == ["scheduleUpdateOnFiber"]
+        assert extract_identifier_tokens(
+            "look at commitPassiveMountEffects please"
+        ) == ["commitPassiveMountEffects"]
+
+    def test_plain_lowercase_words_not_matched(self) -> None:
+        assert extract_identifier_tokens("where does the value come from") == []
+        assert extract_identifier_tokens("this does nothing special") == []
+
+    def test_capitalised_sentence_starter_still_not_matched(self) -> None:
+        assert extract_identifier_tokens("Where is this handled") == []
+
+    def test_allcaps_acronym_not_matched(self) -> None:
+        assert extract_identifier_tokens("this uses HTML and the API a lot") == []
+
+    def test_single_letter_prefix_brand_word_not_matched(self) -> None:
+        """A single lowercase letter before the case transition (the common
+        brand-name shape, e.g. "iPhone"/"eBay") is excluded — the shape
+        requires at least two lower/digit characters before the transition,
+        which also happens to keep this class of common English proper noun
+        out of the identifier-hint path without any word-specific list."""
+        assert extract_identifier_tokens("does this look iPhone-like to you") == []
+        assert extract_identifier_tokens("what about eBay integration") == []
+
+    def test_lower_camelcase_mixed_with_other_shapes_preserves_order(self) -> None:
+        tokens = extract_identifier_tokens(
+            "compare scheduleUpdateOnFiber to WorkspaceLock and acquire_lock"
+        )
+        assert tokens == ["scheduleUpdateOnFiber", "WorkspaceLock", "acquire_lock"]
+
+    def test_dotted_form_still_tried_first_with_lower_camelcase_leaf(self) -> None:
+        """Ordering regression: the dotted alternative must still win over the
+        lowerCamelCase alternative when both could apply to a substring of
+        the match, so a qualified call stays one token, not two."""
+        tokens = extract_identifier_tokens("what does fiber.scheduleUpdate do")
+        assert tokens == ["fiber.scheduleUpdate"]
