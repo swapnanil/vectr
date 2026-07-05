@@ -452,3 +452,9 @@ _id_hint_cfg: dict[str, Any] = _cfg["search"]["identifier_hint"]
 SEARCH_IDENTIFIER_HINT_ENABLED: bool = bool(_id_hint_cfg["enabled"])
 SEARCH_IDENTIFIER_HINT_MAX_IDENTIFIERS: int = int(_id_hint_cfg["max_identifiers"])
 SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS: int = int(_id_hint_cfg["max_locations"])
+
+# UPG-NEARMISS-SYMBOL-NAMES: additive, honestly-labeled near-miss names for an
+# identifier-shaped token that fails EXACT symbol-graph resolution.
+SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED: bool = bool(_id_hint_cfg["nearmiss_enabled"])
+SEARCH_IDENTIFIER_HINT_NEARMISS_MAX: int = int(_id_hint_cfg["nearmiss_max"])
+SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN: int = int(_id_hint_cfg["nearmiss_min_prefix_len"])

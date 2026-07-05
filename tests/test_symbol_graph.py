@@ -415,6 +415,81 @@ class TestLocateL2:
         assert isinstance(result, LocateResult)
 
 
+# ---------------------------------------------------------------------------
+# UPG-NEARMISS-SYMBOL-NAMES: cheap, deterministic near-miss lookup reused by
+# app.service.identifier_hint_nearmiss for a token that already failed exact
+# resolution. Every result here is inexact by construction.
+# ---------------------------------------------------------------------------
+
+class TestNearestSymbolNames:
+    def test_prefix_containment_when_token_extends_a_real_shorter_name(self, tmp_path) -> None:
+        """The common "misremembered one extra word" near-miss shape: the
+        token is a real, shorter symbol name plus a trailing word. None of
+        locate_l2's own strategies compare in this direction (they only
+        match when the SYMBOL name contains the token, not the reverse), so
+        this is the one new bounded query nearest_symbol_names adds."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "control.py", "class CacheControl:\n    pass\n")
+        g.index_file("ws", str(tmp_path / "control.py"))
+
+        # Confirm locate_l2 itself truly falls through to "none" for this pair
+        # (pins the gap this method fills; regression guard if locate_l2 ever
+        # changes to cover this direction itself).
+        assert g.locate_l2("ws", "CacheControlHeader").resolution_strategy == "none"
+
+        near = g.nearest_symbol_names("ws", "CacheControlHeader", limit=3)
+        assert [s.name for s in near] == ["CacheControl"]
+
+    def test_reuses_locate_l2_non_exact_strategy_when_available(self, tmp_path) -> None:
+        """When locate_l2 already resolves the token via one of its own
+        non-exact strategies (here: fuzzy), nearest_symbol_names reuses that
+        result rather than running the prefix fallback."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "f.py", "def foo_bar(): pass")
+        g.index_file("ws", str(tmp_path / "f.py"))
+
+        near = g.nearest_symbol_names("ws", "fo_bar", limit=3)
+        assert [s.name for s in near] == ["foo_bar"]
+
+    def test_no_candidate_yields_empty_list(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "control.py", "class CacheControl:\n    pass\n")
+        g.index_file("ws", str(tmp_path / "control.py"))
+
+        assert g.nearest_symbol_names("ws", "XyzzyQwerty", limit=3) == []
+
+    def test_short_candidate_name_below_min_prefix_len_is_excluded(self, tmp_path) -> None:
+        """A real symbol whose name is shorter than the configured minimum
+        shared length is never offered as a prefix-containment near-miss,
+        even when the token literally starts with it — a short, generic
+        name (here 2 chars) would otherwise "match" as a prefix of nearly
+        anything."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "a.py", "def ab():\n    pass\n")
+        g.index_file("ws", str(tmp_path / "a.py"))
+
+        # Length gap (16 vs 2) rules out locate_l2's own fuzzy strategy too,
+        # so "none" of its non-exact strategies interferes with this check.
+        assert g.locate_l2("ws", "abXyzzyLongTokenHere").resolution_strategy == "none"
+        assert g.nearest_symbol_names("ws", "abXyzzyLongTokenHere", limit=3) == []
+
+    def test_respects_limit_cap(self, tmp_path) -> None:
+        """Three real symbol names are each a literal prefix of the token
+        (layered: shorter names are themselves prefixes of the longer ones)
+        — the cap must still bound the returned list to `limit`."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(
+            tmp_path, "control.py",
+            "class CacheControl:\n    pass\n"
+            "class CacheControlExtra:\n    pass\n"
+            "class CacheControlExtraStuff:\n    pass\n",
+        )
+        g.index_file("ws", str(tmp_path / "control.py"))
+
+        near = g.nearest_symbol_names("ws", "CacheControlExtraStuffMoreWords", limit=2)
+        assert len(near) <= 2
+
+
 class TestLevenshtein:
     def test_identical_strings(self) -> None:
         assert _levenshtein("abc", "abc") == 0

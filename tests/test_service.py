@@ -418,3 +418,79 @@ class TestIdentifierHintSymbols:
             "resolver.py": "class WorkspaceLock:\n    pass\n",
         })
         assert svc.identifier_hint_symbols("how does WorkspaceLock work") == []
+
+
+# ---------------------------------------------------------------------------
+# UPG-NEARMISS-SYMBOL-NAMES: additive, honestly-labeled near-miss names for an
+# identifier-shaped token that fails EXACT symbol-graph resolution. Sourced
+# entirely from the symbol graph's own deterministic partial-match machinery
+# — never a query-content guess, never presented as an exact match.
+# ---------------------------------------------------------------------------
+
+class TestIdentifierHintNearMiss:
+    def _make_service(self, tmp_path, monkeypatch, files: dict[str, str]):
+        return TestIdentifierHintSymbols()._make_service(tmp_path, monkeypatch, files)
+
+    def test_close_name_returns_nearmiss_pair(self, tmp_path, monkeypatch) -> None:
+        """A one-token misremembering of a real symbol name (an extra
+        trailing word appended) surfaces the real, shorter symbol name as an
+        honestly-labeled near-miss, keyed by the failed token."""
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "control.py": "class CacheControl:\n    pass\n",
+        })
+        pairs = svc.identifier_hint_nearmiss("what does CacheControlHeader do")
+        assert len(pairs) == 1
+        token, syms = pairs[0]
+        assert token == "CacheControlHeader"
+        assert any(s.name == "CacheControl" for s in syms)
+
+    def test_garbage_token_with_no_near_neighbors_yields_nothing(self, tmp_path, monkeypatch) -> None:
+        """A token that shares no real symbol as a prefix, substring, or
+        close edit-distance match yields no near-miss pair at all."""
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "control.py": "class CacheControl:\n    pass\n",
+        })
+        assert svc.identifier_hint_nearmiss("what about XyzzyQwerty here") == []
+
+    def test_exactly_resolved_token_has_no_nearmiss_entry(self, tmp_path, monkeypatch) -> None:
+        """A token that resolves EXACTLY must never also appear in the
+        near-miss list — near-miss is only for tokens that failed exactly."""
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "control.py": "class CacheControl:\n    pass\n",
+        })
+        pairs = svc.identifier_hint_nearmiss("look at CacheControl now")
+        assert pairs == []
+
+    def test_no_identifier_shaped_token_yields_nothing(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "control.py": "class CacheControl:\n    pass\n",
+        })
+        assert svc.identifier_hint_nearmiss("what does this class do overall") == []
+
+    def test_nearmiss_disabled_via_config_returns_empty(self, tmp_path, monkeypatch) -> None:
+        from agent import config as config_module
+        monkeypatch.setattr(config_module, "SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED", False)
+        import app.service as service_module
+        monkeypatch.setattr(service_module, "SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED", False)
+
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "control.py": "class CacheControl:\n    pass\n",
+        })
+        assert svc.identifier_hint_nearmiss("what does CacheControlHeader do") == []
+
+    def test_nearmiss_max_caps_total_names_across_tokens(self, tmp_path, monkeypatch) -> None:
+        """The cap is a TOTAL budget across the whole response, not
+        per-token — two failing tokens share one small cap."""
+        from agent import config as config_module
+        monkeypatch.setattr(config_module, "SEARCH_IDENTIFIER_HINT_NEARMISS_MAX", 1)
+        import app.service as service_module
+        monkeypatch.setattr(service_module, "SEARCH_IDENTIFIER_HINT_NEARMISS_MAX", 1)
+
+        svc = self._make_service(tmp_path, monkeypatch, {
+            "control.py": "class CacheControl:\n    pass\nclass AlphaHelperThing:\n    pass\n",
+        })
+        pairs = svc.identifier_hint_nearmiss(
+            "compare CacheControlHeader to AlphaHelperThingExtra"
+        )
+        total_names = sum(len(syms) for _token, syms in pairs)
+        assert total_names <= 1

@@ -446,6 +446,27 @@ search:
     # Maximum resolved symbol locations shown per identifier.
     max_locations: 3
 
+    # UPG-NEARMISS-SYMBOL-NAMES: when an identifier-shaped token fails EXACT
+    # resolution, additively surface the nearest existing symbol NAMES so the
+    # caller LLM learns it misremembered a name rather than seeing nothing.
+    # Sourced entirely from the symbol graph's own deterministic partial-match
+    # machinery (locate_l2's non-exact strategies, plus one bounded prefix-
+    # containment check — see SymbolGraph.nearest_symbol_names) — never a
+    # semantic guess, and always labeled inexact in the rendered section.
+    nearmiss_enabled: true
+
+    # Maximum distinct near-miss symbol names shown, TOTAL across the whole
+    # response (not per token) — keeps the addition small even when more
+    # than one identifier-shaped token in the query fails to resolve exactly.
+    nearmiss_max: 3
+
+    # Minimum length (characters) an existing symbol's name must have to be
+    # offered as a prefix-containment near-miss candidate (the token "starts
+    # with" that shorter, real symbol name). Prevents a short, generic symbol
+    # name (e.g. a 2-3 char helper) from spuriously "matching" as a prefix of
+    # many unrelated tokens.
+    nearmiss_min_prefix_len: 6
+
 indexing:
   # hard cap — prevents single huge chunks diluting embeddings
   max_chunk_lines: 150

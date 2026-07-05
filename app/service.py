@@ -14,6 +14,8 @@ from agent.config import (
     SEARCH_IDENTIFIER_HINT_ENABLED,
     SEARCH_IDENTIFIER_HINT_MAX_IDENTIFIERS,
     SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS,
+    SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED,
+    SEARCH_IDENTIFIER_HINT_NEARMISS_MAX,
 )
 
 logger = logging.getLogger(__name__)
@@ -406,6 +408,47 @@ class VectrService:
                 seen_ids.add(sym.symbol_id)
                 resolved.append(sym)
         return resolved
+
+    def identifier_hint_nearmiss(self, query: str) -> list[tuple[str, list]]:
+        """Additive, honestly-labeled near-miss hint (UPG-NEARMISS-SYMBOL-NAMES).
+
+        For each identifier-shaped token attempted by `identifier_hint_symbols`
+        (same tokenizer, same `max_identifiers` cap) that does NOT resolve to
+        an exact symbol-graph hit, looks up the nearest existing symbol NAMES
+        via `SymbolGraph.nearest_symbol_names` — the symbol graph's own cheap,
+        deterministic partial-match machinery, never a semantic guess. A token
+        that resolves exactly, or that has no near-miss candidate at all, is
+        simply absent from the returned list (matching the "nothing appears"
+        behaviour of `identifier_hint_symbols`). Capped at
+        `search.identifier_hint.nearmiss_max` distinct names TOTAL across the
+        whole response, not per token, so the addition stays small. Returns a
+        list of `(token, [Symbol, ...])` pairs; every symbol here is inexact
+        by construction — the caller (MCP dispatch) must label it as a
+        near-miss, never present it as a match.
+        """
+        if not SEARCH_IDENTIFIER_HINT_ENABLED or not SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED:
+            return []
+        from agent.identifier_hint import extract_identifier_tokens
+
+        tokens = extract_identifier_tokens(query)[:SEARCH_IDENTIFIER_HINT_MAX_IDENTIFIERS]
+        pairs: list[tuple[str, list]] = []
+        budget = SEARCH_IDENTIFIER_HINT_NEARMISS_MAX
+        for token in tokens:
+            if budget <= 0:
+                break
+            exact = self._symbol_graph.locate_l2(
+                self._workspace_root, token, limit=SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS
+            )
+            if exact.resolution_strategy == "exact":
+                continue
+            near = self._symbol_graph.nearest_symbol_names(
+                self._workspace_root, token, limit=budget
+            )
+            if not near:
+                continue
+            pairs.append((token, near))
+            budget -= len(near)
+        return pairs
 
     @property
     def last_indexed(self) -> str:

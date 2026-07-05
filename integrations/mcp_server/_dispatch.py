@@ -165,6 +165,22 @@ def handle_tools_call(
                 hint_lines.append(f"  [{s.kind}] {s.name}  {s.file_path}:{s.start_line}")
             sections.append("\n".join(hint_lines))
 
+        # UPG-NEARMISS-SYMBOL-NAMES: additive, honestly-labeled follow-on —
+        # for an identifier-shaped token that did NOT resolve exactly, show
+        # the nearest existing symbol names so the caller learns it
+        # misremembered a name instead of seeing nothing. Explicitly labeled
+        # inexact ("No exact match ... nearest symbol names"), appended below
+        # the exact-match section above; never reorders/replaces L3 results.
+        nearmiss_pairs = service.identifier_hint_nearmiss(query)
+        if nearmiss_pairs:
+            nm_lines = []
+            for token, syms in nearmiss_pairs:
+                names = ", ".join(f"{s.name} ({s.file_path}:{s.start_line})" for s in syms)
+                nm_lines.append(
+                    f"─── No exact match for {token!r}; nearest symbol names: {names} ───"
+                )
+            sections.append("\n".join(nm_lines))
+
         content_text = "\n\n".join(sections)
 
         # auto-append eviction hint only on a FRESH context-pressure escalation

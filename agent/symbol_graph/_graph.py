@@ -23,6 +23,7 @@ from agent.config import (
     LOCATE_LARGE_SPAN_THRESHOLD,
     LOCATE_SMALL_SPAN_THRESHOLD,
     INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES,
+    SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN,
 )
 
 logger = logging.getLogger(__name__)
@@ -1255,6 +1256,61 @@ class SymbolGraph:
                 )
 
         return LocateResult(symbols=[], resolution_strategy="none", query=name)
+
+    def nearest_symbol_names(self, workspace: str, token: str, limit: int) -> list[Symbol]:
+        """Cheap, deterministic near-miss lookup for a token that already
+        failed EXACT resolution (see `app.service.identifier_hint_nearmiss`,
+        UPG-NEARMISS-SYMBOL-NAMES). Never returns an "exact" result — every
+        candidate here is inexact by construction, and the caller is
+        responsible for labeling it as a near-miss, never as a match.
+
+        Reuses `locate_l2`'s own non-exact resolution strategies (suffix,
+        same_module, import_chain, substring, fuzzy) first. Those already
+        cover a token that is a typo of, or shares a substring with, a real
+        symbol name — but they only compare in the direction "the SYMBOL
+        name contains/resembles the token". The other common near-miss shape
+        — the token itself IS a real, shorter symbol name with an extra
+        trailing word misremembered onto it (e.g. token "CacheControlHeader"
+        against the real symbol "CacheControl") — falls through all of
+        `locate_l2`'s strategies to "none", because none of them checks
+        whether the TOKEN contains a shorter existing name as a prefix. One
+        additional bounded prefix-containment query against the same
+        `symbols` table covers that shape without any new fuzzy/edit-distance
+        machinery: an existing symbol name is a candidate only when the token
+        literally starts with it and the name is at least
+        `search.identifier_hint.nearmiss_min_prefix_len` characters long
+        (excludes short, generic names from matching as a "prefix" of
+        unrelated tokens).
+        """
+        if limit <= 0:
+            return []
+        result = self.locate_l2(workspace, token, limit=limit)
+        if result.resolution_strategy not in ("exact", "none"):
+            return result.symbols[:limit]
+
+        min_len = SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN
+        if len(token) < min_len:
+            return []
+        token_lower = token.lower()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM symbols WHERE workspace = ? AND LENGTH(name) >= ? "
+                "AND LENGTH(name) < ? ORDER BY LENGTH(name) DESC",
+                (workspace, min_len, len(token)),
+            ).fetchall()
+        seen_names: set[str] = set()
+        candidates = []
+        for r in rows:
+            if r["name"] in seen_names or not token_lower.startswith(r["name"].lower()):
+                continue
+            seen_names.add(r["name"])
+            candidates.append(r)
+        if not candidates:
+            return []
+        syms = [self._row_to_symbol(r) for r in candidates[:limit]]
+        for s in syms:
+            s.snippet = self.get_snippet(s.file_path, s.start_line, s.end_line)
+        return syms
 
     # ------------------------------------------------------------------
     # Query: trace (call graph)

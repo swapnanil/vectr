@@ -52,6 +52,9 @@ def _mock_service():
     # UPG-QUERYTYPE-REROUTE: additive symbol-graph hint — empty by default so
     # the common-case response has no exact-identifier-match section.
     svc.identifier_hint_symbols.return_value = []
+    # UPG-NEARMISS-SYMBOL-NAMES: additive near-miss hint — empty by default so
+    # the common-case response has no near-miss section either.
+    svc.identifier_hint_nearmiss.return_value = []
     svc.status.return_value = {
         "indexed_files": 3,
         "total_chunks": 100,
@@ -488,6 +491,87 @@ class TestVectrSearch:
         svc = _mock_service()  # identifier_hint_symbols() defaults to []
         result = handle_tools_call("vectr_search", {"query": "what are the dependencies here"}, svc)
         assert "Symbol graph (exact matches" not in result["content"][0]["text"]
+
+    # -----------------------------------------------------------------
+    # UPG-NEARMISS-SYMBOL-NAMES — additive near-miss symbol-name hint
+    # -----------------------------------------------------------------
+
+    def test_nearmiss_section_appended_below_results_and_honestly_labeled(self) -> None:
+        """When identifier_hint_nearmiss() returns candidates, the dispatch
+        layer appends an inexact-labeled section BELOW the L3 results (and
+        below the exact-match section, if any) — never as a match."""
+        from agent.symbol_graph import Symbol
+
+        svc = _mock_service()
+        svc.identifier_hint_nearmiss.return_value = [
+            ("CacheControlHeader", [
+                Symbol(
+                    symbol_id=2, workspace="/repo", name="CacheControl", kind="class",
+                    file_path="control.py", start_line=22, end_line=40,
+                ),
+            ]),
+        ]
+        result = handle_tools_call("vectr_search", {"query": "CacheControlHeader usage"}, svc)
+        text = result["content"][0]["text"]
+
+        assert result["isError"] is False
+        assert "No exact match for 'CacheControlHeader'" in text
+        assert "nearest symbol names" in text
+        assert "CacheControl (control.py:22)" in text
+        # appended below the L3 result section
+        assert text.index("auth.py") < text.index("No exact match for")
+
+    def test_nearmiss_section_below_exact_match_section_when_both_present(self) -> None:
+        """A query with one exactly-resolved token and one near-miss token
+        shows both sections, exact-match first, near-miss below it."""
+        from agent.symbol_graph import Symbol
+
+        svc = _mock_service()
+        svc.identifier_hint_symbols.return_value = [
+            Symbol(
+                symbol_id=1, workspace="/repo", name="WorkspaceLock", kind="class",
+                file_path="resolver.py", start_line=214, end_line=240,
+            ),
+        ]
+        svc.identifier_hint_nearmiss.return_value = [
+            ("CacheControlHeader", [
+                Symbol(
+                    symbol_id=2, workspace="/repo", name="CacheControl", kind="class",
+                    file_path="control.py", start_line=22, end_line=40,
+                ),
+            ]),
+        ]
+        result = handle_tools_call(
+            "vectr_search", {"query": "WorkspaceLock vs CacheControlHeader"}, svc
+        )
+        text = result["content"][0]["text"]
+        assert text.index("Symbol graph (exact matches") < text.index("No exact match for")
+
+    def test_no_nearmiss_section_when_nothing_found(self) -> None:
+        """The common case — no near-miss candidates at all — must not emit
+        the section (matches identifier_hint_nearmiss() defaulting to [])."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_search", {"query": "XyzzyQwerty nonsense"}, svc)
+        assert "No exact match for" not in result["content"][0]["text"]
+
+    def test_nearmiss_section_caps_at_three_names(self) -> None:
+        """Never more than 3 near-miss names total in the rendered section,
+        even if a mocked service returned more than the configured cap."""
+        from agent.symbol_graph import Symbol
+
+        svc = _mock_service()
+        svc.identifier_hint_nearmiss.return_value = [
+            ("BigTokenName", [
+                Symbol(
+                    symbol_id=i, workspace="/repo", name=f"BigToken{i}", kind="class",
+                    file_path="t.py", start_line=i, end_line=i + 1,
+                )
+                for i in range(3)
+            ]),
+        ]
+        result = handle_tools_call("vectr_search", {"query": "BigTokenName lookup"}, svc)
+        text = result["content"][0]["text"]
+        assert text.count("(t.py:") == 3
 
 
 # ---------------------------------------------------------------------------
