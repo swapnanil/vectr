@@ -838,6 +838,32 @@ symbol_graph:
       - virtual
       - using
 
+  # UPG-REACT-TSX-FUNCTION-DECL-DROP: recovery for a grammar desync that
+  # swallows an unrelated region of siblings into one opaque, mis-typed node
+  # (e.g. a single unparseable construct hundreds of lines earlier can wreck
+  # the parser's recovery for the rest of the file). Language-agnostic — any
+  # tree-sitter grammar's error-recovery path can produce this shape, not
+  # just Flow/tsx. When the walker hits a node that is not itself a
+  # recognized symbol/call construct but has_error is set and its own span
+  # is large, it is worth an isolated reparse of just that byte range: the
+  # parser often resyncs cleanly once it starts fresh without the earlier
+  # desync's carried-over state.
+  error_recovery:
+    # Minimum line-span (end_line - start_line) an opaque errored node must
+    # cover before an isolated reparse is attempted. A short span IS the
+    # error (no swallowed siblings to recover) — reparsing it wastes a parse
+    # pass for nothing.
+    min_span_lines: 8
+    # Reparse attempts budget per file. Bounds worst-case parse cost when a
+    # file has many/deeply-nested desynced regions.
+    max_reparse_attempts_per_file: 200
+    # Per-attempt cap on how many original siblings a single recovery reparse
+    # may absorb while growing past an arbitrary mid-declaration cut (see
+    # error_recovery above). Without its own cap, one badly-cut region can
+    # burn the entire per-file budget growing sibling-by-sibling and starve
+    # every other desynced region in the same file.
+    max_extend_steps_per_attempt: 20
+
 workspace:
   # Directory names written into a FRESH .vectrignore on first `vectr start` /
   # `vectr init` when the workspace has none yet (UPG-13.2). An existing
