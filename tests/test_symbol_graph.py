@@ -2624,11 +2624,13 @@ class TestFileImportanceARCH1a:
             )
 
     def test_schema_version_bumped(self) -> None:
-        """SYMBOL_SCHEMA_VERSION must be >= 8 (ARCH-2 bumped from 7; later
-        bumps, e.g. UPG-REACT-TSX-FUNCTION-DECL-DROP's extraction-behavior
-        change, are expected to keep raising it further)."""
-        assert SYMBOL_SCHEMA_VERSION >= 8, (
-            f"Expected SYMBOL_SCHEMA_VERSION>=8 after ARCH-2 bump, got {SYMBOL_SCHEMA_VERSION}"
+        """SYMBOL_SCHEMA_VERSION is an exact pin, not a floor: every
+        extraction-behavior change must bump it (or existing installs never
+        rebuild their graph) AND consciously update this pin in the same
+        commit. Currently 9 (UPG-REACT-TSX-FUNCTION-DECL-DROP bumped from 8/ARCH-2)."""
+        assert SYMBOL_SCHEMA_VERSION == 9, (
+            f"Expected SYMBOL_SCHEMA_VERSION=9; got {SYMBOL_SCHEMA_VERSION}. "
+            "If you changed extraction behavior, bump the version and update this pin."
         )
 
 
