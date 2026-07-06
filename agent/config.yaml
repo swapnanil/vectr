@@ -993,3 +993,11 @@ embedding:
   # such registration (like this default) embeds queries and documents
   # identically, unchanged.
   default_model: ibm-granite/granite-embedding-english-r2
+  # Hard cap on the encoder's token sequence length for local (sentence-
+  # transformers) embedding, applied on top of whatever the model's own
+  # config declares. Long-context embedders (this default declares 8192)
+  # otherwise encode every long chunk at full length — quadratic-attention
+  # cost on CPU, observed to stall a full-corpus index for hours — while
+  # short-context models (512) are unaffected. 512 matches the prior
+  # default's behavior; raise deliberately, with indexing throughput in mind.
+  max_seq_length: 512

@@ -54,6 +54,36 @@ def _make_provider(prompts: dict[str, str]) -> tuple[LocalEmbedProvider, _FakeST
     return provider, fake_model
 
 
+class TestMaxSeqLengthCap:
+    """config.yaml embedding.max_seq_length caps the loaded encoder's sequence
+    length (a long-context model's own 8k config otherwise stalls CPU indexing),
+    while a model that already declares a lower cap keeps its own."""
+
+    def _build_with_model_cap(self, model_max_seq_length):
+        fake_model = _FakeSTModel({})
+        if model_max_seq_length is not None:
+            fake_model.max_seq_length = model_max_seq_length
+        with patch("agent.model_cache.load_with_offline_preference", return_value=fake_model):
+            provider = LocalEmbedProvider("any-model-name")
+        return provider, fake_model
+
+    def test_long_context_model_capped_to_config_value(self):
+        from agent.config import EMBEDDING_MAX_SEQ_LENGTH
+        _, fake_model = self._build_with_model_cap(8192)
+        assert fake_model.max_seq_length == EMBEDDING_MAX_SEQ_LENGTH
+
+    def test_short_context_model_keeps_its_own_lower_cap(self):
+        from agent.config import EMBEDDING_MAX_SEQ_LENGTH
+        _, fake_model = self._build_with_model_cap(256)
+        assert 256 <= EMBEDDING_MAX_SEQ_LENGTH, "test premise: model cap below config cap"
+        assert fake_model.max_seq_length == 256
+
+    def test_model_without_seq_length_attribute_gets_config_cap(self):
+        from agent.config import EMBEDDING_MAX_SEQ_LENGTH
+        _, fake_model = self._build_with_model_cap(None)
+        assert fake_model.max_seq_length == EMBEDDING_MAX_SEQ_LENGTH
+
+
 class TestAsymmetricModelQueryPrompt:
     """Model registers a "query" prompt (e.g. arctic-embed) — asserts the split."""
 

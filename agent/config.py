@@ -535,3 +535,4 @@ SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN: int = int(_id_hint_cfg["nearmiss
 # ---------------------------------------------------------------------------
 
 EMBEDDING_DEFAULT_MODEL: str = str(_cfg["embedding"]["default_model"])
+EMBEDDING_MAX_SEQ_LENGTH: int = int(_cfg["embedding"]["max_seq_length"])

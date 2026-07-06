@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from agent.config import EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL
+from agent.config import (
+    EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL,
+    EMBEDDING_MAX_SEQ_LENGTH as _EMBEDDING_MAX_SEQ_LENGTH,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +70,14 @@ class LocalEmbedProvider:
             model_name,
             str(cache_dir),
         )
+        # Cap the encoder's sequence length (config.yaml embedding.max_seq_length).
+        # A long-context model's own config otherwise wins — the current default
+        # declares 8192, and encoding long chunks at full length on CPU has
+        # quadratic-attention cost that stalls a full-corpus index for hours.
+        # Only ever lowers: a model that already declares less keeps its own cap.
+        current_cap = getattr(self._model, "max_seq_length", None)
+        if current_cap is None or current_cap > _EMBEDDING_MAX_SEQ_LENGTH:
+            self._model.max_seq_length = _EMBEDDING_MAX_SEQ_LENGTH
         # Asymmetric embedding models (arctic-embed and others) register a "query"
         # prompt in their sentence-transformers config that must be prepended to
         # search queries but NOT to the documents/chunks being indexed. Detected from
