@@ -30,9 +30,14 @@ async def lifespan(application: FastAPI):
     extra_roots = _json.loads(os.getenv("VECTR_EXTRA_ROOTS", "[]"))
     memory_only = os.getenv("VECTR_MEMORY_ONLY", "") == "1"
     search_only = os.getenv("VECTR_SEARCH_ONLY", "") == "1"
+    # UPG-WS-ROOT-MISDETECT: set by `vectr start`/`restart` only when the user
+    # gave an explicit workspace path — that path must win over the
+    # git-toplevel walk-up VectrService otherwise applies.
+    workspace_explicit = os.getenv("VECTR_WORKSPACE_EXPLICIT", "") == "1"
     svc = VectrService(
         workspace_root=workspace, port=port, extra_roots=extra_roots,
         memory_only=memory_only, search_only=search_only,
+        workspace_explicit=workspace_explicit,
     )
     svc.start_background_index()
     application.state.service = svc

@@ -56,6 +56,7 @@ class VectrService:
         extra_roots: list[str] | None = None,
         memory_only: bool = False,
         search_only: bool = False,
+        workspace_explicit: bool = False,
     ) -> None:
         from agent.indexer import CodeIndexer
         from agent.searcher import CodeSearcher
@@ -67,7 +68,16 @@ class VectrService:
         from integrations.vscode_bridge import configure_all
         from integrations.workspace_detect import find_workspace_root
 
-        self._workspace_root = find_workspace_root(workspace_root)
+        # UPG-WS-ROOT-MISDETECT: an explicitly-given workspace path (CLI
+        # positional arg or --path flag) always wins verbatim — it must never
+        # be silently replaced by the enclosing git repo's root. The
+        # git-toplevel walk-up in find_workspace_root only applies when the
+        # caller gave no path at all (workspace_explicit=False, e.g. a bare
+        # `vectr start` defaulting to cwd).
+        if workspace_explicit:
+            self._workspace_root = str(Path(workspace_root).resolve())
+        else:
+            self._workspace_root = find_workspace_root(workspace_root)
         self._extra_roots: list[str] = list(extra_roots or [])
         self._port = port
         # Some embedding models are asymmetric — search queries must be embedded

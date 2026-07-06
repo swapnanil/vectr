@@ -77,7 +77,9 @@ class TestCmdStart:
              patch("main._do_start") as mock_do_start:
             m.cmd_start(_make_args(paths=[ws], port=8765))
 
-        mock_do_start.assert_called_once_with(ws, 8765, wh, extra_roots=[], memory_only=False, search_only=False)
+        mock_do_start.assert_called_once_with(
+            ws, 8765, wh, extra_roots=[], memory_only=False, search_only=False, workspace_explicit=True,
+        )
 
     def test_prunes_dead_entries_before_starting(self, tmp_path):
         ws = "/project/a"
@@ -1235,6 +1237,130 @@ class TestCmdWatch:
 
 
 # ---------------------------------------------------------------------------
+# UPG-WS-ROOT-MISDETECT: an explicitly-given workspace path must always win
+# over the git-toplevel walk-up — `vectr start <path>` on a .git-less
+# subdirectory of a git repo must never silently index the enclosing repo.
+# ---------------------------------------------------------------------------
+
+class TestIsExplicitWorkspace:
+    def test_true_for_positional_workspace_arg(self):
+        args = argparse.Namespace(workspace="/some/dir", paths=None)
+        assert m._is_explicit_workspace(args) is True
+
+    def test_true_for_path_flag(self):
+        args = argparse.Namespace(workspace=None, paths=["/some/dir"])
+        assert m._is_explicit_workspace(args) is True
+
+    def test_false_when_neither_given(self):
+        args = argparse.Namespace(workspace=None, paths=None)
+        assert m._is_explicit_workspace(args) is False
+
+    def test_false_when_paths_is_empty_list(self):
+        args = argparse.Namespace(workspace=None, paths=[])
+        assert m._is_explicit_workspace(args) is False
+
+
+class TestWarnIfEnclosingRepo:
+    def test_warns_when_nested_inside_enclosing_git_repo(self, tmp_path, capsys):
+        (tmp_path / ".git").mkdir()
+        nested = tmp_path / "sub" / "project"
+        nested.mkdir(parents=True)
+
+        m._warn_if_enclosing_repo(str(nested))
+
+        err = capsys.readouterr().err
+        assert str(tmp_path) in err
+        assert str(nested) in err
+
+    def test_no_warning_when_workspace_is_its_own_repo_root(self, tmp_path, capsys):
+        (tmp_path / ".git").mkdir()
+
+        m._warn_if_enclosing_repo(str(tmp_path))
+
+        assert capsys.readouterr().err == ""
+
+    def test_no_warning_when_no_git_repo_anywhere(self, tmp_path, capsys):
+        nested = tmp_path / "sub"
+        nested.mkdir()
+
+        m._warn_if_enclosing_repo(str(nested))
+
+        assert capsys.readouterr().err == ""
+
+
+class TestDoStartExplicitEnvConstruction:
+    """_do_start must propagate VECTR_WORKSPACE_EXPLICIT to the daemon
+    process only when the caller resolved an explicit path."""
+
+    def _mock_popen_factory(self, captured_env: dict):
+        def _mock_popen(cmd, env, **kwargs):
+            captured_env.update(env)
+            proc = MagicMock()
+            proc.pid = 99999
+            return proc
+        return _mock_popen
+
+    def test_explicit_flag_adds_env_var(self, tmp_path):
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        captured_env: dict = {}
+
+        with patch("subprocess.Popen", side_effect=self._mock_popen_factory(captured_env)), \
+             patch("main.InstanceRegistry") as MockReg, \
+             patch("main._migrate_legacy_files"), \
+             patch("builtins.open", MagicMock()):
+            MockReg.return_value.register = MagicMock()
+            m._do_start(ws, 8765, wh, workspace_explicit=True)
+
+        assert captured_env.get("VECTR_WORKSPACE_EXPLICIT") == "1"
+
+    def test_default_does_not_add_env_var(self, tmp_path):
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        captured_env: dict = {}
+
+        with patch("subprocess.Popen", side_effect=self._mock_popen_factory(captured_env)), \
+             patch("main.InstanceRegistry") as MockReg, \
+             patch("main._migrate_legacy_files"), \
+             patch("builtins.open", MagicMock()):
+            MockReg.return_value.register = MagicMock()
+            m._do_start(ws, 8765, wh)
+
+        assert captured_env.get("VECTR_WORKSPACE_EXPLICIT", "") != "1"
+
+    def test_cmd_start_positional_workspace_threads_explicit_true(self, tmp_path):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            args = argparse.Namespace(workspace=str(tmp_path), paths=None, port=8765)
+            m.cmd_start(args)
+
+        _, call_kwargs = mock_do_start.call_args
+        assert call_kwargs.get("workspace_explicit") is True
+
+    def test_cmd_start_default_cwd_is_not_explicit(self, tmp_path, monkeypatch):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        monkeypatch.chdir(tmp_path)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            args = argparse.Namespace(workspace=None, paths=None, port=8765)
+            m.cmd_start(args)
+
+        _, call_kwargs = mock_do_start.call_args
+        assert call_kwargs.get("workspace_explicit") is False
+
+
+# ---------------------------------------------------------------------------
 # Multi-root workspace support
 # ---------------------------------------------------------------------------
 
@@ -1330,7 +1456,9 @@ class TestMultiRoot:
              patch("main._do_start") as mock_do_start:
             m.cmd_start(_make_args(paths=[ws_a, ws_b], port=8765))
 
-        mock_do_start.assert_called_once_with(ws_a, 8765, wh, extra_roots=[ws_b], memory_only=False, search_only=False)
+        mock_do_start.assert_called_once_with(
+            ws_a, 8765, wh, extra_roots=[ws_b], memory_only=False, search_only=False, workspace_explicit=True,
+        )
 
 
 # ---------------------------------------------------------------------------

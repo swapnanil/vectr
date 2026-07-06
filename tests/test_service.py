@@ -537,3 +537,52 @@ class TestIdentifierHintNearMiss:
         )
         total_names = sum(len(syms) for _token, syms in pairs)
         assert total_names <= 1
+
+
+# ---------------------------------------------------------------------------
+# UPG-WS-ROOT-MISDETECT: `vectr start <path>` on a .git-less subdirectory of
+# a git repo must index the path AS GIVEN, never silently substitute the
+# enclosing repo root. workspace_explicit=True is set by main.py only when
+# the CLI resolved an explicit path (positional arg or --path flag); when it
+# is False (the default — no path given, cwd default) the pre-existing
+# git-toplevel walk-up behavior is unchanged.
+# ---------------------------------------------------------------------------
+
+class TestWorkspaceExplicitResolution:
+    def test_explicit_path_wins_over_enclosing_git_repo(self, tmp_path, monkeypatch) -> None:
+        """The audited bug: a repo-less nested dir must be indexed as given,
+        not the enclosing repo it happens to sit inside."""
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        (tmp_path / ".git").mkdir()
+        nested = tmp_path / "sub" / "project"
+        nested.mkdir(parents=True)
+        make_py(nested, "a.py", "def foo(): pass\n")
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db_nested")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(nested), workspace_explicit=True)
+
+        assert svc._workspace_root == str(nested.resolve())
+
+    def test_default_no_path_keeps_git_toplevel_behavior(self, tmp_path, monkeypatch) -> None:
+        """workspace_explicit defaults False (bare `vectr start`, cwd
+        default) — the pre-existing git-toplevel walk-up must be unchanged."""
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        (tmp_path / ".git").mkdir()
+        nested = tmp_path / "sub" / "project"
+        nested.mkdir(parents=True)
+        make_py(nested, "a.py", "def foo(): pass\n")
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db_default")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(nested))  # workspace_explicit not passed
+
+        assert svc._workspace_root == str(tmp_path.resolve())

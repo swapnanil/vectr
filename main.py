@@ -453,6 +453,37 @@ def _resolve_workspace_roots(args: argparse.Namespace) -> list[str]:
     return [str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())]
 
 
+def _is_explicit_workspace(args: argparse.Namespace) -> bool:
+    """True if the user gave an explicit workspace path to start/restart
+    (positional `.code-workspace`/directory arg, or one or more --path
+    flags), as opposed to defaulting to cwd/VECTR_WORKSPACE.
+
+    UPG-WS-ROOT-MISDETECT: an explicit path must always win over the
+    git-toplevel walk-up in `find_workspace_root` — that walk-up is only
+    appropriate when the user gave vectr no path to go on at all.
+    """
+    return bool(getattr(args, "workspace", None)) or bool(getattr(args, "paths", None) or [])
+
+
+def _warn_if_enclosing_repo(workspace: str) -> None:
+    """One-line warning when an explicitly-given workspace path is not
+    itself a git repo root but is nested inside an enclosing one
+    (UPG-WS-ROOT-MISDETECT). Informational only: the enclosing repo is
+    never indexed instead of the path the user gave.
+    """
+    from integrations.workspace_detect import find_workspace_root
+
+    resolved = str(Path(workspace).resolve())
+    enclosing = find_workspace_root(resolved)
+    if enclosing != resolved:
+        print(
+            f"Note: {resolved} is not itself a git repo root; it is nested inside "
+            f"the git repo at {enclosing}. Indexing only the given path, not the "
+            f"enclosing repo.",
+            file=sys.stderr,
+        )
+
+
 def _apply_exclude_args(workspace: str, exclude_entries: list[str]) -> None:
     """Append `--exclude` entries to .vectrignore (shared by `init` and `start`).
 
@@ -615,6 +646,7 @@ def _do_start(
     extra_roots: list[str] | None = None,
     memory_only: bool = False,
     search_only: bool = False,
+    workspace_explicit: bool = False,
 ) -> None:
     if memory_only and search_only:
         raise ValueError("Cannot start vectr in both --memory-only and --search-only mode simultaneously")
@@ -633,6 +665,10 @@ def _do_start(
         env["VECTR_MEMORY_ONLY"] = "1"
     if search_only:
         env["VECTR_SEARCH_ONLY"] = "1"
+    if workspace_explicit:
+        # UPG-WS-ROOT-MISDETECT: tells VectrService to trust `workspace`
+        # verbatim instead of walking up to the nearest enclosing .git root.
+        env["VECTR_WORKSPACE_EXPLICIT"] = "1"
     vectr_dir = Path(__file__).resolve().parent
     with open(log_path, "a") as log_file:
         proc = subprocess.Popen(
@@ -690,6 +726,9 @@ def cmd_start(args: argparse.Namespace) -> None:
     extra_roots = roots[1:]
     ws_hash = workspace_hash(workspace)
     preferred_port = args.port
+    explicit = _is_explicit_workspace(args)
+    if explicit:
+        _warn_if_enclosing_repo(workspace)
 
     # write user-defined exclusions to .vectrignore before indexing starts
     _apply_exclude_args(workspace, getattr(args, "exclude", None) or [])
@@ -713,7 +752,10 @@ def cmd_start(args: argparse.Namespace) -> None:
         _write_workspace_config(root, port, search_only=search_only)
     if not memory_only:
         _preflight_grammars()
-    _do_start(workspace, port, ws_hash, extra_roots=extra_roots, memory_only=memory_only, search_only=search_only)
+    _do_start(
+        workspace, port, ws_hash, extra_roots=extra_roots,
+        memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
+    )
 
 
 def cmd_index(args: argparse.Namespace) -> None:
@@ -1057,6 +1099,9 @@ def cmd_restart(args: argparse.Namespace) -> None:
     extra_roots = roots[1:]
     ws_hash = workspace_hash(workspace)
     preferred_port = args.port
+    explicit = _is_explicit_workspace(args)
+    if explicit:
+        _warn_if_enclosing_repo(workspace)
 
     registry = InstanceRegistry()
     entry = registry.get(ws_hash)
@@ -1069,7 +1114,10 @@ def cmd_restart(args: argparse.Namespace) -> None:
     port = registry.find_free_port(ws_hash, preferred_port)
     for root in roots:
         _write_workspace_config(root, port, search_only=search_only)
-    _do_start(workspace, port, ws_hash, extra_roots=extra_roots, memory_only=memory_only, search_only=search_only)
+    _do_start(
+        workspace, port, ws_hash, extra_roots=extra_roots,
+        memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
+    )
 
 
 def cmd_forget(args: argparse.Namespace) -> None:
@@ -1172,7 +1220,13 @@ def cmd_watch(args: argparse.Namespace) -> None:
     _preflight_grammars()
 
     roots = _resolve_workspace_roots(args)
-    workspace = find_workspace_root(roots[0])
+    # UPG-WS-ROOT-MISDETECT: an explicit path/positional workspace arg wins
+    # verbatim; the git-toplevel walk-up only applies when none was given.
+    if _is_explicit_workspace(args):
+        workspace = str(Path(roots[0]).resolve())
+        _warn_if_enclosing_repo(workspace)
+    else:
+        workspace = find_workspace_root(roots[0])
     extra_roots = roots[1:]
     embed_model = os.getenv("VECTR_EMBED_MODEL", EMBEDDING_DEFAULT_MODEL)
 
