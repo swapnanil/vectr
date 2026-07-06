@@ -3058,6 +3058,108 @@ class TestChunkerHygiene:
 
 
 # ---------------------------------------------------------------------------
+# UPG-TRIVIAL-DROP-ALIAS-DEFS — symbol-bearing definition chunks are exempt
+# from the UPG-1.1 trivial-drop even when their content alone reads as a bare
+# stub.  A one-line alias class (``class X(Base, metaclass=Meta): pass``) or
+# a parameter-less stub function is the canonical answer to "where is X
+# defined" — dropping it makes the symbol structurally unfindable by search,
+# even though the symbol graph / `locate` resolves it fine. The exemption is
+# gated at the drop site on the chunk's OWN recorded `symbol_name` +
+# `node_type` (chunk_quality.is_definition_chunk), never on content/keywords.
+# ---------------------------------------------------------------------------
+
+class TestAliasDefinitionExemption:
+    def test_class_alias_with_metaclass_emits_one_chunk(self, tmp_path) -> None:
+        """A `pass`-bodied class alias with a metaclass — previously emitted
+        ZERO chunks (the single decl line matched _DECL_LINE_RE-adjacent
+        trivial rules) — now emits exactly one class_definition chunk with
+        its symbol_name preserved."""
+        from agent.indexer import chunk_file
+        f = make_py(
+            tmp_path, "widgets.py",
+            "class BaseWidget:\n"
+            "    def render(self):\n"
+            "        return self.value\n"
+            "\n"
+            "\n"
+            "class WidgetMeta(type):\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            "class AliasWidget(BaseWidget, metaclass=WidgetMeta):\n"
+            "    pass\n",
+        )
+        chunks = chunk_file(f)
+        alias_chunks = [c for c in chunks if c.symbol_name == "AliasWidget"]
+        assert len(alias_chunks) == 1, (
+            f"expected exactly one AliasWidget chunk, got {len(alias_chunks)}: {chunks}"
+        )
+        alias_chunk = alias_chunks[0]
+        assert alias_chunk.node_type == "class_definition"
+        assert "class AliasWidget" in alias_chunk.content
+
+        # The bare metaclass alias (also a `pass`-bodied one-liner) is kept too.
+        meta_chunks = [c for c in chunks if c.symbol_name == "WidgetMeta"]
+        assert len(meta_chunks) == 1
+        assert meta_chunks[0].node_type == "class_definition"
+
+    def test_function_stub_alias_emits_one_chunk(self, tmp_path) -> None:
+        """A parameter-less stub function (`def foo():\\n    pass`) is the
+        same shape as the class case — previously dropped by the two-line-
+        stub trivial rule (UPG-15.1), now kept because it carries a real
+        symbol_name and a function_definition node_type."""
+        from agent.indexer import chunk_file
+        f = make_py(tmp_path, "hooks.py", "def on_shutdown():\n    pass\n")
+        chunks = chunk_file(f)
+        stub_chunks = [c for c in chunks if c.symbol_name == "on_shutdown"]
+        assert len(stub_chunks) == 1, f"expected one on_shutdown chunk, got: {chunks}"
+        assert stub_chunks[0].node_type == "function_definition"
+
+    def test_bare_import_only_file_still_dropped(self, tmp_path) -> None:
+        """Negative guard: a lone-import module (no symbol definitions at
+        all) has no `is_definition_chunk` exemption available — it degrades
+        to a window chunk with an empty symbol_name and must still be
+        dropped entirely (UPG-1.1 unweakened)."""
+        from agent.indexer import chunk_file
+        f = make_py(tmp_path, "reexport.py", "import os\n")
+        chunks = chunk_file(f)
+        assert chunks == []
+
+    def test_punctuation_only_file_still_dropped(self, tmp_path) -> None:
+        """Negative guard: a punctuation-only fallback-window file (no AST
+        symbol) is still trivially dropped."""
+        from agent.indexer import chunk_file
+        f = tmp_path / "stub.c"
+        f.write_text("}\n")
+        chunks = chunk_file(str(f))
+        assert chunks == []
+
+    def test_short_text_stub_still_dropped(self, tmp_path) -> None:
+        """Negative guard: a 1-line plain-text fixture stub (UPG-15.5) has no
+        symbol_name/definition node_type and is still trivially dropped."""
+        from agent.indexer import chunk_file
+        f = tmp_path / "fixture.txt"
+        f.write_text("Logged out\n")
+        chunks = chunk_file(str(f))
+        assert chunks == []
+
+    def test_is_definition_chunk_requires_both_symbol_and_definition_node_type(self) -> None:
+        from agent.chunk_quality import is_definition_chunk
+        assert is_definition_chunk("AliasWidget", "class_definition") is True
+        assert is_definition_chunk("on_shutdown", "function_definition") is True
+        assert is_definition_chunk("Widget", "method_definition") is True
+        assert is_definition_chunk("Widget", "method_declaration") is True
+        # No symbol name → never exempt, regardless of node_type.
+        assert is_definition_chunk("", "class_definition") is False
+        # A non-definition node_type (window/navigational/section) → never exempt.
+        assert is_definition_chunk("AliasWidget", "window") is False
+        assert is_definition_chunk("AliasWidget", "navigational") is False
+        # Rust impl_item is deliberately excluded (implementation, not the
+        # type's own definition site — mirrors is_type_definition_chunk).
+        assert is_definition_chunk("Widget", "impl_item") is False
+
+
+# ---------------------------------------------------------------------------
 # UPG-15.7 — Pool-entry trivial filter (F19 fix)
 # ---------------------------------------------------------------------------
 

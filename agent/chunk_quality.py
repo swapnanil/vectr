@@ -805,6 +805,52 @@ _FUNCTION_NODE_TYPES: frozenset[str] = frozenset({
     "function_item",         # rust (outside an impl_item)
 })
 
+# Method node_type strings the indexer stamps on a chunk (see `_CHUNK_NODE_TYPES`
+# in agent/indexer/_chunking.py) for languages whose grammar gives a method its
+# own distinct node type — javascript/typescript ("method_definition"), go/java
+# ("method_declaration"). Python has no separate method node type: a method's
+# `def` parses to the same "function_definition" already in
+# `_FUNCTION_NODE_TYPES` above, distinguished from a module-level function only
+# by its (indentation-derived) class context, not by node_type. Kept apart
+# from `_FUNCTION_NODE_TYPES` because that set's own docstring records a
+# DELIBERATE exclusion of method node types for a different purpose (owning-
+# class importance attribution, UPG-SIBLING-TYPEDEF-CROWDING) — this set is
+# for the orthogonal question of "is this chunk a symbol DEFINITION at all"
+# (UPG-TRIVIAL-DROP-ALIAS-DEFS), where a method is exactly as much a
+# definition as a module-level function.
+_METHOD_NODE_TYPES: frozenset[str] = frozenset({
+    "method_definition",
+    "method_declaration",
+})
+
+# The full symbol-DEFINITION node_type family (UPG-TRIVIAL-DROP-ALIAS-DEFS):
+# type definitions (class/struct/enum/interface/trait/type-alias) plus
+# function/method definitions. A chunk whose node_type is in this set actually
+# DECLARES a named symbol — as opposed to a navigational/window/markdown-
+# section chunk, or an implementation block (Rust `impl_item`) that is not
+# itself the type's own definition site.
+_DEFINITION_NODE_TYPES: frozenset[str] = (
+    _TYPE_DEF_NODE_TYPES | _FUNCTION_NODE_TYPES | _METHOD_NODE_TYPES
+)
+
+
+def is_definition_chunk(symbol_name: str, node_type: str) -> bool:
+    """True if a chunk is a real symbol DEFINITION — a named class, struct,
+    enum, interface, type-alias, function, or method (UPG-TRIVIAL-DROP-ALIAS-
+    DEFS).
+
+    Used to EXEMPT an otherwise content-trivial chunk (e.g. a one-line
+    ``class ModelForm(BaseModelForm, metaclass=ModelFormMetaclass): pass``
+    alias, or a single-statement function body) from the UPG-1.1 trivial-drop
+    at index time: a symbol-bearing definition is the canonical answer to
+    "where is X defined" even when its body is a bare ``pass``/one-liner, so
+    dropping it makes the symbol structurally unfindable by search (the
+    symbol graph / ``locate`` is unaffected — this is a search-only gap).
+    A pure chunk-PROPERTY check (node_type + the chunk's own recorded
+    symbol_name), never the query.
+    """
+    return bool(symbol_name) and node_type in _DEFINITION_NODE_TYPES
+
 
 def is_module_level_function_chunk(node_type: str, class_ctx: str) -> bool:
     """True if a chunk defines a MODULE-LEVEL function (not a method), as

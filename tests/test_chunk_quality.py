@@ -16,6 +16,7 @@ from agent.chunk_quality import (
     is_content_structural_test_chunk,
     is_type_definition_chunk,
     is_module_level_function_chunk,
+    is_definition_chunk,
     is_private_symbol_name,
     quality_score,
     normalized_content,
@@ -450,6 +451,52 @@ class TestIsModuleLevelFunctionChunk:
         # a class context WAS recovered, this is a method, not a module-level
         # function, and must not be treated as one.
         assert is_module_level_function_chunk("function_definition", "Widget") is False
+
+
+class TestIsDefinitionChunk:
+    """UPG-TRIVIAL-DROP-ALIAS-DEFS: the symbol-DEFINITION node_type family used
+    to exempt a content-trivial alias/one-line chunk from the UPG-1.1
+    trivial-drop at the indexer's drop site (agent/indexer/_chunking.py
+    `_postprocess_chunks`). A pure chunk-PROPERTY check — content is never
+    inspected here."""
+
+    @pytest.mark.parametrize("node_type", [
+        "class_definition",        # python
+        "class_declaration",       # javascript/typescript/java
+        "interface_declaration",   # typescript/java
+        "type_alias_declaration",  # typescript
+        "enum_declaration",        # typescript/java
+        "type_declaration",        # go
+        "struct_item",             # rust
+        "trait_item",              # rust
+        "enum_item",                # rust
+        "struct_specifier",        # c/cpp
+        "enum_specifier",          # c/cpp
+        "type_definition",         # c/cpp typedef
+        "class_specifier",         # cpp
+        "function_definition",     # python/c/cpp
+        "function_declaration",    # javascript/typescript/go/zig
+        "function_expression",     # javascript/typescript
+        "arrow_function",          # javascript/typescript
+        "function_item",           # rust
+        "method_definition",       # javascript/typescript
+        "method_declaration",      # go/java
+    ])
+    def test_positive_node_types_with_symbol_name(self, node_type):
+        assert is_definition_chunk("Thing", node_type) is True
+
+    @pytest.mark.parametrize("node_type", [
+        "window",         # sliding-window fallback chunk — no AST symbol
+        "section",        # markdown section
+        "navigational",   # re-export / import-only block
+        "impl_item",      # Rust impl block — an implementation, not the type's own definition site
+    ])
+    def test_negative_node_types_with_symbol_name(self, node_type):
+        assert is_definition_chunk("Thing", node_type) is False
+
+    def test_empty_symbol_name_never_exempt_regardless_of_node_type(self):
+        assert is_definition_chunk("", "class_definition") is False
+        assert is_definition_chunk("", "function_definition") is False
 
 
 class TestLeadingDocstringKey:

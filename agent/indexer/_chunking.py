@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agent.chunk_quality import (
     NAVIGATIONAL_NODE_TYPE,
+    is_definition_chunk,
     is_navigational_chunk,
     is_trivial_chunk,
 )
@@ -396,12 +397,22 @@ def _postprocess_chunks(chunks: list[CodeChunk]) -> list[CodeChunk]:
 
     - UPG-1.1: drop standalone trivial chunks (bare punctuation/return, lone
       import/const) — they have no retrieval value and flood top-N on ties.
+      EXEMPT (UPG-TRIVIAL-DROP-ALIAS-DEFS): a chunk that is itself a symbol
+      DEFINITION (`is_definition_chunk` — real `symbol_name` + a class/struct/
+      enum/interface/type-alias/function/method node_type) is kept even when
+      its content alone would read as trivial. A one-line alias like
+      ``class ModelForm(BaseModelForm, metaclass=ModelFormMetaclass): pass``
+      IS the canonical answer to "where is X defined" — dropping it makes the
+      symbol structurally unfindable by search, even though the symbol graph
+      / `locate` sees it fine. `is_trivial_chunk` itself is unchanged (other
+      callers still judge these chunks' content-only quality at rank time);
+      only the DROP decision is gated on the chunk's own recorded properties.
     - UPG-1.2: tag re-export / import-only blocks as navigational so the ranker
       can heavily down-weight them (they're a table of contents, not an answer).
     """
     out: list[CodeChunk] = []
     for c in chunks:
-        if is_trivial_chunk(c.content, c.language):
+        if is_trivial_chunk(c.content, c.language) and not is_definition_chunk(c.symbol_name, c.node_type):
             continue
         if c.node_type != NAVIGATIONAL_NODE_TYPE and is_navigational_chunk(c.content, c.language):
             c.node_type = NAVIGATIONAL_NODE_TYPE
