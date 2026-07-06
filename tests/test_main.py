@@ -316,6 +316,74 @@ class TestCmdStatus:
         out = capsys.readouterr().out
         assert "Mode      : search-only" in out
 
+    def test_single_instance_connect_error_says_not_listening(self, tmp_path, capsys):
+        """UPG-CLI-START-READY-RACE: nothing listening on the port at all is
+        a distinct, more confident message than 'listening but not ready'."""
+        import httpx
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", side_effect=httpx.ConnectError("refused")), \
+             pytest.raises(SystemExit) as exc_info:
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "not listening" in err
+
+    def test_single_instance_timeout_says_listening_but_not_ready(self, tmp_path, capsys):
+        """UPG-CLI-START-READY-RACE: a connection that times out (as opposed
+        to being refused) means a process IS listening — likely still inside
+        FastAPI lifespan startup loading the embedder — which must not read
+        as 'not running', and must not crash with an unhandled exception
+        (previously only httpx.ConnectError was caught here)."""
+        import httpx
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", side_effect=httpx.ReadTimeout("timed out")), \
+             pytest.raises(SystemExit) as exc_info:
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "listening" in err
+        assert "not responding yet" in err
+
+    def test_single_instance_http_status_error_shows_daemon_detail(self, tmp_path, capsys):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", return_value=_mode_gated_response("some_error", "some detail", 500)), \
+             pytest.raises(SystemExit) as exc_info:
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        assert exc_info.value.code == 1
+        assert "some detail" in capsys.readouterr().err
+
+    def test_status_all_distinguishes_not_listening_from_not_ready(self, tmp_path, capsys):
+        import httpx
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register("aaa000000000", "/project/a", 8765, 111)
+        reg.register("bbb000000000", "/project/b", 8766, 222)
+
+        def _get(url, **kwargs):
+            if ":8765" in url:
+                raise httpx.ConnectError("refused")
+            raise httpx.ReadTimeout("timed out")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("httpx.get", side_effect=_get):
+            m.cmd_status(_make_args(**{"all": True}))
+
+        out = capsys.readouterr().out
+        assert "not listening" in out
+        assert "not responding yet" in out
+
 
 # ---------------------------------------------------------------------------
 # cmd_restart
@@ -1621,6 +1689,101 @@ class TestWarnIfEnclosingRepo:
         m._warn_if_enclosing_repo(str(nested))
 
         assert capsys.readouterr().err == ""
+
+
+class TestWaitForDaemonReady:
+    """UPG-CLI-START-READY-RACE: `_do_start` must not print success before
+    the daemon is actually reachable."""
+
+    def test_returns_true_immediately_when_already_alive(self):
+        with patch("main._is_server_alive", return_value=(True, "/ws")), \
+             patch("main.time.sleep") as mock_sleep:
+            assert m._wait_for_daemon_ready(8765, 111) is True
+        mock_sleep.assert_not_called()
+
+    def test_polls_until_alive(self):
+        responses = [(False, None), (False, None), (True, "/ws")]
+        with patch("main._is_server_alive", side_effect=responses), \
+             patch("main._is_pid_alive", return_value=True), \
+             patch("main.time.sleep") as mock_sleep:
+            assert m._wait_for_daemon_ready(8765, 111) is True
+        assert mock_sleep.call_count == 2
+
+    def test_returns_false_early_when_process_already_dead(self):
+        """Must not wait out the full poll-timeout window for a process that
+        has already exited — that process will never start responding."""
+        with patch("main._is_server_alive", return_value=(False, None)), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("main.time.sleep") as mock_sleep:
+            assert m._wait_for_daemon_ready(8765, 111) is False
+        mock_sleep.assert_not_called()
+
+    def test_returns_false_after_timeout_when_never_alive_but_process_lives(self):
+        with patch("main._is_server_alive", return_value=(False, None)), \
+             patch("main._is_pid_alive", return_value=True), \
+             patch("main.time.monotonic", side_effect=[0.0, 0.1, 100.0]), \
+             patch("main.time.sleep"):
+            assert m._wait_for_daemon_ready(8765, 111) is False
+
+
+class TestDoStartReadinessBranches:
+    """UPG-CLI-START-READY-RACE: `_do_start`'s printed message must reflect
+    whether the daemon actually became reachable, not just that Popen()
+    returned."""
+
+    def _patched_popen(self):
+        def _mock_popen(cmd, env, **kwargs):
+            proc = MagicMock()
+            proc.pid = 99999
+            return proc
+        return _mock_popen
+
+    def test_prints_success_when_daemon_becomes_ready(self, tmp_path, capsys):
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        with patch("subprocess.Popen", side_effect=self._patched_popen()), \
+             patch("main.InstanceRegistry") as MockReg, \
+             patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=True), \
+             patch("builtins.open", MagicMock()):
+            MockReg.return_value.register = MagicMock()
+            m._do_start(ws, 8765, wh)
+
+        err = capsys.readouterr().err
+        assert "Vectr started" in err
+        assert "not responding yet" not in err
+        assert "failed to start" not in err
+
+    def test_prints_still_loading_message_when_not_ready_but_process_alive(self, tmp_path, capsys):
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        with patch("subprocess.Popen", side_effect=self._patched_popen()), \
+             patch("main.InstanceRegistry") as MockReg, \
+             patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=False), \
+             patch("main._is_pid_alive", return_value=True), \
+             patch("builtins.open", MagicMock()):
+            MockReg.return_value.register = MagicMock()
+            m._do_start(ws, 8765, wh)
+
+        err = capsys.readouterr().err
+        assert "has not" in err and "responding yet" in err
+        assert "Poll readiness with: vectr status" in err
+
+    def test_prints_failed_message_when_process_exited(self, tmp_path, capsys):
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        with patch("subprocess.Popen", side_effect=self._patched_popen()), \
+             patch("main.InstanceRegistry") as MockReg, \
+             patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("builtins.open", MagicMock()):
+            MockReg.return_value.register = MagicMock()
+            m._do_start(ws, 8765, wh)
+
+        err = capsys.readouterr().err
+        assert "failed to start" in err
 
 
 class TestDoStartExplicitEnvConstruction:

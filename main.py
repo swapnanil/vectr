@@ -13,6 +13,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from agent.config import (
+    CLI_START_READY_POLL_INTERVAL_S,
+    CLI_START_READY_POLL_TIMEOUT_S,
+    CLI_START_READY_PROBE_TIMEOUT_S,
+)
 from agent.instance_registry import (
     InstanceRegistry,
     _is_pid_alive,
@@ -224,6 +229,25 @@ def _is_server_alive(port: int, timeout: float = 2.0) -> tuple[bool, str | None]
         return True, resp.json().get("workspace_root")
     except Exception:
         return False, None
+
+
+def _wait_for_daemon_ready(port: int, pid: int) -> bool:
+    """Poll /v1/status until the just-spawned daemon actually answers, or
+    `cli.start_ready_poll_timeout_s` elapses (UPG-CLI-START-READY-RACE).
+    Returns True only once the daemon is genuinely listening and responding
+    — never optimistically. Returns False early (without waiting out the
+    full timeout) if the spawned process has already exited, since a dead
+    process will never start responding.
+    """
+    deadline = time.monotonic() + CLI_START_READY_POLL_TIMEOUT_S
+    while time.monotonic() < deadline:
+        alive, _ = _is_server_alive(port, timeout=CLI_START_READY_PROBE_TIMEOUT_S)
+        if alive:
+            return True
+        if not _is_pid_alive(pid):
+            return False
+        time.sleep(CLI_START_READY_POLL_INTERVAL_S)
+    return False
 
 
 def _get_daemon_mode(port: int, timeout: float = 2.0) -> str | None:
@@ -739,25 +763,53 @@ def _do_start(
         extra_roots=extra_roots, code_workspace_file=code_workspace_file,
     )
     mode_tag = " [memory-only]" if memory_only else (" [search-only]" if search_only else "")
-    print(f"Vectr started{mode_tag} (PID {proc.pid}) on port {port}", file=sys.stderr)
-    print(f"Workspace : {workspace}", file=sys.stderr)
-    if extra_roots:
-        for r in extra_roots:
-            print(f"          + {r}", file=sys.stderr)
-    print(f"MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
-    print(f"Logs      : {log_path}", file=sys.stderr)
-    if memory_only:
+
+    # UPG-CLI-START-READY-RACE: block until the daemon is actually reachable
+    # (or the readiness window elapses) before printing a success message.
+    # Before this fix, `start` printed success right after Popen() returned —
+    # only proof a process was spawned, not that it had bound its port or
+    # finished loading the embedder in its FastAPI lifespan. Running
+    # `vectr status` right after that "success" line could still see a
+    # connection refused, reading as start having lied.
+    if _wait_for_daemon_ready(port, proc.pid):
+        print(f"Vectr started{mode_tag} (PID {proc.pid}) on port {port}", file=sys.stderr)
+        print(f"Workspace : {workspace}", file=sys.stderr)
+        if extra_roots:
+            for r in extra_roots:
+                print(f"          + {r}", file=sys.stderr)
+        print(f"MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
+        print(f"Logs      : {log_path}", file=sys.stderr)
+        if memory_only:
+            print(
+                f"Mode      : memory-only (no code indexing/watcher; memory tools + hooks active)",
+                file=sys.stderr,
+            )
+        elif search_only:
+            print(
+                f"Mode      : search-only (no working-memory layer; search/locate/trace/map active)",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Check indexing progress: vectr status --path {workspace}", file=sys.stderr)
+    elif _is_pid_alive(proc.pid):
         print(
-            f"Mode      : memory-only (no code indexing/watcher; memory tools + hooks active)",
+            f"Vectr started{mode_tag} (PID {proc.pid}) on port {port}, but has not "
+            f"started responding yet after {CLI_START_READY_POLL_TIMEOUT_S:.0f}s.",
             file=sys.stderr,
         )
-    elif search_only:
         print(
-            f"Mode      : search-only (no working-memory layer; search/locate/trace/map active)",
+            "It may still be loading (large workspace / first-run embedding-model "
+            "download) — this is not necessarily a failure.",
             file=sys.stderr,
         )
+        print(f"Logs      : {log_path}", file=sys.stderr)
+        print(f"Poll readiness with: vectr status --path {workspace}", file=sys.stderr)
     else:
-        print(f"Check indexing progress: vectr status --path {workspace}", file=sys.stderr)
+        print(
+            f"Vectr failed to start: the process exited before becoming ready.",
+            file=sys.stderr,
+        )
+        print(f"Logs      : {log_path}", file=sys.stderr)
 
 
 def _get_port_for_workspace(workspace: str, fallback: int) -> int:
@@ -1150,8 +1202,10 @@ def cmd_status(args: argparse.Namespace) -> None:
                 d = resp.json()
                 for line in _mode_and_index_lines(d, "Files    ", "Chunks   ", None, mode_label="Mode     "):
                     print(line)
-            except Exception:
-                print("  (server not responding)")
+            except httpx.ConnectError:
+                print("  (not listening — not running)")
+            except httpx.HTTPError:
+                print("  (listening, but not responding yet — still starting up)")
         return
 
     workspace = str(Path(args.path).resolve())
@@ -1169,7 +1223,24 @@ def cmd_status(args: argparse.Namespace) -> None:
             print(line)
         print(f"Embed model   : {data['embed_model']}")
     except httpx.ConnectError:
-        print(f"Vectr is not running on port {port}.", file=sys.stderr)
+        # UPG-CLI-START-READY-RACE: nothing is listening on this port at all
+        # — genuinely not running, as opposed to the case below.
+        print(f"Vectr is not listening on port {port} (not running). Run: vectr start", file=sys.stderr)
+        sys.exit(1)
+    except httpx.HTTPStatusError as exc:
+        print(f"Vectr is listening on port {port} but returned an error: {_daemon_error_detail(exc)}", file=sys.stderr)
+        sys.exit(1)
+    except httpx.HTTPError:
+        # Connection accepted but the request didn't complete (timeout,
+        # dropped connection, ...) — the daemon is listening but not yet
+        # ready to serve requests, e.g. still inside FastAPI lifespan
+        # startup loading the embedder. Distinct from "not running": the
+        # process exists, it just isn't answering yet.
+        print(
+            f"Vectr is listening on port {port} but is not responding yet "
+            f"(still starting up). Try again in a few seconds.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 

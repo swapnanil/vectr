@@ -451,6 +451,16 @@ SYMBOL_GRAPH_ERROR_RECOVERY_MAX_EXTEND_STEPS_PER_ATTEMPT: int = int(
 )
 
 # ---------------------------------------------------------------------------
+# CLI daemon-readiness poll (UPG-CLI-START-READY-RACE)
+# ---------------------------------------------------------------------------
+
+_cli_cfg: dict[str, Any] = _cfg["cli"]
+
+CLI_START_READY_POLL_TIMEOUT_S: float = float(_cli_cfg["start_ready_poll_timeout_s"])
+CLI_START_READY_POLL_INTERVAL_S: float = float(_cli_cfg["start_ready_poll_interval_s"])
+CLI_START_READY_PROBE_TIMEOUT_S: float = float(_cli_cfg["start_ready_probe_timeout_s"])
+
+# ---------------------------------------------------------------------------
 # Workspace / watcher tunables (UPG-13.1/13.2/13.3)
 # ---------------------------------------------------------------------------
 
