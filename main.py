@@ -301,6 +301,59 @@ def _write_or_update(path: Path, content: str, label: str) -> None:
         print(f"  Updated {path} ({label})", file=sys.stderr)
 
 
+_IDE_CONFIG_MARKER_REL = Path(".vectr") / "ide_config"
+
+
+def _ide_config_disabled(workspace: str) -> bool:
+    """True if this workspace durably opted out of vectr's automatic IDE
+    integration file writes (UPG-CLI-WRITES-DISCLOSURE) via a prior
+    `--no-ide-config` run. Persisted at `.vectr/ide_config` so subsequent
+    start/restart/init calls honor the choice without repeating the flag —
+    delete the file to re-enable."""
+    marker = Path(workspace) / _IDE_CONFIG_MARKER_REL
+    if not marker.exists():
+        return False
+    try:
+        return marker.read_text(encoding="utf-8").strip() == "disabled"
+    except OSError:
+        return False
+
+
+def _persist_ide_config_disabled(workspace: str) -> None:
+    marker = Path(workspace) / _IDE_CONFIG_MARKER_REL
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("disabled\n", encoding="utf-8")
+
+
+def _maybe_write_workspace_config(
+    workspace: str, port: int, args: argparse.Namespace, *, search_only: bool = False,
+) -> None:
+    """Gate `_write_workspace_config` on `--no-ide-config` or a prior durable
+    opt-out (UPG-CLI-WRITES-DISCLOSURE): `start`/`restart`/`init` previously
+    wrote 7 IDE integration files into the workspace root on every call with
+    no disclosure in --help and no way to opt out. `--no-ide-config` skips
+    the writes for this call AND persists the choice (`.vectr/ide_config`)
+    so later start/restart calls keep honoring it without repeating the flag.
+    """
+    if getattr(args, "no_ide_config", False):
+        _persist_ide_config_disabled(workspace)
+        print(
+            f"  Skipped IDE config file writes for {workspace} (--no-ide-config). "
+            f"This choice persists at {Path(workspace) / _IDE_CONFIG_MARKER_REL} "
+            f"for future start/restart/init calls; delete that file to re-enable.",
+            file=sys.stderr,
+        )
+        return
+    if _ide_config_disabled(workspace):
+        print(
+            f"  IDE config file writes are disabled for {workspace} "
+            f"({Path(workspace) / _IDE_CONFIG_MARKER_REL}). Delete that file to re-enable.",
+            file=sys.stderr,
+        )
+        return
+    _write_workspace_config(workspace, port, search_only=search_only)
+
+
 def _write_workspace_config(workspace: str, port: int, *, search_only: bool = False) -> None:
     """Write per-IDE MCP config files and IDE guidance into the workspace root.
 
@@ -847,7 +900,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     if entry is not None and _is_pid_alive(entry["pid"]):
         port = entry["port"]
         for root in roots:
-            _write_workspace_config(root, port, search_only=search_only)
+            _maybe_write_workspace_config(root, port, args, search_only=search_only)
         print("Vectr is already running for this workspace.", file=sys.stderr)
         print(f"  Workspace : {workspace}", file=sys.stderr)
         print(f"  Port      : {port}", file=sys.stderr)
@@ -856,7 +909,7 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     port = registry.find_free_port(ws_hash, preferred_port)
     for root in roots:
-        _write_workspace_config(root, port, search_only=search_only)
+        _maybe_write_workspace_config(root, port, args, search_only=search_only)
     if not memory_only:
         _preflight_grammars()
     _do_start(
@@ -1308,7 +1361,7 @@ def cmd_restart(args: argparse.Namespace) -> None:
 
     port = registry.find_free_port(ws_hash, preferred_port)
     for root in roots:
-        _write_workspace_config(root, port, search_only=search_only)
+        _maybe_write_workspace_config(root, port, args, search_only=search_only)
     _do_start(
         workspace, port, ws_hash, extra_roots=extra_roots,
         memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
@@ -1384,7 +1437,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         else:
             _write_claude_hooks(workspace)
 
-    _write_workspace_config(workspace, port, search_only=search_only)
+    _maybe_write_workspace_config(workspace, port, args, search_only=search_only)
 
     # write user-defined exclusions to .vectrignore
     _apply_exclude_args(workspace, getattr(args, "exclude", None) or [])
@@ -1466,6 +1519,29 @@ _EXCLUDE_HELP = (
     "--exclude '*.generated.py' --exclude 're:legacy/.*'"
 )
 
+# Shared IDE-config-writes disclosure (UPG-CLI-WRITES-DISCLOSURE): start,
+# restart, and init all write IDE integration files into the workspace root
+# as a side effect, with no prior --help mention and no opt-out.
+_IDE_CONFIG_WRITES_DISCLOSURE = (
+    "On first run for a workspace, vectr writes IDE integration files into "
+    "the workspace root so an AI editor can auto-discover the MCP server: "
+    "CLAUDE.md, .cursor/rules/vectr.mdc, .mcp.json, .cursor/mcp.json, "
+    ".vscode/mcp.json, .claude/settings.json, and .vectrignore (default "
+    "excludes) — 7 files. Files for other editors/agents (AGENTS.md, "
+    ".cursorrules, GEMINI.md, CODEX.md, .github/copilot-instructions.md) "
+    "only get a vectr guidance block appended if the file already exists — "
+    "they are never created from scratch. Pass --no-ide-config to skip all "
+    "of this; the choice persists at .vectr/ide_config for future start/"
+    "restart/init calls on this workspace (delete that file to re-enable). "
+    "See `vectr init --reset-config` to remove already-written blocks."
+)
+
+_NO_IDE_CONFIG_HELP = (
+    "Skip writing IDE integration config files for this workspace and "
+    "persist that choice (see the command description above). Delete "
+    ".vectr/ide_config to re-enable on a later run."
+)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -1488,6 +1564,7 @@ def main() -> None:
         "start",
         help="Start the Vectr daemon and index the workspace. "
              "Accepts a .code-workspace file, one or more --path flags, or defaults to cwd.",
+        description=_IDE_CONFIG_WRITES_DISCLOSURE,
     )
     p_start.add_argument(
         "workspace", nargs="?", default=None,
@@ -1531,12 +1608,23 @@ def main() -> None:
             "store. Mutually exclusive with --memory-only."
         ),
     )
+    p_start.add_argument(
+        "--no-ide-config",
+        action="store_true",
+        default=False,
+        dest="no_ide_config",
+        help=_NO_IDE_CONFIG_HELP,
+    )
 
     p_stop = sub.add_parser("stop", help="Stop the daemon for a workspace")
     p_stop.add_argument("--path", default=_default_path)
     p_stop.add_argument("--all", action="store_true", help="Stop all running instances")
 
-    p_restart = sub.add_parser("restart", help="Stop and restart the daemon for a workspace")
+    p_restart = sub.add_parser(
+        "restart",
+        help="Stop and restart the daemon for a workspace",
+        description=_IDE_CONFIG_WRITES_DISCLOSURE,
+    )
     p_restart.add_argument(
         "workspace", nargs="?", default=None,
         help="Path to a .code-workspace file or a single workspace directory",
@@ -1557,6 +1645,13 @@ def main() -> None:
         dest="search_only",
         help="Restart in search-only mode (no working-memory layer; see vectr start --search-only).",
     )
+    p_restart.add_argument(
+        "--no-ide-config",
+        action="store_true",
+        default=False,
+        dest="no_ide_config",
+        help=_NO_IDE_CONFIG_HELP,
+    )
 
     p_forget = sub.add_parser("forget", help="Delete working-memory notes for a workspace")
     p_forget.add_argument("--path", default=_default_path)
@@ -1571,11 +1666,22 @@ def main() -> None:
         help="Path to a .code-workspace file or a single workspace directory")
     p_watch.add_argument("--path", action="append", dest="paths", metavar="DIR")
 
-    p_init = sub.add_parser("init", help="Write CLAUDE.md and .mcp.json to a workspace (no server)")
+    p_init = sub.add_parser(
+        "init",
+        help="Write CLAUDE.md and .mcp.json to a workspace (no server)",
+        description=_IDE_CONFIG_WRITES_DISCLOSURE,
+    )
     p_init.add_argument("--path", default=_default_path)
     p_init.add_argument(
         "--exclude", action="append", metavar="PATTERN", dest="exclude",
         help=_EXCLUDE_HELP,
+    )
+    p_init.add_argument(
+        "--no-ide-config",
+        action="store_true",
+        default=False,
+        dest="no_ide_config",
+        help=_NO_IDE_CONFIG_HELP,
     )
     p_init.add_argument(
         "--style",

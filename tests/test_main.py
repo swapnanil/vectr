@@ -556,6 +556,66 @@ class TestWriteWorkspaceConfig:
 
 
 # ---------------------------------------------------------------------------
+# --no-ide-config opt-out (UPG-CLI-WRITES-DISCLOSURE)
+# ---------------------------------------------------------------------------
+
+class TestNoIdeConfigOptOut:
+    def test_ide_config_disabled_false_when_no_marker(self, tmp_path):
+        assert m._ide_config_disabled(str(tmp_path)) is False
+
+    def test_ide_config_disabled_true_after_persist(self, tmp_path):
+        m._persist_ide_config_disabled(str(tmp_path))
+        assert m._ide_config_disabled(str(tmp_path)) is True
+        assert (tmp_path / ".vectr" / "ide_config").read_text(encoding="utf-8").strip() == "disabled"
+
+    def test_maybe_write_calls_through_by_default(self, tmp_path):
+        with patch("main._write_workspace_config") as mock_write:
+            m._maybe_write_workspace_config(str(tmp_path), 8765, _make_args())
+        mock_write.assert_called_once_with(str(tmp_path), 8765, search_only=False)
+
+    def test_maybe_write_skips_and_persists_with_flag(self, tmp_path, capsys):
+        with patch("main._write_workspace_config") as mock_write:
+            m._maybe_write_workspace_config(str(tmp_path), 8765, _make_args(no_ide_config=True))
+        mock_write.assert_not_called()
+        assert (tmp_path / ".vectr" / "ide_config").exists()
+        assert "Skipped IDE config" in capsys.readouterr().err
+
+    def test_maybe_write_skips_when_already_persisted_without_flag(self, tmp_path, capsys):
+        m._persist_ide_config_disabled(str(tmp_path))
+        with patch("main._write_workspace_config") as mock_write:
+            m._maybe_write_workspace_config(str(tmp_path), 8765, _make_args())
+        mock_write.assert_not_called()
+        assert "disabled" in capsys.readouterr().err.lower()
+
+    def test_cmd_init_no_ide_config_flag_skips_writes_end_to_end(self, tmp_path):
+        m.cmd_init(_make_args(path=str(tmp_path), no_ide_config=True))
+        assert not (tmp_path / "CLAUDE.md").exists()
+        assert not (tmp_path / ".mcp.json").exists()
+        assert (tmp_path / ".vectr" / "ide_config").exists()
+
+    def test_cmd_start_honors_persisted_optout_without_repeating_flag(self, tmp_path):
+        ws = str(tmp_path)
+        m._persist_ide_config_disabled(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config") as mock_write, \
+             patch("main._do_start"):
+            m.cmd_start(_make_args(paths=[ws], port=8765))
+        mock_write.assert_not_called()
+
+    def test_start_help_discloses_ide_config_writes(self, capsys):
+        with pytest.raises(SystemExit):
+            with patch("sys.argv", ["vectr", "start", "--help"]):
+                m.main()
+        out = capsys.readouterr().out
+        assert "--no-ide-config" in out
+        assert "CLAUDE.md" in out
+
+
+# ---------------------------------------------------------------------------
 # _daemon_error_detail / _handle_daemon_call_error (UPG-CLI-MEMONLY-CRASH)
 # ---------------------------------------------------------------------------
 
