@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import threading
 import time
 from pathlib import Path
@@ -46,6 +47,7 @@ class CodeWatcher(FileSystemEventHandler):
         self._observer: Observer | None = None
         self._excluded_dirs = self._collect_excluded_dirs()
         self._excluded_file_globs = self._collect_excluded_globs()
+        self._excluded_regexes = self._collect_excluded_regexes()
         # path -> ObservedWatch returned by Observer.schedule(), so a watch can
         # be individually unscheduled when its dir is added to .vectrignore
         # mid-session (UPG-13.3).
@@ -88,15 +90,35 @@ class CodeWatcher(FileSystemEventHandler):
     def _is_indexable(self, path: str) -> bool:
         return Path(path).suffix.lower() in LANG_BY_EXT
 
-    def _is_excluded(self, path: str) -> bool:
-        """True if a path is under an excluded dir, or matches an excluded file glob.
+    def _collect_excluded_regexes(self) -> dict[str, list[re.Pattern]]:
+        """Compiled `re:` path-regex entries per root's .vectrignore (UPG-EXCLUDE-REGEX).
 
-        Directory matching is scoped to path components BELOW a workspace root.
-        Matching the absolute prefix too would wrongly exclude an entire
-        workspace that merely lives under a dir named like an excluded one —
-        e.g. any repo checked out under /tmp on Linux (the prefix contains
-        'tmp'), or a path containing 'build'/'target'. (Paths outside every
-        root fall back to all parts.)
+        Kept per-root — unlike the flattened dir/glob sets — because a regex
+        is matched against a path relative to its own workspace root, so a
+        pattern from one root's .vectrignore must never be evaluated against
+        another root's tree.
+        """
+        from integrations.workspace_detect import get_vectrignore_regexes
+        regexes: dict[str, list[re.Pattern]] = {}
+        for root in self._indexer.all_roots:
+            try:
+                root_regexes = get_vectrignore_regexes(str(root))
+            except Exception:
+                root_regexes = []
+            if root_regexes:
+                regexes[str(root)] = root_regexes
+        return regexes
+
+    def _is_excluded(self, path: str) -> bool:
+        """True if a path is under an excluded dir, matches an excluded file
+        glob, or matches an excluded path regex.
+
+        Directory and regex matching are scoped to path components/paths
+        BELOW a workspace root. Matching the absolute prefix too would
+        wrongly exclude an entire workspace that merely lives under a dir
+        named like an excluded one — e.g. any repo checked out under /tmp on
+        Linux (the prefix contains 'tmp'), or a path containing
+        'build'/'target'. (Paths outside every root fall back to all parts.)
         """
         p = Path(path)
         if self._excluded_file_globs and any(
@@ -105,10 +127,15 @@ class CodeWatcher(FileSystemEventHandler):
             return True
         for root in self._indexer.all_roots:
             try:
-                rel_parts = p.relative_to(root).parts
-                return bool(set(rel_parts) & self._excluded_dirs)
+                rel = p.relative_to(root)
             except ValueError:
                 continue
+            if set(rel.parts) & self._excluded_dirs:
+                return True
+            root_regexes = self._excluded_regexes.get(str(root))
+            if root_regexes and any(rx.search(rel.as_posix()) for rx in root_regexes):
+                return True
+            return False
         return bool(set(p.parts) & self._excluded_dirs)
 
     def _is_vectrignore_path(self, path: str) -> bool:
@@ -251,6 +278,7 @@ class CodeWatcher(FileSystemEventHandler):
         """Re-read .vectrignore and re-schedule watches to match (UPG-13.3)."""
         self._excluded_dirs = self._collect_excluded_dirs()
         self._excluded_file_globs = self._collect_excluded_globs()
+        self._excluded_regexes = self._collect_excluded_regexes()
         self._reschedule_watches()
 
     def _reschedule_watches(self) -> None:

@@ -139,7 +139,7 @@ class CodeIndexer:
         """
         from integrations.workspace_detect import (
             should_index_file, get_gitignore_patterns, get_vectrignore_dirs,
-            get_vectrignore_file_globs,
+            get_vectrignore_file_globs, get_vectrignore_regexes,
         )
 
         # Collect candidate files across all roots; each root gets its own
@@ -152,13 +152,18 @@ class CodeIndexer:
             # existing bare directory-name exclusions below.
             root_patterns = [*root_patterns, *get_vectrignore_file_globs(str(root))]
             vectrignore_dirs = get_vectrignore_dirs(str(root))
+            # UPG-EXCLUDE-REGEX: `re:<pattern>` .vectrignore entries, matched
+            # against each file's workspace-relative path — additive, on top
+            # of the dir-name and glob exclusions above.
+            vectrignore_regexes = get_vectrignore_regexes(str(root))
             all_excluded = EXCLUDED_DIRS | vectrignore_dirs
             for dirpath, dirnames, filenames in os.walk(root):
                 dirnames[:] = [d for d in dirnames if d not in all_excluded and not d.startswith(".")]
                 for fname in filenames:
                     fpath = Path(dirpath) / fname
                     if should_index_file(str(fpath), root_patterns, extra_excluded_dirs=vectrignore_dirs,
-                                         workspace_root=str(root)):
+                                         workspace_root=str(root),
+                                         extra_excluded_regexes=vectrignore_regexes):
                         all_files.append(fpath)
 
         should_index_paths = {str(f) for f in all_files}

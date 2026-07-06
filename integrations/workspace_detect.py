@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import fnmatch
+import logging
+import re
 from pathlib import Path
 
 from agent.chunk_quality import is_generated_file, is_vectr_config_file, is_build_artifact_file
 from agent.indexer import LANG_BY_EXT
+
+logger = logging.getLogger(__name__)
 
 _SUPPORTED_EXTS = set(LANG_BY_EXT.keys())
 
@@ -13,6 +17,12 @@ _ALWAYS_SKIP = {
     ".git", ".svn", "__pycache__", "node_modules", ".venv", "venv",
     "dist", "build", ".next", ".nuxt", "target", "coverage",
 }
+
+# UPG-EXCLUDE-REGEX: a .vectrignore line prefixed with this is a regex matched
+# against the workspace-relative POSIX path of each candidate file, rather
+# than a bare directory name or a filename glob. e.g. "re:legacy/.*" or
+# "re:.*_(backup|old|copy)\\.\\w+$".
+VECTRIGNORE_REGEX_PREFIX = "re:"
 
 
 def find_workspace_root(start_path: str) -> str:
@@ -43,31 +53,43 @@ def get_gitignore_patterns(workspace_root: str) -> list[str]:
     return _read_ignore_lines(Path(workspace_root) / ".gitignore")
 
 
+def _is_regex_pattern(entry: str) -> bool:
+    """True if a .vectrignore entry is a `re:<pattern>` path regex (UPG-EXCLUDE-REGEX)."""
+    return entry.startswith(VECTRIGNORE_REGEX_PREFIX)
+
+
 def _is_glob_pattern(entry: str) -> bool:
     """True if a .vectrignore entry is a file glob rather than a bare dir name.
 
     Bare directory names (e.g. "vendor") are handled by get_vectrignore_dirs.
     Entries containing glob metacharacters (e.g. "*.generated.py") are handled
     by get_vectrignore_file_globs (UPG-13.3) — additive, so existing dir-name
-    behaviour is unchanged for every entry that isn't a glob.
+    behaviour is unchanged for every entry that isn't a glob. A `re:` regex
+    entry is never treated as a glob even if its pattern text contains glob
+    metacharacters (UPG-EXCLUDE-REGEX) — it's routed to get_vectrignore_regexes
+    instead.
     """
+    if _is_regex_pattern(entry):
+        return False
     return any(ch in entry for ch in "*?[")
 
 
 def get_vectrignore_dirs(workspace_root: str) -> set[str]:
     """Read .vectrignore and return a set of directory names to exclude.
 
-    .vectrignore format: one directory name (or file glob, see
-    get_vectrignore_file_globs) per line, # comments supported.
+    .vectrignore format: one directory name, file glob (see
+    get_vectrignore_file_globs), or `re:<pattern>` path regex (see
+    get_vectrignore_regexes) per line, # comments supported.
     Example:
         # exclude vendor and generated code
         vendor
         generated
         proto-gen
+        re:legacy/.*
     """
     return {
         line for line in _read_ignore_lines(Path(workspace_root) / ".vectrignore")
-        if not _is_glob_pattern(line)
+        if not _is_glob_pattern(line) and not _is_regex_pattern(line)
     }
 
 
@@ -75,15 +97,44 @@ def get_vectrignore_file_globs(workspace_root: str) -> list[str]:
     """Read .vectrignore and return file glob patterns (UPG-13.3).
 
     An entry is treated as a glob when it contains a glob metacharacter
-    (*, ?, or [) — e.g. "*.generated.py" — rather than a bare directory name.
-    Additive layer on top of get_vectrignore_dirs: dir-name entries keep their
-    existing directory-exclusion semantics unchanged; globs are matched against
-    individual file names by callers (agent.watcher.CodeWatcher, should_index_file).
+    (*, ?, or [) — e.g. "*.generated.py" — rather than a bare directory name
+    or a `re:` path regex. Additive layer on top of get_vectrignore_dirs:
+    dir-name entries keep their existing directory-exclusion semantics
+    unchanged; globs are matched against individual file names by callers
+    (agent.watcher.CodeWatcher, should_index_file).
     """
     return [
         line for line in _read_ignore_lines(Path(workspace_root) / ".vectrignore")
         if _is_glob_pattern(line)
     ]
+
+
+def get_vectrignore_regexes(workspace_root: str) -> list[re.Pattern]:
+    """Read .vectrignore and compile `re:<pattern>` entries (UPG-EXCLUDE-REGEX).
+
+    Each pattern is matched (via `.search`) against the workspace-relative
+    POSIX path of a candidate file — e.g. "re:legacy/.*" excludes every file
+    under a top-level legacy/ dir, "re:.*_(backup|old|copy)\\.\\w+$" excludes
+    stale renamed files anywhere in the tree. Additive alongside bare
+    directory names (get_vectrignore_dirs) and file globs
+    (get_vectrignore_file_globs).
+
+    A line whose pattern text fails to compile is logged as a single warning
+    naming the bad line and skipped — a malformed regex in a hand-edited
+    .vectrignore must never keep the daemon from starting.
+    """
+    regexes: list[re.Pattern] = []
+    for line in _read_ignore_lines(Path(workspace_root) / ".vectrignore"):
+        if not _is_regex_pattern(line):
+            continue
+        pattern_text = line[len(VECTRIGNORE_REGEX_PREFIX):]
+        try:
+            regexes.append(re.compile(pattern_text))
+        except re.error as exc:
+            logger.warning(
+                "Skipping invalid regex in .vectrignore (%r): %s", line, exc
+            )
+    return regexes
 
 
 def write_default_vectrignore(workspace_root: str) -> bool:
@@ -103,7 +154,11 @@ def write_default_vectrignore(workspace_root: str) -> bool:
     lines = [
         "# vectr default excludes — generated on first `vectr start`/`vectr init`.",
         "# vectr never overwrites this file once it exists; edit freely.",
-        "# One directory name or file glob (e.g. *.generated.py) per line.",
+        "# One entry per line, in any of three forms:",
+        "#   a directory name           (e.g. vendor)",
+        "#   a file glob                (e.g. *.generated.py)",
+        "#   a `re:` path regex         (e.g. re:legacy/.*  or  re:.*_(backup|old|copy)\\.\\w+$)",
+        "# `re:` patterns match against the workspace-relative path of each file.",
         "",
         *WORKSPACE_DEFAULT_VECTRIGNORE_DIRS,
         "",
@@ -113,7 +168,14 @@ def write_default_vectrignore(workspace_root: str) -> bool:
 
 
 def write_vectrignore(workspace_root: str, dirs: list[str]) -> None:
-    """Append directory names to .vectrignore, skipping duplicates."""
+    """Append entries to .vectrignore, skipping duplicates.
+
+    Entries are written verbatim, so this also accepts file globs and
+    `re:<pattern>` path regexes (UPG-EXCLUDE-REGEX) alongside bare directory
+    names — callers that accept `re:` entries from a user (e.g. the `--exclude`
+    CLI flag) must validate them with re.compile before calling this, since
+    this function performs no validation itself.
+    """
     vectrignore = Path(workspace_root) / ".vectrignore"
     existing: set[str] = set()
     lines: list[str] = []
@@ -138,6 +200,7 @@ def should_index_file(
     gitignore_patterns: list[str],
     extra_excluded_dirs: set[str] | None = None,
     workspace_root: str | None = None,
+    extra_excluded_regexes: list[re.Pattern] | None = None,
 ) -> bool:
     """Return True if the file should be indexed.
 
@@ -145,6 +208,9 @@ def should_index_file(
     workspace_root (when given) — a workspace that itself lives under an
     excluded-sounding prefix (e.g. /tmp/myproject or repo/tmp/fixture) must
     not have every one of its files excluded by its own absolute path.
+    extra_excluded_regexes (UPG-EXCLUDE-REGEX, see get_vectrignore_regexes)
+    are matched the same way — against the workspace-relative path — for the
+    same reason.
     """
     path = Path(file_path)
 
@@ -161,16 +227,22 @@ def should_index_file(
 
     excluded = _ALWAYS_SKIP | (extra_excluded_dirs or set())
 
-    parts = path.parts
+    rel_path = path
     if workspace_root:
         try:
-            parts = path.resolve().relative_to(Path(workspace_root).resolve()).parts
+            rel_path = path.resolve().relative_to(Path(workspace_root).resolve())
         except ValueError:
-            pass  # file outside the root — fall back to full-path parts
+            pass  # file outside the root — fall back to the full path
 
-    for part in parts:
+    for part in rel_path.parts:
         if part in excluded:
             return False
+
+    if extra_excluded_regexes:
+        rel_posix = rel_path.as_posix()
+        for regex in extra_excluded_regexes:
+            if regex.search(rel_posix):
+                return False
 
     # check gitignore patterns
     name = path.name

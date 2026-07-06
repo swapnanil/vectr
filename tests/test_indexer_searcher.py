@@ -1703,6 +1703,22 @@ class TestIndexingHygiene:
         assert not any("vendor/lib.py" in p for p in paths), "excluded dir not pruned"
         assert any("app.py" in p for p in paths)
 
+    def test_vectrignore_regex_excluded_file_pruned_on_reindex(self, indexer, tmp_path) -> None:
+        # UPG-EXCLUDE-REGEX: `re:<pattern>` entries prune the same way as bare
+        # dir names and file globs — the reconcile mechanism is walk-set based,
+        # so adding a regex line that newly excludes a file is enough.
+        (tmp_path / "legacy").mkdir()
+        make_py(tmp_path, "legacy/handler.py", "def handler(): pass")
+        make_py(tmp_path, "app.py", "def app(): pass")
+        indexer.index_workspace()
+        assert any("legacy/handler.py" in p for p in self._file_paths_in_collection(indexer))
+
+        (tmp_path / ".vectrignore").write_text("re:legacy/.*\n", encoding="utf-8")
+        indexer.index_workspace()
+        paths = self._file_paths_in_collection(indexer)
+        assert not any("legacy/handler.py" in p for p in paths), "regex-excluded file not pruned"
+        assert any("app.py" in p for p in paths)
+
     def test_prune_drops_mtime_cache_entry(self, indexer, tmp_path) -> None:
         gone = Path(make_py(tmp_path, "gone.py", "def gone(): pass"))
         indexer.index_workspace()

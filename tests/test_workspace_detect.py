@@ -27,6 +27,14 @@ from integrations.workspace_detect import (
     should_index_file,
 )
 
+_MIXED_VECTRIGNORE = """\
+# mixed entry forms (UPG-EXCLUDE-REGEX)
+vendor
+*.generated.py
+re:legacy/.*
+re:(unclosed
+"""
+
 
 # ---------------------------------------------------------------------------
 # find_workspace_root
@@ -431,3 +439,104 @@ class TestShouldIndexFileWorkspaceUnderExcludedPrefix:
         f.parent.mkdir(parents=True)
         f.write_text("x = 1\n")
         assert should_index_file(str(f), [], extra_excluded_dirs={"tmp"}) is False
+
+
+# ---------------------------------------------------------------------------
+# UPG-EXCLUDE-REGEX: `re:<pattern>` .vectrignore entries
+# ---------------------------------------------------------------------------
+
+class TestVectrignoreRegex:
+    def test_mixed_vectrignore_parses_all_forms(self, tmp_path, caplog) -> None:
+        from integrations.workspace_detect import (
+            get_vectrignore_dirs, get_vectrignore_file_globs, get_vectrignore_regexes,
+        )
+        (tmp_path / ".vectrignore").write_text(_MIXED_VECTRIGNORE, encoding="utf-8")
+
+        with caplog.at_level("WARNING"):
+            regexes = get_vectrignore_regexes(str(tmp_path))
+
+        assert get_vectrignore_dirs(str(tmp_path)) == {"vendor"}
+        assert get_vectrignore_file_globs(str(tmp_path)) == ["*.generated.py"]
+        # Only the valid regex compiles; the invalid one is skipped, not raised.
+        assert len(regexes) == 1
+        assert regexes[0].pattern == "legacy/.*"
+
+    def test_invalid_regex_line_logs_one_warning_naming_the_line(self, tmp_path, caplog) -> None:
+        from integrations.workspace_detect import get_vectrignore_regexes
+        (tmp_path / ".vectrignore").write_text("re:(unclosed\n", encoding="utf-8")
+
+        with caplog.at_level("WARNING"):
+            regexes = get_vectrignore_regexes(str(tmp_path))
+
+        assert regexes == []
+        assert len(caplog.records) == 1
+        assert "re:(unclosed" in caplog.records[0].message
+
+    def test_no_vectrignore_returns_empty(self, tmp_path) -> None:
+        from integrations.workspace_detect import get_vectrignore_regexes
+        assert get_vectrignore_regexes(str(tmp_path)) == []
+
+    def test_regex_entry_excluded_from_dirs_and_globs(self, tmp_path) -> None:
+        # A `re:` line must never leak into get_vectrignore_dirs or
+        # get_vectrignore_file_globs even though its pattern text often
+        # contains glob metacharacters (*, ?, [) itself.
+        from integrations.workspace_detect import get_vectrignore_dirs, get_vectrignore_file_globs
+        (tmp_path / ".vectrignore").write_text("re:.*_(backup|old)\\.\\w+$\n", encoding="utf-8")
+        assert get_vectrignore_dirs(str(tmp_path)) == set()
+        assert get_vectrignore_file_globs(str(tmp_path)) == []
+
+
+class TestShouldIndexFileRegex:
+    def test_path_scoped_regex_excludes_files_under_dir(self, tmp_path) -> None:
+        from integrations.workspace_detect import should_index_file, get_vectrignore_regexes
+        (tmp_path / ".vectrignore").write_text("re:legacy/.*\n", encoding="utf-8")
+        regexes = get_vectrignore_regexes(str(tmp_path))
+
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        f = legacy / "handler.py"
+        f.touch()
+        assert should_index_file(
+            str(f), [], workspace_root=str(tmp_path), extra_excluded_regexes=regexes
+        ) is False
+
+    def test_name_anchored_regex_excludes_matching_filename(self, tmp_path) -> None:
+        from integrations.workspace_detect import should_index_file, get_vectrignore_regexes
+        (tmp_path / ".vectrignore").write_text(r"re:.*_backup\.sql$" + "\n", encoding="utf-8")
+        regexes = get_vectrignore_regexes(str(tmp_path))
+
+        f = tmp_path / "schema_backup.sql"
+        f.touch()
+        assert should_index_file(
+            str(f), [], workspace_root=str(tmp_path), extra_excluded_regexes=regexes
+        ) is False
+
+    def test_regex_does_not_exclude_non_matching_file(self, tmp_path) -> None:
+        from integrations.workspace_detect import should_index_file, get_vectrignore_regexes
+        (tmp_path / ".vectrignore").write_text("re:legacy/.*\n", encoding="utf-8")
+        regexes = get_vectrignore_regexes(str(tmp_path))
+
+        src = tmp_path / "src"
+        src.mkdir()
+        f = src / "main.py"
+        f.touch()
+        assert should_index_file(
+            str(f), [], workspace_root=str(tmp_path), extra_excluded_regexes=regexes
+        ) is True
+
+    def test_file_outside_workspace_root_does_not_crash(self, tmp_path) -> None:
+        # Mirrors the existing `parts` fallback for dir-name exclusion: a
+        # file that isn't actually under workspace_root falls back to
+        # matching its own full path instead of raising.
+        from integrations.workspace_detect import should_index_file
+        import re as re_mod
+
+        other = tmp_path / "elsewhere" / "module.py"
+        other.parent.mkdir(parents=True)
+        other.touch()
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        regexes = [re_mod.compile("legacy/.*")]
+        assert should_index_file(
+            str(other), [], workspace_root=str(ws), extra_excluded_regexes=regexes
+        ) is True

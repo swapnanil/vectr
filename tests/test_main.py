@@ -1331,3 +1331,77 @@ class TestMultiRoot:
             m.cmd_start(_make_args(paths=[ws_a, ws_b], port=8765))
 
         mock_do_start.assert_called_once_with(ws_a, 8765, wh, extra_roots=[ws_b], memory_only=False, search_only=False)
+
+
+# ---------------------------------------------------------------------------
+# --exclude on `init` and `start` (UPG-EXCLUDE-REGEX)
+# ---------------------------------------------------------------------------
+
+class TestExcludeFlag:
+    """Same repeatable append-to-.vectrignore semantics on both subcommands:
+    a bare directory name, a file glob, or a `re:<pattern>` path regex. An
+    invalid `re:` pattern must exit non-zero and write nothing at all."""
+
+    def test_init_writes_plain_dir(self, tmp_path):
+        with patch("main.InstanceRegistry") as MockReg:
+            MockReg.return_value.get.return_value = None
+            m.cmd_init(_make_args(path=str(tmp_path), exclude=["vendor"]))
+        content = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        assert "vendor" in content
+
+    def test_init_writes_regex_entry(self, tmp_path):
+        with patch("main.InstanceRegistry") as MockReg:
+            MockReg.return_value.get.return_value = None
+            m.cmd_init(_make_args(path=str(tmp_path), exclude=["re:legacy/.*"]))
+        content = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        assert "re:legacy/.*" in content
+
+    def test_init_invalid_regex_exits_and_writes_nothing(self, tmp_path):
+        # cmd_init seeds a DEFAULT .vectrignore as part of workspace config
+        # (unrelated to --exclude) — so "writes nothing" here means the bad
+        # --exclude entry itself must never be appended, not that the file
+        # can't exist at all.
+        with patch("main.InstanceRegistry") as MockReg:
+            MockReg.return_value.get.return_value = None
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_init(_make_args(path=str(tmp_path), exclude=["re:(unclosed"]))
+        assert exc_info.value.code != 0
+        content = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        assert "unclosed" not in content
+
+    def test_start_writes_regex_entry(self, tmp_path):
+        ws = str(tmp_path)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start"):
+            m.cmd_start(_make_args(paths=[ws], port=8765, exclude=["re:legacy/.*"]))
+        content = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        assert "re:legacy/.*" in content
+
+    def test_start_writes_plain_dir_unchanged(self, tmp_path):
+        ws = str(tmp_path)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start"):
+            m.cmd_start(_make_args(paths=[ws], port=8765, exclude=["vendor"]))
+        content = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
+        assert "vendor" in content
+
+    def test_start_invalid_regex_exits_before_any_registry_access(self, tmp_path):
+        ws = str(tmp_path)
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._do_start") as mock_do_start:
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_start(_make_args(paths=[ws], port=8765, exclude=["re:[unclosed"]))
+        assert exc_info.value.code != 0
+        assert not (tmp_path / ".vectrignore").exists()
+        MockReg.assert_not_called()
+        mock_do_start.assert_not_called()

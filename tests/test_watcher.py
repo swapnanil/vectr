@@ -600,6 +600,62 @@ class TestVectrignoreFileGlobs:
 
 
 # ---------------------------------------------------------------------------
+# CodeWatcher — .vectrignore `re:` path regex patterns (UPG-EXCLUDE-REGEX)
+# ---------------------------------------------------------------------------
+
+class TestVectrignoreRegex:
+    def test_regex_excludes_matching_path(self, tmp_path):
+        (tmp_path / ".vectrignore").write_text("re:legacy/.*\n", encoding="utf-8")
+        watcher = _watcher_with_mock_observer(tmp_path)
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        assert watcher._is_excluded(str(legacy / "handler.py")) is True
+
+    def test_regex_does_not_exclude_sibling(self, tmp_path):
+        (tmp_path / ".vectrignore").write_text("re:legacy/.*\n", encoding="utf-8")
+        watcher = _watcher_with_mock_observer(tmp_path)
+        src = tmp_path / "src"
+        src.mkdir()
+        assert watcher._is_excluded(str(src / "main.py")) is False
+
+    def test_regex_scoped_per_root(self, tmp_path):
+        # A `re:` pattern from one root's .vectrignore must not be evaluated
+        # against a different (sibling) root's tree.
+        from pathlib import Path
+        root_a = tmp_path / "root_a"
+        root_b = tmp_path / "root_b"
+        root_a.mkdir()
+        root_b.mkdir()
+        (root_b / ".vectrignore").write_text("re:legacy/.*\n", encoding="utf-8")
+        indexer = MagicMock()
+        indexer.workspace_root = str(root_a)
+        indexer.all_roots = [Path(root_a), Path(root_b)]
+        watcher = CodeWatcher(indexer)
+        assert watcher._is_excluded(str(root_b / "legacy" / "old.py")) is True
+        assert watcher._is_excluded(str(root_a / "legacy" / "old.py")) is False
+
+    def test_on_modified_skips_regex_excluded_file(self, tmp_path):
+        # Uses a supported extension (.py) so the assertion actually exercises
+        # the regex exclusion path, not just the unrelated _is_indexable check.
+        (tmp_path / ".vectrignore").write_text(r"re:.*_backup\.py$" + "\n", encoding="utf-8")
+        watcher = _watcher_with_mock_observer(tmp_path)
+        watcher._debounce = MagicMock()
+        watcher.on_modified(_mock_event(str(tmp_path / "schema_backup.py")))
+        watcher._debounce.schedule.assert_not_called()
+
+    def test_vectrignore_modify_event_refreshes_regexes(self, tmp_path):
+        watcher = _watcher_with_mock_observer(tmp_path)
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        assert watcher._is_excluded(str(legacy / "handler.py")) is False
+
+        (tmp_path / ".vectrignore").write_text("re:legacy/.*\n", encoding="utf-8")
+        watcher.on_modified(_mock_event(str(tmp_path / ".vectrignore")))
+
+        assert watcher._is_excluded(str(legacy / "handler.py")) is True
+
+
+# ---------------------------------------------------------------------------
 # CodeWatcher — end-to-end CPU-storm regression (UPG-13.1 acceptance)
 #
 # Uses the REAL watchdog Observer (not mocked) so this exercises the actual

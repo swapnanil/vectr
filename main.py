@@ -573,6 +573,31 @@ def _resolve_workspace_roots(args: argparse.Namespace) -> list[str]:
     return [str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())]
 
 
+def _apply_exclude_args(workspace: str, exclude_entries: list[str]) -> None:
+    """Append `--exclude` entries to .vectrignore (shared by `init` and `start`).
+
+    Same repeatable append semantics either way — a directory name, a file
+    glob, or a `re:<pattern>` path regex (UPG-EXCLUDE-REGEX). Every `re:`
+    entry is validated with re.compile BEFORE anything is written: a bad
+    pattern must exit non-zero with a clear message rather than land silently
+    in .vectrignore (where the daemon would then have to warn and skip it).
+    """
+    if not exclude_entries:
+        return
+    from integrations.workspace_detect import write_vectrignore, VECTRIGNORE_REGEX_PREFIX
+
+    for entry in exclude_entries:
+        if entry.startswith(VECTRIGNORE_REGEX_PREFIX):
+            pattern_text = entry[len(VECTRIGNORE_REGEX_PREFIX):]
+            try:
+                re.compile(pattern_text)
+            except re.error as exc:
+                print(f"Error: invalid regex in --exclude {entry!r}: {exc}", file=sys.stderr)
+                sys.exit(1)
+
+    write_vectrignore(workspace, exclude_entries)
+    print(f"  Added to .vectrignore: {', '.join(exclude_entries)}", file=sys.stderr)
+
 
 # Map from normalised language key to the Python module name of its grammar
 # (used to derive the pip package name — module_name.replace("_", "-")).
@@ -785,6 +810,9 @@ def cmd_start(args: argparse.Namespace) -> None:
     extra_roots = roots[1:]
     ws_hash = workspace_hash(workspace)
     preferred_port = args.port
+
+    # write user-defined exclusions to .vectrignore before indexing starts
+    _apply_exclude_args(workspace, getattr(args, "exclude", None) or [])
 
     registry = InstanceRegistry()
     registry.prune_dead()
@@ -1236,11 +1264,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     _write_workspace_config(workspace, port, search_only=search_only)
 
     # write user-defined exclusions to .vectrignore
-    exclude_dirs: list[str] = getattr(args, "exclude", None) or []
-    if exclude_dirs:
-        from integrations.workspace_detect import write_vectrignore
-        write_vectrignore(workspace, exclude_dirs)
-        print(f"  Added to .vectrignore: {', '.join(exclude_dirs)}", file=sys.stderr)
+    _apply_exclude_args(workspace, getattr(args, "exclude", None) or [])
 
     # write style override if --style is specified
     if getattr(args, "style", None):
@@ -1303,6 +1327,17 @@ def cmd_watch(args: argparse.Namespace) -> None:
 # Argument parsing
 # ---------------------------------------------------------------------------
 
+# Shared --exclude help text (init and start accept identical entry forms —
+# UPG-EXCLUDE-REGEX). PATTERN accepts a bare directory name, a file glob
+# (e.g. *.generated.py), or a `re:<pattern>` path regex matched against the
+# workspace-relative path (e.g. re:legacy/.* or re:.*_(backup|old)\.\w+$).
+_EXCLUDE_HELP = (
+    "Append a directory name, file glob, or `re:<pattern>` path regex to "
+    ".vectrignore (repeatable). Examples: --exclude vendor "
+    "--exclude '*.generated.py' --exclude 're:legacy/.*'"
+)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="vectr", description="Zero-config semantic codebase indexer")
     sub = parser.add_subparsers(dest="command")
@@ -1325,6 +1360,10 @@ def main() -> None:
              "Example: vectr start --path dir1 --path dir2",
     )
     p_start.add_argument("--port", type=int, default=_default_port)
+    p_start.add_argument(
+        "--exclude", action="append", metavar="PATTERN", dest="exclude",
+        help=_EXCLUDE_HELP,
+    )
     p_start.add_argument(
         "--memory-only",
         action="store_true",
@@ -1396,9 +1435,8 @@ def main() -> None:
     p_init = sub.add_parser("init", help="Write CLAUDE.md and .mcp.json to a workspace (no server)")
     p_init.add_argument("--path", default=_default_path)
     p_init.add_argument(
-        "--exclude", action="append", metavar="DIR", dest="exclude",
-        help="Append a directory name to .vectrignore (repeatable). "
-             "Example: vectr init --exclude vendor --exclude generated",
+        "--exclude", action="append", metavar="PATTERN", dest="exclude",
+        help=_EXCLUDE_HELP,
     )
     p_init.add_argument(
         "--style",
