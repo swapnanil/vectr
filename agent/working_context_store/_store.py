@@ -809,6 +809,7 @@ class WorkingContextStore:
         notes: list[WorkingNote],
         stale_warnings: dict[int, list[str]] | None = None,
         detail: str = "index",
+        surface: str = "mcp",
     ) -> str:
         """Format recalled notes into a clean LLM-readable string.
 
@@ -821,6 +822,13 @@ class WorkingContextStore:
 
         If stale_warnings is provided (full detail only), notes whose referenced files
         have changed are flagged with a [STALE] marker and a warning.
+
+        surface='mcp' (default): the expand hint uses the MCP tool-call form
+        (`vectr_recall(note_id=N)`) — correct for the MCP dispatch path, whose
+        caller is an editor's LLM. surface='cli': the expand hint uses the
+        actual shell form (`vectr recall --id N`) — used by the REST route
+        `vectr recall`/`vectr remember` go through, whose caller is a human
+        terminal (UPG-CLI-RECALL-HINT: MCP tool syntax is meaningless there).
         """
         if not notes:
             return "No working notes found."
@@ -832,7 +840,8 @@ class WorkingContextStore:
             return f"{age_h:.0f}h" if age_h < 48 else f"{age_h / 24:.0f}d"
 
         if detail == "index":
-            header = f"# Working Notes — index ({len(notes)} entries; use vectr_recall(note_id=N) to expand)\n"
+            expand_hint = "use vectr_recall(note_id=N) to expand" if surface == "mcp" else "run `vectr recall --id N` to expand"
+            header = f"# Working Notes — index ({len(notes)} entries; {expand_hint})\n"
             lines = [header]
             for n in notes:
                 kind_label = n.kind if n.kind else DEFAULT_KIND

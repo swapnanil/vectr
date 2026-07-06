@@ -925,6 +925,10 @@ def cmd_recall(args: argparse.Namespace) -> None:
                 payload["sort_by"] = args.sort_by
             detail = getattr(args, "detail", "index") or "index"
             payload["detail"] = detail
+    # UPG-CLI-RECALL-HINT: this is the human terminal surface — the response's
+    # expand hint must be the real `vectr recall --id N` shell form, not the
+    # MCP tool-call form the daemon renders by default.
+    payload["surface"] = "cli"
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/recall", json=payload, timeout=30)
         resp.raise_for_status()

@@ -192,12 +192,30 @@ class RecallRequest(BaseModel):
     sort_by: str = Field(default="relevance", description="Sort order (UPG-RECALL-HIERARCHY): relevance | recency | priority")
     detail: str = Field(default="index", description="Detail level (UPG-RECALL-HIERARCHY): 'index' = one-line summary per note (default, token-bounded); 'full' = full bodies")
     note_id: int | None = Field(default=None, description="Expand a single note by ID (UPG-RECALL-HIERARCHY): returns full body, ignores query")
+    surface: str = Field(
+        default="mcp",
+        description=(
+            "Caller surface (UPG-CLI-RECALL-HINT): 'mcp' (default) — the "
+            "response's expand hint uses the MCP tool-call form, correct for "
+            "the MCP dispatch path and for hook-injected context (both are "
+            "ultimately read by the editor's LLM). 'cli' — the hint uses the "
+            "real shell form; set by `vectr recall`'s own request, whose "
+            "reader is a human terminal."
+        ),
+    )
 
     @field_validator("kind")
     @classmethod
     def validate_kind(cls, v: str | None) -> str | None:
         if v is not None and v not in _VALID_KINDS:
             raise ValueError(f"kind must be one of: {', '.join(_VALID_KINDS)}")
+        return v
+
+    @field_validator("surface")
+    @classmethod
+    def validate_surface(cls, v: str) -> str:
+        if v not in ("mcp", "cli"):
+            raise ValueError("surface must be one of: mcp, cli")
         return v
 
 

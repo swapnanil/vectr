@@ -250,13 +250,13 @@ def client_real_memory(tmp_path):
 
     def _recall(query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
                 min_similarity=None, file_path=None, max_age_days=None, sort_by="relevance",
-                detail="index", note_id=None):
+                detail="index", note_id=None, surface="mcp"):
         if note_id is not None:
             note = real_store.get_note(ws, note_id)
             if note is None:
                 return f"Note #{note_id} not found."
             stale = real_store.check_staleness([note], ws)
-            return real_store.format_notes_for_llm([note], stale_warnings=stale, detail="full")
+            return real_store.format_notes_for_llm([note], stale_warnings=stale, detail="full", surface=surface)
         if boot:
             boot_notes = real_store.boot_recall(ws)
             if not boot_notes:
@@ -266,17 +266,18 @@ def client_real_memory(tmp_path):
             other_notes = [n for n in boot_notes if n.kind != "directive"]
             parts = []
             if directive_notes:
-                parts.append(real_store.format_notes_for_llm(directive_notes, stale_warnings=stale, detail="full"))
+                parts.append(real_store.format_notes_for_llm(directive_notes, stale_warnings=stale, detail="full", surface=surface))
             if other_notes:
-                parts.append(real_store.format_notes_for_llm(other_notes, stale_warnings=stale, detail="index"))
+                parts.append(real_store.format_notes_for_llm(other_notes, stale_warnings=stale, detail="index", surface=surface))
             return "\n".join(parts)
         if file_path:
             path_notes = real_store.recall_for_path(ws, file_path, kind=kind, limit=limit)
-            return real_store.format_notes_for_llm(path_notes, detail=detail) if path_notes else ""
+            return real_store.format_notes_for_llm(path_notes, detail=detail, surface=surface) if path_notes else ""
         return real_store.format_notes_for_llm(
             real_store.recall(ws, query, tags, priority, limit, kind=kind, min_similarity=min_similarity,
                               max_age_days=max_age_days, sort_by=sort_by),
             detail=detail,
+            surface=surface,
         )
 
     svc.recall.side_effect = _recall

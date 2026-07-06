@@ -673,7 +673,14 @@ class VectrService:
         sort_by: str = "relevance",
         detail: str = "index",
         note_id: int | None = None,
+        surface: str = "mcp",
     ) -> str:
+        """`surface` selects the expand-hint phrasing rendered by
+        `format_notes_for_llm` — 'mcp' (default: the MCP dispatch path, and
+        hook-injected recall, both leave this unset since their reader is the
+        editor's LLM) or 'cli' (only `cmd_recall`'s own REST request sets this
+        explicitly, since its reader is a human terminal). See its docstring
+        (UPG-CLI-RECALL-HINT)."""
         self._require_memory_layer()
         # Single-note expand: note_id overrides everything else (UPG-RECALL-HIERARCHY).
         if note_id is not None:
@@ -681,7 +688,7 @@ class VectrService:
             if note is None:
                 return f"Note #{note_id} not found."
             stale = self._context_store.check_staleness([note], self._workspace_root)
-            return self._context_store.format_notes_for_llm([note], stale_warnings=stale, detail="full")
+            return self._context_store.format_notes_for_llm([note], stale_warnings=stale, detail="full", surface=surface)
 
         # Boot mode (UPG-9.2): unconditional directive + high-task set for
         # harness-injected recall. Ignores query/tags/priority/kind/limit and
@@ -700,10 +707,10 @@ class VectrService:
             parts: list[str] = []
             if directive_notes:
                 parts.append(self._context_store.format_notes_for_llm(
-                    directive_notes, stale_warnings=stale, detail="full"))
+                    directive_notes, stale_warnings=stale, detail="full", surface=surface))
             if other_notes:
                 parts.append(self._context_store.format_notes_for_llm(
-                    other_notes, stale_warnings=stale, detail="index"))
+                    other_notes, stale_warnings=stale, detail="index", surface=surface))
             return "\n".join(parts)
 
         # Path-anchored mode (UPG-9.6): notes recorded against a specific file,
@@ -715,7 +722,7 @@ class VectrService:
             if not notes:
                 return ""
             stale = self._context_store.check_staleness(notes, self._workspace_root)
-            return self._context_store.format_notes_for_llm(notes, stale_warnings=stale, detail=detail)
+            return self._context_store.format_notes_for_llm(notes, stale_warnings=stale, detail=detail, surface=surface)
 
         notes = self._context_store.recall(
             workspace=self._workspace_root,
@@ -729,7 +736,7 @@ class VectrService:
             sort_by=sort_by,
         )
         stale = self._context_store.check_staleness(notes, self._workspace_root)
-        return self._context_store.format_notes_for_llm(notes, stale_warnings=stale, detail=detail)
+        return self._context_store.format_notes_for_llm(notes, stale_warnings=stale, detail=detail, surface=surface)
 
     def forget_note(self, note_id: int) -> bool:
         self._require_memory_layer()

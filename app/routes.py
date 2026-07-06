@@ -230,7 +230,10 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
     )
     return RememberResponse(
         note_id=note_id,
-        message=f"Stored note #{note_id}. Recall with vectr_recall — <50ms, verbatim, any time.",
+        # CLI-form hint (UPG-CLI-RECALL-HINT): this route is the CLI's `vectr
+        # remember`, not the MCP tool — the MCP dispatch builds its own
+        # separate confirmation text in `vectr_remember(note_id=N)` form.
+        message=f"Stored note #{note_id}. Recall with: vectr recall --id {note_id}",
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 
@@ -255,6 +258,7 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
         sort_by=body.sort_by,
         detail=body.detail,
         note_id=body.note_id,
+        surface=body.surface,
     )
     return RecallResponse(
         notes=notes_text,

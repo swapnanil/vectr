@@ -295,6 +295,23 @@ class TestFormatDetailTiers:
         assert "No working notes found" in store.format_notes_for_llm([], detail="index")
         assert "No working notes found" in store.format_notes_for_llm([], detail="full")
 
+    def test_index_header_uses_mcp_form_by_default(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/ws", "note content")
+        notes = store.recall("/ws")
+        text = store.format_notes_for_llm(notes, detail="index")
+        assert "vectr_recall(note_id=N)" in text
+
+    def test_index_header_uses_cli_form_for_cli_surface(self, tmp_path) -> None:
+        """UPG-CLI-RECALL-HINT: `vectr recall` output must show the real CLI
+        flag, not the MCP tool-call syntax, which is meaningless in a shell."""
+        store = _store(tmp_path)
+        store.remember("/ws", "note content")
+        notes = store.recall("/ws")
+        text = store.format_notes_for_llm(notes, detail="index", surface="cli")
+        assert "vectr recall --id N" in text
+        assert "vectr_recall(" not in text
+
 
 # ---------------------------------------------------------------------------
 # (3) Service-level get_note + recall with note_id
@@ -454,3 +471,29 @@ class TestRESTHierarchy:
         client_real_memory.post("/v1/remember", json={"content": "recent note"})
         resp = client_real_memory.post("/v1/recall", json={"max_age_days": 1.0, "detail": "full"})
         assert resp.status_code == 200
+
+    def test_recall_rest_defaults_to_mcp_form_expand_hint(self, client_real_memory) -> None:
+        """POST /v1/recall without surface keeps the MCP tool-call hint —
+        the REST route is also used by hook-injected recall, whose reader is
+        the editor's LLM, same as the MCP dispatch path (UPG-CLI-RECALL-HINT)."""
+        client_real_memory.post("/v1/remember", json={"content": "note", "title": "t"})
+        resp = client_real_memory.post("/v1/recall", json={})
+        assert "vectr_recall(note_id=N)" in resp.json()["notes"]
+
+    def test_recall_rest_surface_cli_uses_shell_form_expand_hint(self, client_real_memory) -> None:
+        """UPG-CLI-RECALL-HINT: `vectr recall` (main.py cmd_recall) sends
+        surface='cli' explicitly — the response must show the real flag."""
+        client_real_memory.post("/v1/remember", json={"content": "note", "title": "t"})
+        resp = client_real_memory.post("/v1/recall", json={"surface": "cli"})
+        notes = resp.json()["notes"]
+        assert "vectr recall --id N" in notes
+        assert "vectr_recall(" not in notes
+
+    def test_remember_rest_message_uses_cli_form_not_mcp_syntax(self, client_real_memory) -> None:
+        """UPG-CLI-RECALL-HINT: /v1/remember (the CLI's `vectr remember`
+        backend) must not confirm with MCP tool-call syntax like
+        'vectr_recall' — that's meaningless typed at a shell prompt."""
+        resp = client_real_memory.post("/v1/remember", json={"content": "note"})
+        message = resp.json()["message"]
+        assert "vectr_recall" not in message
+        assert "vectr recall" in message
