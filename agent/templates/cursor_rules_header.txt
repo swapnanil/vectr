@@ -1,0 +1,5 @@
+---
+description: Vectr tool usage rules for AI-assisted development
+alwaysApply: true
+---
+

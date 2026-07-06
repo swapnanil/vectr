@@ -1,0 +1,1 @@
+Your working-memory notes are auto-injected below — do not call vectr_recall to re-fetch them; call it only for something not shown here.

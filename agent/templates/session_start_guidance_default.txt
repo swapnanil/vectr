@@ -1,0 +1,3 @@
+**At session start (always):** call `vectr_status()` first.
+- `notes_count > 0` → prior work on this codebase is saved; call `vectr_recall(query="<your task>")` before opening any files.
+- `notes_count == 0` → skip recall and proceed.

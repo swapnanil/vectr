@@ -1,0 +1,7 @@
+{{
+  "mcpServers": {{
+    "vectr": {{
+      "url": "http://localhost:{port}/mcp"
+    }}
+  }}
+}}

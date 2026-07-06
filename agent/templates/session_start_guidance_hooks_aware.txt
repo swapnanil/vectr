@@ -1,0 +1,1 @@
+**At session start:** your working-memory notes are auto-injected automatically (on session start and again per prompt) — you don't need to call `vectr_status`/`vectr_recall` just to see them. Call `vectr_recall` only for an on-demand deep-dive: expanding a specific note (`note_id=`), or a targeted query the automatic injection didn't cover.
