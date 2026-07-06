@@ -611,6 +611,315 @@ pub const Account = struct {
 
 
 # ---------------------------------------------------------------------------
+# Type-definition chunking (UPG-RUST-STRUCT-CHUNK-MISSING)
+#
+# A struct/trait/enum/interface/type-alias definition is a standalone
+# top-level unit exactly like a function or class. Before this fix, a Rust
+# struct/trait/enum was never collected as its own chunk — synthetic
+# fixtures only, per-language, each proving (a) a type-def-only file no
+# longer degrades to a window chunk, (b) a mixed type-def + function file
+# emits both, and (c) chunk_quality.is_type_definition_chunk actually
+# activates (DEF-B) for the new chunk's recorded node_type.
+# ---------------------------------------------------------------------------
+
+class TestRustTypeDefChunking:
+    def test_struct_only_file_emits_struct_chunk_not_window(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "shapes.rs"
+        p.write_text(
+            '/// A point in 2D space.\n'
+            'struct Point {\n'
+            '    x: i32,\n'
+            '    y: i32,\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        assert "window" not in node_types, f"struct-only file degraded to window chunk: {node_types}"
+        assert "struct_item" in node_types
+
+    def test_struct_doc_comment_attached(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "shapes.rs"
+        p.write_text(
+            '/// A point in 2D space.\n'
+            'struct Point {\n'
+            '    x: i32,\n'
+            '    y: i32,\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        struct_chunk = next(c for c in chunks if c.node_type == "struct_item")
+        assert "A point in 2D space." in struct_chunk.content
+        assert struct_chunk.symbol_name == "Point"
+
+    def test_mixed_struct_and_function_emit_both_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "shapes.rs"
+        p.write_text(
+            '/// A point in 2D space.\n'
+            'struct Point {\n'
+            '    x: i32,\n'
+            '}\n'
+            '\n'
+            'fn origin() -> Point {\n'
+            '    Point { x: 0 }\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        assert "struct_item" in node_types
+        assert "function_item" in node_types
+        names = {c.symbol_name for c in chunks}
+        assert "Point" in names and "origin" in names
+
+    def test_trait_and_enum_get_own_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "shapes.rs"
+        p.write_text(
+            '/// Any shape has an area.\n'
+            'trait Shape {\n'
+            '    fn area(&self) -> f64;\n'
+            '}\n'
+            '\n'
+            '/// The set of supported colors.\n'
+            'enum Color {\n'
+            '    Red,\n'
+            '    Green,\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        by_type = {c.node_type: c for c in chunks}
+        assert "trait_item" in by_type and "enum_item" in by_type
+        assert by_type["trait_item"].symbol_name == "Shape"
+        assert by_type["enum_item"].symbol_name == "Color"
+        assert "Any shape has an area." in by_type["trait_item"].content
+        assert "The set of supported colors." in by_type["enum_item"].content
+
+    def test_impl_item_still_excluded_from_type_def(self) -> None:
+        from agent.chunk_quality import is_type_definition_chunk
+        assert is_type_definition_chunk("impl_item") is False
+
+    def test_new_rust_node_types_activate_def_b(self) -> None:
+        from agent.chunk_quality import is_type_definition_chunk
+        assert is_type_definition_chunk("struct_item") is True
+        assert is_type_definition_chunk("trait_item") is True
+        assert is_type_definition_chunk("enum_item") is True
+
+
+class TestTypeScriptTypeDefChunking:
+    def test_interface_only_file_emits_interface_chunk_not_window(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "shapes.ts"
+        p.write_text(
+            '/** A widget configuration. */\n'
+            'interface WidgetConfig {\n'
+            '  size: number;\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        assert "window" not in node_types
+        assert "interface_declaration" in node_types
+        interface_chunk = next(c for c in chunks if c.node_type == "interface_declaration")
+        assert interface_chunk.symbol_name == "WidgetConfig"
+        assert "A widget configuration." in interface_chunk.content
+
+    def test_mixed_interface_and_function_emit_both_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "shapes.ts"
+        p.write_text(
+            'interface WidgetConfig {\n'
+            '  size: number;\n'
+            '}\n'
+            '\n'
+            'function makeWidget(): WidgetConfig {\n'
+            '  return { size: 1 };\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        assert "interface_declaration" in node_types
+        assert "function_declaration" in node_types
+
+    def test_type_alias_and_enum_get_own_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "shapes.ts"
+        p.write_text(
+            'type WidgetId = string;\n'
+            '\n'
+            'enum WidgetKind {\n'
+            '  Small,\n'
+            '  Large,\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        by_type = {c.node_type: c for c in chunks}
+        assert "type_alias_declaration" in by_type and "enum_declaration" in by_type
+        assert by_type["type_alias_declaration"].symbol_name == "WidgetId"
+        assert by_type["enum_declaration"].symbol_name == "WidgetKind"
+
+    def test_class_declaration_symbol_name_extracted(self, tmp_path) -> None:
+        # Regression guard: a TS class's own name node is `type_identifier`,
+        # not `identifier` — before this fix, every TS class chunk's
+        # symbol_name silently came back "" (found while wiring the new
+        # type-def node types through the same extraction helper).
+        from agent.indexer import chunk_file
+        p = tmp_path / "widget.ts"
+        p.write_text(
+            'class Widget extends Base {\n'
+            '  render() {}\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        class_chunk = next(c for c in chunks if c.node_type == "class_declaration")
+        assert class_chunk.symbol_name == "Widget"
+
+    def test_new_ts_node_types_activate_def_b(self) -> None:
+        from agent.chunk_quality import is_type_definition_chunk
+        assert is_type_definition_chunk("interface_declaration") is True
+        assert is_type_definition_chunk("type_alias_declaration") is True
+        assert is_type_definition_chunk("enum_declaration") is True
+
+
+class TestGoTypeDeclChunking:
+    def test_struct_only_file_emits_type_declaration_chunk_not_window(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "shapes.go"
+        p.write_text(
+            'package shapes\n'
+            '\n'
+            '// Point is a location in 2D space.\n'
+            'type Point struct {\n'
+            '\tX int\n'
+            '\tY int\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        assert "window" not in node_types
+        assert "type_declaration" in node_types
+        type_chunk = next(c for c in chunks if c.node_type == "type_declaration")
+        assert type_chunk.symbol_name == "Point"
+        assert "Point is a location in 2D space." in type_chunk.content
+
+    def test_mixed_type_decl_and_function_emit_both_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "shapes.go"
+        p.write_text(
+            'package shapes\n'
+            '\n'
+            'type Point struct {\n'
+            '\tX int\n'
+            '}\n'
+            '\n'
+            'func Origin() Point {\n'
+            '\treturn Point{}\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        assert "type_declaration" in node_types
+        assert "function_declaration" in node_types
+
+    def test_new_go_node_type_activates_def_b(self) -> None:
+        from agent.chunk_quality import is_type_definition_chunk
+        assert is_type_definition_chunk("type_declaration") is True
+
+
+class TestJavaTypeDefChunking:
+    def test_interface_only_file_emits_interface_chunk_not_window(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "Shape.java"
+        p.write_text(
+            '/** Any shape has an area. */\n'
+            'interface Shape {\n'
+            '    double area();\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        assert "window" not in node_types
+        assert "interface_declaration" in node_types
+        interface_chunk = next(c for c in chunks if c.node_type == "interface_declaration")
+        assert interface_chunk.symbol_name == "Shape"
+        assert "Any shape has an area." in interface_chunk.content
+
+    def test_mixed_interface_enum_and_class_emit_all_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "Shape.java"
+        p.write_text(
+            'interface Shape {\n'
+            '    double area();\n'
+            '}\n'
+            '\n'
+            'enum Color {\n'
+            '    RED, GREEN\n'
+            '}\n'
+            '\n'
+            'class Circle {\n'
+            '    double radius;\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        assert {"interface_declaration", "enum_declaration", "class_declaration"} <= node_types
+
+    def test_new_java_node_types_activate_def_b(self) -> None:
+        from agent.chunk_quality import is_type_definition_chunk
+        assert is_type_definition_chunk("interface_declaration") is True
+        assert is_type_definition_chunk("enum_declaration") is True
+
+
+class TestZigInlineTestChunking:
+    """test_declaration was dormant (UPG-RUST-STRUCT-CHUNK-MISSING) — a Zig
+    inline `test "..." { ... }` block was invisible to the chunker rather than
+    present-but-demoted. Chunking it activates the already-shipped DEF-A
+    structural test detection (is_content_structural_test_chunk)."""
+
+    def test_inline_test_block_gets_own_chunk_not_window(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "math.zig"
+        p.write_text(
+            'const std = @import("std");\n'
+            '\n'
+            '/// Verifies addition.\n'
+            'test "basic add" {\n'
+            '    try std.testing.expect(1 + 1 == 2);\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        assert "window" not in node_types
+        assert "test_declaration" in node_types
+        test_chunk = next(c for c in chunks if c.node_type == "test_declaration")
+        assert "Verifies addition." in test_chunk.content
+        assert 'test "basic add"' in test_chunk.content
+
+    def test_mixed_test_and_function_emit_both_chunks(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        p = tmp_path / "math.zig"
+        p.write_text(
+            'test "basic add" {\n'
+            '    const x = 1 + 1;\n'
+            '}\n'
+            '\n'
+            'pub fn add(a: i32, b: i32) i32 {\n'
+            '    return a + b;\n'
+            '}\n'
+        )
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        assert "test_declaration" in node_types
+        assert "function_declaration" in node_types
+
+    def test_inline_test_chunk_is_structurally_demoted(self) -> None:
+        from agent.chunk_quality import is_content_structural_test_chunk
+        content = 'test "basic add" {\n    try std.testing.expect(1 + 1 == 2);\n}'
+        assert is_content_structural_test_chunk(content, language="zig") is True
+
+
+# ---------------------------------------------------------------------------
 # C / C++ language support (UPG-3.2 — locate/trace were dead on C)
 # ---------------------------------------------------------------------------
 

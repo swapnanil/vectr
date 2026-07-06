@@ -114,14 +114,41 @@ def _parser_language_for(language: str, code: str) -> str:
 _CLASS_NODE_TYPES = {"class_definition", "class_declaration"}
 
 # Node types that represent top-level code units worth indexing per language
+#
+# UPG-RUST-STRUCT-CHUNK-MISSING: a type DEFINITION (struct/trait/enum/interface/
+# type-alias) is a standalone top-level unit exactly like a function or class —
+# omitting it from this set means it is either silently swallowed into whatever
+# sibling chunk happens to claim the file, or the whole file falls back to one
+# anonymous "window" chunk if no other target type is present. Each language's
+# type-def node type is added here once verified (via a live tree-sitter parse)
+# to be a real standalone top-level node in that grammar, activating
+# chunk_quality._TYPE_DEF_NODE_TYPES / is_type_definition_chunk (DEF-B) for it:
+#   rust:       struct_item / trait_item / enum_item — verified top-level nodes
+#               distinct from impl_item (an implementation of a type, not its
+#               definition — UPG-4.5 draws the same line in the symbol graph).
+#   typescript: interface_declaration / type_alias_declaration / enum_declaration
+#               — each a standalone top-level type definition (verified).
+#   go:         type_declaration — a single node type covers struct/interface/
+#               alias forms in this grammar (verified); the type's name is
+#               nested one level under a `type_spec` child, handled below in
+#               `_extract_symbol_name`.
+#   java:       interface_declaration / enum_declaration — standalone top-level
+#               definitions alongside the already-chunked class_declaration.
+# zig `test_declaration` (`test "name" { ... }`) is added too, but for a
+# different reason: it is not a type definition, it activates the DORMANT
+# Zig inline-test detection in chunk_quality.is_content_structural_test_chunk
+# (DEF-A) — without its own chunk, a Zig test block is invisible to the index
+# rather than present-but-demoted, which is a worse outcome (it can still
+# surface via the window fallback, undemoted, on a file with no functions).
 _CHUNK_NODE_TYPES: dict[str, set[str]] = {
     "python": {"function_definition", "class_definition"},
     "javascript": {"function_declaration", "function_expression", "arrow_function", "class_declaration", "method_definition"},
-    "typescript": {"function_declaration", "function_expression", "arrow_function", "class_declaration", "method_definition"},
-    "go": {"function_declaration", "method_declaration"},
-    "rust": {"function_item", "impl_item"},
-    "java": {"method_declaration", "class_declaration"},
-    "zig": {"function_declaration", "variable_declaration"},
+    "typescript": {"function_declaration", "function_expression", "arrow_function", "class_declaration",
+                   "method_definition", "interface_declaration", "type_alias_declaration", "enum_declaration"},
+    "go": {"function_declaration", "method_declaration", "type_declaration"},
+    "rust": {"function_item", "impl_item", "struct_item", "trait_item", "enum_item"},
+    "java": {"method_declaration", "class_declaration", "interface_declaration", "enum_declaration"},
+    "zig": {"function_declaration", "variable_declaration", "test_declaration"},
     "c": {"function_definition", "struct_specifier", "enum_specifier", "type_definition"},
     "cpp": {"function_definition", "class_specifier", "struct_specifier",
             "enum_specifier", "type_definition", "namespace_definition"},
@@ -186,8 +213,27 @@ def _extract_symbol_name(node, language: str, code_bytes: bytes) -> str:
         nm = c_symbol_name(node, code_bytes)
         if nm:
             return nm
+    # Go nests a type_declaration's own name one level down, under a type_spec
+    # child (`type Point struct {...}` -> type_declaration -> type_spec ->
+    # name field), rather than exposing it as a direct child like every other
+    # node type this function handles (verified via a live tree-sitter-go
+    # parse — UPG-RUST-STRUCT-CHUNK-MISSING).
+    if language == "go" and node.type == "type_declaration":
+        for child in node.children:
+            if child.type == "type_spec":
+                nm = child.child_by_field_name("name")
+                if nm is not None:
+                    return code_bytes[nm.start_byte:nm.end_byte].decode("utf-8", errors="replace")
+        return ""
     for child in node.children:
-        if child.type in ("identifier", "name", "property_identifier"):
+        # "type_identifier" covers a type definition's own name in grammars
+        # that distinguish it from a value identifier — e.g. a TS/Rust
+        # struct/interface/type-alias/class name (verified via live parses;
+        # UPG-RUST-STRUCT-CHUNK-MISSING). Checked in the same pass as
+        # "identifier" so declaration order still decides which child wins
+        # when both could appear (a function's own name always precedes any
+        # nested return-type token).
+        if child.type in ("identifier", "name", "property_identifier", "type_identifier"):
             return code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
     return ""
 

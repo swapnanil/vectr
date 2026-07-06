@@ -207,6 +207,59 @@ class TestExtractSymbolsFromFile:
         assert {"foo", "bar", "baz"}.issubset(names)
 
 
+class TestGoTypeDeclarationNameUPGRustStructChunkMissing:
+    """A Go `type_declaration`'s own name is nested one level down, under a
+    `type_spec` child, unlike every other symbol-defining node this module
+    handles — before this fix, `_get_symbol_name` never found it as a direct
+    child, so every Go struct/interface/type-alias symbol silently got
+    name="" and was dropped from the graph entirely (found while wiring the
+    Rust struct-chunking fix — UPG-RUST-STRUCT-CHUNK-MISSING)."""
+
+    def test_struct_type_declaration_name_resolved(self, tmp_path) -> None:
+        p = tmp_path / "shapes.go"
+        p.write_text(
+            "package shapes\n"
+            "\n"
+            "type Point struct {\n"
+            "\tX int\n"
+            "\tY int\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        by_name = {s["name"]: s for s in symbols}
+        assert "Point" in by_name
+        assert by_name["Point"]["kind"] == "struct"
+
+    def test_interface_type_declaration_name_resolved(self, tmp_path) -> None:
+        p = tmp_path / "shapes.go"
+        p.write_text(
+            "package shapes\n"
+            "\n"
+            "type Shape interface {\n"
+            "\tArea() float64\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        names = {s["name"] for s in symbols}
+        assert "Shape" in names
+
+    def test_no_blank_name_symbol_emitted(self, tmp_path) -> None:
+        p = tmp_path / "shapes.go"
+        p.write_text(
+            "package shapes\n"
+            "\n"
+            "type Point struct {\n"
+            "\tX int\n"
+            "}\n"
+            "\n"
+            "func Origin() Point {\n"
+            "\treturn Point{}\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        assert "" not in {s["name"] for s in symbols}
+
+
 # ---------------------------------------------------------------------------
 # SymbolGraph — index_file / delete_file / symbol_count
 # ---------------------------------------------------------------------------

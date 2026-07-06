@@ -714,41 +714,26 @@ def extract_class_from_content(content: str) -> str:
 # chunk is a TYPE DEFINITION (struct/enum/trait/class/interface/typedef)
 # rather than a function/method or a type's separate implementation block.
 # Verified empirically against the exact `_CHUNK_NODE_TYPES` dict per
-# language — REACHABLE today means this string can actually be found on an
-# indexed chunk's node_type; DORMANT means the type-def node exists in the
-# grammar and is listed here for forward-compat/documentation, but
-# `_CHUNK_NODE_TYPES` for that language does not currently select it as a
-# top-level chunk boundary, so it can never appear as a chunk's node_type
-# until that (separate, indexer-level) chunking gap is closed:
+# language — REACHABLE means this string can actually be found on an indexed
+# chunk's node_type today. All entries below are REACHABLE
+# (UPG-RUST-STRUCT-CHUNK-MISSING closed the last DORMANT gaps: Rust
+# struct_item/trait_item/enum_item, TypeScript interface_declaration /
+# type_alias_declaration / enum_declaration, Go type_declaration, and Java
+# interface_declaration / enum_declaration were all added to
+# `_CHUNK_NODE_TYPES` so each now gets its own top-level chunk instead of
+# being silently swallowed by a sibling chunk or a window fallback):
 #   python:      class_definition                    — REACHABLE
 #   javascript:  class_declaration                   — REACHABLE
-#   typescript:  class_declaration                   — REACHABLE
-#                interface_declaration / type_alias_declaration /
-#                enum_declaration                     — DORMANT (not in
-#                _CHUNK_NODE_TYPES["typescript"])
-#   java:        class_declaration                   — REACHABLE
-#                interface_declaration / enum_declaration — DORMANT (not in
-#                _CHUNK_NODE_TYPES["java"], which only has method_declaration
-#                / class_declaration)
-#   go:          type_declaration                    — DORMANT (not in
-#                _CHUNK_NODE_TYPES["go"], which only has function_declaration
-#                / method_declaration)
-#   rust:        struct_item, trait_item, enum_item   — ALL THREE DORMANT.
-#                _CHUNK_NODE_TYPES["rust"] is {"function_item", "impl_item"}
-#                only — a Rust struct/trait/enum definition is never
-#                collected as its own chunk today: if the same file also
-#                defines a function, the type definition is silently
-#                skipped entirely; if the file has no function_item/impl_item
-#                at all, the whole file falls back to a single anonymous
-#                "window" chunk instead. This is a genuine indexer-level
-#                chunking gap (confirmed via a live chunk_file() probe on a
-#                synthetic struct/enum/trait fixture), not a ranking gap —
-#                DEF-B's prior is a correctly-implemented no-op for Rust
-#                type definitions until that gap is closed. impl_item is
-#                deliberately EXCLUDED from this set even after such a fix:
-#                an impl block is an implementation of a type, not the
-#                type's own definition (symbol_graph already draws this same
-#                distinction, UPG-4.5).
+#   typescript:  class_declaration, interface_declaration,
+#                type_alias_declaration, enum_declaration — REACHABLE
+#   java:        class_declaration, interface_declaration,
+#                enum_declaration                    — REACHABLE
+#   go:          type_declaration                    — REACHABLE (single node
+#                type covers struct/interface/alias forms in this grammar)
+#   rust:        struct_item, trait_item, enum_item   — REACHABLE. impl_item
+#                is deliberately EXCLUDED from this set: an impl block is an
+#                implementation of a type, not the type's own definition
+#                (symbol_graph already draws this same distinction, UPG-4.5).
 #   c / cpp:     struct_specifier, enum_specifier, type_definition — REACHABLE
 #   cpp only:    class_specifier                     — REACHABLE
 _TYPE_DEF_NODE_TYPES: frozenset[str] = frozenset({

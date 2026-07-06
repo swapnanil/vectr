@@ -80,6 +80,19 @@ def _get_symbol_name(node, code_bytes: bytes, language: str = "") -> str:
         # type_identifier is the RETURN type, not the name — use the shared helper.
         from agent.indexer import c_symbol_name
         return c_symbol_name(node, code_bytes)
+    # Go nests a type_declaration's own name one level down, under a type_spec
+    # child (`type Point struct {...}` -> type_declaration -> type_spec ->
+    # name field) rather than exposing it as a direct child (verified via a
+    # live tree-sitter-go parse; UPG-RUST-STRUCT-CHUNK-MISSING). Without this,
+    # every Go struct/interface/type-alias symbol silently gets name="" and is
+    # dropped from the symbol graph entirely.
+    if language == "go" and node.type == "type_declaration":
+        for child in node.children:
+            if child.type == "type_spec":
+                nm = child.child_by_field_name("name")
+                if nm is not None:
+                    return code_bytes[nm.start_byte:nm.end_byte].decode("utf-8", errors="replace")
+        return ""
     for child in node.children:
         if child.type in ("identifier", "name", "property_identifier", "type_identifier"):
             return code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
