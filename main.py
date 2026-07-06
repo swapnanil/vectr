@@ -1468,7 +1468,17 @@ _EXCLUDE_HELP = (
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="vectr", description="Zero-config semantic codebase indexer")
+    parser = argparse.ArgumentParser(
+        prog="vectr",
+        description=(
+            "Vectr: persistent external memory and semantic code search for AI coding "
+            "agents. Indexes a codebase for fast search/symbol/call-graph lookups over "
+            "MCP (search/locate/trace/map), and provides working memory (remember/"
+            "recall/snapshot) that survives context compaction and session restarts. "
+            "This CLI runs the daemon (start/stop/status) and also exposes search/"
+            "remember/recall directly from a shell."
+        ),
+    )
     sub = parser.add_subparsers(dest="command")
 
     _default_path = os.getenv("VECTR_WORKSPACE", ".")
@@ -1631,7 +1641,7 @@ def main() -> None:
     p_remember.add_argument("--path", default=_default_path)
     p_remember.add_argument("--port", type=int, default=_default_port)
 
-    p_recall = sub.add_parser("recall", help="Print recalled working-memory notes to stdout (for hooks)")
+    p_recall = sub.add_parser("recall", help="Print recalled working-memory notes to stdout")
     p_recall.add_argument("query", nargs="?", default=None, help="Semantic recall query (optional)")
     p_recall.add_argument("--tags", action="append", metavar="TAG", help="Filter by tag (repeatable)")
     p_recall.add_argument("--priority", choices=["high", "medium", "low"], default=None)

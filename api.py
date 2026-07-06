@@ -50,7 +50,12 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(
     title="Vectr",
-    description="Zero-config semantic codebase indexer with MCP protocol",
+    description=(
+        "Persistent external memory and semantic code search for AI coding agents, "
+        "exposed over MCP and this REST API: codebase search/symbol-graph lookups "
+        "(search/locate/trace/map) plus a working-memory store (remember/recall/"
+        "snapshot) that survives context compaction and session boundaries."
+    ),
     version="1.0.0",
     lifespan=lifespan,
 )

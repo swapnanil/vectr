@@ -2126,3 +2126,35 @@ class TestExcludeFlag:
         assert not (tmp_path / ".vectrignore").exists()
         MockReg.assert_not_called()
         mock_do_start.assert_not_called()
+
+
+class TestTopLevelDescription:
+    """UPG-CLI-DESC: `vectr -h` must describe BOTH capabilities (search AND
+    working memory), not just "codebase indexer" — the prior wording gave
+    no indication the CLI/MCP surface has a memory half at all."""
+
+    def test_help_mentions_both_search_and_memory(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            with patch("sys.argv", ["vectr", "--help"]):
+                m.main()
+        assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        header = out.split("positional arguments")[0]
+        assert "memory" in header.lower()
+        assert "search" in header.lower()
+        # Editor-agnostic: no product/editor names in the top-level description.
+        assert "Claude" not in header
+
+    def test_recall_help_no_longer_says_for_hooks_only(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            with patch("sys.argv", ["vectr", "--help"]):
+                m.main()
+        assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        assert "recall" in out
+        assert "for hooks" not in out
+
+    def test_fastapi_app_description_mentions_both_capabilities(self) -> None:
+        import api
+        assert "memory" in api.app.description.lower()
+        assert "search" in api.app.description.lower()
