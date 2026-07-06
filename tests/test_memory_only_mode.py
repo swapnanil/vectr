@@ -379,6 +379,39 @@ class TestRestRoutesMemoryOnly:
         body = resp.json()
         assert body["detail"]["error"] == "memory_only_mode"
 
+    def test_index_returns_503_in_memory_only_mode(self):
+        """UPG-CLI-MEMONLY-CRASH companion: indexing is pointless when search
+        is disabled — /v1/index is gated the same way /v1/search already is,
+        rather than silently building an index nothing can query."""
+        from fastapi.testclient import TestClient
+        from api import app
+        from tests.conftest import _base_mock_service
+
+        svc = _base_mock_service()
+        svc.memory_only = True
+
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                app.state.service = svc
+                resp = c.post("/v1/index", json={"path": "/some/path", "force": False})
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["detail"]["error"] == "memory_only_mode"
+
+    def test_index_succeeds_in_full_mode(self):
+        from fastapi.testclient import TestClient
+        from api import app
+        from tests.conftest import _base_mock_service
+
+        svc = _base_mock_service()
+        svc.memory_only = False
+
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=True) as c:
+                app.state.service = svc
+                resp = c.post("/v1/index", json={"path": "/some/path", "force": False})
+        assert resp.status_code == 200
+
     def test_search_succeeds_in_full_mode(self):
         from fastapi.testclient import TestClient
         from api import app

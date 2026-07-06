@@ -178,6 +178,43 @@ def _api_base(port: int) -> str:
     return f"http://localhost:{port}"
 
 
+def _daemon_error_detail(exc: "httpx.HTTPStatusError") -> str:
+    """Extract the server's structured `detail` message from a daemon error
+    response, e.g. {"detail": {"error": "memory_only_mode", "detail": "..."}}
+    (see app/routes.py's mode-gated 503s). Falls back to the raw status code
+    when the body isn't in that shape.
+    """
+    try:
+        body = exc.response.json()
+    except Exception:
+        return f"Vectr returned HTTP {exc.response.status_code}."
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict):
+        return detail.get("detail") or detail.get("error") or str(detail)
+    if isinstance(detail, str):
+        return detail
+    return f"Vectr returned HTTP {exc.response.status_code}."
+
+
+def _handle_daemon_call_error(exc: Exception, port: int) -> None:
+    """Uniform CLI error contract for every subcommand that talks to the
+    daemon over REST (UPG-CLI-MEMONLY-CRASH): a down daemon and a daemon
+    that declines the request (e.g. search/index disabled in memory-only
+    mode, memory tools disabled in search-only mode) must both print one
+    clean line to stderr and exit 1 — never an unhandled traceback exposing
+    internal paths. Re-raises anything it doesn't recognise so a genuine bug
+    still surfaces instead of being silently swallowed.
+    """
+    import httpx
+    if isinstance(exc, httpx.ConnectError):
+        print(f"Error: Vectr is not running on port {port}. Run: vectr start", file=sys.stderr)
+        sys.exit(1)
+    if isinstance(exc, httpx.HTTPStatusError):
+        print(f"Error: {_daemon_error_detail(exc)}", file=sys.stderr)
+        sys.exit(1)
+    raise exc
+
+
 def _is_server_alive(port: int, timeout: float = 2.0) -> tuple[bool, str | None]:
     """Return (alive, workspace_root). Non-blocking within timeout."""
     try:
@@ -771,9 +808,8 @@ def cmd_index(args: argparse.Namespace) -> None:
         )
         resp.raise_for_status()
         print(json.dumps(resp.json(), indent=2))
-    except httpx.ConnectError:
-        print(f"Error: Vectr is not running on port {port}. Run: vectr start", file=sys.stderr)
-        sys.exit(1)
+    except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
+        _handle_daemon_call_error(exc, port)
 
 
 def cmd_search(args: argparse.Namespace) -> None:
@@ -799,9 +835,8 @@ def cmd_search(args: argparse.Namespace) -> None:
             print()
             print(r["content"][:1000])
         print(f"\n— {data['query_time_ms']}ms  {data['chunks_searched']} chunks searched", file=sys.stderr)
-    except httpx.ConnectError:
-        print(f"Error: Vectr is not running on port {port}. Run: vectr start", file=sys.stderr)
-        sys.exit(1)
+    except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
+        _handle_daemon_call_error(exc, port)
 
 
 def cmd_remember(args: argparse.Namespace) -> None:
@@ -825,18 +860,22 @@ def cmd_remember(args: argparse.Namespace) -> None:
         resp = httpx.post(f"{_api_base(port)}/v1/remember", json=payload, timeout=30)
         resp.raise_for_status()
         print(resp.json().get("message", "Stored note."))
-    except httpx.ConnectError:
-        print(f"Error: Vectr is not running on port {port}. Run: vectr start", file=sys.stderr)
-        sys.exit(1)
+    except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
+        _handle_daemon_call_error(exc, port)
 
 
 def cmd_recall(args: argparse.Namespace) -> None:
     """Print recalled working-memory notes to stdout (UPG-9.1).
 
-    stdout is the field SessionStart / UserPromptSubmit hooks inject into the
-    model's context, so this command writes notes to stdout and nothing else.
-    It is intentionally resilient: if the daemon is down it emits no notes and
-    still exits 0, so a hook that shells out can never break the session.
+    This is the human-facing subcommand — `vectr recall` at a shell prompt or
+    in a script — and follows the same error contract as every sibling
+    subcommand (daemon down or declining the request -> stderr message,
+    exit 1). It is NOT the hook path: hook entries written by
+    `_write_claude_hooks` invoke `vectr hook <event>` (see cmd_hook), which
+    resolves its own daemon connection via `_fetch_recall` and never raises
+    regardless of daemon state — that resilience lives entirely in cmd_hook,
+    not here, so a down daemon can never look like a successful recall to a
+    script that shells out to this command (UPG-CLI-RECALL-EXITCODE).
     """
     import httpx
 
@@ -873,8 +912,8 @@ def cmd_recall(args: argparse.Namespace) -> None:
         notes = resp.json().get("notes", "")
         if notes:
             print(notes)
-    except httpx.ConnectError:
-        print(f"Vectr not running on port {port}; no notes recalled.", file=sys.stderr)
+    except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
+        _handle_daemon_call_error(exc, port)
 
 
 def _fetch_recall(port: int, payload: dict) -> str:
@@ -1144,9 +1183,8 @@ def cmd_forget(args: argparse.Namespace) -> None:
         resp.raise_for_status()
         data = resp.json()
         print(f"Deleted {data['deleted']} working-memory notes for {workspace}")
-    except httpx.ConnectError:
-        print(f"Error: Vectr is not running on port {port}. Run: vectr start", file=sys.stderr)
-        sys.exit(1)
+    except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
+        _handle_daemon_call_error(exc, port)
 
 
 def cmd_init(args: argparse.Namespace) -> None:

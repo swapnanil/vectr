@@ -60,6 +60,9 @@ async def health(request: Request) -> HealthResponse:
 @router.post("/v1/index", response_model=IndexResponse)
 async def index(body: IndexRequest, request: Request) -> IndexResponse:
     svc = _service(request)
+    if getattr(svc, "memory_only", False):
+        from app.service import _MEMORY_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
     try:
         files, chunks, elapsed = svc.index(body.path, force=body.force)
     except Exception as exc:

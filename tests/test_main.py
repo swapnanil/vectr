@@ -37,6 +37,21 @@ def _make_args(**kwargs) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
+def _mode_gated_response(error: str, detail: str, status_code: int = 503):
+    """Build a MagicMock httpx.Response whose .raise_for_status() raises an
+    HTTPStatusError carrying the SAME structured body app/routes.py's mode
+    gates return, e.g. {"detail": {"error": "memory_only_mode", "detail": "..."}}.
+    """
+    import httpx
+    mock_resp = MagicMock()
+    mock_resp.status_code = status_code
+    mock_resp.json.return_value = {"detail": {"error": error, "detail": detail}}
+    mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        str(status_code), request=MagicMock(), response=mock_resp,
+    )
+    return mock_resp
+
+
 def _registry_with(tmp_path, entries: dict) -> InstanceRegistry:
     reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
     for ws_hash_key, entry in entries.items():
@@ -371,6 +386,175 @@ class TestWriteWorkspaceConfig:
 
 
 # ---------------------------------------------------------------------------
+# _daemon_error_detail / _handle_daemon_call_error (UPG-CLI-MEMONLY-CRASH)
+# ---------------------------------------------------------------------------
+
+class TestDaemonErrorDetail:
+    def test_extracts_nested_detail_string(self):
+        mock_resp = _mode_gated_response("memory_only_mode", "vectr is in memory-only mode...")
+        exc = mock_resp.raise_for_status.side_effect
+        assert m._daemon_error_detail(exc) == "vectr is in memory-only mode..."
+
+    def test_falls_back_to_status_code_on_unstructured_body(self):
+        import httpx
+        from unittest.mock import MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.json.side_effect = ValueError("not json")
+        exc = httpx.HTTPStatusError("500", request=MagicMock(), response=mock_resp)
+        assert "500" in m._daemon_error_detail(exc)
+
+
+class TestHandleDaemonCallError:
+    def test_connect_error_exits_one_with_not_running_message(self, capsys):
+        import httpx
+        with pytest.raises(SystemExit) as exc_info:
+            m._handle_daemon_call_error(httpx.ConnectError("down"), 8765)
+        assert exc_info.value.code == 1
+        assert "not running" in capsys.readouterr().err.lower()
+
+    def test_http_status_error_exits_one_with_server_detail(self, capsys):
+        mock_resp = _mode_gated_response("memory_only_mode", "vectr is in memory-only mode...")
+        exc = mock_resp.raise_for_status.side_effect
+        with pytest.raises(SystemExit) as exc_info:
+            m._handle_daemon_call_error(exc, 8765)
+        assert exc_info.value.code == 1
+        assert "memory-only mode" in capsys.readouterr().err
+
+    def test_unrecognised_exception_reraises(self):
+        with pytest.raises(ValueError):
+            m._handle_daemon_call_error(ValueError("unrelated"), 8765)
+
+
+# ---------------------------------------------------------------------------
+# cmd_index / cmd_search (UPG-CLI-MEMONLY-CRASH)
+# ---------------------------------------------------------------------------
+
+class TestCmdIndex:
+    def test_posts_to_index_endpoint_and_prints_result(self, tmp_path, capsys):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"indexed_files": 3, "chunks": 12, "elapsed_ms": 40}
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(path=str(tmp_path), force=False, port=8765)
+            m.cmd_index(args)
+
+        call_url = mock_post.call_args[0][0]
+        assert "/v1/index" in call_url
+        assert "3" in capsys.readouterr().out
+
+    def test_connect_error_exits_nonzero_with_clean_message(self, tmp_path, capsys):
+        import argparse
+        import httpx
+        from unittest.mock import patch
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", side_effect=httpx.ConnectError("down")):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(path=str(tmp_path), force=False, port=8765)
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_index(args)
+
+        assert exc_info.value.code == 1
+        assert "not running" in capsys.readouterr().err.lower()
+
+    def test_memory_only_gate_prints_detail_instead_of_crashing(self, tmp_path, capsys):
+        """UPG-CLI-MEMONLY-CRASH: indexing against a memory-only daemon (which
+        503s /v1/index) must print the server's clean detail message and exit
+        1 — not raise an unhandled httpx.HTTPStatusError traceback."""
+        import argparse
+        from unittest.mock import patch
+
+        mock_resp = _mode_gated_response("memory_only_mode", "vectr is in memory-only mode...")
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(path=str(tmp_path), force=False, port=8765)
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_index(args)
+
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "memory-only mode" in err
+        assert "Traceback" not in err
+
+
+class TestCmdSearch:
+    def test_posts_to_search_endpoint_and_prints_results(self, tmp_path, capsys, monkeypatch):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        monkeypatch.chdir(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"file": "a.py", "lines": "1-5", "score": 0.9, "symbol": "foo", "language": "python",
+                 "content": "def foo(): pass"},
+            ],
+            "query_time_ms": 5,
+            "chunks_searched": 10,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query="foo function", n=5, language=None, port=8765)
+            m.cmd_search(args)
+
+        call_url = mock_post.call_args[0][0]
+        assert "/v1/search" in call_url
+        assert "a.py" in capsys.readouterr().out
+
+    def test_connect_error_exits_nonzero_with_clean_message(self, tmp_path, capsys, monkeypatch):
+        import argparse
+        import httpx
+        from unittest.mock import patch
+
+        monkeypatch.chdir(tmp_path)
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", side_effect=httpx.ConnectError("down")):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query="foo", n=5, language=None, port=8765)
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_search(args)
+
+        assert exc_info.value.code == 1
+        assert "not running" in capsys.readouterr().err.lower()
+
+    def test_search_only_gate_prints_detail_instead_of_crashing(self, tmp_path, capsys, monkeypatch):
+        """UPG-CLI-MEMONLY-CRASH companion: search against a search-only-mode
+        daemon succeeds (search is always on there); the crash class this
+        guards is the same handler used when a mode gate 503s search itself
+        (e.g. a future gate, or a misconfigured instance)."""
+        import argparse
+        from unittest.mock import patch
+
+        mock_resp = _mode_gated_response("some_gate_mode", "vectr declined this request...")
+
+        monkeypatch.chdir(tmp_path)
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query="foo", n=5, language=None, port=8765)
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_search(args)
+
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "vectr declined this request" in err
+        assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
 # cmd_forget
 # ---------------------------------------------------------------------------
 
@@ -511,8 +695,11 @@ class TestCmdRecall:
 
         assert capsys.readouterr().out == ""
 
-    def test_daemon_down_is_silent_and_exits_zero(self, tmp_path, capsys):
-        """Recall feeds hook-injected context; a down daemon must never break the session."""
+    def test_daemon_down_follows_standard_error_contract(self, tmp_path, capsys):
+        """UPG-CLI-RECALL-EXITCODE: the human `vectr recall` subcommand follows
+        the same error contract as every sibling (stderr message + exit 1) —
+        it is NOT the hook path (hooks invoke `vectr hook <event>`, which owns
+        its own never-raise resilience in cmd_hook/_fetch_recall)."""
         import argparse
         import httpx
         from unittest.mock import patch
@@ -522,10 +709,40 @@ class TestCmdRecall:
             MockReg.return_value.get.return_value = None
             args = argparse.Namespace(query="lock flow", tags=None, priority=None,
                                       limit=10, path=str(tmp_path), port=8765)
-            # No SystemExit raised → exit 0.
-            m.cmd_recall(args)
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_recall(args)
 
-        assert capsys.readouterr().out == ""
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "not running" in err.lower()
+
+    def test_memory_only_and_search_only_gate_errors_still_print_detail(self, tmp_path, capsys):
+        """A daemon that's up but declines the request (e.g. search-only mode
+        gating /v1/recall's 503) must also print the clean server detail and
+        exit 1, not crash with a raw HTTPStatusError traceback."""
+        import argparse
+        import httpx
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "detail": {"error": "search_only_mode", "detail": "vectr is in search-only mode..."},
+        }
+        mock_resp.status_code = 503
+        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "503", request=MagicMock(), response=mock_resp,
+        )
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query="lock flow", tags=None, priority=None,
+                                      limit=10, path=str(tmp_path), port=8765)
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_recall(args)
+
+        assert exc_info.value.code == 1
+        assert "search-only mode" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
