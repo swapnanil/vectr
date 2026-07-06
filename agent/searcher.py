@@ -16,6 +16,7 @@ from agent.chunk_quality import (
     is_trivial_chunk,
     extract_class_from_content,
     is_type_definition_chunk,
+    is_module_level_function_chunk,
     leading_docstring_key,
 )
 from agent.config import (
@@ -716,6 +717,12 @@ class CodeSearcher:
             # promote symbol_name (UPG-11.10, presentational) and to look up the
             # chunk's owning-class importance below (ARCH-2, affects ranking).
             class_ctx = extract_class_from_content(r.content)
+            # own_name: the chunk's OWN bare leaf name, captured before the
+            # UPG-11.10 requalification below overwrites r.symbol_name — needed
+            # by the UPG-SIBLING-TYPEDEF-CROWDING attribution below, since the
+            # importance map is keyed on bare names (symbols.name), never the
+            # presentational "Class.leaf" form.
+            own_name = r.symbol_name
             # UPG-11.10: promote symbol_name to the qualified "Class.leaf" form.
             # Presentational only — it makes the REST/MCP `symbol` field show
             # "Field.deconstruct" instead of the bare "deconstruct" so callers see
@@ -726,10 +733,28 @@ class CodeSearcher:
             # factor ∈ [1, 1+lambda]. No-op when no map installed or lambda = 0.
             imp_file = self._file_importance.get(r.file_path, 0.0) if self._file_importance else 0.0
             file_factor = 1.0 + _IMPORTANCE_PRIOR_LAMBDA * imp_file
-            # ARCH-2: relevance-gated class-importance prior — same shape as
-            # ARCH-1b, at class granularity. No-op when the chunk has no class
-            # context, no map is installed, or lambda = 0.
-            imp_class = self._class_importance.get(class_ctx, 0.0) if class_ctx and self._class_importance else 0.0
+            # DEF-B (UPG-RUST-DEF-EVICTION): pure chunk PROPERTY (node_type/
+            # content/language only — never the query). Computed here (ahead of
+            # its def_factor use below) because UPG-SIBLING-TYPEDEF-CROWDING's
+            # class-importance attribution also needs it.
+            is_type_def = is_type_definition_chunk(r.node_type, r.content, r.language)
+            # ARCH-2 (UPG-SIBLING-TYPEDEF-CROWDING extension): relevance-gated
+            # class/symbol-importance prior, same shape as ARCH-1b at
+            # class/type/function-name granularity. A METHOD chunk (the
+            # original ARCH-2 case) is attributed via its owning class's name
+            # (class_ctx), unchanged. A TYPE-DEFINITION chunk (struct/enum/
+            # trait/class/interface/typedef — is_type_def above) or a
+            # MODULE-LEVEL FUNCTION chunk (no owning class recovered) is
+            # instead attributed to its OWN name — a base type's own definition
+            # or a corpus-central helper function was previously invisible to
+            # this prior entirely (imp_class stuck at 0.0), letting same-file
+            # narrower siblings crowd it out at a near-tie base relevance. No-op
+            # when the relevant name has no class/symbol context, no map is
+            # installed, or lambda = 0.
+            if is_type_def or is_module_level_function_chunk(r.node_type, class_ctx):
+                imp_class = self._class_importance.get(own_name, 0.0) if own_name and self._class_importance else 0.0
+            else:
+                imp_class = self._class_importance.get(class_ctx, 0.0) if class_ctx and self._class_importance else 0.0
             class_factor = 1.0 + _CLASS_IMPORTANCE_PRIOR_LAMBDA * imp_class
             # ARCH-4b: relevance-gated purpose-similarity prior — carries the
             # ARCH-4 dual-vector pool-entry signal into the FINAL sort, which the
@@ -757,11 +782,11 @@ class CodeSearcher:
             # look-alikes leapfrog them.
             purpose_factor = 1.0 + _PURPOSE_RANK_PRIOR_LAMBDA * r.purpose_sim * q
             # DEF-B (UPG-RUST-DEF-EVICTION): relevance-gated type-definition
-            # node_type prior. is_type_definition is a pure chunk PROPERTY
-            # (node_type/content/language only — never the query), so this
-            # factor is an exact no-op (1.0) for any chunk that is not a
-            # struct/enum/trait/class/interface definition.
-            is_type_def = is_type_definition_chunk(r.node_type, r.content, r.language)
+            # node_type prior. is_type_def (computed above, alongside the
+            # class-importance attribution) is a pure chunk PROPERTY (node_type/
+            # content/language only — never the query), so this factor is an
+            # exact no-op (1.0) for any chunk that is not a struct/enum/trait/
+            # class/interface definition.
             def_factor = 1.0 + _TYPE_DEF_PRIOR_LAMBDA * (1.0 if is_type_def else 0.0)
             scored.append((base * q * file_factor * class_factor * purpose_factor * def_factor, q, i, r))
 

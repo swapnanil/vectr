@@ -148,24 +148,40 @@ ranking:
     lambda: 0.25
 
   class_importance:
-    # ARCH-2: class-level "canonical = most-referenced" importance (whole-word
-    # reference frequency of the class name across the corpus, computed at index
-    # time by SymbolGraph._compute_and_store_class_importance and stored in the
-    # class_importance table) is blended into the FINAL search sort as a second
-    # relevance-gated multiplicative prior, alongside ARCH-1b's file-level prior:
+    # ARCH-2: class/symbol-name "canonical = most-referenced" importance
+    # (whole-word reference frequency of the name across the corpus, computed
+    # at index time by SymbolGraph._compute_and_store_class_importance and
+    # stored in the class_importance table) is blended into the FINAL search
+    # sort as a second relevance-gated multiplicative prior, alongside
+    # ARCH-1b's file-level prior:
     #     final_score = base_rerank_score * quality_score
     #                    * (1 + lambda_file * file_importance)
     #                    * (1 + lambda_class * class_importance)
-    # where class_importance ∈ [0,1] is the normalized reference frequency of the
-    # chunk's owning class (0 when the chunk has no class context, e.g. a
-    # module-level function). This is the lever for same-leaf method collisions
-    # (two unrelated classes that both define a method with the same name) that
-    # file-level importance cannot discriminate — a class's own body often IS the
-    # file, so file-level PageRank has no separating signal. lambda=0 disables it
-    # (behaviour identical to pre-ARCH-2). Conservative default 0.25, matching
-    # ARCH-1b's default: reorders same-leaf look-alikes toward the canonical class
-    # without overriding clear relevance. Live F22/F23 tuning is tracked in
-    # tasks.md ARCH-2.
+    # where class_importance ∈ [0,1] is the normalized reference frequency of
+    # the relevant name. This is the lever for same-leaf collisions (two
+    # unrelated classes that both define a method with the same name; a
+    # canonical type's own definition chunk crowded by a same-file, narrower
+    # sibling type; a corpus-central module-level function crowded by a
+    # rarely-referenced sibling function — UPG-SIBLING-TYPEDEF-CROWDING) that
+    # file-level importance cannot discriminate — a symbol's own body often IS
+    # the file, so file-level PageRank has no separating signal.
+    #
+    # UPG-SIBLING-TYPEDEF-CROWDING extended attribution beyond methods: a
+    # METHOD chunk still uses its owning class's name (unchanged); a
+    # TYPE-DEFINITION chunk (struct/enum/trait/class/interface/typedef) or a
+    # MODULE-LEVEL FUNCTION chunk is instead attributed to its OWN name —
+    # previously stuck at class_importance=0 forever since neither has an
+    # owning-class context to key off. See agent/searcher.py
+    # (is_type_definition_chunk / is_module_level_function_chunk gated
+    # lookup).
+    #
+    # lambda=0 disables it (behaviour identical to pre-ARCH-2). Conservative
+    # default 0.25, matching ARCH-1b's default: reorders same-leaf look-alikes
+    # toward the canonical symbol without overriding clear relevance — the
+    # multiplicative gate bounds the factor to [1, 1+lambda] regardless of how
+    # skewed the importance map is, so a modest lambda here cannot let even a
+    # maximum-importance rival overturn a clear cross-encoder relevance lead.
+    # Live F22/F23 tuning is tracked in tasks.md ARCH-2.
     lambda: 0.25
 
   purpose_rank:

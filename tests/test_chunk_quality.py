@@ -15,6 +15,7 @@ from agent.chunk_quality import (
     is_test_file,
     is_content_structural_test_chunk,
     is_type_definition_chunk,
+    is_module_level_function_chunk,
     is_private_symbol_name,
     quality_score,
     normalized_content,
@@ -415,6 +416,40 @@ class TestIsTypeDefinitionChunk:
         # trigger the variable_declaration content check.
         content = "pub const Point = struct {\n    x: i32,\n};"
         assert is_type_definition_chunk("variable_declaration", content, "python") is False
+
+
+class TestIsModuleLevelFunctionChunk:
+    """UPG-SIBLING-TYPEDEF-CROWDING: module-level function node_type predicate
+    (mirrors TestIsTypeDefinitionChunk's shape) — the chunk-PROPERTY check that
+    gates ARCH-2's own-name importance attribution for functions."""
+
+    @pytest.mark.parametrize("node_type", [
+        "function_definition",   # python, c, cpp
+        "function_declaration",  # javascript, typescript, go, zig
+        "function_expression",   # javascript, typescript
+        "arrow_function",        # javascript, typescript
+        "function_item",         # rust
+    ])
+    def test_positive_node_types_without_class_context(self, node_type):
+        assert is_module_level_function_chunk(node_type, "") is True
+
+    @pytest.mark.parametrize("node_type", [
+        "method_definition",
+        "method_declaration",
+        "class_definition",
+        "struct_item",
+        "impl_item",
+        "window",
+    ])
+    def test_negative_node_types(self, node_type):
+        assert is_module_level_function_chunk(node_type, "") is False
+
+    def test_function_node_type_with_class_context_is_not_module_level(self):
+        # A function-family node_type IS the shape a method chunk sometimes has
+        # (e.g. a Rust impl_item's method never recovering class_context) — if
+        # a class context WAS recovered, this is a method, not a module-level
+        # function, and must not be treated as one.
+        assert is_module_level_function_chunk("function_definition", "Widget") is False
 
 
 class TestLeadingDocstringKey:

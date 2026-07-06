@@ -4,6 +4,7 @@ SQLite-backed SymbolGraph: locate, trace, format, and persistence.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import sqlite3
 import time
@@ -17,6 +18,7 @@ from agent.symbol_graph._constants import (
     _KIND_RANK,
     _KIND_RANK_DEFAULT,
     _BUILTINS,
+    _IMPORTANCE_SYMBOL_KINDS,
     graph_toolchain_fingerprint,
 )
 from agent.config import (
@@ -837,57 +839,84 @@ class SymbolGraph:
     def _compute_and_store_class_importance(
         self, workspace: str, file_paths: list[str],
     ) -> None:
-        """Compute class-level reference-frequency importance and persist scores.
+        """Compute symbol-name reference-frequency importance and persist scores.
 
-        Extends ARCH-1a's file-level importance to class granularity — the signal
-        that discriminates same-leaf METHOD collisions (two unrelated classes that
-        both define a `delete` method) which file-level importance cannot: in a
-        module with one dominant class, the class *is* the file, so file-level
-        PageRank can't separate the canonical class's methods from a same-file
-        helper's same-named method, and it can't separate two candidate classes
-        that live in different but equally-"important" files at all. Call edges are
-        leaf-only (no receiver-type resolution — `obj.delete()` edges only ever
-        record the bare `delete` target), so no edge-based signal can attribute a
-        call to one class over another; whole-word reference frequency of the
-        class's own NAME sidesteps that entirely (validated design — receiver-type
-        resolution was evaluated and rejected as the lever; see docs/tasks.md ARCH-2).
+        Extends ARCH-1a's file-level importance to class/type/function-name
+        granularity — the signal that discriminates same-leaf collisions (two
+        unrelated classes that both define a `delete` method; a module-level
+        function crowded by a same-file, rarely-referenced sibling; a base
+        type's own definition chunk crowded by its narrower same-file variants,
+        UPG-SIBLING-TYPEDEF-CROWDING) which file-level importance cannot: in a
+        module with one dominant symbol, that symbol *is* the file, so
+        file-level PageRank can't separate the canonical symbol's chunk from a
+        same-file sibling's, and it can't separate two candidates that live in
+        different but equally-"important" files at all. Call edges are leaf-only
+        (no receiver-type resolution — `obj.delete()` edges only ever record the
+        bare `delete` target), so no edge-based signal can attribute a call to
+        one owner over another; whole-word reference frequency of the symbol's
+        own NAME sidesteps that entirely (validated design — receiver-type
+        resolution was evaluated and rejected as the lever; see docs/tasks.md
+        ARCH-2).
 
         Algorithm:
-          1. Collect the distinct class names defined in this workspace (symbols
-             table, kind='class').
+          1. Collect the distinct names of every TYPE DEFINITION (class/struct/
+             enum/interface/typedef — see `_IMPORTANCE_SYMBOL_KINDS`) plus every
+             module-level FUNCTION defined in this workspace (symbols table).
+             A type-def or module-level-function chunk is attributed to its OWN
+             name at query time (searcher-side); a method chunk keeps the
+             existing owning-class attribution — see (3) below.
           2. Single pass per file: tokenize into whole-word identifiers and count
-             occurrences of the known class names (definitions, instantiations,
-             type hints, inheritance, docs — anywhere the name appears as a whole
-             word). O(corpus size), not O(classes x corpus size).
-          3. Normalize to [0,1] by dividing by the max raw count.
+             occurrences of the known names (definitions, instantiations, type
+             hints, inheritance, calls, docs — anywhere the name appears as a
+             whole word). O(corpus size), not O(names x corpus size).
+          3. Normalize to (0,1] with `log(1 + count) / log(1 + max_count)`
+             rather than a linear `count / max_count`. Once function names
+             (which skew toward far higher raw counts than class names — a
+             widely-called helper can dwarf every class's reference count) share
+             the same map, a linear scale lets one high-frequency function name
+             stretch `max_count` enough to compress every OTHER name's score
+             toward the same near-zero value, erasing the very separation this
+             table exists to preserve; log-scaling compresses the top of the
+             range instead, so a decisive raw-count gap (e.g. 439 vs 43) still
+             yields a visibly different score after normalization even when the
+             map's max count grows by an order of magnitude. The multiplicative
+             relevance gate (`1 + lambda * score`, lambda <= 1) bounds the
+             factor to `[1, 1+lambda]` regardless of scale choice, so an adverse
+             case (a less-central name outscoring the true answer, e.g. 34 vs
+             85) still cannot overturn a clear cross-encoder relevance lead —
+             log-scaling only affects whether decisive cases stay visibly
+             separated, not the no-overturn guarantee.
           4. Bulk-insert into class_importance (delete-first for idempotency).
 
-        A class name is intentionally NOT qualified by defining file — same-named
-        classes across files (e.g. a repeated `Meta`/`Config` inner class) share one
-        corpus-wide reference count, matching "canonical = most-referenced" rather
-        than a per-definition-site count. Owning-class attribution for a given
-        chunk happens at query time via the already-existing
-        chunk_quality.extract_class_from_content() (searcher-side); this method
-        only computes the per-class score.
+        A name is intentionally NOT qualified by defining file — same-named
+        symbols across files (e.g. a repeated `Meta`/`Config` inner class) share
+        one corpus-wide reference count, matching "canonical = most-referenced"
+        rather than a per-definition-site count.
+
+        The table/column names (`class_importance`, `qualified_class`) predate
+        this extension and are kept as-is to avoid schema churn — the stored
+        score is symbol-name importance generally, not class-only.
 
         Pure stdlib — no new dependency, mirrors _compute_and_store_importance.
         """
         with self._conn() as conn:
-            class_names: set[str] = {
+            placeholders = ",".join("?" * len(_IMPORTANCE_SYMBOL_KINDS))
+            names: set[str] = {
                 name for (name,) in conn.execute(
-                    "SELECT DISTINCT name FROM symbols WHERE workspace = ? AND kind = 'class'",
-                    (workspace,),
+                    "SELECT DISTINCT name FROM symbols WHERE workspace = ? "
+                    f"AND kind IN ({placeholders})",
+                    (workspace, *_IMPORTANCE_SYMBOL_KINDS),
                 )
             }
 
-        if not class_names:
+        if not names:
             with self._conn() as conn:
                 conn.execute(
                     "DELETE FROM class_importance WHERE workspace = ?", (workspace,)
                 )
             return
 
-        counts: dict[str, int] = dict.fromkeys(class_names, 0)
+        counts: dict[str, int] = dict.fromkeys(names, 0)
         for fp in file_paths:
             try:
                 text = Path(fp).read_text(encoding="utf-8", errors="ignore")
@@ -905,18 +934,19 @@ class SymbolGraph:
                 "DELETE FROM class_importance WHERE workspace = ?", (workspace,)
             )
             if max_count > 0:
+                log_max = math.log1p(max_count)
                 conn.executemany(
                     "INSERT INTO class_importance (workspace, qualified_class, score) "
                     "VALUES (?, ?, ?)",
                     (
-                        (workspace, name, count / max_count)
+                        (workspace, name, math.log1p(count) / log_max)
                         for name, count in counts.items() if count > 0
                     ),
                 )
 
         logger.debug(
-            "ARCH-2 class importance: workspace=%s classes=%d max_raw=%d",
-            workspace, len(class_names), max_count,
+            "ARCH-2 symbol-name importance: workspace=%s names=%d max_raw=%d",
+            workspace, len(names), max_count,
         )
 
     def class_importance(self, workspace: str) -> dict[str, float]:

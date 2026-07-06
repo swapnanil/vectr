@@ -2115,11 +2115,11 @@ class TestDualVectorPoolEntryEvidenceGate:
 
 def _sr(
     content, path="/p/a.py", node_type="", score=0.7, lang="python", purpose_sim=0.0,
-    dense_sim=0.0, ce_relevance=None,
+    dense_sim=0.0, ce_relevance=None, symbol_name="",
 ):
     from agent.searcher import SearchResult
     return SearchResult(
-        file_path=path, lines="1-9", symbol_name="", language=lang,
+        file_path=path, lines="1-9", symbol_name=symbol_name, language=lang,
         score=score, content=content, node_type=node_type,
         purpose_sim=purpose_sim, dense_sim=dense_sim, ce_relevance=ce_relevance,
     )
@@ -2541,6 +2541,147 @@ class TestClassImportancePrior:
         searcher.set_class_importance({"SomeOtherClass": 1.0})
         out = searcher._apply_quality_and_dedup("process the item", cands)
         assert out[0] is lookalike
+
+    def test_method_chunk_still_uses_owning_class_unchanged(self, searcher) -> None:
+        # UPG-SIBLING-TYPEDEF-CROWDING must not change METHOD-chunk attribution:
+        # a method chunk's importance still comes from its owning class's own
+        # name (class_ctx), never from the method's own leaf name, even when the
+        # importance map happens to also contain an entry keyed on the method's
+        # bare name (a false attribution the map lookup must not fall into).
+        canonical, cands = self._same_leaf_collision()
+        # "process" (the shared method leaf) is seeded into the map too, at the
+        # HIGHEST score — if method attribution ever switched to the chunk's
+        # own (leaf) name instead of its owning class, this would lift every
+        # same-leaf candidate equally and the canonical-class ordering below
+        # would no longer hold.
+        searcher.set_class_importance({"Widget": 1.0, "Gadget": 0.0, "process": 1.0})
+        out = searcher._apply_quality_and_dedup("process the item", cands)
+        assert out[0] is canonical, (
+            f"method attribution must still key on owning class, not own leaf "
+            f"name; got {out[0].file_path}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# UPG-SIBLING-TYPEDEF-CROWDING — ARCH-2 extension: a TYPE-DEFINITION chunk or a
+# MODULE-LEVEL FUNCTION chunk is attributed to its OWN name's importance
+# (rather than always reading 0.0, as the original ARCH-2 class-context-only
+# lookup did), so a canonical type/function can no longer be crowded out by a
+# same-file, rarely-referenced sibling at a near-tie base relevance.
+# ---------------------------------------------------------------------------
+
+class TestSiblingTypedefCrowding:
+    def test_type_definition_chunk_gets_own_name_importance(self, searcher) -> None:
+        # A struct's own definition chunk (no owning class — node_type is a
+        # TYPE-DEFINITION kind) must be attributed to ITS OWN name, not left at
+        # importance=0.0 forever. Same near-tie shape as the other priors'
+        # tests: the canonical struct starts one rank behind a same-leaf
+        # sibling struct at a lower reference count.
+        sibling = _sr(
+            "struct Gadget {\n    value: i32,\n}\n// fields",
+            path="/p/gadget.rs", lang="rust", node_type="struct_item",
+            symbol_name="Gadget",
+        )
+        canonical = _sr(
+            "struct Widget {\n    value: i32,\n}\n// fields",
+            path="/p/widget.rs", lang="rust", node_type="struct_item",
+            symbol_name="Widget",
+        )
+        filler = [
+            _sr(f"fn other{i}() -> i32 {{\n    return {i};\n    z={i}\n}}",
+                path=f"/p/f{i}.rs", lang="rust", node_type="function_item",
+                symbol_name=f"other{i}")
+            for i in range(8)
+        ]
+        cands = [sibling, canonical] + filler
+        searcher.set_class_importance({"Widget": 1.0, "Gadget": 0.0})
+        out = searcher._apply_quality_and_dedup("widget", cands)
+        assert out[0] is canonical, (
+            f"type-def chunk's own name must be looked up (ARCH-2 extension); "
+            f"got {out[0].file_path}"
+        )
+
+    def test_module_level_function_chunk_gets_own_name_importance(self, searcher) -> None:
+        # A module-level function chunk (no owning class, function-family
+        # node_type) must be attributed to ITS OWN name — the gap this task
+        # closes (a corpus-central helper function was previously invisible to
+        # ARCH-2's importance prior, imp_class stuck at 0.0 forever).
+        sibling = _sr(
+            "def rarely_called():\n    return run()\n    # impl body\n    y=2",
+            path="/p/rare.py", node_type="function_definition",
+            symbol_name="rarely_called",
+        )
+        canonical = _sr(
+            "def widely_called():\n    return run()\n    # impl body\n    x=1",
+            path="/p/hot.py", node_type="function_definition",
+            symbol_name="widely_called",
+        )
+        filler = [
+            _sr(f"def other{i}():\n    return {i}\n    z={i}",
+                path=f"/p/f{i}.py", node_type="function_definition",
+                symbol_name=f"other{i}")
+            for i in range(8)
+        ]
+        cands = [sibling, canonical] + filler
+        searcher.set_class_importance({"widely_called": 1.0, "rarely_called": 0.0})
+        out = searcher._apply_quality_and_dedup("call the routine", cands)
+        assert out[0] is canonical, (
+            f"module-level function's own name must be looked up (ARCH-2 "
+            f"extension); got {out[0].file_path}"
+        )
+
+    def test_adverse_case_does_not_overturn_clear_relevance(self, searcher) -> None:
+        # STEP-0 evidence includes adverse cases where the truth is LESS-
+        # referenced than a rival (e.g. 34 vs 85). The multiplicative
+        # relevance gate (1 + lambda * importance, lambda <= 1) bounds the
+        # class_factor to [1, 1+lambda] regardless of the importance gap, so a
+        # clearly-irrelevant rival (last rank, base relevance ~0) with the
+        # MAXIMUM possible importance score must still not overtake a clearly-
+        # relevant top type-def chunk with zero importance — same shape as the
+        # existing ARCH-2 test_prior_does_not_override_clear_relevance, applied
+        # to the new own-name attribution path.
+        top = _sr(
+            "struct Widget {\n    value: i32,\n}\n// fields",
+            path="/p/widget.rs", lang="rust", node_type="struct_item",
+            symbol_name="Widget",
+        )
+        filler = [
+            _sr(f"fn other{i}() -> i32 {{\n    return {i};\n    z={i}\n}}",
+                path=f"/p/f{i}.rs", lang="rust", node_type="function_item",
+                symbol_name=f"Rival{i}" if i == 7 else f"other{i}")
+            for i in range(8)
+        ]
+        cands = [top] + filler
+        searcher.set_class_importance({"Widget": 0.0, "Rival7": 1.0})
+        out = searcher._apply_quality_and_dedup("widget", cands)
+        assert out[0] is top, (
+            f"clear top relevance must hold despite a max-importance rival "
+            f"at the bottom rank; got {out[0].file_path}"
+        )
+
+    def test_empty_map_is_noop_for_type_def_and_module_function(self, searcher) -> None:
+        # No importance map installed → the ARCH-2 factor is an exact no-op
+        # (1.0) for the two new attribution paths too, exactly as it already is
+        # for the original method-owning-class path.
+        sibling = _sr(
+            "struct Gadget {\n    value: i32,\n}\n// fields",
+            path="/p/gadget.rs", lang="rust", node_type="struct_item",
+            symbol_name="Gadget",
+        )
+        canonical = _sr(
+            "struct Widget {\n    value: i32,\n}\n// fields",
+            path="/p/widget.rs", lang="rust", node_type="struct_item",
+            symbol_name="Widget",
+        )
+        cands = [sibling, canonical]
+        searcher.set_class_importance({})
+        out = searcher._apply_quality_and_dedup("widget", cands)
+        # Pre-blend rank order preserved (sibling led at rank 0) — no map
+        # means no lift for either candidate.
+        assert out[0] is sibling, (
+            f"empty importance map must be a no-op for type-def chunks too; "
+            f"got {out[0].file_path}"
+        )
 
 
 # ---------------------------------------------------------------------------

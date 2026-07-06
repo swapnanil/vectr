@@ -787,6 +787,47 @@ def is_type_definition_chunk(node_type: str, content: str = "", language: str = 
 
 
 # ---------------------------------------------------------------------------
+# Module-level function node_type (UPG-SIBLING-TYPEDEF-CROWDING)
+# ---------------------------------------------------------------------------
+
+# Tree-sitter node_type strings the indexer stamps on a FUNCTION chunk (see
+# agent/indexer/_chunking.py `_CHUNK_NODE_TYPES`) across every language with a
+# symbol graph. Deliberately excludes method node_types ("method_definition",
+# "method_declaration") — those are always owned by a class/receiver, even on
+# the rare occasion the "# class: X" context prefix failed to attach, so they
+# must keep going through the existing owning-class attribution path rather
+# than being mistaken for a standalone function.
+_FUNCTION_NODE_TYPES: frozenset[str] = frozenset({
+    "function_definition",   # python, c, cpp
+    "function_declaration",  # javascript, typescript, go, zig (go/zig: never a receiver method — see "method_declaration")
+    "function_expression",   # javascript, typescript
+    "arrow_function",        # javascript, typescript
+    "function_item",         # rust (outside an impl_item)
+})
+
+
+def is_module_level_function_chunk(node_type: str, class_ctx: str) -> bool:
+    """True if a chunk defines a MODULE-LEVEL function (not a method), as
+    opposed to a method chunk whose owning class happened to resolve (or a
+    type definition / type's implementation block).
+
+    A module-level function has its own reference-frequency importance (ARCH-2
+    extension, UPG-SIBLING-TYPEDEF-CROWDING) exactly like a class/struct name
+    does — a corpus-central function (e.g. one call thousands of sites route
+    through) can otherwise lose to a same-file, rarely-referenced sibling
+    function at a near-tie base relevance, the same crowding class of problem
+    ARCH-2 already fixes for classes.
+
+    `class_ctx` is the caller's already-extracted
+    `extract_class_from_content(content)` result — passed in rather than
+    recomputed here since every caller already has it at hand. This is a pure
+    chunk-PROPERTY check (node_type + the chunk's own recovered class context),
+    never the query.
+    """
+    return node_type in _FUNCTION_NODE_TYPES and not class_ctx
+
+
+# ---------------------------------------------------------------------------
 # Purpose-text distillation (ARCH-4 dual-vector pool entry)
 # ---------------------------------------------------------------------------
 

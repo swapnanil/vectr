@@ -15,6 +15,7 @@ Tests verify:
 """
 from __future__ import annotations
 
+import math
 import textwrap
 from pathlib import Path
 
@@ -2680,9 +2681,10 @@ class TestFileImportanceARCH1a:
         """SYMBOL_SCHEMA_VERSION is an exact pin, not a floor: every
         extraction-behavior change must bump it (or existing installs never
         rebuild their graph) AND consciously update this pin in the same
-        commit. Currently 9 (UPG-REACT-TSX-FUNCTION-DECL-DROP bumped from 8/ARCH-2)."""
-        assert SYMBOL_SCHEMA_VERSION == 9, (
-            f"Expected SYMBOL_SCHEMA_VERSION=9; got {SYMBOL_SCHEMA_VERSION}. "
+        commit. Currently 10 (UPG-SIBLING-TYPEDEF-CROWDING bumped from 9/
+        UPG-REACT-TSX-FUNCTION-DECL-DROP)."""
+        assert SYMBOL_SCHEMA_VERSION == 10, (
+            f"Expected SYMBOL_SCHEMA_VERSION=10; got {SYMBOL_SCHEMA_VERSION}. "
             "If you changed extraction behavior, bump the version and update this pin."
         )
 
@@ -2893,13 +2895,20 @@ class TestClassImportanceARCH2:
         g._compute_and_store_class_importance(ws, [])
         assert g.class_importance(ws) == {}
 
-    def test_no_classes_no_crash(self, tmp_path) -> None:
-        """A workspace with symbols but no classes (only functions) must not crash."""
+    def test_module_level_function_enters_importance_map(self, tmp_path) -> None:
+        """UPG-SIBLING-TYPEDEF-CROWDING: a workspace with no classes (only a
+        module-level function) must not crash, and the function's own name now
+        enters the importance map — module-level functions get the same
+        reference-frequency importance a class name does (a sole entry scores
+        1.0, the max-count normalization case)."""
         ws = str(tmp_path)
         g = SymbolGraph(ws)
         p = make_py(tmp_path, "funcs.py", "def standalone():\n    pass\n")
         g.build_for_workspace(ws, [p])
-        assert g.class_importance(ws) == {}
+        scores = g.class_importance(ws)
+        assert scores.get("standalone", 0.0) == pytest.approx(1.0), (
+            f"module-level function name must enter the importance map, got {scores}"
+        )
 
     def test_class_importance_empty_when_never_built(self, tmp_path) -> None:
         """A freshly created SymbolGraph with no compute call returns an empty dict."""
@@ -2918,3 +2927,91 @@ class TestClassImportanceARCH2:
         g.build_for_workspace(ws, [p1, p2, p3])
         scores = g.class_importance(ws)
         assert "Config" in scores
+
+    def test_struct_kind_enters_importance_map(self, tmp_path) -> None:
+        """UPG-SIBLING-TYPEDEF-CROWDING: a non-'class'-kind type definition
+        (Go's `type ... struct`, symbol kind='struct') enters the importance
+        map exactly like a python 'class'-kind symbol does — type-def kinds
+        beyond 'class' (struct/enum/interface/type) are all covered, not just
+        the original ARCH-2 class-only seed set."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        p1 = tmp_path / "shapes.go"
+        p1.write_text(
+            "package shapes\n\ntype Point struct {\n\tX int\n\tY int\n}\n"
+        )
+        referencers = []
+        for i in range(5):
+            rp = tmp_path / f"caller_{i}.go"
+            rp.write_text(
+                "package shapes\n\nfunc build() Point {\n\treturn Point{}\n}\n"
+            )
+            referencers.append(str(rp))
+        g.build_for_workspace(ws, [str(p1)] + referencers)
+        scores = g.class_importance(ws)
+        assert scores.get("Point", 0.0) > 0.0, (
+            f"struct-kind symbol name must enter the importance map, got {scores}"
+        )
+
+    def test_log_scale_preserves_separation_against_high_frequency_name(
+        self, tmp_path,
+    ) -> None:
+        """UPG-SIBLING-TYPEDEF-CROWDING normalization: once a high-frequency
+        module-level function name shares the map with class names, a decisive
+        raw-count gap between two OTHER names must still produce a visibly
+        separated (non-near-tied) ABSOLUTE score difference — the
+        log(1+x)/log(1+max) scale compresses the top of a widened count range
+        instead of squashing every non-maximal name's raw score down toward
+        the same tiny absolute value a linear count/max_count scale would
+        (a linear scale's normalized RATIO between two names is invariant to
+        max_count — dividing both by the same denominator cancels out — but
+        the multiplicative rank blend `1 + lambda * score` (agent/searcher.py)
+        is gated on the ABSOLUTE difference between two candidates' scores,
+        not their ratio, so a linear scale's shrinking absolute magnitudes
+        under a large max_count make the resulting factor gap ranking-
+        irrelevant even though the ratio is unchanged)."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        # Widget: referenced (whole word) 40 times; Gadget: 4 times — a 10x,
+        # decisive separation mirroring the STEP-0 evidence shape.
+        widget_refs = "\n".join(f"x{i} = Widget()" for i in range(40))
+        gadget_refs = "\n".join(f"y{i} = Gadget()" for i in range(4))
+        p1 = make_py(tmp_path, "widget.py", "class Widget:\n    pass\n" + widget_refs + "\n")
+        p2 = make_py(tmp_path, "gadget.py", "class Gadget:\n    pass\n" + gadget_refs + "\n")
+        # A module-level function referenced 5000 times — dwarfs both classes'
+        # counts and stretches max_count by two orders of magnitude, the
+        # scenario a linear scale's absolute-difference gap cannot survive.
+        hot_calls = "\n".join(f"hot_helper()  # call {i}" for i in range(5000))
+        p3 = make_py(tmp_path, "hot.py", "def hot_helper():\n    pass\n" + hot_calls + "\n")
+        g.build_for_workspace(ws, [p1, p2, p3])
+
+        scores = g.class_importance(ws)
+        # Raw whole-word counts: Widget = 1 (own "class Widget:" line) + 40
+        # refs = 41; Gadget = 1 + 4 = 5; hot_helper = 1 + 5000 calls = 5001 (max).
+        widget_count, gadget_count, max_count = 41, 5, 5001
+        expected_log_gap = (
+            math.log1p(widget_count) - math.log1p(gadget_count)
+        ) / math.log1p(max_count)
+        assert scores["Widget"] - scores["Gadget"] == pytest.approx(
+            expected_log_gap, abs=1e-9,
+        )
+        # At the configured class_importance lambda (0.25), this is a >=5%
+        # multiplicative factor gap between the two candidates — a ranking-
+        # relevant separation, not a near-tie.
+        assert (scores["Widget"] - scores["Gadget"]) * 0.25 > 0.05, (
+            f"decisive raw-count gap collapsed to a ranking-irrelevant "
+            f"absolute difference after normalization: {scores}"
+        )
+        # Sanity: the corresponding LINEAR (count/max_count) absolute gap
+        # would be over an order of magnitude smaller — the concrete reason
+        # log-scale was chosen (arithmetic only; not exercising product code).
+        linear_gap = (widget_count / max_count) - (gadget_count / max_count)
+        assert linear_gap * 0.25 < 0.01, (
+            "expected the linear scale's absolute gap to be ranking-"
+            "irrelevant (<1% factor difference) here — if this no longer "
+            "holds, revisit the log-scale choice"
+        )
+        assert (scores["Widget"] - scores["Gadget"]) > 10 * linear_gap, (
+            "log-scale gap should be at least an order of magnitude larger "
+            "than the linear-scale gap in this high-max_count scenario"
+        )

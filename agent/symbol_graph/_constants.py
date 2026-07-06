@@ -76,6 +76,22 @@ _SYMBOL_TYPES: dict[str, dict[str, str]] = {
     },
 }
 
+# Symbol `kind` values (the presentational labels _SYMBOL_TYPES maps node types
+# to, above) that name-frequency importance is computed over
+# (SymbolGraph._compute_and_store_class_importance, ARCH-2 /
+# UPG-SIBLING-TYPEDEF-CROWDING). Covers every TYPE-DEFINITION kind across
+# languages (class, struct, enum, interface — Rust traits map to "interface" —
+# and C/C++'s "type" for typedef/using) plus "function" for module-level
+# functions. Deliberately excludes "method" (always attributed via its owning
+# class, not its own name — see searcher._apply_quality_and_dedup), "impl"
+# (an implementation of a type, not the type's own definition — UPG-4.5), and
+# "route"/"macro"/"namespace" (not the corpus-centrality signal this table
+# targets). Derived directly from the kind vocabulary above, not a tunable a
+# reviewer would adjust independent of the parser/grammar it describes.
+_IMPORTANCE_SYMBOL_KINDS: frozenset[str] = frozenset({
+    "class", "struct", "enum", "interface", "type", "function",
+})
+
 # UPG-10.3: node types that bind a MODULE-LEVEL name (a constant/config/binding
 # that isn't a function or class but IS something callers `locate` — e.g. Python
 # `_CLAUDE_MD = """..."""`). Indexed only at module scope (see the scope guard in
@@ -100,7 +116,7 @@ SYMBOL_LANGUAGES: frozenset[str] = frozenset(_SYMBOL_TYPES)
 # name resolution). Combined with the parser-language set + embed model into the
 # toolchain fingerprint (UPG-8.7) so a vectr upgrade is detectable and the graph
 # is rebuilt rather than silently serving partial/old results.
-SYMBOL_SCHEMA_VERSION = 9  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4) · 4: module-level constants (UPG-10.3) · 5: .txt/.rst prose docs indexed (UPG-11.3) · 6: symbol_importance table added (ARCH-1a) · 7: Flow-typed .js routed to tsx grammar + keyword/ERROR-node symbol rejection (UPG-JSFLOW-SYMBOLS) · 8: class_importance table added (ARCH-2) · 9: name-node-scoped error check (a locally-erroring construct no longer erases a symbol whose own name token is clean) + isolated-reparse error-recovery for catastrophically desynced subtrees (UPG-REACT-TSX-FUNCTION-DECL-DROP)
+SYMBOL_SCHEMA_VERSION = 10  # 1: base · 2: C/C++ + per-def trace (UPG-3.2/4.x) · 3: Rust uses-edges (UPG-4.4) · 4: module-level constants (UPG-10.3) · 5: .txt/.rst prose docs indexed (UPG-11.3) · 6: symbol_importance table added (ARCH-1a) · 7: Flow-typed .js routed to tsx grammar + keyword/ERROR-node symbol rejection (UPG-JSFLOW-SYMBOLS) · 8: class_importance table added (ARCH-2) · 9: name-node-scoped error check (a locally-erroring construct no longer erases a symbol whose own name token is clean) + isolated-reparse error-recovery for catastrophically desynced subtrees (UPG-REACT-TSX-FUNCTION-DECL-DROP) · 10: class_importance seeded from all type-definition kinds (struct/enum/interface/type, not just class) plus module-level functions, and normalized with log(1+count)/log(1+max) instead of linear (UPG-SIBLING-TYPEDEF-CROWDING)
 
 
 def grammar_available(language: str) -> bool:
