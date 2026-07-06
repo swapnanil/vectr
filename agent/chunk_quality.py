@@ -485,7 +485,7 @@ def is_build_artifact_file(file_path: str) -> bool:
     return False
 
 
-# A C/C++ file basename that starts with "_test" (e.g. "_testcapimodule.c") —
+# A C/C++ file basename that starts with "_test" (e.g. "_testutilmodule.c") —
 # a shipped internal test module, following the leading-underscore-for-
 # internal-module convention some C codebases use for their own test suite
 # files (UPG-RUST-DEF-EVICTION / DEF-A). Distinct from the trailing "_test.c"
