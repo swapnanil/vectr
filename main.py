@@ -899,6 +899,15 @@ def cmd_search(args: argparse.Namespace) -> None:
         if not results:
             print("No results found.", file=sys.stderr)
             return
+        # UPG-CLI-SEARCH-FLOOR: `low_confidence` is an EXISTING signal — the
+        # MCP surface has rendered it as a banner since UPG-NOTFOUND-FLOOR;
+        # the CLI silently dropped it, so a nonsense query printed 10
+        # formatted results indistinguishable from a real hit. Render the
+        # same signal here, in CLI-appropriate wording (no `vectr_locate`
+        # reference — no such subcommand exists).
+        if data.get("low_confidence"):
+            from agent.config import NOTFOUND_FLOOR_BANNER_CLI
+            print(f"\n--- Low confidence ---\n{NOTFOUND_FLOOR_BANNER_CLI}", file=sys.stderr)
         for i, r in enumerate(results, 1):
             print(f"\n[{i}] {r['file']}  lines {r['lines']}  score {r['score']:.3f}")
             if r["symbol"]:
@@ -1592,7 +1601,21 @@ def main() -> None:
     p_index.add_argument("--port", type=int, default=_default_port)
     p_index.add_argument("--force", action="store_true", help="Force full re-index")
 
-    p_search = sub.add_parser("search", help="Semantic search")
+    p_search = sub.add_parser(
+        "search",
+        help="Semantic search",
+        description=(
+            "Semantic search over the indexed codebase. Each result's `score` "
+            "is an absolute per-(query, result) relevance value in [0, 1], not "
+            "a rank-derived percentile — it can legitimately be low even for "
+            "the best available match if nothing in the codebase is a strong "
+            "fit. A '--- Low confidence ---' banner is printed above the "
+            "results when the query itself has no lexical anchor anywhere in "
+            "the index, or the top result's own relevance score is below the "
+            "configured floor (`ranking.notfound_floor.*` in config.yaml) — "
+            "results are still shown in full even when it fires."
+        ),
+    )
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--n", type=int, default=10)
     p_search.add_argument("--language", help="Filter by language")

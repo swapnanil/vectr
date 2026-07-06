@@ -723,6 +723,64 @@ class TestCmdSearch:
         assert "vectr declined this request" in err
         assert "Traceback" not in err
 
+    def test_low_confidence_prints_cli_form_banner(self, tmp_path, capsys, monkeypatch):
+        """UPG-CLI-SEARCH-FLOOR: the CLI must render the EXISTING
+        low_confidence signal (already computed server-side, already
+        exposed on SearchResponse) — before this fix it was silently
+        dropped, so a nonsense query printed formatted results
+        indistinguishable from a real hit. The CLI banner must not mention
+        `vectr_locate` — no such subcommand exists."""
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        monkeypatch.chdir(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"file": "a.py", "lines": "1-5", "score": 0.05, "symbol": None,
+                 "language": "python", "content": "garbage"},
+            ],
+            "query_time_ms": 5,
+            "chunks_searched": 10,
+            "low_confidence": True,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query="asdkjfasdlkfj", n=5, language=None, port=8765)
+            m.cmd_search(args)
+
+        err = capsys.readouterr().err
+        assert "Low confidence" in err
+        assert "vectr_locate" not in err
+
+    def test_confident_result_prints_no_banner(self, tmp_path, capsys, monkeypatch):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        monkeypatch.chdir(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"file": "a.py", "lines": "1-5", "score": 0.95, "symbol": "foo",
+                 "language": "python", "content": "def foo(): pass"},
+            ],
+            "query_time_ms": 5,
+            "chunks_searched": 10,
+            "low_confidence": False,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query="foo function", n=5, language=None, port=8765)
+            m.cmd_search(args)
+
+        assert "Low confidence" not in capsys.readouterr().err
+
 
 # ---------------------------------------------------------------------------
 # cmd_forget

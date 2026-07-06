@@ -429,6 +429,13 @@ ranking:
     # salvage a lead; this only adds a signal it currently has no way to see.
     banner: "No strong match for this query — the results below scored low on absolute relevance and may be unrelated. Try vectr_locate with the exact symbol name, rephrase the query, or fall back to grep/reading the file directly."
 
+    # UPG-CLI-SEARCH-FLOOR: separate CLI-surface banner, printed by `vectr
+    # search` when SearchResponse.low_confidence is true. The MCP banner
+    # above names `vectr_locate` — meaningless at a shell prompt, since no
+    # `vectr locate` subcommand exists. Same signal, phrasing for a human
+    # terminal reader instead of the editor's LLM.
+    banner_cli: "No strong match for this query — the results below scored low on absolute relevance and may be unrelated. Try an exact symbol name, rephrase the query, or fall back to grep/reading the file directly."
+
 strategy:
   # Fallback hybrid-search weights used before the first index-time codebase
   # fingerprint has run (agent.strategy_selector.select_strategy). Once a

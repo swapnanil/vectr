@@ -251,6 +251,12 @@ NOTFOUND_FLOOR_BANNER : str
     Low-confidence banner text prepended to the MCP vectr_search response
     when the floor fires.
 
+NOTFOUND_FLOOR_BANNER_CLI : str
+    Low-confidence banner text printed by `vectr search` (CLI surface) when
+    the floor fires (UPG-CLI-SEARCH-FLOOR). Separate from the MCP banner
+    above because that text names `vectr_locate`, meaningless at a shell
+    prompt — no `vectr locate` subcommand exists.
+
 EMBEDDING_DEFAULT_MODEL : str
     Default local (sentence-transformers) embedding model for the L3 content
     index (UPG-EMBEDDER-SWAP-GRANITE). A workspace's ChromaDB collection is
@@ -523,6 +529,7 @@ NOTFOUND_FLOOR_STOPWORDS: frozenset[str] = frozenset(_nff_cfg["stopwords"])
 NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS: int = int(_nff_cfg["min_zero_df_tokens"])
 NOTFOUND_FLOOR_MIN_TOP_RELEVANCE: float = float(_nff_cfg["min_top_relevance"])
 NOTFOUND_FLOOR_BANNER: str = str(_nff_cfg["banner"])
+NOTFOUND_FLOOR_BANNER_CLI: str = str(_nff_cfg["banner_cli"])
 
 # ---------------------------------------------------------------------------
 # Search — additive identifier-shape symbol-graph hint (UPG-QUERYTYPE-REROUTE)
