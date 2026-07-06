@@ -971,3 +971,18 @@ watcher:
   # only the root's direct children, never the whole tree, so it stays cheap
   # regardless of repo size.
   top_level_rescan_interval_s: 5.0
+
+embedding:
+  # Default local (sentence-transformers) embedding model for the L3 content
+  # index (UPG-EMBEDDER-SWAP-GRANITE). Dimension-compatible drop-in for the
+  # prior default (Snowflake/snowflake-arctic-embed-m-v1.5 — both 768-dim),
+  # but a DIFFERENT vector space: a workspace's collection must never mix
+  # vectors from the two (see CodeIndexer's embed-model stamp, which forces
+  # a full rebuild on a stamp mismatch rather than letting old and new
+  # vectors coexist). Query-prompt handling stays model-driven, never
+  # hardcoded to either model's specific prefix convention: LocalEmbedProvider
+  # detects a registered "query" prompt on the loaded model itself
+  # (`model.prompts`) and only applies it when one exists, so a model with no
+  # such registration (like this default) embeds queries and documents
+  # identically, unchanged.
+  default_model: ibm-granite/granite-embedding-english-r2

@@ -14,6 +14,7 @@ import numpy as np
 
 from agent.chunk_quality import build_purpose_text
 from agent.config import DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED
+from agent.config import EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL
 from agent.indexer._constants import (
     EXCLUDED_DIRS,
     _FILE_BATCH_SIZE,
@@ -22,6 +23,7 @@ from agent.indexer._constants import (
     _CHUNK_WORKERS,
     _MTIME_CACHE_SCHEMA_KEY,
     INDEXING_SCHEMA_VERSION,
+    _EMBED_MODEL_STAMP_FILE,
 )
 from agent.indexer._chunking import chunk_file
 from agent.indexer._types import CodeChunk
@@ -33,7 +35,7 @@ class CodeIndexer:
     def __init__(
         self,
         workspace_root: str,
-        embed_model: str = "Snowflake/snowflake-arctic-embed-m-v1.5",
+        embed_model: str = _EMBEDDING_DEFAULT_MODEL,
         db_path: str | None = None,
         extra_roots: list[str] | None = None,
     ) -> None:
@@ -145,6 +147,27 @@ class CodeIndexer:
         mtime_cache = self._load_mtime_cache()
         pruned = self._prune_orphaned_chunks(should_index_paths, mtime_cache)
 
+        # UPG-EMBEDDER-SWAP-GRANITE: vectors from two different embedding
+        # models must never silently coexist in one collection (a same-
+        # dimension model swap is exactly the silent-corruption case — cosine
+        # distances between the two spaces are meaningless even though
+        # ChromaDB's HNSW index accepts them without error). A stamp mismatch
+        # — including a MISSING stamp, treated as a mismatch rather than a
+        # match since a pre-existing index from an older vectr version
+        # predates this mechanism — forces the same full-rebuild path as an
+        # explicit force=True: every file is re-chunked/re-embedded and (in
+        # Phase 2) its existing chunks are unconditionally deleted first, so
+        # no old-model vector can survive the rebuild alongside a new one.
+        stored_embed_model = self._stored_embed_model()
+        if not force and stored_embed_model != self.embed_model:
+            logger.warning(
+                "Embedding model changed (index built with %r, now configured "
+                "with %r) — forcing a full vector index rebuild so vectors "
+                "from the two models never mix in one collection",
+                stored_embed_model, self.embed_model,
+            )
+            force = True
+
         if force:
             # Clean rebuild: ignore the mtime cache so every file is re-indexed,
             # and (in Phase 2) its existing chunks are deleted first. (UPG-8.6)
@@ -166,6 +189,7 @@ class CodeIndexer:
         if not to_index:
             if pruned:
                 self._save_mtime_cache(mtime_cache)  # persist orphan removals
+            self._write_embed_model_stamp()  # cheap no-op when already current
             logger.info("All %d files up to date — nothing to re-index", len(all_files))
             self._last_indexed = time.time()
             return len(self._indexed_files), self._collection.count()
@@ -267,6 +291,7 @@ class CodeIndexer:
         # Persist mtime cache
         mtime_cache.update(new_mtimes)
         self._save_mtime_cache(mtime_cache)
+        self._write_embed_model_stamp()
 
         self._last_indexed = time.time()
         return len(self._indexed_files), self._collection.count()
@@ -428,6 +453,36 @@ class CodeIndexer:
             payload = dict(cache)
             payload[_MTIME_CACHE_SCHEMA_KEY] = INDEXING_SCHEMA_VERSION
             path.write_text(json.dumps(payload), encoding="utf-8")
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Embedding-model version stamp (UPG-EMBEDDER-SWAP-GRANITE) — see
+    # _EMBED_MODEL_STAMP_FILE's docstring for why this is a separate file
+    # from the mtime cache rather than another key inside it.
+    # ------------------------------------------------------------------
+
+    def _embed_model_stamp_path(self) -> Path:
+        return self._db_dir / _EMBED_MODEL_STAMP_FILE
+
+    def _stored_embed_model(self) -> str | None:
+        """The embed_model that built the collection's CURRENT vectors, or
+        None if no stamp exists yet (fresh index, or a pre-existing index
+        from a vectr version that predates this mechanism — callers must
+        treat None as a mismatch, not a match)."""
+        path = self._embed_model_stamp_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        model = data.get("embed_model")
+        return str(model) if model else None
+
+    def _write_embed_model_stamp(self) -> None:
+        path = self._embed_model_stamp_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"embed_model": self.embed_model}), encoding="utf-8")
         except OSError:
             pass
 

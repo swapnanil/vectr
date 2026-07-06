@@ -1870,6 +1870,82 @@ class TestSchemaVersionRebuildTrigger:
         assert "__vectr_index_schema_version__" not in loaded  # sentinel stripped from the dict
 
 
+class TestEmbedModelStampRebuildTrigger:
+    """UPG-EMBEDDER-SWAP-GRANITE: vectors from two different embedding models
+    must never silently coexist in one collection. The embed-model stamp
+    forces a full rebuild (force=True) on mismatch, unlike the softer
+    mtime-cache-reset that INDEXING_SCHEMA_VERSION uses — a same-dimension
+    model swap accepts into ChromaDB's HNSW index without error, so a weaker
+    check would silently mix vector spaces.
+    """
+
+    def test_stamp_written_on_fresh_index(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        assert indexer._stored_embed_model() == indexer.embed_model
+
+    def test_matching_stamp_does_not_force_rebuild(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+
+        delete_calls: list = []
+        real_delete = indexer._collection.delete
+
+        def _tracking_delete(*args, **kwargs):
+            delete_calls.append((args, kwargs))
+            return real_delete(*args, **kwargs)
+
+        indexer._collection.delete = _tracking_delete
+        # Same embed_model, nothing changed on disk — incremental skip, no
+        # chunk deletion (which only happens for force or previously-cached files).
+        indexer.index_workspace()
+        assert delete_calls == []
+
+    def test_mismatched_stamp_forces_full_rebuild(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+
+        import json
+        stamp_path = indexer._embed_model_stamp_path()
+        stamp_path.write_text(
+            json.dumps({"embed_model": "some-other-embedding-model"}), encoding="utf-8"
+        )
+
+        delete_calls: list = []
+        real_delete = indexer._collection.delete
+
+        def _tracking_delete(*args, **kwargs):
+            delete_calls.append((args, kwargs))
+            return real_delete(*args, **kwargs)
+
+        indexer._collection.delete = _tracking_delete
+        indexer.index_workspace()
+        # force=True unconditionally deletes-then-reinserts every re-indexed file's chunks.
+        assert delete_calls, "a stamp mismatch must force the full-rebuild delete-then-reinsert path"
+        assert indexer._stored_embed_model() == indexer.embed_model  # stamp updated to current model
+
+    def test_missing_stamp_treated_as_mismatch_not_match(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+
+        stamp_path = indexer._embed_model_stamp_path()
+        stamp_path.unlink()  # simulate a pre-existing index from an older vectr version
+
+        assert indexer._stored_embed_model() is None
+
+        delete_calls: list = []
+        real_delete = indexer._collection.delete
+
+        def _tracking_delete(*args, **kwargs):
+            delete_calls.append((args, kwargs))
+            return real_delete(*args, **kwargs)
+
+        indexer._collection.delete = _tracking_delete
+        indexer.index_workspace()
+        assert delete_calls, "a missing stamp must be treated as a mismatch (rebuild), not a match"
+        assert indexer._stored_embed_model() == indexer.embed_model
+
+
 # ---------------------------------------------------------------------------
 # ARCH-4 — dilution evidence gate: dual-vector pool entry, end-to-end
 # through index -> search.

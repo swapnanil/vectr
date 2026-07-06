@@ -250,6 +250,13 @@ NOTFOUND_FLOOR_MIN_TOP_RELEVANCE : float
 NOTFOUND_FLOOR_BANNER : str
     Low-confidence banner text prepended to the MCP vectr_search response
     when the floor fires.
+
+EMBEDDING_DEFAULT_MODEL : str
+    Default local (sentence-transformers) embedding model for the L3 content
+    index (UPG-EMBEDDER-SWAP-GRANITE). A workspace's ChromaDB collection is
+    stamped with whichever model built it (CodeIndexer's embed-model stamp);
+    changing this value forces a full vector index rebuild on next index
+    rather than mixing vectors from two models in one collection.
 """
 from __future__ import annotations
 
@@ -518,3 +525,9 @@ SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS: int = int(_id_hint_cfg["max_locations"])
 SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED: bool = bool(_id_hint_cfg["nearmiss_enabled"])
 SEARCH_IDENTIFIER_HINT_NEARMISS_MAX: int = int(_id_hint_cfg["nearmiss_max"])
 SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN: int = int(_id_hint_cfg["nearmiss_min_prefix_len"])
+
+# ---------------------------------------------------------------------------
+# Embedding — default local model (UPG-EMBEDDER-SWAP-GRANITE)
+# ---------------------------------------------------------------------------
+
+EMBEDDING_DEFAULT_MODEL: str = str(_cfg["embedding"]["default_model"])

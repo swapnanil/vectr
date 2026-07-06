@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from agent.config import EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL
+
 
 # ---------------------------------------------------------------------------
 # Chunk dataclass
@@ -31,18 +33,19 @@ class EmbedProvider(Protocol):
 
     def embed_query(self, texts: list[str]) -> list[list[float]]:
         """Embed search-query text. Distinct from `embed()` (document/indexing side)
-        because asymmetric embedding models (e.g. the default Snowflake arctic-embed
-        model) require a different, model-registered prompt for queries than for the
-        passages they're matched against. Providers with no such distinction may just
-        delegate to `embed()`.
+        because some asymmetric embedding models require a different, model-
+        registered prompt for queries than for the passages they're matched
+        against. Providers with no such distinction may just delegate to
+        `embed()`.
         """
         ...
 
 
 class LocalEmbedProvider:
-    """Uses sentence-transformers (no API key). Default: Snowflake/snowflake-arctic-embed-m-v1.5."""
+    """Uses sentence-transformers (no API key). Default model: config.yaml embedding.default_model
+    (UPG-EMBEDDER-SWAP-GRANITE)."""
 
-    def __init__(self, model_name: str = "Snowflake/snowflake-arctic-embed-m-v1.5") -> None:
+    def __init__(self, model_name: str = _EMBEDDING_DEFAULT_MODEL) -> None:
         from sentence_transformers import SentenceTransformer
         from agent.model_cache import load_with_offline_preference
         cache_dir = Path.home() / ".cache" / "vectr" / "models"

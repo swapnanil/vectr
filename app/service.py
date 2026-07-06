@@ -16,6 +16,7 @@ from agent.config import (
     SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS,
     SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED,
     SEARCH_IDENTIFIER_HINT_NEARMISS_MAX,
+    EMBEDDING_DEFAULT_MODEL,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,10 +70,11 @@ class VectrService:
         self._workspace_root = find_workspace_root(workspace_root)
         self._extra_roots: list[str] = list(extra_roots or [])
         self._port = port
-        # Default is an asymmetric embedding model — search queries must be embedded
+        # Some embedding models are asymmetric — search queries must be embedded
         # via the provider's embed_query (registered "query" prompt), never embed().
-        # See agent/indexer/_types.py:LocalEmbedProvider for the query/document split.
-        self._embed_model = os.getenv("VECTR_EMBED_MODEL", "Snowflake/snowflake-arctic-embed-m-v1.5")
+        # See agent/indexer/_types.py:LocalEmbedProvider for the query/document split,
+        # detected from the loaded model itself rather than hardcoded per model.
+        self._embed_model = os.getenv("VECTR_EMBED_MODEL", EMBEDDING_DEFAULT_MODEL)
         # Memory-only mode: code indexing + file watcher are disabled.
         # Reads from env (propagated by _do_start) or from the constructor arg.
         self._memory_only: bool = memory_only or (os.getenv("VECTR_MEMORY_ONLY", "") == "1")

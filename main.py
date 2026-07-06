@@ -1260,6 +1260,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 def cmd_watch(args: argparse.Namespace) -> None:
     """Index workspace(s) and start filesystem watcher without launching the MCP server."""
     import hashlib
+    from agent.config import EMBEDDING_DEFAULT_MODEL
     from agent.indexer import CodeIndexer
     from agent.watcher import CodeWatcher
     from integrations.workspace_detect import find_workspace_root
@@ -1269,7 +1270,7 @@ def cmd_watch(args: argparse.Namespace) -> None:
     roots = _resolve_workspace_roots(args)
     workspace = find_workspace_root(roots[0])
     extra_roots = roots[1:]
-    embed_model = os.getenv("VECTR_EMBED_MODEL", "Snowflake/snowflake-arctic-embed-m-v1.5")
+    embed_model = os.getenv("VECTR_EMBED_MODEL", EMBEDDING_DEFAULT_MODEL)
 
     # Use same db layout as VectrService so a later `vectr start` shares the index.
     db_hash = hashlib.md5(workspace.encode()).hexdigest()[:12]

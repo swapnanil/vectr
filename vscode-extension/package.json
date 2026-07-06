@@ -46,7 +46,7 @@
         },
         "vectr.embedModel": {
           "type": "string",
-          "default": "Snowflake/snowflake-arctic-embed-m-v1.5",
+          "default": "ibm-granite/granite-embedding-english-r2",
           "description": "Embedding model for semantic search. Default model (~440 MB) runs locally on CPU with no API key required. Override with any HuggingFace sentence-transformers model ID."
         }
       }

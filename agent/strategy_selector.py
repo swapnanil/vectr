@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent.config import EMBEDDING_DEFAULT_MODEL
+
 
 @dataclass
 class CodebaseFingerprint:
@@ -284,9 +286,9 @@ def select_strategy(fp: CodebaseFingerprint) -> RetrievalStrategy:
 
     # Recommend embed model
     is_code_heavy = fp.dominant_language in _STATIC_LANGS or fp.size_class == "large"
-    recommended = "Snowflake/snowflake-arctic-embed-m-v1.5"
+    recommended = EMBEDDING_DEFAULT_MODEL
     if is_code_heavy:
-        reasons.append("code-heavy repo — default Snowflake/snowflake-arctic-embed-m-v1.5 is optimal")
+        reasons.append(f"code-heavy repo — default {EMBEDDING_DEFAULT_MODEL} is optimal")
 
     return RetrievalStrategy(
         semantic_weight=round(sem, 2),

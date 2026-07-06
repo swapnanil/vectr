@@ -84,3 +84,22 @@ INDEXING_SCHEMA_VERSION = 3  # 1: pre-ARCH-4 baseline (unversioned cache, implic
 # Chosen to never collide with a real filesystem path (mtime-cache keys are
 # always absolute file paths).
 _MTIME_CACHE_SCHEMA_KEY = "__vectr_index_schema_version__"
+
+# ---------------------------------------------------------------------------
+# Embedding-model version stamp — vector-space safety (UPG-EMBEDDER-SWAP-GRANITE)
+# ---------------------------------------------------------------------------
+
+# A separate small JSON file (co-located with the mtime cache under the same
+# per-workspace `~/.cache/vectr/db/<hash>` directory) recording the
+# `CodeIndexer.embed_model` identifier that built the CURRENT contents of the
+# ChromaDB collection. Kept out of the mtime-cache JSON deliberately: that
+# file's mismatch handling only resets the incremental-skip state (an
+# optimization), whereas an embed-model mismatch is a correctness issue —
+# vectors from two different models must never coexist in one collection,
+# so it must unconditionally force CodeIndexer.index_workspace()'s
+# `force=True` full-rebuild path (unconditional per-file delete-then-
+# reinsert), not just the softer "treat cache as cold" behaviour. A missing
+# stamp file (a pre-existing index built by a vectr version that predates
+# this mechanism) is treated as a mismatch too, since we cannot know what
+# model produced those vectors.
+_EMBED_MODEL_STAMP_FILE = "embed_model_stamp.json"

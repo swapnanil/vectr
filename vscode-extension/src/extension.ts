@@ -70,7 +70,7 @@ async function startAllWorkspaces(context: vscode.ExtensionContext): Promise<voi
 async function startWorkspace(context: vscode.ExtensionContext, workspaceRoot: string): Promise<void> {
     const cfg = vscode.workspace.getConfiguration('vectr');
     const preferredPort = cfg.get<number>('port', 8765);
-    const embedModel = cfg.get<string>('embedModel', 'Snowflake/snowflake-arctic-embed-m-v1.5');
+    const embedModel = cfg.get<string>('embedModel', 'ibm-granite/granite-embedding-english-r2');
 
     // Check if this workspace already has a live daemon (via instances.json)
     const existingPort = readWorkspacePort(workspaceRoot);

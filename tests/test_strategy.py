@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from agent.config import EMBEDDING_DEFAULT_MODEL
 from agent.strategy_selector import (
     CodebaseFingerprint,
     RetrievalStrategy,
@@ -163,12 +164,12 @@ class TestSelectStrategy:
     def test_all_codebases_recommend_default_model(self) -> None:
         for lang in ("go", "java", "rust", "python", None):
             s = select_strategy(_fp(dominant_language=lang))
-            assert "snowflake-arctic-embed" in s.recommended_embed_model.lower(), \
-                f"Expected snowflake model for lang={lang}, got {s.recommended_embed_model}"
+            assert s.recommended_embed_model == EMBEDDING_DEFAULT_MODEL, \
+                f"Expected configured default model for lang={lang}, got {s.recommended_embed_model}"
 
     def test_large_codebase_recommends_default_model(self) -> None:
         s = select_strategy(_fp(size_class="large", dominant_language=None))
-        assert "snowflake-arctic-embed" in s.recommended_embed_model.lower()
+        assert s.recommended_embed_model == EMBEDDING_DEFAULT_MODEL
 
     def test_rationale_non_empty(self) -> None:
         s = select_strategy(_fp())
