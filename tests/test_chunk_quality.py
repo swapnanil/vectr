@@ -30,6 +30,8 @@ from agent.config import (
     QUALITY_NAV_DECLARATION_RESCUE,
     QUALITY_TEST_DEPRIORITISED,
     QUALITY_PRIVATE_SYMBOL,
+    QUALITY_TRIVIAL,
+    QUALITY_SHORT_PENALTY,
     TEST_FRAMEWORK_FAN_IN_THRESHOLD,
 )
 
@@ -710,6 +712,69 @@ class TestQualityScore:
 
 
 # ---------------------------------------------------------------------------
+# UPG-TRIVIAL-DROP-ALIAS-DEFS — rank-time exemption from the trivial multiplier
+#
+# A symbol-bearing definition chunk (real symbol_name + a definition-family
+# node_type) is exempt from index-time trivial-DROP already; it must also be
+# exempt from the RANK-time `trivial` (0.15) multiplier for the same reason —
+# a one-line alias class IS the canonical answer to "where is X defined",
+# and 0.15x buries it beyond what the importance-blend priors can recover.
+# ---------------------------------------------------------------------------
+
+class TestQualityScoreDefinitionTrivialExemption:
+    def test_alias_class_def_does_not_get_trivial_multiplier(self):
+        content = "class AliasWidget(BaseWidget, metaclass=WidgetMeta):\n    pass"
+        s = quality_score(
+            content, language="python", node_type="class_definition",
+            symbol_name="AliasWidget",
+        )
+        assert s != pytest.approx(QUALITY_TRIVIAL)
+        assert s > QUALITY_TRIVIAL
+
+    def test_stub_function_def_does_not_get_trivial_multiplier(self):
+        content = "def on_shutdown():\n    pass"
+        s = quality_score(
+            content, language="python", node_type="function_definition",
+            symbol_name="on_shutdown",
+        )
+        assert s != pytest.approx(QUALITY_TRIVIAL)
+        assert s > QUALITY_TRIVIAL
+
+    def test_genuinely_trivial_non_definition_chunk_still_demoted(self):
+        # Bare return, no symbol_name, a window (not a definition) node_type —
+        # the exemption must not leak to ordinary junk chunks.
+        s = quality_score("return", language="python", node_type="window", symbol_name="")
+        assert s == pytest.approx(QUALITY_TRIVIAL)
+
+    def test_lone_import_with_no_symbol_name_still_demoted(self):
+        s = quality_score("import os", language="python", node_type="window", symbol_name="")
+        assert s == pytest.approx(QUALITY_TRIVIAL)
+
+    def test_definition_node_type_without_symbol_name_still_demoted(self):
+        # Guard: the exemption requires BOTH a real symbol_name AND a
+        # definition node_type — a definition-family node_type alone (e.g.
+        # symbol_name extraction failed) must not exempt the chunk.
+        content = "class AliasWidget(BaseWidget):\n    pass"
+        s = quality_score(
+            content, language="python", node_type="class_definition", symbol_name="",
+        )
+        assert s == pytest.approx(QUALITY_TRIVIAL)
+
+    def test_private_helper_definition_still_demoted_not_blanket_one(self):
+        # The exemption falls through to the REMAINING rules, not a special
+        # 1.0 — a private-named definition chunk still takes the private-
+        # symbol demotion (and the short-chunk penalty), so it is not
+        # accidentally boosted to full quality either.
+        content = "class _PrivateAlias(BaseWidget):\n    pass"
+        s = quality_score(
+            content, language="python", node_type="class_definition",
+            symbol_name="_PrivateAlias",
+        )
+        assert s != pytest.approx(QUALITY_TRIVIAL)
+        assert s == pytest.approx(QUALITY_SHORT_PENALTY * QUALITY_PRIVATE_SYMBOL)
+
+
+# ---------------------------------------------------------------------------
 # UPG-16.1 (F30) — private/internal symbol deprioritisation
 # ---------------------------------------------------------------------------
 
@@ -1172,7 +1237,7 @@ class TestTrivialDocChunks:
         )
 
     def test_quality_score_trivial_for_1line_html(self) -> None:
-        """quality_score() must return _Q_TRIVIAL for a 1-line HTML fixture."""
+        """quality_score() must return QUALITY_TRIVIAL for a 1-line HTML fixture."""
         from agent.config import QUALITY_TRIVIAL
         score = quality_score("Logged out", file_path="/tests/auth_tests/templates/registration/logged_out.html", language="html")
         assert score == pytest.approx(QUALITY_TRIVIAL, abs=0.01), (
@@ -1181,7 +1246,7 @@ class TestTrivialDocChunks:
         )
 
     def test_quality_score_trivial_for_1line_txt(self) -> None:
-        """quality_score() must return _Q_TRIVIAL for a 1-line TXT stub."""
+        """quality_score() must return QUALITY_TRIVIAL for a 1-line TXT stub."""
         from agent.config import QUALITY_TRIVIAL
         score = quality_score("django", file_path="/Django.egg-info/top_level.txt", language="txt")
         assert score == pytest.approx(QUALITY_TRIVIAL, abs=0.01), (
@@ -1190,7 +1255,7 @@ class TestTrivialDocChunks:
         )
 
     def test_quality_score_nontrivial_for_multiline_txt_doc(self) -> None:
-        """quality_score() must NOT return _Q_TRIVIAL for multi-line .txt doc."""
+        """quality_score() must NOT return QUALITY_TRIVIAL for multi-line .txt doc."""
         from agent.config import QUALITY_TRIVIAL
         doc = (
             "Writing custom model fields\n"

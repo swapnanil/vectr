@@ -637,6 +637,9 @@ def quality_score(
     (is_content_structural_test_chunk, DEF-A) rather than its path.
     ``symbol_name`` (the chunk's bare, unqualified symbol leaf) mildly demotes
     a private/internal helper (UPG-16.1 / F30) — see is_private_symbol_name.
+    ``symbol_name`` + ``node_type`` together also EXEMPT a symbol-bearing
+    definition chunk from the trivial multiplier (UPG-TRIVIAL-DROP-ALIAS-DEFS)
+    — see is_definition_chunk.
     """
     if file_path and is_vectr_config_file(file_path):
         return _Q_VECTR_CONFIG
@@ -647,7 +650,19 @@ def quality_score(
                 if parts and parts <= query_tokens:
                     return _Q_NAV_DECLARATION_RESCUE
         return _Q_NAVIGATIONAL
-    if is_trivial_chunk(content, language):
+    # UPG-TRIVIAL-DROP-ALIAS-DEFS: a chunk that is itself a symbol DEFINITION
+    # (real symbol_name + a class/struct/enum/interface/type-alias/function/
+    # method node_type, is_definition_chunk) is exempt from the trivial
+    # multiplier for the same reason it is exempt from the index-time
+    # trivial-DROP in _chunking.py's _postprocess_chunks — a one-line alias
+    # class (`class ModelForm(Base, metaclass=Meta): pass`) IS the canonical
+    # answer to "where is X defined", so scoring it identically to a bare
+    # `return`/lone-import chunk buries it beyond what the importance blend
+    # can recover. Falls through to the remaining rules below (test/doc/
+    # private-symbol/short-chunk demotions all still apply) rather than
+    # returning a special-cased score — a definition chunk is scored like
+    # any other real chunk, not given a blanket exemption from every prior.
+    if is_trivial_chunk(content, language) and not is_definition_chunk(symbol_name, node_type):
         return _Q_TRIVIAL
     if language == "markdown" and is_markdown_heading_only(content):
         return _Q_HEADING_ONLY
