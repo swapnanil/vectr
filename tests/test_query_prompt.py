@@ -84,6 +84,31 @@ class TestMaxSeqLengthCap:
         assert fake_model.max_seq_length == EMBEDDING_MAX_SEQ_LENGTH
 
 
+class TestCpuLoadDtype:
+    """CPU loads must force float32 (UPG-EMBED-CPU-DTYPE): a checkpoint shipping
+    bfloat16 weights otherwise runs through software-emulated bf16 matmuls on
+    CPU — measured 12x slower than float32 for identical inputs."""
+
+    def test_cpu_load_forces_float32_model_kwargs(self):
+        import torch
+
+        captured = {}
+
+        class _CapturingST:
+            def __init__(self, model_name, **kwargs):
+                captured.update(kwargs)
+                self.prompts = {}
+                self.max_seq_length = 512
+
+        with patch("sentence_transformers.SentenceTransformer", _CapturingST), \
+             patch("agent.model_cache.load_with_offline_preference",
+                   side_effect=lambda loader, *a, **kw: loader(True)):
+            LocalEmbedProvider("any-model-name")
+
+        assert captured["device"] == "cpu"
+        assert captured["model_kwargs"] == {"torch_dtype": torch.float32}
+
+
 class TestAsymmetricModelQueryPrompt:
     """Model registers a "query" prompt (e.g. arctic-embed) — asserts the split."""
 

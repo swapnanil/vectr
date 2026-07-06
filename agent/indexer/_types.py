@@ -49,6 +49,7 @@ class LocalEmbedProvider:
     (UPG-EMBEDDER-SWAP-GRANITE)."""
 
     def __init__(self, model_name: str = _EMBEDDING_DEFAULT_MODEL) -> None:
+        import torch
         from sentence_transformers import SentenceTransformer
         from agent.model_cache import load_with_offline_preference
         cache_dir = Path.home() / ".cache" / "vectr" / "models"
@@ -60,12 +61,19 @@ class LocalEmbedProvider:
         # a cache it already has. Falls back to a network-enabled load on a
         # genuine cache miss (first run) so that UX is unchanged.
         self._model = load_with_offline_preference(
+            # torch_dtype float32 is load-bearing on CPU (UPG-EMBED-CPU-DTYPE):
+            # transformers honors the checkpoint's declared dtype, and a model
+            # shipping bfloat16 weights (the current default does) runs through
+            # software-emulated bf16 matmuls on CPU — measured 12x slower than
+            # float32 for identical inputs. On CPU float32 is strictly correct;
+            # revisit only if a GPU/MPS device path is ever added.
             lambda local_only: SentenceTransformer(
                 model_name,
                 cache_folder=str(cache_dir),
                 trust_remote_code=True,
                 device="cpu",
                 local_files_only=local_only,
+                model_kwargs={"torch_dtype": torch.float32},
             ),
             model_name,
             str(cache_dir),
