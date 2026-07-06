@@ -133,6 +133,25 @@ PURPOSE_RANK_PRIOR_LAMBDA : float
     pool-entry signal into the final rank, which the body-only cross-encoder
     rerank cannot see.
 
+TYPE_DEF_PRIOR_LAMBDA : float
+    Blend weight for the type-definition node_type prior in the final search
+    sort (UPG-RUST-DEF-EVICTION / DEF-B), composed with the three priors
+    above: final_score = ... * (1 + lambda_purpose * purpose_sim *
+    quality_score) * (1 + lambda_def * is_type_definition). is_type_definition
+    is 1 when the chunk's own node_type is a struct/enum/trait/class/interface
+    definition (chunk_quality.is_type_definition_chunk), else 0. 0 disables
+    (pre-DEF-B behaviour). The lever that keeps a canonical type definition
+    from losing to a same-name test/usage site at comparable rerank score.
+
+DOCSTRING_DEDUP_LINES : int
+    Leading docstring/comment lines compared when computing the near-duplicate
+    docstring dedup key (UPG-RUST-DEF-EVICTION / DEF-C).
+
+DOCSTRING_DEDUP_MIN_CHARS : int
+    Minimum normalized leading-docstring length (chars) below which a chunk is
+    never folded by the docstring dedup key — chunks with a trivial or absent
+    leading header keep every occurrence (UPG-RUST-DEF-EVICTION / DEF-C).
+
 INDEXING_FLOW_SCAN_HEAD_BYTES : int
     Bytes scanned from the start of a `.js` file when detecting Flow type syntax
     (UPG-JSFLOW-SYMBOLS). A header scan, not a full-file walk.
@@ -325,6 +344,23 @@ CLASS_IMPORTANCE_PRIOR_LAMBDA: float = float(_cimp_cfg["lambda"])
 _prp_cfg: dict[str, Any] = _cfg["ranking"]["purpose_rank"]
 
 PURPOSE_RANK_PRIOR_LAMBDA: float = float(_prp_cfg["lambda"])
+
+# ---------------------------------------------------------------------------
+# Type-definition node_type prior (UPG-RUST-DEF-EVICTION / DEF-B)
+# ---------------------------------------------------------------------------
+
+_tdp_cfg: dict[str, Any] = _cfg["ranking"]["type_def_prior"]
+
+TYPE_DEF_PRIOR_LAMBDA: float = float(_tdp_cfg["lambda"])
+
+# ---------------------------------------------------------------------------
+# Docstring near-duplicate dedup (UPG-RUST-DEF-EVICTION / DEF-C)
+# ---------------------------------------------------------------------------
+
+_ddd_cfg: dict[str, Any] = _cfg["ranking"]["docstring_dedup"]
+
+DOCSTRING_DEDUP_LINES: int = int(_ddd_cfg["lines"])
+DOCSTRING_DEDUP_MIN_CHARS: int = int(_ddd_cfg["min_chars"])
 
 # ---------------------------------------------------------------------------
 # Rerank pool sizes (UPG-12.1)

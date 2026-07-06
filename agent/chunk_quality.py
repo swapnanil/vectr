@@ -37,6 +37,8 @@ from agent.config import (
     DUAL_VECTOR_MAX_SIGNATURE_LINES as _DV_MAX_SIGNATURE_LINES,
     DUAL_VECTOR_MAX_DOCSTRING_LINES as _DV_MAX_DOCSTRING_LINES,
     DUAL_VECTOR_MAX_DOCSTRING_CHARS as _DV_MAX_DOCSTRING_CHARS,
+    DOCSTRING_DEDUP_LINES as _DOCSTRING_DEDUP_LINES,
+    DOCSTRING_DEDUP_MIN_CHARS as _DOCSTRING_DEDUP_MIN_CHARS,
 )
 
 # A synthetic node_type stamped on re-export / import-only chunks so the ranker
@@ -483,16 +485,84 @@ def is_build_artifact_file(file_path: str) -> bool:
     return False
 
 
+# A C/C++ file basename that starts with "_test" (e.g. "_testcapimodule.c") —
+# a shipped internal test module, following the leading-underscore-for-
+# internal-module convention some C codebases use for their own test suite
+# files (UPG-RUST-DEF-EVICTION / DEF-A). Distinct from the trailing "_test.c"
+# / "_test.h" pattern below (a name that ENDS in "_test").
+_C_LEADING_TEST_FILE_RE = re.compile(r"^_test.*\.(c|h)$")
+
+
 def is_test_file(file_path: str) -> bool:
     """True for test files, which should not outrank implementation (UPG-2.3)."""
     p = PurePosixPath(file_path.replace("\\", "/"))
     name = p.name.lower()
-    if name.startswith("test_") or name.endswith(("_test.py", "_test.go", ".test.ts", ".test.js", ".spec.ts", ".spec.js")):
+    if name.startswith("test_") or name.endswith((
+        "_test.py", "_test.go", ".test.ts", ".test.js", ".spec.ts", ".spec.js",
+        "_test.c", "_test.h",
+    )):
         return True
     if re.match(r"test.*\.(java|kt)$", name):
         return True
+    if _C_LEADING_TEST_FILE_RE.match(name):
+        return True
     parts = {part.lower() for part in p.parts[:-1]}
     return bool(parts & {"test", "tests", "__tests__", "spec", "testing"})
+
+
+# ---------------------------------------------------------------------------
+# Content-structural inline-test detection (UPG-RUST-DEF-EVICTION / DEF-A)
+# ---------------------------------------------------------------------------
+
+# is_test_file() is purely path-based, so test code co-located INSIDE a
+# production file evades the demotion above: a Rust #[test] fn (or one inside
+# a #[cfg(test)] mod block) living in an otherwise-production .rs file, or a
+# Zig inline `test "…" {` block, never has a test-named path to match. These
+# are AST-emitted structural markers — the same class of signal as the
+# existing _IMPORT_LINE_RE / _TRIVIAL_LINE_RE structural patterns in this
+# module (language syntax, not a tunable vocabulary), gated by the chunk's
+# own recorded `language` field so a coincidental line shape in an unrelated
+# language can never trigger it.
+
+# Rust test-attribute family. The chunker prepends a function's leading
+# attribute lines as "comments" (indexer._get_leading_comments treats any
+# `#`-prefixed line as a leading-comment line), so a #[test]-attributed fn's
+# chunk content already starts with this line today — no reindex required.
+_RUST_TEST_ATTR_RE = re.compile(r"^#\[\s*(test|tokio::test|cfg\(test\))\s*\]$")
+
+# Zig inline test-block declaration head: `test "name" {` or bare `test {`.
+_ZIG_TEST_DECL_RE = re.compile(r'^test\s*(".*?"\s*)?\{')
+
+
+def is_content_structural_test_chunk(content: str, language: str = "") -> bool:
+    """True if the chunk's own text structurally marks it as test code, even
+    when its FILE path is not test-named (UPG-RUST-DEF-EVICTION / DEF-A).
+
+    Scans only the chunk's HEAD region — the leading attribute/comment lines
+    the chunker already prepends before the declaration line, plus the
+    declaration line itself — and stops at the first line that is neither an
+    attribute/comment nor a recognised test-block head. A string literal or
+    comment mentioning "#[test]"/"test {" somewhere INSIDE a function body is
+    therefore never matched; only a marker that actually precedes/opens the
+    declaration counts.
+
+    Known gap (not silently patched — honest limitation of this first cut): a
+    helper function defined inside the same `#[cfg(test)] mod { ... }` block
+    as a `#[test]` fn, but not itself carrying the `#[test]` attribute, has no
+    marker in its own chunk head and is not caught here.
+    """
+    lang = (language or "").lower()
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if lang == "rust" and _RUST_TEST_ATTR_RE.match(stripped):
+            return True
+        if lang == "zig" and _ZIG_TEST_DECL_RE.match(stripped):
+            return True
+        if not (stripped.startswith(_COMMENT_PREFIXES) or stripped.startswith("@")):
+            break
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -562,9 +632,11 @@ def quality_score(
     (UPG-NAV-OVERDEMOTE-DECL / F59). ``file_fan_in`` (corpus-wide unambiguous
     caller-file count, see symbol_graph.file_fan_in) exempts a shipped
     testing-framework file misclassified by its test-named path from the
-    test-file demotion (UPG-TESTPATH-FRAMEWORK-MISCLASS / F58). ``symbol_name``
-    (the chunk's bare, unqualified symbol leaf) mildly demotes a private/
-    internal helper (UPG-16.1 / F30) — see is_private_symbol_name.
+    test-file demotion (UPG-TESTPATH-FRAMEWORK-MISCLASS / F58) — the SAME
+    exemption also covers a chunk classified as test by its own content
+    (is_content_structural_test_chunk, DEF-A) rather than its path.
+    ``symbol_name`` (the chunk's bare, unqualified symbol leaf) mildly demotes
+    a private/internal helper (UPG-16.1 / F30) — see is_private_symbol_name.
     """
     if file_path and is_vectr_config_file(file_path):
         return _Q_VECTR_CONFIG
@@ -583,7 +655,17 @@ def quality_score(
     score = 1.0
     if file_path and is_generated_file(file_path):
         score *= _Q_GENERATED
-    if file_path and is_test_file(file_path) and file_fan_in < _TEST_FRAMEWORK_FAN_IN_THRESHOLD:
+    # DEF-A (UPG-RUST-DEF-EVICTION): a chunk is test code either because its
+    # FILE path says so (is_test_file, path-based, UPG-2.3) or because its OWN
+    # content structurally marks it as such (a Rust #[test] fn / Zig inline
+    # `test "…" {` block living in an otherwise-production file, UPG-2.3's
+    # path-only check cannot see these). Same demotion tier and same
+    # framework-fan-in escape apply regardless of which signal fired.
+    is_test_chunk = (
+        (file_path and is_test_file(file_path))
+        or is_content_structural_test_chunk(content, language)
+    )
+    if is_test_chunk and file_fan_in < _TEST_FRAMEWORK_FAN_IN_THRESHOLD:
         score *= _Q_TEST_DEPRIORITISED
     if is_doc_language(language):
         score *= _Q_DOC_PROSE
@@ -620,6 +702,103 @@ def extract_class_from_content(content: str) -> str:
     """
     m = _CLASS_PREFIX_RE.search(content)
     return m.group(1) if m else ""
+
+
+# ---------------------------------------------------------------------------
+# Type-definition node_type prior (UPG-RUST-DEF-EVICTION / DEF-B)
+# ---------------------------------------------------------------------------
+
+# Tree-sitter node_type strings the indexer actually stamps on a chunk
+# (agent/indexer/_chunking.py `_CHUNK_NODE_TYPES` — the node.type recorded on
+# CodeChunk, NOT the symbol graph's presentational "kind" label) when the
+# chunk is a TYPE DEFINITION (struct/enum/trait/class/interface/typedef)
+# rather than a function/method or a type's separate implementation block.
+# Verified empirically against the exact `_CHUNK_NODE_TYPES` dict per
+# language — REACHABLE today means this string can actually be found on an
+# indexed chunk's node_type; DORMANT means the type-def node exists in the
+# grammar and is listed here for forward-compat/documentation, but
+# `_CHUNK_NODE_TYPES` for that language does not currently select it as a
+# top-level chunk boundary, so it can never appear as a chunk's node_type
+# until that (separate, indexer-level) chunking gap is closed:
+#   python:      class_definition                    — REACHABLE
+#   javascript:  class_declaration                   — REACHABLE
+#   typescript:  class_declaration                   — REACHABLE
+#                interface_declaration / type_alias_declaration /
+#                enum_declaration                     — DORMANT (not in
+#                _CHUNK_NODE_TYPES["typescript"])
+#   java:        class_declaration                   — REACHABLE
+#                interface_declaration / enum_declaration — DORMANT (not in
+#                _CHUNK_NODE_TYPES["java"], which only has method_declaration
+#                / class_declaration)
+#   go:          type_declaration                    — DORMANT (not in
+#                _CHUNK_NODE_TYPES["go"], which only has function_declaration
+#                / method_declaration)
+#   rust:        struct_item, trait_item, enum_item   — ALL THREE DORMANT.
+#                _CHUNK_NODE_TYPES["rust"] is {"function_item", "impl_item"}
+#                only — a Rust struct/trait/enum definition is never
+#                collected as its own chunk today: if the same file also
+#                defines a function, the type definition is silently
+#                skipped entirely; if the file has no function_item/impl_item
+#                at all, the whole file falls back to a single anonymous
+#                "window" chunk instead. This is a genuine indexer-level
+#                chunking gap (confirmed via a live chunk_file() probe on a
+#                synthetic struct/enum/trait fixture), not a ranking gap —
+#                DEF-B's prior is a correctly-implemented no-op for Rust
+#                type definitions until that gap is closed. impl_item is
+#                deliberately EXCLUDED from this set even after such a fix:
+#                an impl block is an implementation of a type, not the
+#                type's own definition (symbol_graph already draws this same
+#                distinction, UPG-4.5).
+#   c / cpp:     struct_specifier, enum_specifier, type_definition — REACHABLE
+#   cpp only:    class_specifier                     — REACHABLE
+_TYPE_DEF_NODE_TYPES: frozenset[str] = frozenset({
+    "class_definition",
+    "class_declaration",
+    "interface_declaration",
+    "type_alias_declaration",
+    "enum_declaration",
+    "type_declaration",
+    "struct_item",
+    "trait_item",
+    "enum_item",
+    "struct_specifier",
+    "enum_specifier",
+    "type_definition",
+    "class_specifier",
+})
+
+# Zig has no distinct type-definition node type: both `pub const Foo = struct
+# {...}` (a genuine type definition) and a plain `pub const x = 5;` (an
+# ordinary constant) parse to the SAME chunk node_type, "variable_declaration"
+# (verified empirically against a live tree-sitter-zig parse and against
+# agent/indexer/_chunking.py `_CHUNK_NODE_TYPES["zig"]`). Matching on
+# node_type alone would therefore boost every top-level Zig constant, not
+# just type factories — so a Zig "variable_declaration" chunk additionally
+# needs this narrow, declaration-HEAD-only content check (never the body) for
+# the `= struct {` / `= enum {` / `= union {` / `= opaque {` factory shape
+# before the type-def prior is granted.
+_ZIG_TYPE_FACTORY_HEAD_RE = re.compile(
+    r"^(pub\s+)?const\s+\w+\s*=\s*(struct|enum|union|opaque)\b"
+)
+
+
+def is_type_definition_chunk(node_type: str, content: str = "", language: str = "") -> bool:
+    """True if a chunk defines a TYPE (struct/enum/trait/class/typedef), as
+    opposed to a function/method or a type's separate implementation block
+    (UPG-RUST-DEF-EVICTION / DEF-B).
+
+    When a type definition and a usage or test site of the same name compete
+    at similar relevance, the definition is the canonical answer to "where is
+    X defined" — usages are one vectr_trace call away. This is a chunk-
+    PROPERTY check computed only from the chunk's own recorded node_type/
+    content/language, never from the query.
+    """
+    if node_type in _TYPE_DEF_NODE_TYPES:
+        return True
+    if (language or "").lower() == "zig" and node_type == "variable_declaration":
+        first_line = next((l.strip() for l in content.splitlines() if l.strip()), "")
+        return bool(_ZIG_TYPE_FACTORY_HEAD_RE.match(first_line))
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -792,3 +971,40 @@ def build_purpose_text(
 def normalized_content(content: str) -> str:
     """Whitespace-collapsed lowercase form for exact/near-duplicate detection."""
     return re.sub(r"\s+", " ", content).strip().lower()
+
+
+def leading_docstring_key(content: str, language: str = "") -> str:
+    """Normalized leading docstring/comment-block key for near-dup collapse
+    (UPG-RUST-DEF-EVICTION / DEF-C).
+
+    Byte-identical full-content dedup (`normalized_content`, UPG-2.2) misses
+    near-duplicate boilerplate: several thin wrapper/test chunks that copy the
+    same rustdoc/JSDoc/docstring header onto otherwise-different bodies still
+    bury the canonical definition under look-alike results. This returns a
+    second, independent dedup key built ONLY from the chunk's own leading
+    doc/comment lines (reusing the same `_leading_doc_and_code` /
+    `_extract_python_docstring` split used for purpose-text distillation),
+    capped at `_DOCSTRING_DEDUP_LINES` lines.
+
+    Returns "" (never a valid dedup key — the caller must treat an empty
+    string as "do not collapse this chunk on this key") when the chunk has no
+    leading doc at all, or when the normalized header is shorter than
+    `_DOCSTRING_DEDUP_MIN_CHARS` — a trivial/near-empty header must not fold
+    together chunks that merely share a blank or one-word comment.
+    """
+    lines = content.splitlines()
+    leading_doc, code_lines = _leading_doc_and_code(lines)
+
+    doc_text = "\n".join(leading_doc)
+    if not doc_text and (language or "").lower() == "python":
+        _, body_start = _extract_signature(code_lines)
+        doc_text = _extract_python_docstring(code_lines[body_start:])
+
+    if not doc_text:
+        return ""
+
+    capped = "\n".join(doc_text.splitlines()[:_DOCSTRING_DEDUP_LINES])
+    normalized = normalized_content(capped)
+    if len(normalized) < _DOCSTRING_DEDUP_MIN_CHARS:
+        return ""
+    return normalized

@@ -13,9 +13,12 @@ from agent.chunk_quality import (
     is_vectr_config_file,
     is_generated_file,
     is_test_file,
+    is_content_structural_test_chunk,
+    is_type_definition_chunk,
     is_private_symbol_name,
     quality_score,
     normalized_content,
+    leading_docstring_key,
     extract_class_from_content,
     is_symbol_bearing_chunk,
     build_purpose_text,
@@ -270,6 +273,9 @@ class TestIsTestFile:
         "/proj/src/widget.spec.js",
         "/proj/__tests__/util.js",
         "/proj/test/Helper.java",
+        "/proj/src/widget_test.c",   # trailing "_test.c" (UPG-RUST-DEF-EVICTION / DEF-A)
+        "/proj/src/widget_test.h",
+        "/proj/src/_test_internal.c",  # leading "_test" (DEF-A)
     ])
     def test_is_test(self, path):
         assert is_test_file(path) is True
@@ -278,10 +284,198 @@ class TestIsTestFile:
         "/proj/agent/indexer.py",
         "/proj/src/resolver.rs",
         "/proj/testing_utils.py",   # 'testing' in name but file itself isn't a test module
+        "/proj/src/contest.c",      # contains "test" mid-word, not a test-file pattern
     ])
     def test_not_test(self, path):
         # testing_utils.py: name doesn't start with test_; dir not a test dir
         assert is_test_file(path) is False
+
+
+class TestIsContentStructuralTestChunk:
+    """DEF-A (UPG-RUST-DEF-EVICTION): content-structural inline-test detection.
+
+    is_test_file() is path-only and misses test code co-located inside an
+    otherwise-production file — a Rust #[test] fn, or a Zig inline
+    `test "..." {` block.
+    """
+
+    def test_rust_test_attribute_head_is_detected(self):
+        content = "#[test]\nfn checks_parses_ok() {\n    assert_eq!(parse(\"1.0\"), Ok(1.0));\n}"
+        assert is_content_structural_test_chunk(content, language="rust") is True
+
+    def test_rust_tokio_test_attribute_head_is_detected(self):
+        content = "#[tokio::test]\nasync fn checks_async_ok() {\n    assert!(true);\n}"
+        assert is_content_structural_test_chunk(content, language="rust") is True
+
+    def test_rust_cfg_test_attribute_head_is_detected(self):
+        content = "#[cfg(test)]\nmod tests {\n    fn helper() {}\n}"
+        assert is_content_structural_test_chunk(content, language="rust") is True
+
+    def test_rust_production_fn_is_not_detected(self):
+        content = "pub fn parse(input: &str) -> Result<f64, Error> {\n    input.parse()\n}"
+        assert is_content_structural_test_chunk(content, language="rust") is False
+
+    def test_rust_body_mention_of_test_literal_is_not_detected(self):
+        # A string literal deep in the body mentioning "#[test]" must not
+        # trigger the head-only structural marker.
+        content = "pub fn describe() -> &'static str {\n    \"see #[test] docs\"\n}"
+        assert is_content_structural_test_chunk(content, language="rust") is False
+
+    def test_zig_named_test_block_head_is_detected(self):
+        content = 'test "parses a basic value" {\n    try std.testing.expect(true);\n}'
+        assert is_content_structural_test_chunk(content, language="zig") is True
+
+    def test_zig_bare_test_block_head_is_detected(self):
+        content = "test {\n    try std.testing.expect(true);\n}"
+        assert is_content_structural_test_chunk(content, language="zig") is True
+
+    def test_zig_production_fn_is_not_detected(self):
+        content = "pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}"
+        assert is_content_structural_test_chunk(content, language="zig") is False
+
+    def test_language_gate_prevents_cross_language_false_positive(self):
+        # A Rust-shaped attribute line in a non-Rust chunk must not trigger.
+        content = "#[test]\nfn f() {}"
+        assert is_content_structural_test_chunk(content, language="python") is False
+
+
+class TestQualityScoreContentStructuralTestDemotion:
+    """DEF-A wiring: quality_score demotes a content-structurally-detected test
+    chunk with the SAME tier and SAME fan-in escape as a path-based one, even
+    when the file path itself is not test-named.
+    """
+
+    def test_rust_inline_test_in_production_path_is_demoted(self):
+        content = "#[test]\nfn checks_ok() {\n    assert_eq!(1, 1);\n    let x = 2;\n    let y = 3;\n}"
+        s = quality_score(content, file_path="/proj/src/lib.rs", language="rust")
+        assert s == pytest.approx(QUALITY_TEST_DEPRIORITISED)
+
+    def test_zig_inline_test_in_production_path_is_demoted(self):
+        content = 'test "checks basic add" {\n    try std.testing.expect(add(1, 1) == 2);\n}'
+        s = quality_score(content, file_path="/proj/src/main.zig", language="zig")
+        assert s == pytest.approx(QUALITY_TEST_DEPRIORITISED)
+
+    def test_production_fn_in_same_file_is_not_demoted(self):
+        content = "pub fn parse(input: &str) -> Result<f64, Error> {\n    input.parse()\n    // more\n}"
+        s = quality_score(content, file_path="/proj/src/lib.rs", language="rust")
+        assert s == pytest.approx(1.0)
+
+    def test_fan_in_escape_applies_to_content_structural_detection_too(self):
+        # F58's framework-fan-in exemption must cover BOTH signals identically.
+        content = "#[test]\nfn checks_ok() {\n    assert_eq!(1, 1);\n    let x = 2;\n    let y = 3;\n}"
+        demoted = quality_score(content, file_path="/proj/src/lib.rs", language="rust")
+        exempted = quality_score(
+            content, file_path="/proj/src/lib.rs", language="rust",
+            file_fan_in=TEST_FRAMEWORK_FAN_IN_THRESHOLD,
+        )
+        assert exempted > demoted
+        assert exempted == pytest.approx(1.0)
+
+
+class TestIsTypeDefinitionChunk:
+    """DEF-B (UPG-RUST-DEF-EVICTION): type-definition node_type prior predicate.
+
+    node_type values below are the exact tree-sitter strings verified against
+    agent/indexer/_chunking.py's `_CHUNK_NODE_TYPES` (see chunk_quality.py's
+    _TYPE_DEF_NODE_TYPES comment for the full per-language reachability audit,
+    including which of these are currently dormant for a given language).
+    """
+
+    @pytest.mark.parametrize("node_type", [
+        "class_definition",   # python
+        "class_declaration",  # javascript/typescript/java
+        "struct_specifier",   # c/cpp
+        "enum_specifier",     # c/cpp
+        "type_definition",    # c/cpp typedef
+        "class_specifier",    # cpp
+    ])
+    def test_positive_node_types(self, node_type):
+        assert is_type_definition_chunk(node_type) is True
+
+    @pytest.mark.parametrize("node_type", [
+        "function_definition",
+        "function_declaration",
+        "method_declaration",
+        "impl_item",   # a Rust impl block is NOT the type's own definition
+        "window",
+    ])
+    def test_negative_node_types(self, node_type):
+        assert is_type_definition_chunk(node_type) is False
+
+    def test_zig_type_factory_head_is_detected(self):
+        content = "pub const Point = struct {\n    x: i32,\n    y: i32,\n};"
+        assert is_type_definition_chunk("variable_declaration", content, "zig") is True
+
+    def test_zig_plain_constant_is_not_detected(self):
+        content = "pub const max_retries = 5;"
+        assert is_type_definition_chunk("variable_declaration", content, "zig") is False
+
+    def test_zig_check_is_language_gated(self):
+        # The same struct-factory-shaped line in a non-Zig chunk must not
+        # trigger the variable_declaration content check.
+        content = "pub const Point = struct {\n    x: i32,\n};"
+        assert is_type_definition_chunk("variable_declaration", content, "python") is False
+
+
+class TestLeadingDocstringKey:
+    """DEF-C (UPG-RUST-DEF-EVICTION): near-duplicate leading-docstring dedup key."""
+
+    def test_same_leading_doc_different_body_yields_same_key(self):
+        content_a = (
+            "/// Represents a single configuration entry loaded from disk.\n"
+            "/// Used across the module for validated settings access.\n"
+            "struct ConfigEntry { value: String }"
+        )
+        content_b = (
+            "/// Represents a single configuration entry loaded from disk.\n"
+            "/// Used across the module for validated settings access.\n"
+            "struct ConfigEntryTestDouble { value: String, extra: bool }"
+        )
+        key_a = leading_docstring_key(content_a, "rust")
+        key_b = leading_docstring_key(content_b, "rust")
+        assert key_a != ""
+        assert key_a == key_b
+
+    def test_different_leading_doc_yields_different_key(self):
+        content_a = (
+            "/// Represents a single configuration entry loaded from disk.\n"
+            "/// Used across the module for validated settings access.\n"
+            "struct ConfigEntry { value: String }"
+        )
+        content_c = (
+            "/// Handles outbound network retries with exponential backoff.\n"
+            "/// Not related to configuration loading at all.\n"
+            "struct RetryPolicy { attempts: u32 }"
+        )
+        key_a = leading_docstring_key(content_a, "rust")
+        key_c = leading_docstring_key(content_c, "rust")
+        assert key_a != key_c
+
+    def test_no_leading_docstring_never_yields_a_key(self):
+        content = "struct Bare { value: String }"
+        assert leading_docstring_key(content, "rust") == ""
+
+    def test_trivial_short_header_never_yields_a_key(self):
+        # Below the min-chars floor — must not collapse chunks that merely
+        # share a blank/one-word comment.
+        content = "// ok\nfn f() {}"
+        assert leading_docstring_key(content, "rust") == ""
+
+    def test_python_docstring_is_used_when_no_leading_comment(self):
+        content_a = (
+            "def load_entry():\n"
+            "    \"\"\"Load a single configuration entry from disk and validate it.\"\"\"\n"
+            "    return read()\n"
+        )
+        content_b = (
+            "def load_entry_v2():\n"
+            "    \"\"\"Load a single configuration entry from disk and validate it.\"\"\"\n"
+            "    return read_v2()\n"
+        )
+        key_a = leading_docstring_key(content_a, "python")
+        key_b = leading_docstring_key(content_b, "python")
+        assert key_a != ""
+        assert key_a == key_b
 
 
 class TestQualityScore:

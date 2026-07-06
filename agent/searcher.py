@@ -15,6 +15,8 @@ from agent.chunk_quality import (
     quality_score,
     is_trivial_chunk,
     extract_class_from_content,
+    is_type_definition_chunk,
+    leading_docstring_key,
 )
 from agent.config import (
     RERANK_TOP_K as _RERANK_TOP_K,
@@ -23,6 +25,7 @@ from agent.config import (
     IMPORTANCE_PRIOR_LAMBDA as _IMPORTANCE_PRIOR_LAMBDA,
     CLASS_IMPORTANCE_PRIOR_LAMBDA as _CLASS_IMPORTANCE_PRIOR_LAMBDA,
     PURPOSE_RANK_PRIOR_LAMBDA as _PURPOSE_RANK_PRIOR_LAMBDA,
+    TYPE_DEF_PRIOR_LAMBDA as _TYPE_DEF_PRIOR_LAMBDA,
     DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED,
     DUAL_VECTOR_BLEND_MODE as _DUAL_VECTOR_BLEND_MODE,
     DUAL_VECTOR_BLEND_WEIGHT as _DUAL_VECTOR_BLEND_WEIGHT,
@@ -647,14 +650,19 @@ class CodeSearcher:
         Pipeline: final_score = base_rerank_score * quality_score(chunk) *
         (1 + lambda_file * file_importance) (ARCH-1b) * (1 + lambda_class *
         class_importance) (ARCH-2) * (1 + lambda_purpose * purpose_sim *
-        quality_score(chunk)) (ARCH-4b, quality-weighted by UPG-PREFIX-COMPOSE).
-        All three are relevance-gated multiplicative priors — multiplying by
-        base_rerank_score means an irrelevant high-importance/high-purpose-sim
-        chunk (base ≈ 0) is never lifted. When no importance map is installed (or
-        a lambda = 0) that factor is 1.0 and the score falls back accordingly (all
-        three absent → base × quality, pre-ARCH-1b). purpose_sim defaults to 0.0
-        on every SearchResult built outside a purpose-vector pool-entry rescue, so
-        the ARCH-4b factor is an exact no-op for chunks with no purpose vector.
+        quality_score(chunk)) (ARCH-4b, quality-weighted by UPG-PREFIX-COMPOSE)
+        * (1 + lambda_def * is_type_definition) (UPG-RUST-DEF-EVICTION / DEF-B).
+        All four are relevance-gated multiplicative priors — multiplying by
+        base_rerank_score means an irrelevant high-importance/high-purpose-sim/
+        type-def chunk (base ≈ 0) is never lifted. When no importance map is
+        installed (or a lambda = 0) that factor is 1.0 and the score falls back
+        accordingly (all four absent → base × quality, pre-ARCH-1b). purpose_sim
+        defaults to 0.0 on every SearchResult built outside a purpose-vector
+        pool-entry rescue, so the ARCH-4b factor is an exact no-op for chunks
+        with no purpose vector; is_type_definition is a pure content/node_type
+        property computed fresh per chunk (chunk_quality.is_type_definition_chunk),
+        so the DEF-B factor is an exact no-op for any non-type-definition chunk
+        regardless of query.
         The purpose factor is additionally weighted by the chunk's own
         quality_score so a quality-demoted chunk's textual purpose-match (e.g. a
         test helper whose docstring happens to restate the query) cannot buy
@@ -667,7 +675,9 @@ class CodeSearcher:
         per-chunk quality prior then demotes trivial / navigational / generated /
         heading-only / test chunks (UPG-2.1, 2.3). Byte-identical chunks collapse
         to a single representative with a duplicate count so boilerplate can't flood
-        the top-N (UPG-2.2).
+        the top-N (UPG-2.2); a second collapse key on the normalized leading
+        docstring/comment block catches near-duplicate boilerplate headers that
+        the byte-identical key misses (UPG-RUST-DEF-EVICTION / DEF-C).
 
         UPG-SCORE-DISPLAY-FLAT: `final_score` (the composite above) is an
         ORDERING KEY ONLY — it decides sort order and dedup precedence and is
@@ -743,7 +753,14 @@ class CodeSearcher:
             # candidates keep the full boost) without letting quality-demoted
             # look-alikes leapfrog them.
             purpose_factor = 1.0 + _PURPOSE_RANK_PRIOR_LAMBDA * r.purpose_sim * q
-            scored.append((base * q * file_factor * class_factor * purpose_factor, q, i, r))
+            # DEF-B (UPG-RUST-DEF-EVICTION): relevance-gated type-definition
+            # node_type prior. is_type_definition is a pure chunk PROPERTY
+            # (node_type/content/language only — never the query), so this
+            # factor is an exact no-op (1.0) for any chunk that is not a
+            # struct/enum/trait/class/interface definition.
+            is_type_def = is_type_definition_chunk(r.node_type, r.content, r.language)
+            def_factor = 1.0 + _TYPE_DEF_PRIOR_LAMBDA * (1.0 if is_type_def else 0.0)
+            scored.append((base * q * file_factor * class_factor * purpose_factor * def_factor, q, i, r))
 
         # Deterministic order: final score desc, quality desc, length desc, then
         # original rank, then path — so equal-scoring boilerplate never wins by
@@ -758,14 +775,30 @@ class CodeSearcher:
         # (UPG-SCORE-DISPLAY-FLAT) — no clamp or per-result-set normalization
         # is needed; `scored` below is consumed only for its sort order.
 
-        seen: dict[str, int] = {}
+        # UPG-RUST-DEF-EVICTION / DEF-C: two independent dedup keys — the
+        # existing byte-identical full-content key (UPG-2.2), and a new
+        # near-duplicate key on the chunk's own normalized leading docstring/
+        # comment block. Either key matching an already-seen representative
+        # collapses the chunk into it (dup_count on the best-ranked survivor,
+        # since `scored` is already sorted best-first). A chunk with no
+        # leading docstring (leading_docstring_key returns "") is NEVER
+        # collapsed by the docstring key — only the content key can catch it.
+        seen_content: dict[str, int] = {}
+        seen_docstring: dict[str, int] = {}
         out: list[SearchResult] = []
         for _final_score, _, _, r in scored:
-            key = normalized_content(r.content)
-            if key in seen:
-                out[seen[key]].dup_count += 1
+            content_key = normalized_content(r.content)
+            doc_key = leading_docstring_key(r.content, r.language)
+            existing_idx = seen_content.get(content_key)
+            if existing_idx is None and doc_key:
+                existing_idx = seen_docstring.get(doc_key)
+            if existing_idx is not None:
+                out[existing_idx].dup_count += 1
                 continue
-            seen[key] = len(out)
+            idx = len(out)
+            seen_content[content_key] = idx
+            if doc_key:
+                seen_docstring[doc_key] = idx
             r.dup_count = 0
             # UPG-SCORE-DISPLAY-FLAT: the displayed score is the absolute
             # per-(query, chunk) relevance — the cross-encoder's judgment when

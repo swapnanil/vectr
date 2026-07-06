@@ -1744,6 +1744,68 @@ class TestRankingQuality:
         assert searcher._apply_quality_and_dedup("q", []) == []
 
 
+# ---------------------------------------------------------------------------
+# UPG-RUST-DEF-EVICTION / DEF-C — near-duplicate leading-docstring dedup,
+# wired into _apply_quality_and_dedup's final collapse alongside the existing
+# byte-identical full-content key (UPG-2.2).
+# ---------------------------------------------------------------------------
+
+class TestDocstringDedupWiring:
+    def test_near_duplicate_docstring_different_body_collapses(self, searcher) -> None:
+        # Two DIFFERENT bodies (so the byte-identical content key does not
+        # already catch this) sharing the same leading doc-comment block must
+        # collapse to one representative via the docstring key.
+        best = _sr(
+            "/// Represents a single configuration entry loaded from disk.\n"
+            "/// Used across the module for validated settings access.\n"
+            "struct ConfigEntry { value: String }",
+            path="/p/config_entry.rs", lang="rust",
+        )
+        near_dup = _sr(
+            "/// Represents a single configuration entry loaded from disk.\n"
+            "/// Used across the module for validated settings access.\n"
+            "struct ConfigEntryHelper { value: String, extra: bool }",
+            path="/p/config_entry_helper.rs", lang="rust",
+        )
+        out = searcher._apply_quality_and_dedup("configuration entry", [best, near_dup])
+        assert len(out) == 1
+        assert out[0].dup_count == 1
+
+    def test_chunks_with_no_leading_docstring_never_collapse(self, searcher) -> None:
+        # Two DIFFERENT, undocumented chunks must never be folded together by
+        # the docstring key (it returns "" for both — never a valid key).
+        a = _sr("struct Bare { value: String }", path="/p/bare_a.rs", lang="rust")
+        b = _sr("struct AlsoBare { value: String }", path="/p/bare_b.rs", lang="rust")
+        out = searcher._apply_quality_and_dedup("bare struct", [a, b])
+        assert len(out) == 2
+
+    def test_different_leading_docstring_never_collapses(self, searcher) -> None:
+        a = _sr(
+            "/// Represents a single configuration entry loaded from disk.\n"
+            "/// Used across the module for validated settings access.\n"
+            "struct ConfigEntry { value: String }",
+            path="/p/config_entry.rs", lang="rust",
+        )
+        b = _sr(
+            "/// Handles outbound network retries with exponential backoff.\n"
+            "/// Not related to configuration loading at all.\n"
+            "struct RetryPolicy { attempts: u32 }",
+            path="/p/retry_policy.rs", lang="rust",
+        )
+        out = searcher._apply_quality_and_dedup("q", [a, b])
+        assert len(out) == 2
+
+    def test_byte_identical_dedup_still_works(self, searcher) -> None:
+        # Existing UPG-2.2 full-content dedup must be unaffected by the new key.
+        cands = [
+            _sr("## Create accounts", path="/p/rust/README.md", lang="markdown"),
+            _sr("## Create accounts", path="/p/java/README.md", lang="markdown"),
+        ]
+        out = searcher._apply_quality_and_dedup("create accounts", cands)
+        assert len(out) == 1
+        assert out[0].dup_count == 1
+
+
 class TestImportancePrior:
     """ARCH-1b: file-level PageRank importance blended as a relevance-gated
     multiplicative prior into the final search sort."""
@@ -2048,6 +2110,85 @@ class TestClassImportancePrior:
         searcher.set_class_importance({"SomeOtherClass": 1.0})
         out = searcher._apply_quality_and_dedup("process the item", cands)
         assert out[0] is lookalike
+
+
+# ---------------------------------------------------------------------------
+# UPG-RUST-DEF-EVICTION / DEF-B — type-definition node_type prior blended as a
+# fourth relevance-gated multiplicative factor, composed with the three priors
+# above. Unlike file/class importance, this factor needs no installed map: it
+# is computed fresh per chunk from node_type/content/language.
+# ---------------------------------------------------------------------------
+
+class TestTypeDefPrior:
+    def _def_vs_usage_near_tie(self):
+        # A struct's own definition chunk (rank 1, one behind a same-name
+        # usage/test-site look-alike at rank 0) — the near-tie shape DEF-B
+        # must resolve, mirroring ARCH-1b/ARCH-2's near-tie test shape.
+        usage_site = _sr(
+            "fn make_default() -> Widget {\n    Widget { value: 0 }\n    // impl body\n}",
+            path="/p/factory.rs", lang="rust", node_type="function_item",
+        )
+        definition = _sr(
+            "struct Widget {\n    value: i32,\n}\n// fields",
+            path="/p/widget.rs", lang="rust", node_type="struct_item",
+        )
+        filler = [
+            _sr(f"fn other{i}() -> i32 {{\n    return {i};\n    z={i}\n}}",
+                path=f"/p/f{i}.rs", lang="rust", node_type="function_item")
+            for i in range(8)
+        ]
+        return definition, [usage_site, definition] + filler
+
+    def test_type_definition_ranks_first_at_near_tie(self, searcher) -> None:
+        definition, cands = self._def_vs_usage_near_tie()
+        out = searcher._apply_quality_and_dedup("widget", cands)
+        assert out[0] is definition, (
+            f"type-def chunk must overtake a one-rank-ahead usage site; got {out[0].file_path}"
+        )
+
+    def test_lambda_zero_is_exact_noop(self, searcher) -> None:
+        import agent.searcher as searcher_mod
+        definition, cands = self._def_vs_usage_near_tie()
+        usage_site = cands[0]
+        orig_lambda = searcher_mod._TYPE_DEF_PRIOR_LAMBDA
+        searcher_mod._TYPE_DEF_PRIOR_LAMBDA = 0.0
+        try:
+            out = searcher._apply_quality_and_dedup("widget", cands)
+        finally:
+            searcher_mod._TYPE_DEF_PRIOR_LAMBDA = orig_lambda
+        assert out[0] is usage_site, (
+            f"lambda=0 must be an exact no-op; got order {[r.file_path for r in out]}"
+        )
+
+    def test_prior_does_not_override_clear_relevance(self, searcher) -> None:
+        # A clearly irrelevant type-def chunk (last rank) must NOT jump a
+        # clearly-relevant top chunk: gated by base_rerank_score.
+        top = _sr(
+            "fn make_default() -> Widget {\n    Widget { value: 0 }\n    x=1\n}",
+            path="/p/factory.rs", lang="rust", node_type="function_item",
+        )
+        filler = [
+            _sr(f"fn other{i}() -> i32 {{\n    return {i};\n    z={i}\n}}",
+                path=f"/p/f{i}.rs", lang="rust", node_type="function_item")
+            for i in range(7)
+        ]
+        last = _sr(
+            "struct Unrelated {\n    n: i32,\n}\n// fields",
+            path="/p/unrelated.rs", lang="rust", node_type="struct_item",
+        )
+        cands = [top] + filler + [last]
+        out = searcher._apply_quality_and_dedup("widget", cands)
+        assert out[0] is top, f"clear top relevance must hold; got {out[0].file_path}"
+
+    def test_non_type_def_node_type_is_unaffected(self, searcher) -> None:
+        # A function chunk's rank must be identical whether or not a
+        # co-candidate is a type definition — the factor only ever multiplies
+        # the type-def chunk's own score.
+        a = _sr("def alpha():\n    return compute()\n    x=1", path="/p/a.py")
+        b = _sr("def beta():\n    return compute()\n    y=2", path="/p/b.py")
+        out = searcher._apply_quality_and_dedup("compute", [a, b])
+        assert out[0] is a
+        assert out.index(a) < out.index(b)
 
 
 # ---------------------------------------------------------------------------

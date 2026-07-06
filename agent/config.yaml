@@ -223,6 +223,47 @@ ranking:
     # shows zero other case flipped by this change.
     lambda: 0.9
 
+  type_def_prior:
+    # UPG-RUST-DEF-EVICTION / DEF-B: a fourth relevance-gated multiplicative
+    # prior, same shape as file_importance/class_importance/purpose_rank
+    # above:
+    #     final_score = base_rerank_score * quality_score
+    #                    * (1 + lambda_file * file_importance)
+    #                    * (1 + lambda_class * class_importance)
+    #                    * (1 + lambda_purpose * purpose_sim * quality_score)
+    #                    * (1 + lambda_def * is_type_definition)
+    # where is_type_definition is 1 when the chunk's own node_type is a TYPE
+    # DEFINITION (struct/enum/trait/class/interface — see
+    # chunk_quality.is_type_definition_chunk), else 0. Cross-language witness:
+    # a struct/type's canonical definition chunk repeatedly loses to same-name
+    # test code and usage sites at comparable rerank scores because the
+    # cross-encoder has no visibility into "this chunk IS the definition" —
+    # only the AST does. lambda=0 disables it (pre-DEF-B behaviour). Default
+    # 0.15, smaller than class_importance/file_importance's 0.25: this prior
+    # fires on every type-def chunk unconditionally (not gated by corpus-wide
+    # reference frequency), so a larger lambda would systematically favour
+    # definitions over well-matched usage sites even when the usage IS the
+    # better answer to the query.
+    lambda: 0.15
+
+  docstring_dedup:
+    # UPG-RUST-DEF-EVICTION / DEF-C: a second, independent dedup key
+    # (alongside the existing byte-normalized full-content key, UPG-2.2)
+    # keyed on a chunk's normalized LEADING docstring/comment block only.
+    # Near-duplicate boilerplate headers (the same rustdoc/JSDoc/docstring
+    # copy-pasted across several thin wrapper/test chunks with otherwise
+    # different bodies) evade the full-content key but still bury the
+    # canonical definition under several near-identical-looking results.
+    # `lines` bounds how many leading doc lines are compared (matches the
+    # dual-vector purpose-text docstring cap's spirit — a header is a header,
+    # extra lines rarely add distinguishing signal). `min_chars` is a floor
+    # on the normalized header's length below which a chunk is NEVER folded
+    # into this key (chunks with a trivial/near-empty leading header, or none
+    # at all, keep every occurrence — collapsing on near-nothing would fold
+    # together unrelated chunks that merely share a blank or 1-word header).
+    lines: 3
+    min_chars: 20
+
   locate_ranking:
     # UPG-15.10: scope-depth + line-span signals for locate ranking.
     # These penalise class/function definitions that are buried inside function
