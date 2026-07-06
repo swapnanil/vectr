@@ -1904,6 +1904,8 @@ class TestEmbedModelStampRebuildTrigger:
     def test_mismatched_stamp_forces_full_rebuild(self, indexer, tmp_path) -> None:
         make_py(tmp_path, "a.py", "def a(): pass")
         indexer.index_workspace()
+        count_before = indexer._collection.count()
+        assert count_before > 0
 
         import json
         stamp_path = indexer._embed_model_stamp_path()
@@ -1911,39 +1913,67 @@ class TestEmbedModelStampRebuildTrigger:
             json.dumps({"embed_model": "some-other-embedding-model"}), encoding="utf-8"
         )
 
-        delete_calls: list = []
-        real_delete = indexer._collection.delete
-
-        def _tracking_delete(*args, **kwargs):
-            delete_calls.append((args, kwargs))
-            return real_delete(*args, **kwargs)
-
-        indexer._collection.delete = _tracking_delete
+        # A mismatch must DROP AND RECREATE both collections (ChromaDB pins a
+        # collection's dimensionality at first insert and keeps it even after
+        # every entry is deleted, so per-entry deletion alone would crash a
+        # different-dimension swap) and fully repopulate them.
+        old_collection = indexer._collection
+        old_purpose = indexer._purpose_collection
         indexer.index_workspace()
-        # force=True unconditionally deletes-then-reinserts every re-indexed file's chunks.
-        assert delete_calls, "a stamp mismatch must force the full-rebuild delete-then-reinsert path"
+        assert indexer._collection is not old_collection, \
+            "a stamp mismatch must drop and recreate the body collection"
+        assert indexer._purpose_collection is not old_purpose, \
+            "a stamp mismatch must drop and recreate the purpose collection"
+        assert indexer._collection.count() == count_before  # fully re-populated
         assert indexer._stored_embed_model() == indexer.embed_model  # stamp updated to current model
 
     def test_missing_stamp_treated_as_mismatch_not_match(self, indexer, tmp_path) -> None:
         make_py(tmp_path, "a.py", "def a(): pass")
         indexer.index_workspace()
+        count_before = indexer._collection.count()
+        assert count_before > 0
 
         stamp_path = indexer._embed_model_stamp_path()
         stamp_path.unlink()  # simulate a pre-existing index from an older vectr version
 
         assert indexer._stored_embed_model() is None
 
-        delete_calls: list = []
-        real_delete = indexer._collection.delete
-
-        def _tracking_delete(*args, **kwargs):
-            delete_calls.append((args, kwargs))
-            return real_delete(*args, **kwargs)
-
-        indexer._collection.delete = _tracking_delete
+        old_collection = indexer._collection
         indexer.index_workspace()
-        assert delete_calls, "a missing stamp must be treated as a mismatch (rebuild), not a match"
+        assert indexer._collection is not old_collection, \
+            "a missing stamp must be treated as a mismatch (recreate + rebuild), not a match"
+        assert indexer._collection.count() == count_before
         assert indexer._stored_embed_model() == indexer.embed_model
+
+    def test_different_dimension_model_swap_rebuilds_cleanly(self, indexer, tmp_path, monkeypatch) -> None:
+        """The crash case the drop-and-recreate exists for: swapping to a model
+        with a DIFFERENT embedding dimension. Without collection recreation the
+        rebuild's reinsert would raise a dimension-mismatch error, because the
+        old collection keeps its original dimensionality even after every
+        entry is deleted."""
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        count_before = indexer._collection.count()
+        assert count_before > 0
+
+        from tests.conftest import _DummyEmbedProvider
+
+        class _Small384Provider(_DummyEmbedProvider):
+            DIM = 384
+
+        from agent import indexer as idx_module
+        monkeypatch.setattr(
+            idx_module, "get_embed_provider", lambda _model: _Small384Provider()
+        )
+        from agent.indexer import CodeIndexer
+        idx2 = CodeIndexer(
+            workspace_root=str(tmp_path),
+            embed_model="different-dimension-model",
+            db_path=str(tmp_path / "chroma"),
+        )
+        files, chunks = idx2.index_workspace()  # must not raise
+        assert chunks == count_before
+        assert idx2._stored_embed_model() == "different-dimension-model"
 
 
 # ---------------------------------------------------------------------------
@@ -3443,6 +3473,23 @@ class TestWarmReranker:
         s = CodeSearcher(indexer)
         assert s._reranker is None
         s.warm_reranker()  # must not raise
+
+    def test_reranker_model_defaults_to_config_key(self, indexer, monkeypatch) -> None:
+        """With no VECTR_RERANKER_MODEL env override, the reranker model comes
+        from config.yaml's ranking.rerank.model (RERANK_MODEL) — a reranker
+        swap must be a config change, never a code change. The env var, when
+        set (as this suite's conftest does to disable reranking), still wins."""
+        monkeypatch.delenv("VECTR_RERANKER_MODEL", raising=False)
+        from agent.config import RERANK_MODEL
+        from agent.searcher import CodeSearcher
+
+        s = CodeSearcher(indexer)
+        assert s._reranker is not None
+        assert s._reranker._model_name == RERANK_MODEL
+
+        monkeypatch.setenv("VECTR_RERANKER_MODEL", "some-env-override-model")
+        s2 = CodeSearcher(indexer)
+        assert s2._reranker._model_name == "some-env-override-model"
 
 
 # ---------------------------------------------------------------------------

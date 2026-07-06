@@ -19,6 +19,7 @@ from agent.chunk_quality import (
     leading_docstring_key,
 )
 from agent.config import (
+    RERANK_MODEL as _RERANK_MODEL,
     RERANK_TOP_K as _RERANK_TOP_K,
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
     RERANK_PRE_FILTER_FETCH_K as _RERANK_PRE_FILTER_FETCH_K,
@@ -292,8 +293,10 @@ class CodeSearcher:
         # test-framework fan-in exemption is a no-op (every test-path file keeps
         # the full test_deprioritised demotion, pre-F58 behaviour).
         self._file_fan_in: dict[str, int] = {}
-        # Read at instantiation so test fixtures can override via os.environ before creating searcher
-        reranker_model = os.getenv("VECTR_RERANKER_MODEL", "BAAI/bge-reranker-base")
+        # Read at instantiation so test fixtures can override via os.environ
+        # before creating searcher; the config.yaml ranking.rerank.model key
+        # is the default so a reranker swap is a config change, not a code change.
+        reranker_model = os.getenv("VECTR_RERANKER_MODEL", _RERANK_MODEL)
         self._reranker = _Reranker(reranker_model) if reranker_model else None
 
     def warm_reranker(self) -> None:

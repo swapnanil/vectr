@@ -48,6 +48,22 @@ class CodeIndexer:
         self._db_dir = db_dir
 
         self._client = chromadb.PersistentClient(path=str(db_dir))
+        self._create_collections()
+        self._last_indexed: float = 0.0
+        self._indexed_files: set[str] = set()
+        self._lang_cache: tuple[int, dict[str, dict[str, int]]] | None = None  # (chunk_count, per-lang stats) — UPG-3.1/3.3
+
+        # Deferred: look up get_embed_provider through the package namespace so that
+        # test-time monkeypatching of agent.indexer.get_embed_provider is honoured
+        # (identical to the original flat-module behaviour where the function lived
+        # in the same module namespace that patches target).
+        import agent.indexer as _idx
+        self._embed_provider = _idx.get_embed_provider(embed_model)
+
+    def _workspace_hash(self) -> str:
+        return hashlib.md5(str(self.workspace_root).encode()).hexdigest()[:12]
+
+    def _create_collections(self) -> None:
         self._collection = self._client.get_or_create_collection(
             name="code_chunks",
             metadata={
@@ -73,19 +89,26 @@ class CodeIndexer:
                 "hnsw:M": 32,
             },
         )
-        self._last_indexed: float = 0.0
-        self._indexed_files: set[str] = set()
-        self._lang_cache: tuple[int, dict[str, dict[str, int]]] | None = None  # (chunk_count, per-lang stats) — UPG-3.1/3.3
 
-        # Deferred: look up get_embed_provider through the package namespace so that
-        # test-time monkeypatching of agent.indexer.get_embed_provider is honoured
-        # (identical to the original flat-module behaviour where the function lived
-        # in the same module namespace that patches target).
-        import agent.indexer as _idx
-        self._embed_provider = _idx.get_embed_provider(embed_model)
+    def _recreate_collections(self) -> None:
+        """Drop and recreate both vector collections.
 
-    def _workspace_hash(self) -> str:
-        return hashlib.md5(str(self.workspace_root).encode()).hexdigest()[:12]
+        ChromaDB pins a collection's embedding dimensionality at first insert
+        and keeps it even after every entry is deleted, so an embedding-model
+        swap to a DIFFERENT-dimension model would crash the per-file
+        delete-then-reinsert rebuild (`force=True`) against the old
+        collection. On an embed-model stamp mismatch the collections
+        themselves must be dropped, not just their contents — this also
+        guarantees no old-model vector can survive regardless of any
+        per-file bookkeeping.
+        """
+        for name in ("code_chunks", "code_chunks_purpose"):
+            try:
+                self._client.delete_collection(name)
+            except Exception:
+                pass  # collection may not exist yet — nothing to drop
+        self._create_collections()
+        self._lang_cache = None
 
     @property
     def all_roots(self) -> list[Path]:
@@ -154,19 +177,22 @@ class CodeIndexer:
         # ChromaDB's HNSW index accepts them without error). A stamp mismatch
         # — including a MISSING stamp, treated as a mismatch rather than a
         # match since a pre-existing index from an older vectr version
-        # predates this mechanism — forces the same full-rebuild path as an
-        # explicit force=True: every file is re-chunked/re-embedded and (in
-        # Phase 2) its existing chunks are unconditionally deleted first, so
-        # no old-model vector can survive the rebuild alongside a new one.
+        # predates this mechanism — drops and recreates both collections
+        # (ChromaDB pins dimensionality at first insert, so a different-
+        # dimension model would otherwise crash the reinsert) and forces the
+        # full-rebuild path: every file is re-chunked/re-embedded into the
+        # fresh collections, so no old-model vector can survive.
         stored_embed_model = self._stored_embed_model()
-        if not force and stored_embed_model != self.embed_model:
-            logger.warning(
-                "Embedding model changed (index built with %r, now configured "
-                "with %r) — forcing a full vector index rebuild so vectors "
-                "from the two models never mix in one collection",
-                stored_embed_model, self.embed_model,
-            )
-            force = True
+        if stored_embed_model != self.embed_model:
+            if not force:
+                logger.warning(
+                    "Embedding model changed (index built with %r, now configured "
+                    "with %r) — forcing a full vector index rebuild so vectors "
+                    "from the two models never mix in one collection",
+                    stored_embed_model, self.embed_model,
+                )
+                force = True
+            self._recreate_collections()
 
         if force:
             # Clean rebuild: ignore the mtime cache so every file is re-indexed,

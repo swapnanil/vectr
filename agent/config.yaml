@@ -282,6 +282,12 @@ ranking:
     small_span_threshold: 10
 
   rerank:
+    # Cross-encoder reranker model (HuggingFace id). The VECTR_RERANKER_MODEL
+    # env var overrides this key (test fixtures rely on that); an empty value
+    # disables reranking entirely. Swapping this model needs no reindex —
+    # the reranker scores (query, chunk) pairs at query time only.
+    model: "BAAI/bge-reranker-base"
+
     # rerank this many hybrid candidates before trimming to n_results
     top_k: 40
 
@@ -294,10 +300,11 @@ ranking:
     # Before trimming to top_k_unfiltered, the hybrid retrieval fetches this many raw
     # candidates, drops any that are trivial (is_trivial_chunk == True) and not
     # forced-inclusion candidates, THEN trims to top_k_unfiltered.  This ensures the
-    # rerank pool of ~60 is filled with real code even on fixture-heavy corpora (e.g.
-    # Django's ~161 1–2-line HTML/TXT templates that otherwise crowd out code).
-    # Rule: pre_filter_fetch_k must be >= top_k_unfiltered.  Setting it to ~200
-    # covers Django's 161 fixture chunks while remaining <0.5% of the 41k-chunk corpus.
+    # rerank pool of ~60 is filled with real code even on fixture-heavy repos
+    # (a large web codebase can carry a hundred-plus 1–2-line HTML/TXT template
+    # chunks that otherwise crowd out code).
+    # Rule: pre_filter_fetch_k must be >= top_k_unfiltered.  ~200 covers such
+    # fixture blocks while remaining a tiny fraction of a 40k-chunk corpus.
     # The cross-encoder reranker only sees ~top_k_unfiltered (~60) candidates, so latency
     # is unaffected by this wider initial fetch.
     pre_filter_fetch_k: 200

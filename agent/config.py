@@ -370,10 +370,14 @@ DOCSTRING_DEDUP_LINES: int = int(_ddd_cfg["lines"])
 DOCSTRING_DEDUP_MIN_CHARS: int = int(_ddd_cfg["min_chars"])
 
 # ---------------------------------------------------------------------------
-# Rerank pool sizes (UPG-12.1)
+# Rerank pool sizes (UPG-12.1) + reranker model
 # ---------------------------------------------------------------------------
 
 _rr_cfg: dict[str, Any] = _cfg["ranking"]["rerank"]
+
+# Cross-encoder reranker (HuggingFace id). VECTR_RERANKER_MODEL overrides at
+# the searcher; empty disables reranking. Query-time only — no reindex on swap.
+RERANK_MODEL: str = str(_rr_cfg["model"])
 
 RERANK_TOP_K: int = int(_rr_cfg["top_k"])
 RERANK_TOP_K_UNFILTERED: int = int(_rr_cfg["top_k_unfiltered"])
