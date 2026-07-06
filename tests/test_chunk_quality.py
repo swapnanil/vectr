@@ -477,6 +477,71 @@ class TestLeadingDocstringKey:
         assert key_a != ""
         assert key_a == key_b
 
+    # -- attribute/decorator-line shadowing fix (merge-review regression) ---
+
+    def test_decorator_shadowed_python_docstring_still_keys_on_body_docstring(self):
+        # A leading decorator line (@abc.abstractmethod) must not shadow the
+        # real docstring, which is the method body's FIRST statement, not a
+        # leading comment. Includes the indexer-injected "# class: X" context
+        # line (skipped separately by _leading_doc_and_code) to match the real
+        # chunk shape this bug was found against.
+        content_a = (
+            "    @abc.abstractmethod\n"
+            "# class: Suite\n"
+            "def run(self, *, cwd: str) -> Command | None:\n"
+            "        \"\"\"Resolve a modified lockfile using pip-tools, from a warm cache.\n"
+            "\n"
+            "        More detail about the first variant.\n"
+            "        \"\"\"\n"
+        )
+        content_b = (
+            "    @abc.abstractmethod\n"
+            "# class: Suite\n"
+            "def resolve_incremental(self, *, cwd: str) -> Command | None:\n"
+            "        \"\"\"Resolve a modified lockfile using pip-tools, from a warm cache.\n"
+            "\n"
+            "        Different detail about the second variant.\n"
+            "        \"\"\"\n"
+        )
+        content_c = (
+            "    @abc.abstractmethod\n"
+            "# class: Suite\n"
+            "def teardown(self, *, cwd: str) -> Command | None:\n"
+            "        \"\"\"Tear down the suite's temporary working directory.\n"
+            "        \"\"\"\n"
+        )
+        key_a = leading_docstring_key(content_a, "python")
+        key_b = leading_docstring_key(content_b, "python")
+        key_c = leading_docstring_key(content_c, "python")
+        assert key_a != ""
+        assert key_a == key_b
+        assert key_a != key_c
+
+    def test_shared_rust_derive_attribute_alone_never_collapses(self):
+        # Two DIFFERENT structs whose only leading line is the SAME #[derive]
+        # attribute, with no /// doc comment, must never key on the shared
+        # attribute — the wrong-collapse hazard this fix defends against.
+        content_a = "#[derive(Debug, Clone)]\nstruct Foo {\n    x: i32,\n}"
+        content_b = "#[derive(Debug, Clone)]\nstruct Bar {\n    y: i32,\n    z: bool,\n}"
+        assert leading_docstring_key(content_a, "rust") == ""
+        assert leading_docstring_key(content_b, "rust") == ""
+
+    def test_rust_doc_comment_after_derive_attribute_keys_on_doc_only(self):
+        # A doc comment following a leading attribute line must still be found
+        # and used as the key — only the attribute line itself is filtered.
+        content = (
+            "#[derive(Debug, Clone)]\n"
+            "/// A canonical widget type used across the module.\n"
+            "/// Second line of documentation.\n"
+            "struct Foo {\n"
+            "    x: i32,\n"
+            "}"
+        )
+        key = leading_docstring_key(content, "rust")
+        assert key != ""
+        assert "derive" not in key
+        assert "canonical widget type" in key
+
 
 class TestQualityScore:
     def test_real_code_is_high(self):

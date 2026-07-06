@@ -973,6 +973,25 @@ def normalized_content(content: str) -> str:
     return re.sub(r"\s+", " ", content).strip().lower()
 
 
+# A leading attribute/decorator line — Python/Java `@decorator`/`@Override`,
+# Rust/Zig `#[attr]` — is a STRUCTURAL marker, not documentation prose, even
+# though `_leading_doc_and_code` sweeps it into the same "leading comment"
+# block as a real doc-comment (both start with `@`/`#`, the same convention
+# `_get_leading_comments` uses at chunk-creation time). Left unfiltered here,
+# it shadows the real docstring in two ways: (1) a chunk whose ONLY leading
+# line is a decorator (e.g. `@abc.abstractmethod` immediately above a Python
+# method whose docstring is its FIRST body statement, not a leading comment)
+# makes `doc_text` non-empty, so the Python-docstring fallback below never
+# runs and the dedup key becomes the decorator text itself (too short/generic
+# to mean anything, or worse: identical across UNRELATED overrides that merely
+# share `@abc.abstractmethod`); (2) two DIFFERENT Rust structs sharing only a
+# `#[derive(Debug, Clone)]` line with no `///` doc would wrongly key on that
+# shared attribute and collapse together. Filtering these lines out before
+# keying — and falling through to the doc that follows them, or to no key at
+# all if there is none — fixes both.
+_ATTR_DECORATOR_LINE_RE = re.compile(r"^(@\w|#\[)")
+
+
 def leading_docstring_key(content: str, language: str = "") -> str:
     """Normalized leading docstring/comment-block key for near-dup collapse
     (UPG-RUST-DEF-EVICTION / DEF-C).
@@ -984,16 +1003,19 @@ def leading_docstring_key(content: str, language: str = "") -> str:
     second, independent dedup key built ONLY from the chunk's own leading
     doc/comment lines (reusing the same `_leading_doc_and_code` /
     `_extract_python_docstring` split used for purpose-text distillation),
-    capped at `_DOCSTRING_DEDUP_LINES` lines.
+    with attribute/decorator lines filtered out (see `_ATTR_DECORATOR_LINE_RE`
+    above), capped at `_DOCSTRING_DEDUP_LINES` lines.
 
     Returns "" (never a valid dedup key — the caller must treat an empty
     string as "do not collapse this chunk on this key") when the chunk has no
-    leading doc at all, or when the normalized header is shorter than
-    `_DOCSTRING_DEDUP_MIN_CHARS` — a trivial/near-empty header must not fold
-    together chunks that merely share a blank or one-word comment.
+    leading doc at all (once attribute/decorator lines are filtered out), or
+    when the normalized header is shorter than `_DOCSTRING_DEDUP_MIN_CHARS` —
+    a trivial/near-empty header must not fold together chunks that merely
+    share a blank or one-word comment (or, per the above, a bare decorator).
     """
     lines = content.splitlines()
     leading_doc, code_lines = _leading_doc_and_code(lines)
+    leading_doc = [l for l in leading_doc if not _ATTR_DECORATOR_LINE_RE.match(l)]
 
     doc_text = "\n".join(leading_doc)
     if not doc_text and (language or "").lower() == "python":
