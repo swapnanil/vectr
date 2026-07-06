@@ -267,6 +267,7 @@ class CodeIndexer:
         # to avoid leaving stale chunks whose ids no longer match (UPG-8.6). The
         # purpose collection (ARCH-4) is keyed by the same file_path metadata, so
         # its stale entries are dropped alongside the body collection's.
+        phase_start = time.time()
         for fpath_str in new_mtimes:
             if force or fpath_str in mtime_cache:  # previously indexed → delete old chunks
                 try:
@@ -281,6 +282,8 @@ class CodeIndexer:
                         self._purpose_collection.delete(ids=existing_p["ids"])
                 except Exception:
                     pass
+        logger.info("  stale-chunk sweep done: %d files in %.0fs",
+                    len(new_mtimes), time.time() - phase_start)
 
         # Phase 3: global batched embed + upsert
         # Embed in large batches (256) for BLAS efficiency, upsert in smaller batches (100)
@@ -301,12 +304,16 @@ class CodeIndexer:
 
         total = len(ids)
         all_embeddings: list[list[float]] = []
+        phase_start = time.time()
         for i in range(0, total, _EMBED_BATCH_SIZE):
             batch_docs = documents[i: i + _EMBED_BATCH_SIZE]
             all_embeddings.extend(self._embed_provider.embed(batch_docs))
             if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
                 logger.info("  embedded %d/%d chunks...", i, total)
+        logger.info("  content embed done: %d chunks in %.0fs",
+                    total, time.time() - phase_start)
 
+        phase_start = time.time()
         for i in range(0, total, _UPSERT_BATCH_SIZE):
             self._collection.upsert(
                 ids=ids[i: i + _UPSERT_BATCH_SIZE],
@@ -314,6 +321,10 @@ class CodeIndexer:
                 metadatas=metadatas[i: i + _UPSERT_BATCH_SIZE],
                 embeddings=all_embeddings[i: i + _UPSERT_BATCH_SIZE],
             )
+            if i % (50 * _UPSERT_BATCH_SIZE) == 0 and i > 0:
+                logger.info("  upserted %d/%d chunks...", i, total)
+        logger.info("  content upsert done: %d chunks in %.0fs",
+                    total, time.time() - phase_start)
 
         self._upsert_purpose_vectors(all_chunks)
 
@@ -434,9 +445,15 @@ class CodeIndexer:
 
         total = len(ids)
         all_embeddings: list[list[float]] = []
+        phase_start = time.time()
         for i in range(0, total, _EMBED_BATCH_SIZE):
             all_embeddings.extend(self._embed_provider.embed(documents[i: i + _EMBED_BATCH_SIZE]))
+            if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
+                logger.info("  purpose-embedded %d/%d symbol chunks...", i, total)
+        logger.info("  purpose embed done: %d symbol chunks in %.0fs",
+                    total, time.time() - phase_start)
 
+        phase_start = time.time()
         for i in range(0, total, _UPSERT_BATCH_SIZE):
             self._purpose_collection.upsert(
                 ids=ids[i: i + _UPSERT_BATCH_SIZE],
@@ -444,6 +461,8 @@ class CodeIndexer:
                 metadatas=metadatas[i: i + _UPSERT_BATCH_SIZE],
                 embeddings=all_embeddings[i: i + _UPSERT_BATCH_SIZE],
             )
+        logger.info("  purpose upsert done: %d symbol chunks in %.0fs",
+                    total, time.time() - phase_start)
 
     # ------------------------------------------------------------------
     # mtime cache — tracks file modification times for incremental indexing
