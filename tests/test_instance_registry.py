@@ -80,6 +80,23 @@ def test_unregister_nonexistent_is_noop(registry):
     registry.unregister("doesnotexist")  # should not raise
 
 
+def test_register_defaults_extra_roots_and_code_workspace_file(registry):
+    registry.register("abc123456789", "/project/a", 8765, 12345)
+    entry = registry.get("abc123456789")
+    assert entry["extra_roots"] == []
+    assert entry["code_workspace_file"] is None
+
+
+def test_register_stores_extra_roots_and_code_workspace_file(registry):
+    registry.register(
+        "abc123456789", "/project/a", 8765, 12345,
+        extra_roots=["/project/b"], code_workspace_file="/project/proj.code-workspace",
+    )
+    entry = registry.get("abc123456789")
+    assert entry["extra_roots"] == ["/project/b"]
+    assert entry["code_workspace_file"] == "/project/proj.code-workspace"
+
+
 def test_register_overwrites_existing_entry(registry):
     registry.register("abc123456789", "/project/a", 8765, 100)
     registry.register("abc123456789", "/project/a", 8766, 200)

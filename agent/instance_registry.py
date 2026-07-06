@@ -71,13 +71,27 @@ class InstanceRegistry:
     def list_all(self) -> dict[str, Any]:
         return self._read()
 
-    def register(self, ws_hash: str, workspace: str, port: int, pid: int) -> None:
+    def register(
+        self,
+        ws_hash: str,
+        workspace: str,
+        port: int,
+        pid: int,
+        extra_roots: list[str] | None = None,
+        code_workspace_file: str | None = None,
+    ) -> None:
         data = self._read()
         data[ws_hash] = {
             "workspace": workspace,
             "port": port,
             "pid": pid,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            # Extra roots + the originating .code-workspace file (if any) are
+            # recorded here so `vectr status` can show what this instance
+            # actually serves without re-deriving it from CLI args it never
+            # saw (UPG-CLI-STATUS-MODE).
+            "extra_roots": extra_roots or [],
+            "code_workspace_file": code_workspace_file,
         }
         self._write(data)
 

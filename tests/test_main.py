@@ -94,6 +94,7 @@ class TestCmdStart:
 
         mock_do_start.assert_called_once_with(
             ws, 8765, wh, extra_roots=[], memory_only=False, search_only=False, workspace_explicit=True,
+            code_workspace_file=None,
         )
 
     def test_prunes_dead_entries_before_starting(self, tmp_path):
@@ -213,6 +214,107 @@ class TestCmdStatus:
 
         out = capsys.readouterr().out
         assert "No running" in out
+
+    def test_single_instance_shows_mode_line(self, tmp_path, capsys):
+        """UPG-CLI-STATUS-MODE: the Mode line is new — /v1/status already
+        returns `mode`, but cmd_status silently dropped it."""
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "workspace_root": str(tmp_path), "indexed_files": 10, "total_chunks": 50,
+            "last_indexed": "2026-01-01T00:00:00Z", "embed_model": "granite", "mode": "full",
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", return_value=mock_resp):
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        out = capsys.readouterr().out
+        assert "Mode          : full" in out
+        assert "Indexed files : 10" in out
+
+    def test_memory_only_mode_rewords_indexed_rows(self, tmp_path, capsys):
+        """UPG-CLI-STATUS-MODE: in memory-only mode, files/chunks/last-indexed
+        must not be rendered as live counts — 'Last indexed: never' and a
+        0-files-with-nonzero-chunks row are misleading when indexing is
+        intentionally off, not merely pending."""
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "workspace_root": str(tmp_path), "indexed_files": 0, "total_chunks": 5148,
+            "last_indexed": "never", "embed_model": "granite", "mode": "memory-only",
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", return_value=mock_resp):
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        out = capsys.readouterr().out
+        assert "Mode          : memory-only" in out
+        assert "Last indexed  : never" not in out
+        assert "Indexed files :" not in out
+        assert "disabled in memory-only mode" in out
+        assert "5148" in out
+
+    def test_shows_code_workspace_file_when_started_from_one(self, tmp_path, capsys):
+        """UPG-CLI-STATUS-MODE: the workspace line shows the originating
+        .code-workspace file (recorded at start/restart time) instead of just
+        the primary folder, when the instance was launched from one."""
+        ws_file = str(tmp_path / "proj.code-workspace")
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111, code_workspace_file=ws_file)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "workspace_root": str(tmp_path), "indexed_files": 1, "total_chunks": 1,
+            "last_indexed": "2026-01-01T00:00:00Z", "embed_model": "granite", "mode": "full",
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", return_value=mock_resp):
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        assert ws_file in capsys.readouterr().out
+
+    def test_shows_extra_roots_when_no_code_workspace_file(self, tmp_path, capsys):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111, extra_roots=["/other/root"])
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "workspace_root": str(tmp_path), "indexed_files": 1, "total_chunks": 1,
+            "last_indexed": "2026-01-01T00:00:00Z", "embed_model": "granite", "mode": "full",
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", return_value=mock_resp):
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        assert "/other/root" in capsys.readouterr().out
+
+    def test_status_all_shows_mode_per_instance(self, tmp_path, capsys):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register("aaa000000000", "/project/a", 8765, 111)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"indexed_files": 100, "total_chunks": 500, "mode": "search-only"}
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("httpx.get", return_value=mock_resp):
+            m.cmd_status(_make_args(**{"all": True}))
+
+        out = capsys.readouterr().out
+        assert "Mode      : search-only" in out
 
 
 # ---------------------------------------------------------------------------
@@ -1477,6 +1579,22 @@ class TestIsExplicitWorkspace:
         assert m._is_explicit_workspace(args) is False
 
 
+class TestCodeWorkspaceFileArg:
+    def test_returns_resolved_path_for_code_workspace_positional(self, tmp_path):
+        ws_file = tmp_path / "proj.code-workspace"
+        ws_file.write_text('{"folders": [{"path": "."}]}')
+        args = argparse.Namespace(workspace=str(ws_file))
+        assert m._code_workspace_file_arg(args) == str(ws_file.resolve())
+
+    def test_none_for_plain_directory_positional(self, tmp_path):
+        args = argparse.Namespace(workspace=str(tmp_path))
+        assert m._code_workspace_file_arg(args) is None
+
+    def test_none_when_no_workspace_arg(self):
+        args = argparse.Namespace(workspace=None)
+        assert m._code_workspace_file_arg(args) is None
+
+
 class TestWarnIfEnclosingRepo:
     def test_warns_when_nested_inside_enclosing_git_repo(self, tmp_path, capsys):
         (tmp_path / ".git").mkdir()
@@ -1575,6 +1693,42 @@ class TestDoStartExplicitEnvConstruction:
 
         _, call_kwargs = mock_do_start.call_args
         assert call_kwargs.get("workspace_explicit") is False
+
+    def test_cmd_start_threads_code_workspace_file_to_do_start(self, tmp_path):
+        """UPG-CLI-STATUS-MODE: starting from a .code-workspace file records
+        that file's path so `vectr status` can show it later."""
+        folder = tmp_path / "proj"
+        folder.mkdir()
+        ws_file = tmp_path / "proj.code-workspace"
+        ws_file.write_text(json.dumps({"folders": [{"path": "proj"}]}))
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            args = argparse.Namespace(workspace=str(ws_file), paths=None, port=8765)
+            m.cmd_start(args)
+
+        _, call_kwargs = mock_do_start.call_args
+        assert call_kwargs.get("code_workspace_file") == str(ws_file.resolve())
+
+    def test_cmd_start_plain_directory_has_no_code_workspace_file(self, tmp_path):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            args = argparse.Namespace(workspace=str(tmp_path), paths=None, port=8765)
+            m.cmd_start(args)
+
+        _, call_kwargs = mock_do_start.call_args
+        assert call_kwargs.get("code_workspace_file") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1675,6 +1829,7 @@ class TestMultiRoot:
 
         mock_do_start.assert_called_once_with(
             ws_a, 8765, wh, extra_roots=[ws_b], memory_only=False, search_only=False, workspace_explicit=True,
+            code_workspace_file=None,
         )
 
 

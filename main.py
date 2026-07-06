@@ -490,6 +490,20 @@ def _resolve_workspace_roots(args: argparse.Namespace) -> list[str]:
     return [str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())]
 
 
+def _code_workspace_file_arg(args: argparse.Namespace) -> str | None:
+    """The resolved `.code-workspace` file path the user gave `start`/`restart`,
+    or None if they gave a plain directory / --path flags / nothing.
+
+    Recorded in the InstanceRegistry so `vectr status` can show the file the
+    instance was actually launched from instead of just its primary folder
+    (UPG-CLI-STATUS-MODE).
+    """
+    ws = getattr(args, "workspace", None)
+    if ws and str(ws).endswith(".code-workspace"):
+        return str(Path(ws).resolve())
+    return None
+
+
 def _is_explicit_workspace(args: argparse.Namespace) -> bool:
     """True if the user gave an explicit workspace path to start/restart
     (positional `.code-workspace`/directory arg, or one or more --path
@@ -684,6 +698,7 @@ def _do_start(
     memory_only: bool = False,
     search_only: bool = False,
     workspace_explicit: bool = False,
+    code_workspace_file: str | None = None,
 ) -> None:
     if memory_only and search_only:
         raise ValueError("Cannot start vectr in both --memory-only and --search-only mode simultaneously")
@@ -719,7 +734,10 @@ def _do_start(
         )
 
     _migrate_legacy_files()
-    InstanceRegistry().register(ws_hash, workspace, port, proc.pid)
+    InstanceRegistry().register(
+        ws_hash, workspace, port, proc.pid,
+        extra_roots=extra_roots, code_workspace_file=code_workspace_file,
+    )
     mode_tag = " [memory-only]" if memory_only else (" [search-only]" if search_only else "")
     print(f"Vectr started{mode_tag} (PID {proc.pid}) on port {port}", file=sys.stderr)
     print(f"Workspace : {workspace}", file=sys.stderr)
@@ -792,6 +810,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     _do_start(
         workspace, port, ws_hash, extra_roots=extra_roots,
         memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
+        code_workspace_file=_code_workspace_file_arg(args),
     )
 
 
@@ -1054,6 +1073,54 @@ def cmd_hook(args: argparse.Namespace) -> None:
         pass  # hook safety: never propagate
 
 
+def _workspace_display_lines(entry: dict, fallback_workspace: str, label: str) -> list[str]:
+    """Format the "Workspace" line(s) for `status` output.
+
+    Shows the originating `.code-workspace` file when the instance was
+    started from one (recorded in the registry at `start`/`restart` time),
+    otherwise the primary folder plus any extra roots — never just the
+    primary folder alone when there's more to the workspace than that
+    (UPG-CLI-STATUS-MODE).
+    """
+    code_workspace_file = (entry or {}).get("code_workspace_file")
+    primary = (entry or {}).get("workspace") or fallback_workspace
+    if code_workspace_file:
+        return [f"{label} : {code_workspace_file}"]
+    lines = [f"{label} : {primary}"]
+    for extra in (entry or {}).get("extra_roots") or []:
+        lines.append(f"{' ' * len(label)}   + {extra}")
+    return lines
+
+
+def _mode_and_index_lines(
+    data: dict, files_label: str, chunks_label: str, last_indexed_label: str | None,
+    mode_label: str = "Mode         ",
+) -> list[str]:
+    """Format the Mode + indexed-files/chunks/last-indexed lines.
+
+    In memory-only/search-only mode, indexing never runs in this process —
+    `indexed_files` reflects only files this process has walked (0, since
+    the startup walk is skipped), while `total_chunks` reads the persisted
+    index and can be nonzero from an earlier full-mode run. Framing both as
+    if they were live counts is misleading (UPG-CLI-STATUS-MODE): the mode
+    line makes the gap self-explanatory, and the row wording says the
+    figures are what's persisted, not what this run has done.
+    """
+    mode = data.get("mode", "full")
+    lines = [f"{mode_label} : {mode}"]
+    if mode == "full":
+        lines.append(f"{files_label} : {data['indexed_files']}")
+        lines.append(f"{chunks_label} : {data['total_chunks']}")
+        if last_indexed_label:
+            lines.append(f"{last_indexed_label} : {data['last_indexed']}")
+    else:
+        lines.append(
+            f"{chunks_label} : {data['total_chunks']} "
+            f"(persisted from the last full index; indexing is disabled in {mode} mode)"
+        )
+    return lines
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     import httpx
 
@@ -1067,7 +1134,9 @@ def cmd_status(args: argparse.Namespace) -> None:
             return
         for entry in instances.values():
             port = entry["port"]
-            print(f"\nWorkspace : {entry['workspace']}")
+            print()
+            for line in _workspace_display_lines(entry, entry["workspace"], "Workspace"):
+                print(line)
             print(f"Port      : {port}")
             print(f"PID       : {entry['pid']}")
             print(f"Started   : {entry.get('started_at', 'unknown')}")
@@ -1075,22 +1144,25 @@ def cmd_status(args: argparse.Namespace) -> None:
                 resp = httpx.get(f"{_api_base(port)}/v1/status", timeout=2)
                 resp.raise_for_status()
                 d = resp.json()
-                print(f"Files     : {d['indexed_files']}")
-                print(f"Chunks    : {d['total_chunks']}")
+                for line in _mode_and_index_lines(d, "Files    ", "Chunks   ", None, mode_label="Mode     "):
+                    print(line)
             except Exception:
                 print("  (server not responding)")
         return
 
     workspace = str(Path(args.path).resolve())
+    entry = registry.get(workspace_hash(workspace))
     port = _get_port_for_workspace(workspace, args.port)
     try:
         resp = httpx.get(f"{_api_base(port)}/v1/status", timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        print(f"Workspace     : {data['workspace_root']}")
-        print(f"Indexed files : {data['indexed_files']}")
-        print(f"Total chunks  : {data['total_chunks']}")
-        print(f"Last indexed  : {data['last_indexed']}")
+        for line in _workspace_display_lines(entry, data["workspace_root"], "Workspace    "):
+            print(line)
+        for line in _mode_and_index_lines(
+            data, "Indexed files", "Total chunks ", "Last indexed ", mode_label="Mode         ",
+        ):
+            print(line)
         print(f"Embed model   : {data['embed_model']}")
     except httpx.ConnectError:
         print(f"Vectr is not running on port {port}.", file=sys.stderr)
@@ -1156,6 +1228,7 @@ def cmd_restart(args: argparse.Namespace) -> None:
     _do_start(
         workspace, port, ws_hash, extra_roots=extra_roots,
         memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
+        code_workspace_file=_code_workspace_file_arg(args),
     )
 
 
