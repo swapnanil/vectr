@@ -189,11 +189,14 @@ def handle_tools_call(
         # auto-append eviction hint only on a FRESH context-pressure escalation
         # (UPG-7.1) — gated so it can't repeat on every response. Reads the
         # calling session's own advisor (UPG-EVICT-SESSION-SCOPE).
+        # UPG-REMEMBER-BANNER-FATIGUE: at most one remember-related banner per
+        # response — the eviction hint (when it fires) already tells the
+        # caller to call vectr_remember, so the softer turn-count nudge only
+        # runs when the eviction hint didn't.
         hint = service.auto_eviction_hint(session_id=session_id)
         if hint:
             content_text += f"\n\n─── Context management hint ───\n{hint}"
-
-        if _should_nudge_remember(session_id):
+        elif _should_nudge_remember(session_id):
             content_text += _remember_nudge_text(session_id)
 
         return {"content": [{"type": "text", "text": content_text}], "isError": False}
@@ -388,10 +391,11 @@ def handle_tools_call(
         except Exception:
             pass
 
+        # UPG-REMEMBER-BANNER-FATIGUE: at most one remember-related banner.
         hint = service.auto_eviction_hint(session_id=session_id)  # UPG-7.1: gated, not every response
         if hint:
             text += f"\n\n─── Context management hint ───\n{hint}"
-        if _should_nudge_remember(session_id):
+        elif _should_nudge_remember(session_id):
             text += _remember_nudge_text(session_id)
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
@@ -415,10 +419,11 @@ def handle_tools_call(
             name, direction=direction, limit=limit, include_builtins=include_builtins
         )
         text = service.format_trace(trace_result, name)
+        # UPG-REMEMBER-BANNER-FATIGUE: at most one remember-related banner.
         hint = service.auto_eviction_hint(session_id=session_id)  # UPG-7.1: gated, not every response
         if hint:
             text += f"\n\n─── Context management hint ───\n{hint}"
-        if _should_nudge_remember(session_id):
+        elif _should_nudge_remember(session_id):
             text += _remember_nudge_text(session_id)
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
@@ -440,8 +445,10 @@ def handle_tools_call(
         kind = arguments.get("kind", "finding")
         title = arguments.get("title", "") or ""
         note_id = service.remember(content=content, tags=tags, priority=priority, kind=kind, title=title)
-        # reset the turn-count nudge and enable memory tools for this session
+        # reset the turn-count nudge, the eviction advisor's remember-fatigue
+        # counter (UPG-REMEMBER-BANNER-FATIGUE), and enable memory tools
         _reset_calls_since_save(session_id)
+        service.note_remembered(session_id=session_id)
         enable_memory_for_session(session_id)
         return {
             "content": [{"type": "text", "text": f"Stored note #{note_id}. Recall with vectr_recall — <50ms, verbatim, any time."}],

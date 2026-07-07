@@ -24,7 +24,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from agent.config import EVICTION_HINT_MAX_IDS, EVICTION_RETRIEVED_TOKEN_GATE
+from agent.config import (
+    EVICTION_HINT_MAX_IDS,
+    EVICTION_REMEMBER_ESCALATION_CHUNKS,
+    EVICTION_RETRIEVED_TOKEN_GATE,
+)
 
 
 @dataclass
@@ -65,6 +69,7 @@ class EvictionAdvisor:
         time_threshold_seconds: float = 180.0,
         rearm_retrieval_calls: int = 4,
         retrieved_token_gate: int | None = None,
+        remember_escalation_chunks: int | None = None,
     ) -> None:
         # Fire when ANY of these conditions is met:
         #   cumulative injected chars ÷ 4 >= 40K  (vectr-tracked content)
@@ -100,6 +105,13 @@ class EvictionAdvisor:
             retrieved_token_gate if retrieved_token_gate is not None
             else EVICTION_RETRIEVED_TOKEN_GATE
         )
+        # UPG-REMEMBER-BANNER-FATIGUE: gates auto_eviction_hint()'s escalated
+        # directive on chunks retrieved since the last vectr_remember, not
+        # just on raw context pressure — see note_remembered().
+        self._remember_escalation_chunks: int = (
+            remember_escalation_chunks if remember_escalation_chunks is not None
+            else EVICTION_REMEMBER_ESCALATION_CHUNKS
+        )
         self._chunks: list[RetrievedChunk] = []
         self._tool_call_count: int = 0
         self._retrieval_call_count: int = 0
@@ -107,6 +119,10 @@ class EvictionAdvisor:
         # (tokens, retrieval_count, wall_time) recorded the last time the auto
         # footer emitted; None until the first emit. Gates auto_eviction_hint().
         self._last_emit: tuple[int, int, float] | None = None
+        # New chunks recorded since the caller's last vectr_remember (or
+        # session start). Reset by note_remembered(). See
+        # EVICTION_REMEMBER_ESCALATION_CHUNKS.
+        self._chunks_since_remember: int = 0
 
     def record(
         self, file_path: str, lines: str, symbol_name: str, content: str,
@@ -124,6 +140,7 @@ class EvictionAdvisor:
             content=content,
             chunk_id=chunk_id,
         ))
+        self._chunks_since_remember += 1
 
     def record_results(self, results: list) -> None:
         """Record a batch of SearchResult objects (from searcher.py)."""
@@ -135,6 +152,17 @@ class EvictionAdvisor:
                 content=r.content,
                 chunk_id=getattr(r, "chunk_id", "") or "",
             )
+
+    def note_remembered(self) -> None:
+        """Call when the caller's vectr_remember succeeds this session.
+
+        Resets the chunks-since-last-remember counter so
+        auto_eviction_hint()'s escalated directive doesn't immediately
+        re-fire on the very next retrieval (UPG-REMEMBER-BANNER-FATIGUE).
+        Does not touch should_evict()'s own token/call/time state — a
+        vectr_remember doesn't reduce the actual context already retrieved.
+        """
+        self._chunks_since_remember = 0
 
     def increment_tool_call(self) -> None:
         """Increment the total MCP tool call counter for this session."""
@@ -186,6 +214,13 @@ class EvictionAdvisor:
 
         The explicit ``vectr_evict_hint`` tool and the ``/v1/evict`` endpoint
         still use ``eviction_hint()`` (ungated): an explicit ask always answers.
+
+        UPG-REMEMBER-BANNER-FATIGUE: also suppressed when too few NEW chunks
+        have been retrieved since the caller's last vectr_remember (or
+        session start) — repeating the escalated directive right after the
+        caller just complied trains it to ignore urgent language. Below
+        that count, MCP dispatch's own turn-count soft nudge (or nothing)
+        takes over instead of this method's harsher wording.
         """
         if not self.should_evict() or not self._fresh_escalation():
             return ""
@@ -195,6 +230,8 @@ class EvictionAdvisor:
         # but three 15-line methods contribute only ~100–150 tokens — far below
         # real context pressure.
         if self._tokens_since_last_hint() < self._retrieved_token_gate:
+            return ""
+        if self._chunks_since_remember < self._remember_escalation_chunks:
             return ""
         hint = self.eviction_hint()
         if hint:
@@ -279,6 +316,7 @@ class EvictionAdvisor:
         self._retrieval_call_count = 0
         self._session_started_at = time.time()
         self._last_emit = None
+        self._chunks_since_remember = 0
 
     def as_chunk_dicts(self) -> list[dict]:
         """Serialisable form for snapshot storage."""

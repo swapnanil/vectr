@@ -455,6 +455,13 @@ class VectrService:
             content=content, chunk_id=chunk_id,
         )
 
+    def note_remembered(self, session_id: str | None = None) -> None:
+        """Tell the calling session's eviction advisor that vectr_remember
+        just succeeded (UPG-REMEMBER-BANNER-FATIGUE) — resets its
+        chunks-since-last-remember counter so the escalated ACTION REQUIRED
+        directive doesn't immediately re-fire on the next retrieval."""
+        self._advisor_for(session_id).note_remembered()
+
     def indexed_languages(self) -> list[str]:
         """Distinct languages actually present in the index (UPG-3.1)."""
         return self._indexer.indexed_languages()

@@ -96,6 +96,11 @@ EVICTION_MAX_TRACKED_SESSIONS : int
     Maximum concurrent per-session EvictionAdvisor instances tracked by a
     daemon before the oldest is dropped (LRU) (UPG-EVICT-SESSION-SCOPE).
 
+EVICTION_REMEMBER_ESCALATION_CHUNKS : int
+    Chunks retrieved since the caller's last vectr_remember before
+    auto_eviction_hint()'s escalated ACTION REQUIRED directive fires again
+    (UPG-REMEMBER-BANNER-FATIGUE).
+
 INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES : int
     Maximum unresolved caller/callee example strings surfaced in the
     vectr_ingest_traces response (UPG-7.3). Edges are ingested regardless;
@@ -449,6 +454,7 @@ _evict_cfg: dict[str, Any] = _cfg["behavior"]["eviction"]
 EVICTION_RETRIEVED_TOKEN_GATE: int = int(_evict_cfg["retrieved_token_gate"])
 EVICTION_HINT_MAX_IDS: int = int(_evict_cfg["hint_max_ids"])
 EVICTION_MAX_TRACKED_SESSIONS: int = int(_evict_cfg["max_tracked_sessions"])
+EVICTION_REMEMBER_ESCALATION_CHUNKS: int = int(_evict_cfg["remember_escalation_chunks"])
 
 # ---------------------------------------------------------------------------
 # Symbol graph — reserved keywords (UPG-JSFLOW-SYMBOLS)

@@ -616,6 +616,19 @@ behavior:
     # daemon serving many short-lived sessions can't grow this without bound.
     max_tracked_sessions: 50
 
+    # UPG-REMEMBER-BANNER-FATIGUE: auto_eviction_hint()'s escalated
+    # "ACTION REQUIRED: call vectr_remember NOW" directive only fires once
+    # this many NEW chunks have been retrieved since the caller's last
+    # vectr_remember call (or since session start, if it has never called
+    # vectr_remember). Right after a vectr_remember, repeating the same
+    # urgent directive on the very next retrieval trains the caller to
+    # ignore it — the counter gives it a chance to actually comply before
+    # escalating again. Below this count, MCP dispatch's existing
+    # turn-count soft nudge (behavior.remember_nudge, or nothing) takes
+    # over instead; see _should_nudge_remember/_remember_nudge_text.
+    # Set in the same order of magnitude as rearm_retrieval_calls (4) above.
+    remember_escalation_chunks: 3
+
   ingest_traces:
     # Maximum number of "caller/callee not found in the indexed symbol graph"
     # example strings surfaced in the vectr_ingest_traces response text (UPG-7.3).

@@ -1439,6 +1439,10 @@ class TestEvictionAdvisorIntegration:
         # every one of those methods to the same real advisor keeps this an
         # honest integration test of handle_tools_call's wiring.
         from agent.eviction_advisor import EvictionAdvisor
+        # remember_escalation_chunks=0 disables the UPG-REMEMBER-BANNER-FATIGUE
+        # gate by default — these are integration tests of the pre-existing
+        # UPG-7.1/UPG-11.15 wiring, not of the remember-fatigue gate itself.
+        advisor_kwargs.setdefault("remember_escalation_chunks", 0)
         svc = _mock_service()
         real_advisor = EvictionAdvisor(**advisor_kwargs)
         svc._eviction_advisor = real_advisor
