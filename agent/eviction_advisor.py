@@ -400,7 +400,13 @@ class EvictionAdvisor:
         # UPG-EVICT-SESSION-SCOPE: list the exact re-fetch keys additively —
         # only for chunks whose id is a known-good vectr_fetch key (never a
         # guessed one), capped so the hint's own token cost stays bounded.
-        fetch_ids = [c.chunk_id for c in self._chunks if c.chunk_id][:EVICTION_HINT_MAX_IDS]
+        # UPG-EVICT-REFETCH-KEYS-STALE: self._chunks is oldest-first with
+        # re-touched chunks moved to the end, so take the suffix and reverse —
+        # most recently retrieved first, matching the file list's stated
+        # ordering above. The old prefix slice pinned the session's OLDEST
+        # chunks here forever, rendering the identical id list in every
+        # escalated banner regardless of what was retrieved since.
+        fetch_ids = [c.chunk_id for c in self._chunks if c.chunk_id][-EVICTION_HINT_MAX_IDS:][::-1]
         if fetch_ids:
             id_list = ", ".join(f'"{i}"' for i in fetch_ids)
             lines += [
