@@ -4,6 +4,7 @@ WorkingContextStore — SQLite-backed store for LLM working notes and session sn
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from pathlib import Path
@@ -11,6 +12,23 @@ from pathlib import Path
 from agent.working_context_store._audit import audit
 from agent.working_context_store._encryption import _build_encryptor, _extract_file_paths, _NoteEncryptor
 from agent.working_context_store._types import DEFAULT_KIND, VALID_KINDS, SnapshotEntry, WorkingNote
+
+logger = logging.getLogger(__name__)
+
+# Metadata key stamped on the 'working_memory' ChromaDB collection recording
+# the embed model that produced its CURRENT vectors (UPG-NOTES-EMBED-MIGRATION).
+# Mirrors CodeIndexer's embed-model stamp for the code index (see
+# agent/indexer/_constants.py's _EMBED_MODEL_STAMP_FILE docstring), but notes
+# are irreplaceable user memory rather than a rebuildable derived index, so a
+# stamp mismatch here triggers an in-place re-embed + vector update instead of
+# a drop-and-rebuild.
+_NOTES_EMBED_MODEL_KEY = "embed_model"
+
+# Intentionally NOT in config.yaml (Tier-3, same category as the indexer's
+# _EMBED_BATCH_SIZE): a pure throughput lever with no effect on ranking,
+# recall behavior, or note content — only how many texts are handed to
+# embed_fn per call during a one-time startup migration.
+_NOTES_REEMBED_BATCH_SIZE = 256
 
 
 class WorkingContextStore:
@@ -31,6 +49,20 @@ class WorkingContextStore:
     matched against — reusing embed_fn for both would silently skip that prompt on
     every recall. Callers that don't care about the distinction (e.g. tests with a
     plain symmetric stand-in) may omit embed_query_fn; it then defaults to embed_fn.
+
+    embed_model, when given, identifies the model embed_fn/embed_query_fn currently
+    embed with (e.g. "ibm-granite/granite-embedding-english-r2"). It is stamped onto
+    the 'working_memory' collection's metadata (UPG-NOTES-EMBED-MIGRATION). If the
+    stamp on an existing collection differs from embed_model — including a MISSING
+    stamp on a collection that already holds vectors, since we cannot know what
+    model produced those — every active note's content is re-embedded with the
+    current embed_fn and the collection's vectors are updated in place before the
+    constructor returns, so note vectors and query vectors are never silently drawn
+    from two different embedding spaces. This mirrors CodeIndexer's embed-model
+    stamp for the code index, but migrates rather than drops: notes are
+    irreplaceable user memory, and re-embedding a few hundred short texts is cheap.
+    embed_model is optional and defaults to None, in which case no stamping or
+    migration happens at all (existing constructions and tests are unaffected).
     """
 
     def __init__(
@@ -39,12 +71,14 @@ class WorkingContextStore:
         embed_fn=None,
         notes_chroma_client=None,
         embed_query_fn=None,
+        embed_model: str | None = None,
     ) -> None:
         self._db_path = Path(db_dir) / "working_context.sqlite"
         self._encryptor: _NoteEncryptor | None = _build_encryptor()
         # Semantic recall: embed notes at write time, cosine search at recall time
         self._embed_fn = embed_fn   # Callable[[list[str]], list[list[float]]] | None
         self._embed_query_fn = embed_query_fn or embed_fn  # query-mode embed, defaults to embed_fn
+        self._embed_model = embed_model  # current model name, for the embed-model stamp/migration
         self._notes_col = None
         if embed_fn is not None and notes_chroma_client is not None:
             try:
@@ -55,6 +89,16 @@ class WorkingContextStore:
             except Exception:
                 pass  # embedding unavailable — fall back to SQL LIKE silently
         self._init_db()
+        if self._notes_col is not None and self._embed_model:
+            try:
+                self._reconcile_embed_model_stamp()
+            except Exception:
+                logger.warning(
+                    "vectr: working-memory embed-model migration failed — "
+                    "note vectors may still be in a stale embedding space; "
+                    "will retry on next startup",
+                    exc_info=True,
+                )
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path))
@@ -433,6 +477,132 @@ class WorkingContextStore:
                 )
 
         return notes
+
+    # ------------------------------------------------------------------
+    # Embed-model stamp + migration (UPG-NOTES-EMBED-MIGRATION)
+    # ------------------------------------------------------------------
+
+    def _stored_notes_embed_model(self) -> str | None:
+        """The embed model stamped on the 'working_memory' collection's
+        metadata, or None if no stamp exists yet (fresh collection, or one
+        created before this mechanism existed)."""
+        if self._notes_col is None:
+            return None
+        metadata = self._notes_col.metadata or {}
+        model = metadata.get(_NOTES_EMBED_MODEL_KEY)
+        return str(model) if model else None
+
+    def _write_notes_embed_model_stamp(self) -> None:
+        """Stamp the 'working_memory' collection with the embed model that
+        produced its CURRENT vectors.
+
+        Two ChromaDB gotchas apply to `collection.modify(metadata=...)`, both
+        confirmed against the installed client version:
+          - It REPLACES the collection's metadata wholesale rather than
+            merging into it, so passing only the changed key would drop
+            every other existing metadata entry. The existing metadata is
+            always merged with the new stamp first.
+          - It unconditionally rejects an `hnsw:space` key in the passed
+            metadata with a ValueError — "changing the distance function...
+            is not supported" — even when the value is unchanged, so
+            `hnsw:space` must be stripped from the merged dict before the
+            call. This is safe: the collection's actual distance function is
+            pinned at creation independent of the metadata dict shown
+            afterward, so dropping the key from displayed metadata does not
+            change query behavior (verified: cosine ordering is identical
+            before and after a modify() call that omits `hnsw:space`).
+        """
+        if self._notes_col is None or not self._embed_model:
+            return
+        merged = {
+            k: v for k, v in (self._notes_col.metadata or {}).items()
+            if k != "hnsw:space"
+        }
+        merged[_NOTES_EMBED_MODEL_KEY] = self._embed_model
+        try:
+            self._notes_col.modify(metadata=merged)
+        except Exception:
+            pass
+
+    def _reconcile_embed_model_stamp(self) -> None:
+        """Migrate note vectors when the configured embed model differs from
+        the stamp recorded on the 'working_memory' collection.
+
+        A missing stamp on a collection that already holds vectors is treated
+        as a mismatch, not a match: we cannot know what model produced those
+        vectors, so re-embedding with the current model is the only way to
+        make the space self-consistent either way. An empty/new collection
+        has nothing to migrate and is simply stamped.
+        """
+        stamped = self._stored_notes_embed_model()
+        if stamped == self._embed_model:
+            return
+        count = self._notes_col.count()
+        if count == 0:
+            self._write_notes_embed_model_stamp()
+            return
+        start = time.time()
+        migrated = self._reembed_all_notes()
+        self._write_notes_embed_model_stamp()
+        logger.info(
+            "vectr: migrated %d working-memory note vector(s) from embed model "
+            "%r to %r in %.2fs",
+            migrated, stamped, self._embed_model, time.time() - start,
+        )
+
+    def _reembed_all_notes(self) -> int:
+        """Re-embed every note row's content with the current embed_fn and
+        overwrite its vector in the 'working_memory' collection (same id).
+
+        Operates across ALL workspaces in this SQLite file — the collection
+        keys vectors by note_id alone, with no workspace scoping — and
+        includes superseded notes: they remain queryable via
+        `recall(include_superseded=True)`, so their vectors must stay in the
+        current embedding space too. Note content, ids, and every other SQL
+        column are untouched; only the vector side is rewritten.
+        """
+        with self._conn() as conn:
+            rows = conn.execute("SELECT note_id, content FROM notes").fetchall()
+        if not rows:
+            return 0
+
+        ids: list[str] = []
+        contents: list[str] = []
+        for row in rows:
+            content = row["content"]
+            if self._encryptor:
+                try:
+                    content = self._encryptor.decrypt(content)
+                except Exception:
+                    continue  # skip a row that can't be decrypted rather than abort the migration
+            ids.append(str(row["note_id"]))
+            contents.append(content)
+        if not contents:
+            return 0
+
+        for start in range(0, len(contents), _NOTES_REEMBED_BATCH_SIZE):
+            batch_ids = ids[start:start + _NOTES_REEMBED_BATCH_SIZE]
+            batch_contents = contents[start:start + _NOTES_REEMBED_BATCH_SIZE]
+            vectors = self._embed_fn(batch_contents)
+            self._notes_col.upsert(ids=batch_ids, embeddings=vectors)
+        return len(contents)
+
+    def embed_model_stamp_mismatch(self) -> str | None:
+        """Return the stamped embed model if it still differs from the
+        configured one, else None.
+
+        Migration runs synchronously in the constructor, so under normal
+        operation this returns None by the time __init__ has returned. It
+        exists so `vectr status` can surface a mid-failure state (e.g. the
+        embedder was unavailable during the migration attempt) instead of
+        silently masking a stale note-vector space.
+        """
+        if self._notes_col is None or not self._embed_model:
+            return None
+        stamped = self._stored_notes_embed_model()
+        if stamped != self._embed_model:
+            return stamped or "unknown (unstamped)"
+        return None
 
     def boot_recall(self, workspace: str) -> list[WorkingNote]:
         """Unconditional 'boot set' for harness-injected recall (UPG-9.2).

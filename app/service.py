@@ -168,6 +168,7 @@ class VectrService:
                 embed_fn=self._indexer.embed_texts,
                 embed_query_fn=self._indexer.embed_query_batch,
                 notes_chroma_client=self._indexer.chroma_client,
+                embed_model=self._indexer.embed_model,
             )
 
         # Eviction advisor (UPG-EVICT-SESSION-SCOPE): one advisor per calling
@@ -608,6 +609,13 @@ class VectrService:
             "notes_count": self.count_notes(),
             "grammars_unavailable": missing,
             "mode": mode,
+            # UPG-NOTES-EMBED-MIGRATION: normally None — migration runs
+            # synchronously at startup, so this only surfaces a mid-failure
+            # state (e.g. the embedder was unavailable during migration).
+            "notes_embed_model_mismatch": (
+                self._context_store.embed_model_stamp_mismatch()
+                if self._context_store is not None else None
+            ),
             **self._symbol_graph_status(),
             **strategy_info,
         }

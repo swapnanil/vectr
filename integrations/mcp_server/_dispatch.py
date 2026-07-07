@@ -274,6 +274,18 @@ def handle_tools_call(
                 "snapshot) are disabled; search, locate, trace and map are active"
             )
 
+        # UPG-NOTES-EMBED-MIGRATION: surfaces a mid-failure state only — the
+        # migration that keeps note vectors and the configured embed model in
+        # sync runs synchronously at startup, so this is normally absent.
+        notes_mismatch = status.get("notes_embed_model_mismatch")
+        if notes_mismatch:
+            lines.append(
+                f"  WARNING        : working-memory notes are stamped with embed "
+                f"model {notes_mismatch!r} but {status['embed_model']!r} is "
+                "configured — semantic recall ranking may be degraded until "
+                "migration completes on the next restart"
+            )
+
         # Per-language coverage + symbol availability (UPG-3.3). Tells the agent
         # where locate/trace will work (symbol graph) vs. where to use search only.
         langs = status.get("languages") or []

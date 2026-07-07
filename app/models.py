@@ -144,6 +144,11 @@ class StatusResponse(BaseModel):
     # Daemon mode: "full" (default), "memory-only" (no indexing/watcher), or
     # "search-only" (no working-memory layer — see UPG-SEARCH-ONLY-MODE)
     mode: str = "full"
+    # Set only when the working-memory note vectors are stamped with a
+    # different embed model than the one currently configured (should not
+    # persist past startup — migration runs synchronously — see
+    # UPG-NOTES-EMBED-MIGRATION). None means the two agree.
+    notes_embed_model_mismatch: str | None = None
 
 
 class HealthResponse(BaseModel):

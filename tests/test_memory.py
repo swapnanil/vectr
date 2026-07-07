@@ -1162,3 +1162,210 @@ class TestSemanticRecall:
         store = WorkingContextStore(str(tmp_path), embed_fn=_dummy_embed, notes_chroma_client=client)
         col_names = [c.name for c in client.list_collections()]
         assert "working_memory" in col_names
+
+
+# ---------------------------------------------------------------------------
+# UPG-NOTES-EMBED-MIGRATION — embed-model stamp + re-embed migration
+# ---------------------------------------------------------------------------
+
+def _const_embed(vector: list[float]):
+    """Return an embed_fn that maps every text to the same fixed vector,
+    so two "models" are trivially distinguishable by which vector a note's
+    embedding lands on."""
+    def _embed(texts: list[str]) -> list[list[float]]:
+        return [list(vector) for _ in texts]
+    return _embed
+
+
+def _counting_embed(vector: list[float], calls: list[list[str]]):
+    """Like _const_embed, but records every batch of texts it was called
+    with, so a test can assert re-embedding actually happened per note."""
+    def _embed(texts: list[str]) -> list[list[float]]:
+        calls.append(list(texts))
+        return [list(vector) for _ in texts]
+    return _embed
+
+
+class TestNotesEmbedModelMigration:
+    """UPG-NOTES-EMBED-MIGRATION: notes must never be recalled against a
+    stale embedding space silently — a stamp mismatch (or a missing stamp on
+    a collection that already holds vectors) triggers a one-time re-embed
+    of every note's content, in place, before the constructor returns."""
+
+    def test_fresh_collection_is_stamped_with_current_model(self, tmp_path) -> None:
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store = WorkingContextStore(
+            str(tmp_path), embed_fn=_const_embed([1.0, 0.0]),
+            notes_chroma_client=client, embed_model="model-a",
+        )
+        assert store._stored_notes_embed_model() == "model-a"
+        assert store.embed_model_stamp_mismatch() is None
+
+    def test_no_embed_model_given_skips_stamping(self, tmp_path) -> None:
+        """embed_model defaults to None — existing callers/tests keep working
+        with no stamp/migration logic active at all."""
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store = WorkingContextStore(
+            str(tmp_path), embed_fn=_const_embed([1.0, 0.0]), notes_chroma_client=client,
+        )
+        assert store._stored_notes_embed_model() is None
+        assert store.embed_model_stamp_mismatch() is None
+
+    def test_matching_stamp_does_not_reembed(self, tmp_path) -> None:
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        chroma_dir = str(tmp_path / "chroma")
+        client = chromadb.PersistentClient(path=chroma_dir)
+        store1 = WorkingContextStore(
+            str(tmp_path), embed_fn=_const_embed([1.0, 0.0]),
+            notes_chroma_client=client, embed_model="model-a",
+        )
+        note_id = store1.remember("/repo", "original note content")
+
+        calls: list[list[str]] = []
+        client2 = chromadb.PersistentClient(path=chroma_dir)
+        WorkingContextStore(
+            str(tmp_path), embed_fn=_counting_embed([9.0, 9.0], calls),
+            notes_chroma_client=client2, embed_model="model-a",
+        )
+        assert calls == []  # same model — no re-embed on startup
+
+        vec = store1._notes_col.get(ids=[str(note_id)], include=["embeddings"])["embeddings"][0]
+        assert list(vec) == [1.0, 0.0]  # vector untouched
+
+    def test_mismatched_stamp_triggers_reembed_and_stamp_update(self, tmp_path) -> None:
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        chroma_dir = str(tmp_path / "chroma")
+        client = chromadb.PersistentClient(path=chroma_dir)
+        store1 = WorkingContextStore(
+            str(tmp_path), embed_fn=_const_embed([1.0, 0.0]),
+            notes_chroma_client=client, embed_model="model-a",
+        )
+        note_id = store1.remember("/repo", "note that must survive migration")
+
+        calls: list[list[str]] = []
+        client2 = chromadb.PersistentClient(path=chroma_dir)
+        store2 = WorkingContextStore(
+            str(tmp_path), embed_fn=_counting_embed([0.0, 1.0], calls),
+            notes_chroma_client=client2, embed_model="model-b",
+        )
+
+        # re-embed happened, over the note's real content
+        assert any("note that must survive migration" in batch for batch in calls)
+        # stamp updated to the new model
+        assert store2._stored_notes_embed_model() == "model-b"
+        assert store2.embed_model_stamp_mismatch() is None
+        # vector actually changed to the new model's output
+        vec = store2._notes_col.get(ids=[str(note_id)], include=["embeddings"])["embeddings"][0]
+        assert list(vec) == [0.0, 1.0]
+        # note content and id untouched
+        note = store2.get_note("/repo", note_id)
+        assert note is not None
+        assert note.content == "note that must survive migration"
+        assert note.note_id == note_id
+
+    def test_unstamped_collection_with_vectors_is_treated_as_mismatch(self, tmp_path) -> None:
+        """A collection with vectors but no stamp predates this mechanism —
+        we cannot know what model produced those vectors, so it is migrated
+        just like an explicit mismatch, not assumed to already match."""
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        chroma_dir = str(tmp_path / "chroma")
+        client = chromadb.PersistentClient(path=chroma_dir)
+        # embed_model=None -> no stamp written, mirroring a pre-migration install
+        store1 = WorkingContextStore(
+            str(tmp_path), embed_fn=_const_embed([1.0, 0.0]), notes_chroma_client=client,
+        )
+        note_id = store1.remember("/repo", "pre-existing unstamped note")
+        assert store1._stored_notes_embed_model() is None
+
+        calls: list[list[str]] = []
+        client2 = chromadb.PersistentClient(path=chroma_dir)
+        store2 = WorkingContextStore(
+            str(tmp_path), embed_fn=_counting_embed([0.0, 1.0], calls),
+            notes_chroma_client=client2, embed_model="model-b",
+        )
+        assert any("pre-existing unstamped note" in batch for batch in calls)
+        assert store2._stored_notes_embed_model() == "model-b"
+        vec = store2._notes_col.get(ids=[str(note_id)], include=["embeddings"])["embeddings"][0]
+        assert list(vec) == [0.0, 1.0]
+
+    def test_empty_collection_is_stamped_without_reembed(self, tmp_path) -> None:
+        """A brand-new, empty collection has nothing to migrate — it is just
+        stamped so the next startup with the same model takes the no-op path."""
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        chroma_dir = str(tmp_path / "chroma")
+        client = chromadb.PersistentClient(path=chroma_dir)
+        WorkingContextStore(
+            str(tmp_path), embed_fn=_const_embed([1.0, 0.0]), notes_chroma_client=client,
+        )  # no embed_model -> unstamped, no notes
+
+        calls: list[list[str]] = []
+        client2 = chromadb.PersistentClient(path=chroma_dir)
+        store2 = WorkingContextStore(
+            str(tmp_path), embed_fn=_counting_embed([0.0, 1.0], calls),
+            notes_chroma_client=client2, embed_model="model-b",
+        )
+        assert calls == []  # nothing to re-embed
+        assert store2._stored_notes_embed_model() == "model-b"
+
+    def test_recall_works_after_simulated_model_swap(self, tmp_path) -> None:
+        """End-to-end: semantic recall must still work after a model swap —
+        the query is embedded with the NEW model, and must match the
+        migrated (also new-model) note vector, not the stale one."""
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        chroma_dir = str(tmp_path / "chroma")
+        client = chromadb.PersistentClient(path=chroma_dir)
+        store1 = WorkingContextStore(
+            str(tmp_path), embed_fn=_dummy_embed,
+            notes_chroma_client=client, embed_model="model-a",
+        )
+        ws = "/repo"
+        content = "handle_legacy_finalizers appends to gc.garbage when tp_del is set"
+        store1.remember(ws, content)
+
+        # Simulate a model swap: a NEW embed function (still hash-based+deterministic,
+        # but a distinct "model") is now configured.
+        def _swapped_embed(texts: list[str]) -> list[list[float]]:
+            import hashlib
+            result = []
+            for t in texts:
+                h = hashlib.md5(("swapped::" + t).encode()).digest()
+                vec = [(b / 255.0 - 0.5) for b in (h * 48)]
+                norm = sum(x * x for x in vec) ** 0.5 or 1.0
+                result.append([x / norm for x in vec])
+            return result
+
+        client2 = chromadb.PersistentClient(path=chroma_dir)
+        store2 = WorkingContextStore(
+            str(tmp_path), embed_fn=_swapped_embed, embed_query_fn=_swapped_embed,
+            notes_chroma_client=client2, embed_model="model-b",
+        )
+        notes = store2.recall(ws, query=content)
+        assert len(notes) == 1
+        assert notes[0].content == content
+
+    def test_status_mismatch_helper_reports_stamp_when_forced(self, tmp_path) -> None:
+        """embed_model_stamp_mismatch() surfaces a real disagreement — used
+        as a defensive check by `vectr status`, not expected to fire once
+        migration has run (it always runs synchronously in __init__)."""
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        chroma_dir = str(tmp_path / "chroma")
+        client = chromadb.PersistentClient(path=chroma_dir)
+        store = WorkingContextStore(
+            str(tmp_path), embed_fn=_const_embed([1.0, 0.0]),
+            notes_chroma_client=client, embed_model="model-a",
+        )
+        # Force a stamp disagreement directly (as if migration had failed
+        # mid-way and left the object's view of the model stale) without
+        # re-running __init__'s migration path.
+        store._embed_model = "model-c"
+        assert store.embed_model_stamp_mismatch() == "model-a"
