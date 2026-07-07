@@ -66,19 +66,41 @@ _SESSION_START_GUIDANCE_DEFAULT = load_template("session_start_guidance_default.
 # genuinely on-demand cases instead.
 _SESSION_START_GUIDANCE_HOOKS_AWARE = load_template("session_start_guidance_hooks_aware.txt")
 
+# UPG-INSTRUCTION-VET (V3): the tool-loading blockquote describes one host's
+# deferred-tool mechanics (ToolSearch, the mcp__vectr__ tool-name prefix) that
+# do not exist in other AI IDEs. It is spliced in only for the CLAUDE.md
+# render; every other IDE config file (AGENTS.md, .cursorrules, GEMINI.md,
+# CODEX.md, copilot-instructions.md, .cursor/rules) gets the shared body with
+# the placeholder removed.
+_TOOL_LOADING_GUIDANCE_CLAUDE = load_template("tool_loading_guidance_claude.txt")
+_TOOL_LOADING_GUIDANCE_CLAUDE_SEARCH_ONLY = load_template("tool_loading_guidance_claude_search_only.txt")
 
-def _render_claude_md(hooks_installed: bool, search_only: bool = False) -> str:
+
+def _splice(template: str, placeholder: str, text: str) -> str:
+    """Replace `placeholder` with `text`; an empty splice also collapses the
+    blank lines that framed the placeholder so no gap is left behind."""
+    if text:
+        return template.replace(placeholder, text.rstrip("\n"))
+    return template.replace(f"\n{placeholder}\n", "")
+
+
+def _render_claude_md(hooks_installed: bool, search_only: bool = False, tool_loading: bool = False) -> str:
     """Render the CLAUDE.md guidance block.
 
     `search_only` selects the search-only variant (UPG-SEARCH-ONLY-MODE) — no
     working-memory section, no session-start recall instructions, since this
-    daemon has no notes DB. Otherwise `hooks_installed` selects the
-    session-start guidance matching whether Claude Code hooks are installed
-    for this workspace (UPG-11.5)."""
+    daemon has no notes DB. `hooks_installed` selects the session-start
+    guidance matching whether hooks are installed for this workspace
+    (UPG-11.5). `tool_loading` splices the deferred-tool loading blockquote —
+    True only for the CLAUDE.md write, whose host actually has that mechanism
+    (UPG-INSTRUCTION-VET V3)."""
     if search_only:
-        return _CLAUDE_MD_SEARCH_ONLY
+        loading = _TOOL_LOADING_GUIDANCE_CLAUDE_SEARCH_ONLY if tool_loading else ""
+        return _splice(_CLAUDE_MD_SEARCH_ONLY, "__TOOL_LOADING_GUIDANCE__", loading)
     guidance = _SESSION_START_GUIDANCE_HOOKS_AWARE if hooks_installed else _SESSION_START_GUIDANCE_DEFAULT
-    return _CLAUDE_MD.replace("__SESSION_START_GUIDANCE__", guidance)
+    rendered = _CLAUDE_MD.replace("__SESSION_START_GUIDANCE__", guidance)
+    loading = _TOOL_LOADING_GUIDANCE_CLAUDE if tool_loading else ""
+    return _splice(rendered, "__TOOL_LOADING_GUIDANCE__", loading)
 
 
 _MCP_JSON = load_template("mcp.json.template")
@@ -106,17 +128,20 @@ _IDE_CONFIG_APPEND_ONLY: tuple[str, ...] = (
 )
 
 
-def _make_vectr_block(*, hooks_installed: bool = False, search_only: bool = False) -> str:
+def _make_vectr_block(*, hooks_installed: bool = False, search_only: bool = False, tool_loading: bool = False) -> str:
     """`hooks_installed` selects the session-start guidance variant (UPG-11.5) —
     only meaningful for CLAUDE.md, since Claude Code hooks are the only
     injection path today; other IDE config files always get the default.
     `search_only` selects the no-working-memory variant (UPG-SEARCH-ONLY-MODE)
-    and takes precedence over `hooks_installed`."""
-    return f"{_VECTR_BLOCK_START}\n{_render_claude_md(hooks_installed, search_only=search_only).rstrip()}\n{_VECTR_BLOCK_END}\n"
+    and takes precedence over `hooks_installed`. `tool_loading` splices the
+    host-specific deferred-tool loading blockquote — CLAUDE.md only
+    (UPG-INSTRUCTION-VET V3)."""
+    return f"{_VECTR_BLOCK_START}\n{_render_claude_md(hooks_installed, search_only=search_only, tool_loading=tool_loading).rstrip()}\n{_VECTR_BLOCK_END}\n"
 
 
 def _write_ide_config_merge_safe(
     path: Path, *, create_if_missing: bool, hooks_installed: bool = False, search_only: bool = False,
+    tool_loading: bool = False,
 ) -> None:
     """Write the vectr guidance block into an IDE config file.
 
@@ -125,7 +150,7 @@ def _write_ide_config_merge_safe(
     - File exists, no vectr block            → append block after existing content.
     - File exists, vectr block present       → replace block in-place (idempotent).
     """
-    block = _make_vectr_block(hooks_installed=hooks_installed, search_only=search_only)
+    block = _make_vectr_block(hooks_installed=hooks_installed, search_only=search_only, tool_loading=tool_loading)
 
     if not path.exists():
         if not create_if_missing:
@@ -379,6 +404,7 @@ def _write_workspace_config(workspace: str, port: int, *, search_only: bool = Fa
 
     _write_ide_config_merge_safe(
         root / "CLAUDE.md", create_if_missing=True, hooks_installed=hooks_installed, search_only=search_only,
+        tool_loading=True,
     )
     for _rel in _IDE_CONFIG_APPEND_ONLY:
         _write_ide_config_merge_safe(root / _rel, create_if_missing=False, search_only=search_only)

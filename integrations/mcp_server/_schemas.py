@@ -4,7 +4,7 @@ from __future__ import annotations
 MCP_SERVER_INFO = {
     "name": "vectr",
     "version": "2.0.0",
-    "description": "Zero-config semantic codebase search with layered memory (L1 map + L2 symbols + L3 content)",
+    "description": "Zero-config semantic code search + persistent working memory for AI agents",
     "capabilities": {"tools": {}},
 }
 
@@ -50,7 +50,7 @@ _EXPLORATION_TOOLS = [
             "no rerank, just the chunk. Every vectr_search/vectr_locate/vectr_trace "
             "result carries its chunk's id (the `file:start-end` shown in the result "
             "header). Use this to restore a chunk that was cleared from your context "
-            "(by tool-result eviction, /compact, or a context-editing tombstone) "
+            "(by tool-result eviction, context compaction, or a context-editing tombstone) "
             "instead of re-running vectr_search or re-reading the whole file. "
             "NOT for finding NEW content — use vectr_search for that."
         ),
@@ -75,6 +75,8 @@ _EXPLORATION_TOOLS = [
             "Call once at the start of any session to decide whether vectr_recall is worth calling: "
             "if notes_count > 0, call vectr_recall(query=...) to retrieve relevant notes. "
             "If notes_count == 0, skip recall entirely. "
+            "If your session already shows auto-injected Working Notes (vectr hooks), those ARE "
+            "the recall output — do not re-call vectr_recall for them. "
             "Also useful when vectr_search returns nothing and you suspect indexing is still running."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
@@ -201,7 +203,7 @@ _MEMORY_WRITE_TOOLS = [
         "name": "vectr_remember",
         "description": (
             "Save a working note and recall it on demand in <50ms — "
-            "whether later this session, through /compact, or in a future session. "
+            "whether later this session, through context compaction, or in a future session. "
             "Use the moment you discover something non-obvious: a key file path, a call pattern, a gotcha, "
             "a partial stub, task progress. "
             "Store the actual code or finding — vectr returns it in <50ms; "
@@ -260,12 +262,13 @@ _MEMORY_WRITE_TOOLS = [
     {
         "name": "vectr_evict_hint",
         "description": (
-            "Vectr lists which retrieved code chunks it can re-retrieve in <50ms — "
-            "you do not need to re-read those files. "
-            "Use at the exploration → implementation transition to avoid unnecessary re-reads. "
+            "Lists the code chunks retrieved by THIS session that are safe to drop from "
+            "context — each is re-fetchable verbatim in one deterministic call, and the "
+            "response includes the exact vectr_fetch(ids=[...]) re-fetch keys. "
+            "Use at the exploration → implementation transition, or when context pressure builds. "
             "This is the reverse signal in the vectr protocol: "
             "the AI saves findings (vectr_remember), "
-            "vectr signals what it can recall instantly (vectr_evict_hint). "
+            "vectr signals what it can restore instantly (vectr_evict_hint). "
             "NOT needed on short sessions — most useful after many vectr_search/vectr_locate calls."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},

@@ -520,7 +520,9 @@ class TestWriteWorkspaceConfig:
         content = (tmp_path / "CLAUDE.md").read_text()
         assert "working memory IS vectr" in content
         assert "vectr_remember" in content
-        assert ".claude" in content  # explicitly steers off the built-in memory dir
+        # explicitly steers off the host's built-in file-memory directory
+        # (editor-agnostic wording — UPG-INSTRUCTION-VET V3)
+        assert "editor-managed memory directory" in content
 
     def test_settings_json_created_if_missing(self, tmp_path):
         m._write_workspace_config(str(tmp_path), 8765)
@@ -1508,17 +1510,56 @@ class TestClaudeMdHookAwareGuidance:
         m._write_workspace_config(str(tmp_path), 8765)
         content = (tmp_path / "CLAUDE.md").read_text()
         assert 'call `vectr_recall(query="<your task>")`' in content
-        assert "auto-injected" not in content
+        # The hooks-aware splice must be absent (its distinctive first phrase —
+        # "auto-injected" alone is no longer a valid proxy: the kind-taxonomy
+        # row uses the word for directive notes in both variants).
+        assert "your working-memory notes are auto-injected automatically" not in content
 
     def test_with_hooks_installed_uses_hook_aware_guidance(self, tmp_path):
         m._write_claude_hooks(str(tmp_path))          # hooks installed first
         m._write_workspace_config(str(tmp_path), 8765)
         content = (tmp_path / "CLAUDE.md").read_text()
-        assert "auto-injected" in content
+        assert "your working-memory notes are auto-injected automatically" in content
         assert 'call `vectr_recall(query="<your task>")`' not in content
         # vectr_recall is still documented — just redirected to on-demand use.
         assert "on-demand deep-dive" in content
         assert "note_id" in content
+
+
+class TestInstructionVetV3ToolLoadingSplice:
+    """UPG-INSTRUCTION-VET V3: the deferred-tool loading blockquote
+    (ToolSearch, mcp__vectr__ tool-name prefix) is host-specific mechanics —
+    spliced into CLAUDE.md only. Every other IDE config surface gets the
+    shared body without it, and no placeholder residue."""
+
+    def test_claude_md_contains_tool_loading_guidance(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert "ToolSearch" in content
+        assert "mcp__vectr__vectr_fetch" in content  # V6: fetch in the select list
+        assert "__TOOL_LOADING_GUIDANCE__" not in content
+
+    def test_cursor_rules_omit_tool_loading_guidance(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / ".cursor" / "rules" / "vectr.mdc").read_text()
+        assert "ToolSearch" not in content
+        assert "mcp__vectr__" not in content
+        assert "__TOOL_LOADING_GUIDANCE__" not in content
+
+    def test_append_only_ide_configs_omit_tool_loading_guidance(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("# My agents\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert "ToolSearch" not in content
+        assert "mcp__vectr__" not in content
+        assert "__TOOL_LOADING_GUIDANCE__" not in content
+
+    def test_claude_md_teaches_correction_capture(self, tmp_path):
+        # UPG-CORRECTION-CAPTURE: user corrections must be stored as directives.
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "CLAUDE.md").read_text()
+        assert 'kind="directive"' in content
+        assert "corrects your behavior" in content
 
     def test_init_hooks_single_run_produces_hook_aware_config(self, tmp_path):
         """`vectr init --hooks` writes hooks AND config in one run — ordering
