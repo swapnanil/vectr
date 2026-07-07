@@ -17,7 +17,9 @@ from agent.config import (
     SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED,
     SEARCH_IDENTIFIER_HINT_NEARMISS_MAX,
     EMBEDDING_DEFAULT_MODEL,
+    EVICTION_MAX_TRACKED_SESSIONS,
 )
+from agent.eviction_advisor import EvictionAdvisor
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +77,6 @@ class VectrService:
         from agent.cartographer import PassportStore
         from agent.working_context_store import WorkingContextStore
         from agent.symbol_graph import SymbolGraph
-        from agent.eviction_advisor import EvictionAdvisor
         from integrations.vscode_bridge import configure_all
         from integrations.workspace_detect import find_workspace_root
 
@@ -169,10 +170,16 @@ class VectrService:
                 notes_chroma_client=self._indexer.chroma_client,
             )
 
-        # Session eviction advisor
+        # Eviction advisor (UPG-EVICT-SESSION-SCOPE): one advisor per calling
+        # MCP session, so one session never sees chunks retrieved by another.
+        # `self._eviction_advisor` remains the shared advisor used when no
+        # session_id is known (REST callers, backwards-compat callers) — every
+        # session-scoped lookup below falls back to it when session_id is None.
+        self._eviction_threshold_tokens = int(os.getenv("VECTR_EVICT_THRESHOLD", "4000"))
         self._eviction_advisor = EvictionAdvisor(
-            eviction_threshold_tokens=int(os.getenv("VECTR_EVICT_THRESHOLD", "4000"))
+            eviction_threshold_tokens=self._eviction_threshold_tokens
         )
+        self._session_advisors: dict[str, EvictionAdvisor] = {}
 
         self._indexing = False
         self._index_thread: threading.Thread | None = None
@@ -389,16 +396,64 @@ class VectrService:
             elapsed = int((time.monotonic() - t0) * 1000)
             return files, chunks, elapsed
 
+    def _advisor_for(self, session_id: str | None) -> EvictionAdvisor:
+        """Look up (or create) the EvictionAdvisor for the calling session
+        (UPG-EVICT-SESSION-SCOPE). `session_id=None` (REST callers, or an MCP
+        transport that never sent one) shares one daemon-global advisor —
+        unchanged backwards-compat behaviour. A known session_id gets its own
+        advisor so it never sees chunks another session retrieved. The
+        registry is LRU-bounded to EVICTION_MAX_TRACKED_SESSIONS so a
+        long-running daemon serving many short-lived sessions can't grow it
+        without bound."""
+        if not session_id:
+            return self._eviction_advisor
+        advisor = self._session_advisors.get(session_id)
+        if advisor is None:
+            if len(self._session_advisors) >= EVICTION_MAX_TRACKED_SESSIONS:
+                oldest_id = next(iter(self._session_advisors))
+                del self._session_advisors[oldest_id]
+            advisor = EvictionAdvisor(eviction_threshold_tokens=self._eviction_threshold_tokens)
+            self._session_advisors[session_id] = advisor
+        else:
+            # Refresh recency for the LRU bound above.
+            del self._session_advisors[session_id]
+            self._session_advisors[session_id] = advisor
+        return advisor
+
     def search(
         self, query: str, n_results: int = 10, language: str | None = None
     ) -> tuple[list, int]:
-        """Returns (SearchResult list, query_time_ms). Also records for eviction tracking."""
+        """Returns (SearchResult list, query_time_ms).
+
+        Does NOT record into any eviction advisor (UPG-EVICT-SESSION-SCOPE) —
+        recording happens exactly once, at render time, against the calling
+        session's advisor (see MCP dispatch's vectr_search handler /
+        `record_results`). A REST `/v1/search` caller has no session_id and
+        gets pure retrieval with no eviction-tracking side effect.
+        """
         sem_w = self._strategy.semantic_weight if self._strategy else STRATEGY_DEFAULT_SEMANTIC_WEIGHT
         results, query_ms = self._searcher.search(
             query, n_results=n_results, language=language, semantic_weight=sem_w
         )
-        self._eviction_advisor.record_results(results)
         return results, query_ms
+
+    def record_results(self, results: list, session_id: str | None = None) -> None:
+        """Record rendered SearchResult chunks into the calling session's
+        eviction advisor (UPG-EVICT-SESSION-SCOPE). Call with the exact list
+        that was serialized into the tool response — not the pre-truncation
+        candidate pool."""
+        self._advisor_for(session_id).record_results(results)
+
+    def record_chunk(
+        self, *, file_path: str, lines: str, symbol_name: str, content: str,
+        chunk_id: str = "", session_id: str | None = None,
+    ) -> None:
+        """Record one rendered chunk (vectr_fetch, vectr_locate snippets) into
+        the calling session's eviction advisor (UPG-EVICT-SESSION-SCOPE)."""
+        self._advisor_for(session_id).record(
+            file_path=file_path, lines=lines, symbol_name=symbol_name,
+            content=content, chunk_id=chunk_id,
+        )
 
     def indexed_languages(self) -> list[str]:
         """Distinct languages actually present in the index (UPG-3.1)."""
@@ -772,7 +827,7 @@ class VectrService:
         return self._context_store.snapshot(
             workspace=self._workspace_root,
             label=label,
-            retrieved_chunks=self._eviction_advisor.as_chunk_dicts(),
+            retrieved_chunks=self._advisor_for(session_id).as_chunk_dicts(),
             session_id=session_id,
         )
 
@@ -788,17 +843,18 @@ class VectrService:
     # Eviction advisor
     # ------------------------------------------------------------------
 
-    def eviction_hint(self) -> str:
-        return self._eviction_advisor.eviction_hint()
+    def eviction_hint(self, session_id: str | None = None) -> str:
+        return self._advisor_for(session_id).eviction_hint()
 
-    def auto_eviction_hint(self) -> str:
+    def auto_eviction_hint(self, session_id: str | None = None) -> str:
         """Gated per-response footer (UPG-7.1) — fires only on fresh context-
         pressure escalation, not every response. Used by the MCP search/locate/
-        trace auto-append; the explicit vectr_evict_hint tool uses eviction_hint()."""
-        return self._eviction_advisor.auto_eviction_hint()
+        trace auto-append; the explicit vectr_evict_hint tool uses eviction_hint().
+        Reads the calling session's advisor (UPG-EVICT-SESSION-SCOPE)."""
+        return self._advisor_for(session_id).auto_eviction_hint()
 
-    def should_evict(self) -> bool:
-        return self._eviction_advisor.should_evict()
+    def should_evict(self, session_id: str | None = None) -> bool:
+        return self._advisor_for(session_id).should_evict()
 
     def count_notes(self) -> int:
         """Return number of active working-memory notes for this workspace.

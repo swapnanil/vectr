@@ -69,9 +69,10 @@ def handle_tools_call(
     session_id: str | None = None,
 ) -> dict:
     """Dispatch an MCP tool call. `service` is the VectrService instance."""
-    # Count every tool call — used by the tool-call-count eviction trigger
+    # Count every tool call — used by the tool-call-count eviction trigger.
+    # Reads the calling session's own advisor (UPG-EVICT-SESSION-SCOPE).
     try:
-        service._eviction_advisor.increment_tool_call()
+        service._advisor_for(session_id).increment_tool_call()
     except Exception:
         pass
 
@@ -87,7 +88,7 @@ def handle_tools_call(
     # Count retrieval-specific calls (search/locate/trace) for the retrieval-count trigger
     if tool_name in ("vectr_search", "vectr_locate", "vectr_trace"):
         try:
-            service._eviction_advisor.increment_retrieval_call()
+            service._advisor_for(session_id).increment_retrieval_call()
         except Exception:
             pass
 
@@ -115,9 +116,11 @@ def handle_tools_call(
             query, n_results=n_results, language=language
         )
 
-        # Record chunks so the eviction advisor can reference them in the hint
+        # Record the rendered chunks into the calling session's eviction
+        # advisor (UPG-EVICT-SESSION-SCOPE) — the single recording site for
+        # vectr_search, at render time, against the calling session only.
         try:
-            service._eviction_advisor.record_results(results)
+            service.record_results(results, session_id=session_id)
         except Exception:
             pass
 
@@ -184,8 +187,9 @@ def handle_tools_call(
         content_text = "\n\n".join(sections)
 
         # auto-append eviction hint only on a FRESH context-pressure escalation
-        # (UPG-7.1) — gated so it can't repeat on every response
-        hint = service.auto_eviction_hint()
+        # (UPG-7.1) — gated so it can't repeat on every response. Reads the
+        # calling session's own advisor (UPG-EVICT-SESSION-SCOPE).
+        hint = service.auto_eviction_hint(session_id=session_id)
         if hint:
             content_text += f"\n\n─── Context management hint ───\n{hint}"
 
@@ -211,16 +215,18 @@ def handle_tools_call(
         except ValueError as exc:
             return _mcp_error(str(exc))
 
-        # Record fetched chunks so the eviction advisor can reference them —
+        # Record fetched chunks into the calling session's eviction advisor —
         # mirrors the recording behaviour of vectr_search above.
         try:
             for e in entries:
                 if e["found"]:
-                    service._eviction_advisor.record(
+                    service.record_chunk(
                         file_path=e["file_path"],
                         lines=f"{e['start_line']}-{e['end_line']}",
                         symbol_name=e.get("symbol_name", ""),
                         content=e["content"],
+                        chunk_id=e["id"],
+                        session_id=session_id,
                     )
         except Exception:
             pass
@@ -360,7 +366,29 @@ def handle_tools_call(
         caller_file = arguments.get("caller_file", "").strip() or None
         symbols = service.locate_with_snippets(name, limit=limit, caller_file=caller_file)
         text = service.format_locate(symbols, name)
-        hint = service.auto_eviction_hint()  # UPG-7.1: gated, not every response
+
+        # Record the rendered snippets into the calling session's eviction
+        # advisor (UPG-EVICT-SESSION-SCOPE) — same render-time recording
+        # contract as vectr_search. No chunk_id: a symbol's line range is not
+        # guaranteed to match a stored chunk boundary, so vectr_fetch is never
+        # advertised for these (would risk a re-fetch key that doesn't work).
+        try:
+            rendered_symbols = getattr(symbols, "symbols", None)
+            if rendered_symbols is None and isinstance(symbols, list):
+                rendered_symbols = symbols
+            for s in rendered_symbols or []:
+                if getattr(s, "snippet", ""):
+                    service.record_chunk(
+                        file_path=s.file_path,
+                        lines=f"{s.start_line}-{s.end_line}",
+                        symbol_name=s.name,
+                        content=s.snippet,
+                        session_id=session_id,
+                    )
+        except Exception:
+            pass
+
+        hint = service.auto_eviction_hint(session_id=session_id)  # UPG-7.1: gated, not every response
         if hint:
             text += f"\n\n─── Context management hint ───\n{hint}"
         if _should_nudge_remember(session_id):
@@ -387,7 +415,7 @@ def handle_tools_call(
             name, direction=direction, limit=limit, include_builtins=include_builtins
         )
         text = service.format_trace(trace_result, name)
-        hint = service.auto_eviction_hint()  # UPG-7.1: gated, not every response
+        hint = service.auto_eviction_hint(session_id=session_id)  # UPG-7.1: gated, not every response
         if hint:
             text += f"\n\n─── Context management hint ───\n{hint}"
         if _should_nudge_remember(session_id):
@@ -451,14 +479,14 @@ def handle_tools_call(
             query=query, tags=tags, priority=priority, limit=limit, kind=kind, boot=boot,
             detail=detail, sort_by=sort_by, max_age_days=max_age_days, note_id=note_id_arg,
         )
-        hint = service.auto_eviction_hint()  # UPG-7.1: gated, not every response
+        hint = service.auto_eviction_hint(session_id=session_id)  # UPG-7.1: gated, not every response
         if hint:
             text += f"\n\n─── Context management hint ───\n{hint}"
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_evict_hint ----
     if tool_name == "vectr_evict_hint":
-        hint = service.eviction_hint()
+        hint = service.eviction_hint(session_id=session_id)
         if not hint:
             hint = "No retrieved chunks to evict. Context window is clean."
         return {"content": [{"type": "text", "text": hint}], "isError": False}
@@ -474,8 +502,13 @@ def handle_tools_call(
             from app.service import _SEARCH_ONLY_MSG
             return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
 
-        session_id = arguments.get("session_id") or None
-        snapshot_id = service.snapshot_session(label=label, session_id=session_id)
+        # UPG-EVICT-SESSION-SCOPE: an explicit "session_id" argument (e.g. a
+        # multi-agent caller labeling a shared snapshot) overrides the calling
+        # MCP session; otherwise default to the transport-level session_id so
+        # the snapshot captures THIS session's own retrieved chunks rather than
+        # the anonymous shared advisor's (near-always empty for a real session).
+        snapshot_session_id = arguments.get("session_id") or session_id
+        snapshot_id = service.snapshot_session(label=label, session_id=snapshot_session_id)
         return {
             "content": [{"type": "text", "text": f"Snapshot saved: {snapshot_id}\nLabel: {label}\nNotes are available via vectr_recall any time — later in this session or in future sessions."}],
             "isError": False,

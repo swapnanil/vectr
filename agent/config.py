@@ -88,6 +88,14 @@ EVICTION_RETRIEVED_TOKEN_GATE : int
     before auto_eviction_hint() will emit. Suppresses the hint on bursts of tiny
     searches that contribute negligible context pressure (UPG-11.15).
 
+EVICTION_HINT_MAX_IDS : int
+    Maximum chunk ids listed as re-fetch keys in eviction_hint()'s render
+    (UPG-EVICT-SESSION-SCOPE).
+
+EVICTION_MAX_TRACKED_SESSIONS : int
+    Maximum concurrent per-session EvictionAdvisor instances tracked by a
+    daemon before the oldest is dropped (LRU) (UPG-EVICT-SESSION-SCOPE).
+
 INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES : int
     Maximum unresolved caller/callee example strings surfaced in the
     vectr_ingest_traces response (UPG-7.3). Edges are ingested regardless;
@@ -439,6 +447,8 @@ BEHAVIOR_REMEMBER_NUDGE_COOLDOWN: int = int(_beh_cfg["cooldown"])
 _evict_cfg: dict[str, Any] = _cfg["behavior"]["eviction"]
 
 EVICTION_RETRIEVED_TOKEN_GATE: int = int(_evict_cfg["retrieved_token_gate"])
+EVICTION_HINT_MAX_IDS: int = int(_evict_cfg["hint_max_ids"])
+EVICTION_MAX_TRACKED_SESSIONS: int = int(_evict_cfg["max_tracked_sessions"])
 
 # ---------------------------------------------------------------------------
 # Symbol graph — reserved keywords (UPG-JSFLOW-SYMBOLS)

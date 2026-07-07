@@ -24,7 +24,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from agent.config import EVICTION_RETRIEVED_TOKEN_GATE
+from agent.config import EVICTION_HINT_MAX_IDS, EVICTION_RETRIEVED_TOKEN_GATE
 
 
 @dataclass
@@ -33,6 +33,13 @@ class RetrievedChunk:
     lines: str
     symbol_name: str
     content: str
+    # UPG-EVICT-SESSION-SCOPE: the exact vectr_fetch re-fetch key for this chunk
+    # (`file_path:start_line-end_line`), when the caller had one. Empty for
+    # chunks recorded from a surface that doesn't guarantee an exact indexed
+    # chunk id (e.g. a symbol-graph snippet whose line range may not match a
+    # stored chunk boundary) — never guessed, so eviction_hint() only ever
+    # advertises a re-fetch key that is known to work.
+    chunk_id: str = ""
     retrieved_at: float = field(default_factory=time.time)
 
     @property
@@ -101,7 +108,10 @@ class EvictionAdvisor:
         # footer emitted; None until the first emit. Gates auto_eviction_hint().
         self._last_emit: tuple[int, int, float] | None = None
 
-    def record(self, file_path: str, lines: str, symbol_name: str, content: str) -> None:
+    def record(
+        self, file_path: str, lines: str, symbol_name: str, content: str,
+        chunk_id: str = "",
+    ) -> None:
         """Record a chunk that was delivered to the LLM this session."""
         # avoid duplicate tracking for the same file:lines
         key = f"{file_path}:{lines}"
@@ -112,6 +122,7 @@ class EvictionAdvisor:
             lines=lines,
             symbol_name=symbol_name,
             content=content,
+            chunk_id=chunk_id,
         ))
 
     def record_results(self, results: list) -> None:
@@ -122,6 +133,7 @@ class EvictionAdvisor:
                 lines=str(r.lines),
                 symbol_name=r.symbol_name or "",
                 content=r.content,
+                chunk_id=getattr(r, "chunk_id", "") or "",
             )
 
     def increment_tool_call(self) -> None:
@@ -229,8 +241,9 @@ class EvictionAdvisor:
             "file captures findings, not the navigational path to reach them.",
             "",
             f"Vectr has {len(self._chunks)} retrieved chunks (~{total_tokens} tokens)"
-            " fully indexed. The raw chunks are re-retrievable via vectr_search or vectr_locate in <50ms."
-            " Your synthesized analysis (saved via vectr_remember) is retrievable via vectr_recall. Drop these chunks from context:",
+            " fully indexed. Drop these chunks from context — each is re-fetchable"
+            " verbatim via vectr_fetch(ids=[...]) in <50ms."
+            " Your synthesized analysis (saved via vectr_remember) is retrievable via vectr_recall.",
             "",
         ]
         for fpath, chunks in shown:
@@ -241,6 +254,17 @@ class EvictionAdvisor:
             lines.append(f"  {fpath}  [{ranges}]")
         if overflow:
             lines.append(f"  ... and {overflow} more file(s). All retrievable via vectr_search('<description>').")
+
+        # UPG-EVICT-SESSION-SCOPE: list the exact re-fetch keys additively —
+        # only for chunks whose id is a known-good vectr_fetch key (never a
+        # guessed one), capped so the hint's own token cost stays bounded.
+        fetch_ids = [c.chunk_id for c in self._chunks if c.chunk_id][:EVICTION_HINT_MAX_IDS]
+        if fetch_ids:
+            id_list = ", ".join(f'"{i}"' for i in fetch_ids)
+            lines += [
+                "",
+                f"Re-fetch keys: vectr_fetch(ids=[{id_list}]) restores these verbatim.",
+            ]
 
         lines += [
             "",
@@ -264,6 +288,7 @@ class EvictionAdvisor:
                 "lines": c.lines,
                 "symbol": c.symbol_name,
                 "content": c.content,
+                "chunk_id": c.chunk_id,
             }
             for c in self._chunks
         ]

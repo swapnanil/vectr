@@ -1431,13 +1431,31 @@ class TestFormatSearchResults:
 class TestEvictionAdvisorIntegration:
 
     def _service_with_real_advisor(self, **advisor_kwargs):
+        # UPG-EVICT-SESSION-SCOPE: the real VectrService now routes every
+        # advisor read/write through `_advisor_for(session_id)` + the
+        # `record_results`/`record_chunk` methods rather than the bare
+        # `_eviction_advisor` attribute. These tests call handle_tools_call
+        # with no session_id (the anonymous/shared-advisor path), so wiring
+        # every one of those methods to the same real advisor keeps this an
+        # honest integration test of handle_tools_call's wiring.
         from agent.eviction_advisor import EvictionAdvisor
         svc = _mock_service()
         real_advisor = EvictionAdvisor(**advisor_kwargs)
         svc._eviction_advisor = real_advisor
-        svc.should_evict.side_effect = real_advisor.should_evict
-        svc.eviction_hint.side_effect = real_advisor.eviction_hint
-        svc.auto_eviction_hint.side_effect = real_advisor.auto_eviction_hint
+        svc._advisor_for.side_effect = lambda session_id=None: real_advisor
+        svc.should_evict.side_effect = lambda session_id=None: real_advisor.should_evict()
+        svc.eviction_hint.side_effect = lambda session_id=None: real_advisor.eviction_hint()
+        svc.auto_eviction_hint.side_effect = lambda session_id=None: real_advisor.auto_eviction_hint()
+        svc.record_results.side_effect = (
+            lambda results, session_id=None: real_advisor.record_results(results)
+        )
+        svc.record_chunk.side_effect = (
+            lambda file_path, lines, symbol_name, content, chunk_id="", session_id=None:
+            real_advisor.record(
+                file_path=file_path, lines=lines, symbol_name=symbol_name,
+                content=content, chunk_id=chunk_id,
+            )
+        )
         return svc, real_advisor
 
     def test_search_populates_chunks_in_eviction_advisor(self) -> None:

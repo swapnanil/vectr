@@ -213,13 +213,15 @@ class TestEvictionHint:
         assert "fn_a" in hint[auth_idx:auth_idx + 200] or "fn_a" in hint
 
     def test_hint_distinguishes_chunk_retrieval_from_note_retrieval(self) -> None:
-        # Raw codebase chunks → re-retrievable via vectr_search/vectr_locate
+        # Raw codebase chunks → re-retrievable via vectr_fetch (UPG-CTX-EVICT
+        # deterministic re-fetch surface superseded the earlier "re-run
+        # vectr_search/vectr_locate" wording — UPG-EVICT-SESSION-SCOPE).
         # Synthesized analysis (saved via vectr_remember) → retrievable via vectr_recall
         # Both paths must appear so the LLM understands the full protocol.
         adv = EvictionAdvisor()
         adv.record("f.py", "1-5", "fn", "content" * 10)
         hint = adv.eviction_hint()
-        assert "vectr_search" in hint, "hint must tell LLM how to re-retrieve raw codebase chunks"
+        assert "vectr_fetch" in hint, "hint must tell LLM how to re-retrieve raw codebase chunks"
         assert "vectr_recall" in hint, "hint must tell LLM that saved notes are retrieved via vectr_recall, not vectr_search"
 
     def test_hint_contains_directive_action_required(self) -> None:
