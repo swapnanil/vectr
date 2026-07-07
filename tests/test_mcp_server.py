@@ -219,7 +219,8 @@ class TestHandleToolsList:
     def test_required_tools_present_no_session(self) -> None:
         names = {t["name"] for t in handle_tools_list()["tools"]}
         for expected in ("vectr_search", "vectr_status", "vectr_remember", "vectr_recall",
-                         "vectr_map", "vectr_locate", "vectr_trace", "vectr_snapshot"):
+                         "vectr_map", "vectr_locate", "vectr_trace", "vectr_snapshot",
+                         "vectr_fetch"):
             assert expected in names
 
 
@@ -823,6 +824,80 @@ class TestVectrTrace:
 
 
 # ---------------------------------------------------------------------------
+# vectr_fetch (UPG-CTX-EVICT)
+# ---------------------------------------------------------------------------
+
+class TestVectrFetch:
+    def test_fetch_missing_ids_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_fetch", {}, svc)
+        assert result["isError"] is True
+        assert "ids is required" in result["content"][0]["text"]
+
+    def test_fetch_empty_ids_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_fetch", {"ids": []}, svc)
+        assert result["isError"] is True
+
+    def test_fetch_calls_service_with_ids_in_order(self) -> None:
+        svc = _mock_service()
+        svc.fetch.return_value = [
+            {"id": "a.py:1-5", "found": True, "file_path": "a.py", "start_line": 1,
+             "end_line": 5, "symbol_name": "foo", "language": "python", "content": "def foo(): pass"},
+        ]
+        handle_tools_call("vectr_fetch", {"ids": ["a.py:1-5"]}, svc)
+        svc.fetch.assert_called_once_with(["a.py:1-5"])
+
+    def test_fetch_renders_found_chunk_with_id_and_content(self) -> None:
+        svc = _mock_service()
+        svc.fetch.return_value = [
+            {"id": "a.py:1-5", "found": True, "file_path": "a.py", "start_line": 1,
+             "end_line": 5, "symbol_name": "foo", "language": "python", "content": "def foo(): pass"},
+        ]
+        result = handle_tools_call("vectr_fetch", {"ids": ["a.py:1-5"]}, svc)
+        text = result["content"][0]["text"]
+        assert result["isError"] is False
+        assert "a.py:1-5" in text
+        assert "def foo(): pass" in text
+
+    def test_fetch_renders_missing_id_as_not_found(self) -> None:
+        svc = _mock_service()
+        svc.fetch.return_value = [{"id": "gone.py:1-5", "found": False}]
+        result = handle_tools_call("vectr_fetch", {"ids": ["gone.py:1-5"]}, svc)
+        text = result["content"][0]["text"]
+        assert "gone.py:1-5" in text
+        assert "not found" in text
+
+    def test_fetch_ids_echoed_in_request_order(self) -> None:
+        svc = _mock_service()
+        svc.fetch.return_value = [
+            {"id": "b.py:1-2", "found": True, "file_path": "b.py", "start_line": 1,
+             "end_line": 2, "symbol_name": "", "language": "python", "content": "b content"},
+            {"id": "a.py:1-2", "found": True, "file_path": "a.py", "start_line": 1,
+             "end_line": 2, "symbol_name": "", "language": "python", "content": "a content"},
+        ]
+        result = handle_tools_call("vectr_fetch", {"ids": ["b.py:1-2", "a.py:1-2"]}, svc)
+        text = result["content"][0]["text"]
+        assert text.index("b.py:1-2") < text.index("a.py:1-2")
+
+    def test_fetch_exceeding_cap_returns_error(self) -> None:
+        svc = _mock_service()
+        svc.fetch.side_effect = ValueError("Too many ids requested")
+        result = handle_tools_call("vectr_fetch", {"ids": ["x"] * 100}, svc)
+        assert result["isError"] is True
+        assert "Too many ids" in result["content"][0]["text"]
+
+    def test_fetch_memory_only_returns_memory_only_message(self) -> None:
+        from app.service import _MEMORY_ONLY_MSG
+        svc = _mock_service()
+        svc.memory_only = True
+        result = handle_tools_call("vectr_fetch", {"ids": ["a.py:1-5"]}, svc)
+        assert result["isError"] is False
+        assert _MEMORY_ONLY_MSG in result["content"][0]["text"]
+        svc.fetch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # vectr_remember
 # ---------------------------------------------------------------------------
 
@@ -1245,7 +1320,10 @@ class TestFormatSearchResults:
         assert "more lines" not in text
         assert "line 59" in text
 
-    def test_truncation_footer_includes_read_pointer(self) -> None:
+    def test_truncation_footer_includes_fetch_pointer(self) -> None:
+        """UPG-CTX-EVICT: the truncation footer points at vectr_fetch(ids=[...])
+        rather than a blind Read(file, offset=N) — vectr_fetch restores the full
+        chunk deterministically and keeps the caller in the vectr tool family."""
         from agent.searcher import SearchResult
         long_content = "\n".join(f"line {i}" for i in range(120))
         result = SearchResult(
@@ -1253,7 +1331,8 @@ class TestFormatSearchResults:
             language="python", score=0.9, content=long_content,
         )
         text = _format_search_results([result], "query", 10, 100)
-        assert "Read" in text, "footer must contain a Read pointer for full context"
+        assert "vectr_fetch(ids=" in text, "footer must contain a vectr_fetch pointer for full context"
+        assert "big.py:1-120" in text, "footer must reference the chunk's own id"
 
     def test_expand_hint_fires_when_content_capped_by_2000_char_limit(self) -> None:
         """UPG-11.4-b: when content was truncated by the 2000-char storage cap
@@ -1283,11 +1362,12 @@ class TestFormatSearchResults:
             "UPG-11.4-b: expand hint must fire when stored content is shorter than symbol range. "
             f"Got: {text[-200:]}"
         )
-        assert "Read(" in text, (
-            "UPG-11.4-b: expand hint must contain a Read() pointer for the full definition."
+        assert "vectr_fetch(ids=" in text, (
+            "UPG-CTX-EVICT: expand hint must contain a vectr_fetch(ids=[...]) pointer "
+            "for the full definition."
         )
-        assert "offset=605" in text, (
-            "UPG-11.4-b: expand hint offset must be symbol_start_line - 1 = 605 (0-indexed). "
+        assert "django/db/models/fields/__init__.py:606-705" in text, (
+            "UPG-CTX-EVICT: expand hint must reference the chunk's own id. "
             f"Got: {text[-200:]}"
         )
 
@@ -1315,9 +1395,10 @@ class TestFormatSearchResults:
             f"Got: {text[-200:]}"
         )
 
-    def test_expand_hint_shows_correct_limit(self) -> None:
-        """UPG-11.4-b: the expand hint must pass limit=symbol_range_lines so the
-        caller reads exactly the full definition, not an arbitrary window.
+    def test_expand_hint_references_chunk_id(self) -> None:
+        """UPG-CTX-EVICT: the expand hint must reference the chunk's own id
+        (file:start-end) so vectr_fetch(ids=[...]) can restore exactly this
+        chunk — not an arbitrary Read() window/limit.
         """
         from agent.searcher import SearchResult
         stored_content = "\n".join(f"    line {i}" for i in range(45))
@@ -1332,9 +1413,8 @@ class TestFormatSearchResults:
             symbol_end_line=100,  # 100-line symbol
         )
         text = _format_search_results([result], "deconstruct", 5, 100)
-        # Expand hint should include limit=100 (the full symbol range)
-        assert "limit=100" in text, (
-            "UPG-11.4-b: expand hint must include limit=symbol_range_lines (100). "
+        assert "vectr_fetch(ids=" in text and "fields.py:1-100" in text, (
+            "UPG-CTX-EVICT: expand hint must reference the chunk's own id (fields.py:1-100). "
             f"Got: {text[-300:]}"
         )
 

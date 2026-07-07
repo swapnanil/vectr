@@ -263,6 +263,11 @@ EMBEDDING_DEFAULT_MODEL : str
     stamped with whichever model built it (CodeIndexer's embed-model stamp);
     changing this value forces a full vector index rebuild on next index
     rather than mixing vectors from two models in one collection.
+
+FETCH_MAX_IDS_PER_CALL : int
+    Maximum chunk ids accepted per vectr_fetch / POST /v1/fetch / `vectr
+    fetch` call (UPG-CTX-EVICT). Bounds the deterministic re-fetch-by-id
+    surface so it can't be used as an unbounded bulk export of the index.
 """
 from __future__ import annotations
 
@@ -553,3 +558,9 @@ SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN: int = int(_id_hint_cfg["nearmiss
 
 EMBEDDING_DEFAULT_MODEL: str = str(_cfg["embedding"]["default_model"])
 EMBEDDING_MAX_SEQ_LENGTH: int = int(_cfg["embedding"]["max_seq_length"])
+
+# ---------------------------------------------------------------------------
+# Deterministic re-fetch-by-chunk-id contract (UPG-CTX-EVICT)
+# ---------------------------------------------------------------------------
+
+FETCH_MAX_IDS_PER_CALL: int = int(_cfg["fetch"]["max_ids_per_call"])

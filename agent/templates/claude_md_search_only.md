@@ -8,7 +8,7 @@ Vectr gives you fast semantic search over this codebase.
 
 > **This workspace runs in search-only mode.** Working-memory tools (`vectr_remember`/`vectr_recall`/`vectr_forget`/`vectr_snapshot`) are disabled for this daemon — there is no notes database to write to. Use scratch notes or the conversation itself for anything you need to remember across turns.
 
-## Semantic search — 4 tools
+## Semantic search — 5 tools
 
 The codebase is fully indexed. One `vectr_search` call returns ranked, relevant code chunks — no grep loops across hundreds of files, no wasted turns reading the wrong files. Use these for all exploration; use Read only to read a specific file that vectr has already pointed you to.
 
@@ -18,6 +18,7 @@ The codebase is fully indexed. One `vectr_search` call returns ranked, relevant 
 | `vectr_locate(name="SymbolName")` | Symbol graph lookup — name → file:line in one call. Replaces find + grep for definitions. | `vectr_locate(name="WorkspaceLock")` → `resolver.rs:214` |
 | `vectr_trace(name="symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace(name="acquire_lock")` |
 | `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
+| `vectr_fetch(ids=["file:start-end"])` | Restore a chunk shown in an earlier result after it leaves your context — no re-search, no file re-read. Every search/locate/trace result names its own id; pass it back verbatim. | `vectr_fetch(ids=["resolver.rs:200-240"])` |
 
 **Which tool for which question:** "where is X defined" → `vectr_locate`; "who calls X" / "what does X call" → `vectr_trace`; "what does this repo look like" → `vectr_map`; anything else (a pattern, a concept, "how does X work") → `vectr_search`.
 

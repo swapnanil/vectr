@@ -209,6 +209,12 @@ class SearchResult:
     score: float
     content: str
     node_type: str = ""
+    # UPG-CTX-EVICT: the exact ChromaDB id this chunk was retrieved under
+    # (`file_path:start_line-end_line`) — threaded through verbatim from the
+    # hybrid retrieval pool rather than re-derived from file_path/lines, so it
+    # is guaranteed to be the literal id vectr_fetch/`/v1/fetch` can restore.
+    # Empty for any SearchResult built outside search() (e.g. test fixtures).
+    chunk_id: str = ""
     dup_count: int = 0   # number of identical chunks collapsed into this one (UPG-2.2)
     # UPG-SCORE-DISPLAY-FLAT: `score` is an ABSOLUTE query-doc relevance value
     # (the cross-encoder relevance when reranked, else the dense cosine
@@ -580,6 +586,7 @@ class CodeSearcher:
                 lines=f"{start_line}-{end_line}",
                 symbol_name=meta.get("symbol_name", ""),
                 language=meta.get("language", ""),
+                chunk_id=cid,
                 # Placeholder — _apply_quality_and_dedup overwrites this with the
                 # absolute relevance value (ce_relevance, else dense_sim) before
                 # the result is returned (UPG-SCORE-DISPLAY-FLAT). Kept here only

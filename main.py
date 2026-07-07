@@ -979,6 +979,37 @@ def cmd_search(args: argparse.Namespace) -> None:
         _handle_daemon_call_error(exc, port)
 
 
+def cmd_fetch(args: argparse.Namespace) -> None:
+    """Re-fetch one or more chunks by exact id, verbatim (UPG-CTX-EVICT).
+
+    Shell path to the same deterministic re-fetch surface as the MCP
+    `vectr_fetch` tool and `POST /v1/fetch` — restores a chunk shown in an
+    earlier `vectr search`/`vectr_locate`/`vectr_trace` result after it has
+    left context, with no re-search or file re-read.
+    """
+    import httpx
+
+    workspace = str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())
+    port = _get_port_for_workspace(workspace, args.port)
+    try:
+        resp = httpx.post(f"{_api_base(port)}/v1/fetch", json={"ids": args.ids}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        for entry in data.get("results", []):
+            if not entry.get("found"):
+                print(f"\n[{entry['id']}] not found", file=sys.stderr)
+                continue
+            print(f"\n[{entry['id']}]  {entry['file_path']}  lines {entry['lines']}")
+            if entry.get("symbol"):
+                print(f"    {entry['symbol']}  ({entry['language']})")
+            print()
+            print(entry["content"])
+        if data.get("note"):
+            print(f"\n{data['note']}", file=sys.stderr)
+    except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
+        _handle_daemon_call_error(exc, port)
+
+
 def cmd_remember(args: argparse.Namespace) -> None:
     """Store a working-memory note via the workspace daemon (UPG-9.1).
 
@@ -1761,6 +1792,19 @@ def main() -> None:
     p_search.add_argument("--language", help="Filter by language")
     p_search.add_argument("--port", type=int, default=_default_port)
 
+    p_fetch = sub.add_parser(
+        "fetch",
+        help="Re-fetch chunks by exact id, verbatim",
+        description=(
+            "Deterministic re-fetch by chunk id — restores a chunk shown in an "
+            "earlier search/locate/trace result after it has left context, with "
+            "no re-search or file re-read. Ids not present in the index are "
+            "reported as not found (the file likely changed since indexing)."
+        ),
+    )
+    p_fetch.add_argument("ids", nargs="+", help="Chunk id(s), e.g. path/to/file.py:10-42")
+    p_fetch.add_argument("--port", type=int, default=_default_port)
+
     p_remember = sub.add_parser("remember", help="Store a working-memory note (shell path to the note store)")
     p_remember.add_argument("content", help="The note content to store")
     p_remember.add_argument("--tags", action="append", metavar="TAG", help="Topic tag (repeatable)")
@@ -1806,6 +1850,7 @@ def main() -> None:
         "init":    cmd_init,
         "index":   cmd_index,
         "search":  cmd_search,
+        "fetch":   cmd_fetch,
         "status":  cmd_status,
         "stop":    cmd_stop,
         "forget":  cmd_forget,

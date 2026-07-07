@@ -44,6 +44,30 @@ _EXPLORATION_TOOLS = [
         },
     },
     {
+        "name": "vectr_fetch",
+        "description": (
+            "Deterministic re-fetch of a code chunk by its exact id — no embedding, "
+            "no rerank, just the chunk. Every vectr_search/vectr_locate/vectr_trace "
+            "result carries its chunk's id (the `file:start-end` shown in the result "
+            "header). Use this to restore a chunk that was cleared from your context "
+            "(by tool-result eviction, /compact, or a context-editing tombstone) "
+            "instead of re-running vectr_search or re-reading the whole file. "
+            "NOT for finding NEW content — use vectr_search for that."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Chunk ids to restore, exactly as shown in a prior "
+                                    "search/locate/trace result (e.g. 'src/auth.py:10-20').",
+                },
+            },
+            "required": ["ids"],
+        },
+    },
+    {
         "name": "vectr_status",
         "description": (
             "Returns index health (files, chunks, embed model) AND notes_count (number of notes "

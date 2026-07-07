@@ -1862,6 +1862,50 @@ class TestDualVectorPurposeCollection:
         assert idx._purpose_collection.count() == 0
 
 
+class TestFetchChunks:
+    """Deterministic re-fetch by chunk id (UPG-CTX-EVICT part a)."""
+
+    def test_found_ids_return_full_content_and_metadata(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "svc.py", """
+            def known_function():
+                return 42
+        """)
+        indexer.index_file(path)
+        body_ids, body_docs, _ = indexer.get_all_documents()
+        result = indexer.fetch_chunks(body_ids)
+        assert len(result) == len(body_ids)
+        for entry, cid, doc in zip(result, body_ids, body_docs):
+            assert entry["id"] == cid
+            assert entry["found"] is True
+            assert entry["content"] == doc
+            assert entry["file_path"]
+
+    def test_missing_id_reported_as_not_found(self, indexer) -> None:
+        result = indexer.fetch_chunks(["does-not-exist.py:1-2"])
+        assert result == [{"id": "does-not-exist.py:1-2", "found": False}]
+
+    def test_mixed_found_and_missing_preserves_request_order(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "mix.py", "def known(): pass")
+        indexer.index_file(path)
+        body_ids, _, _ = indexer.get_all_documents()
+        real_id = body_ids[0]
+        requested = ["missing-1", real_id, "missing-2"]
+        result = indexer.fetch_chunks(requested)
+        assert [r["id"] for r in result] == requested
+        assert result[0]["found"] is False
+        assert result[1]["found"] is True
+        assert result[2]["found"] is False
+
+    def test_empty_ids_returns_empty_list(self, indexer) -> None:
+        assert indexer.fetch_chunks([]) == []
+
+    def test_exceeding_cap_raises_value_error(self, indexer) -> None:
+        from agent.config import FETCH_MAX_IDS_PER_CALL
+        too_many = [f"id-{i}" for i in range(FETCH_MAX_IDS_PER_CALL + 1)]
+        with pytest.raises(ValueError):
+            indexer.fetch_chunks(too_many)
+
+
 class TestSchemaVersionRebuildTrigger:
     """A bump to INDEXING_SCHEMA_VERSION must invalidate the mtime cache (ARCH-4)."""
 

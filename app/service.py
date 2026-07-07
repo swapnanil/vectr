@@ -45,6 +45,17 @@ _SEARCH_ONLY_MSG = (
     "trace and map are active."
 )
 
+# UPG-CTX-EVICT: shared note appended to a vectr_fetch/`/v1/fetch` response
+# whenever at least one requested id came back missing — the file most
+# likely changed since indexing (edited, moved, or deleted), shifting or
+# removing that chunk's id. Re-running vectr_search recovers the current
+# content under a fresh id.
+_FETCH_NOT_FOUND_NOTE = (
+    "One or more requested ids were not found — the file likely changed "
+    "since indexing (edited, moved, or deleted), which shifts or removes "
+    "chunk ids. Re-run vectr_search to get current ids."
+)
+
 
 class VectrService:
     """Singleton-style service. Create once at startup; shared via FastAPI app state."""
@@ -392,6 +403,16 @@ class VectrService:
     def indexed_languages(self) -> list[str]:
         """Distinct languages actually present in the index (UPG-3.1)."""
         return self._indexer.indexed_languages()
+
+    def fetch(self, ids: list[str]) -> list[dict]:
+        """Deterministic re-fetch by chunk id (UPG-CTX-EVICT part a).
+
+        Disabled in memory-only mode — there is no code index to fetch from,
+        the same guard as search/locate/trace.
+        """
+        if self._memory_only:
+            raise RuntimeError(_MEMORY_ONLY_MSG)
+        return self._indexer.fetch_chunks(ids)
 
     def identifier_hint_symbols(self, query: str) -> list:
         """Additive, high-precision symbol-graph hint (UPG-QUERYTYPE-REROUTE).

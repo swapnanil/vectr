@@ -9,7 +9,7 @@ Vectr gives you two capabilities:
 
 > **This workspace's working memory IS vectr — not files.** Record every finding, decision, and gotcha with `vectr_remember`. Do **not** write them to scratch `.md` files or a `~/.claude` memory directory: only vectr notes are re-injected automatically after `/compact` and recalled in <50ms — ad-hoc files are not, and they fragment your memory across two places. Any time you are about to "save a note to a file", call `vectr_remember` instead.
 
-## Semantic search — 5 tools
+## Semantic search — 6 tools
 
 The codebase is fully indexed. One `vectr_search` call returns ranked, relevant code chunks — no grep loops across hundreds of files, no wasted turns reading the wrong files. Use these for all exploration; use Read only to read a specific file that vectr has already pointed you to.
 
@@ -20,6 +20,7 @@ The codebase is fully indexed. One `vectr_search` call returns ranked, relevant 
 | `vectr_trace(name="symbol")` | Call graph — who calls this symbol, and what does it call. | `vectr_trace(name="acquire_lock")` |
 | `vectr_map()` | Codebase overview — file tree + module summaries. Call once on an unfamiliar repo; follow with `vectr_map_save` if it returns raw metadata. | First visit to an unknown repo |
 | `vectr_map_save(summary)` | Save a plain-English codebase summary (~200–350 tokens) as a permanent passport. Only call when `vectr_map` returned raw metadata. | `vectr_map_save("uv is a Rust-based Python package manager…")` |
+| `vectr_fetch(ids=["file:start-end"])` | Restore a chunk shown in an earlier result after it leaves your context — no re-search, no file re-read. Every search/locate/trace result names its own id; pass it back verbatim. | `vectr_fetch(ids=["resolver.rs:200-240"])` |
 
 **Which tool for which question:** "where is X defined" → `vectr_locate`; "who calls X" / "what does X call" → `vectr_trace`; "what does this repo look like" → `vectr_map`; anything else (a pattern, a concept, "how does X work") → `vectr_search`.
 

@@ -801,6 +801,60 @@ class CodeIndexer:
             include=["documents", "metadatas", "distances"],
         )
 
+    def fetch_chunks(self, ids: list[str]) -> list[dict]:
+        """Deterministic re-fetch by chunk id (UPG-CTX-EVICT part a).
+
+        A direct ``self._collection.get(ids=...)`` — no embedding, no rerank,
+        no ranking of any kind. Every rendered search result carries its
+        chunk's exact ChromaDB id (``file_path:start_line-end_line``); this is
+        the counterpart lookup that restores the full chunk from that id
+        alone, so a chunk cleared from the caller's context (by harness tool-
+        result eviction, ``/compact``, or an API context-editing tombstone)
+        never requires a re-search or a blind file re-read.
+
+        Returns one dict per requested id, in REQUEST order (Chroma's own
+        ``get(ids=...)`` does not preserve order and silently omits ids it
+        doesn't have — both are corrected here):
+          {"id": ..., "found": True,  "file_path": ..., "start_line": ...,
+           "end_line": ..., "symbol_name": ..., "language": ..., "content": ...}
+          {"id": ..., "found": False}
+
+        Raises ValueError if `ids` exceeds FETCH_MAX_IDS_PER_CALL.
+        """
+        from agent.config import FETCH_MAX_IDS_PER_CALL
+        if len(ids) > FETCH_MAX_IDS_PER_CALL:
+            raise ValueError(
+                f"Too many ids requested ({len(ids)}) — vectr_fetch accepts at "
+                f"most {FETCH_MAX_IDS_PER_CALL} per call."
+            )
+        if not ids:
+            return []
+        batch = self._collection.get(ids=ids, include=["documents", "metadatas"])
+        found_ids = batch.get("ids") or []
+        found_docs = batch.get("documents") or []
+        found_metas = batch.get("metadatas") or []
+        by_id: dict[str, tuple[str, dict]] = {
+            cid: (doc, meta) for cid, doc, meta in zip(found_ids, found_docs, found_metas)
+        }
+        results: list[dict] = []
+        for requested_id in ids:
+            hit = by_id.get(requested_id)
+            if hit is None:
+                results.append({"id": requested_id, "found": False})
+                continue
+            doc, meta = hit
+            results.append({
+                "id": requested_id,
+                "found": True,
+                "file_path": meta.get("file_path", ""),
+                "start_line": int(meta.get("start_line", 0)),
+                "end_line": int(meta.get("end_line", 0)),
+                "symbol_name": meta.get("symbol_name", ""),
+                "language": meta.get("language", ""),
+                "content": doc,
+            })
+        return results
+
     def get_chunk_documents(self, chunk_ids: list[str]) -> dict[str, tuple[str, dict]]:
         """Batch-fetch (document, metadata) from the body collection for given ids.
 

@@ -47,6 +47,10 @@ class CodeChunkResult(BaseModel):
     # 0/0 means the chunk was not associated with a named symbol (e.g. a window chunk).
     symbol_start_line: int = 0
     symbol_end_line: int = 0
+    # UPG-CTX-EVICT: the exact chunk id — pass verbatim to vectr_fetch /
+    # POST /v1/fetch to restore this chunk deterministically, no re-search
+    # or file re-read needed.
+    id: str = ""
 
 
 class SearchResponse(BaseModel):
@@ -72,6 +76,33 @@ class IndexResponse(BaseModel):
     total_chunks: int
     processing_ms: int
     model: str
+
+
+class FetchRequest(BaseModel):
+    ids: list[str] = Field(
+        ..., min_length=1,
+        description="Chunk ids to re-fetch verbatim — the exact `file:start-end` "
+                    "id shown in a search/locate/trace result.",
+    )
+
+
+class FetchEntry(BaseModel):
+    id: str
+    found: bool
+    file_path: str = ""
+    lines: str = ""
+    symbol: str | None = None
+    language: str = ""
+    content: str = ""
+
+
+class FetchResponse(BaseModel):
+    results: list[FetchEntry]
+    # Shared note, present only when at least one requested id was not found —
+    # the most likely cause is the file changed since indexing (the chunk's
+    # line range shifted or the symbol was removed), not a transient error.
+    note: str | None = None
+    processing_ms: int
 
 
 class LanguageStat(BaseModel):

@@ -194,6 +194,40 @@ def handle_tools_call(
 
         return {"content": [{"type": "text", "text": content_text}], "isError": False}
 
+    # ---- vectr_fetch ----
+    if tool_name == "vectr_fetch":
+        ids = arguments.get("ids")
+        if not isinstance(ids, list) or not ids:
+            return _mcp_error("ids is required (a non-empty list of chunk ids)")
+        ids = [str(i) for i in ids]
+
+        # Memory-only mode: no code index to fetch from — same guard as search/locate/trace.
+        if getattr(service, "memory_only", False):
+            from app.service import _MEMORY_ONLY_MSG
+            return {"content": [{"type": "text", "text": _MEMORY_ONLY_MSG}], "isError": False}
+
+        try:
+            entries = service.fetch(ids)
+        except ValueError as exc:
+            return _mcp_error(str(exc))
+
+        # Record fetched chunks so the eviction advisor can reference them —
+        # mirrors the recording behaviour of vectr_search above.
+        try:
+            for e in entries:
+                if e["found"]:
+                    service._eviction_advisor.record(
+                        file_path=e["file_path"],
+                        lines=f"{e['start_line']}-{e['end_line']}",
+                        symbol_name=e.get("symbol_name", ""),
+                        content=e["content"],
+                    )
+        except Exception:
+            pass
+
+        text = _format_fetch_results(entries)
+        return {"content": [{"type": "text", "text": text}], "isError": False}
+
     # ---- vectr_status ----
     if tool_name == "vectr_status":
         status = service.status()
@@ -541,10 +575,12 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
     for i, r in enumerate(results, 1):
         lines.append(f"{'─' * 60}")
         dup = f"  (+{r.dup_count} more identical)" if getattr(r, "dup_count", 0) else ""
-        lines.append(f"[{i}] {r.file_path}  lines {r.lines}  score {r.score:.3f}{dup}")
+        chunk_id = getattr(r, "chunk_id", "") or f"{r.file_path}:{r.lines}"
+        lines.append(f"[{i}] {chunk_id}  score {r.score:.3f}{dup}")
         if r.symbol_name:
-            # UPG-11.4: include symbol line-range so caller can expand to full definition
-            # without a blind whole-file re-read: Read(file_path, offset=symbol_start_line-1)
+            # UPG-11.4: include symbol line-range so the caller knows the full
+            # definition's extent even when the displayed content is capped —
+            # vectr_fetch(ids=[chunk_id]) below restores it in full if needed.
             sym_range = ""
             s_start = getattr(r, "symbol_start_line", 0)
             s_end = getattr(r, "symbol_end_line", 0)
@@ -559,16 +595,23 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         # content lines to the full symbol line range stored in metadata:
         # if the chunk has symbol_start_line / symbol_end_line set and the
         # content is more than 5 lines shorter than the full range, the content
-        # was capped and the caller needs a Read() to see the whole definition.
+        # was capped and the caller needs to expand to see the whole definition.
         s_start = getattr(r, "symbol_start_line", 0)
         s_end = getattr(r, "symbol_end_line", 0)
         symbol_range_lines = (s_end - s_start + 1) if (s_start and s_end and s_end > s_start) else 0
         content_truncated = symbol_range_lines > 0 and len(content_lines) < symbol_range_lines - 5
+        # UPG-CTX-EVICT: the expand hint now points at vectr_fetch(ids=[...])
+        # rather than a blind Read(file, offset=N) — vectr_fetch returns the
+        # chunk's FULL stored content (no 2000-char display cap), keeps the
+        # caller in the vectr tool family, and works even after the file on
+        # disk has moved on from what was indexed.
         if len(content_lines) > 80:
             # Hard cap: the content itself is long but we also cap the display.
             lines.append("\n".join(content_lines[:80]))
-            start = str(r.lines).split("-")[0] if "-" in str(r.lines) else str(r.lines)
-            lines.append(f"... {len(content_lines) - 80} more lines — Read({r.file_path!r}, offset={start}) for full context")
+            lines.append(
+                f"... {len(content_lines) - 80} more lines — "
+                f"vectr_fetch(ids=[{chunk_id!r}]) restores the full chunk"
+            )
         elif content_truncated:
             # Content was silently capped by the 2000-char storage limit before
             # it reached the full symbol body.  Show what we have, then prompt.
@@ -576,11 +619,39 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
             missing = symbol_range_lines - len(content_lines)
             lines.append(
                 f"... {missing} more lines (content capped at ~2000 chars) — "
-                f"Read({r.file_path!r}, offset={s_start - 1}, limit={symbol_range_lines}) for full definition"
+                f"vectr_fetch(ids=[{chunk_id!r}]) restores the full chunk"
             )
         else:
             lines.append(r.content)
         lines.append("")
+    lines.append(
+        'Results are re-fetchable anytime: vectr_fetch(ids=["<id>"]) restores '
+        "a chunk after it leaves your context."
+    )
+    return "\n".join(lines)
+
+
+def _format_fetch_results(entries: list[dict]) -> str:
+    """Render vectr_fetch results using the same id + symbol + content
+    conventions as _format_search_results (UPG-CTX-EVICT), so a restored
+    chunk reads identically to how it first appeared in a search response."""
+    lines: list[str] = []
+    missing = [e["id"] for e in entries if not e["found"]]
+    for e in entries:
+        lines.append(f"{'─' * 60}")
+        if not e["found"]:
+            lines.append(f"[{e['id']}] not found")
+            lines.append("")
+            continue
+        lines.append(f"[{e['id']}]")
+        if e.get("symbol_name"):
+            lines.append(f"    symbol: {e['symbol_name']}  language: {e.get('language', '')}")
+        lines.append("")
+        lines.append(e.get("content", ""))
+        lines.append("")
+    if missing:
+        from app.service import _FETCH_NOT_FOUND_NOTE
+        lines.append(_FETCH_NOT_FOUND_NOTE)
     return "\n".join(lines)
 
 

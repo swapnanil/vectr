@@ -1041,3 +1041,12 @@ embedding:
   # short-context models (512) are unaffected. 512 matches the prior
   # default's behavior; raise deliberately, with indexing throughput in mind.
   max_seq_length: 512
+
+fetch:
+  # UPG-CTX-EVICT: deterministic re-fetch-by-chunk-id contract. Every chunk
+  # already carries a stable id (`file_path:start_line-end_line`, the literal
+  # ChromaDB id) — vectr_fetch/POST /v1/fetch/`vectr fetch` restore any of
+  # them verbatim in one call, no embedding or rerank involved. This caps how
+  # many ids a single call may request, so a caller can't turn the re-fetch
+  # surface into an unbounded bulk-export of the whole index.
+  max_ids_per_call: 20

@@ -901,6 +901,98 @@ class TestCmdSearch:
 
 
 # ---------------------------------------------------------------------------
+# cmd_fetch (UPG-CTX-EVICT)
+# ---------------------------------------------------------------------------
+
+class TestCmdFetch:
+    def test_posts_to_fetch_endpoint_and_prints_content(self, tmp_path, capsys, monkeypatch):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        monkeypatch.chdir(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"id": "a.py:1-5", "found": True, "file_path": "a.py", "lines": "1-5",
+                 "symbol": "foo", "language": "python", "content": "def foo(): pass"},
+            ],
+            "note": None,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(ids=["a.py:1-5"], port=8765)
+            m.cmd_fetch(args)
+
+        call_url = mock_post.call_args[0][0]
+        assert "/v1/fetch" in call_url
+        assert mock_post.call_args[1]["json"] == {"ids": ["a.py:1-5"]}
+        out = capsys.readouterr().out
+        assert "a.py:1-5" in out
+        assert "def foo(): pass" in out
+
+    def test_missing_id_prints_not_found_to_stderr(self, tmp_path, capsys, monkeypatch):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        monkeypatch.chdir(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [{"id": "gone.py:1-5", "found": False}],
+            "note": "One or more requested chunks were not found — the file "
+                    "may have changed since indexing.",
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(ids=["gone.py:1-5"], port=8765)
+            m.cmd_fetch(args)
+
+        err = capsys.readouterr().err
+        assert "gone.py:1-5" in err
+        assert "not found" in err
+
+    def test_connect_error_exits_nonzero_with_clean_message(self, tmp_path, capsys, monkeypatch):
+        import argparse
+        import httpx
+        from unittest.mock import patch
+
+        monkeypatch.chdir(tmp_path)
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", side_effect=httpx.ConnectError("down")):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(ids=["a.py:1-5"], port=8765)
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_fetch(args)
+
+        assert exc_info.value.code == 1
+        assert "not running" in capsys.readouterr().err.lower()
+
+    def test_memory_only_gate_prints_detail_instead_of_crashing(self, tmp_path, capsys, monkeypatch):
+        import argparse
+        from unittest.mock import patch
+
+        mock_resp = _mode_gated_response("memory_only_mode", "vectr is in memory-only mode...")
+
+        monkeypatch.chdir(tmp_path)
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(ids=["a.py:1-5"], port=8765)
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_fetch(args)
+
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "vectr is in memory-only mode" in err
+        assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
 # cmd_forget
 # ---------------------------------------------------------------------------
 
@@ -1668,9 +1760,10 @@ class TestClaudeMdFraming:
         assert "semantic search" in block.lower()
         assert "working memory" in block.lower()
 
-    def test_search_section_lists_all_five_tools(self, tmp_path):
+    def test_search_section_lists_all_six_tools(self, tmp_path):
         block = self._vectr_block(tmp_path)
-        for tool in ("vectr_search", "vectr_locate", "vectr_trace", "vectr_map", "vectr_map_save"):
+        for tool in ("vectr_search", "vectr_locate", "vectr_trace", "vectr_map", "vectr_map_save",
+                     "vectr_fetch"):
             assert tool in block, f"{tool} must appear in the search section"
 
     def test_memory_section_lists_all_seven_tools(self, tmp_path):

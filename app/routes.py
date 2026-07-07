@@ -7,6 +7,9 @@ from fastapi import APIRouter, Body, HTTPException, Request
 
 from agent.llm_client import get_model
 from app.models import (
+    FetchEntry,
+    FetchRequest,
+    FetchResponse,
     ForgetRequest,
     HealthResponse,
     IndexRequest,
@@ -98,6 +101,7 @@ async def search(body: SearchRequest, request: Request) -> SearchResponse:
                 content=r.content,
                 symbol_start_line=getattr(r, "symbol_start_line", 0),
                 symbol_end_line=getattr(r, "symbol_end_line", 0),
+                id=getattr(r, "chunk_id", ""),
             )
             for r in results
         ],
@@ -106,6 +110,42 @@ async def search(body: SearchRequest, request: Request) -> SearchResponse:
         processing_ms=int((time.monotonic() - t0) * 1000),
         model=get_model(),
         low_confidence=getattr(results, "low_confidence", False),
+    )
+
+
+@router.post("/v1/fetch", response_model=FetchResponse)
+async def fetch(body: FetchRequest, request: Request) -> FetchResponse:
+    """Deterministic re-fetch by chunk id (UPG-CTX-EVICT part a) — no
+    embedding, no rerank, just the exact chunk(s) named by id."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "memory_only", False):
+        from app.service import _MEMORY_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
+    try:
+        entries = svc.fetch(body.ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": "too_many_ids", "detail": str(exc)})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"error": "fetch_failed", "detail": str(exc)})
+
+    from app.service import _FETCH_NOT_FOUND_NOTE
+    any_missing = any(not e["found"] for e in entries)
+    return FetchResponse(
+        results=[
+            FetchEntry(
+                id=e["id"],
+                found=e["found"],
+                file_path=e.get("file_path", ""),
+                lines=f"{e['start_line']}-{e['end_line']}" if e["found"] else "",
+                symbol=e.get("symbol_name") or None if e["found"] else None,
+                language=e.get("language", ""),
+                content=e.get("content", ""),
+            )
+            for e in entries
+        ],
+        note=_FETCH_NOT_FOUND_NOTE if any_missing else None,
+        processing_ms=int((time.monotonic() - t0) * 1000),
     )
 
 
