@@ -197,6 +197,77 @@ class TestCmdStop:
         err = capsys.readouterr().err
         assert "No running" in err
 
+    def test_stop_positional_workspace(self, tmp_path):
+        # UPG-CLI-STOP-PATH-POSITIONAL: `vectr stop <workspace>` must work like
+        # start/restart's positional, not just --path.
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server") as mock_stop:
+            m.cmd_stop(_make_args(workspace=ws, path="/should/be/ignored", **{"all": False}))
+
+        mock_stop.assert_called_once_with(12345)
+        assert reg.get(wh) is None
+
+    def test_stop_path_flag_still_works_without_positional(self, tmp_path):
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server") as mock_stop:
+            m.cmd_stop(_make_args(workspace=None, path=ws, **{"all": False}))
+
+        mock_stop.assert_called_once_with(12345)
+        assert reg.get(wh) is None
+
+    def test_stop_positional_wins_over_path_flag(self, tmp_path):
+        # Positional and --path both given (pointing at different workspaces):
+        # positional must win, exactly like start/restart's `_resolve_workspace_roots`.
+        ws_positional = "/project/positional"
+        ws_flag = "/project/flag"
+        wh = workspace_hash(ws_positional)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws_positional, 8765, 12345)
+        reg.register(workspace_hash(ws_flag), ws_flag, 8766, 54321)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server") as mock_stop:
+            m.cmd_stop(_make_args(workspace=ws_positional, path=ws_flag, **{"all": False}))
+
+        mock_stop.assert_called_once_with(12345)
+        assert reg.get(wh) is None
+        assert reg.get(workspace_hash(ws_flag)) is not None
+
+    def test_stop_positional_code_workspace_file_uses_first_root(self, tmp_path):
+        ws_file = tmp_path / "project.code-workspace"
+        root_a = tmp_path / "a"
+        root_b = tmp_path / "b"
+        root_a.mkdir()
+        root_b.mkdir()
+        ws_file.write_text(
+            json.dumps({"folders": [{"path": str(root_a)}, {"path": str(root_b)}]}),
+            encoding="utf-8",
+        )
+        wh = workspace_hash(str(root_a))
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, str(root_a), 8765, 12345)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server") as mock_stop:
+            m.cmd_stop(_make_args(workspace=str(ws_file), **{"all": False}))
+
+        mock_stop.assert_called_once_with(12345)
+        assert reg.get(wh) is None
+
 
 # ---------------------------------------------------------------------------
 # cmd_status

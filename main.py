@@ -1456,7 +1456,7 @@ def cmd_stop(args: argparse.Namespace) -> None:
             print(f"  Stopped PID {pid}")
         return
 
-    workspace = str(Path(args.path).resolve())
+    workspace = _resolve_stop_workspace(args)
     ws_hash = workspace_hash(workspace)
     registry.prune_dead()
     entry = registry.get(ws_hash)
@@ -1467,6 +1467,23 @@ def cmd_stop(args: argparse.Namespace) -> None:
     _stop_server(pid)
     registry.unregister(ws_hash)
     print(f"Vectr stopped (PID {pid})")
+
+
+def _resolve_stop_workspace(args: argparse.Namespace) -> str:
+    """Resolve the single workspace path `stop` should act on.
+
+    The optional positional `workspace` argument (UPG-CLI-STOP-PATH-POSITIONAL)
+    mirrors `start`/`restart`'s positional — a `.code-workspace` file or a plain
+    directory — and wins over `--path` when both are given, matching how
+    `_resolve_workspace_roots` prioritises the positional for start/restart.
+    Falls back to `--path` (or its default) when no positional was given.
+    """
+    workspace_arg = getattr(args, "workspace", None)
+    if workspace_arg:
+        if str(workspace_arg).endswith(".code-workspace"):
+            return _parse_code_workspace(workspace_arg)[0]
+        return str(Path(workspace_arg).resolve())
+    return str(Path(args.path).resolve())
 
 
 def cmd_restart(args: argparse.Namespace) -> None:
@@ -1769,6 +1786,11 @@ def main() -> None:
     )
 
     p_stop = sub.add_parser("stop", help="Stop the daemon for a workspace")
+    p_stop.add_argument(
+        "workspace", nargs="?", default=None,
+        help="Path to a .code-workspace file or a single workspace directory "
+             "(same positional `start`/`restart` accept; wins over --path if both given)",
+    )
     p_stop.add_argument("--path", default=_default_path)
     p_stop.add_argument("--all", action="store_true", help="Stop all running instances")
 
