@@ -332,7 +332,22 @@ class EvictionAdvisor:
         for c in self._chunks:
             by_file.setdefault(c.file_path, []).append(c)
 
-        file_items = list(by_file.items())
+        # UPG-EVICT-HINT-RECENCY: order files most-recently-retrieved-first,
+        # not by first-ever-recorded order (a dict's insertion-order iteration
+        # was an accident of implementation, not a chosen policy). The
+        # caller's active working set — what it can most usefully drop from
+        # context and re-fetch on demand — is whatever it retrieved most
+        # recently, not whatever it happened to retrieve first this session.
+        # A file's recency is the position (in self._chunks) of the LAST
+        # chunk recorded for it; since record() appends monotonically, that
+        # position doubles as a recency sequence number. Sorting descending
+        # by this unique-per-file key is deterministic; the stable sort
+        # tie-breaks by insertion order in the (practically unreachable)
+        # case of equal keys.
+        last_seq: dict[str, int] = {}
+        for i, c in enumerate(self._chunks):
+            last_seq[c.file_path] = i
+        file_items = sorted(by_file.items(), key=lambda kv: last_seq[kv[0]], reverse=True)
         shown = file_items[:5]
         overflow = len(file_items) - len(shown)
 
@@ -359,6 +374,7 @@ class EvictionAdvisor:
             " verbatim via vectr_fetch(ids=[...]) in <50ms."
             " Your synthesized analysis (saved via vectr_remember) is retrievable via vectr_recall.",
             "",
+            "Files below are listed most recently retrieved first:",
         ]
         for fpath, chunks in shown:
             ranges = ", ".join(

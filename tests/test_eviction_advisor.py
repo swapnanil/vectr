@@ -242,6 +242,66 @@ class TestEvictionHint:
 
 
 # ---------------------------------------------------------------------------
+# EvictionAdvisor.eviction_hint() — UPG-EVICT-HINT-RECENCY
+#
+# The visible top-5 files/ids must be ordered most-recently-retrieved-first,
+# not by first-ever-recorded (dict insertion) order, so the LLM sees the
+# files most relevant to its current working set — not stale early lookups.
+# ---------------------------------------------------------------------------
+
+class TestEvictionHintRecency:
+    def _record_files_a_through_g(self, adv: EvictionAdvisor) -> None:
+        for name in "ABCDEFG":
+            adv.record(f"{name}.py", "1-10", f"fn_{name}", f"content_{name}" * 5)
+
+    def test_top_five_shown_most_recently_retrieved_first(self) -> None:
+        adv = EvictionAdvisor()
+        self._record_files_a_through_g(adv)
+        hint = adv.eviction_hint()
+
+        expected_order = ["G.py", "F.py", "E.py", "D.py", "C.py"]
+        positions = [hint.index(f) for f in expected_order]
+        assert positions == sorted(positions), (
+            "files must be listed most-recently-retrieved first: "
+            f"expected order {expected_order}, got hint:\n{hint}"
+        )
+        # A.py and B.py were retrieved earliest and overflow past the top 5.
+        assert "A.py" not in hint
+        assert "B.py" not in hint
+
+    def test_overflow_count_names_the_remaining_files(self) -> None:
+        adv = EvictionAdvisor()
+        self._record_files_a_through_g(adv)
+        hint = adv.eviction_hint()
+        assert "and 2 more file(s)" in hint
+
+    def test_recency_policy_stated_in_hint_text(self) -> None:
+        adv = EvictionAdvisor()
+        self._record_files_a_through_g(adv)
+        hint = adv.eviction_hint()
+        assert "most recently retrieved first" in hint
+
+    def test_re_retrieving_a_file_moves_it_back_to_the_front(self) -> None:
+        """A file's recency is the position of its LAST recorded chunk, not
+        its first — retrieving new lines from an early file should move it
+        back to the front of the list."""
+        adv = EvictionAdvisor()
+        self._record_files_a_through_g(adv)
+        # A.py is retrieved again (new line range), most recently of all.
+        adv.record("A.py", "20-30", "fn_A2", "more_content_a" * 5)
+        hint = adv.eviction_hint()
+        assert hint.index("A.py") < hint.index("G.py")
+
+    def test_ordering_is_deterministic_across_repeated_calls(self) -> None:
+        adv = EvictionAdvisor()
+        self._record_files_a_through_g(adv)
+        first = adv.eviction_hint()
+        second = adv.eviction_hint()
+        third = adv.eviction_hint()
+        assert first == second == third
+
+
+# ---------------------------------------------------------------------------
 # EvictionAdvisor — clear_session
 # ---------------------------------------------------------------------------
 
