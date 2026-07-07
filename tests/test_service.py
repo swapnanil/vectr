@@ -247,6 +247,46 @@ class TestStatusDeterminismUPG82:
 
 
 # ---------------------------------------------------------------------------
+# UPG-CLI-DAEMON-VERSION-SKEW: /v1/status carries the daemon's version stamp
+# ---------------------------------------------------------------------------
+
+class TestStatusVersionStamp:
+    def _make_service(self, tmp_path, monkeypatch):
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "a.py", "def foo(): pass\n")
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+        return svc
+
+    def test_status_includes_a_non_empty_version_stamp(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        data = svc.status()
+        assert data["version_stamp"]
+        assert isinstance(data["version_stamp"], str)
+
+    def test_version_stamp_matches_compute_version_stamp(self, tmp_path, monkeypatch) -> None:
+        """The daemon must stamp itself with the exact same function the CLI
+        uses to compute its own local stamp — otherwise the two are never
+        comparable even when the code genuinely matches."""
+        from agent.version_stamp import compute_version_stamp
+        svc = self._make_service(tmp_path, monkeypatch)
+        assert svc.status()["version_stamp"] == compute_version_stamp()
+
+    def test_version_stamp_is_stable_across_repeated_status_calls(self, tmp_path, monkeypatch) -> None:
+        """Stamped once at startup (`self._version_stamp`), not recomputed on
+        every `status()` call — two consecutive calls must agree."""
+        svc = self._make_service(tmp_path, monkeypatch)
+        assert svc.status()["version_stamp"] == svc.status()["version_stamp"]
+
+
+# ---------------------------------------------------------------------------
 # T14: suggest_instruction_style
 # ---------------------------------------------------------------------------
 

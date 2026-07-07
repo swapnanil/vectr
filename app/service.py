@@ -20,6 +20,7 @@ from agent.config import (
     EVICTION_MAX_TRACKED_SESSIONS,
 )
 from agent.eviction_advisor import EvictionAdvisor
+from agent.version_stamp import compute_version_stamp
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,12 @@ class VectrService:
         self._db_dir = db_dir
 
         logger.info("Initialising Vectr for workspace: %s (db: %s)", self._workspace_root, db_dir)
+
+        # Version stamp (UPG-CLI-DAEMON-VERSION-SKEW): computed once at daemon
+        # startup and never refreshed for the lifetime of this process — the
+        # whole point is to detect that *this running process* predates a
+        # source upgrade the CLI now sees on disk.
+        self._version_stamp = compute_version_stamp()
 
         # L3 — content retrieval (existing)
         # db_path scopes ChromaDB under the same configured db_dir as all other stores
@@ -609,6 +616,7 @@ class VectrService:
             "notes_count": self.count_notes(),
             "grammars_unavailable": missing,
             "mode": mode,
+            "version_stamp": self._version_stamp,
             # UPG-NOTES-EMBED-MIGRATION: normally None — migration runs
             # synchronously at startup, so this only surfaces a mid-failure
             # state (e.g. the embedder was unavailable during migration).

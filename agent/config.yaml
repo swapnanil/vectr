@@ -998,6 +998,12 @@ cli:
   # loop above — short, since a probe that hangs this long just means "not
   # ready yet," and we want to retry rather than block on one slow attempt.
   start_ready_probe_timeout_s: 1.0
+  # UPG-CLI-DAEMON-VERSION-SKEW: HTTP timeout for the standalone /v1/status
+  # probe a daemon-talking subcommand issues to compare its local version
+  # stamp against the running daemon's. Short and best-effort — a slow/failed
+  # probe just means the check is skipped this invocation, never a blocked
+  # command.
+  version_skew_probe_timeout_s: 1.0
 
 workspace:
   # Directory names written into a FRESH .vectrignore on first `vectr start` /

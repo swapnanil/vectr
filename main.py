@@ -17,6 +17,7 @@ from agent.config import (
     CLI_START_READY_POLL_INTERVAL_S,
     CLI_START_READY_POLL_TIMEOUT_S,
     CLI_START_READY_PROBE_TIMEOUT_S,
+    CLI_VERSION_SKEW_PROBE_TIMEOUT_S,
 )
 from agent.instance_registry import (
     InstanceRegistry,
@@ -24,6 +25,7 @@ from agent.instance_registry import (
     workspace_hash,
 )
 from agent.prompt_templates import load_template
+from agent.version_stamp import compute_version_stamp
 
 load_dotenv()
 
@@ -243,6 +245,41 @@ def _handle_daemon_call_error(exc: Exception, port: int) -> None:
         print(f"Error: {_daemon_error_detail(exc)}", file=sys.stderr)
         sys.exit(1)
     raise exc
+
+
+def _check_version_skew(port: int, daemon_status: dict | None = None) -> None:
+    """Warn once, to stderr, when the daemon on `port` is running older code
+    than this CLI invocation (UPG-CLI-DAEMON-VERSION-SKEW). This is the ONE
+    shared choke point every daemon-talking subcommand calls — the
+    comparison logic itself is never copy-pasted per subcommand.
+
+    Never blocks or fails the calling command: any probe failure (daemon
+    down, timeout, older daemon missing the field entirely) or a stamp that
+    isn't available on either side is silently treated as "can't tell,"
+    never as a mismatch. `daemon_status` lets a caller that already fetched
+    `/v1/status` (e.g. `vectr status`) reuse that payload instead of a
+    second round-trip; otherwise this fetches it directly with a short,
+    best-effort timeout.
+    """
+    try:
+        if daemon_status is None:
+            import httpx
+            resp = httpx.get(
+                f"{_api_base(port)}/v1/status", timeout=CLI_VERSION_SKEW_PROBE_TIMEOUT_S
+            )
+            resp.raise_for_status()
+            daemon_status = resp.json()
+        daemon_stamp = daemon_status.get("version_stamp")
+        local_stamp = compute_version_stamp()
+        if not daemon_stamp or not local_stamp or daemon_stamp == local_stamp:
+            return
+        print(
+            f"vectr: daemon on port {port} is running older code "
+            f"({daemon_stamp} vs {local_stamp}) — run 'vectr restart <workspace>'",
+            file=sys.stderr,
+        )
+    except Exception:
+        return
 
 
 def _is_server_alive(port: int, timeout: float = 2.0) -> tuple[bool, str | None]:
@@ -950,6 +987,7 @@ def cmd_index(args: argparse.Namespace) -> None:
 
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
+    _check_version_skew(port)
     try:
         resp = httpx.post(
             f"{_api_base(port)}/v1/index",
@@ -974,6 +1012,7 @@ def cmd_search(args: argparse.Namespace) -> None:
 
     workspace = str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())
     port = _get_port_for_workspace(workspace, args.port)
+    _check_version_skew(port)
     payload: dict = {"query": args.query, "n_results": args.n}
     if args.language:
         payload["language"] = args.language
@@ -1017,6 +1056,7 @@ def cmd_fetch(args: argparse.Namespace) -> None:
 
     workspace = str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())
     port = _get_port_for_workspace(workspace, args.port)
+    _check_version_skew(port)
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/fetch", json={"ids": args.ids}, timeout=30)
         resp.raise_for_status()
@@ -1046,6 +1086,7 @@ def cmd_remember(args: argparse.Namespace) -> None:
 
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
+    _check_version_skew(port)
     payload: dict = {"content": args.content, "priority": args.priority}
     if getattr(args, "kind", None):
         payload["kind"] = args.kind
@@ -1078,6 +1119,7 @@ def cmd_recall(args: argparse.Namespace) -> None:
 
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
+    _check_version_skew(port)
     payload: dict = {"limit": args.limit}
     if getattr(args, "boot", False):
         # Boot mode ignores all filters server-side; send only the flag.
@@ -1328,6 +1370,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                 d = resp.json()
                 for line in _mode_and_index_lines(d, "Files    ", "Chunks   ", None, mode_label="Mode     "):
                     print(line)
+                _check_version_skew(port, daemon_status=d)
             except httpx.ConnectError:
                 print("  (not listening — not running)")
             except httpx.HTTPError:
@@ -1348,6 +1391,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         ):
             print(line)
         print(f"Embed model   : {data['embed_model']}")
+        _check_version_skew(port, daemon_status=data)
     except httpx.ConnectError:
         # UPG-CLI-START-READY-RACE: nothing is listening on this port at all
         # — genuinely not running, as opposed to the case below.
@@ -1452,6 +1496,7 @@ def cmd_forget(args: argparse.Namespace) -> None:
 
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
+    _check_version_skew(port)
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/memory/clear", timeout=10)
         resp.raise_for_status()

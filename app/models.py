@@ -149,6 +149,11 @@ class StatusResponse(BaseModel):
     # persist past startup — migration runs synchronously — see
     # UPG-NOTES-EMBED-MIGRATION). None means the two agree.
     notes_embed_model_mismatch: str | None = None
+    # UPG-CLI-DAEMON-VERSION-SKEW: package version (+ short git SHA when the
+    # daemon runs from a git checkout), stamped once at process startup. The
+    # CLI recomputes the same stamp per invocation and warns on mismatch.
+    # Optional so a stale/partial mock in a test doesn't fail validation.
+    version_stamp: str | None = None
 
 
 class HealthResponse(BaseModel):

@@ -59,6 +59,24 @@ def _registry_with(tmp_path, entries: dict) -> InstanceRegistry:
     return reg
 
 
+@pytest.fixture(autouse=True)
+def _stub_version_skew_probe(monkeypatch):
+    """Every daemon-talking subcommand now also probes /v1/status to compare
+    version stamps (UPG-CLI-DAEMON-VERSION-SKEW, `_check_version_skew`).
+    Default that probe to "daemon unreachable" here so the many existing
+    tests in this file that mock only `httpx.post` (not `httpx.get`) never
+    make a real network call against a possibly-live local vectr daemon on
+    the same port. Tests that specifically exercise the probe (TestCmdStatus,
+    TestCheckVersionSkew) patch `httpx.get` themselves within their own
+    `with patch(...)` block, which overrides this default for their scope.
+    """
+    import httpx
+    monkeypatch.setattr(
+        httpx, "get",
+        MagicMock(side_effect=httpx.ConnectError("stubbed — no real daemon calls in unit tests")),
+    )
+
+
 # ---------------------------------------------------------------------------
 # cmd_start
 # ---------------------------------------------------------------------------
@@ -682,6 +700,160 @@ class TestHandleDaemonCallError:
     def test_unrecognised_exception_reraises(self):
         with pytest.raises(ValueError):
             m._handle_daemon_call_error(ValueError("unrelated"), 8765)
+
+
+# ---------------------------------------------------------------------------
+# _check_version_skew (UPG-CLI-DAEMON-VERSION-SKEW)
+# ---------------------------------------------------------------------------
+
+class TestCheckVersionSkew:
+    def test_mismatch_prints_exactly_one_stderr_line(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.0.0+local1"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.0.0+old0000"})
+        err = capsys.readouterr().err
+        lines = [l for l in err.splitlines() if l.strip()]
+        assert len(lines) == 1
+        assert "daemon on port 8765 is running older code" in lines[0]
+        assert "1.0.0+old0000" in lines[0]
+        assert "1.0.0+local1" in lines[0]
+        assert "vectr restart" in lines[0]
+
+    def test_matching_stamps_print_nothing(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.0.0+abc1234"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.0.0+abc1234"})
+        assert capsys.readouterr().err == ""
+
+    def test_daemon_stamp_missing_prints_nothing(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.0.0+abc1234"):
+            m._check_version_skew(8765, daemon_status={})
+        assert capsys.readouterr().err == ""
+
+    def test_local_stamp_unavailable_prints_nothing(self, capsys):
+        with patch("main.compute_version_stamp", return_value=""):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.0.0+abc1234"})
+        assert capsys.readouterr().err == ""
+
+    def test_never_raises_when_daemon_is_unreachable(self, capsys):
+        """No `daemon_status` given -> probes /v1/status itself; a down
+        daemon must never surface as an exception or block the caller."""
+        import httpx
+        with patch("httpx.get", side_effect=httpx.ConnectError("down")):
+            m._check_version_skew(8765)  # must not raise
+        assert capsys.readouterr().err == ""
+
+    def test_probes_status_itself_when_no_daemon_status_given(self, capsys):
+        import httpx
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"version_stamp": "1.0.0+remote1"}
+        with patch("httpx.get", return_value=mock_resp), \
+             patch("main.compute_version_stamp", return_value="1.0.0+local22"):
+            m._check_version_skew(8765)
+        err = capsys.readouterr().err
+        assert "1.0.0+remote1" in err
+        assert "1.0.0+local22" in err
+
+
+class TestVersionSkewWiring:
+    """Confirms every daemon-talking subcommand calls the ONE shared
+    `_check_version_skew` helper — the comparison/printing logic itself is
+    never copy-pasted per subcommand (tested in isolation above)."""
+
+    def test_cmd_index_calls_check_version_skew(self, tmp_path):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"indexed_files": 1, "total_chunks": 1, "processing_ms": 1, "model": "m"}
+        mock_resp.raise_for_status.return_value = None
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp), \
+             patch("main._check_version_skew") as mock_check:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(path=str(tmp_path), force=False, port=8765)
+            m.cmd_index(args)
+        mock_check.assert_called_once_with(8765)
+
+    def test_cmd_search_calls_check_version_skew(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"results": [], "query_time_ms": 1, "chunks_searched": 0}
+        mock_resp.raise_for_status.return_value = None
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp), \
+             patch("main._check_version_skew") as mock_check:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query="x", n=10, language=None, port=8765)
+            m.cmd_search(args)
+        mock_check.assert_called_once_with(8765)
+
+    def test_cmd_fetch_calls_check_version_skew(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"results": [], "note": None}
+        mock_resp.raise_for_status.return_value = None
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp), \
+             patch("main._check_version_skew") as mock_check:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(ids=["a.py:1-5"], port=8765)
+            m.cmd_fetch(args)
+        mock_check.assert_called_once_with(8765)
+
+    def test_cmd_remember_calls_check_version_skew(self, tmp_path):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"note_id": 1, "message": "Stored note #1.", "processing_ms": 1}
+        mock_resp.raise_for_status.return_value = None
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp), \
+             patch("main._check_version_skew") as mock_check:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(content="x", tags=None, priority="medium",
+                                      path=str(tmp_path), port=8765)
+            m.cmd_remember(args)
+        mock_check.assert_called_once_with(8765)
+
+    def test_cmd_recall_calls_check_version_skew(self, tmp_path):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"notes": "", "processing_ms": 1}
+        mock_resp.raise_for_status.return_value = None
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp), \
+             patch("main._check_version_skew") as mock_check:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(query="x", tags=None, priority=None,
+                                      limit=10, path=str(tmp_path), port=8765)
+            m.cmd_recall(args)
+        mock_check.assert_called_once_with(8765)
+
+    def test_cmd_forget_calls_check_version_skew(self, tmp_path):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"deleted": 1}
+        mock_resp.raise_for_status.return_value = None
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp), \
+             patch("main._check_version_skew") as mock_check:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(path=str(tmp_path), port=8765)
+            m.cmd_forget(args)
+        mock_check.assert_called_once_with(8765)
+
+    def test_cmd_status_reuses_fetched_status_payload_not_a_second_probe(self, tmp_path):
+        """cmd_status already fetched /v1/status for its own display — the
+        version-skew check must reuse that payload (`daemon_status=`) rather
+        than firing a redundant second HTTP call."""
+        mock_resp = MagicMock()
+        status_data = {
+            "workspace_root": str(tmp_path), "indexed_files": 1, "total_chunks": 1,
+            "last_indexed": "2026-01-01T00:00:00Z", "mode": "full", "embed_model": "m",
+            "version_stamp": "1.0.0+abc1234",
+        }
+        mock_resp.json.return_value = status_data
+        mock_resp.raise_for_status.return_value = None
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.get", return_value=mock_resp), \
+             patch("main._check_version_skew") as mock_check:
+            MockReg.return_value.get.return_value = {"port": 8765, "pid": 1, "workspace": str(tmp_path)}
+            args = argparse.Namespace(path=str(tmp_path), port=8765, all=False)
+            m.cmd_status(args)
+        mock_check.assert_called_once_with(8765, daemon_status=status_data)
 
 
 # ---------------------------------------------------------------------------
