@@ -101,6 +101,12 @@ EVICTION_REMEMBER_ESCALATION_CHUNKS : int
     auto_eviction_hint()'s escalated ACTION REQUIRED directive fires again
     (UPG-REMEMBER-BANNER-FATIGUE).
 
+EVICTION_REMEMBER_ESCALATION_TOKENS : int
+    Tokens retrieved since the caller's last vectr_remember required IN ADDITION
+    to EVICTION_REMEMBER_ESCALATION_CHUNKS before the escalated directive fires
+    again — a companion gate so one large single search cannot trip both the
+    chunk-count and token gates in a single burst (UPG-EVICT-ESCALATION-GATE-TOO-LOW).
+
 INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES : int
     Maximum unresolved caller/callee example strings surfaced in the
     vectr_ingest_traces response (UPG-7.3). Edges are ingested regardless;
@@ -470,6 +476,7 @@ EVICTION_RETRIEVED_TOKEN_GATE: int = int(_evict_cfg["retrieved_token_gate"])
 EVICTION_HINT_MAX_IDS: int = int(_evict_cfg["hint_max_ids"])
 EVICTION_MAX_TRACKED_SESSIONS: int = int(_evict_cfg["max_tracked_sessions"])
 EVICTION_REMEMBER_ESCALATION_CHUNKS: int = int(_evict_cfg["remember_escalation_chunks"])
+EVICTION_REMEMBER_ESCALATION_TOKENS: int = int(_evict_cfg["remember_escalation_tokens"])
 
 # ---------------------------------------------------------------------------
 # Symbol graph — reserved keywords (UPG-JSFLOW-SYMBOLS)

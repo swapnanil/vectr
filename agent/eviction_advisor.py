@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from agent.config import (
     EVICTION_HINT_MAX_IDS,
     EVICTION_REMEMBER_ESCALATION_CHUNKS,
+    EVICTION_REMEMBER_ESCALATION_TOKENS,
     EVICTION_RETRIEVED_TOKEN_GATE,
 )
 
@@ -70,6 +71,7 @@ class EvictionAdvisor:
         rearm_retrieval_calls: int = 4,
         retrieved_token_gate: int | None = None,
         remember_escalation_chunks: int | None = None,
+        remember_escalation_tokens: int | None = None,
     ) -> None:
         # Fire when ANY of these conditions is met:
         #   cumulative injected chars ÷ 4 >= 40K  (vectr-tracked content)
@@ -112,6 +114,15 @@ class EvictionAdvisor:
             remember_escalation_chunks if remember_escalation_chunks is not None
             else EVICTION_REMEMBER_ESCALATION_CHUNKS
         )
+        # UPG-EVICT-ESCALATION-GATE-TOO-LOW: companion gate required IN ADDITION
+        # to _remember_escalation_chunks — see note_remembered() and
+        # _tokens_since_remember(). A single large search can satisfy the chunk
+        # gate alone in one burst; requiring both makes that burst insufficient
+        # on its own to re-trip the escalated directive.
+        self._remember_escalation_tokens: int = (
+            remember_escalation_tokens if remember_escalation_tokens is not None
+            else EVICTION_REMEMBER_ESCALATION_TOKENS
+        )
         self._chunks: list[RetrievedChunk] = []
         self._tool_call_count: int = 0
         self._retrieval_call_count: int = 0
@@ -123,6 +134,18 @@ class EvictionAdvisor:
         # session start). Reset by note_remembered(). See
         # EVICTION_REMEMBER_ESCALATION_CHUNKS.
         self._chunks_since_remember: int = 0
+        # Tracked total-token count as of the caller's last vectr_remember (or
+        # 0 at session start). _tokens_since_remember() subtracts this baseline
+        # from the running total (UPG-EVICT-ESCALATION-GATE-TOO-LOW).
+        self._tokens_at_last_remember: int = 0
+        # True once note_remembered() has fired and no escalated (ACTION
+        # REQUIRED) directive has re-emitted since. While True, the NEXT
+        # eligible auto-hint renders the softer, non-imperative form instead
+        # of escalating immediately — repeating harsh wording on the very
+        # next search after compliance trains the caller to ignore it.
+        # Starts False: before the caller has ever called vectr_remember,
+        # auto_eviction_hint() escalates immediately as before.
+        self._soft_fire_pending: bool = False
 
     def record(
         self, file_path: str, lines: str, symbol_name: str, content: str,
@@ -156,13 +179,23 @@ class EvictionAdvisor:
     def note_remembered(self) -> None:
         """Call when the caller's vectr_remember succeeds this session.
 
-        Resets the chunks-since-last-remember counter so
-        auto_eviction_hint()'s escalated directive doesn't immediately
-        re-fire on the very next retrieval (UPG-REMEMBER-BANNER-FATIGUE).
+        Resets the chunks-since-last-remember counter and the tokens-since-
+        last-remember baseline so auto_eviction_hint()'s escalated directive
+        doesn't immediately re-fire on the very next retrieval
+        (UPG-REMEMBER-BANNER-FATIGUE, UPG-EVICT-ESCALATION-GATE-TOO-LOW).
+        Also arms the softer first-refire wording (see _soft_fire_pending).
         Does not touch should_evict()'s own token/call/time state — a
         vectr_remember doesn't reduce the actual context already retrieved.
         """
         self._chunks_since_remember = 0
+        self._tokens_at_last_remember = self.total_tokens_in_session()
+        self._soft_fire_pending = True
+
+    def _tokens_since_remember(self) -> int:
+        """Tokens tracked since the caller's last vectr_remember (or session
+        start, if never called). Companion to _chunks_since_remember —
+        see EVICTION_REMEMBER_ESCALATION_TOKENS."""
+        return self.total_tokens_in_session() - self._tokens_at_last_remember
 
     def increment_tool_call(self) -> None:
         """Increment the total MCP tool call counter for this session."""
@@ -215,12 +248,20 @@ class EvictionAdvisor:
         The explicit ``vectr_evict_hint`` tool and the ``/v1/evict`` endpoint
         still use ``eviction_hint()`` (ungated): an explicit ask always answers.
 
-        UPG-REMEMBER-BANNER-FATIGUE: also suppressed when too few NEW chunks
-        have been retrieved since the caller's last vectr_remember (or
-        session start) — repeating the escalated directive right after the
-        caller just complied trains it to ignore urgent language. Below
-        that count, MCP dispatch's own turn-count soft nudge (or nothing)
-        takes over instead of this method's harsher wording.
+        UPG-REMEMBER-BANNER-FATIGUE / UPG-EVICT-ESCALATION-GATE-TOO-LOW: also
+        suppressed unless BOTH enough new chunks AND enough new tokens have
+        been retrieved since the caller's last vectr_remember (or session
+        start) — a single large search can trip a chunk-only gate in one
+        burst, so both must independently clear before the gate is satisfied
+        at all. Below that, MCP dispatch's own turn-count soft nudge (or
+        nothing) takes over instead of this method's wording.
+
+        Once the gate is satisfied, the FIRST eligible fire after a
+        vectr_remember renders the softer, non-imperative form (not ACTION
+        REQUIRED); only a second-or-later eligible fire without an
+        intervening vectr_remember escalates to the imperative directive
+        (UPG-EVICT-ESCALATION-GATE-TOO-LOW) — so compliance is never
+        answered with the same harsh wording on the very next response.
         """
         if not self.should_evict() or not self._fresh_escalation():
             return ""
@@ -231,33 +272,58 @@ class EvictionAdvisor:
         # real context pressure.
         if self._tokens_since_last_hint() < self._retrieved_token_gate:
             return ""
-        if self._chunks_since_remember < self._remember_escalation_chunks:
+        if (
+            self._chunks_since_remember < self._remember_escalation_chunks
+            or self._tokens_since_remember() < self._remember_escalation_tokens
+        ):
             return ""
-        hint = self.eviction_hint()
+        escalate = not self._soft_fire_pending
+        hint = self.eviction_hint(escalated=escalate)
         if hint:
             self._last_emit = (
                 self.total_tokens_in_session(),
                 self._retrieval_call_count,
                 time.time(),
             )
+            if not escalate:
+                # Soft form consumed — the next eligible fire (without an
+                # intervening vectr_remember) escalates.
+                self._soft_fire_pending = False
         return hint
 
-    def eviction_hint(self) -> str:
+    def eviction_hint(self, escalated: bool = True) -> str:
         """
         Return a message listing chunks vectr can re-retrieve in <50ms.
         Always safe to call — returns an empty hint if nothing has been retrieved
         and no time-based pressure exists.
+
+        escalated=True (the default, used by the explicit vectr_evict_hint tool
+        and the /v1/evict endpoint — an explicit ask always gets the full
+        directive) renders the imperative "ACTION REQUIRED" wording plus a
+        trailing machine-readable ``needs_remember: true`` line a harness can
+        key off without parsing prose. escalated=False renders the identical
+        factual content (files, token count, re-fetch keys) with softer,
+        non-imperative wording and omits the needs_remember line — used by
+        auto_eviction_hint() for the first eligible re-fire after a
+        vectr_remember (UPG-EVICT-ESCALATION-GATE-TOO-LOW).
         """
         if not self._chunks:
             # No vectr-tracked chunks, but time pressure still warrants a nudge
             elapsed = time.time() - self._session_started_at
             if elapsed >= self._time_threshold_seconds:
+                if escalated:
+                    return (
+                        "─── ACTION REQUIRED ───\n"
+                        "Call vectr_remember(content, tags=[...]) NOW before continuing.\n"
+                        "Save: key type names, module paths, entry points, non-obvious patterns.\n"
+                        "Your synthesized understanding does not persist automatically.\n"
+                        "Call vectr_remember now, then continue your task.\n"
+                        "needs_remember: true"
+                    )
                 return (
-                    "─── ACTION REQUIRED ───\n"
-                    "Call vectr_remember(content, tags=[...]) NOW before continuing.\n"
+                    "Reminder: consider calling vectr_remember(content, tags=[...]) soon.\n"
                     "Save: key type names, module paths, entry points, non-obvious patterns.\n"
-                    "Your synthesized understanding does not persist automatically.\n"
-                    "Call vectr_remember now, then continue your task."
+                    "Your synthesized understanding does not persist automatically."
                 )
             return ""
 
@@ -270,13 +336,24 @@ class EvictionAdvisor:
         shown = file_items[:5]
         overflow = len(file_items) - len(shown)
 
-        lines = [
-            "─── ACTION REQUIRED ───",
-            "Call vectr_remember(content, tags=[...]) NOW before continuing.",
-            "Save: key type names, module paths, entry points, non-obvious patterns.",
-            "Your synthesized understanding does not persist automatically — the output",
-            "file captures findings, not the navigational path to reach them.",
-            "",
+        if escalated:
+            lines = [
+                "─── ACTION REQUIRED ───",
+                "Call vectr_remember(content, tags=[...]) NOW before continuing.",
+                "Save: key type names, module paths, entry points, non-obvious patterns.",
+                "Your synthesized understanding does not persist automatically — the output",
+                "file captures findings, not the navigational path to reach them.",
+                "",
+            ]
+        else:
+            lines = [
+                "─── context recap ───",
+                "New content has been retrieved since your last vectr_remember. If you found",
+                "anything worth keeping — key type names, module paths, entry points, non-obvious",
+                "patterns — call vectr_remember(content, tags=[...]) now; otherwise continue.",
+                "",
+            ]
+        lines += [
             f"Vectr has {len(self._chunks)} retrieved chunks (~{total_tokens} tokens)"
             " fully indexed. Drop these chunks from context — each is re-fetchable"
             " verbatim via vectr_fetch(ids=[...]) in <50ms."
@@ -303,10 +380,12 @@ class EvictionAdvisor:
                 f"Re-fetch keys: vectr_fetch(ids=[{id_list}]) restores these verbatim.",
             ]
 
-        lines += [
-            "",
-            "Call vectr_remember now, then continue your task.",
-        ]
+        if escalated:
+            lines += [
+                "",
+                "Call vectr_remember now, then continue your task.",
+                "needs_remember: true",
+            ]
         return "\n".join(lines)
 
     def clear_session(self) -> None:
@@ -317,6 +396,8 @@ class EvictionAdvisor:
         self._session_started_at = time.time()
         self._last_emit = None
         self._chunks_since_remember = 0
+        self._tokens_at_last_remember = 0
+        self._soft_fire_pending = False
 
     def as_chunk_dicts(self) -> list[dict]:
         """Serialisable form for snapshot storage."""

@@ -629,6 +629,18 @@ behavior:
     # Set in the same order of magnitude as rearm_retrieval_calls (4) above.
     remember_escalation_chunks: 3
 
+    # UPG-EVICT-ESCALATION-GATE-TOO-LOW: companion gate to remember_escalation_chunks,
+    # required in ADDITION to it (both must hold). remember_escalation_chunks alone is
+    # smaller than a single search's default n_results (5), so on large-chunk corpora
+    # one vectr_search call can add >4000 tokens in a single burst — tripping both the
+    # chunk-count gate AND the existing retrieved_token_gate at once, right after the
+    # caller just complied with vectr_remember. Gating on accumulated TOKENS since the
+    # last vectr_remember (not just since the last hint) means a single typical search
+    # (~4000 tokens on a large-chunk corpus, per retrieved_token_gate's own comment)
+    # cannot cross this threshold alone — it takes roughly two such searches, giving the
+    # caller a real chance to act on vectr_remember before repeat pressure builds back up.
+    remember_escalation_tokens: 8000
+
   ingest_traces:
     # Maximum number of "caller/callee not found in the indexed symbol graph"
     # example strings surfaced in the vectr_ingest_traces response text (UPG-7.3).

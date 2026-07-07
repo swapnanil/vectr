@@ -255,6 +255,7 @@ class TestHintListsExactIds:
         advisor._retrieval_call_threshold = 0
         advisor._retrieved_token_gate = 0
         advisor._remember_escalation_chunks = 0
+        advisor._remember_escalation_tokens = 0
 
         result = handle_tools_call(
             "vectr_search", {"query": "handler"}, svc, session_id="session-a"

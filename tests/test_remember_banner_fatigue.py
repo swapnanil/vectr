@@ -1,4 +1,4 @@
-"""Tests for UPG-REMEMBER-BANNER-FATIGUE.
+"""Tests for UPG-REMEMBER-BANNER-FATIGUE and UPG-EVICT-ESCALATION-GATE-TOO-LOW.
 
 Covers:
   a) EvictionAdvisor.note_remembered() resets the chunks-since-remember
@@ -14,6 +14,14 @@ Covers:
   d) MCP dispatch never stacks the eviction-hint banner and the turn-count
      soft nudge (_should_nudge_remember/_remember_nudge_text) in the same
      response.
+  e) UPG-EVICT-ESCALATION-GATE-TOO-LOW: a companion tokens-since-remember gate
+     (EVICTION_REMEMBER_ESCALATION_TOKENS) required in ADDITION to the chunk
+     gate, so a single large search cannot trip both gates in one burst.
+  f) The first eligible re-fire after a vectr_remember renders the softer,
+     non-escalated wording; only a second-or-later eligible re-fire without
+     an intervening vectr_remember escalates to "ACTION REQUIRED".
+  g) The machine-readable `needs_remember: true` line appears only on the
+     escalated form.
 """
 from __future__ import annotations
 
@@ -21,7 +29,10 @@ from unittest.mock import patch
 
 import pytest
 
-from agent.config import EVICTION_REMEMBER_ESCALATION_CHUNKS
+from agent.config import (
+    EVICTION_REMEMBER_ESCALATION_CHUNKS,
+    EVICTION_REMEMBER_ESCALATION_TOKENS,
+)
 from agent.eviction_advisor import EvictionAdvisor
 
 from tests.conftest import make_py, _DummyEmbedProvider, _RealVectrService
@@ -45,12 +56,17 @@ def _make_service(tmp_path, monkeypatch, num_files: int = 1):
 
 def _adv(**kw) -> EvictionAdvisor:
     """Advisor with every OTHER trigger disabled/maxed so tests focus solely
-    on the remember-escalation gate."""
+    on the remember-escalation gate. remember_escalation_tokens defaults to 0
+    (disabled) so tests exercising only the chunk-count half of the gate
+    (remember_escalation_chunks) aren't also blocked by the companion
+    token-count gate (UPG-EVICT-ESCALATION-GATE-TOO-LOW); tests of the token
+    gate itself override it explicitly."""
     kw.setdefault("eviction_threshold_tokens", 100_000)
     kw.setdefault("tool_call_threshold", 1000)
     kw.setdefault("time_threshold_seconds", 100_000)
     kw.setdefault("retrieval_call_threshold", 0)
     kw.setdefault("retrieved_token_gate", 0)
+    kw.setdefault("remember_escalation_tokens", 0)
     return EvictionAdvisor(**kw)
 
 
@@ -106,6 +122,13 @@ class TestRememberEscalationGate:
         )
 
     def test_escalates_again_once_threshold_chunks_retrieved(self) -> None:
+        # UPG-EVICT-ESCALATION-GATE-TOO-LOW: the eligibility gate (enough
+        # chunks/tokens since the last vectr_remember) only decides WHETHER
+        # auto_eviction_hint() fires at all. Once eligible, the FIRST re-fire
+        # after a vectr_remember renders the softer, non-escalated wording;
+        # only a SECOND eligible re-fire without an intervening vectr_remember
+        # escalates to "ACTION REQUIRED" — see TestSoftThenEscalateProgression
+        # for the dedicated soft/escalate test.
         threshold = 3
         # rearm_retrieval_calls=1 disables the UPG-7.1 fresh-escalation re-arm
         # gate so this test focuses solely on the remember-escalation gate.
@@ -121,8 +144,14 @@ class TestRememberEscalationGate:
         assert adv.auto_eviction_hint() == "", "still below threshold since remember"
         adv.record("last.py", "1-10", "fn", "x" * 400)  # crosses the threshold
         adv.increment_retrieval_call()
+        first_refire = adv.auto_eviction_hint()
+        assert first_refire != "" and "ACTION REQUIRED" not in first_refire, (
+            "the first eligible re-fire after vectr_remember must use the softer, "
+            "non-escalated wording"
+        )
+        adv.increment_retrieval_call()  # re-arm _fresh_escalation (rearm=1)
         assert "ACTION REQUIRED" in adv.auto_eviction_hint(), (
-            "threshold chunks retrieved since remember must re-escalate"
+            "a second eligible re-fire without an intervening vectr_remember must escalate"
         )
 
     def test_never_remembered_counts_from_session_start(self) -> None:
@@ -161,6 +190,163 @@ class TestRememberEscalationConfig:
     def test_constant_exists_and_is_positive(self) -> None:
         assert isinstance(EVICTION_REMEMBER_ESCALATION_CHUNKS, int)
         assert EVICTION_REMEMBER_ESCALATION_CHUNKS > 0
+
+    def test_escalation_tokens_constant_exists_and_is_positive(self) -> None:
+        """UPG-EVICT-ESCALATION-GATE-TOO-LOW: companion token gate."""
+        assert isinstance(EVICTION_REMEMBER_ESCALATION_TOKENS, int)
+        assert EVICTION_REMEMBER_ESCALATION_TOKENS > 0
+
+    def test_default_escalation_tokens_exceeds_a_single_search_burst(self) -> None:
+        """The whole point of the gate: a single search returning n_results=5
+        chunks of the size describing the live-reproduced defect (~800+ tokens
+        each, per the retrieved_token_gate=4000 comment) must not alone clear
+        the gate. Concretely: 5 chunks whose combined tokens equal exactly
+        retrieved_token_gate's own worked example (4000 tokens) must be
+        strictly below EVICTION_REMEMBER_ESCALATION_TOKENS."""
+        from agent.config import EVICTION_RETRIEVED_TOKEN_GATE
+        assert EVICTION_RETRIEVED_TOKEN_GATE < EVICTION_REMEMBER_ESCALATION_TOKENS
+
+    def test_missing_remember_escalation_tokens_key_raises(self) -> None:
+        """Direct subscript access must raise KeyError on a missing key —
+        never silently default (per UPG-12.1 pattern)."""
+        import yaml
+
+        broken_yaml = """
+behavior:
+  eviction:
+    remember_escalation_chunks: 3
+"""
+        cfg = yaml.safe_load(broken_yaml)
+        with pytest.raises(KeyError):
+            _ = cfg["behavior"]["eviction"]["remember_escalation_tokens"]
+
+
+# ---------------------------------------------------------------------------
+# UPG-EVICT-ESCALATION-GATE-TOO-LOW
+#
+# Live-reproduced defect: the escalated banner re-fired on the very next
+# search after the caller had just complied with vectr_remember, because
+# remember_escalation_chunks (3) is smaller than a single search's default
+# n_results (5) — one large-chunk search can cross both the chunk-count gate
+# and the pre-existing token gate in a single burst.
+# ---------------------------------------------------------------------------
+
+class TestEscalationGateTooLow:
+    def _big_chunk_content(self, tokens: int) -> str:
+        return "x" * (tokens * 4)
+
+    def test_defect_reproduction_one_remember_then_one_large_search(self) -> None:
+        """Reproduces the live defect: one vectr_remember, then a single search
+        burst of 5 large chunks (>4000 tokens total, mirroring a real
+        large-chunk-corpus search response) must NOT render the escalated
+        ACTION REQUIRED banner immediately afterward."""
+        adv = _adv(
+            remember_escalation_chunks=EVICTION_REMEMBER_ESCALATION_CHUNKS,
+            remember_escalation_tokens=EVICTION_REMEMBER_ESCALATION_TOKENS,
+        )
+        # Prime and comply once, mirroring "caller just complied with vectr_remember".
+        adv.record("prior.py", "1-10", "fn", self._big_chunk_content(500))
+        adv.increment_retrieval_call()
+        adv.note_remembered()
+
+        # A single vectr_search call, default n_results=5, each chunk ~900
+        # tokens on a large-chunk corpus -> ~4500 tokens in one burst. Before
+        # the fix this alone crossed both remember_escalation_chunks (3) and
+        # the pre-existing retrieved_token_gate (4000).
+        for i in range(5):
+            adv.record(f"big{i}.py", "1-50", f"fn_{i}", self._big_chunk_content(900))
+        adv.increment_retrieval_call()
+
+        hint = adv.auto_eviction_hint()
+        assert "ACTION REQUIRED" not in hint, (
+            "the escalated banner must not re-fire on the very next search "
+            "burst right after the caller complied with vectr_remember"
+        )
+        assert "needs_remember: true" not in hint
+
+    def test_huge_single_burst_crossing_both_gates_still_renders_soft_first(self) -> None:
+        """Defense-in-depth: even if a single search burst is large enough to
+        cross BOTH the chunk gate and the new token gate in one call, the
+        FIRST eligible re-fire after vectr_remember still renders the softer
+        wording, not ACTION REQUIRED — the soft/escalate split (not just the
+        token gate) is what prevents immediate re-escalation on corpora with
+        chunks large enough to blow past any fixed token threshold in one call."""
+        adv = _adv(
+            remember_escalation_chunks=EVICTION_REMEMBER_ESCALATION_CHUNKS,
+            remember_escalation_tokens=EVICTION_REMEMBER_ESCALATION_TOKENS,
+        )
+        adv.record("prior.py", "1-10", "fn", self._big_chunk_content(500))
+        adv.increment_retrieval_call()
+        adv.note_remembered()
+
+        # One huge search burst crossing both gates in a single call.
+        for i in range(5):
+            adv.record(f"huge{i}.py", "1-200", f"fn_{i}", self._big_chunk_content(2000))
+        adv.increment_retrieval_call()
+
+        hint = adv.auto_eviction_hint()
+        assert hint != "", "sanity: gate should be crossed"
+        assert "ACTION REQUIRED" not in hint, (
+            "first eligible re-fire after vectr_remember must be soft even when "
+            "a single burst crosses both gates at once"
+        )
+
+    def test_soft_then_escalated_progression(self) -> None:
+        """First eligible re-fire after vectr_remember -> soft wording.
+        Second eligible re-fire, no intervening vectr_remember -> escalated."""
+        adv = _adv(remember_escalation_chunks=1, remember_escalation_tokens=1,
+                   rearm_retrieval_calls=1)
+        adv.record("a.py", "1-10", "fn", "x" * 40)
+        adv.increment_retrieval_call()
+        assert "ACTION REQUIRED" in adv.auto_eviction_hint(), "first-ever fire escalates"
+
+        adv.note_remembered()
+        adv.record("b.py", "1-10", "fn", "x" * 40)
+        adv.increment_retrieval_call()
+        soft_hint = adv.auto_eviction_hint()
+        assert soft_hint != "" and "ACTION REQUIRED" not in soft_hint, (
+            "first eligible re-fire after vectr_remember must be soft"
+        )
+        assert "vectr_remember" in soft_hint
+
+        adv.record("c.py", "1-10", "fn", "x" * 40)
+        adv.increment_retrieval_call()
+        escalated_hint = adv.auto_eviction_hint()
+        assert "ACTION REQUIRED" in escalated_hint, (
+            "second eligible re-fire without an intervening vectr_remember must escalate"
+        )
+
+    def test_needs_remember_line_present_only_on_escalated_form(self) -> None:
+        adv = EvictionAdvisor()
+        adv.record("f.py", "1-5", "fn", "content" * 20)
+        escalated = adv.eviction_hint(escalated=True)
+        soft = adv.eviction_hint(escalated=False)
+        assert "needs_remember: true" in escalated
+        assert "needs_remember" not in soft
+
+    def test_needs_remember_line_present_only_on_escalated_no_chunks_form(self) -> None:
+        """The no-chunks time-triggered fallback must also gate the token on
+        escalated vs. soft."""
+        adv = EvictionAdvisor(time_threshold_seconds=0)
+        escalated = adv.eviction_hint(escalated=True)
+        soft = adv.eviction_hint(escalated=False)
+        assert "needs_remember: true" in escalated
+        assert "needs_remember" not in soft
+
+    def test_soft_form_omits_action_required_but_keeps_vectr_remember_call(self) -> None:
+        adv = EvictionAdvisor()
+        adv.record("f.py", "1-5", "fn", "content" * 20)
+        soft = adv.eviction_hint(escalated=False)
+        assert "ACTION REQUIRED" not in soft
+        assert "vectr_remember" in soft
+
+    def test_explicit_eviction_hint_default_stays_escalated(self) -> None:
+        """The explicit vectr_evict_hint tool / /v1/evict endpoint call
+        eviction_hint() with no arguments — must stay ungated AND escalated."""
+        adv = EvictionAdvisor()
+        adv.record("f.py", "1-5", "fn", "content" * 20)
+        assert "ACTION REQUIRED" in adv.eviction_hint()
+        assert "needs_remember: true" in adv.eviction_hint()
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +429,7 @@ class TestNoDoubleBannerStacking:
         advisor._retrieval_call_threshold = 0
         advisor._retrieved_token_gate = 0
         advisor._remember_escalation_chunks = 0  # force the escalated banner to qualify
+        advisor._remember_escalation_tokens = 0
 
         # push the turn-count soft-nudge counter past its own threshold too
         _session_calls_since_save["session-a"] = BEHAVIOR_REMEMBER_NUDGE_THRESHOLD + 1

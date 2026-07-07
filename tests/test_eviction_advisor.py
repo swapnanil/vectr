@@ -423,14 +423,16 @@ class TestAutoEvictionHintGatingUPG71:
     def _adv_with_chunk(self, **kw):
         # defaults that disable every trigger except the one a test exercises.
         # retrieved_token_gate=0 disables the UPG-11.15 token-accumulation gate,
-        # remember_escalation_chunks=0 disables the UPG-REMEMBER-BANNER-FATIGUE
-        # gate, so these tests can focus exclusively on UPG-7.1 fresh-escalation
+        # remember_escalation_chunks=0 / remember_escalation_tokens=0 disable
+        # the UPG-REMEMBER-BANNER-FATIGUE / UPG-EVICT-ESCALATION-GATE-TOO-LOW
+        # gates, so these tests can focus exclusively on UPG-7.1 fresh-escalation
         # semantics.
         kw.setdefault("eviction_threshold_tokens", 100_000)
         kw.setdefault("tool_call_threshold", 1000)
         kw.setdefault("time_threshold_seconds", 100_000)
         kw.setdefault("retrieved_token_gate", 0)
         kw.setdefault("remember_escalation_chunks", 0)
+        kw.setdefault("remember_escalation_tokens", 0)
         adv = EvictionAdvisor(**kw)
         adv.record("auth.py", "1-10", "verify", "x" * 400)  # ~100 tracked tokens
         return adv
@@ -507,13 +509,15 @@ class TestAutoEvictionHintTokenGateUPG1115:
     def _adv(self, gate: int = 4000, **kw) -> EvictionAdvisor:
         """Build an advisor where only the retrieval-call trigger is active
         (tokens/tools/time all set high) and the token gate is explicit.
-        remember_escalation_chunks=0 disables the UPG-REMEMBER-BANNER-FATIGUE
-        gate so these tests focus exclusively on the token-accumulation gate."""
+        remember_escalation_chunks=0 / remember_escalation_tokens=0 disable
+        the UPG-REMEMBER-BANNER-FATIGUE / UPG-EVICT-ESCALATION-GATE-TOO-LOW
+        gates so these tests focus exclusively on the token-accumulation gate."""
         kw.setdefault("eviction_threshold_tokens", 100_000)
         kw.setdefault("tool_call_threshold", 1000)
         kw.setdefault("time_threshold_seconds", 100_000)
         kw.setdefault("retrieval_call_threshold", 1)
         kw.setdefault("remember_escalation_chunks", 0)
+        kw.setdefault("remember_escalation_tokens", 0)
         return EvictionAdvisor(retrieved_token_gate=gate, **kw)
 
     # -----------------------------------------------------------------------
