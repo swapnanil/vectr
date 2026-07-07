@@ -292,7 +292,12 @@ class WorkingContextStore:
         Superseded notes are excluded by default. Pass include_superseded=True
         to see the full history including notes marked as superseded.
         Without a query, results are ordered by author_trust_score DESC, decay_score DESC,
-        last_accessed DESC so the highest-trust contributor's notes surface first.
+        created_at DESC, note_id DESC so the highest-trust contributor's notes surface
+        first, with a fully deterministic tie-break (UPG-RECALL-ORDER-CHURN: last_accessed
+        is intentionally excluded from this ordering — recall itself updates
+        last_accessed on every note it returns, so using it as a sort key made
+        two back-to-back identical calls read-your-own-writes into a different
+        order each time).
 
         max_age_days: when set, only notes created within the last max_age_days days
         are returned (UPG-RECALL-HIERARCHY time filter).
@@ -353,8 +358,13 @@ class WorkingContextStore:
                 " created_at DESC LIMIT ?"
             )
         else:
-            # relevance (default): trust/decay/last_accessed ordering
-            sql += " ORDER BY author_trust_score DESC, decay_score DESC, last_accessed DESC LIMIT ?"
+            # relevance (default): trust/decay ordering, then a deterministic
+            # tie-break (UPG-RECALL-ORDER-CHURN — last_accessed excluded, see
+            # the recall() docstring above).
+            sql += (
+                " ORDER BY author_trust_score DESC, decay_score DESC,"
+                " created_at DESC, note_id DESC LIMIT ?"
+            )
         params.append(limit)
 
         with self._conn() as conn:
@@ -673,7 +683,14 @@ class WorkingContextStore:
         if kind:
             sql += " AND kind = ?"
             params.append(kind)
-        sql += " ORDER BY author_trust_score DESC, decay_score DESC, last_accessed DESC LIMIT ?"
+        # UPG-RECALL-ORDER-CHURN: same deterministic tie-break as recall()'s
+        # default SQL path — last_accessed excluded (recall() bumps it on
+        # every note it returns, which would otherwise reorder these ties on
+        # the very next call).
+        sql += (
+            " ORDER BY author_trust_score DESC, decay_score DESC,"
+            " created_at DESC, note_id DESC LIMIT ?"
+        )
         params.append(limit)
 
         with self._conn() as conn:

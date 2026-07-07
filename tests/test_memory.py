@@ -194,6 +194,37 @@ class TestCRUD:
         notes = store.recall("/repo")
         assert notes[0].last_accessed >= before
 
+    def test_default_recall_order_is_stable_across_repeated_calls(self, tmp_path) -> None:
+        """UPG-RECALL-ORDER-CHURN: recall() bumps last_accessed on every note
+        it returns. Before this fix, the default no-query order tie-broke on
+        last_accessed DESC, so two back-to-back identical calls could return
+        a different order each time (read-your-own-writes churn) once ties
+        formed. Several notes here share equal author_trust_score (default,
+        untouched) and decay_score (freshly created, no half-life elapsed),
+        so they are tied on every ORDER BY column except the deterministic
+        created_at/note_id tie-break."""
+        store = _store(tmp_path)
+        for i in range(8):
+            store.remember("/repo", f"note {i}")
+
+        first = [n.note_id for n in store.recall("/repo", limit=8)]
+        second = [n.note_id for n in store.recall("/repo", limit=8)]
+        third = [n.note_id for n in store.recall("/repo", limit=8)]
+
+        assert first == second == third
+
+    def test_recall_for_path_order_is_stable_across_repeated_calls(self, tmp_path) -> None:
+        """UPG-RECALL-ORDER-CHURN: recall_for_path shares the same ORDER BY
+        tie-break as the default recall() path and must be equally stable."""
+        store = _store(tmp_path)
+        for i in range(6):
+            store.remember("/repo", f"gotcha about auth.py note {i}", kind="gotcha")
+
+        first = [n.note_id for n in store.recall_for_path("/repo", "auth.py")]
+        second = [n.note_id for n in store.recall_for_path("/repo", "auth.py")]
+
+        assert first == second
+
     def test_forget_specific_note(self, tmp_path) -> None:
         store = _store(tmp_path)
         nid = store.remember("/repo", "to remove")
