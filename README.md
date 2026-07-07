@@ -26,7 +26,7 @@ Vectr breaks the re-discovery loop:
 - **One recall call** → structured notes from any prior session, verbatim, in <50ms
 - **Survives `/compact`** → notes are persisted to disk, not stored in context
 
-**Measured, not hypothetical:** recalling 3 stored notes with `vectr_recall` costs 360 tokens in one tool call. Re-deriving the same three facts with grep + Read costs ~2,060 tokens across six tool calls on the same 182-file Python repo — **~5.7× fewer tokens, 6× fewer tool calls**, in under 50ms (chars/4 tokenization; full breakdown in [Measured costs, honestly](#measured-costs-honestly)). Across a 6-task CPython sprint measuring real Read+Bash calls, that recall discipline cut re-discovery by **39% overall**, with per-task reductions ranging **24%–85%** depending on how unfamiliar the code was to the model.
+**Measured, not hypothetical:** recalling 3 stored notes with `vectr_recall` costs 360 tokens in one tool call. Re-deriving the same three facts with grep + Read costs ~2,060 tokens across six tool calls on the same 182-file Python repo — **~5.7× fewer tokens, 6× fewer tool calls**, in under 50ms (chars/4 tokenization; full breakdown in [Measured costs, honestly](#measured-costs-honestly)). Across a 6-task CPython sprint measuring real Read+Bash calls, that recall discipline cut re-discovery by **39% overall**, with per-task reductions ranging **0%–85%** depending on how unfamiliar the code was to the model (the 0% task is one the model could already navigate from training — see [When vectr can hurt](#when-vectr-can-hurt)).
 
 Notes are persisted to disk, not held in the conversation — they survive `/compact` and a fresh session equally; the session boundary doesn't matter.
 
@@ -87,7 +87,7 @@ Per-call token cost (median, 182-file Python repo, chars/4 tokenization):
 
 The trade-off, stated plainly: for a single pointed lookup on a small, already-familiar repo, grep is cheaper — vectr's median cost across 5 single-fact tasks was **+60% more tokens** — and faster, since a `vectr_search` round-trip takes 1.7–3.6s against ~28ms for grep. Vectr doesn't win on per-call cost; it wins on tool-call count (one round-trip instead of several), answer completeness (a whole symbol back, not a partial file read), and everything in working memory — the 5.7× recall refund from the opening section compounds with every task you resume.
 
-Fine print: the automatic eviction/reminder banners riding along on tool responses cost tokens too — an always-on re-fetch footer runs ~27 tokens, a light nudge ~89 tokens, and an escalated "you have unreviewed findings" banner scales from ~480 to ~535 tokens before it plateaus.
+Fine print: the automatic eviction/reminder banners riding along on tool responses cost tokens too — an always-on re-fetch footer runs ~27 tokens, a light nudge ~89 tokens, and the escalated action-required banner (fires only after both the chunk and token thresholds are crossed without a save) scales from ~480 to ~535 tokens before it plateaus.
 
 **When it pays off:** unfamiliar or large codebases, work you resume (later this session, after `/compact`, or in a new session), and long sessions with many turns. **When it doesn't:** a one-off grep on code you already know cold — reach for grep instead.
 
