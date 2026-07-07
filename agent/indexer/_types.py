@@ -49,9 +49,10 @@ class LocalEmbedProvider:
     (UPG-EMBEDDER-SWAP-GRANITE)."""
 
     def __init__(self, model_name: str = _EMBEDDING_DEFAULT_MODEL) -> None:
+        from agent.model_cache import load_with_offline_preference, suppress_model_load_noise
+        suppress_model_load_noise()
         import torch
         from sentence_transformers import SentenceTransformer
-        from agent.model_cache import load_with_offline_preference
         cache_dir = Path.home() / ".cache" / "vectr" / "models"
         cache_dir.mkdir(parents=True, exist_ok=True)
         # UPG-RERANKER-HF-NETWORK: prefer an offline (local_files_only) load

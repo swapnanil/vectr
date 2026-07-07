@@ -616,6 +616,31 @@ class TestNoIdeConfigOptOut:
 
 
 # ---------------------------------------------------------------------------
+# vectr init: provisional-port disclosure (UPG-CLI-SMALL-UX)
+# ---------------------------------------------------------------------------
+
+class TestInitProvisionalPort:
+    def test_no_registered_instance_prints_provisional_port_note(self, tmp_path, capsys) -> None:
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._maybe_write_workspace_config"), \
+             patch("main._apply_exclude_args"):
+            MockReg.return_value.get.return_value = None
+            m.cmd_init(_make_args(path=str(tmp_path)))
+        err = capsys.readouterr().err
+        assert "provisional" in err.lower()
+        assert "8765" in err
+
+    def test_registered_instance_prints_no_provisional_note(self, tmp_path, capsys) -> None:
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._maybe_write_workspace_config"), \
+             patch("main._apply_exclude_args"):
+            MockReg.return_value.get.return_value = {"port": 8999}
+            m.cmd_init(_make_args(path=str(tmp_path)))
+        err = capsys.readouterr().err
+        assert "provisional" not in err.lower()
+
+
+# ---------------------------------------------------------------------------
 # _daemon_error_detail / _handle_daemon_call_error (UPG-CLI-MEMONLY-CRASH)
 # ---------------------------------------------------------------------------
 
@@ -666,8 +691,12 @@ class TestCmdIndex:
         import argparse
         from unittest.mock import patch, MagicMock
 
+        # Real IndexResponse shape (app/models.py): indexed_files, total_chunks,
+        # processing_ms, model.
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"indexed_files": 3, "chunks": 12, "elapsed_ms": 40}
+        mock_resp.json.return_value = {
+            "indexed_files": 3, "total_chunks": 12, "processing_ms": 40, "model": "org/embed-model",
+        }
         mock_resp.raise_for_status.return_value = None
 
         with patch("main.InstanceRegistry") as MockReg, \
@@ -678,7 +707,36 @@ class TestCmdIndex:
 
         call_url = mock_post.call_args[0][0]
         assert "/v1/index" in call_url
-        assert "3" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "3" in out
+        assert "12" in out
+        assert "40" in out
+
+    def test_prints_human_text_not_raw_json_and_omits_model_field(self, tmp_path, capsys) -> None:
+        """UPG-CLI-SMALL-UX: `vectr index` used to print `json.dumps(...)`
+        verbatim, including the irrelevant embedding-model-name `model` field.
+        Output must be human text, and must not surface `model` at all."""
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "indexed_files": 7, "total_chunks": 55, "processing_ms": 1234,
+            "model": "sentence-transformers/some-embedding-model",
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(path=str(tmp_path), force=False, port=8765)
+            m.cmd_index(args)
+
+        out = capsys.readouterr().out
+        assert "{" not in out  # not raw JSON
+        assert "some-embedding-model" not in out
+        assert "model" not in out.lower()
+        assert "7" in out and "55" in out and "1234" in out
 
     def test_connect_error_exits_nonzero_with_clean_message(self, tmp_path, capsys):
         import argparse

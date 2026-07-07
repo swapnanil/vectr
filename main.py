@@ -931,7 +931,14 @@ def cmd_index(args: argparse.Namespace) -> None:
             timeout=600,
         )
         resp.raise_for_status()
-        print(json.dumps(resp.json(), indent=2))
+        data = resp.json()
+        # UPG-CLI-SMALL-UX: human-readable text, matching every sibling
+        # subcommand, instead of a raw json.dumps of IndexResponse. `model`
+        # (the embedding model name) is dropped here — it answers "which
+        # model did this?", not "how did indexing go?"; still present on
+        # the REST response for callers that do want it.
+        print(f"Indexed {data['indexed_files']} files, {data['total_chunks']} chunks "
+              f"in {data['processing_ms']}ms.")
     except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
         _handle_daemon_call_error(exc, port)
 
@@ -1414,7 +1421,24 @@ def cmd_init(args: argparse.Namespace) -> None:
         return
 
     entry = InstanceRegistry().get(workspace_hash(workspace))
+    port_is_provisional = entry is None
     port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", "8765"))
+    if port_is_provisional:
+        # UPG-CLI-SMALL-UX: no instance is registered for this workspace yet,
+        # so this port is a guess (VECTR_PORT or the 8765 fallback), not a
+        # confirmed bound port — a real collision target if something else
+        # already owns it. `vectr start` always finds an actually-free port
+        # and overwrites these same files with it (see the CLI table entry
+        # for `vectr init`), so this is silently self-correcting, but a user
+        # who never runs `start` right after `init` would otherwise have no
+        # indication the written port is unconfirmed.
+        print(
+            f"  Note: no vectr instance is running for this workspace yet — "
+            f"MCP config files below use provisional port {port}. "
+            f"`vectr start` will assign the real free port and correct them "
+            f"automatically if it differs.",
+            file=sys.stderr,
+        )
 
     # Search-only mode (UPG-SEARCH-ONLY-MODE) has no working-memory layer to
     # inject — detected live from the running daemon (mode is a daemon

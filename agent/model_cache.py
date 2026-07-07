@@ -27,6 +27,36 @@ from typing import Callable, TypeVar
 T = TypeVar("T")
 
 
+def suppress_model_load_noise() -> None:
+    """Silence tqdm download/fetch progress bars and INFO-level logging that
+    sentence-transformers' underlying huggingface_hub/transformers
+    dependencies print on model load (UPG-CLI-SMALL-UX): implementation
+    noise to a CLI user watching `vectr watch` index a workspace in the
+    foreground, and clutter in the daemon's own log file for `start`/
+    `restart` (whose stdout/stderr are redirected there, not the terminal,
+    but a user tailing the log while `vectr status` reports "still
+    loading" hits the same noise).
+
+    Uses each library's own official suppression API rather than setting
+    environment variables, since some versions of these libraries only read
+    the env var once at import time — calling the API instead works
+    regardless of import order or of which module happens to import
+    sentence_transformers first. Best-effort: never raises, so an older or
+    newer dependency version missing one of these functions never breaks
+    model loading.
+    """
+    try:
+        from huggingface_hub.utils import disable_progress_bars
+        disable_progress_bars()
+    except Exception:
+        pass
+    try:
+        from transformers.utils import logging as _hf_logging
+        _hf_logging.set_verbosity_error()
+    except Exception:
+        pass
+
+
 def is_model_cached(model_name: str, cache_dir: str) -> bool:
     """Best-effort check for whether ``model_name`` already has a snapshot in
     ``cache_dir`` (vectr's Hugging Face cache root).

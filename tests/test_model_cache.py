@@ -8,11 +8,11 @@ mocked.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent.model_cache import is_model_cached, load_with_offline_preference
+from agent.model_cache import is_model_cached, load_with_offline_preference, suppress_model_load_noise
 
 
 # ---------------------------------------------------------------------------
@@ -157,3 +157,58 @@ class TestLocalEmbedProviderOfflineLoading:
 
         assert len(calls) == 1
         assert calls[0]["local_files_only"] is False
+
+
+# ---------------------------------------------------------------------------
+# suppress_model_load_noise (UPG-CLI-SMALL-UX): tqdm/HF-logging suppression
+# shared by both model-load call sites (embedder, reranker).
+# ---------------------------------------------------------------------------
+
+class TestSuppressModelLoadNoise:
+    def test_calls_disable_progress_bars_and_set_verbosity_error(self) -> None:
+        mock_disable = MagicMock()
+        mock_set_verbosity = MagicMock()
+        with patch("huggingface_hub.utils.disable_progress_bars", mock_disable), \
+             patch("transformers.utils.logging.set_verbosity_error", mock_set_verbosity):
+            suppress_model_load_noise()
+        mock_disable.assert_called_once()
+        mock_set_verbosity.assert_called_once()
+
+    def test_never_raises_if_disable_progress_bars_missing(self) -> None:
+        with patch("huggingface_hub.utils.disable_progress_bars", side_effect=ImportError("boom")):
+            suppress_model_load_noise()  # must not raise
+
+    def test_never_raises_if_set_verbosity_error_missing(self) -> None:
+        with patch("transformers.utils.logging.set_verbosity_error", side_effect=ImportError("boom")):
+            suppress_model_load_noise()  # must not raise
+
+    def test_embedder_load_calls_noise_suppression(self, tmp_path) -> None:
+        from agent.indexer._types import LocalEmbedProvider
+
+        class _FakeSTModel:
+            def __init__(self, model_name, **kwargs):
+                self.prompts = {}
+
+        mock_suppress = MagicMock()
+        with patch("agent.model_cache.is_model_cached", return_value=True), \
+             patch("sentence_transformers.SentenceTransformer", _FakeSTModel), \
+             patch("pathlib.Path.home", return_value=tmp_path), \
+             patch("agent.model_cache.suppress_model_load_noise", mock_suppress):
+            LocalEmbedProvider("org/name")
+        mock_suppress.assert_called_once()
+
+    def test_reranker_load_calls_noise_suppression(self, tmp_path) -> None:
+        from agent.searcher import _Reranker
+
+        class _FakeCrossEncoder:
+            def __init__(self, model_name, **kwargs):
+                pass
+
+        mock_suppress = MagicMock()
+        with patch("agent.model_cache.is_model_cached", return_value=True), \
+             patch("sentence_transformers.CrossEncoder", _FakeCrossEncoder), \
+             patch("pathlib.Path.home", return_value=tmp_path), \
+             patch("agent.model_cache.suppress_model_load_noise", mock_suppress):
+            reranker = _Reranker("org/name")
+            reranker._load()
+        mock_suppress.assert_called_once()

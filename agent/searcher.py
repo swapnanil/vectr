@@ -131,8 +131,9 @@ class _Reranker:
         if self._model is not None or self._failed:
             return
         try:
+            from agent.model_cache import load_with_offline_preference, suppress_model_load_noise
+            suppress_model_load_noise()
             from sentence_transformers import CrossEncoder
-            from agent.model_cache import load_with_offline_preference
             cache_dir = str(Path.home() / ".cache" / "vectr" / "models")
             # UPG-RERANKER-HF-NETWORK: prefer an offline (local_files_only)
             # load when this model is already fully cached, so search never
