@@ -80,6 +80,32 @@ class TestRecallRoute:
         resp = client.post("/v1/recall", json={})
         assert "processing_ms" in resp.json()
 
+    # UPG-HOOK-INJECT-OBSERVABILITY: hook_event is the caller-declared field
+    # that lets the daemon count hook-driven injections (never inferred from
+    # content — see RecallRequest.hook_event).
+    @pytest.mark.parametrize("hook_event", ["SessionStart", "UserPromptSubmit", "PreToolUse"])
+    def test_recall_valid_hook_event_accepted(self, client, hook_event) -> None:
+        resp = client.post("/v1/recall", json={"hook_event": hook_event})
+        assert resp.status_code == 200
+
+    def test_recall_invalid_hook_event_rejected(self, client) -> None:
+        resp = client.post("/v1/recall", json={"hook_event": "PreCompact"})
+        assert resp.status_code == 422
+
+    def test_recall_forwards_hook_event_to_service(self, client) -> None:
+        client.post("/v1/recall", json={"boot": True, "hook_event": "SessionStart"})
+        from api import app
+        app.state.service.recall.assert_called_with(
+            query=None, tags=None, priority=None, limit=10, kind=None, boot=True,
+            min_similarity=None, file_path=None, max_age_days=None, sort_by="relevance",
+            detail="index", note_id=None, surface="mcp", hook_event="SessionStart",
+        )
+
+    def test_recall_without_hook_event_forwards_none(self, client) -> None:
+        client.post("/v1/recall", json={})
+        from api import app
+        assert app.state.service.recall.call_args.kwargs["hook_event"] is None
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/snapshot

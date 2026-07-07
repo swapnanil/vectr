@@ -250,7 +250,7 @@ def client_real_memory(tmp_path):
 
     def _recall(query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
                 min_similarity=None, file_path=None, max_age_days=None, sort_by="relevance",
-                detail="index", note_id=None, surface="mcp"):
+                detail="index", note_id=None, surface="mcp", hook_event=None):
         if note_id is not None:
             note = real_store.get_note(ws, note_id)
             if note is None:

@@ -225,6 +225,16 @@ WATCHER_MAX_RSS_MB : float
     a watcher-triggered batch re-index is deferred to the next quiet window
     instead of run (UPG-WATCHER-PRESSURE-GOVERNOR). 0 disables the check.
 
+HOOKS_LOG_INJECTIONS : bool
+    When true, every hook-driven recall that actually injects notes appends
+    one line to ~/.vectr/logs/<workspace-hash>.hooks.log (UPG-HOOK-INJECT-
+    OBSERVABILITY). Off by default — the per-hook-kind counters in `vectr
+    status` cover the common case without writing to disk.
+
+HOOKS_LOG_CHARS_PER_TOKEN : int
+    Divisor for the approximate token count written to the optional hook
+    injection log above (UPG-HOOK-INJECT-OBSERVABILITY).
+
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT : float
 STRATEGY_DEFAULT_BM25_WEIGHT : float
     Fallback hybrid-search weights used before the first index-time codebase
@@ -528,6 +538,15 @@ WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S: float = float(_watcher_cfg["top_level_resca
 WATCHER_BURST_FILES_THRESHOLD: int = int(_watcher_cfg["burst_files_threshold"])
 WATCHER_BURST_QUIET_SECONDS: float = float(_watcher_cfg["burst_quiet_seconds"])
 WATCHER_MAX_RSS_MB: float = float(_watcher_cfg["max_rss_mb"])
+
+# ---------------------------------------------------------------------------
+# Hook injection observability (UPG-HOOK-INJECT-OBSERVABILITY)
+# ---------------------------------------------------------------------------
+
+_hooks_cfg: dict[str, Any] = _cfg["hooks"]
+
+HOOKS_LOG_INJECTIONS: bool = bool(_hooks_cfg["log_injections"])
+HOOKS_LOG_CHARS_PER_TOKEN: int = int(_hooks_cfg["log_chars_per_token"])
 
 # ---------------------------------------------------------------------------
 # ingest_traces unresolved-caller/callee warning cap (UPG-7.3)

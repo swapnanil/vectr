@@ -517,6 +517,48 @@ class TestCmdStatus:
         out = capsys.readouterr().out
         assert "Watcher" not in out
 
+    def test_hook_injection_line_shown_with_counts(self, tmp_path, capsys):
+        # UPG-HOOK-INJECT-OBSERVABILITY: `vectr status` surfaces per-hook-kind
+        # injection counts so a human can tell hooks are actually firing.
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "workspace_root": str(tmp_path), "indexed_files": 10, "total_chunks": 50,
+            "last_indexed": "2026-01-01T00:00:00Z", "embed_model": "granite", "mode": "full",
+            "hook_injection_counts": {"SessionStart": 3, "PreToolUse": 2},
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", return_value=mock_resp):
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        out = capsys.readouterr().out
+        assert "Hook injections" in out
+        assert "SessionStart 3" in out
+        assert "PreToolUse 2" in out
+
+    def test_hook_injection_line_absent_when_no_injections(self, tmp_path, capsys):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "workspace_root": str(tmp_path), "indexed_files": 10, "total_chunks": 50,
+            "last_indexed": "2026-01-01T00:00:00Z", "embed_model": "granite", "mode": "full",
+            "hook_injection_counts": {},
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", return_value=mock_resp):
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        out = capsys.readouterr().out
+        assert "Hook injections" not in out
+
 
 # ---------------------------------------------------------------------------
 # cmd_restart
@@ -1515,7 +1557,9 @@ class TestCmdHookSessionStart:
              patch("main._fetch_recall", return_value="x") as mock_fetch:
             MockReg.return_value.get.return_value = {"port": 8765}
             m.cmd_hook(argparse.Namespace(hook_event="session-start"))
-        assert mock_fetch.call_args[0][1] == {"boot": True}
+        # UPG-HOOK-INJECT-OBSERVABILITY: hook_event is the wire that lets the
+        # daemon count this as a SessionStart injection.
+        assert mock_fetch.call_args[0][1] == {"boot": True, "hook_event": "SessionStart"}
 
     def test_emits_nothing_when_no_notes(self, monkeypatch, capsys):
         """A fresh workspace injects nothing — no empty envelope, just silence."""
@@ -1594,6 +1638,12 @@ class TestCmdHookUserPromptSubmit:
         out, _ = self._run('{"cwd": "/p", "prompt": "unrelated"}', "", monkeypatch, capsys)
         assert out.strip() == ""
 
+    def test_sends_hook_event_userpromptsubmit(self, monkeypatch, capsys):
+        """UPG-HOOK-INJECT-OBSERVABILITY: this is the wire that lets the daemon
+        count a UserPromptSubmit injection — without it, counters never increment."""
+        _, mock_fetch = self._run('{"cwd": "/p", "prompt": "lock flow"}', "x", monkeypatch, capsys)
+        assert mock_fetch.call_args[0][1]["hook_event"] == "UserPromptSubmit"
+
 
 class TestCmdHookPreToolUse:
     def _run(self, stdin_json: str, recall_text: str, monkeypatch, capsys):
@@ -1615,6 +1665,23 @@ class TestCmdHookPreToolUse:
         sent = mock_fetch.call_args[0][1]
         assert sent["file_path"] == "/p/agent/symbol_graph.py"
         assert sent["kind"] == "gotcha"
+        # UPG-HOOK-INJECT-OBSERVABILITY: the wire that lets the daemon count
+        # this as a PreToolUse injection.
+        assert sent["hook_event"] == "PreToolUse"
+
+    def test_emits_gotcha_for_read_file(self, monkeypatch, capsys):
+        """UPG-HOOK-INJECT-OBSERVABILITY (c): file-path extraction is generic
+        (tool_input.file_path) regardless of tool name — Read must surface a
+        recorded gotcha exactly like Edit/Write. Which tool names actually
+        reach this hook is a matcher decision in `_write_claude_hooks`, not a
+        content-based branch here."""
+        stdin = '{"cwd": "/p", "tool_name": "Read", "tool_input": {"file_path": "/p/agent/symbol_graph.py"}}'
+        out, mock_fetch = self._run(stdin, "[1] [GOTCHA] index_file takes workspace first", monkeypatch, capsys)
+        payload = json.loads(out)
+        assert payload["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert "index_file takes workspace first" in payload["hookSpecificOutput"]["additionalContext"]
+        sent = mock_fetch.call_args[0][1]
+        assert sent["file_path"] == "/p/agent/symbol_graph.py"
 
     def test_no_double_recall_notice_on_pretooluse(self, monkeypatch, capsys):
         """UPG-11.5's notice is scoped to SessionStart/UserPromptSubmit only —
@@ -1716,12 +1783,14 @@ class TestInitHooks:
         assert "matcher" not in groups[0]   # UserPromptSubmit has no matcher
         assert groups[0]["hooks"][0]["command"] == "vectr hook user-prompt-submit"
 
-    def test_writes_pretooluse_hook_with_edit_write_matcher(self, tmp_path):
+    def test_writes_pretooluse_hook_with_edit_write_read_matcher(self, tmp_path):
+        """UPG-HOOK-INJECT-OBSERVABILITY (c): matcher extended to Read so
+        gotcha injection also fires on file-reading tools, not only edits."""
         m._write_claude_hooks(str(tmp_path))
         data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
         groups = data["hooks"]["PreToolUse"]
         assert len(groups) == 1
-        assert groups[0]["matcher"] == "Edit|Write"
+        assert groups[0]["matcher"] == "Edit|Write|Read"
         assert groups[0]["hooks"][0]["command"] == "vectr hook pre-tool-use"
 
     def test_writes_precompact_hook(self, tmp_path):

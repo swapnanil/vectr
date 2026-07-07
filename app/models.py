@@ -164,6 +164,12 @@ class StatusResponse(BaseModel):
     watcher_pending_files: int = 0
     watcher_batch_running: bool = False
     watcher_last_batch_duration_ms: int = 0
+    # Hook-driven injection counters (UPG-HOOK-INJECT-OBSERVABILITY): how many
+    # times each hook kind's recall actually returned notes to inject, since
+    # this daemon process started. Only counts hook-declared calls (see
+    # RecallRequest.hook_event); direct vectr_recall/`vectr recall` calls are
+    # never counted here. Empty dict means no hook has injected notes yet.
+    hook_injection_counts: dict[str, int] = {}
 
 
 class HealthResponse(BaseModel):
@@ -254,6 +260,18 @@ class RecallRequest(BaseModel):
             "reader is a human terminal."
         ),
     )
+    hook_event: str | None = Field(
+        default=None,
+        description=(
+            "Caller-declared hook kind (UPG-HOOK-INJECT-OBSERVABILITY): "
+            "'SessionStart' | 'UserPromptSubmit' | 'PreToolUse', set only by "
+            "`vectr hook`'s own request. When set and this call actually "
+            "returns notes, the daemon counts one injection under this hook "
+            "kind (surfaced in `vectr status`). None (the default — used by "
+            "direct vectr_recall/`vectr recall` calls) records nothing; only "
+            "harness-injected recall is counted."
+        ),
+    )
 
     @field_validator("kind")
     @classmethod
@@ -267,6 +285,13 @@ class RecallRequest(BaseModel):
     def validate_surface(cls, v: str) -> str:
         if v not in ("mcp", "cli"):
             raise ValueError("surface must be one of: mcp, cli")
+        return v
+
+    @field_validator("hook_event")
+    @classmethod
+    def validate_hook_event(cls, v: str | None) -> str | None:
+        if v is not None and v not in ("SessionStart", "UserPromptSubmit", "PreToolUse"):
+            raise ValueError("hook_event must be one of: SessionStart, UserPromptSubmit, PreToolUse")
         return v
 
 

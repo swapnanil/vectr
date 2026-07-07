@@ -300,6 +300,7 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
         detail=body.detail,
         note_id=body.note_id,
         surface=body.surface,
+        hook_event=body.hook_event,
     )
     return RecallResponse(
         notes=notes_text,

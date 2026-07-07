@@ -18,6 +18,8 @@ from agent.config import (
     SEARCH_IDENTIFIER_HINT_NEARMISS_MAX,
     EMBEDDING_DEFAULT_MODEL,
     EVICTION_MAX_TRACKED_SESSIONS,
+    HOOKS_LOG_INJECTIONS,
+    HOOKS_LOG_CHARS_PER_TOKEN,
 )
 from agent.eviction_advisor import EvictionAdvisor
 from agent.version_stamp import compute_version_stamp
@@ -197,6 +199,13 @@ class VectrService:
         # so benchmark tooling can read accurate counts via GET /v1/call_counts.
         self._call_counts: dict[str, int] = {}
         self._call_counts_lock = threading.Lock()
+
+        # Per-hook-kind injection counters (UPG-HOOK-INJECT-OBSERVABILITY): how
+        # many times each hook's recall actually returned notes to inject,
+        # since this process started. Recorded from `recall(hook_event=...)`,
+        # surfaced in `status()` / `vectr status`.
+        self._hook_injection_counts: dict[str, int] = {}
+        self._hook_injection_lock = threading.Lock()
 
         # Adaptive strategy — computed after first index, defaults until then
         from agent.strategy_selector import RetrievalStrategy
@@ -381,6 +390,51 @@ class VectrService:
             old = dict(self._call_counts)
             self._call_counts.clear()
             return old
+
+    # ------------------------------------------------------------------
+    # Hook injection counters (UPG-HOOK-INJECT-OBSERVABILITY): recorded from
+    # `recall()` below, only when a hook-declared call actually returned
+    # notes. A working memory system and a dead one look identical to the
+    # human until this makes injection visible — read via `status()`.
+    # ------------------------------------------------------------------
+
+    def _record_hook_injection(self, hook_event: str, notes: str) -> None:
+        """Count one injection for `hook_event`, and optionally log it.
+
+        No-op when `notes` is empty — an empty-result hook call (e.g. a
+        SessionStart on a fresh workspace with no directives yet) injected
+        nothing, so it must not count as an injection.
+        """
+        if not notes:
+            return
+        with self._hook_injection_lock:
+            self._hook_injection_counts[hook_event] = (
+                self._hook_injection_counts.get(hook_event, 0) + 1
+            )
+        if HOOKS_LOG_INJECTIONS:
+            self._append_hook_injection_log(hook_event, notes)
+
+    def _append_hook_injection_log(self, hook_event: str, notes: str) -> None:
+        """Append one line to ~/.vectr/logs/<workspace-hash>.hooks.log.
+
+        Failure here must never break recall — any error is logged and
+        swallowed, never raised.
+        """
+        try:
+            from agent.instance_registry import workspace_hash
+            log_dir = Path.home() / ".vectr" / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"{workspace_hash(self._workspace_root)}.hooks.log"
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            tokens = len(notes) // HOOKS_LOG_CHARS_PER_TOKEN
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"{ts}\t{hook_event}\ttokens={tokens}\n")
+        except Exception:
+            logger.exception("failed to write hook injection log")
+
+    def get_hook_injection_counts(self) -> dict[str, int]:
+        with self._hook_injection_lock:
+            return dict(self._hook_injection_counts)
 
     # ------------------------------------------------------------------
     # L3 — search and index operations
@@ -627,6 +681,7 @@ class VectrService:
             **self._symbol_graph_status(),
             **strategy_info,
             **self._watcher.watcher_status(),
+            "hook_injection_counts": self.get_hook_injection_counts(),
         }
 
     def _symbol_graph_status(self) -> dict:
@@ -774,13 +829,47 @@ class VectrService:
         detail: str = "index",
         note_id: int | None = None,
         surface: str = "mcp",
+        hook_event: str | None = None,
     ) -> str:
         """`surface` selects the expand-hint phrasing rendered by
         `format_notes_for_llm` — 'mcp' (default: the MCP dispatch path, and
         hook-injected recall, both leave this unset since their reader is the
         editor's LLM) or 'cli' (only `cmd_recall`'s own REST request sets this
         explicitly, since its reader is a human terminal). See its docstring
-        (UPG-CLI-RECALL-HINT)."""
+        (UPG-CLI-RECALL-HINT).
+
+        `hook_event` (UPG-HOOK-INJECT-OBSERVABILITY): set only by `vectr
+        hook`'s own request — 'SessionStart' | 'UserPromptSubmit' |
+        'PreToolUse'. When set and this call actually returns notes, counts
+        one injection under that hook kind (see `status()`). None (the
+        default — direct vectr_recall/`vectr recall` calls) records nothing.
+        """
+        notes = self._recall_impl(
+            query=query, tags=tags, priority=priority, limit=limit, kind=kind,
+            boot=boot, min_similarity=min_similarity, file_path=file_path,
+            max_age_days=max_age_days, sort_by=sort_by, detail=detail,
+            note_id=note_id, surface=surface,
+        )
+        if hook_event is not None:
+            self._record_hook_injection(hook_event, notes)
+        return notes
+
+    def _recall_impl(
+        self,
+        query: str | None = None,
+        tags: list[str] | None = None,
+        priority: str | None = None,
+        limit: int = 10,
+        kind: str | None = None,
+        boot: bool = False,
+        min_similarity: float | None = None,
+        file_path: str | None = None,
+        max_age_days: float | None = None,
+        sort_by: str = "relevance",
+        detail: str = "index",
+        note_id: int | None = None,
+        surface: str = "mcp",
+    ) -> str:
         self._require_memory_layer()
         # Single-note expand: note_id overrides everything else (UPG-RECALL-HIERARCHY).
         if note_id is not None:

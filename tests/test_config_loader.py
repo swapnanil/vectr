@@ -248,3 +248,19 @@ class TestConfigLoaderWorkspaceAndWatcher:
         """watcher.py must import the rescan interval from config, not hardcode it."""
         from agent.watcher import WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S
         assert WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S is cfg.WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S
+
+
+class TestConfigLoaderHooks:
+    """hooks.* values must load correctly from config.yaml (UPG-HOOK-INJECT-OBSERVABILITY)."""
+
+    def test_log_injections_defaults_false(self) -> None:
+        assert cfg.HOOKS_LOG_INJECTIONS is False
+
+    def test_log_chars_per_token_default(self) -> None:
+        assert cfg.HOOKS_LOG_CHARS_PER_TOKEN == 4
+
+    def test_log_injections_is_bool(self) -> None:
+        assert isinstance(cfg.HOOKS_LOG_INJECTIONS, bool)
+
+    def test_log_chars_per_token_is_int(self) -> None:
+        assert isinstance(cfg.HOOKS_LOG_CHARS_PER_TOKEN, int)

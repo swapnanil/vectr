@@ -1090,6 +1090,22 @@ watcher:
   # reading — deliberately conservative for a resource-safety guard.
   max_rss_mb: 0
 
+hooks:
+  # UPG-HOOK-INJECT-OBSERVABILITY: when true, every hook-driven recall that
+  # actually injects notes (SessionStart/UserPromptSubmit/PreToolUse) appends
+  # one line to ~/.vectr/logs/<workspace-hash>.hooks.log — timestamp, hook
+  # kind, and an approximate token count of what was injected. Off by
+  # default: the per-hook-kind counters in `vectr status` already answer the
+  # common "is this actually firing" question without writing to disk; turn
+  # this on only when auditing exact injection timing/volume.
+  log_injections: false
+
+  # Divisor used to turn the injected notes' character count into an
+  # approximate token count for the optional injection log above. 4 is the
+  # commonly-cited chars-per-token ratio for English/code text; this is a
+  # rough sizing signal for the log, not a billing-accurate count.
+  log_chars_per_token: 4
+
 embedding:
   # Default local (sentence-transformers) embedding model for the L3 content
   # index (UPG-EMBEDDER-SWAP-GRANITE). Dimension-compatible drop-in for the

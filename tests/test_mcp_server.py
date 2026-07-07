@@ -76,6 +76,9 @@ def _mock_service():
         "watcher_pending_files": 0,
         "watcher_batch_running": False,
         "watcher_last_batch_duration_ms": 0,
+        # UPG-HOOK-INJECT-OBSERVABILITY: hook injection counters are always
+        # present in the real service.status() output — mock the real shape.
+        "hook_injection_counts": {},
     }
     svc.get_map.return_value = "# Passport\nA FastAPI service."
     # UPG-6.2: save_map returns a shaped result, not None — real shape.
@@ -672,6 +675,24 @@ class TestVectrStatus:
         text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
         assert "Watcher" in text
         assert "batch running" in text
+
+    def test_hook_injection_line_absent_when_no_injections(self) -> None:
+        # UPG-HOOK-INJECT-OBSERVABILITY: a workspace with no hooks installed
+        # (or whose hooks haven't fired yet) stays terse, same as Watcher.
+        svc = _mock_service()
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "Hook injections" not in text
+
+    def test_hook_injection_line_shown_with_counts(self) -> None:
+        svc = _mock_service()
+        svc.status.return_value = {
+            **svc.status.return_value,
+            "hook_injection_counts": {"SessionStart": 3, "PreToolUse": 2},
+        }
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "Hook injections" in text
+        assert "SessionStart 3" in text
+        assert "PreToolUse 2" in text
 
     def test_notes_count_zero_shows_skip_hint(self) -> None:
         svc = _mock_service()

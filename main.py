@@ -542,8 +542,13 @@ def _write_claude_hooks(workspace: str) -> None:
                         command="vectr hook session-start")
     # UPG-9.5 — UserPromptSubmit (no matcher): per-turn semantic recall keyed to the prompt.
     _install_hook_group(hooks, "UserPromptSubmit", command="vectr hook user-prompt-submit")
-    # UPG-9.6 — PreToolUse (Edit|Write): surface the gotcha recorded against the file being edited.
-    _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write",
+    # UPG-9.6 — PreToolUse (Edit|Write|Read): surface the gotcha recorded against
+    # the file about to be read or edited. Extended to Read (UPG-HOOK-INJECT-
+    # OBSERVABILITY): a file-reading tool has just as deterministic a
+    # tool_input.file_path as Edit/Write, so it gets the same gotcha injection
+    # at the moment the model is about to look at that file, not only when
+    # it's about to change it.
+    _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|Read",
                         command="vectr hook pre-tool-use")
     # UPG-9.7 — PreCompact (manual|auto): snapshot working memory before /compact replaces context.
     _install_hook_group(hooks, "PreCompact", matcher="manual|auto",
@@ -1258,7 +1263,10 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # the MEMORY.md equivalent — present before turn 1, zero model agency.
             # detail is NOT sent for boot=True because the service renders directives
             # at full and tasks at index automatically in the boot path.
-            notes = _fetch_recall(port, {"boot": True})
+            # hook_event (UPG-HOOK-INJECT-OBSERVABILITY) is the wire that makes this
+            # firing visible in `vectr status` — without it, the daemon has no way
+            # to tell a harness-injected recall apart from a direct one.
+            notes = _fetch_recall(port, {"boot": True, "hook_event": "SessionStart"})
             _emit_hook_context("SessionStart", notes)
 
         elif args.hook_event == "user-prompt-submit":
@@ -1273,17 +1281,22 @@ def cmd_hook(args: argparse.Namespace) -> None:
             min_sim = float(os.getenv("VECTR_HOOK_MIN_SIMILARITY", str(_HOOK_MIN_SIMILARITY)))
             notes = _fetch_recall(port, {
                 "query": prompt, "limit": limit, "min_similarity": min_sim, "detail": "index",
+                "hook_event": "UserPromptSubmit",
             })
             _emit_hook_context("UserPromptSubmit", notes)
 
         elif args.hook_event == "pre-tool-use":
-            # Gotcha injection (UPG-9.6): about to Edit/Write a file — surface any
-            # caveat recorded against THAT file, at the moment of the edit. Static
+            # Gotcha injection (UPG-9.6): about to read or edit a file — surface any
+            # caveat recorded against THAT file, at the moment of the tool call. Static
             # .claude/rules path-scoping can't do this; the gotcha is accrued + semantic.
+            # `file_path` extraction is deterministic and tool-agnostic (Read, Edit,
+            # Write, ... all put the target path under tool_input.file_path) — which
+            # tool names actually reach this hook is a matcher decision made by
+            # `_write_claude_hooks`, not a content-based guess made here.
             file_path = ((event.get("tool_input") or {}).get("file_path") or "").strip()
             if not file_path:
                 return
-            notes = _fetch_recall(port, {"file_path": file_path, "kind": "gotcha"})
+            notes = _fetch_recall(port, {"file_path": file_path, "kind": "gotcha", "hook_event": "PreToolUse"})
             _emit_hook_context("PreToolUse", notes)
 
         elif args.hook_event == "pre-compact":
@@ -1365,6 +1378,20 @@ def _watcher_backlog_line(data: dict) -> str | None:
     return f"Watcher       : {', '.join(parts)}"
 
 
+def _hook_injection_line(data: dict) -> str | None:
+    """One-line hook-injection-count summary for `vectr status` (UPG-HOOK-
+    INJECT-OBSERVABILITY) — None when no hook has injected anything yet, so a
+    workspace with no Claude Code hooks installed (or whose hooks haven't
+    fired) stays terse instead of a permanent zero line. Without this, hook
+    injection is invisible: notes land silently in the model's context and
+    the human has no way to tell a working memory system from a dead one."""
+    counts = data.get("hook_injection_counts") or {}
+    if not counts:
+        return None
+    parts = ", ".join(f"{kind} {n}" for kind, n in counts.items())
+    return f"Hook injections : {parts}"
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     import httpx
 
@@ -1393,6 +1420,9 @@ def cmd_status(args: argparse.Namespace) -> None:
                 watcher_line = _watcher_backlog_line(d)
                 if watcher_line:
                     print(watcher_line)
+                hook_line = _hook_injection_line(d)
+                if hook_line:
+                    print(hook_line)
                 _check_version_skew(port, daemon_status=d)
             except httpx.ConnectError:
                 print("  (not listening — not running)")
@@ -1417,6 +1447,9 @@ def cmd_status(args: argparse.Namespace) -> None:
         watcher_line = _watcher_backlog_line(data)
         if watcher_line:
             print(watcher_line)
+        hook_line = _hook_injection_line(data)
+        if hook_line:
+            print(hook_line)
         _check_version_skew(port, daemon_status=data)
     except httpx.ConnectError:
         # UPG-CLI-START-READY-RACE: nothing is listening on this port at all

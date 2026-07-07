@@ -48,6 +48,9 @@ def _make_service():
         # UPG-8.7: symbol-graph build trust signals (real shape)
         "symbol_graph_complete": True,
         "symbol_graph_failed_files": 0,
+        # UPG-HOOK-INJECT-OBSERVABILITY: hook injection counters are always
+        # present in the real service.status() output — mock the real shape.
+        "hook_injection_counts": {"SessionStart": 3, "PreToolUse": 2},
     }
     svc.get_map.return_value = "# Codebase Passport\nFastAPI service."
     # UPG-6.2: save_map returns a shaped result — real shape.
@@ -320,6 +323,9 @@ def test_status(client) -> None:
     assert langs["python"]["symbols"] is True
     assert langs["python"]["files"] == 10
     assert langs["markdown"]["symbols"] is False
+    # UPG-HOOK-INJECT-OBSERVABILITY: hook injection counters surface in
+    # /v1/status so `vectr status`/vectr_status can render them.
+    assert data["hook_injection_counts"] == {"SessionStart": 3, "PreToolUse": 2}
 
 
 # ---------------------------------------------------------------------------

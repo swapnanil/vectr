@@ -333,6 +333,18 @@ def handle_tools_call(
                 f"{f', last batch {last_ms}ms' if last_ms else ''}"
             )
 
+        # Hook injection counters (UPG-HOOK-INJECT-OBSERVABILITY): only shown
+        # when at least one hook has actually injected notes, so a workspace
+        # with no Claude Code hooks installed (or whose hooks haven't fired
+        # yet) stays terse — same quiet-when-zero pattern as the watcher line
+        # above. Without this line, hook injection is invisible: notes land
+        # silently in the model's context and there's no way to tell a
+        # working memory system from a dead one.
+        hook_counts = status.get("hook_injection_counts") or {}
+        if hook_counts:
+            hook_parts = ", ".join(f"{kind} {n}" for kind, n in hook_counts.items())
+            lines.append(f"  Hook injections: {hook_parts}")
+
         # inject adaptive instruction style hint at session start
         try:
             style = service.suggest_instruction_style()
