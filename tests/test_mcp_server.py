@@ -957,6 +957,44 @@ class TestVectrFetch:
         assert _MEMORY_ONLY_MSG in result["content"][0]["text"]
         svc.fetch.assert_not_called()
 
+    def test_fetch_of_storage_capped_symbol_carries_truncation_warning(self) -> None:
+        """UPG-FETCH-TRUNCATION-SILENT: a symbol chunk capped at index time
+        (stored content shorter than the symbol's own recorded line span)
+        must render the SAME truncation warning + Read() pointer that
+        vectr_search already applies — a re-fetch of a large chunk must never
+        silently look complete."""
+        svc = _mock_service()
+        # 375-line class; only 45 lines survived the storage cap.
+        stored_content = "\n".join(f"    line {i}" for i in range(45))
+        svc.fetch.return_value = [
+            {"id": "eviction_advisor.py:55-429", "found": True,
+             "file_path": "eviction_advisor.py", "start_line": 55, "end_line": 429,
+             "symbol_name": "EvictionAdvisor", "language": "python",
+             "content": stored_content},
+        ]
+        result = handle_tools_call("vectr_fetch", {"ids": ["eviction_advisor.py:55-429"]}, svc)
+        text = result["content"][0]["text"]
+        assert "more lines (content capped at ~2000 chars)" in text, (
+            f"missing truncation warning. Got: {text[-300:]}"
+        )
+        assert "Read(" in text and "offset=54" in text and "limit=375" in text, (
+            f"missing Read() fallback pointer. Got: {text[-300:]}"
+        )
+
+    def test_fetch_of_complete_small_chunk_carries_no_truncation_warning(self) -> None:
+        """A chunk whose stored content fully covers its symbol's line span
+        must render with no truncation warning at all."""
+        svc = _mock_service()
+        svc.fetch.return_value = [
+            {"id": "a.py:1-5", "found": True, "file_path": "a.py", "start_line": 1,
+             "end_line": 5, "symbol_name": "foo", "language": "python",
+             "content": "def foo():\n    pass"},
+        ]
+        result = handle_tools_call("vectr_fetch", {"ids": ["a.py:1-5"]}, svc)
+        text = result["content"][0]["text"]
+        assert "content capped" not in text
+        assert "Read(" not in text
+
 
 # ---------------------------------------------------------------------------
 # vectr_remember

@@ -1058,6 +1058,7 @@ def cmd_fetch(args: argparse.Namespace) -> None:
     left context, with no re-search or file re-read.
     """
     import httpx
+    from integrations.mcp_server._dispatch import _storage_cap_truncation_warning
 
     workspace = str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())
     port = _get_port_for_workspace(workspace, args.port)
@@ -1075,6 +1076,19 @@ def cmd_fetch(args: argparse.Namespace) -> None:
                 print(f"    {entry['symbol']}  ({entry['language']})")
             print()
             print(entry["content"])
+            # UPG-FETCH-TRUNCATION-SILENT: `lines` carries the symbol's full
+            # recorded span even when the stored content was capped shorter
+            # at index time — same detection MCP's vectr_fetch applies.
+            start_s, _, end_s = entry.get("lines", "").partition("-")
+            try:
+                start_line, end_line = int(start_s), int(end_s)
+            except ValueError:
+                start_line = end_line = 0
+            warning = _storage_cap_truncation_warning(
+                entry["content"], entry.get("file_path", ""), start_line, end_line,
+            )
+            if warning:
+                print(warning)
         if data.get("note"):
             print(f"\n{data['note']}", file=sys.stderr)
     except (httpx.ConnectError, httpx.HTTPStatusError) as exc:

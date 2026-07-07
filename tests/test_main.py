@@ -1264,6 +1264,62 @@ class TestCmdFetch:
         assert "a.py:1-5" in out
         assert "def foo(): pass" in out
 
+    def test_storage_capped_symbol_prints_truncation_warning(self, tmp_path, capsys, monkeypatch):
+        """UPG-FETCH-TRUNCATION-SILENT: `vectr fetch` must carry the same
+        truncation warning as the MCP vectr_fetch tool — REST/CLI is its own
+        renderer, not automatically covered by the MCP-layer fix."""
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        monkeypatch.chdir(tmp_path)
+        stored_content = "\n".join(f"    line {i}" for i in range(45))
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"id": "eviction_advisor.py:55-429", "found": True,
+                 "file_path": "eviction_advisor.py", "lines": "55-429",
+                 "symbol": "EvictionAdvisor", "language": "python",
+                 "content": stored_content},
+            ],
+            "note": None,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(ids=["eviction_advisor.py:55-429"], port=8765)
+            m.cmd_fetch(args)
+
+        out = capsys.readouterr().out
+        assert "content capped at ~2000 chars" in out
+        assert "Read(" in out and "offset=54" in out and "limit=375" in out
+
+    def test_complete_small_chunk_prints_no_truncation_warning(self, tmp_path, capsys, monkeypatch):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        monkeypatch.chdir(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"id": "a.py:1-5", "found": True, "file_path": "a.py", "lines": "1-5",
+                 "symbol": "foo", "language": "python", "content": "def foo():\n    pass"},
+            ],
+            "note": None,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(ids=["a.py:1-5"], port=8765)
+            m.cmd_fetch(args)
+
+        out = capsys.readouterr().out
+        assert "content capped" not in out
+        assert "Read(" not in out
+
     def test_missing_id_prints_not_found_to_stderr(self, tmp_path, capsys, monkeypatch):
         import argparse
         from unittest.mock import patch, MagicMock

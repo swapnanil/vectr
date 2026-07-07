@@ -649,6 +649,38 @@ def handle_tools_call(
     return _mcp_error(f"Unknown tool: {tool_name}")
 
 
+def _storage_cap_truncation_warning(
+    content: str, file_path: str, symbol_start_line: int, symbol_end_line: int,
+) -> str | None:
+    """Detect index-time storage-cap truncation and return the Read() fallback
+    warning, or None when the content is complete.
+
+    A symbol chunk that exceeds the indexer's per-chunk cap (large classes/
+    methods — see agent/indexer/_chunking.py) is stored capped: fewer lines
+    than the symbol's own recorded `symbol_start_line`/`symbol_end_line` span.
+    Detected by comparing the rendered content's line count against that span
+    (UPG-11.4-b / UPG-FETCH-TRUNCATION-SILENT). No vectr_fetch(...) can
+    recover the missing tail — the index itself holds only the capped
+    content — so the fallback points at a direct file read reaching it.
+    Shared by every surface that renders a chunk's content as prose
+    (_format_search_results, _format_fetch_results) so a truncated chunk
+    never appears complete on one surface and flagged on another.
+    """
+    content_lines = content.splitlines()
+    symbol_range_lines = (
+        symbol_end_line - symbol_start_line + 1
+        if (symbol_start_line and symbol_end_line and symbol_end_line > symbol_start_line)
+        else 0
+    )
+    if symbol_range_lines > 0 and len(content_lines) < symbol_range_lines - 5:
+        missing = symbol_range_lines - len(content_lines)
+        return (
+            f"... {missing} more lines (content capped at ~2000 chars) — "
+            f"Read({file_path!r}, offset={symbol_start_line - 1}, limit={symbol_range_lines}) for full definition"
+        )
+    return None
+
+
 def _format_search_results(results, query: str, query_ms: int, chunks_searched: int) -> str:
     if not results:
         return f"No results found for: {query}"
@@ -672,15 +704,7 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         content_lines = r.content.splitlines()
         # UPG-11.4-b: emit an expand hint when the stored content was truncated
         # by the 2000-char cap (searcher stores content[:2000], ~48 lines for
-        # dense methods).  We detect truncation by comparing the number of
-        # content lines to the full symbol line range stored in metadata:
-        # if the chunk has symbol_start_line / symbol_end_line set and the
-        # content is more than 5 lines shorter than the full range, the content
-        # was capped and the caller needs to expand to see the whole definition.
-        s_start = getattr(r, "symbol_start_line", 0)
-        s_end = getattr(r, "symbol_end_line", 0)
-        symbol_range_lines = (s_end - s_start + 1) if (s_start and s_end and s_end > s_start) else 0
-        content_truncated = symbol_range_lines > 0 and len(content_lines) < symbol_range_lines - 5
+        # dense methods) — see _storage_cap_truncation_warning().
         # UPG-CTX-EVICT: the display-cap expand hint points at
         # vectr_fetch(ids=[...]) — vectr_fetch returns the chunk's FULL stored
         # content (no 80-line display cap) and keeps the caller in the vectr
@@ -688,6 +712,9 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         # capped at ~2000 chars at index time is stored capped, so vectr_fetch
         # would return the same truncated content — only a file read reaches
         # the missing tail.
+        s_start = getattr(r, "symbol_start_line", 0)
+        s_end = getattr(r, "symbol_end_line", 0)
+        truncation_warning = _storage_cap_truncation_warning(r.content, r.file_path, s_start, s_end)
         if len(content_lines) > 80:
             # Hard cap: the content itself is long but we also cap the display.
             lines.append("\n".join(content_lines[:80]))
@@ -695,17 +722,11 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
                 f"... {len(content_lines) - 80} more lines — "
                 f"vectr_fetch(ids=[{chunk_id!r}]) restores the full chunk"
             )
-        elif content_truncated:
+        elif truncation_warning:
             # Content was silently capped by the 2000-char storage limit before
             # it reached the full symbol body.  Show what we have, then prompt.
-            # vectr_fetch cannot help here — the index itself holds only the
-            # capped content — so point at the file on disk.
             lines.append(r.content)
-            missing = symbol_range_lines - len(content_lines)
-            lines.append(
-                f"... {missing} more lines (content capped at ~2000 chars) — "
-                f"Read({r.file_path!r}, offset={s_start - 1}, limit={symbol_range_lines}) for full definition"
-            )
+            lines.append(truncation_warning)
         else:
             lines.append(r.content)
         lines.append("")
@@ -719,7 +740,15 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
 def _format_fetch_results(entries: list[dict]) -> str:
     """Render vectr_fetch results using the same id + symbol + content
     conventions as _format_search_results (UPG-CTX-EVICT), so a restored
-    chunk reads identically to how it first appeared in a search response."""
+    chunk reads identically to how it first appeared in a search response.
+
+    UPG-FETCH-TRUNCATION-SILENT: a chunk stored incomplete because of the
+    indexer's per-chunk storage cap (see _storage_cap_truncation_warning) is
+    STILL stored incomplete when re-fetched by id — vectr_fetch restores the
+    exact stored bytes, not the original file. Apply the same truncation
+    check search already applies so a re-fetch never silently looks complete
+    on exactly the large chunks a caller is most tempted to evict.
+    """
     lines: list[str] = []
     missing = [e["id"] for e in entries if not e["found"]]
     for e in entries:
@@ -732,7 +761,13 @@ def _format_fetch_results(entries: list[dict]) -> str:
         if e.get("symbol_name"):
             lines.append(f"    symbol: {e['symbol_name']}  language: {e.get('language', '')}")
         lines.append("")
-        lines.append(e.get("content", ""))
+        content = e.get("content", "")
+        lines.append(content)
+        truncation_warning = _storage_cap_truncation_warning(
+            content, e.get("file_path", ""), e.get("start_line", 0), e.get("end_line", 0),
+        )
+        if truncation_warning:
+            lines.append(truncation_warning)
         lines.append("")
     if missing:
         from app.service import _FETCH_NOT_FOUND_NOTE
