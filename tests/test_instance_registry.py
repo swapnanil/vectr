@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from pathlib import Path
 from unittest.mock import patch
 
@@ -233,6 +234,22 @@ def test_is_pid_alive_nonexistent_pid():
 
 
 def test_port_is_free_high_port():
-    # A high ephemeral port should be free in a test environment.
-    # We pick something above 49152 that's unlikely to be in use.
-    assert _port_is_free(59876) is True
+    # A fixed high port (e.g. 59876) races the OS's own ephemeral port
+    # allocator — another process on the machine can be bound to it when
+    # this test runs (UPG-TEST-PORT-FLAKE), so assert on a port the OS itself
+    # just certified as free instead of a hardcoded guess: bind a throwaway
+    # socket to port 0 (kernel picks any free port), read back the assigned
+    # port, then release it and confirm _port_is_free agrees.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    assert _port_is_free(free_port) is True
+
+
+def test_port_is_free_false_when_port_is_held():
+    # Companion case: a port this test itself holds open must report False.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        held_port = held.getsockname()[1]
+        assert _port_is_free(held_port) is False
