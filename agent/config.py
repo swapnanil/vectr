@@ -107,6 +107,16 @@ EVICTION_REMEMBER_ESCALATION_TOKENS : int
     again — a companion gate so one large single search cannot trip both the
     chunk-count and token gates in a single burst (UPG-EVICT-ESCALATION-GATE-TOO-LOW).
 
+BOOT_MAX_DIRECTIVE_NOTES : int
+    Maximum directive notes returned by boot_recall() (UPG-9.2). Directives
+    are ordered oldest-first (standing rules stay in a stable order).
+
+BOOT_MAX_TASK_NOTES : int
+    Maximum high-priority task notes returned by boot_recall() (UPG-9.2),
+    ordered newest-first (UPG-TASK-NOTE-INJECTION-RECENCY): task notes are
+    current-work state, so the boot set surfaces only the freshest
+    checkpoints rather than the full task history.
+
 INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES : int
     Maximum unresolved caller/callee example strings surfaced in the
     vectr_ingest_traces response (UPG-7.3). Edges are ingested regardless;
@@ -487,6 +497,15 @@ EVICTION_HINT_MAX_IDS: int = int(_evict_cfg["hint_max_ids"])
 EVICTION_MAX_TRACKED_SESSIONS: int = int(_evict_cfg["max_tracked_sessions"])
 EVICTION_REMEMBER_ESCALATION_CHUNKS: int = int(_evict_cfg["remember_escalation_chunks"])
 EVICTION_REMEMBER_ESCALATION_TOKENS: int = int(_evict_cfg["remember_escalation_tokens"])
+
+# ---------------------------------------------------------------------------
+# Boot recall bounds (UPG-9.2 / UPG-TASK-NOTE-INJECTION-RECENCY)
+# ---------------------------------------------------------------------------
+
+_boot_cfg: dict[str, Any] = _cfg["behavior"]["boot"]
+
+BOOT_MAX_DIRECTIVE_NOTES: int = int(_boot_cfg["max_directive_notes"])
+BOOT_MAX_TASK_NOTES: int = int(_boot_cfg["max_task_notes"])
 
 # ---------------------------------------------------------------------------
 # Symbol graph — reserved keywords (UPG-JSFLOW-SYMBOLS)

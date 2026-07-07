@@ -297,7 +297,13 @@ class WorkingContextStore:
         is intentionally excluded from this ordering — recall itself updates
         last_accessed on every note it returns, so using it as a sort key made
         two back-to-back identical calls read-your-own-writes into a different
-        order each time).
+        order each time). kind='task' notes are exempted from the trust/decay
+        part of that ordering (UPG-TASK-NOTE-INJECTION-RECENCY): a task note is
+        current-work state, not a relevance-ranked learning, so an older task
+        note with a higher author_trust_score/decay_score must never outrank a
+        newer one — for kind='task' rows the trust/decay columns are treated
+        as equal and created_at DESC (then note_id DESC) decides the order
+        directly. Every other kind is unaffected.
 
         max_age_days: when set, only notes created within the last max_age_days days
         are returned (UPG-RECALL-HIERARCHY time filter).
@@ -360,9 +366,15 @@ class WorkingContextStore:
         else:
             # relevance (default): trust/decay ordering, then a deterministic
             # tie-break (UPG-RECALL-ORDER-CHURN — last_accessed excluded, see
-            # the recall() docstring above).
+            # the recall() docstring above). kind='task' notes are current-work
+            # state, not relevance-ranked learnings — author_trust_score/
+            # decay_score are neutralised to a constant for them so recency
+            # dominates regardless of trust (UPG-TASK-NOTE-INJECTION-RECENCY);
+            # every other kind keeps the unmodified trust/decay ordering.
             sql += (
-                " ORDER BY author_trust_score DESC, decay_score DESC,"
+                " ORDER BY"
+                " (CASE WHEN kind = 'task' THEN 1.0 ELSE author_trust_score END) DESC,"
+                " (CASE WHEN kind = 'task' THEN 1.0 ELSE decay_score END) DESC,"
                 " created_at DESC, note_id DESC LIMIT ?"
             )
         params.append(limit)
@@ -624,20 +636,34 @@ class WorkingContextStore:
         and a SessionStart hook must work on a fresh (0-note) workspace without
         erroring. Returns [] when there is nothing to inject.
 
-        Directives are ordered first (they are imperatives), then high tasks,
-        each oldest-first so standing rules stay in a stable order. Does NOT
-        bump last_accessed — boot injection is automatic, not an agency-driven
-        access, so it must not interfere with decay.
+        Directives are returned first (they are imperatives), oldest-first so
+        standing rules stay in a stable order, capped at
+        config.BOOT_MAX_DIRECTIVE_NOTES. High-priority task notes follow,
+        ordered newest-first — created_at DESC, note_id DESC tie-break — and
+        capped at config.BOOT_MAX_TASK_NOTES (UPG-TASK-NOTE-INJECTION-RECENCY):
+        a task note is current-work state, so the boot set must surface the
+        latest checkpoint first rather than whichever task note happens to be
+        oldest, and must not grow unbounded as task notes accumulate over a
+        long-running workspace. Does NOT bump last_accessed — boot injection
+        is automatic, not an agency-driven access, so it must not interfere
+        with decay.
         """
-        sql = (
-            "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
-            "AND (kind = 'directive' OR (kind = 'task' AND priority = 'high')) "
-            "ORDER BY CASE kind WHEN 'directive' THEN 0 ELSE 1 END, created_at ASC "
-            "LIMIT 100"
-        )
+        from agent.config import BOOT_MAX_DIRECTIVE_NOTES, BOOT_MAX_TASK_NOTES
+
         with self._conn() as conn:
-            rows = conn.execute(sql, (workspace,)).fetchall()
-        notes = [self._row_to_note(r) for r in rows]
+            directive_rows = conn.execute(
+                "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
+                "AND kind = 'directive' ORDER BY created_at ASC LIMIT ?",
+                (workspace, BOOT_MAX_DIRECTIVE_NOTES),
+            ).fetchall()
+            task_rows = conn.execute(
+                "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
+                "AND kind = 'task' AND priority = 'high' "
+                "ORDER BY created_at DESC, note_id DESC LIMIT ?",
+                (workspace, BOOT_MAX_TASK_NOTES),
+            ).fetchall()
+        notes = [self._row_to_note(r) for r in directive_rows] + \
+                [self._row_to_note(r) for r in task_rows]
         audit("RECALL", workspace=workspace, query="", notes_returned=len(notes), method="boot")
         return notes
 
@@ -686,9 +712,12 @@ class WorkingContextStore:
         # UPG-RECALL-ORDER-CHURN: same deterministic tie-break as recall()'s
         # default SQL path — last_accessed excluded (recall() bumps it on
         # every note it returns, which would otherwise reorder these ties on
-        # the very next call).
+        # the very next call). UPG-TASK-NOTE-INJECTION-RECENCY: same kind='task'
+        # trust/decay exemption as recall() — see that method's docstring.
         sql += (
-            " ORDER BY author_trust_score DESC, decay_score DESC,"
+            " ORDER BY"
+            " (CASE WHEN kind = 'task' THEN 1.0 ELSE author_trust_score END) DESC,"
+            " (CASE WHEN kind = 'task' THEN 1.0 ELSE decay_score END) DESC,"
             " created_at DESC, note_id DESC LIMIT ?"
         )
         params.append(limit)

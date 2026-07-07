@@ -641,6 +641,20 @@ behavior:
     # caller a real chance to act on vectr_remember before repeat pressure builds back up.
     remember_escalation_tokens: 8000
 
+  boot:
+    # SessionStart boot recall (UPG-9.2): unconditional directive notes are
+    # capped defensively so a workspace with unusually many standing rules
+    # doesn't inject an unbounded block every session. Directives are
+    # ordered oldest-first (standing rules stay in a stable order).
+    max_directive_notes: 100
+
+    # UPG-TASK-NOTE-INJECTION-RECENCY: kind=task notes are current-work
+    # state, not relevance-ranked learnings — they are ordered strictly
+    # newest-first (ignoring author_trust_score/decay_score) and capped to
+    # this many so the boot set surfaces only the freshest checkpoints, not
+    # the full task history.
+    max_task_notes: 5
+
   ingest_traces:
     # Maximum number of "caller/callee not found in the indexed symbol graph"
     # example strings surfaced in the vectr_ingest_traces response text (UPG-7.3).
