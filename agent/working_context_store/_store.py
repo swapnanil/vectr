@@ -1032,6 +1032,11 @@ class WorkingContextStore:
         detail='index' (default, UPG-RECALL-HIERARCHY): renders ONE crisp line per note:
             [#<note_id>] <kind>/<priority> · <title>  (<relative age>)
           No body is included. Token-bounded for hook injection and default recall.
+          When the note carries a caller-declared agent/subagent identifier
+          (`author_id`, set via vectr_remember's optional `agent` argument —
+          UPG-SUBAGENT-MEMORY), it renders as an attribution tag right after
+          priority: `[#12] task/high (coder-2) · title  (2h)`. Never inferred;
+          a note with no `agent` renders exactly as before this feature shipped.
 
         detail='full': renders the full body format (pre-existing behaviour).
           Use for explicit vectr_recall(detail='full') or single-note expand (note_id path).
@@ -1078,8 +1083,12 @@ class WorkingContextStore:
                 title = n.title or (n.content.strip().splitlines()[0][:80] if n.content.strip() else "(no title)")
                 stale_marker = " [STALE]" if n.note_id in stale_warnings else ""
                 id_str = f"#{n.note_id}" if surface == "mcp" else f"{n.note_id}"
+                # UPG-SUBAGENT-MEMORY: caller-declared agent/subagent attribution
+                # (author_id) — never inferred. Absent renders exactly as before.
+                agent_marker = f" ({n.author_id})" if n.author_id else ""
                 lines.append(
-                    f"[{id_str}] {kind_label}/{n.priority} · {title}  ({_age_str(n.created_at)}){stale_marker}"
+                    f"[{id_str}] {kind_label}/{n.priority}{agent_marker} · {title}"
+                    f"  ({_age_str(n.created_at)}){stale_marker}"
                 )
             return "\n".join(lines)
 

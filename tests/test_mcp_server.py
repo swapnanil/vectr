@@ -966,7 +966,7 @@ class TestVectrRemember:
     def test_remember_calls_service(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "Found auth bug"}, svc)
-        svc.remember.assert_called_once_with(content="Found auth bug", tags=None, priority="medium", kind="finding", title="")
+        svc.remember.assert_called_once_with(content="Found auth bug", tags=None, priority="medium", kind="finding", title="", agent="")
 
     def test_remember_returns_note_id(self) -> None:
         svc = _mock_service()
@@ -987,6 +987,7 @@ class TestVectrRemember:
             priority="high",
             kind="finding",
             title="",
+            agent="",
         )
 
     def test_remember_missing_content_returns_error(self) -> None:
@@ -997,14 +998,14 @@ class TestVectrRemember:
     def test_remember_invalid_priority_clamps_to_medium(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "note", "priority": "urgent"}, svc)
-        svc.remember.assert_called_once_with(content="note", tags=None, priority="medium", kind="finding", title="")
+        svc.remember.assert_called_once_with(content="note", tags=None, priority="medium", kind="finding", title="", agent="")
 
     def test_remember_passes_kind_through(self) -> None:
         """UPG-9.3: an explicit kind reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "never push to main", "kind": "directive"}, svc)
         svc.remember.assert_called_once_with(content="never push to main", tags=None,
-                                             priority="medium", kind="directive", title="")
+                                             priority="medium", kind="directive", title="", agent="")
 
     def test_remember_passes_title_through(self) -> None:
         """UPG-RECALL-HIERARCHY: explicit title reaches the service."""
@@ -1014,7 +1015,18 @@ class TestVectrRemember:
         }, svc)
         svc.remember.assert_called_once_with(
             content="def acquire_lock(): ...", tags=None, priority="medium",
-            kind="finding", title="workspace lock acquisition",
+            kind="finding", title="workspace lock acquisition", agent="",
+        )
+
+    def test_remember_passes_agent_through(self) -> None:
+        """UPG-SUBAGENT-MEMORY: an explicit agent identifier reaches the service."""
+        svc = _mock_service()
+        handle_tools_call("vectr_remember", {
+            "content": "found the bug in the parser", "agent": "coder-2",
+        }, svc)
+        svc.remember.assert_called_once_with(
+            content="found the bug in the parser", tags=None, priority="medium",
+            kind="finding", title="", agent="coder-2",
         )
 
 

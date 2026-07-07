@@ -34,7 +34,7 @@ A note stored with `vectr_remember` is the only finding that survives three thin
 | Tool | Purpose | Example |
 |---|---|---|
 | `vectr_status()` | Note count + index state — tells you whether recall is worth calling. When to call it: see the session-start guidance below. | `vectr_status()` → `notes_count: 3` |
-| `vectr_remember(content, kind, tags, priority, title)` | Save a key finding — actual code or pattern, not a file pointer. `kind` controls how the note comes back: `directive` = standing rule, auto-injected at every future session start; `task` = current-work state; `gotcha` = file-anchored caveat that resurfaces when that file is touched; `finding` (default) = relevance-ranked learning; `reference` = pointer to a URL/ticket. | `vectr_remember("lock_workspace() at resolver.rs:214 acquires PID-scoped lock; drops on scope exit.", tags=["lock", "resolver"], priority="high")` |
+| `vectr_remember(content, kind, tags, priority, title, agent)` | Save a key finding — actual code or pattern, not a file pointer. `kind` controls how the note comes back: `directive` = standing rule, auto-injected at every future session start; `task` = current-work state, always recalled newest-first; `gotcha` = file-anchored caveat that resurfaces when that file is touched; `finding` (default) = relevance-ranked learning; `reference` = pointer to a URL/ticket. `agent` (optional) — your own identifier when you are a subagent or orchestrator in a multi-agent workflow (e.g. `"coder-2"`); never inferred, shown as an attribution tag in recall output when set. | `vectr_remember("lock_workspace() at resolver.rs:214 acquires PID-scoped lock; drops on scope exit.", tags=["lock", "resolver"], priority="high")` |
 | `vectr_evict_hint()` | Lists retrieved chunks that vectr can re-retrieve in <50ms — no need to re-read those files later. | At exploration → implementation transition |
 
 **Unlocked after your first `vectr_remember` call (or when prior notes exist):**
@@ -45,6 +45,8 @@ A note stored with `vectr_remember` is the only finding that survives three thin
 | `vectr_forget(note_id)` | Delete a stale or superseded note by its `[#N]` id; `all=true` clears every note. | `vectr_forget(note_id=12)` |
 | `vectr_snapshot("label")` | Seal current notes as a named checkpoint. | `vectr_snapshot("lock-cycle-mapped")` |
 | `vectr_snapshot_list()` | List saved checkpoints. Use at session start if `vectr_recall` returned nothing useful. | `vectr_snapshot_list()` |
+
+**Multi-agent handoff (orchestrator + subagent workflows):** working memory is a shared bus for the whole workspace, not scoped to one conversation — a note written by a subagent is immediately visible to the orchestrator's recall, and vice versa, through the same daemon. If you are a subagent, call `vectr_remember` with your key findings **before you finish** (pass `agent="your-name"` so the orchestrator can see who found what) instead of relying on the orchestrator to re-read your full transcript. If you are an orchestrator, brief each subagent to do this, and call `vectr_recall` after a subagent completes instead of parsing its raw output — the notes are the durable handoff artifact; the transcript is not.
 
 ## When to use each capability
 

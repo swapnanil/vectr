@@ -1099,6 +1099,8 @@ def cmd_remember(args: argparse.Namespace) -> None:
         payload["tags"] = args.tags
     if getattr(args, "title", None):
         payload["title"] = args.title
+    if getattr(args, "agent", None):
+        payload["agent"] = args.agent
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/remember", json=payload, timeout=30)
         resp.raise_for_status()
@@ -1964,6 +1966,7 @@ def main() -> None:
     p_remember.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference"],
                             default="finding", help="Memory kind (controls injection policy)")
     p_remember.add_argument("--title", default="", help="Short label for index-tier display (optional; derived from first content line if empty)")
+    p_remember.add_argument("--agent", default="", help="Optional agent/subagent identifier for multi-agent shared-memory attribution (e.g. 'coder-2'); never inferred")
     p_remember.add_argument("--path", default=_default_path)
     p_remember.add_argument("--port", type=int, default=_default_port)
 

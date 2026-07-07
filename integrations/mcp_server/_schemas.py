@@ -255,6 +255,18 @@ _MEMORY_WRITE_TOOLS = [
                     ),
                     "default": "",
                 },
+                "agent": {
+                    "type": "string",
+                    "description": (
+                        "Optional: your identifier when called by a subagent or orchestrator in a "
+                        "multi-agent workflow (e.g. 'coder-2'). Never inferred — set it explicitly if "
+                        "you want attribution. Shown in vectr_recall() index output as a tag, e.g. "
+                        "'[#12] task/high (coder-2) · title'. A subagent should call vectr_remember "
+                        "with its findings BEFORE finishing so the orchestrator can recall them "
+                        "instead of re-reading the subagent's full transcript."
+                    ),
+                    "default": "",
+                },
             },
             "required": ["content"],
         },

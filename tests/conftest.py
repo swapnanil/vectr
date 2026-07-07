@@ -245,8 +245,8 @@ def client_real_memory(tmp_path):
     real_store = WorkingContextStore(str(tmp_path))
     ws = str(tmp_path)
 
-    svc.remember.side_effect = lambda content, tags=None, priority="medium", session_id=None, kind="finding", title="": \
-        real_store.remember(ws, content, tags, priority, session_id, kind=kind, title=title)
+    svc.remember.side_effect = lambda content, tags=None, priority="medium", session_id=None, kind="finding", title="", agent="": \
+        real_store.remember(ws, content, tags, priority, session_id, kind=kind, title=title, author_id=agent)
 
     def _recall(query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
                 min_similarity=None, file_path=None, max_age_days=None, sort_by="relevance",

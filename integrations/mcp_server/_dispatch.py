@@ -482,7 +482,10 @@ def handle_tools_call(
             priority = "medium"
         kind = arguments.get("kind", "finding")
         title = arguments.get("title", "") or ""
-        note_id = service.remember(content=content, tags=tags, priority=priority, kind=kind, title=title)
+        # UPG-SUBAGENT-MEMORY: optional caller-declared agent/subagent
+        # identifier for multi-agent shared-memory attribution — never inferred.
+        agent = arguments.get("agent", "") or ""
+        note_id = service.remember(content=content, tags=tags, priority=priority, kind=kind, title=title, agent=agent)
         # reset the turn-count nudge, the eviction advisor's remember-fatigue
         # counter (UPG-REMEMBER-BANNER-FATIGUE), and enable memory tools
         _reset_calls_since_save(session_id)

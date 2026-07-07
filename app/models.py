@@ -214,6 +214,15 @@ class RememberRequest(BaseModel):
     kind: str = Field(default="finding", description="directive | task | gotcha | finding | reference")
     session_id: str | None = Field(default=None)
     title: str = Field(default="", description="Short label for index-tier display (optional; derived from first content line if empty)")
+    agent: str = Field(
+        default="",
+        description=(
+            "Optional caller-declared identifier for the agent/subagent authoring this "
+            "note (e.g. 'coder-2'), for multi-agent shared-memory attribution. Never "
+            "inferred. Shown in recall index lines when present (e.g. "
+            "'[#12] task/high (coder-2) · title'); absent renders exactly as before."
+        ),
+    )
 
     @field_validator("priority")
     @classmethod

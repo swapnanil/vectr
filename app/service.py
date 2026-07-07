@@ -797,7 +797,14 @@ class VectrService:
         session_id: str | None = None,
         kind: str = "finding",
         title: str = "",
+        agent: str = "",
     ) -> int:
+        """`agent` (UPG-SUBAGENT-MEMORY): optional caller-declared identifier
+        for the agent/subagent authoring this note (e.g. "coder-2") — never
+        inferred. Stored on the note's existing `author_id` column (already
+        documented there as a "developer/agent identifier"; no schema change
+        needed) and surfaced as an attribution tag in recall index lines when
+        present. Absent (default "") renders exactly as before this feature."""
         self._require_memory_layer()
         return self._context_store.remember(
             workspace=self._workspace_root,
@@ -807,6 +814,7 @@ class VectrService:
             session_id=session_id,
             kind=kind,
             title=title,
+            author_id=agent,
         )
 
     def get_note(self, note_id: int):

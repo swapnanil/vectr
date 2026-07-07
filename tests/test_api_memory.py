@@ -46,6 +46,16 @@ class TestRememberRoute:
         resp = client.post("/v1/remember", json={"content": "timing test"})
         assert "processing_ms" in resp.json()
 
+    def test_remember_accepts_agent_field(self, client) -> None:
+        """UPG-SUBAGENT-MEMORY: optional agent identifier is accepted, not rejected."""
+        resp = client.post("/v1/remember", json={"content": "subagent finding", "agent": "coder-2"})
+        assert resp.status_code == 200
+        assert resp.json()["note_id"] is not None
+
+    def test_remember_agent_defaults_to_empty(self, client) -> None:
+        resp = client.post("/v1/remember", json={"content": "no agent set"})
+        assert resp.status_code == 200
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/recall
@@ -180,6 +190,32 @@ class TestMemoryCrossRequest:
         notes = recall_resp.json()["notes"]
         assert "contribute_to_class" in notes
         assert "django/db/models/fields" in notes
+
+    def test_remember_with_agent_shows_attribution_on_recall(self, client_real_memory) -> None:
+        """UPG-SUBAGENT-MEMORY: a note stored with `agent` renders an attribution
+        tag in the recall index line; the orchestrator recalling notes written by
+        a different session/subagent sees who authored each one."""
+        client = client_real_memory
+        resp = client.post("/v1/remember", json={
+            "content": "parser bug found in the tokenizer",
+            "agent": "coder-2",
+        })
+        assert resp.status_code == 200
+
+        recall_resp = client.post("/v1/recall", json={})
+        notes = recall_resp.json()["notes"]
+        assert "(coder-2)" in notes
+
+    def test_remember_without_agent_recall_unchanged(self, client_real_memory) -> None:
+        """Absent `agent` renders exactly as before this feature — no stray tag."""
+        client = client_real_memory
+        resp = client.post("/v1/remember", json={"content": "no attribution here"})
+        assert resp.status_code == 200
+
+        recall_resp = client.post("/v1/recall", json={})
+        notes = recall_resp.json()["notes"]
+        assert "no attribution here" in notes or "no attribution" in notes
+        assert "()" not in notes
 
     def test_multiple_remember_then_recall_all_returned(self, client_real_memory) -> None:
         client = client_real_memory

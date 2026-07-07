@@ -268,6 +268,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         session_id=body.session_id,
         kind=body.kind,
         title=body.title,
+        agent=body.agent,
     )
     return RememberResponse(
         note_id=note_id,

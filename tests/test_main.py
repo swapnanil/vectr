@@ -1425,6 +1425,44 @@ class TestCmdRemember:
                 m.cmd_remember(args)
             assert exc.value.code == 1
 
+    def test_agent_flag_included_in_payload(self, tmp_path):
+        """UPG-SUBAGENT-MEMORY: --agent reaches the /v1/remember payload."""
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"note_id": 3, "message": "Stored note #3.", "processing_ms": 1}
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(content="found the bug", tags=None, priority="medium",
+                                      path=str(tmp_path), port=8765, agent="coder-2")
+            m.cmd_remember(args)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["agent"] == "coder-2"
+
+    def test_agent_flag_omitted_when_not_set(self, tmp_path):
+        """Absent --agent leaves the payload unchanged (backwards compatible)."""
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"note_id": 4, "message": "Stored note #4.", "processing_ms": 1}
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(content="no agent here", tags=None, priority="medium",
+                                      path=str(tmp_path), port=8765)
+            m.cmd_remember(args)
+
+        payload = mock_post.call_args[1]["json"]
+        assert "agent" not in payload
+
 
 class TestCmdRecall:
     def test_prints_notes_to_stdout(self, tmp_path, capsys):
