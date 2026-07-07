@@ -154,8 +154,20 @@ class EvictionAdvisor:
         """Record a chunk that was delivered to the LLM this session."""
         # avoid duplicate tracking for the same file:lines
         key = f"{file_path}:{lines}"
-        if any(f"{c.file_path}:{c.lines}" == key for c in self._chunks):
-            return
+        for i, c in enumerate(self._chunks):
+            if f"{c.file_path}:{c.lines}" == key:
+                # UPG-EVICT-RECENCY-DEDUP-BLIND: a repeat retrieval of the exact
+                # same chunk (the LLM re-running the same query and getting the
+                # same top hit) is the common case, and eviction_hint()'s
+                # most-recently-retrieved-first ordering keys recency off a
+                # file's position in self._chunks. Without this move, re-touching
+                # a file never refreshes that position, so the file the caller
+                # just retrieved again silently renders LAST instead of first.
+                # Move the existing entry to the end (fresh recency) without
+                # storing a duplicate or advancing any counter below — a dedup
+                # hit must be a no-op for token/chunk totals, only recency moves.
+                self._chunks.append(self._chunks.pop(i))
+                return
         self._chunks.append(RetrievedChunk(
             file_path=file_path,
             lines=lines,

@@ -292,6 +292,35 @@ class TestEvictionHintRecency:
         hint = adv.eviction_hint()
         assert hint.index("A.py") < hint.index("G.py")
 
+    def test_re_retrieving_the_identical_chunk_moves_it_back_to_the_front(self) -> None:
+        """UPG-EVICT-RECENCY-DEDUP-BLIND: re-recording the EXACT same file:lines
+        (the common case — the LLM re-runs the same query and gets the same top
+        hit) must still refresh recency, even though record() dedups and does
+        not store a second chunk."""
+        adv = EvictionAdvisor()
+        self._record_files_a_through_g(adv)
+        # A.py is retrieved again with the SAME line range as before — this is
+        # the dedup path in record(), which used to return early without
+        # touching recency.
+        adv.record("A.py", "1-10", "fn_A", "content_A" * 5)
+        hint = adv.eviction_hint()
+        assert hint.index("A.py") < hint.index("G.py")
+
+    def test_dedup_hit_does_not_double_count_tokens_or_chunks(self) -> None:
+        """A dedup hit only moves recency — it must not re-count tokens toward
+        the escalation gates or grow the tracked chunk count."""
+        adv = EvictionAdvisor()
+        self._record_files_a_through_g(adv)
+        tokens_before = adv.total_tokens_in_session()
+        chunk_count_before = len(adv._chunks)
+        chunks_since_remember_before = adv._chunks_since_remember
+
+        adv.record("A.py", "1-10", "fn_A", "content_A" * 5)
+
+        assert adv.total_tokens_in_session() == tokens_before
+        assert len(adv._chunks) == chunk_count_before
+        assert adv._chunks_since_remember == chunks_since_remember_before
+
     def test_ordering_is_deterministic_across_repeated_calls(self) -> None:
         adv = EvictionAdvisor()
         self._record_files_a_through_g(adv)
