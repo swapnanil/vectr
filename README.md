@@ -5,6 +5,10 @@
 [![CI](https://github.com/swapnanil/vectr/actions/workflows/ci.yml/badge.svg)](https://github.com/swapnanil/vectr/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
+[![Version 1.0.0](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![MCP: 14 tools](https://img.shields.io/badge/MCP-14%20tools-blue.svg)](#14-mcp-tools)
+
+Version 1.0.0 · Last updated 2026-07-08 · [CHANGELOG](CHANGELOG.md)
 
 Vectr gives AI code editors two things they lack: **semantic codebase search** and **persistent working memory** — both served over MCP with zero configuration.
 
@@ -18,9 +22,13 @@ Every time an AI code editor starts a task, it re-reads the same files it read y
 
 Vectr breaks the re-discovery loop:
 
-- **One index** → semantic search over your whole codebase in <20ms  
-- **One recall call** → structured notes from any prior session, verbatim, in <50ms  
+- **One index** → semantic search over your whole codebase in <20ms
+- **One recall call** → structured notes from any prior session, verbatim, in <50ms
 - **Survives `/compact`** → notes are persisted to disk, not stored in context
+
+**Measured, not hypothetical:** recalling 3 stored notes with `vectr_recall` costs 360 tokens in one tool call. Re-deriving the same three facts with grep + Read costs ~2,060 tokens across six tool calls on the same 182-file Python repo — **~5.7× fewer tokens, 6× fewer tool calls**, in under 50ms (chars/4 tokenization; full breakdown in [Measured costs, honestly](#measured-costs-honestly)). Across a 6-task CPython sprint measuring real Read+Bash calls, that recall discipline cut re-discovery by **39% overall**, with per-task reductions ranging **24%–85%** depending on how unfamiliar the code was to the model.
+
+Notes are persisted to disk, not held in the conversation — they survive `/compact` and a fresh session equally; the session boundary doesn't matter.
 
 **No API key required.** The embedding model runs locally.
 
@@ -66,6 +74,25 @@ Full results: [`benchmarks/`](benchmarks/)
 
 ---
 
+## Measured costs, honestly
+
+Per-call token cost (median, 182-file Python repo, chars/4 tokenization):
+
+| Tool | Median tokens | Range |
+|---|---:|---|
+| `vectr_search` | ~2,320 | 1,437–3,091 (n=8) |
+| `vectr_locate` | ~192 | — |
+| `vectr_trace` | ~720 | — |
+| `vectr_recall` (index tier) | ~180 | — |
+
+The trade-off, stated plainly: for a single pointed lookup on a small, already-familiar repo, grep is cheaper — vectr's median cost across 5 single-fact tasks was **+60% more tokens** — and faster, since a `vectr_search` round-trip takes 1.7–3.6s against ~28ms for grep. Vectr doesn't win on per-call cost; it wins on tool-call count (one round-trip instead of several), answer completeness (a whole symbol back, not a partial file read), and everything in working memory — the 5.7× recall refund from the opening section compounds with every task you resume.
+
+Fine print: the automatic eviction/reminder banners riding along on tool responses cost tokens too — an always-on re-fetch footer runs ~27 tokens, a light nudge ~89 tokens, and an escalated "you have unreviewed findings" banner scales from ~480 to ~535 tokens before it plateaus.
+
+**When it pays off:** unfamiliar or large codebases, work you resume (later this session, after `/compact`, or in a new session), and long sessions with many turns. **When it doesn't:** a one-off grep on code you already know cold — reach for grep instead.
+
+---
+
 ## Quick start
 
 **Local (recommended)**
@@ -101,12 +128,17 @@ Exposes port 8765. Docker does not auto-write IDE config files — use local ins
 
 `vectr start` writes the MCP config for your editor automatically. Restart your editor once.
 
-| Editor | Config written automatically |
-|---|---|
-| Claude Code | `.claude/settings.json` |
-| Cursor | `.cursor/mcp.json` |
-| VS Code / GitHub Copilot | `.vscode/mcp.json` |
-| Windsurf, Cline, Continue | See manual setup below |
+| Editor | Config | Status |
+|---|---|---|
+| Claude Code | Auto — `.claude/settings.json`, guidance file, and session hooks (memory auto-injected at session start, per prompt, and before file read/edit) | **Verified** |
+| Cursor | Auto — `.cursor/mcp.json` | Experimental |
+| VS Code / GitHub Copilot | Auto — `.vscode/mcp.json` | Experimental |
+| Windsurf | Manual — see below | Experimental |
+| Cline | Manual — see below | Experimental |
+| Continue | Manual — see below | Experimental |
+| Codex CLI | — | Planned (post-v1) |
+
+"Verified" means the full integration (config, guidance, and hooks) has been exercised end to end. "Experimental" means the MCP config is written and works, but the integration hasn't been run through the same verification pass. "Planned" means no support yet.
 
 <details>
 <summary>Manual setup</summary>
@@ -147,11 +179,11 @@ Exposes port 8765. Docker does not auto-write IDE config files — use local ins
 3. **Hybrid search** — vector similarity + BM25 combined, weighted by codebase characteristics (large/unfamiliar → semantic-heavy; small/well-documented → BM25-heavy).
 4. **Symbol graph** — call edges, import chains, and HTTP routes (Flask/FastAPI/Express/Spring) are extracted and stored. `vectr_locate` uses 5 fallback strategies: exact match → suffix → same-module → unique-name → import-chain → fuzzy (edit distance ≤ 2).
 5. **Working memory** — `vectr_remember` stores structured notes to SQLite + ChromaDB. `vectr_recall` does semantic search over notes — not SQL LIKE — so multi-word queries always find relevant context.
-6. **MCP protocol** — 12 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
+6. **MCP protocol** — 14 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
 
 ---
 
-## 13 MCP tools
+## 14 MCP tools
 
 `vectr start` writes a `CLAUDE.md` into your workspace with this table and usage guidance — your AI code editor knows which tool to reach for without being prompted.
 
@@ -171,12 +203,17 @@ Exposes port 8765. Docker does not auto-write IDE config files — use local ins
 
 | Situation | Tool |
 |---|---|
-| Notes exist from a prior session | `vectr_recall(query)` — semantic vector search, not substring match |
-| You found something worth preserving | `vectr_remember(content, tags, priority)` |
+| Notes exist from a prior session | `vectr_recall(query)` — semantic vector search, not substring match; two-tier (crisp index by default, expand one note with `note_id=N` or all bodies with `detail='full'`) |
+| You found something worth preserving | `vectr_remember(content, tags, priority, kind, title, agent)` — `kind` controls injection: `directive` fires unconditionally every session, `task` carries current-work state, `gotcha` resurfaces when its file is touched, `finding` (default) is relevance-ranked, `reference` is a pointer; `title` labels the note in index output; `agent` attributes it to a subagent/orchestrator |
+| Context is filling up | `vectr_evict_hint()` — identifies chunks vectr can re-retrieve, with the exact re-fetch ids |
+| A chunk shown earlier has left your context | `vectr_fetch(ids=[...])` — deterministic, byte-verbatim re-fetch by id; no re-search, no file re-read; flags a truncation warning if the index itself stored a capped chunk |
 | End of a long session, want a checkpoint | `vectr_snapshot("label")` |
 | Looking for a prior checkpoint | `vectr_snapshot_list()` |
-| Context is filling up | `vectr_evict_hint()` — identifies chunks vectr can re-retrieve |
 | Notes are stale after a large refactor | `vectr_forget(note_id=N)` per note, or `vectr_forget(all=true)` to clear |
+
+Workspace-scoped notes double as a shared bus for multi-agent workflows: an orchestrator and its subagents all read and write the same note store, so a subagent can call `vectr_remember(..., agent="coder-2")` with its findings before finishing, and the orchestrator recalls them instead of re-reading the subagent's full transcript. The `agent` param is never inferred — it's explicit attribution, and it shows up as a tag in `vectr_recall` index output.
+
+On editors with session hooks (see the [host-support matrix](#connect-to-your-ai-code-editor) for which ones), recall is injected automatically — directives and high-priority tasks at session start, semantic recall keyed to each prompt, and file-anchored gotchas before a read or edit — with observability via a `Hook injections` line in `vectr status`.
 
 ---
 
@@ -184,12 +221,16 @@ Exposes port 8765. Docker does not auto-write IDE config files — use local ins
 
 ```bash
 vectr start                           # index + start daemon for current dir
-vectr start --path /project/api       # specific workspace
+vectr start /project/api              # positional workspace: a directory or .code-workspace file
+vectr start --path /project/api       # specific workspace (repeatable, multi-root)
+vectr start --memory-only             # working memory + hooks only — no code index, no watcher
 vectr status                          # index health, chunk count, notes count
 vectr status --all                    # all running instances
-vectr stop --path /project/api        # stop one instance
+vectr stop /project/api               # stop one instance (same positional as start)
+vectr stop --path /project/api        # stop one instance (equivalent --path form)
 vectr stop --all                      # stop all instances
 vectr index --path .                  # re-index without restarting daemon
+vectr fetch src/auth.py:10-42         # re-fetch a chunk by exact id, verbatim
 vectr init --path .                   # write CLAUDE.md + MCP config without starting
 vectr init --exclude vendor           # exclude directories from indexing
 vectr forget --path .                 # delete all working-memory notes
@@ -236,6 +277,8 @@ vectr index --path . --force      # ignore the incremental cache, re-embed every
 | Go | AST | ✓ |
 | Rust | AST | ✓ |
 | Java | AST | ✓ |
+| C | AST | ✓ |
+| C++ | AST | ✓ |
 | Zig | AST | ✓ |
 | All others | 200-line windows, 50-line overlap | — |
 
