@@ -304,13 +304,39 @@ class TestFormatDetailTiers:
 
     def test_index_header_uses_cli_form_for_cli_surface(self, tmp_path) -> None:
         """UPG-CLI-RECALL-HINT: `vectr recall` output must show the real CLI
-        flag, not the MCP tool-call syntax, which is meaningless in a shell."""
+        flag, not the MCP tool-call syntax, which is meaningless in a shell.
+
+        UPG-CLI-RECALL-ID-FOOTGUN: the hint must also name a real, directly
+        copy-pasteable note id from the current results — not a generic `N`
+        placeholder — so a terminal user can paste it verbatim."""
         store = _store(tmp_path)
-        store.remember("/ws", "note content")
+        nid = store.remember("/ws", "note content")
         notes = store.recall("/ws")
         text = store.format_notes_for_llm(notes, detail="index", surface="cli")
-        assert "vectr recall --id N" in text
+        assert f"vectr recall --id {nid}" in text
         assert "vectr_recall(" not in text
+
+    def test_index_cli_surface_renders_ids_without_hash_sigil(self, tmp_path) -> None:
+        """UPG-CLI-RECALL-ID-FOOTGUN: zsh's interactive_comments strips a
+        leading `#` as a comment, so `vectr recall #125` silently becomes a
+        bare `vectr recall` with the argument eaten. CLI-surface rendering
+        must use `[125]`, never `[#125]`, so nothing a user copies into a
+        shell is misinterpreted as a comment."""
+        store = _store(tmp_path)
+        nid = store.remember("/ws", "note content")
+        notes = store.recall("/ws")
+        text = store.format_notes_for_llm(notes, detail="index", surface="cli")
+        assert f"[{nid}]" in text
+        assert f"[#{nid}]" not in text
+
+    def test_index_mcp_surface_keeps_hash_sigil_unchanged(self, tmp_path) -> None:
+        """MCP surface is untouched by UPG-CLI-RECALL-ID-FOOTGUN: its caller
+        is the editor's LLM, which never pastes a raw id into a shell."""
+        store = _store(tmp_path)
+        nid = store.remember("/ws", "note content")
+        notes = store.recall("/ws")
+        text = store.format_notes_for_llm(notes, detail="index", surface="mcp")
+        assert f"[#{nid}]" in text
 
 
 # ---------------------------------------------------------------------------
@@ -482,12 +508,18 @@ class TestRESTHierarchy:
 
     def test_recall_rest_surface_cli_uses_shell_form_expand_hint(self, client_real_memory) -> None:
         """UPG-CLI-RECALL-HINT: `vectr recall` (main.py cmd_recall) sends
-        surface='cli' explicitly — the response must show the real flag."""
-        client_real_memory.post("/v1/remember", json={"content": "note", "title": "t"})
+        surface='cli' explicitly — the response must show the real flag.
+        UPG-CLI-RECALL-ID-FOOTGUN: that flag must name a real, pasteable id
+        (not a generic `N` placeholder), and note ids must render without the
+        `#` sigil zsh would strip as a comment."""
+        r = client_real_memory.post("/v1/remember", json={"content": "note", "title": "t"})
+        nid = r.json()["note_id"]
         resp = client_real_memory.post("/v1/recall", json={"surface": "cli"})
         notes = resp.json()["notes"]
-        assert "vectr recall --id N" in notes
+        assert f"vectr recall --id {nid}" in notes
         assert "vectr_recall(" not in notes
+        assert f"[{nid}]" in notes
+        assert f"[#{nid}]" not in notes
 
     def test_remember_rest_message_uses_cli_form_not_mcp_syntax(self, client_real_memory) -> None:
         """UPG-CLI-RECALL-HINT: /v1/remember (the CLI's `vectr remember`

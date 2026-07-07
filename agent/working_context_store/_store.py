@@ -999,6 +999,17 @@ class WorkingContextStore:
         actual shell form (`vectr recall --id N`) — used by the REST route
         `vectr recall`/`vectr remember` go through, whose caller is a human
         terminal (UPG-CLI-RECALL-HINT: MCP tool syntax is meaningless there).
+
+        surface also controls how each note's id is rendered in the index
+        listing (UPG-CLI-RECALL-ID-FOOTGUN): 'mcp' keeps `[#N]` — the `#` is
+        harmless there since the editor's LLM never pastes it into a shell.
+        'cli' renders the bare `[N]` instead — a terminal user who copies
+        `[#125]` into `vectr recall #125` hits zsh's `interactive_comments`,
+        which silently strips `#125` as a comment and leaves a bare
+        `vectr recall` (a semantic-query no-op) with no error. The 'cli'
+        header hint also names a real id from the current results
+        (`vectr recall --id <that id>`) rather than a generic placeholder,
+        so it is directly copy-pasteable.
         """
         if not notes:
             return "No working notes found."
@@ -1010,15 +1021,19 @@ class WorkingContextStore:
             return f"{age_h:.0f}h" if age_h < 48 else f"{age_h / 24:.0f}d"
 
         if detail == "index":
-            expand_hint = "use vectr_recall(note_id=N) to expand" if surface == "mcp" else "run `vectr recall --id N` to expand"
+            if surface == "mcp":
+                expand_hint = "use vectr_recall(note_id=N) to expand"
+            else:
+                expand_hint = f"run `vectr recall --id {notes[0].note_id}` to expand"
             header = f"# Working Notes — index ({len(notes)} entries; {expand_hint})\n"
             lines = [header]
             for n in notes:
                 kind_label = n.kind if n.kind else DEFAULT_KIND
                 title = n.title or (n.content.strip().splitlines()[0][:80] if n.content.strip() else "(no title)")
                 stale_marker = " [STALE]" if n.note_id in stale_warnings else ""
+                id_str = f"#{n.note_id}" if surface == "mcp" else f"{n.note_id}"
                 lines.append(
-                    f"[#{n.note_id}] {kind_label}/{n.priority} · {title}  ({_age_str(n.created_at)}){stale_marker}"
+                    f"[{id_str}] {kind_label}/{n.priority} · {title}  ({_age_str(n.created_at)}){stale_marker}"
                 )
             return "\n".join(lines)
 
