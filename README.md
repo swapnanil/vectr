@@ -175,7 +175,7 @@ Exposes port 8765. Docker does not auto-write IDE config files — use local ins
 ## How it works
 
 1. **AST-aware chunking** — tree-sitter parses each file and splits at function/class/method boundaries. No chunk breaks mid-logic.
-2. **Code embeddings** — `Snowflake/snowflake-arctic-embed-m-v1.5` maps natural-language queries to code symbols ("JWT validation" → `verify_jwt_token`). BM25 handles exact symbol names.
+2. **Code embeddings** — `ibm-granite/granite-embedding-english-r2` (local, CPU-fast, overridable) maps natural-language queries to code symbols ("JWT validation" → `verify_jwt_token`). BM25 handles exact symbol names.
 3. **Hybrid search** — vector similarity + BM25 combined, weighted by codebase characteristics (large/unfamiliar → semantic-heavy; small/well-documented → BM25-heavy).
 4. **Symbol graph** — call edges, import chains, and HTTP routes (Flask/FastAPI/Express/Spring) are extracted and stored. `vectr_locate` uses 5 fallback strategies: exact match → suffix → same-module → unique-name → import-chain → fuzzy (edit distance ≤ 2).
 5. **Working memory** — `vectr_remember` stores structured notes to SQLite + ChromaDB. `vectr_recall` does semantic search over notes — not SQL LIKE — so multi-word queries always find relevant context.

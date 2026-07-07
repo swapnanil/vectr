@@ -1,7 +1,7 @@
 {
   "name": "vectr",
   "displayName": "Vectr — Semantic Codebase Search",
-  "description": "Zero-config local codebase indexer. Auto-starts when you open a workspace and serves code context to Claude Code, Cursor, and any MCP-compatible AI assistant.",
+  "description": "Zero-config local codebase indexer. Auto-starts when you open a workspace and serves semantic code search and persistent working memory to any MCP-compatible AI code editor.",
   "version": "1.0.0",
   "publisher": "swapnanilsaha",
   "license": "MIT",
