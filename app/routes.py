@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import time
+import uuid
 
-from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request, Response
 
 from agent.llm_client import get_model
 from app.models import (
@@ -367,8 +368,17 @@ async def mcp_info() -> dict:
 
 
 @router.post("/mcp")
-async def mcp_jsonrpc(request: Request, body: dict = Body(...)) -> dict:
-    """Standard MCP JSON-RPC transport — handles initialize / tools/list / tools/call / ping."""
+async def mcp_jsonrpc(request: Request, response: Response, body: dict = Body(...)) -> dict:
+    """Standard MCP JSON-RPC transport — handles initialize / tools/list / tools/call / ping.
+
+    Session identity (UPG-MCP-SESSION-ID-HANDSHAKE): per the MCP streamable-HTTP
+    transport, the server assigns a session id by returning it in the
+    `Mcp-Session-Id` response header on `initialize`; a compliant client echoes
+    that same header on every subsequent request. We honor that header first
+    (case-insensitive per HTTP, handled by Starlette), then fall back to
+    vectr-invented mechanisms (`_meta.sessionId`, `X-Session-ID`) for callers —
+    tests, curl, older shims — that predate the handshake.
+    """
     jsonrpc_id = body.get("id")
     method = body.get("method", "")
     params = body.get("params") or {}
@@ -380,6 +390,7 @@ async def mcp_jsonrpc(request: Request, body: dict = Body(...)) -> dict:
         return {"jsonrpc": "2.0", "id": jsonrpc_id, "error": {"code": code, "message": message}}
 
     if method == "initialize":
+        response.headers["Mcp-Session-Id"] = uuid.uuid4().hex
         return _ok({
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
@@ -392,9 +403,15 @@ async def mcp_jsonrpc(request: Request, body: dict = Body(...)) -> dict:
     if method == "ping":
         return _ok({})
 
-    # extract session ID from _meta for adaptive tool registration
+    # Resolve session id: server-assigned handshake header first, then the
+    # vectr-invented fallbacks kept for backwards compatibility.
     meta = params.get("_meta") or body.get("_meta") or {}
-    session_id = meta.get("sessionId") or request.headers.get("X-Session-ID") or None
+    session_id = (
+        request.headers.get("Mcp-Session-Id")
+        or meta.get("sessionId")
+        or request.headers.get("X-Session-ID")
+        or None
+    )
 
     if method == "tools/list":
         svc = _service(request)
