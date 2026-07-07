@@ -204,6 +204,21 @@ WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S : float
     new top-level directories/files since the watcher never watches the workspace
     root itself (UPG-13.1/13.3).
 
+WATCHER_BURST_FILES_THRESHOLD : int
+    Distinct paths pending per-file debounce simultaneously above which
+    CodeWatcher cancels every per-file timer and collapses into one deferred
+    batch re-index (UPG-WATCHER-PRESSURE-GOVERNOR) — bounds embed-pipeline
+    load under a sustained multi-file edit stream.
+
+WATCHER_BURST_QUIET_SECONDS : float
+    Seconds of repo-wide silence required, once burst coalescing has started,
+    before the collapsed batch actually runs (UPG-WATCHER-PRESSURE-GOVERNOR).
+
+WATCHER_MAX_RSS_MB : float
+    Self-limit (MB) on this process's own peak resident set size above which
+    a watcher-triggered batch re-index is deferred to the next quiet window
+    instead of run (UPG-WATCHER-PRESSURE-GOVERNOR). 0 disables the check.
+
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT : float
 STRATEGY_DEFAULT_BM25_WEIGHT : float
     Fallback hybrid-search weights used before the first index-time codebase
@@ -501,6 +516,11 @@ WORKSPACE_DEFAULT_VECTRIGNORE_DIRS: tuple[str, ...] = tuple(
 _watcher_cfg: dict[str, Any] = _cfg["watcher"]
 
 WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S: float = float(_watcher_cfg["top_level_rescan_interval_s"])
+
+# UPG-WATCHER-PRESSURE-GOVERNOR: burst coalescing + self-limit tunables.
+WATCHER_BURST_FILES_THRESHOLD: int = int(_watcher_cfg["burst_files_threshold"])
+WATCHER_BURST_QUIET_SECONDS: float = float(_watcher_cfg["burst_quiet_seconds"])
+WATCHER_MAX_RSS_MB: float = float(_watcher_cfg["max_rss_mb"])
 
 # ---------------------------------------------------------------------------
 # ingest_traces unresolved-caller/callee warning cap (UPG-7.3)

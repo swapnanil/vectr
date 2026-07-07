@@ -70,6 +70,12 @@ def _mock_service():
         "bm25_weight": 0.30,
         "graph_first": False,
         "strategy_rationale": "default weights — no workspace fingerprint yet, index the workspace to compute one",
+        # UPG-WATCHER-PRESSURE-GOVERNOR: watcher backlog fields are always
+        # present in the real service.status() output — mock the real shape.
+        "watcher_burst_mode": False,
+        "watcher_pending_files": 0,
+        "watcher_batch_running": False,
+        "watcher_last_batch_duration_ms": 0,
     }
     svc.get_map.return_value = "# Passport\nA FastAPI service."
     # UPG-6.2: save_map returns a shaped result, not None — real shape.
@@ -632,6 +638,40 @@ class TestVectrStatus:
         assert "vectr_recall" in text.lower(), (
             "when notes_count > 0, output must hint to call vectr_recall"
         )
+
+    def test_watcher_line_absent_when_quiet(self) -> None:
+        # UPG-WATCHER-PRESSURE-GOVERNOR: a quiet workspace's status stays terse.
+        svc = _mock_service()
+        result = handle_tools_call("vectr_status", {}, svc)
+        assert "Watcher" not in result["content"][0]["text"]
+
+    def test_watcher_line_shown_during_burst(self) -> None:
+        svc = _mock_service()
+        svc.status.return_value = {
+            **svc.status.return_value,
+            "watcher_burst_mode": True,
+            "watcher_pending_files": 12,
+            "watcher_batch_running": False,
+            "watcher_last_batch_duration_ms": 340,
+        }
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "Watcher" in text
+        assert "12" in text
+        assert "burst mode" in text
+        assert "340ms" in text
+
+    def test_watcher_line_shown_while_batch_running(self) -> None:
+        svc = _mock_service()
+        svc.status.return_value = {
+            **svc.status.return_value,
+            "watcher_burst_mode": False,
+            "watcher_pending_files": 3,
+            "watcher_batch_running": True,
+            "watcher_last_batch_duration_ms": 0,
+        }
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "Watcher" in text
+        assert "batch running" in text
 
     def test_notes_count_zero_shows_skip_hint(self) -> None:
         svc = _mock_service()

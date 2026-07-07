@@ -626,6 +626,7 @@ class VectrService:
             ),
             **self._symbol_graph_status(),
             **strategy_info,
+            **self._watcher.watcher_status(),
         }
 
     def _symbol_graph_status(self) -> dict:

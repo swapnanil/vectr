@@ -154,6 +154,16 @@ class StatusResponse(BaseModel):
     # CLI recomputes the same stamp per invocation and warns on mismatch.
     # Optional so a stale/partial mock in a test doesn't fail validation.
     version_stamp: str | None = None
+    # Watcher backlog observability (UPG-WATCHER-PRESSURE-GOVERNOR): whether
+    # a sustained multi-file edit stream has coalesced into burst mode,
+    # outstanding paths not yet re-indexed (per-file debounce + burst
+    # collection + queued batch), whether a batch worker is currently
+    # running, and the last batch's wall-clock duration — so runaway churn
+    # is visible instead of silent.
+    watcher_burst_mode: bool = False
+    watcher_pending_files: int = 0
+    watcher_batch_running: bool = False
+    watcher_last_batch_duration_ms: int = 0
 
 
 class HealthResponse(BaseModel):

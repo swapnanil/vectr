@@ -1,6 +1,7 @@
 """Tests for agent/watcher.py — _DebounceTimer and CodeWatcher."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from unittest.mock import MagicMock, call, patch
@@ -692,3 +693,146 @@ class TestCpuStormRegressionRealObserver:
             indexer.index_file.assert_called_once_with(str(src / "main.py"))
         finally:
             watcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# CodeWatcher — burst coalescing + single bounded worker + self-limit
+# (UPG-WATCHER-PRESSURE-GOVERNOR)
+# ---------------------------------------------------------------------------
+
+class TestBurstCoalescing:
+    def test_below_threshold_uses_per_file_debounce(self):
+        # Default burst_files_threshold (8): a couple of distinct edits stay
+        # on the per-file _debounce path, never entering burst mode.
+        watcher = CodeWatcher(_mock_indexer())
+        watcher._debounce = MagicMock()
+        watcher.on_modified(_mock_event("/ws/a.py"))
+        watcher.on_modified(_mock_event("/ws/b.py"))
+        watcher._debounce.schedule.assert_has_calls(
+            [call("/ws/a.py", "modify"), call("/ws/b.py", "modify")]
+        )
+        assert watcher._burst_mode is False
+
+    def test_burst_threshold_triggers_coalesced_batch(self):
+        indexer = _mock_indexer()
+        watcher = CodeWatcher(indexer)
+        with patch("agent.watcher.WATCHER_BURST_FILES_THRESHOLD", 3), \
+             patch("agent.watcher.WATCHER_BURST_QUIET_SECONDS", 0.05):
+            for i in range(5):
+                watcher.on_modified(_mock_event(f"/ws/f{i}.py"))
+
+            # Crossing the threshold cancels the per-file timers and switches
+            # to burst mode — nothing has been indexed yet, waiting for quiet.
+            assert watcher._burst_mode is True
+            indexer.index_file.assert_not_called()
+
+            time.sleep(0.25)  # well past the 0.05s quiet window
+
+        assert {c.args[0] for c in indexer.index_file.call_args_list} == {
+            f"/ws/f{i}.py" for i in range(5)
+        }
+        assert watcher._burst_mode is False
+
+    def test_second_storm_during_running_batch_queues_into_one_pending_batch(self):
+        indexer = _mock_indexer()
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_index_file(path):
+            started.set()
+            release.wait(2)
+
+        indexer.index_file.side_effect = slow_index_file
+        watcher = CodeWatcher(indexer)
+
+        watcher._submit_batch({"/ws/a.py"})
+        assert started.wait(1), "first batch never started"
+        with watcher._batch_lock:
+            assert watcher._batch_running is True
+
+        # A second coalesced batch becomes ready while the first is still
+        # running — it must merge into the ONE pending set, not spawn a
+        # second worker.
+        watcher._submit_batch({"/ws/b.py", "/ws/c.py"})
+        with watcher._batch_lock:
+            assert watcher._pending_batch == {"/ws/b.py", "/ws/c.py"}
+            assert watcher._batch_running is True
+
+        release.set()
+        deadline = time.monotonic() + 2
+        while indexer.index_file.call_count < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert {c.args[0] for c in indexer.index_file.call_args_list} == {
+            "/ws/a.py", "/ws/b.py", "/ws/c.py"
+        }
+        with watcher._batch_lock:
+            assert watcher._batch_running is False
+            assert watcher._pending_batch == set()
+
+    def test_rss_limit_defers_batch_and_logs_one_warning(self, caplog):
+        indexer = _mock_indexer()
+        watcher = CodeWatcher(indexer)
+        watcher._rss_reader = lambda: 999_999.0
+
+        with patch("agent.watcher.WATCHER_MAX_RSS_MB", 10), \
+             caplog.at_level(logging.WARNING, logger="agent.watcher"):
+            watcher._maybe_run_or_defer({"/ws/a.py"})
+
+        indexer.index_file.assert_not_called()
+        assert watcher._burst_mode is True
+        assert watcher._burst_pending == {"/ws/a.py"}
+        warnings = [r for r in caplog.records if "deferring" in r.message]
+        assert len(warnings) == 1
+
+        # Stop the timer this armed so it can't fire during/after the test.
+        with watcher._lock:
+            if watcher._burst_quiet_timer is not None:
+                watcher._burst_quiet_timer.cancel()
+                watcher._burst_quiet_timer = None
+
+    def test_rss_limit_clears_runs_batch_on_next_quiet_window(self):
+        indexer = _mock_indexer()
+        watcher = CodeWatcher(indexer)
+        rss = {"value": 999_999.0}
+        watcher._rss_reader = lambda: rss["value"]
+
+        with patch("agent.watcher.WATCHER_MAX_RSS_MB", 10):
+            watcher._maybe_run_or_defer({"/ws/a.py"})
+        indexer.index_file.assert_not_called()
+        with watcher._lock:
+            if watcher._burst_quiet_timer is not None:
+                watcher._burst_quiet_timer.cancel()
+                watcher._burst_quiet_timer = None
+
+        # Pressure clears; the next quiet window runs the deferred batch.
+        rss["value"] = 0.0
+        with patch("agent.watcher.WATCHER_MAX_RSS_MB", 10):
+            watcher._on_burst_quiet()
+
+        deadline = time.monotonic() + 2
+        while indexer.index_file.call_count < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        indexer.index_file.assert_called_once_with("/ws/a.py")
+
+    def test_watcher_status_fields_present(self):
+        watcher = CodeWatcher(_mock_indexer())
+        status = watcher.watcher_status()
+        assert set(status) == {
+            "watcher_burst_mode", "watcher_pending_files",
+            "watcher_batch_running", "watcher_last_batch_duration_ms",
+        }
+        assert status["watcher_burst_mode"] is False
+        assert status["watcher_pending_files"] == 0
+        assert status["watcher_batch_running"] is False
+        assert status["watcher_last_batch_duration_ms"] == 0
+
+    def test_watcher_status_reflects_pending_and_burst_mode(self):
+        watcher = CodeWatcher(_mock_indexer())
+        watcher._debounce = MagicMock()
+        with patch("agent.watcher.WATCHER_BURST_FILES_THRESHOLD", 100):
+            watcher.on_modified(_mock_event("/ws/a.py"))
+            watcher.on_modified(_mock_event("/ws/b.py"))
+        status = watcher.watcher_status()
+        assert status["watcher_pending_files"] == 2
+        assert status["watcher_burst_mode"] is False

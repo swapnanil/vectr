@@ -1051,6 +1051,33 @@ watcher:
   # regardless of repo size.
   top_level_rescan_interval_s: 5.0
 
+  # UPG-WATCHER-PRESSURE-GOVERNOR: burst coalescing. A sustained multi-file
+  # edit stream (AI coding agents editing many files in quick succession) hits
+  # the per-file debounce independently for every path, so the embed pipeline
+  # never goes idle — no global ceiling on concurrent re-embed work. When more
+  # than this many distinct paths are pending debounce SIMULTANEOUSLY, every
+  # per-file timer is cancelled and every pending path collapses into one
+  # deferred batch re-index instead — an edit storm then costs one batch pass
+  # over N files, not N independent re-embeds.
+  burst_files_threshold: 8
+  # Seconds of repo-wide silence (no new watched-file event) required, once
+  # burst coalescing has kicked in, before the collapsed batch actually runs.
+  # Keeps the batch from firing mid-storm and having to run again seconds
+  # later for the next wave of edits from the same agent turn.
+  burst_quiet_seconds: 15.0
+  # Optional self-limit (MB) on this process's own resident memory before a
+  # watcher-triggered batch re-index is allowed to run; 0 disables the check
+  # (default — the watcher never inspects memory unless a laptop operator
+  # opts in). When set and exceeded, the batch is deferred to the next quiet
+  # window and ONE warning line is logged instead of running — the collected
+  # paths are never dropped, just retried later. Reads this process's peak
+  # resident set size (stdlib `resource.getrusage`, no extra dependency);
+  # peak RSS is monotonically non-decreasing for the life of the process, so
+  # once tripped this acts as a standing "this process has run hot before,
+  # stop feeding it more embed work" brake rather than an instantaneous
+  # reading — deliberately conservative for a resource-safety guard.
+  max_rss_mb: 0
+
 embedding:
   # Default local (sentence-transformers) embedding model for the L3 content
   # index (UPG-EMBEDDER-SWAP-GRANITE). Dimension-compatible drop-in for the

@@ -402,6 +402,50 @@ class TestCmdStatus:
         assert "not listening" in out
         assert "not responding yet" in out
 
+    def test_watcher_backlog_line_shown_when_pending(self, tmp_path, capsys):
+        # UPG-WATCHER-PRESSURE-GOVERNOR: `vectr status` surfaces watcher
+        # backlog so runaway edit-stream churn is visible, not silent.
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "workspace_root": str(tmp_path), "indexed_files": 10, "total_chunks": 50,
+            "last_indexed": "2026-01-01T00:00:00Z", "embed_model": "granite", "mode": "full",
+            "watcher_burst_mode": True, "watcher_pending_files": 14,
+            "watcher_batch_running": False, "watcher_last_batch_duration_ms": 220,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", return_value=mock_resp):
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        out = capsys.readouterr().out
+        assert "Watcher" in out
+        assert "14" in out
+        assert "burst mode" in out
+
+    def test_watcher_backlog_line_absent_when_quiet(self, tmp_path, capsys):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash(str(tmp_path)), str(tmp_path), 8765, 111)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "workspace_root": str(tmp_path), "indexed_files": 10, "total_chunks": 50,
+            "last_indexed": "2026-01-01T00:00:00Z", "embed_model": "granite", "mode": "full",
+            "watcher_burst_mode": False, "watcher_pending_files": 0,
+            "watcher_batch_running": False, "watcher_last_batch_duration_ms": 0,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", return_value=mock_resp):
+            m.cmd_status(_make_args(path=str(tmp_path)))
+
+        out = capsys.readouterr().out
+        assert "Watcher" not in out
+
 
 # ---------------------------------------------------------------------------
 # cmd_restart

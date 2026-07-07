@@ -319,6 +319,20 @@ def handle_tools_call(
             if status.get("strategy_rationale"):
                 lines.append(f"  Strategy why   : {status['strategy_rationale']}")
 
+        # Watcher backlog (UPG-WATCHER-PRESSURE-GOVERNOR): only surfaced when
+        # there is something to report, so a quiet workspace's status stays terse.
+        pending_files = status.get("watcher_pending_files", 0)
+        burst_mode = status.get("watcher_burst_mode", False)
+        batch_running = status.get("watcher_batch_running", False)
+        if pending_files or burst_mode or batch_running:
+            last_ms = status.get("watcher_last_batch_duration_ms", 0)
+            lines.append(
+                f"  Watcher        : {pending_files} file(s) pending"
+                f"{' (burst mode)' if burst_mode else ''}"
+                f"{' — batch running' if batch_running else ''}"
+                f"{f', last batch {last_ms}ms' if last_ms else ''}"
+            )
+
         # inject adaptive instruction style hint at session start
         try:
             style = service.suggest_instruction_style()

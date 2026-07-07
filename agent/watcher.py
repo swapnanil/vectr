@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fnmatch
+import logging
 import re
 import threading
 import time
@@ -10,8 +11,37 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
 
-from agent.config import WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S
+from agent.config import (
+    WATCHER_TOP_LEVEL_RESCAN_INTERVAL_S,
+    WATCHER_BURST_FILES_THRESHOLD,
+    WATCHER_BURST_QUIET_SECONDS,
+    WATCHER_MAX_RSS_MB,
+)
 from agent.indexer import CodeIndexer, LANG_BY_EXT, EXCLUDED_DIRS
+
+logger = logging.getLogger(__name__)
+
+
+def _default_rss_mb() -> float | None:
+    """This process's peak resident set size in MB, or None if unavailable.
+
+    Uses the stdlib `resource` module (no extra dependency) — unavailable on
+    Windows, in which case the self-limit degrades to a no-op (never blocks a
+    batch). `ru_maxrss` is a PEAK value, monotonically non-decreasing for the
+    life of the process — see `watcher.max_rss_mb` in config.yaml for why that
+    is an acceptable (deliberately conservative) reading for this guard.
+    """
+    try:
+        import resource
+        import sys
+    except ImportError:
+        return None
+    try:
+        ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:
+        return None
+    # macOS reports ru_maxrss in bytes; Linux reports it in KB.
+    return ru_maxrss / (1024 * 1024) if sys.platform == "darwin" else ru_maxrss / 1024
 
 
 class _DebounceTimer:
@@ -57,6 +87,32 @@ class CodeWatcher(FileSystemEventHandler):
         self._top_level_file_mtimes: dict[str, float] = {}
         self._running = False
         self._rescan_timer: threading.Timer | None = None
+
+        # ------------------------------------------------------------------
+        # Burst coalescing + single bounded worker (UPG-WATCHER-PRESSURE-GOVERNOR)
+        # ------------------------------------------------------------------
+        # Injectable so tests can simulate memory pressure without touching
+        # the real process; defaults to the stdlib-only reader above.
+        self._rss_reader = _default_rss_mb
+        self._lock = threading.Lock()
+        # Distinct paths currently outstanding on the per-file _debounce timer
+        # (mirrors _debounce._pending's keys — tracked separately so this
+        # logic works even when a test replaces self._debounce with a mock).
+        self._debounce_pending_paths: set[str] = set()
+        self._burst_mode = False
+        # Paths collected while in burst mode, waiting for repo-wide silence.
+        self._burst_pending: set[str] = set()
+        self._burst_quiet_timer: threading.Timer | None = None
+
+        # Single bounded worker for watcher-triggered batch re-index — never
+        # parallel with itself; a batch that arrives while one is already
+        # running merges into this one pending set instead of starting a
+        # second worker (bounded: one pending batch, not one per event).
+        self._batch_lock = threading.Lock()
+        self._batch_running = False
+        self._pending_batch: set[str] = set()
+        self._batch_thread: threading.Thread | None = None
+        self._last_batch_duration_s = 0.0
 
     def _collect_excluded_dirs(self) -> set[str]:
         """Built-in excluded dir names plus every root's .vectrignore entries.
@@ -152,7 +208,7 @@ class CodeWatcher(FileSystemEventHandler):
             self._refresh_vectrignore()
             return
         if self._is_indexable(event.src_path) and not self._is_excluded(event.src_path):
-            self._debounce.schedule(event.src_path, "modify")
+            self._schedule_change(event.src_path, "modify")
 
     def on_created(self, event: FileSystemEvent) -> None:
         if event.is_directory:
@@ -161,7 +217,7 @@ class CodeWatcher(FileSystemEventHandler):
             self._refresh_vectrignore()
             return
         if self._is_indexable(event.src_path) and not self._is_excluded(event.src_path):
-            self._debounce.schedule(event.src_path, "create")
+            self._schedule_change(event.src_path, "create")
 
     def on_deleted(self, event: FileSystemEvent) -> None:
         if event.is_directory:
@@ -170,6 +226,9 @@ class CodeWatcher(FileSystemEventHandler):
             self._watched_dirs.pop(event.src_path, None)
             return
         if self._is_indexable(event.src_path):
+            with self._lock:
+                self._debounce_pending_paths.discard(event.src_path)
+                self._burst_pending.discard(event.src_path)
             self._indexer.delete_file(event.src_path)
             if self._searcher_refresh:
                 self._searcher_refresh()
@@ -185,17 +244,150 @@ class CodeWatcher(FileSystemEventHandler):
         dest = getattr(event, "dest_path", None)
         # The old path leaves the index (if it was something we indexed).
         if src and self._is_indexable(src):
+            with self._lock:
+                self._debounce_pending_paths.discard(src)
+                self._burst_pending.discard(src)
             self._indexer.delete_file(src)
             if self._searcher_refresh:
                 self._searcher_refresh()
         # The new path is indexed like a create/modify (debounced) unless excluded.
         if dest and self._is_indexable(dest) and not self._is_excluded(dest):
-            self._debounce.schedule(dest, "move")
+            self._schedule_change(dest, "move")
 
     def _handle_change(self, path: str, action: str = "modify") -> None:
+        with self._lock:
+            self._debounce_pending_paths.discard(path)
         self._indexer.index_file(path)
         if self._searcher_refresh:
             self._searcher_refresh()
+
+    # ------------------------------------------------------------------
+    # Burst coalescing + single bounded worker (UPG-WATCHER-PRESSURE-GOVERNOR)
+    #
+    # Below `watcher.burst_files_threshold` distinct pending paths, every path
+    # still uses its own independent per-file `_debounce` timer — unchanged
+    # behaviour. Crossing the threshold cancels every outstanding per-file
+    # timer and switches to collecting paths into one set that fires as a
+    # single batch re-index after `watcher.burst_quiet_seconds` of repo-wide
+    # silence — an edit storm then costs one batch pass, not N independent
+    # re-embeds. The batch itself always runs on a single bounded worker: a
+    # new batch that becomes ready while one is still running merges into one
+    # pending set rather than starting a second worker.
+    # ------------------------------------------------------------------
+
+    def _schedule_change(self, path: str, action: str) -> None:
+        enter_burst = False
+        with self._lock:
+            if self._burst_mode:
+                self._burst_pending.add(path)
+                enter_burst = True  # still in burst mode — reset the quiet timer below
+            else:
+                self._debounce.schedule(path, action)
+                self._debounce_pending_paths.add(path)
+                if len(self._debounce_pending_paths) > WATCHER_BURST_FILES_THRESHOLD:
+                    self._debounce.cancel_all()
+                    self._burst_pending |= self._debounce_pending_paths
+                    self._debounce_pending_paths = set()
+                    self._burst_mode = True
+                    enter_burst = True
+        if enter_burst:
+            self._reset_burst_quiet_timer()
+
+    def _reset_burst_quiet_timer(self) -> None:
+        with self._lock:
+            if self._burst_quiet_timer is not None:
+                self._burst_quiet_timer.cancel()
+            timer = threading.Timer(WATCHER_BURST_QUIET_SECONDS, self._on_burst_quiet)
+            timer.daemon = True
+            self._burst_quiet_timer = timer
+            timer.start()
+
+    def _on_burst_quiet(self) -> None:
+        with self._lock:
+            paths = self._burst_pending
+            self._burst_pending = set()
+            self._burst_quiet_timer = None
+            if not paths:
+                self._burst_mode = False
+                return
+        self._maybe_run_or_defer(paths)
+
+    def _maybe_run_or_defer(self, paths: set[str]) -> None:
+        """Hand a coalesced set of paths to the single bounded worker, unless
+        the self-limit RSS gate is tripped (`watcher.max_rss_mb`) — in which
+        case the batch is deferred to the next quiet window and ONE warning
+        line is logged. Paths are never dropped, only retried later."""
+        if self._rss_over_limit():
+            rss = self._rss_reader()
+            logger.warning(
+                "watcher: RSS %.0fMB exceeds watcher.max_rss_mb=%d — deferring "
+                "batch re-index of %d file(s) to the next quiet window",
+                rss or 0.0, WATCHER_MAX_RSS_MB, len(paths),
+            )
+            with self._lock:
+                self._burst_pending |= paths
+                self._burst_mode = True
+            self._reset_burst_quiet_timer()
+            return
+        with self._lock:
+            self._burst_mode = False
+        self._submit_batch(paths)
+
+    def _rss_over_limit(self) -> bool:
+        if WATCHER_MAX_RSS_MB <= 0:
+            return False
+        try:
+            rss_mb = self._rss_reader()
+        except Exception:
+            return False
+        return rss_mb is not None and rss_mb > WATCHER_MAX_RSS_MB
+
+    def _submit_batch(self, paths: set[str]) -> None:
+        with self._batch_lock:
+            if self._batch_running:
+                self._pending_batch |= paths
+                return
+            self._batch_running = True
+        self._launch_batch_thread(paths)
+
+    def _launch_batch_thread(self, paths: set[str]) -> None:
+        def run() -> None:
+            t0 = time.monotonic()
+            for p in sorted(paths):
+                try:
+                    self._indexer.index_file(p)
+                except Exception:
+                    logger.exception("watcher: batch re-index failed for %s", p)
+            if self._searcher_refresh:
+                self._searcher_refresh()
+            with self._batch_lock:
+                self._last_batch_duration_s = time.monotonic() - t0
+                self._batch_running = False
+                next_paths = self._pending_batch
+                self._pending_batch = set()
+            if next_paths:
+                self._maybe_run_or_defer(next_paths)
+
+        thread = threading.Thread(target=run, daemon=True)
+        self._batch_thread = thread
+        thread.start()
+
+    def watcher_status(self) -> dict:
+        """Observability fields for `status` (UPG-WATCHER-PRESSURE-GOVERNOR):
+        so runaway edit-stream churn is visible instead of silent."""
+        with self._lock:
+            burst_mode = self._burst_mode
+            pending = len(self._debounce_pending_paths) + len(self._burst_pending)
+        with self._batch_lock:
+            batch_running = self._batch_running
+            pending += len(self._pending_batch)
+            last_duration_ms = int(self._last_batch_duration_s * 1000)
+        return {
+            "watcher_burst_mode": burst_mode,
+            "watcher_pending_files": pending,
+            "watcher_batch_running": batch_running,
+            "watcher_last_batch_duration_ms": last_duration_ms,
+        }
 
     # ------------------------------------------------------------------
     # Watch scheduling (UPG-13.1)
@@ -265,7 +457,7 @@ class CodeWatcher(FileSystemEventHandler):
                     prev = self._top_level_file_mtimes.get(key)
                     self._top_level_file_mtimes[key] = mtime
                     if prev is not None and mtime > prev:
-                        self._debounce.schedule(key, "modify")
+                        self._schedule_change(key, "modify")
 
         if self._running:
             self._rescan_timer = threading.Timer(
@@ -313,6 +505,10 @@ class CodeWatcher(FileSystemEventHandler):
         self._running = False
         if self._rescan_timer is not None:
             self._rescan_timer.cancel()
+        with self._lock:
+            if self._burst_quiet_timer is not None:
+                self._burst_quiet_timer.cancel()
+                self._burst_quiet_timer = None
         self._debounce.cancel_all()
         if self._observer:
             self._observer.stop()

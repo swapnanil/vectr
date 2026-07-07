@@ -1345,6 +1345,26 @@ def _mode_and_index_lines(
     return lines
 
 
+def _watcher_backlog_line(data: dict) -> str | None:
+    """One-line watcher backlog summary for `vectr status` (UPG-WATCHER-
+    PRESSURE-GOVERNOR) — None when the workspace is quiet, so a healthy
+    workspace's output stays terse instead of always printing a zero line."""
+    pending = data.get("watcher_pending_files", 0)
+    burst = data.get("watcher_burst_mode", False)
+    running = data.get("watcher_batch_running", False)
+    if not (pending or burst or running):
+        return None
+    last_ms = data.get("watcher_last_batch_duration_ms", 0)
+    parts = [f"{pending} file(s) pending"]
+    if burst:
+        parts.append("burst mode")
+    if running:
+        parts.append("batch running")
+    if last_ms:
+        parts.append(f"last batch {last_ms}ms")
+    return f"Watcher       : {', '.join(parts)}"
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     import httpx
 
@@ -1370,6 +1390,9 @@ def cmd_status(args: argparse.Namespace) -> None:
                 d = resp.json()
                 for line in _mode_and_index_lines(d, "Files    ", "Chunks   ", None, mode_label="Mode     "):
                     print(line)
+                watcher_line = _watcher_backlog_line(d)
+                if watcher_line:
+                    print(watcher_line)
                 _check_version_skew(port, daemon_status=d)
             except httpx.ConnectError:
                 print("  (not listening — not running)")
@@ -1391,6 +1414,9 @@ def cmd_status(args: argparse.Namespace) -> None:
         ):
             print(line)
         print(f"Embed model   : {data['embed_model']}")
+        watcher_line = _watcher_backlog_line(data)
+        if watcher_line:
+            print(watcher_line)
         _check_version_skew(port, daemon_status=data)
     except httpx.ConnectError:
         # UPG-CLI-START-READY-RACE: nothing is listening on this port at all
