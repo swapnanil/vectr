@@ -640,11 +640,13 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         s_end = getattr(r, "symbol_end_line", 0)
         symbol_range_lines = (s_end - s_start + 1) if (s_start and s_end and s_end > s_start) else 0
         content_truncated = symbol_range_lines > 0 and len(content_lines) < symbol_range_lines - 5
-        # UPG-CTX-EVICT: the expand hint now points at vectr_fetch(ids=[...])
-        # rather than a blind Read(file, offset=N) — vectr_fetch returns the
-        # chunk's FULL stored content (no 2000-char display cap), keeps the
-        # caller in the vectr tool family, and works even after the file on
-        # disk has moved on from what was indexed.
+        # UPG-CTX-EVICT: the display-cap expand hint points at
+        # vectr_fetch(ids=[...]) — vectr_fetch returns the chunk's FULL stored
+        # content (no 80-line display cap) and keeps the caller in the vectr
+        # tool family. The STORAGE-cap branch below must NOT use it: a chunk
+        # capped at ~2000 chars at index time is stored capped, so vectr_fetch
+        # would return the same truncated content — only a file read reaches
+        # the missing tail.
         if len(content_lines) > 80:
             # Hard cap: the content itself is long but we also cap the display.
             lines.append("\n".join(content_lines[:80]))
@@ -655,11 +657,13 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         elif content_truncated:
             # Content was silently capped by the 2000-char storage limit before
             # it reached the full symbol body.  Show what we have, then prompt.
+            # vectr_fetch cannot help here — the index itself holds only the
+            # capped content — so point at the file on disk.
             lines.append(r.content)
             missing = symbol_range_lines - len(content_lines)
             lines.append(
                 f"... {missing} more lines (content capped at ~2000 chars) — "
-                f"vectr_fetch(ids=[{chunk_id!r}]) restores the full chunk"
+                f"Read({r.file_path!r}, offset={s_start - 1}, limit={symbol_range_lines}) for full definition"
             )
         else:
             lines.append(r.content)

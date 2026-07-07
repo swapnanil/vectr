@@ -1362,13 +1362,16 @@ class TestFormatSearchResults:
             "UPG-11.4-b: expand hint must fire when stored content is shorter than symbol range. "
             f"Got: {text[-200:]}"
         )
-        assert "vectr_fetch(ids=" in text, (
-            "UPG-CTX-EVICT: expand hint must contain a vectr_fetch(ids=[...]) pointer "
-            "for the full definition."
+        # UPG-CTX-EVICT review fix: a chunk capped by the 2000-char STORAGE
+        # limit is stored capped — vectr_fetch would return the same truncated
+        # content, so this branch must point at a file read, not vectr_fetch.
+        assert "Read(" in text and "offset=605" in text and "limit=100" in text, (
+            "storage-capped expand hint must point at a file read reaching the "
+            f"missing tail. Got: {text[-260:]}"
         )
-        assert "django/db/models/fields/__init__.py:606-705" in text, (
-            "UPG-CTX-EVICT: expand hint must reference the chunk's own id. "
-            f"Got: {text[-200:]}"
+        assert "capped at ~2000 chars) — vectr_fetch" not in text, (
+            "vectr_fetch must NOT be advertised for storage-capped chunks — "
+            "the index holds only the capped content."
         )
 
     def test_expand_hint_not_fired_when_content_covers_full_symbol(self) -> None:
