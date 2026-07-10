@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2 — 2026-07-11
+
+- PyPI project page now renders the README (`readme` was missing from package metadata), plus license, author, and project URL metadata.
+- Removed the vestigial `LLM_MODEL` env var, `agent/llm_client.py`, and the dead `model` field it echoed into `/v1/health`, `/v1/index`, `/v1/search`, and `/v1/status` responses. Vectr makes no LLM calls; the field had no consumers.
+- `.env.example` updated to the shipped defaults: `ibm-granite/granite-embedding-english-r2` embedding model; removed the unused `ANTHROPIC_API_KEY` entry.
+- `.vectrignore` untracked (repository-local indexing config, not product content).
+
 ## 1.0.1 — 2026-07-11
 
 - Package description now covers both halves of the product: semantic codebase search and persistent working memory. The 1.0.0 description mentioned only the indexer.

@@ -70,7 +70,7 @@ The research phase (paid once to build notes) costs more for vectr (+94%) becaus
 
 Earlier runs on Apache Camel (Java, 5,856 files): **−58% impl cost · −72% impl tool calls · −39% wall time.**
 
-Full results: [`benchmarks/`](benchmarks/)
+Full results: [`benchmarks/`](https://github.com/swapnanil/vectr/tree/main/benchmarks)
 
 ---
 

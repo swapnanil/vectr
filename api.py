@@ -56,7 +56,7 @@ app = FastAPI(
         "(search/locate/trace/map) plus a working-memory store (remember/recall/"
         "snapshot) that survives context compaction and session boundaries."
     ),
-    version="1.0.1",
+    version="1.0.2",
     lifespan=lifespan,
 )
 

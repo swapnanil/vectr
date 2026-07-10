@@ -6,7 +6,6 @@ import uuid
 
 from fastapi import APIRouter, Body, HTTPException, Request, Response
 
-from agent.llm_client import get_model
 from app.models import (
     FetchEntry,
     FetchRequest,
@@ -55,7 +54,6 @@ async def health(request: Request) -> HealthResponse:
     svc = _service(request)
     return HealthResponse(
         status="ok",
-        model=get_model(),
         embed_model=svc._embed_model,
         last_indexed=svc.last_indexed,
     )
@@ -75,7 +73,6 @@ async def index(body: IndexRequest, request: Request) -> IndexResponse:
         indexed_files=files,
         total_chunks=chunks,
         processing_ms=elapsed,
-        model=get_model(),
     )
 
 
@@ -109,7 +106,6 @@ async def search(body: SearchRequest, request: Request) -> SearchResponse:
         query_time_ms=query_ms,
         chunks_searched=svc.total_chunks,
         processing_ms=int((time.monotonic() - t0) * 1000),
-        model=get_model(),
         low_confidence=getattr(results, "low_confidence", False),
     )
 
@@ -158,7 +154,6 @@ async def status(request: Request) -> StatusResponse:
     return StatusResponse(
         **data,
         processing_ms=int((time.monotonic() - t0) * 1000),
-        model=get_model(),
     )
 
 

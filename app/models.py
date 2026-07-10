@@ -58,7 +58,6 @@ class SearchResponse(BaseModel):
     query_time_ms: int
     chunks_searched: int
     processing_ms: int
-    model: str
     # UPG-NOTFOUND-FLOOR (F46/F52): true when the query names a concept that
     # has no lexical anchor anywhere in the indexed corpus — at least
     # `ranking.notfound_floor.min_zero_df_tokens` of its content words have
@@ -75,7 +74,6 @@ class IndexResponse(BaseModel):
     indexed_files: int
     total_chunks: int
     processing_ms: int
-    model: str
 
 
 class FetchRequest(BaseModel):
@@ -131,7 +129,6 @@ class StatusResponse(BaseModel):
     symbol_graph_complete: bool = False
     symbol_graph_failed_files: int = 0
     processing_ms: int
-    model: str
     # Adaptive retrieval strategy. Always populated by VectrService.status()
     # (UPG-8.2): the config-declared defaults before the first index-time
     # fingerprint, the fingerprint-derived values after. Optional here only
@@ -174,7 +171,6 @@ class StatusResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    model: str
     embed_model: str
     # Sourced from the same VectrService.last_indexed property as
     # /v1/status so the two endpoints never disagree on freshness (UPG-8.2).

@@ -15,8 +15,11 @@ agent = ["config.yaml", "data/*.txt", "templates/*"]
 
 [project]
 name = "vectr"
-version = "1.0.1"
+version = "1.0.2"
 description = "Semantic codebase search + persistent working memory for AI code editors. Local, zero-config, MCP. No API key."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Swapnanil Saha", email = "swapnanilsaha26@gmail.com" }]
 requires-python = ">=3.14"
 dependencies = [
     "fastapi==0.136.3",
@@ -56,6 +59,12 @@ dev = [
     "pytest-asyncio==1.3.0",
     "anyio==4.13.0",
 ]
+
+[project.urls]
+Homepage = "https://swapnanilsaha.com/tools/vectr"
+Repository = "https://github.com/swapnanil/vectr"
+Changelog = "https://github.com/swapnanil/vectr/blob/main/CHANGELOG.md"
+Issues = "https://github.com/swapnanil/vectr/issues"
 
 [project.scripts]
 vectr = "main:main"

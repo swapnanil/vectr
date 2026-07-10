@@ -1,4 +1,0 @@
-# vectr: directory names to exclude from indexing (one per line).
-# tmp/ holds benchmark clones (poc-*); indexing them triggered runaway
-# re-indexing on the always-on instance — see UPG-8.1.
-tmp

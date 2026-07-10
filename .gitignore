@@ -84,3 +84,4 @@ benchmarks/cpython/vectr_index.json
 
 # benchmark run artifacts (eval output, not source)
 benchmarks/harness/results/
+/.vectrignore
