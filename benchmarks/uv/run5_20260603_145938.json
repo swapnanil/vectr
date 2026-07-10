@@ -1438,7 +1438,7 @@
             "duration_s": 0.10503602027893066,
             "turn": 114,
             "tool_name": "Bash",
-            "input_summary": "grep -r \"requests\\[nonexistent\\]\\|extras.*validation\\|validate.*extras\" /Users/s",
+            "input_summary": "grep -r \"requests\\[nonexistent\\]\\|extras.*validation\\|validate.*extras\" /path/to",
             "full_input": {
               "command": "grep -r \"requests\\[nonexistent\\]\\|extras.*validation\\|validate.*extras\" /path/to/vectr/tmp/poc-uv-vanilla/crates --include=\"*.rs\" | head -20"
             },

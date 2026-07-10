@@ -293,7 +293,7 @@
             "duration_s": 0.07472109794616699,
             "turn": 31,
             "tool_name": "Bash",
-            "input_summary": "grep -rn \"__del__\\|tp_finalize\\|tp_del\\|slot_tp_finalize\\|slot_tp_del\" /Users/sw",
+            "input_summary": "grep -rn \"__del__\\|tp_finalize\\|tp_del\\|slot_tp_finalize\\|slot_tp_del\" /path/to",
             "full_input": {
               "command": "grep -rn \"__del__\\|tp_finalize\\|tp_del\\|slot_tp_finalize\\|slot_tp_del\" /path/to/vectr/tmp/poc-cpython-vanilla/Objects/typeobject.c | grep -E \"slot_tp|__del__|tp_finalize|tp_del\" | head -30",
               "description": "Find how __del__ maps to C type slots"

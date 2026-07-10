@@ -102,7 +102,7 @@
             "duration_s": 0.2725350856781006,
             "turn": 8,
             "tool_name": "Bash",
-            "input_summary": "grep -n \"gc_generation_stats\\|gc_stats\\|generation_stats\\|struct gc_gen\" /Users/",
+            "input_summary": "grep -n \"gc_generation_stats\\|gc_stats\\|generation_stats\\|struct gc_gen\" /path/to",
             "full_input": {
               "command": "grep -n \"gc_generation_stats\\|gc_stats\\|generation_stats\\|struct gc_gen\" /path/to/vectr/tmp/poc-cpython-vanilla/Include/internal/pycore_gc.h | head -60",
               "description": "Find generation stats structure definitions"
@@ -250,7 +250,7 @@
             "duration_s": 0.07167315483093262,
             "turn": 29,
             "tool_name": "Bash",
-            "input_summary": "grep -n \"tp_del\\|tp_finalize\\|__del__\\|slot_tp_del\\|slot_tp_finalize\" /Users/swa",
+            "input_summary": "grep -n \"tp_del\\|tp_finalize\\|__del__\\|slot_tp_del\\|slot_tp_finalize\" /path/to",
             "full_input": {
               "command": "grep -n \"tp_del\\|tp_finalize\\|__del__\\|slot_tp_del\\|slot_tp_finalize\" /path/to/vectr/tmp/poc-cpython-vanilla/Objects/typeobject.c | head -40",
               "description": "Find __del__ to tp_del/tp_finalize mapping in typeobject.c"

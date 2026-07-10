@@ -651,7 +651,7 @@
           "duration_s": 0.5787718296051025,
           "turn": 61,
           "tool_name": "Bash",
-          "input_summary": "grep -n \"FAST_SEARCH\\|FAST_COUNT\\|FASTSEARCH\\|fastsearch\\|define.*FAST\" /Users/s",
+          "input_summary": "grep -n \"FAST_SEARCH\\|FAST_COUNT\\|FASTSEARCH\\|fastsearch\\|define.*FAST\" /path/to",
           "full_input": {
             "command": "grep -n \"FAST_SEARCH\\|FAST_COUNT\\|FASTSEARCH\\|fastsearch\\|define.*FAST\" /path/to/vectr/tmp/poc-cpython-vanilla/Objects/stringlib/fastsearch.h | head -30",
             "description": "Look at FASTSEARCH macro signature in fastsearch.h"

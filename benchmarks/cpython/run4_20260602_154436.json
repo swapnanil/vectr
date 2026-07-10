@@ -742,7 +742,7 @@
             "duration_s": 0.09232211112976074,
             "turn": 31,
             "tool_name": "Bash",
-            "input_summary": "grep -n \"tp_del\\|tp_finalize\\|__del__\\|slot_tp_del\\|slot_tp_finalize\" /Users/swa",
+            "input_summary": "grep -n \"tp_del\\|tp_finalize\\|__del__\\|slot_tp_del\\|slot_tp_finalize\" /path/to",
             "full_input": {
               "command": "grep -n \"tp_del\\|tp_finalize\\|__del__\\|slot_tp_del\\|slot_tp_finalize\" /path/to/vectr/tmp/poc-cpython-vectr/Objects/typeobject.c | grep -i \"del\\|finalize\" | head -30",
               "description": "Find how __del__ maps to tp_del vs tp_finalize in typeobject.c"

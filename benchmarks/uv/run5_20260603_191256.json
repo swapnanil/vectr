@@ -1091,7 +1091,7 @@
             "duration_s": 0.06467318534851074,
             "turn": 73,
             "tool_name": "Bash",
-            "input_summary": "grep -n \"provides_extras\\|pub extras\\|ExtraName\\|optional_dependencies\" /Users/s",
+            "input_summary": "grep -n \"provides_extras\\|pub extras\\|ExtraName\\|optional_dependencies\" /path/to",
             "full_input": {
               "command": "grep -n \"provides_extras\\|pub extras\\|ExtraName\\|optional_dependencies\" /path/to/vectr/tmp/poc-uv-vectr/crates/uv-pypi-types/src/metadata/metadata23.rs | head -30",
               "description": "Find extras fields in Metadata23"
@@ -1605,7 +1605,7 @@
             "duration_s": 0.05981302261352539,
             "turn": 111,
             "tool_name": "Bash",
-            "input_summary": "grep -n \"parse_markers\\b\\|parse_marker_\\|\\.marker\\s*=\\|marker:\\s*parse\" /Users/s",
+            "input_summary": "grep -n \"parse_markers\\b\\|parse_marker_\\|\\.marker\\s*=\\|marker:\\s*parse\" /path/to",
             "full_input": {
               "command": "grep -n \"parse_markers\\b\\|parse_marker_\\|\\.marker\\s*=\\|marker:\\s*parse\" /path/to/vectr/tmp/poc-uv-vectr/crates/uv-pep508/src/lib.rs | head -30",
               "description": "Find marker assignment in requirement parsing"
@@ -1631,7 +1631,7 @@
             "duration_s": 0.06528711318969727,
             "turn": 113,
             "tool_name": "Bash",
-            "input_summary": "grep -n \"provides_extra\\|extras.*valid\\|invalid.*extra\\|unknown.*extra\" /Users/s",
+            "input_summary": "grep -n \"provides_extra\\|extras.*valid\\|invalid.*extra\\|unknown.*extra\" /path/to",
             "full_input": {
               "command": "grep -n \"provides_extra\\|extras.*valid\\|invalid.*extra\\|unknown.*extra\" /path/to/vectr/tmp/poc-uv-vectr/crates/uv-resolver/src/resolver/mod.rs | head -20",
               "description": "Search resolver for extras validation"

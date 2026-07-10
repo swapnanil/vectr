@@ -510,7 +510,7 @@
             "duration_s": 0.5170998573303223,
             "turn": 30,
             "tool_name": "Bash",
-            "input_summary": "grep -n \"tp_del\\|tp_finalize\\|__del__\\|slot_tp_del\\|slot_tp_finalize\" /Users/swa",
+            "input_summary": "grep -n \"tp_del\\|tp_finalize\\|__del__\\|slot_tp_del\\|slot_tp_finalize\" /path/to",
             "full_input": {
               "command": "grep -n \"tp_del\\|tp_finalize\\|__del__\\|slot_tp_del\\|slot_tp_finalize\" /path/to/vectr/tmp/poc-cpython-vectr/Objects/typeobject.c | grep -v \"^\\s*//\" | head -40",
               "description": "Find slot mapping for __del__ in typeobject.c"
