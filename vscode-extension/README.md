@@ -15,7 +15,7 @@ Everything runs locally. No API key, no code leaves your machine.
 - Python 3.14+ with the `vectr` package installed:
 
 ```bash
-pip install git+https://github.com/swapnanil/vectr
+pip install vectr
 ```
 
 On first run the embedding model (~440 MB) downloads once and is cached.

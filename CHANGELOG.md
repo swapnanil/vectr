@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 — 2026-07-11
+
+- Package description now covers both halves of the product: semantic codebase search and persistent working memory. The 1.0.0 description mentioned only the indexer.
+- Install instructions updated to `pip install vectr` (PyPI release) in README, extension README, and docs page.
+- Personal development configuration untracked from the repository (`CLAUDE.md`, `.mcp.json`, `.cursor/mcp.json`); local absolute paths in benchmark data and harness scripts genericized.
+
 ## 1.0.0 — 2026-07-08
 
 **Semantic search**

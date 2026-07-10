@@ -100,7 +100,7 @@ Fine print: the automatic eviction/reminder banners riding along on tool respons
 ```bash
 python3.14 -m venv ~/.vectr-env
 source ~/.vectr-env/bin/activate   # Windows: ~/.vectr-env/Scripts/activate
-pip install git+https://github.com/swapnanil/vectr
+pip install vectr
 cd /path/to/your/project
 vectr start
 ```

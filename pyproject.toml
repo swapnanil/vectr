@@ -15,8 +15,8 @@ agent = ["config.yaml", "data/*.txt", "templates/*"]
 
 [project]
 name = "vectr"
-version = "1.0.0"
-description = "Zero-config local semantic codebase indexer with MCP protocol"
+version = "1.0.1"
+description = "Semantic codebase search + persistent working memory for AI code editors. Local, zero-config, MCP. No API key."
 requires-python = ">=3.14"
 dependencies = [
     "fastapi==0.136.3",
