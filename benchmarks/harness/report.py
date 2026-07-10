@@ -9,7 +9,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 import os
-OUTPUT_DIR = os.getenv("POC_OUTPUT_DIR", "/Users/swapnanil.s/Documents/fde/vectr/benchmarks/django")
+OUTPUT_DIR = os.getenv("POC_OUTPUT_DIR", "/path/to/vectr/benchmarks/django")
 
 _WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 
@@ -495,7 +495,7 @@ def save_results(results: list, prompt_variant: str = "additive") -> Path:
 
 
 def save_run3_results(runs: list, prompt_variant: str = "additive", run_ts: str | None = None) -> Path:
-    output_dir = Path(os.getenv("POC_OUTPUT_DIR", "/Users/swapnanil.s/Documents/fde/vectr/benchmarks/cpython"))
+    output_dir = Path(os.getenv("POC_OUTPUT_DIR", "/path/to/vectr/benchmarks/cpython"))
     output_dir.mkdir(parents=True, exist_ok=True)
     ts   = run_ts or datetime.now().strftime("%Y%m%d_%H%M%S")
     path = output_dir / f"run3_{ts}_{prompt_variant}.json"
@@ -777,7 +777,7 @@ def print_run4_report(
 
 
 def save_run4_results(runs: list, run_ts: str | None = None) -> Path:
-    output_dir = Path(os.getenv("POC_OUTPUT_DIR", "/Users/swapnanil.s/Documents/fde/vectr/benchmarks/cpython"))
+    output_dir = Path(os.getenv("POC_OUTPUT_DIR", "/path/to/vectr/benchmarks/cpython"))
     output_dir.mkdir(parents=True, exist_ok=True)
     ts   = run_ts or datetime.now().strftime("%Y%m%d_%H%M%S")
     path = output_dir / f"run4_{ts}.json"
@@ -818,7 +818,7 @@ def save_run4_results(runs: list, run_ts: str | None = None) -> Path:
 
 def save_run_sequential_results(runs: list, run_prefix: str = "run4", run_ts: str | None = None) -> Path:
     """Generic sequential-run save: works for run4, run5 (uv), run6 (tigerbeetle)."""
-    output_dir = Path(os.getenv("POC_OUTPUT_DIR", "/Users/swapnanil.s/Documents/fde/vectr/benchmarks/cpython"))
+    output_dir = Path(os.getenv("POC_OUTPUT_DIR", "/path/to/vectr/benchmarks/cpython"))
     output_dir.mkdir(parents=True, exist_ok=True)
     ts   = run_ts or datetime.now().strftime("%Y%m%d_%H%M%S")
     path = output_dir / f"{run_prefix}_{ts}.json"

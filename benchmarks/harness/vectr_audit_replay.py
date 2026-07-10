@@ -66,7 +66,7 @@ def main():
         print(f"  AFTER:  {code} code · {mdh} md-heading · {mdt} md-text  ({res['query_time_ms']}ms)")
         for i, (r, k) in enumerate(zip(results, kinds), 1):
             tag = {"code": "✅", "md-heading": "❌", "md-text": "📄"}[k]
-            f = r["file"].replace("/Users/swapnanil.s/Documents/", "~/")
+            f = r["file"].replace("/path/to/", "~/")
             first = (r.get("content") or "").strip().splitlines()
             snip = first[0][:60] if first else ""
             print(f"    {i:>2}. {tag} [{r.get('language') or '?':<8}] {r['score']:.3f} {f}:{r['lines']}  | {snip}")

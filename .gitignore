@@ -45,6 +45,10 @@ htmlcov/
 *.swo
 *~
 
+# Local dev scaffolding (agent instructions + editor/MCP config; not shipped)
+/CLAUDE.md
+/.mcp.json
+
 # macOS
 .DS_Store
 .AppleDouble

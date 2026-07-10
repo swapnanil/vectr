@@ -63,7 +63,7 @@ VECTR_DIR   = os.getenv("POC_VECTR_DIR",   "/tmp/poc-django-vectr")
 VANILLA_DIR_RUN3 = os.getenv("POC_VANILLA_DIR_RUN3", "/tmp/poc-cpython-vanilla")
 VECTR_DIR_RUN3   = os.getenv("POC_VECTR_DIR_RUN3",   "/tmp/poc-cpython-vectr")
 
-_VECTR_BASE = "/Users/swapnanil.s/Documents/fde/vectr/tmp"
+_VECTR_BASE = "/path/to/vectr/tmp"
 
 VANILLA_DIR_RUN5 = os.getenv("POC_VANILLA_DIR_RUN5", f"{_VECTR_BASE}/poc-uv-vanilla")
 VECTR_DIR_RUN5   = os.getenv("POC_VECTR_DIR_RUN5",   f"{_VECTR_BASE}/poc-uv-vectr")
@@ -74,7 +74,7 @@ VECTR_DIR_RUN6   = os.getenv("POC_VECTR_DIR_RUN6",   f"{_VECTR_BASE}/poc-tigerbe
 VECTR_PORT_RUN6  = 8767
 
 _CLAUDE_DEFAULT = (
-    "/Users/swapnanil.s/Library/Application Support/Claude"
+    "/path/to/home/Library/Application Support/Claude"
     "/claude-code/2.1.149/claude.app/Contents/MacOS/claude"
 )
 CLAUDE_BIN = _CLAUDE_DEFAULT if os.path.exists(_CLAUDE_DEFAULT) else "claude"
@@ -1438,7 +1438,7 @@ def main() -> None:
         # impl session — a kill loses at most the one impl currently running.
         os.environ.setdefault(
             "POC_OUTPUT_DIR",
-            "/Users/swapnanil.s/Documents/fde/vectr/benchmarks/cpython",
+            "/path/to/vectr/benchmarks/cpython",
         )
         task_filter = args.task
         tasks = CPYTHON_TASKS
@@ -1491,7 +1491,7 @@ def main() -> None:
         if args.resume:
             loaded_ts, resume_state = _load_resume_state(
                 Path(os.environ.get("POC_OUTPUT_DIR",
-                     "/Users/swapnanil.s/Documents/fde/vectr/benchmarks/cpython")),
+                     "/path/to/vectr/benchmarks/cpython")),
                 variant,
             )
             if loaded_ts:
@@ -1633,7 +1633,7 @@ def main() -> None:
         # Vanilla and vectr run in PARALLEL within each task.
         os.environ.setdefault(
             "POC_OUTPUT_DIR",
-            "/Users/swapnanil.s/Documents/fde/vectr/benchmarks/cpython",
+            "/path/to/vectr/benchmarks/cpython",
         )
 
         tasks_to_run = [t for t in GC_TASKS if args.task is None or t.id == t.id and t.id == (args.task or t.id)]
@@ -1740,7 +1740,7 @@ def main() -> None:
             vectr_port=VECTR_PORT_RUN5,
             output_dir=os.environ.get(
                 "POC_OUTPUT_DIR",
-                "/Users/swapnanil.s/Documents/fde/vectr/benchmarks/uv",
+                "/path/to/vectr/benchmarks/uv",
             ),
             max_turns=args.max_turns if args.max_turns is not None else args.max_turns_p2,
             save=args.save,
@@ -1760,7 +1760,7 @@ def main() -> None:
             vectr_port=VECTR_PORT_RUN6,
             output_dir=os.environ.get(
                 "POC_OUTPUT_DIR",
-                "/Users/swapnanil.s/Documents/fde/vectr/benchmarks/tigerbeetle",
+                "/path/to/vectr/benchmarks/tigerbeetle",
             ),
             max_turns=args.max_turns if args.max_turns is not None else args.max_turns_p2,
             save=args.save,

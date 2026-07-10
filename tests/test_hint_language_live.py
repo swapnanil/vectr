@@ -35,12 +35,12 @@ import pytest
 # ---------------------------------------------------------------------------
 
 _CLAUDE_DEFAULT = (
-    "/Users/swapnanil.s/Library/Application Support/Claude"
+    "/path/to/home/Library/Application Support/Claude"
     "/claude-code/2.1.149/claude.app/Contents/MacOS/claude"
 )
 CLAUDE_BIN = _CLAUDE_DEFAULT if os.path.exists(_CLAUDE_DEFAULT) else "claude"
 
-VECTR_WORKSPACE = "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-cpython-vectr"
+VECTR_WORKSPACE = "/path/to/vectr/tmp/poc-cpython-vectr"
 
 VECTR_REMEMBER_TOOL = "mcp__vectr__vectr_remember"
 

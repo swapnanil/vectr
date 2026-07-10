@@ -7,8 +7,9 @@ Usage: python3 vectr_full_audit.py <cpython|uv|tigerbeetle> <port>
 """
 import json, sys, urllib.request
 from collections import Counter
+from pathlib import Path
 
-sys.path.insert(0, "/Users/swapnanil.s/Documents/fde/vectr")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from agent.chunk_quality import (
     is_trivial_chunk, is_navigational_chunk, is_test_file,
     is_generated_file, is_vectr_config_file, is_doc_language,

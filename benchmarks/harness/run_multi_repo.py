@@ -49,13 +49,13 @@ logging.basicConfig(
 logger = logging.getLogger("multi_repo")
 
 _CLAUDE_DEFAULT = (
-    "/Users/swapnanil.s/Library/Application Support/Claude"
+    "/path/to/home/Library/Application Support/Claude"
     "/claude-code/2.1.149/claude.app/Contents/MacOS/claude"
 )
 CLAUDE_BIN = _CLAUDE_DEFAULT if os.path.exists(_CLAUDE_DEFAULT) else "claude"
 
 OUTPUT_DIR = Path(
-    os.getenv("MULTI_REPO_OUTPUT", "/Users/swapnanil.s/Documents/fde/vectr/benchmarks/multi_repo")
+    os.getenv("MULTI_REPO_OUTPUT", "/path/to/vectr/benchmarks/multi_repo")
 )
 
 

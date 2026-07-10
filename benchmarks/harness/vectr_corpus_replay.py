@@ -7,8 +7,9 @@ Usage: python3 vectr_corpus_replay.py <cpython|uv|tigerbeetle> <port>
 
 'Before' baselines are from opus_findings_{corpus}.md (2026-06-14)."""
 import json, sys, urllib.request
+from pathlib import Path
 
-sys.path.insert(0, "/Users/swapnanil.s/Documents/fde/vectr")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from agent.chunk_quality import (
     is_trivial_chunk, is_navigational_chunk, is_test_file,
     is_generated_file, is_vectr_config_file, is_doc_language,
@@ -84,7 +85,7 @@ def main():
         print(f"  {before}")
         print(f"  AFTER: {summary}  ({res['query_time_ms']}ms)")
         for i,(r,k) in enumerate(zip(results,kinds),1):
-            f = r["file"].replace("/Users/swapnanil.s/Documents/fde/vectr/tmp/","")
+            f = r["file"].replace("/path/to/vectr/tmp/","")
             snip = (r.get("content") or "").strip().splitlines()
             snip = snip[0][:58] if snip else ""
             print(f"    {i}. {TAG[k]} [{r.get('language') or '?':<8}] {r['score']:.3f} {f}:{r['lines']} | {snip}")

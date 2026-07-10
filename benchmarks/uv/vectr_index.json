@@ -3,7 +3,7 @@
   "total_chunks": 8298,
   "last_indexed": "2026-06-03T13:23:52Z",
   "embed_model": "Snowflake/snowflake-arctic-embed-m-v1.5",
-  "workspace_root": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-uv-vectr",
+  "workspace_root": "/path/to/vectr/tmp/poc-uv-vectr",
   "symbol_count": 15566,
   "notes_count": 0,
   "processing_ms": 47,

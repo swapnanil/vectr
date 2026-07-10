@@ -1,4 +1,4 @@
-The uv Python package manager source code (Rust) is at: /Users/swapnanil.s/Documents/fde/vectr/tmp/poc-uv-vectr
+The uv Python package manager source code (Rust) is at: /path/to/vectr/tmp/poc-uv-vectr
 
 Explore three related areas of the uv codebase and write investigation files
 documenting your findings. uv is written in Rust — use vectr_search to find

@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "vectr": {
-      "url": "http://localhost:8765/mcp",
-      "name": "Vectr \u2014 Semantic Codebase Search"
-    }
-  }
-}

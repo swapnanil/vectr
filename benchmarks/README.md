@@ -194,4 +194,4 @@ Vanilla P2 doesn't just cost more — it can fail entirely. On `custom_component
 | Run 2 (Camel) | `camel/` | `README.md`, `poc_results_*.json`, `answer_*_p{1,2}.txt` |
 | Run 3 (CPython) | `cpython/` | `README.md`, `run3_*.json` |
 
-POC source: `/Users/swapnanil.s/Documents/swapnanilsaha.com/tools/vectr/poc/`
+POC source: `/path/to/swapnanilsaha.com/tools/vectr/poc/`
