@@ -1193,6 +1193,86 @@ def cmd_start(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_proxy(args: argparse.Namespace) -> None:
+    """Run the experimental localhost Anthropic-shaped proxy (UPG-PRO-16).
+
+    Point the agent harness at it with
+    `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`. It forwards to the real API
+    and — when injection is enabled and the workspace daemon is running — appends
+    deterministic proactive context after the last prompt-cache breakpoint. The
+    listener is localhost-only and refuses any non-loopback bind (Proactive
+    context is a solo/localhost-only feature, mutually exclusive with team mode).
+    """
+    import dataclasses
+
+    from agent.proactive.settings import ProactiveSettings
+    from agent.proactive.proxy import build_proxy_app
+    from agent.proactive.provider import DaemonInjectionProvider
+    from agent.proactive.cache import ResponseCache
+
+    settings = ProactiveSettings.from_env()
+    host = getattr(args, "host", None) or settings.proxy_host
+    port = getattr(args, "port", None) or settings.proxy_port
+    upstream = getattr(args, "upstream", None) or settings.proxy_upstream_base_url
+    inject = settings.proxy_inject and not getattr(args, "no_inject", False)
+    settings = dataclasses.replace(
+        settings, proxy_host=host, proxy_port=port,
+        proxy_upstream_base_url=upstream, proxy_inject=inject,
+    )
+
+    # Localhost-only listener (design §9/§10). A non-loopback bind is refused:
+    # the proxy sees the full conversation, so it is a solo/localhost-only
+    # feature and is mutually exclusive with team / shared-instance mode.
+    if not _is_loopback_host(host):
+        print(
+            f"Error: the vectr proxy binds localhost only; refusing to bind {host}.\n"
+            f"  Proactive context reads the conversation and is a solo-only feature,\n"
+            f"  mutually exclusive with team mode. Use --host 127.0.0.1 (the default).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    workspace = str(Path(getattr(args, "path", ".") or ".").resolve())
+    daemon_port = getattr(args, "daemon_port", None) or _get_port_for_workspace(workspace, 8765)
+    api_key = os.getenv("VECTR_API_KEY") or None
+
+    provider = None
+    if inject:
+        provider = DaemonInjectionProvider(
+            _api_base(daemon_port),
+            timeout_s=max(settings.proxy_inject_budget_ms, 1) / 1000.0,
+            api_key=api_key,
+        )
+    response_cache = None
+    if settings.response_cache_enabled:
+        response_cache = ResponseCache(
+            max_entries=settings.response_cache_max_entries,
+            ttl_seconds=settings.response_cache_ttl_seconds,
+        )
+
+    app = build_proxy_app(
+        settings, injection_provider=provider, response_cache=response_cache
+    )
+
+    base = f"http://{host}:{port}"
+    print("Vectr proxy (experimental — Proactive context) starting.", file=sys.stderr)
+    print(f"  Listening : {base}", file=sys.stderr)
+    print(f"  Upstream  : {upstream}", file=sys.stderr)
+    print(f"  Injection : {'on (daemon ' + _api_base(daemon_port) + ')' if inject else 'off (transparent pass-through)'}", file=sys.stderr)
+    print(f"  Resp cache: {'on' if response_cache is not None else 'off'}", file=sys.stderr)
+    print("  Wire it up:", file=sys.stderr)
+    print(f"    export ANTHROPIC_BASE_URL={base}", file=sys.stderr)
+    print("  Bypass at any time by unsetting it:", file=sys.stderr)
+    print("    unset ANTHROPIC_BASE_URL", file=sys.stderr)
+    print("  Caveats on a non-first-party base URL (documented upstream):", file=sys.stderr)
+    print("    - MCP tool search is disabled unless ENABLE_TOOL_SEARCH=true and the proxy forwards tool_reference blocks.", file=sys.stderr)
+    print("    - Remote Control is disabled on a non-api.anthropic.com base URL.", file=sys.stderr)
+    print("  The upstream API key is forwarded untouched and never stored or logged.", file=sys.stderr)
+
+    import uvicorn
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
 def cmd_index(args: argparse.Namespace) -> None:
     import httpx
 
@@ -1614,6 +1694,32 @@ def _hook_injection_line(data: dict) -> str | None:
     return f"Hook injections : {parts}"
 
 
+def _proactive_injection_line(data: dict) -> str | None:
+    """One-line proactive-injection summary for `vectr status` (UPG-PRO) — None
+    until proactive context has injected something, so a workspace not using the
+    feature stays terse instead of a permanent zero line."""
+    counts = data.get("proactive_injection_counts") or {}
+    if not counts:
+        return None
+    parts = ", ".join(f"{channel} {n}" for channel, n in counts.items())
+    return f"Proactive injections : {parts}"
+
+
+def _artifact_cache_line(data: dict) -> str | None:
+    """One-line org-wide artifact-cache summary for `vectr status` (UPG-PRO) —
+    None when the cache is off, so its metrics only appear once it is enabled."""
+    metrics = data.get("artifact_cache")
+    if not metrics:
+        return None
+    return (
+        f"Artifact cache : {metrics.get('hits', 0)} hits / "
+        f"{metrics.get('misses', 0)} misses "
+        f"(hit rate {metrics.get('hit_rate', 0.0)}, "
+        f"{metrics.get('entries', 0)} entries, "
+        f"~{metrics.get('est_tokens_saved', 0)} tokens saved)"
+    )
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     import httpx
 
@@ -1672,6 +1778,12 @@ def cmd_status(args: argparse.Namespace) -> None:
         hook_line = _hook_injection_line(data)
         if hook_line:
             print(hook_line)
+        proactive_line = _proactive_injection_line(data)
+        if proactive_line:
+            print(proactive_line)
+        cache_line = _artifact_cache_line(data)
+        if cache_line:
+            print(cache_line)
         _check_version_skew(port, daemon_status=data)
     except httpx.ConnectError:
         # UPG-CLI-START-READY-RACE: nothing is listening on this port at all
@@ -2257,6 +2369,35 @@ def main() -> None:
     p_connect.add_argument("--path", default=_default_path,
                            help="Workspace directory to write the editor config into (default cwd)")
 
+    p_proxy = sub.add_parser(
+        "proxy",
+        help="Run the experimental localhost Anthropic-shaped proxy (Proactive context)",
+        description=(
+            "Start a localhost proxy the agent harness targets with "
+            "ANTHROPIC_BASE_URL. It forwards to the real Anthropic API "
+            "transparently (streaming SSE + tool_use passthrough), forwarding "
+            "the upstream API key untouched (never stored, never logged), and — "
+            "when injection is on and the workspace daemon is running — appends "
+            "deterministic proactive context after the last prompt-cache "
+            "breakpoint. EXPERIMENTAL, off by default, localhost-only (a "
+            "non-loopback bind is refused). To bypass it at any time, unset "
+            "ANTHROPIC_BASE_URL."
+        ),
+    )
+    p_proxy.add_argument("--path", default=_default_path,
+                         help="Workspace whose daemon supplies injection context (default cwd)")
+    p_proxy.add_argument("--host", default=None,
+                         help="Proxy bind address (default from config; localhost only)")
+    p_proxy.add_argument("--port", type=int, default=None,
+                         help="Proxy listener port (default from config, e.g. 8785)")
+    p_proxy.add_argument("--upstream", default=None,
+                         help="Upstream base URL to forward to (default https://api.anthropic.com)")
+    p_proxy.add_argument("--daemon-port", type=int, default=None, dest="daemon_port",
+                         help="Port of the local vectr daemon to query for injection "
+                              "(default: resolved from the workspace, else 8765)")
+    p_proxy.add_argument("--no-inject", action="store_true", default=False, dest="no_inject",
+                         help="Run as a pure transparent pass-through (no context injection)")
+
     args = parser.parse_args()
     dispatch = {
         "start":   cmd_start,
@@ -2274,6 +2415,7 @@ def main() -> None:
         "hook":    cmd_hook,
         "key":     cmd_key,
         "connect": cmd_connect,
+        "proxy":   cmd_proxy,
     }
     if args.command in dispatch:
         dispatch[args.command](args)
