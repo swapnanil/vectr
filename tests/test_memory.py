@@ -998,7 +998,10 @@ class TestT16Encryption:
 
     def test_build_encryptor_returns_none_when_no_key(self, monkeypatch) -> None:
         from agent.working_context_store import _build_encryptor
+        from agent.working_context_store import _encryption
         monkeypatch.delenv("VECTR_ENCRYPT_KEY", raising=False)
+        # Hermetic: ignore any real OS keychain entry on the test machine.
+        monkeypatch.setattr(_encryption, "_key_from_keyring", lambda: "")
         assert _build_encryptor() is None
 
     def test_build_encryptor_returns_instance_when_key_set(self, monkeypatch) -> None:
@@ -1006,6 +1009,95 @@ class TestT16Encryption:
         monkeypatch.setenv("VECTR_ENCRYPT_KEY", "test-key")
         enc = _build_encryptor()
         assert isinstance(enc, _NoteEncryptor)
+
+    # --- Title encryption (the derived title otherwise leaks content) ---
+
+    def test_explicit_title_encrypted_in_db_and_decrypted_on_recall(self, tmp_path) -> None:
+        store = self._store_with_key(tmp_path, "title-key")
+        ws = str(tmp_path)
+        store.remember(ws, "body text", title="SECRET-TITLE-XYZ")
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "working_context.sqlite"))
+        row = conn.execute("SELECT title FROM notes LIMIT 1").fetchone()
+        conn.close()
+        assert row[0] != "SECRET-TITLE-XYZ"
+        assert "SECRET-TITLE" not in row[0]
+        notes = store.recall(ws)
+        assert notes[0].title == "SECRET-TITLE-XYZ"
+
+    def test_derived_title_not_stored_as_plaintext(self, tmp_path) -> None:
+        """The default title is the first content line — it must be ciphertext too."""
+        store = self._store_with_key(tmp_path, "k")
+        ws = str(tmp_path)
+        store.remember(ws, "FIRST-LINE-SECRET is the sensitive bit")
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "working_context.sqlite"))
+        row = conn.execute("SELECT title FROM notes LIMIT 1").fetchone()
+        conn.close()
+        assert "FIRST-LINE-SECRET" not in row[0]
+
+    def test_legacy_plaintext_title_readable_after_encryption(self, tmp_path) -> None:
+        store_plain = self._store_no_key(tmp_path)
+        ws = str(tmp_path)
+        store_plain.remember(ws, "body", title="legacy-title")
+        store_enc = self._store_with_key(tmp_path, "later-key")
+        notes = store_enc.recall(ws)
+        assert notes[0].title == "legacy-title"  # tolerant decrypt of old plaintext
+
+    # --- Key sourcing: env vs OS keychain ---
+
+    def test_keyring_sourcing_when_env_unset(self, monkeypatch) -> None:
+        from agent.working_context_store import _encryption, _NoteEncryptor
+        monkeypatch.delenv("VECTR_ENCRYPT_KEY", raising=False)
+        monkeypatch.setattr(_encryption, "_key_from_keyring", lambda: "keychain-key")
+        assert isinstance(_encryption._build_encryptor(), _NoteEncryptor)
+
+    def test_env_key_takes_precedence_over_keyring(self, monkeypatch) -> None:
+        from agent.working_context_store import _encryption
+        monkeypatch.setenv("VECTR_ENCRYPT_KEY", "env-key")
+        called = {"keyring": False}
+
+        def _fake() -> str:
+            called["keyring"] = True
+            return "keychain-key"
+
+        monkeypatch.setattr(_encryption, "_key_from_keyring", _fake)
+        _encryption._build_encryptor()
+        assert called["keyring"] is False  # env short-circuits keychain lookup
+
+    def test_key_from_keyring_best_effort_returns_str(self) -> None:
+        from agent.working_context_store import _encryption
+        # Never raises even when keyring is absent or has no stored value.
+        assert isinstance(_encryption._key_from_keyring(), str)
+
+    # --- Strict posture: omit note vectors under encryption ---
+
+    def test_disable_note_vectors_omits_collection(self, tmp_path, monkeypatch) -> None:
+        from unittest.mock import MagicMock
+        from agent.working_context_store import WorkingContextStore
+        monkeypatch.setenv("VECTR_ENCRYPT_KEY", "k")
+        monkeypatch.setenv("VECTR_ENCRYPT_DISABLE_NOTE_VECTORS", "1")
+        fake_client = MagicMock()
+        store = WorkingContextStore(
+            str(tmp_path),
+            embed_fn=lambda xs: [[0.0] * 768 for _ in xs],
+            notes_chroma_client=fake_client,
+        )
+        assert store._notes_col is None
+        fake_client.get_or_create_collection.assert_not_called()
+
+    def test_note_vectors_created_without_strict_flag(self, tmp_path, monkeypatch) -> None:
+        from unittest.mock import MagicMock
+        from agent.working_context_store import WorkingContextStore
+        monkeypatch.setenv("VECTR_ENCRYPT_KEY", "k")
+        monkeypatch.delenv("VECTR_ENCRYPT_DISABLE_NOTE_VECTORS", raising=False)
+        fake_client = MagicMock()
+        store = WorkingContextStore(
+            str(tmp_path),
+            embed_fn=lambda xs: [[0.0] * 768 for _ in xs],
+            notes_chroma_client=fake_client,
+        )
+        assert store._notes_col is not None
 
 
 # ---------------------------------------------------------------------------

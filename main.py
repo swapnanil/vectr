@@ -973,8 +973,9 @@ def _do_start(
     if memory_only and search_only:
         raise ValueError("Cannot start vectr in both --memory-only and --search-only mode simultaneously")
 
-    log_dir = Path.home() / ".vectr" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    from agent.fs_permissions import secure_dir
+    secure_dir(Path.home() / ".vectr")
+    log_dir = secure_dir(Path.home() / ".vectr" / "logs")
     log_path = log_dir / f"{ws_hash}.log"
 
     env = {

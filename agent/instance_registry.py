@@ -53,7 +53,10 @@ class InstanceRegistry:
             return {}
 
     def _write(self, data: dict[str, Any]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        # ~/.vectr holds the instance registry, logs, and (opt-in) audit log —
+        # owner-only on POSIX hosts (see agent/fs_permissions.py).
+        from agent.fs_permissions import secure_dir
+        secure_dir(self._path.parent)
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2))
         os.rename(tmp, self._path)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -85,7 +86,16 @@ class WorkingContextStore:
         self._embed_query_fn = embed_query_fn or embed_fn  # query-mode embed, defaults to embed_fn
         self._embed_model = embed_model  # current model name, for the embed-model stamp/migration
         self._notes_col = None
-        if embed_fn is not None and notes_chroma_client is not None:
+        # Strict encryption posture (VECTR_ENCRYPT_DISABLE_NOTE_VECTORS): when
+        # encryption is on, the note embedding vectors are a lossy plaintext
+        # projection of note content living in the Chroma store. Setting this
+        # omits them entirely — recall falls back to lexical SQL LIKE — so no
+        # representation of note content leaves the encrypted SQLite column.
+        strict_no_vectors = (
+            self._encryptor is not None
+            and os.getenv("VECTR_ENCRYPT_DISABLE_NOTE_VECTORS", "") == "1"
+        )
+        if embed_fn is not None and notes_chroma_client is not None and not strict_no_vectors:
             try:
                 self._notes_col = notes_chroma_client.get_or_create_collection(
                     name="working_memory",
@@ -225,7 +235,15 @@ class WorkingContextStore:
                 if stripped:
                     title = stripped[:80]
                     break
-        stored_content = self._encryptor.encrypt(content) if self._encryptor else content
+        # Encrypt BOTH content and the (possibly content-derived) title: the
+        # default title is the first content line, so a plaintext title column
+        # would leak the very text encryption is meant to protect.
+        if self._encryptor:
+            stored_content = self._encryptor.encrypt(content)
+            stored_title = self._encryptor.encrypt(title)
+        else:
+            stored_content = content
+            stored_title = title
 
         with self._conn() as conn:
             # conflict resolution: if another note anchors the same code block, supersede it
@@ -252,7 +270,7 @@ class WorkingContextStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?)
                 """,
                 (workspace, stored_content, tags_json, priority, kind, now, now, session_id,
-                 author_id, now, code_hash, title),
+                 author_id, now, code_hash, stored_title),
             )
             note_id = cur.lastrowid
 
@@ -1006,9 +1024,13 @@ class WorkingContextStore:
 
     def _row_to_note(self, row: sqlite3.Row) -> WorkingNote:
         content = row["content"]
+        keys = row.keys()
+        title = row["title"] if "title" in keys else ""
         if self._encryptor:
             content = self._encryptor.decrypt(content)
-        keys = row.keys()
+            # Tolerant decrypt: titles written before title-encryption (or before
+            # encryption was enabled at all) are returned unchanged.
+            title = self._encryptor.decrypt(title)
         return WorkingNote(
             note_id=row["note_id"],
             workspace=row["workspace"],
@@ -1028,7 +1050,7 @@ class WorkingContextStore:
             code_hash=row["code_hash"] if "code_hash" in keys else "",
             superseded_by=row["superseded_by"] if "superseded_by" in keys else None,
             superseded_at=row["superseded_at"] if "superseded_at" in keys else None,
-            title=row["title"] if "title" in keys else "",
+            title=title,
         )
 
     def format_notes_for_llm(

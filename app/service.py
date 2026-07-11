@@ -30,11 +30,17 @@ _DB_DIR_ENV = "VECTR_DB_DIR"
 
 
 def _default_db_dir(workspace_root: str) -> str:
-    """Store DB files in ~/.cache/vectr/<workspace-hash>/"""
+    """Store DB files in ~/.cache/vectr/<workspace-hash>/, owner-only (0700).
+
+    The cache holds the plaintext code index and (unless encrypted) working-
+    memory notes, so both the shared parent and the per-workspace directory are
+    restricted to the owner on POSIX hosts (see agent/fs_permissions.py)."""
     import hashlib
+    from agent.fs_permissions import secure_dir
     slug = hashlib.md5(workspace_root.encode()).hexdigest()[:12]
-    db_dir = Path.home() / ".cache" / "vectr" / slug
-    db_dir.mkdir(parents=True, exist_ok=True)
+    cache_root = Path.home() / ".cache" / "vectr"
+    secure_dir(cache_root)
+    db_dir = secure_dir(cache_root / slug)
     return str(db_dir)
 
 
