@@ -18,6 +18,7 @@ index, notes, or logs anywhere.
 | Instance registry | Workspace path, port, PID per running daemon | `~/.vectr/instances.json` |
 | Daemon logs | Startup/indexing log lines (no query text) | `~/.vectr/logs/<workspace-hash>.log` |
 | Audit log (**opt-in**) | Index/search/remember/recall/forget events — **including query text** and, in team mode, the client label | the path you set in `VECTR_AUDIT_LOG` (unset = nothing is recorded) |
+| API key (**opt-in** auth / team mode) | The shared key, embedded as an `X-Api-Key` header value in **plaintext** | `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json` in the workspace — treat these files as secrets and keep them out of shared or public version control; the daemon itself never persists the key |
 
 The cache (`~/.cache/vectr/`) and state (`~/.vectr/`) directories are created
 owner-only (`0700`) on POSIX systems, so other accounts on a shared machine

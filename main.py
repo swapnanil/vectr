@@ -1089,7 +1089,10 @@ def cmd_key(args: argparse.Namespace) -> None:
         "\nShared key for authenticated / team (central instance) deployments:\n"
         "  server:  VECTR_API_KEY=<key> vectr start --host 0.0.0.0 --path /srv/repo\n"
         "  client:  vectr connect --url http://<server-host>:<port> --api-key <key>\n"
-        "Store it in each client's environment or MCP config; vectr never persists it.",
+        "Store it in each client's environment or MCP config; vectr never persists it.\n"
+        "Configs that embed the key (.mcp.json, .cursor/mcp.json, .vscode/mcp.json)\n"
+        "hold it in plaintext — treat them as secrets and keep them out of shared or\n"
+        "public version control.",
         file=sys.stderr,
     )
 
@@ -1122,6 +1125,12 @@ def cmd_connect(args: argparse.Namespace) -> None:
     print(f"  Workspace : {workspace}", file=sys.stderr)
     if api_key:
         print("  Auth      : X-Api-Key header written to the editor MCP configs", file=sys.stderr)
+        print(
+            "              (.mcp.json, .cursor/mcp.json, .vscode/mcp.json now hold the key\n"
+            "              in plaintext — treat them as secrets; keep them out of shared or\n"
+            "              public version control)",
+            file=sys.stderr,
+        )
     if label:
         print(f"  Client    : notes/audit will be attributed to '{label}'", file=sys.stderr)
     print(

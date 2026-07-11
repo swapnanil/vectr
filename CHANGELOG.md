@@ -16,6 +16,8 @@ zero-config stays the default.
 - When `VECTR_API_KEY` is set at start time, the editor MCP configs vectr
   writes (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`) include the
   `X-Api-Key` header so the editor keeps reaching its own authenticated daemon.
+  These files then hold the key in plaintext; the CLI and docs warn to treat
+  them as secrets and keep them out of shared version control.
 
 ### Team mode (shared central instance)
 - `vectr start --host <addr>` selects the daemon bind address (default

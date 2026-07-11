@@ -317,7 +317,10 @@ Everything below is **opt-in**; enabling nothing changes nothing.
 `/mcp` must carry it (`X-Api-Key: <key>` or `Authorization: Bearer <key>`;
 constant-time comparison; `/v1/health` stays open for liveness probes).
 Generate a key with `vectr key`. When the key is set at start time, the editor
-MCP configs vectr writes include the header automatically.
+MCP configs vectr writes include the header automatically. Those files
+(`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`) then hold the key in
+plaintext — treat them as secrets and keep them out of shared or public
+version control.
 
 **Encryption at rest** — set `VECTR_ENCRYPT_KEY` (or store a passphrase in the
 OS keychain: service `vectr`, username `encrypt-key`; requires
