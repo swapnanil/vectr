@@ -1,6 +1,7 @@
 {
   "name": "vectr",
-  "displayName": "Vectr — Semantic Codebase Search",
+  "displayName": "Vectr — Semantic Code Search + Working Memory",
+  "icon": "icon.png",
   "description": "Zero-config local codebase indexer. Auto-starts when you open a workspace and serves semantic code search and persistent working memory to any MCP-compatible AI code editor.",
   "version": "1.0.0",
   "publisher": "swapnanilsaha",

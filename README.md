@@ -1,5 +1,9 @@
 <!-- mcp-name: io.github.swapnanil/vectr -->
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/swapnanil/vectr/main/assets/banner.svg" alt="vectr — semantic codebase search + persistent working memory for AI code editors" width="560">
+</p>
+
 # Vectr
 
 > **Semantic search and persistent memory for AI code editors.**
