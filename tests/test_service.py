@@ -626,3 +626,57 @@ class TestWorkspaceExplicitResolution:
             svc = VectrService(workspace_root=str(nested))  # workspace_explicit not passed
 
         assert svc._workspace_root == str(tmp_path.resolve())
+
+
+# ---------------------------------------------------------------------------
+# Opt-in audit log — INDEX and SEARCH events ("what was indexed / queried")
+# ---------------------------------------------------------------------------
+
+class TestAuditEvents:
+    def test_index_and_search_emit_audit_events(self, tmp_path, monkeypatch) -> None:
+        import logging
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "greet.py", "def hello_world():\n    return 'hi'\n")
+        log_file = tmp_path / "audit.log"
+        logging.getLogger("vectr.audit").handlers.clear()
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {
+                 "VECTR_DB_DIR": str(tmp_path / "db"),
+                 "VECTR_AUDIT_LOG": str(log_file),
+             }):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+            svc.index(str(tmp_path))
+            svc.search("hello world function")
+
+        logging.getLogger("vectr.audit").handlers.clear()
+        content = log_file.read_text()
+        assert "INDEX" in content
+        assert "SEARCH" in content
+        assert "query=" in content  # what was queried is recorded
+
+    def test_audit_off_by_default_writes_no_file(self, tmp_path, monkeypatch) -> None:
+        import logging
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "greet.py", "def hello_world():\n    return 'hi'\n")
+        logging.getLogger("vectr.audit").handlers.clear()
+        monkeypatch.delenv("VECTR_AUDIT_LOG", raising=False)
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}, clear=False):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+            svc.index(str(tmp_path))
+            svc.search("hello")
+
+        logging.getLogger("vectr.audit").handlers.clear()
+        assert not (tmp_path / "audit.log").exists()

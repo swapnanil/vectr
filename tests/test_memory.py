@@ -138,6 +138,183 @@ class TestWorkspaceIsolation:
 
 
 # ---------------------------------------------------------------------------
+# Team mode: concurrent multi-client access + shared visibility
+# ---------------------------------------------------------------------------
+
+class TestTeamModeConcurrency:
+    """One central daemon serves many agents. Note-ID allocation, counting, and
+    recall must stay correct when several clients write the same workspace's
+    notes DB concurrently (busy_timeout + AUTOINCREMENT)."""
+
+    def test_concurrent_remember_allocates_unique_ids(self, tmp_path) -> None:
+        import threading
+        store = _store(tmp_path)
+        ws = "/team/repo"
+        ids: list[int] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def worker(i: int) -> None:
+            try:
+                nid = store.remember(ws, f"concurrent finding {i}", author_id=f"dev-{i % 3}")
+                with lock:
+                    ids.append(nid)
+            except Exception as exc:  # pragma: no cover - failure path
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(24)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        assert len(ids) == 24
+        assert len(set(ids)) == 24          # every note got a distinct id
+        assert store.count_notes(ws) == 24  # nothing lost under contention
+
+    def test_concurrent_recall_during_writes(self, tmp_path) -> None:
+        import threading
+        store = _store(tmp_path)
+        ws = "/team/repo"
+        for i in range(10):
+            store.remember(ws, f"seed note {i}")
+
+        recalled_counts: list[int] = []
+        stop = threading.Event()
+
+        def writer() -> None:
+            i = 0
+            while not stop.is_set():
+                store.remember(ws, f"live note {i}")
+                i += 1
+
+        def reader() -> None:
+            for _ in range(15):
+                recalled_counts.append(len(store.recall(ws)))
+
+        w = threading.Thread(target=writer)
+        w.start()
+        r = threading.Thread(target=reader)
+        r.start()
+        r.join()
+        stop.set()
+        w.join()
+
+        # Every recall returned a consistent, non-empty snapshot (never crashed).
+        assert all(c >= 10 for c in recalled_counts)
+
+    def test_concurrent_snapshots_all_persisted(self, tmp_path) -> None:
+        import threading
+        store = _store(tmp_path)
+        ws = "/team/repo"
+        store.remember(ws, "shared finding")
+        errors: list[Exception] = []
+
+        def snap(i: int) -> None:
+            try:
+                store.snapshot(ws, label=f"checkpoint-{i}")
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        threads = [threading.Thread(target=snap, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        labels = {s["label"] for s in store.list_snapshots(ws)}
+        assert labels == {f"checkpoint-{i}" for i in range(8)}
+
+    def test_ttl_sweep_safe_alongside_concurrent_writes(self, tmp_path) -> None:
+        import threading
+        import time as _time
+        store = _store(tmp_path)
+        ws = "/team/repo"
+        # Seed expired notes (back-dated 10 days).
+        old_ids = [store.remember(ws, f"old note {i}") for i in range(5)]
+        cutoff = _time.time() - 10 * 86400
+        with store._conn() as conn:
+            conn.execute(
+                "UPDATE notes SET created_at = ? WHERE note_id IN ({})".format(
+                    ",".join("?" * len(old_ids))
+                ),
+                [cutoff] + old_ids,
+            )
+        errors: list[Exception] = []
+
+        def writer() -> None:
+            try:
+                for i in range(10):
+                    store.remember(ws, f"fresh note {i}")
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        def sweeper() -> None:
+            try:
+                store.purge_expired_notes(ws, ttl_days=5.0)
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        w = threading.Thread(target=writer)
+        s = threading.Thread(target=sweeper)
+        w.start(); s.start()
+        w.join(); s.join()
+
+        assert errors == []
+        remaining = store.recall(ws, limit=50)
+        # All 5 expired notes purged; all 10 fresh notes intact.
+        assert len(remaining) == 10
+        assert all("fresh note" in n.content for n in remaining)
+
+    def test_audit_log_intact_under_concurrent_writes(self, tmp_path, monkeypatch) -> None:
+        import logging
+        import threading
+        log_file = tmp_path / "audit.log"
+        monkeypatch.setenv("VECTR_AUDIT_LOG", str(log_file))
+        logging.getLogger("vectr.audit").handlers.clear()
+        store = _store(tmp_path)
+        ws = "/team/repo"
+
+        def worker(i: int) -> None:
+            store.remember(ws, f"audited note {i}")
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        logging.getLogger("vectr.audit").handlers.clear()
+        lines = [ln for ln in log_file.read_text().splitlines() if "REMEMBER" in ln]
+        # One well-formed line per write — no interleaved/torn lines.
+        assert len(lines) == 12
+        assert all("note_id=" in ln for ln in lines)
+
+
+class TestSharedMemoryVisibility:
+    """Shared working memory: any connected agent sees any other agent's notes
+    for the workspace — there are no per-user silos."""
+
+    def test_note_by_one_author_recallable_without_filter(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = "/team/repo"
+        store.remember(ws, "parser rewrite lives in parse/core.py", author_id="alice")
+        notes = store.recall(ws)  # no author/session filter
+        assert any("parser rewrite" in n.content for n in notes)
+        assert notes[0].author_id == "alice"
+
+    def test_second_client_sees_first_clients_note(self, tmp_path) -> None:
+        # Two store objects on the same db_dir model two clients of one daemon.
+        client_a = _store(tmp_path)
+        client_b = _store(tmp_path)
+        ws = "/team/repo"
+        client_a.remember(ws, "dev A: the retry bug is in queue.py", author_id="alice")
+        notes = client_b.recall(ws)
+        assert any("retry bug" in n.content for n in notes)
+
+
+# ---------------------------------------------------------------------------
 # CRUD operations
 # ---------------------------------------------------------------------------
 
@@ -746,6 +923,38 @@ class TestT17DataRetention:
         assert store.count_notes("/workspace/a") == 0
         assert store.count_notes("/workspace/b") == 0
 
+    # --- Purge story: "delete everything" includes snapshots ---
+
+    def test_forget_all_deletes_snapshots_too(self, tmp_path) -> None:
+        """Snapshots embed full note contents; a purge must not leave them."""
+        store, ws = self._store(tmp_path)
+        store.remember(ws, "sensitive finding to purge")
+        snap_id = store.snapshot(ws, label="pre-purge")
+        assert store.list_snapshots(ws) != []
+        store.forget_all(ws)
+        assert store.list_snapshots(ws) == []
+        assert store.restore_snapshot(snap_id) is None
+
+    def test_forget_all_workspaces_deletes_all_snapshots(self, tmp_path) -> None:
+        store, _ = self._store(tmp_path)
+        store.remember("/workspace/a", "note a")
+        store.remember("/workspace/b", "note b")
+        store.snapshot("/workspace/a", label="a-snap")
+        store.snapshot("/workspace/b", label="b-snap")
+        store.forget_all_workspaces()
+        assert store.list_snapshots("/workspace/a") == []
+        assert store.list_snapshots("/workspace/b") == []
+
+    def test_forget_all_scoped_snapshots_of_other_workspace_survive(self, tmp_path) -> None:
+        store, _ = self._store(tmp_path)
+        store.remember("/workspace/a", "note a")
+        store.remember("/workspace/b", "note b")
+        store.snapshot("/workspace/a", label="a-snap")
+        store.snapshot("/workspace/b", label="b-snap")
+        store.forget_all("/workspace/a")
+        assert store.list_snapshots("/workspace/a") == []
+        assert [s["label"] for s in store.list_snapshots("/workspace/b")] == ["b-snap"]
+
     def test_audit_log_disabled_with_empty_env(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("VECTR_AUDIT_LOG", "")
         from agent.working_context_store import audit, _get_audit_logger
@@ -773,6 +982,46 @@ class TestT17DataRetention:
         if log_file.exists():
             content = log_file.read_text()
             assert "INDEX" in content or len(content) >= 0  # file was written
+
+    def test_audit_disabled_by_default_unset_env(self, monkeypatch) -> None:
+        """Audit is OFF unless VECTR_AUDIT_LOG names a path — no silent default."""
+        import logging
+        from agent.working_context_store import _get_audit_logger, audit
+        monkeypatch.delenv("VECTR_AUDIT_LOG", raising=False)
+        logging.getLogger("vectr.audit").handlers.clear()
+        logger = _get_audit_logger()
+        assert len(logger.handlers) == 1
+        assert isinstance(logger.handlers[0], logging.NullHandler)
+        audit("SHOULD_NOT_APPEAR", key="v")  # no raise, no file
+        logging.getLogger("vectr.audit").handlers.clear()
+
+    def test_audit_records_remember_and_recall_when_enabled(self, tmp_path, monkeypatch) -> None:
+        import logging
+        log_file = tmp_path / "audit.log"
+        monkeypatch.setenv("VECTR_AUDIT_LOG", str(log_file))
+        logging.getLogger("vectr.audit").handlers.clear()
+        store, ws = self._store(tmp_path)
+        store.remember(ws, "a finding about the parser")
+        store.recall(ws, query="parser")
+        logging.getLogger("vectr.audit").handlers.clear()
+        content = log_file.read_text()
+        assert "REMEMBER" in content
+        assert "RECALL" in content
+
+    def test_audit_client_attribution_appended(self, tmp_path, monkeypatch) -> None:
+        import logging
+        log_file = tmp_path / "audit.log"
+        monkeypatch.setenv("VECTR_AUDIT_LOG", str(log_file))
+        logging.getLogger("vectr.audit").handlers.clear()
+        from agent.working_context_store import audit, set_audit_client, reset_audit_client
+        token = set_audit_client("alice")
+        audit("SEARCH", query="x")
+        reset_audit_client(token)
+        audit("SEARCH", query="y")  # no client label now
+        logging.getLogger("vectr.audit").handlers.clear()
+        lines = log_file.read_text().splitlines()
+        assert any("query=x" in ln and "client=alice" in ln for ln in lines)
+        assert any("query=y" in ln and "client=" not in ln for ln in lines)
 
     def test_remember_increments_count(self, tmp_path) -> None:
         store, ws = self._store(tmp_path)
@@ -907,7 +1156,10 @@ class TestT16Encryption:
 
     def test_build_encryptor_returns_none_when_no_key(self, monkeypatch) -> None:
         from agent.working_context_store import _build_encryptor
+        from agent.working_context_store import _encryption
         monkeypatch.delenv("VECTR_ENCRYPT_KEY", raising=False)
+        # Hermetic: ignore any real OS keychain entry on the test machine.
+        monkeypatch.setattr(_encryption, "_key_from_keyring", lambda: "")
         assert _build_encryptor() is None
 
     def test_build_encryptor_returns_instance_when_key_set(self, monkeypatch) -> None:
@@ -915,6 +1167,136 @@ class TestT16Encryption:
         monkeypatch.setenv("VECTR_ENCRYPT_KEY", "test-key")
         enc = _build_encryptor()
         assert isinstance(enc, _NoteEncryptor)
+
+    # --- Title encryption (the derived title otherwise leaks content) ---
+
+    def test_explicit_title_encrypted_in_db_and_decrypted_on_recall(self, tmp_path) -> None:
+        store = self._store_with_key(tmp_path, "title-key")
+        ws = str(tmp_path)
+        store.remember(ws, "body text", title="SECRET-TITLE-XYZ")
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "working_context.sqlite"))
+        row = conn.execute("SELECT title FROM notes LIMIT 1").fetchone()
+        conn.close()
+        assert row[0] != "SECRET-TITLE-XYZ"
+        assert "SECRET-TITLE" not in row[0]
+        notes = store.recall(ws)
+        assert notes[0].title == "SECRET-TITLE-XYZ"
+
+    def test_derived_title_not_stored_as_plaintext(self, tmp_path) -> None:
+        """The default title is the first content line — it must be ciphertext too."""
+        store = self._store_with_key(tmp_path, "k")
+        ws = str(tmp_path)
+        store.remember(ws, "FIRST-LINE-SECRET is the sensitive bit")
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "working_context.sqlite"))
+        row = conn.execute("SELECT title FROM notes LIMIT 1").fetchone()
+        conn.close()
+        assert "FIRST-LINE-SECRET" not in row[0]
+
+    def test_legacy_plaintext_title_readable_after_encryption(self, tmp_path) -> None:
+        store_plain = self._store_no_key(tmp_path)
+        ws = str(tmp_path)
+        store_plain.remember(ws, "body", title="legacy-title")
+        store_enc = self._store_with_key(tmp_path, "later-key")
+        notes = store_enc.recall(ws)
+        assert notes[0].title == "legacy-title"  # tolerant decrypt of old plaintext
+
+    # --- Key sourcing: env vs OS keychain ---
+
+    def test_keyring_sourcing_when_env_unset(self, monkeypatch) -> None:
+        from agent.working_context_store import _encryption, _NoteEncryptor
+        monkeypatch.delenv("VECTR_ENCRYPT_KEY", raising=False)
+        monkeypatch.setattr(_encryption, "_key_from_keyring", lambda: "keychain-key")
+        assert isinstance(_encryption._build_encryptor(), _NoteEncryptor)
+
+    def test_env_key_takes_precedence_over_keyring(self, monkeypatch) -> None:
+        from agent.working_context_store import _encryption
+        monkeypatch.setenv("VECTR_ENCRYPT_KEY", "env-key")
+        called = {"keyring": False}
+
+        def _fake() -> str:
+            called["keyring"] = True
+            return "keychain-key"
+
+        monkeypatch.setattr(_encryption, "_key_from_keyring", _fake)
+        _encryption._build_encryptor()
+        assert called["keyring"] is False  # env short-circuits keychain lookup
+
+    def test_key_from_keyring_best_effort_returns_str(self) -> None:
+        from agent.working_context_store import _encryption
+        # Never raises even when keyring is absent or has no stored value.
+        assert isinstance(_encryption._key_from_keyring(), str)
+
+    # --- Strict posture: omit note vectors under encryption ---
+
+    def test_disable_note_vectors_omits_collection(self, tmp_path, monkeypatch) -> None:
+        from unittest.mock import MagicMock
+        from agent.working_context_store import WorkingContextStore
+        monkeypatch.setenv("VECTR_ENCRYPT_KEY", "k")
+        monkeypatch.setenv("VECTR_ENCRYPT_DISABLE_NOTE_VECTORS", "1")
+        fake_client = MagicMock()
+        store = WorkingContextStore(
+            str(tmp_path),
+            embed_fn=lambda xs: [[0.0] * 768 for _ in xs],
+            notes_chroma_client=fake_client,
+        )
+        assert store._notes_col is None
+        fake_client.get_or_create_collection.assert_not_called()
+
+    def test_note_vectors_created_without_strict_flag(self, tmp_path, monkeypatch) -> None:
+        from unittest.mock import MagicMock
+        from agent.working_context_store import WorkingContextStore
+        monkeypatch.setenv("VECTR_ENCRYPT_KEY", "k")
+        monkeypatch.delenv("VECTR_ENCRYPT_DISABLE_NOTE_VECTORS", raising=False)
+        fake_client = MagicMock()
+        store = WorkingContextStore(
+            str(tmp_path),
+            embed_fn=lambda xs: [[0.0] * 768 for _ in xs],
+            notes_chroma_client=fake_client,
+        )
+        assert store._notes_col is not None
+
+    # --- Snapshot payload encryption (snapshots embed decrypted note text) ---
+
+    def test_snapshot_payload_encrypted_in_db(self, tmp_path) -> None:
+        store = self._store_with_key(tmp_path, "snap-key")
+        ws = str(tmp_path)
+        store.remember(ws, "SNAPSHOT-SECRET finding body")
+        store.snapshot(ws, label="checkpoint")
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "working_context.sqlite"))
+        row = conn.execute("SELECT payload FROM snapshots LIMIT 1").fetchone()
+        conn.close()
+        assert "SNAPSHOT-SECRET" not in row[0]  # ciphertext, not plaintext JSON
+
+    def test_snapshot_roundtrip_with_encryption(self, tmp_path) -> None:
+        store = self._store_with_key(tmp_path, "snap-key")
+        ws = str(tmp_path)
+        store.remember(ws, "SNAPSHOT-SECRET finding body")
+        snap_id = store.snapshot(ws, label="checkpoint")
+        restored = store.restore_snapshot(snap_id)
+        assert restored is not None
+        assert any("SNAPSHOT-SECRET" in n["content"] for n in restored["notes"])
+
+    def test_legacy_plaintext_snapshot_restorable_after_encryption(self, tmp_path) -> None:
+        store_plain = self._store_no_key(tmp_path)
+        ws = str(tmp_path)
+        store_plain.remember(ws, "legacy body")
+        snap_id = store_plain.snapshot(ws, label="old")
+        store_enc = self._store_with_key(tmp_path, "later-key")
+        restored = store_enc.restore_snapshot(snap_id)  # tolerant decrypt passthrough
+        assert restored is not None
+        assert any("legacy body" in n["content"] for n in restored["notes"])
+
+    def test_encrypted_snapshot_unreadable_without_key_returns_none(self, tmp_path) -> None:
+        store_enc = self._store_with_key(tmp_path, "the-key")
+        ws = str(tmp_path)
+        store_enc.remember(ws, "protected")
+        snap_id = store_enc.snapshot(ws, label="locked")
+        store_plain = self._store_no_key(tmp_path)
+        # Without the key the payload is ciphertext — not restorable, no crash.
+        assert store_plain.restore_snapshot(snap_id) is None
 
 
 # ---------------------------------------------------------------------------

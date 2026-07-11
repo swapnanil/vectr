@@ -36,6 +36,8 @@ from __future__ import annotations
 from agent.working_context_store._audit import (
     _get_audit_logger,
     audit,
+    reset_audit_client,
+    set_audit_client,
 )
 
 # Types and constants
@@ -61,6 +63,8 @@ __all__ = [
     # Audit
     "_get_audit_logger",
     "audit",
+    "set_audit_client",
+    "reset_audit_client",
     # Types and constants
     "DEFAULT_KIND",
     "VALID_KINDS",

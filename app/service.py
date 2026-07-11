@@ -30,11 +30,17 @@ _DB_DIR_ENV = "VECTR_DB_DIR"
 
 
 def _default_db_dir(workspace_root: str) -> str:
-    """Store DB files in ~/.cache/vectr/<workspace-hash>/"""
+    """Store DB files in ~/.cache/vectr/<workspace-hash>/, owner-only (0700).
+
+    The cache holds the plaintext code index and (unless encrypted) working-
+    memory notes, so both the shared parent and the per-workspace directory are
+    restricted to the owner on POSIX hosts (see agent/fs_permissions.py)."""
     import hashlib
+    from agent.fs_permissions import secure_dir
     slug = hashlib.md5(workspace_root.encode()).hexdigest()[:12]
-    db_dir = Path.home() / ".cache" / "vectr" / slug
-    db_dir.mkdir(parents=True, exist_ok=True)
+    cache_root = Path.home() / ".cache" / "vectr"
+    secure_dir(cache_root)
+    db_dir = secure_dir(cache_root / slug)
     return str(db_dir)
 
 
@@ -456,6 +462,8 @@ class VectrService:
                 self._build_symbol_graph()
                 self._refresh_strategy()
             elapsed = int((time.monotonic() - t0) * 1000)
+            from agent.working_context_store import audit as _audit
+            _audit("INDEX", workspace=self._workspace_root, files=files, chunks=chunks)
             return files, chunks, elapsed
 
     def _advisor_for(self, session_id: str | None) -> EvictionAdvisor:
@@ -496,6 +504,13 @@ class VectrService:
         sem_w = self._strategy.semantic_weight if self._strategy else STRATEGY_DEFAULT_SEMANTIC_WEIGHT
         results, query_ms = self._searcher.search(
             query, n_results=n_results, language=language, semantic_weight=sem_w
+        )
+        # Audit "what was queried" (opt-in; the query text is the whole point of
+        # an audit log, so it is only recorded when the operator enables one).
+        from agent.working_context_store import audit as _audit
+        _audit(
+            "SEARCH", workspace=self._workspace_root,
+            query=query[:200], results=len(results),
         )
         return results, query_ms
 

@@ -112,7 +112,7 @@ class TestCmdStart:
 
         mock_do_start.assert_called_once_with(
             ws, 8765, wh, extra_roots=[], memory_only=False, search_only=False, workspace_explicit=True,
-            code_workspace_file=None,
+            code_workspace_file=None, host="127.0.0.1",
         )
 
     def test_prunes_dead_entries_before_starting(self, tmp_path):
@@ -2752,7 +2752,7 @@ class TestMultiRoot:
 
         mock_do_start.assert_called_once_with(
             ws_a, 8765, wh, extra_roots=[ws_b], memory_only=False, search_only=False, workspace_explicit=True,
-            code_workspace_file=None,
+            code_workspace_file=None, host="127.0.0.1",
         )
 
 
@@ -2860,3 +2860,204 @@ class TestTopLevelDescription:
         import api
         assert "memory" in api.app.description.lower()
         assert "search" in api.app.description.lower()
+
+
+# ---------------------------------------------------------------------------
+# Authentication: key generation + editor-config header emission
+# ---------------------------------------------------------------------------
+
+class TestMcpHeaderInjection:
+    """Unit tests for the header-injection helpers used by both the local
+    authenticated-config path and `vectr connect`."""
+
+    def test_no_headers_returns_config_unchanged(self) -> None:
+        original = m._MCP_JSON.format(port=8765)
+        assert m._inject_mcp_headers(original, {}) == original
+
+    def test_headers_added_to_mcpservers_entry(self) -> None:
+        out = m._inject_mcp_headers(m._MCP_JSON.format(port=8765), {"X-Api-Key": "k"})
+        data = json.loads(out)
+        assert data["mcpServers"]["vectr"]["headers"] == {"X-Api-Key": "k"}
+        assert data["mcpServers"]["vectr"]["url"].endswith(":8765/mcp")
+
+    def test_headers_added_to_servers_entry_vscode(self) -> None:
+        out = m._inject_mcp_headers(m._VSCODE_MCP_JSON.format(port=8765), {"X-Api-Key": "k"})
+        data = json.loads(out)
+        assert data["servers"]["vectr"]["headers"] == {"X-Api-Key": "k"}
+
+    def test_auth_headers_builder(self) -> None:
+        assert m._mcp_auth_headers() == {}
+        assert m._mcp_auth_headers(api_key="k") == {"X-Api-Key": "k"}
+        assert m._mcp_auth_headers(api_key="k", client_label="alice") == {
+            "X-Api-Key": "k",
+            "X-Vectr-Client": "alice",
+        }
+
+
+class TestAuthConfigWriters:
+    """When VECTR_API_KEY is set, the local editor MCP configs must carry the
+    key header so the editor can still reach its own authenticated daemon."""
+
+    def test_no_key_writes_header_free_config(self, tmp_path) -> None:
+        with patch.dict(os.environ, {"VECTR_API_KEY": ""}, clear=False):
+            m._write_workspace_config(str(tmp_path), 8765)
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        assert "headers" not in mcp["mcpServers"]["vectr"]
+
+    def test_key_set_emits_header_in_all_three_configs(self, tmp_path) -> None:
+        with patch.dict(os.environ, {"VECTR_API_KEY": "team-secret"}, clear=False):
+            m._write_workspace_config(str(tmp_path), 8765)
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        cursor = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
+        vscode = json.loads((tmp_path / ".vscode" / "mcp.json").read_text())
+        assert mcp["mcpServers"]["vectr"]["headers"]["X-Api-Key"] == "team-secret"
+        assert cursor["mcpServers"]["vectr"]["headers"]["X-Api-Key"] == "team-secret"
+        assert vscode["servers"]["vectr"]["headers"]["X-Api-Key"] == "team-secret"
+
+
+class TestBindGuard:
+    """Non-loopback binds require authentication (team / central instance)."""
+
+    def test_is_loopback_host(self) -> None:
+        assert m._is_loopback_host("127.0.0.1")
+        assert m._is_loopback_host("localhost")
+        assert m._is_loopback_host("::1")
+        assert m._is_loopback_host("  LOCALHOST  ")
+        assert not m._is_loopback_host("0.0.0.0")
+        assert not m._is_loopback_host("192.168.1.10")
+
+    def test_enforce_blocks_nonloopback_without_key(self, monkeypatch, capsys) -> None:
+        monkeypatch.delenv("VECTR_API_KEY", raising=False)
+        with pytest.raises(SystemExit) as exc:
+            m._enforce_bind_auth("0.0.0.0")
+        assert exc.value.code == 1
+        assert "refusing to bind" in capsys.readouterr().err.lower()
+
+    def test_enforce_allows_nonloopback_with_key(self, monkeypatch) -> None:
+        monkeypatch.setenv("VECTR_API_KEY", "k")
+        m._enforce_bind_auth("0.0.0.0")  # no SystemExit
+
+    def test_enforce_allows_loopback_without_key(self, monkeypatch) -> None:
+        monkeypatch.delenv("VECTR_API_KEY", raising=False)
+        m._enforce_bind_auth("127.0.0.1")
+        m._enforce_bind_auth("localhost")  # no SystemExit
+
+    def test_cmd_start_refuses_nonloopback_without_key(self, monkeypatch) -> None:
+        monkeypatch.delenv("VECTR_API_KEY", raising=False)
+        args = argparse.Namespace(memory_only=False, search_only=False, host="0.0.0.0")
+        with pytest.raises(SystemExit) as exc:
+            m.cmd_start(args)
+        assert exc.value.code == 1
+
+    def test_do_start_binds_requested_host(self, tmp_path, monkeypatch) -> None:
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, **kwargs) -> None:
+                captured["cmd"] = cmd
+                self.pid = 4321
+
+        monkeypatch.setattr(m.subprocess, "Popen", _FakePopen)
+        monkeypatch.setattr(m, "_wait_for_daemon_ready", lambda port, pid: True)
+        monkeypatch.setattr(m, "_migrate_legacy_files", lambda: None)
+        monkeypatch.setattr(m, "InstanceRegistry", lambda: MagicMock())
+
+        m._do_start(str(tmp_path), 18999, "hash123", host="0.0.0.0")
+        cmd = captured["cmd"]
+        assert "--host" in cmd
+        assert cmd[cmd.index("--host") + 1] == "0.0.0.0"
+
+
+class TestCmdConnect:
+    """`vectr connect` writes remote MCP config with headers, spawns nothing."""
+
+    def test_normalize_mcp_url(self) -> None:
+        assert m._normalize_mcp_url("http://h:8765") == "http://h:8765/mcp"
+        assert m._normalize_mcp_url("http://h:8765/") == "http://h:8765/mcp"
+        assert m._normalize_mcp_url("http://h:8765/mcp") == "http://h:8765/mcp"
+        assert m._normalize_mcp_url("http://h:8765/mcp/") == "http://h:8765/mcp"
+
+    def test_connect_writes_remote_configs_with_headers(self, tmp_path) -> None:
+        args = argparse.Namespace(
+            url="http://central:8765", api_key="team-key", label="alice", path=str(tmp_path),
+        )
+        m.cmd_connect(args)
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        entry = mcp["mcpServers"]["vectr"]
+        assert entry["url"] == "http://central:8765/mcp"
+        assert entry["headers"]["X-Api-Key"] == "team-key"
+        assert entry["headers"]["X-Vectr-Client"] == "alice"
+        vscode = json.loads((tmp_path / ".vscode" / "mcp.json").read_text())
+        assert vscode["servers"]["vectr"]["headers"]["X-Api-Key"] == "team-key"
+        cursor = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
+        assert cursor["mcpServers"]["vectr"]["url"] == "http://central:8765/mcp"
+
+    def test_connect_api_key_falls_back_to_env(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("VECTR_API_KEY", "env-key")
+        args = argparse.Namespace(
+            url="http://central:8765/mcp", api_key="", label="", path=str(tmp_path),
+        )
+        m.cmd_connect(args)
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        assert mcp["mcpServers"]["vectr"]["headers"]["X-Api-Key"] == "env-key"
+
+    def test_connect_no_label_writes_no_client_header(self, tmp_path) -> None:
+        args = argparse.Namespace(
+            url="http://central:8765", api_key="k", label="", path=str(tmp_path),
+        )
+        m.cmd_connect(args)
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        assert "X-Vectr-Client" not in mcp["mcpServers"]["vectr"]["headers"]
+
+    def test_connect_does_not_spawn_daemon(self, tmp_path, monkeypatch) -> None:
+        spawned = {"popen": False}
+        monkeypatch.setattr(
+            m.subprocess, "Popen",
+            lambda *a, **k: spawned.__setitem__("popen", True),
+        )
+        args = argparse.Namespace(
+            url="http://central:8765", api_key="k", label="", path=str(tmp_path),
+        )
+        m.cmd_connect(args)
+        assert spawned["popen"] is False
+
+    def test_connect_writes_claude_md_guidance(self, tmp_path) -> None:
+        args = argparse.Namespace(
+            url="http://central:8765", api_key="k", label="", path=str(tmp_path),
+        )
+        m.cmd_connect(args)
+        assert (tmp_path / "CLAUDE.md").exists()
+
+
+class TestCmdKey:
+    def test_key_command_prints_urlsafe_token_to_stdout(self, capsys) -> None:
+        args = argparse.Namespace()
+        m.cmd_key(args)
+        captured = capsys.readouterr()
+        key = captured.out.strip()
+        # secrets.token_urlsafe(32) → ~43 URL-safe chars, one line on stdout.
+        assert len(key) >= 40
+        assert "\n" not in key
+        assert all(c.isalnum() or c in "-_" for c in key)
+        # Usage guidance goes to stderr, never the key generator's stdout.
+        assert "vectr connect" in captured.err
+
+    def test_key_command_generates_distinct_keys(self, capsys) -> None:
+        m.cmd_key(argparse.Namespace())
+        first = capsys.readouterr().out.strip()
+        m.cmd_key(argparse.Namespace())
+        second = capsys.readouterr().out.strip()
+        assert first != second
+
+    def test_key_never_starts_with_dash(self, capsys, monkeypatch) -> None:
+        # A leading '-' makes `--api-key <key>` parse as a flag; cmd_key must
+        # regenerate until the first character is safe.
+        import secrets
+
+        vals = iter(["-Ld0PGVoOJdtIPCtvsRBQVfMEHzSY1FJ6uk3Q9y1AbM",
+                     "sAfEkEy0OJdtIPCtvsRBQVfMEHzSY1FJ6uk3Q9y1AbM"])
+        monkeypatch.setattr(secrets, "token_urlsafe", lambda n: next(vals))
+        m.cmd_key(argparse.Namespace())
+        key = capsys.readouterr().out.strip()
+        assert not key.startswith("-")
+        assert key == "sAfEkEy0OJdtIPCtvsRBQVfMEHzSY1FJ6uk3Q9y1AbM"

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -29,6 +30,11 @@ _NOTES_EMBED_MODEL_KEY = "embed_model"
 # recall behavior, or note content — only how many texts are handed to
 # embed_fn per call during a one-time startup migration.
 _NOTES_REEMBED_BATCH_SIZE = 256
+
+# SQLite busy-wait for a contended write lock (team mode: concurrent clients +
+# the CLI can share one workspace's notes DB). Intentionally NOT in config.yaml
+# — a robustness/timeout knob, same category as the throughput constants above.
+_SQLITE_BUSY_TIMEOUT_S = 5.0
 
 
 class WorkingContextStore:
@@ -80,7 +86,16 @@ class WorkingContextStore:
         self._embed_query_fn = embed_query_fn or embed_fn  # query-mode embed, defaults to embed_fn
         self._embed_model = embed_model  # current model name, for the embed-model stamp/migration
         self._notes_col = None
-        if embed_fn is not None and notes_chroma_client is not None:
+        # Strict encryption posture (VECTR_ENCRYPT_DISABLE_NOTE_VECTORS): when
+        # encryption is on, the note embedding vectors are a lossy plaintext
+        # projection of note content living in the Chroma store. Setting this
+        # omits them entirely — recall falls back to lexical SQL LIKE — so no
+        # representation of note content leaves the encrypted SQLite column.
+        strict_no_vectors = (
+            self._encryptor is not None
+            and os.getenv("VECTR_ENCRYPT_DISABLE_NOTE_VECTORS", "") == "1"
+        )
+        if embed_fn is not None and notes_chroma_client is not None and not strict_no_vectors:
             try:
                 self._notes_col = notes_chroma_client.get_or_create_collection(
                     name="working_memory",
@@ -101,9 +116,15 @@ class WorkingContextStore:
                 )
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path))
+        conn = sqlite3.connect(str(self._db_path), timeout=_SQLITE_BUSY_TIMEOUT_S)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        # Team mode: several clients (and the CLI) can hit one workspace's notes
+        # DB concurrently. WAL allows concurrent readers + one writer; busy_timeout
+        # makes a would-be second writer wait for the lock instead of immediately
+        # raising "database is locked". note_id is AUTOINCREMENT, so IDs stay
+        # unique under concurrent inserts once writes are serialized by the lock.
+        conn.execute(f"PRAGMA busy_timeout={int(_SQLITE_BUSY_TIMEOUT_S * 1000)}")
         return conn
 
     def _init_db(self) -> None:
@@ -214,7 +235,15 @@ class WorkingContextStore:
                 if stripped:
                     title = stripped[:80]
                     break
-        stored_content = self._encryptor.encrypt(content) if self._encryptor else content
+        # Encrypt BOTH content and the (possibly content-derived) title: the
+        # default title is the first content line, so a plaintext title column
+        # would leak the very text encryption is meant to protect.
+        if self._encryptor:
+            stored_content = self._encryptor.encrypt(content)
+            stored_title = self._encryptor.encrypt(title)
+        else:
+            stored_content = content
+            stored_title = title
 
         with self._conn() as conn:
             # conflict resolution: if another note anchors the same code block, supersede it
@@ -241,7 +270,7 @@ class WorkingContextStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?)
                 """,
                 (workspace, stored_content, tags_json, priority, kind, now, now, session_id,
-                 author_id, now, code_hash, title),
+                 author_id, now, code_hash, stored_title),
             )
             note_id = cur.lastrowid
 
@@ -751,11 +780,17 @@ class WorkingContextStore:
         return row[0] if row else 0
 
     def forget_all(self, workspace: str) -> int:
-        """Clear all notes for a workspace."""
+        """Clear all notes AND snapshots for a workspace.
+
+        Snapshots embed full note contents in their payload, so a purge that
+        deleted only the notes table would silently keep every note's text
+        alive in `snapshots` — "delete everything" must mean everything,
+        including the note embedding vectors in the Chroma collection."""
         with self._conn() as conn:
             deleted = conn.execute(
                 "DELETE FROM notes WHERE workspace = ?", (workspace,)
             ).rowcount
+            conn.execute("DELETE FROM snapshots WHERE workspace = ?", (workspace,))
         if deleted > 0 and self._notes_col is not None:
             try:
                 existing_ids = self._notes_col.get(include=[])["ids"]
@@ -767,13 +802,23 @@ class WorkingContextStore:
         return deleted
 
     def forget_all_workspaces(self) -> int:
-        """Delete ALL notes across ALL workspaces in this SQLite file.
+        """Delete ALL notes, snapshots, and note vectors across ALL workspaces
+        in this SQLite file.
 
-        Used by `vectr forget --all` to give a global clean slate.
+        Used by `vectr forget --all` to give a global clean slate — the same
+        "everything means everything" contract as forget_all above.
         Audit entry logged per deletion.
         """
         with self._conn() as conn:
             deleted = conn.execute("DELETE FROM notes").rowcount
+            conn.execute("DELETE FROM snapshots")
+        if self._notes_col is not None:
+            try:
+                existing_ids = self._notes_col.get(include=[])["ids"]
+                if existing_ids:
+                    self._notes_col.delete(ids=existing_ids)
+            except Exception:
+                pass
         audit("FORGET_ALL_WORKSPACES", deleted=deleted)
         return deleted
 
@@ -846,6 +891,11 @@ class WorkingContextStore:
             "retrieved_chunks": retrieved_chunks or [],
             "session_id": session_id,
         })
+        # The payload embeds decrypted note contents (recall() decrypts), so a
+        # plaintext snapshots table would bypass note encryption entirely.
+        # Encrypt the whole payload under the same key as note content.
+        if self._encryptor:
+            payload = self._encryptor.encrypt(payload)
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO snapshots (snapshot_id, workspace, label, payload, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -868,7 +918,18 @@ class WorkingContextStore:
             ).fetchone()
         if row is None:
             return None
-        return json.loads(row["payload"])
+        payload = row["payload"]
+        if self._encryptor:
+            # Tolerant decrypt: snapshots written before payload encryption (or
+            # before a key was configured) pass through unchanged.
+            payload = self._encryptor.decrypt(payload)
+        try:
+            return json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            # Ciphertext without the (correct) key configured — unreadable by
+            # design; treat as not restorable rather than crashing the caller.
+            logger.warning("snapshot %s payload is not readable (encrypted with a different key?)", snapshot_id)
+            return None
 
     # ------------------------------------------------------------------
     # Eviction hints — which chunks can vectr re-retrieve in <50ms?
@@ -995,9 +1056,13 @@ class WorkingContextStore:
 
     def _row_to_note(self, row: sqlite3.Row) -> WorkingNote:
         content = row["content"]
+        keys = row.keys()
+        title = row["title"] if "title" in keys else ""
         if self._encryptor:
             content = self._encryptor.decrypt(content)
-        keys = row.keys()
+            # Tolerant decrypt: titles written before title-encryption (or before
+            # encryption was enabled at all) are returned unchanged.
+            title = self._encryptor.decrypt(title)
         return WorkingNote(
             note_id=row["note_id"],
             workspace=row["workspace"],
@@ -1017,7 +1082,7 @@ class WorkingContextStore:
             code_hash=row["code_hash"] if "code_hash" in keys else "",
             superseded_by=row["superseded_by"] if "superseded_by" in keys else None,
             superseded_at=row["superseded_at"] if "superseded_at" in keys else None,
-            title=row["title"] if "title" in keys else "",
+            title=title,
         )
 
     def format_notes_for_llm(

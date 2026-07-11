@@ -48,9 +48,28 @@ class _NoteEncryptor:
             return stored
 
 
+def _key_from_keyring() -> str:
+    """Read the encryption passphrase from the OS keychain, if the optional
+    `keyring` dependency is installed and a value is stored under
+    service "vectr", username "encrypt-key". Returns "" on any failure —
+    keychain sourcing is a best-effort convenience, never a hard requirement.
+    """
+    try:
+        import keyring  # optional dependency (pip install vectr[encryption])
+    except Exception:
+        return ""
+    try:
+        return keyring.get_password("vectr", "encrypt-key") or ""
+    except Exception:
+        return ""
+
+
 def _build_encryptor() -> _NoteEncryptor | None:
-    """Return a _NoteEncryptor if VECTR_ENCRYPT_KEY is set, else None."""
-    key = os.getenv("VECTR_ENCRYPT_KEY", "")
+    """Return a _NoteEncryptor when an encryption passphrase is available, else
+    None (encryption off — the default). Sourcing precedence: the
+    VECTR_ENCRYPT_KEY environment variable wins; if it is unset, the OS keychain
+    is consulted (env or OS keychain, per the security design)."""
+    key = os.getenv("VECTR_ENCRYPT_KEY", "") or _key_from_keyring()
     return _NoteEncryptor(key) if key else None
 
 

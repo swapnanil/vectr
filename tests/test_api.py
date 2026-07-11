@@ -460,3 +460,91 @@ class TestApiKeyEnforcement:
         with patch.dict("os.environ", {"VECTR_API_KEY": ""}):
             resp = client.get("/v1/status")
         assert resp.status_code == 200
+
+    def test_mcp_endpoint_requires_key(self, client) -> None:
+        """The MCP surface (what the editor's LLM actually talks to) is protected
+        by the same middleware, not just the REST /v1 routes."""
+        with patch.dict("os.environ", {"VECTR_API_KEY": "test-secret-key"}):
+            resp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        assert resp.status_code == 401
+
+    def test_mcp_endpoint_passes_with_key(self, client) -> None:
+        with patch.dict("os.environ", {"VECTR_API_KEY": "test-secret-key"}):
+            resp = client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                headers={"X-Api-Key": "test-secret-key"},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["result"]["serverInfo"]["name"]
+
+    def test_401_body_never_leaks_key(self, client) -> None:
+        """A rejection must never echo the configured key or the provided key."""
+        with patch.dict("os.environ", {"VECTR_API_KEY": "super-secret-value-123"}):
+            resp = client.get("/v1/status", headers={"X-Api-Key": "attacker-guess-456"})
+        assert resp.status_code == 401
+        assert "super-secret-value-123" not in resp.text
+        assert "attacker-guess-456" not in resp.text
+
+    def test_constant_time_comparator_rejects_prefix_match(self, client) -> None:
+        """A key sharing a long prefix but differing at the end is still rejected
+        — the comparison covers the full value, not an early-exit prefix check."""
+        with patch.dict("os.environ", {"VECTR_API_KEY": "abcdefghijklmnop"}):
+            resp_prefix = client.get("/v1/status", headers={"X-Api-Key": "abcdefghijklmnoZ"})
+            resp_short = client.get("/v1/status", headers={"X-Api-Key": "abcdefghij"})
+            resp_exact = client.get("/v1/status", headers={"X-Api-Key": "abcdefghijklmnop"})
+        assert resp_prefix.status_code == 401
+        assert resp_short.status_code == 401
+        assert resp_exact.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Team mode: client attribution via the X-Vectr-Client header
+# ---------------------------------------------------------------------------
+
+class TestClientAttributionHeader:
+    """A team client's label (X-Vectr-Client, written by `vectr connect --label`)
+    becomes the default note author when vectr_remember declares no `agent`."""
+
+    def _remember_call(self, client, headers, arguments):
+        # The working-memory layer must be enabled for the remember branch to run.
+        from api import app
+        app.state.service.search_only = False
+        app.state.service.remember.return_value = 7
+        return client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "vectr_remember", "arguments": arguments},
+            },
+            headers=headers,
+        )
+
+    def test_client_label_becomes_author(self, client) -> None:
+        from api import app
+        svc = app.state.service
+        resp = self._remember_call(
+            client, {"X-Vectr-Client": "bob"}, {"content": "a team finding"},
+        )
+        assert resp.status_code == 200
+        _, kwargs = svc.remember.call_args
+        assert kwargs["agent"] == "bob"
+
+    def test_explicit_agent_wins_over_client_label(self, client) -> None:
+        from api import app
+        svc = app.state.service
+        resp = self._remember_call(
+            client, {"X-Vectr-Client": "bob"},
+            {"content": "a finding", "agent": "coder-2"},
+        )
+        assert resp.status_code == 200
+        _, kwargs = svc.remember.call_args
+        assert kwargs["agent"] == "coder-2"
+
+    def test_no_header_no_attribution(self, client) -> None:
+        from api import app
+        svc = app.state.service
+        resp = self._remember_call(client, {}, {"content": "a solo finding"})
+        assert resp.status_code == 200
+        _, kwargs = svc.remember.call_args
+        assert kwargs["agent"] == ""

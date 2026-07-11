@@ -206,6 +206,31 @@ def _write_cursor_rules(workspace: str, *, search_only: bool = False) -> None:
         print(f"  {'Updated' if existed else 'Created'} {path}", file=sys.stderr)
 
 
+def _mcp_auth_headers(api_key: str = "", client_label: str = "") -> dict[str, str]:
+    """Build the header block an MCP client must send to an authenticated vectr
+    instance: the shared API key, plus an optional client-attribution label."""
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["X-Api-Key"] = api_key
+    if client_label:
+        headers["X-Vectr-Client"] = client_label
+    return headers
+
+
+def _inject_mcp_headers(config_json: str, headers: dict[str, str]) -> str:
+    """Add a `headers` block to the vectr server entry of a rendered MCP config
+    JSON string. Returns config_json unchanged when `headers` is empty, so the
+    default keyless output stays byte-for-byte identical to before."""
+    if not headers:
+        return config_json
+    data = json.loads(config_json)
+    servers = data.get("mcpServers") or data.get("servers") or {}
+    entry = servers.get("vectr")
+    if isinstance(entry, dict):
+        entry["headers"] = headers
+    return json.dumps(data, indent=2) + "\n"
+
+
 def _api_base(port: int) -> str:
     return f"http://localhost:{port}"
 
@@ -450,13 +475,24 @@ def _write_workspace_config(workspace: str, port: int, *, search_only: bool = Fa
     )
     _write_cursor_rules(workspace, search_only=search_only)
 
-    _write_or_update(root / ".mcp.json", _MCP_JSON.format(port=port), f"port {port}")
-    _write_or_update(root / ".cursor" / "mcp.json", _CURSOR_MCP_JSON.format(port=port), f"port {port}")
-    _write_or_update(root / ".vscode" / "mcp.json", _VSCODE_MCP_JSON.format(port=port), f"port {port}")
+    # When this workspace's daemon runs with authentication enabled
+    # (VECTR_API_KEY set), the local editor's MCP config must carry the key
+    # header too, or the editor can no longer reach its own daemon. Keyless
+    # daemons (the default) get the unchanged, header-free config.
+    headers = _mcp_auth_headers(api_key=os.getenv("VECTR_API_KEY", ""))
+    _write_or_update(root / ".mcp.json", _inject_mcp_headers(_MCP_JSON.format(port=port), headers), f"port {port}")
+    _write_or_update(root / ".cursor" / "mcp.json", _inject_mcp_headers(_CURSOR_MCP_JSON.format(port=port), headers), f"port {port}")
+    _write_or_update(root / ".vscode" / "mcp.json", _inject_mcp_headers(_VSCODE_MCP_JSON.format(port=port), headers), f"port {port}")
 
     # Merge-safe (not create-only): UPG-11.5 reordered `vectr init --hooks` to
     # write hooks before workspace config in the same run, so settings.json can
     # already exist (hooks-only) by the time we get here — still needs this key.
+    _ensure_enable_all_project_mcp_servers(root)
+
+
+def _ensure_enable_all_project_mcp_servers(root: Path) -> None:
+    """Merge `enableAllProjectMcpServers: true` into .claude/settings.json,
+    preserving any existing keys. Shared by the local and remote config writers."""
     settings = root / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
     if not settings.exists():
@@ -471,6 +507,64 @@ def _write_workspace_config(workspace: str, port: int, *, search_only: bool = Fa
             data["enableAllProjectMcpServers"] = True
             settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
             print(f"  Updated {settings} (enableAllProjectMcpServers)", file=sys.stderr)
+
+
+def _normalize_mcp_url(url: str) -> str:
+    """Return the MCP endpoint URL for a remote vectr instance. Accepts either
+    a base URL (`http://host:8765`) or one already ending in `/mcp`."""
+    url = url.strip().rstrip("/")
+    if not url.endswith("/mcp"):
+        url = url + "/mcp"
+    return url
+
+
+def _host_from_url(url: str) -> str:
+    """Extract the hostname from an http(s) URL (no port), for the loopback
+    check in `vectr connect`. Best-effort; returns "" if it can't be parsed."""
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def _remote_mcp_configs(url: str, headers: dict[str, str]) -> dict[str, str]:
+    """Build the three editor MCP config JSON texts pointing at a remote vectr
+    instance, with optional auth/attribution headers. Keyed by relative path."""
+    claude = {"mcpServers": {"vectr": {"type": "http", "url": url}}}
+    cursor = {"mcpServers": {"vectr": {"url": url}}}
+    vscode = {"servers": {"vectr": {"type": "http", "url": url}}}
+    if headers:
+        claude["mcpServers"]["vectr"]["headers"] = headers
+        cursor["mcpServers"]["vectr"]["headers"] = headers
+        vscode["servers"]["vectr"]["headers"] = headers
+
+    def _dump(d: dict) -> str:
+        return json.dumps(d, indent=2) + "\n"
+
+    return {
+        ".mcp.json": _dump(claude),
+        ".cursor/mcp.json": _dump(cursor),
+        ".vscode/mcp.json": _dump(vscode),
+    }
+
+
+def _write_remote_workspace_config(workspace: str, url: str, headers: dict[str, str]) -> None:
+    """Configure a local editor to use a REMOTE vectr instance (team / central
+    mode). Writes the editor guidance blocks and the three MCP configs pointing
+    at `url` with the given headers — but spawns no daemon and registers no
+    instance. This is the client half of the client/server split."""
+    root = Path(workspace)
+    # Editor guidance so the MCP client's LLM knows the tools exist.
+    _write_ide_config_merge_safe(root / "CLAUDE.md", create_if_missing=True, tool_loading=True)
+    for _rel in _IDE_CONFIG_APPEND_ONLY:
+        _write_ide_config_merge_safe(root / _rel, create_if_missing=False)
+    _write_ide_config_merge_safe(root / ".github" / "copilot-instructions.md", create_if_missing=False)
+    _write_cursor_rules(workspace)
+
+    for rel, text in _remote_mcp_configs(url, headers).items():
+        _write_or_update(root / rel, text, "remote")
+    _ensure_enable_all_project_mcp_servers(root)
 
 
 def _is_vectr_hook_group(group: dict) -> bool:
@@ -835,6 +929,36 @@ def _preflight_grammars(*, _run_pip=None) -> None:
         )
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"})
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True when `host` is a loopback address the daemon binds to by default —
+    reachable only from the same machine, so no authentication is required."""
+    return host.strip().lower() in _LOOPBACK_HOSTS
+
+
+def _enforce_bind_auth(host: str) -> None:
+    """Refuse to bind beyond loopback without authentication.
+
+    Binding the full codebase index + shared working memory to a network
+    interface with no key would serve them to anyone who can reach the port.
+    A non-loopback bind (team / central-instance mode) therefore requires
+    VECTR_API_KEY to be set. Loopback binds are unaffected.
+    """
+    if _is_loopback_host(host) or os.getenv("VECTR_API_KEY", ""):
+        return
+    print(
+        f"Error: refusing to bind to {host} without authentication.\n"
+        "  Binding beyond localhost exposes the index and working memory to the network.\n"
+        "  Set a shared key first:\n"
+        "    export VECTR_API_KEY=$(vectr key)\n"
+        "  then re-run. To keep vectr local-only, omit --host (defaults to 127.0.0.1).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _do_start(
     workspace: str,
     port: int,
@@ -844,12 +968,14 @@ def _do_start(
     search_only: bool = False,
     workspace_explicit: bool = False,
     code_workspace_file: str | None = None,
+    host: str = "127.0.0.1",
 ) -> None:
     if memory_only and search_only:
         raise ValueError("Cannot start vectr in both --memory-only and --search-only mode simultaneously")
 
-    log_dir = Path.home() / ".vectr" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    from agent.fs_permissions import secure_dir
+    secure_dir(Path.home() / ".vectr")
+    log_dir = secure_dir(Path.home() / ".vectr" / "logs")
     log_path = log_dir / f"{ws_hash}.log"
 
     env = {
@@ -869,7 +995,7 @@ def _do_start(
     vectr_dir = Path(__file__).resolve().parent
     with open(log_path, "a") as log_file:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "api:app", "--host", "127.0.0.1", "--port", str(port)],
+            [sys.executable, "-m", "uvicorn", "api:app", "--host", host, "--port", str(port)],
             env=env,
             cwd=str(vectr_dir),
             start_new_session=True,
@@ -898,7 +1024,14 @@ def _do_start(
         if extra_roots:
             for r in extra_roots:
                 print(f"          + {r}", file=sys.stderr)
-        print(f"MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
+        _url_host = "localhost" if _is_loopback_host(host) else host
+        print(f"MCP URL   : http://{_url_host}:{port}/mcp", file=sys.stderr)
+        if not _is_loopback_host(host):
+            print(
+                f"Bind      : {host} (authenticated). Clients connect with: "
+                f"vectr connect --url http://{host}:{port} --api-key <key>",
+                file=sys.stderr,
+            )
         print(f"Logs      : {log_path}", file=sys.stderr)
         if memory_only:
             print(
@@ -942,12 +1075,85 @@ def _get_port_for_workspace(workspace: str, fallback: int) -> int:
 # Commands
 # ---------------------------------------------------------------------------
 
+def cmd_key(args: argparse.Namespace) -> None:
+    """Print a fresh high-entropy API key for authenticated / team deployments.
+
+    The key goes to stdout (so `KEY=$(vectr key)` works); usage guidance goes
+    to stderr. Vectr never persists the key — the operator sets it in the
+    server's environment (VECTR_API_KEY) and shares it with clients out of band.
+    """
+    import secrets
+    key = secrets.token_urlsafe(32)
+    # A leading '-' makes the key parse as a flag in `--api-key <key>` and
+    # most other CLI contexts; regenerate until the first character is safe.
+    while key.startswith("-"):
+        key = secrets.token_urlsafe(32)
+    print(key)
+    print(
+        "\nShared key for authenticated / team (central instance) deployments:\n"
+        "  server:  VECTR_API_KEY=<key> vectr start --host 0.0.0.0 --path /srv/repo\n"
+        "  client:  vectr connect --url http://<server-host>:<port> --api-key=<key>\n"
+        "Store it in each client's environment or MCP config; vectr never persists it.\n"
+        "Configs that embed the key (.mcp.json, .cursor/mcp.json, .vscode/mcp.json)\n"
+        "hold it in plaintext — treat them as secrets and keep them out of shared or\n"
+        "public version control.",
+        file=sys.stderr,
+    )
+
+
+def cmd_connect(args: argparse.Namespace) -> None:
+    """Configure the local editor to use a REMOTE vectr instance (team mode).
+
+    Writes the editor MCP configs + guidance pointing at a central daemon over
+    the network, with the shared API key (and optional client label) as request
+    headers. Spawns no local daemon. This is how a developer joins a shared
+    working-memory + index instance served by one central host.
+    """
+    workspace = str(Path(getattr(args, "path", ".") or ".").resolve())
+    url = _normalize_mcp_url(args.url)
+    api_key = getattr(args, "api_key", "") or os.getenv("VECTR_API_KEY", "")
+    label = getattr(args, "label", "") or ""
+
+    if url.startswith("http://") and not _is_loopback_host(_host_from_url(url)) and not api_key:
+        print(
+            "Warning: connecting to a non-local instance over plain HTTP without a key.\n"
+            "  If the server requires authentication, pass --api-key or set VECTR_API_KEY.\n"
+            "  Terminate TLS at a reverse proxy for network transport.",
+            file=sys.stderr,
+        )
+
+    headers = _mcp_auth_headers(api_key=api_key, client_label=label)
+    _write_remote_workspace_config(workspace, url, headers)
+
+    print(f"Configured this workspace to use the remote vectr instance at {url}", file=sys.stderr)
+    print(f"  Workspace : {workspace}", file=sys.stderr)
+    if api_key:
+        print("  Auth      : X-Api-Key header written to the editor MCP configs", file=sys.stderr)
+        print(
+            "              (.mcp.json, .cursor/mcp.json, .vscode/mcp.json now hold the key\n"
+            "              in plaintext — treat them as secrets; keep them out of shared or\n"
+            "              public version control)",
+            file=sys.stderr,
+        )
+    if label:
+        print(f"  Client    : notes/audit will be attributed to '{label}'", file=sys.stderr)
+    print(
+        "  Note      : the remote instance indexes its own checkout — search/locate "
+        "results reference the server's files/lines, which may differ from your local tree.",
+        file=sys.stderr,
+    )
+
+
 def cmd_start(args: argparse.Namespace) -> None:
     memory_only = getattr(args, "memory_only", False)
     search_only = getattr(args, "search_only", False)
     if memory_only and search_only:
         print("Error: --memory-only and --search-only are mutually exclusive.", file=sys.stderr)
         sys.exit(1)
+
+    host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
+    # Refuse a non-loopback bind without a shared key BEFORE doing any work.
+    _enforce_bind_auth(host)
 
     roots = _resolve_workspace_roots(args)
     workspace = roots[0]
@@ -983,7 +1189,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     _do_start(
         workspace, port, ws_hash, extra_roots=extra_roots,
         memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
-        code_workspace_file=_code_workspace_file_arg(args),
+        code_workspace_file=_code_workspace_file_arg(args), host=host,
     )
 
 
@@ -1542,6 +1748,9 @@ def cmd_restart(args: argparse.Namespace) -> None:
         print("Error: --memory-only and --search-only are mutually exclusive.", file=sys.stderr)
         sys.exit(1)
 
+    host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
+    _enforce_bind_auth(host)
+
     roots = _resolve_workspace_roots(args)
     workspace = roots[0]
     extra_roots = roots[1:]
@@ -1565,7 +1774,7 @@ def cmd_restart(args: argparse.Namespace) -> None:
     _do_start(
         workspace, port, ws_hash, extra_roots=extra_roots,
         memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
-        code_workspace_file=_code_workspace_file_arg(args),
+        code_workspace_file=_code_workspace_file_arg(args), host=host,
     )
 
 
@@ -1795,6 +2004,12 @@ def main() -> None:
     )
     p_start.add_argument("--port", type=int, default=_default_port)
     p_start.add_argument(
+        "--host", default="127.0.0.1",
+        help="Bind address for the daemon (default 127.0.0.1, local-only). "
+             "Use 0.0.0.0 or a specific interface to serve remote clients "
+             "(team / central instance) — requires VECTR_API_KEY to be set.",
+    )
+    p_start.add_argument(
         "--exclude", action="append", metavar="PATTERN", dest="exclude",
         help=_EXCLUDE_HELP,
     )
@@ -1854,6 +2069,11 @@ def main() -> None:
     )
     p_restart.add_argument("--path", action="append", dest="paths", metavar="DIR")
     p_restart.add_argument("--port", type=int, default=_default_port)
+    p_restart.add_argument(
+        "--host", default="127.0.0.1",
+        help="Bind address for the daemon (default 127.0.0.1). Non-loopback "
+             "binds require VECTR_API_KEY (see vectr start --host).",
+    )
     p_restart.add_argument(
         "--memory-only",
         action="store_true",
@@ -2011,6 +2231,32 @@ def main() -> None:
     p_status.add_argument("--port", type=int, default=_default_port)
     p_status.add_argument("--all", action="store_true", help="List all running instances")
 
+    sub.add_parser(
+        "key",
+        help="Print a fresh high-entropy API key for authenticated / team deployments",
+    )
+
+    p_connect = sub.add_parser(
+        "connect",
+        help="Configure this workspace's editor to use a REMOTE vectr instance "
+             "(team / central server) instead of spawning a local daemon",
+        description=(
+            "Point the local editor's MCP config at a central vectr instance over "
+            "the network, carrying the shared API key (and optional client label) as "
+            "request headers. No local daemon is started. The remote instance serves "
+            "its own indexed checkout and a shared working-memory store — a note one "
+            "connected agent stores is recallable by every other."
+        ),
+    )
+    p_connect.add_argument("--url", required=True,
+                           help="Base URL of the remote instance, e.g. http://central-host:8765")
+    p_connect.add_argument("--api-key", dest="api_key", default="",
+                           help="Shared key for the remote instance (falls back to VECTR_API_KEY)")
+    p_connect.add_argument("--label", default="",
+                           help="Optional client attribution label for notes/audit (e.g. your name)")
+    p_connect.add_argument("--path", default=_default_path,
+                           help="Workspace directory to write the editor config into (default cwd)")
+
     args = parser.parse_args()
     dispatch = {
         "start":   cmd_start,
@@ -2026,6 +2272,8 @@ def main() -> None:
         "remember": cmd_remember,
         "recall":  cmd_recall,
         "hook":    cmd_hook,
+        "key":     cmd_key,
+        "connect": cmd_connect,
     }
     if args.command in dispatch:
         dispatch[args.command](args)
