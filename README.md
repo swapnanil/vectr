@@ -240,6 +240,7 @@ vectr fetch src/auth.py:10-42         # re-fetch a chunk by exact id, verbatim
 vectr init --path .                   # write CLAUDE.md + MCP config without starting
 vectr init --exclude vendor           # exclude directories from indexing
 vectr forget --path .                 # delete all working-memory notes
+vectr proxy                           # experimental: localhost API proxy (see below)
 ```
 
 ---
@@ -351,6 +352,53 @@ trusted peer (no roles, no per-user permissions); the server operator can read
 everything; search results reference the **server's** checkout, which may
 differ from your local tree; vectr speaks plain HTTP — put TLS at a reverse
 proxy or tunnel if the network isn't trusted.
+
+---
+
+## Proactive context (experimental, off by default)
+
+Pull-based recall means the agent has to ask. **Proactive context** is the
+opposite: the right note arrives exactly when it is relevant. It is
+**experimental**, **off by default**, and **localhost-only**.
+
+The `vectr proxy` command runs a small local proxy that sits on the wire between
+your agent and the model API:
+
+```bash
+vectr proxy                            # starts a localhost proxy (default :8785)
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8785   # point your agent at it
+```
+
+What it does and does not do, plainly:
+
+- **Transparent by default.** It forwards every request to the real Anthropic
+  API — streaming responses and tool calls pass through byte-for-byte. Your
+  **API key is forwarded untouched and never stored or logged.**
+- **Deterministic injection, when enabled.** With `VECTR_PROACTIVE=1` and the
+  workspace daemon running, it appends matched working-memory notes to the
+  request *after* the last prompt-cache breakpoint, so your prompt cache is
+  never invalidated. Triggering is a similarity threshold + exact structural
+  matches — never keyword guessing — with a strict per-request budget so a
+  hint only lands when it is worth the tokens.
+- **Fail-open.** If the intelligence layer is slow or errors, your request goes
+  through unchanged. **To bypass the proxy entirely, unset the base URL:**
+  `unset ANTHROPIC_BASE_URL`. The proxy is on the request path, so if it is
+  down, unset the variable to talk to the API directly.
+- **Solo/localhost-only.** It reads your conversation to compute context, so it
+  refuses any non-loopback bind and is mutually exclusive with team mode.
+- **Caveats on a non-first-party base URL (from the Claude Code docs):** MCP
+  tool search is disabled unless `ENABLE_TOOL_SEARCH=true` and the proxy
+  forwards tool-reference blocks; Remote Control is disabled on a
+  non-`api.anthropic.com` base URL.
+
+**Org-wide caching (team mode).** With a central shared instance, vectr can
+cache its own expensive artifacts — semantic search and recall results — keyed
+by exact identity and the current index state, so a re-index or note change
+invalidates them automatically and every connected developer benefits. It is
+off by default (`proactive.cache`), and `vectr status` reports its hit rate and
+estimated tokens saved so the value is measured, not asserted. vectr does **not**
+cache LLM responses across similar requests — only byte-identical ones, locally,
+opt-in — because a wrong cache hit would silently corrupt a conversation.
 
 ---
 

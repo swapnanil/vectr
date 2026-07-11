@@ -82,6 +82,43 @@ zero-config stays the default.
   created owner-only (0700) on POSIX systems; existing directories are
   tightened at startup.
 
+### Proactive context (experimental, off by default)
+- New `vectr proxy` command runs a localhost Anthropic-shaped API proxy the
+  agent harness targets with `ANTHROPIC_BASE_URL`. It forwards `/v1/messages`
+  (and everything else) to the real API transparently — streaming SSE and
+  tool_use pass through byte-for-byte, and the upstream API key is forwarded
+  untouched and never stored or logged. Localhost-only: a non-loopback bind is
+  refused. Bypass it at any time by unsetting `ANTHROPIC_BASE_URL`.
+- When injection is enabled and the workspace daemon is running, the proxy
+  appends deterministic proactive context (matched working-memory notes /
+  structural matches) **after the last prompt-cache breakpoint**, so existing
+  cache prefixes are never invalidated. Injection is fail-open: if the
+  intelligence layer errors or exceeds a tight time budget, the request is
+  forwarded unmodified; a proxy that cannot reach upstream returns an honest
+  upstream-shaped error.
+- Injection triggering is deterministic — structural exact file-path matches +
+  a numeric cosine floor + additive packing — with a per-request item/char
+  budget and per-session dedup/cooldown. No keyword/regex classification of
+  conversation content anywhere.
+- New `POST /v1/proactive` daemon route returns packed context for an assembled
+  window (used by the proxy); scored recall (`recall_scored`) surfaces the
+  per-note cosine similarity the semantic path already computes.
+- Org-wide artifact cache (`proactive.cache`, off by default): caches
+  `/v1/search` and scored-recall results keyed by exact identity + the current
+  index epoch, so a re-index or note change invalidates automatically. On a
+  team instance the cache is shared by every connected client. Exact-match
+  local LLM-response caching in the proxy (`proactive.cache.response_cache`,
+  off by default) serves a cached response only for a byte-identical request
+  within a TTL; semantic-similarity response caching is deliberately not
+  offered (see the design doc's cache-safety analysis).
+- `vectr status` gains proactive-injection counts and artifact-cache metrics
+  (hits/misses/hit-rate/entries/estimated tokens saved) when either is active.
+  A `PROACTIVE_INJECT` audit event records metadata only (channel, item count,
+  anchor ids) — never conversation text or note bodies.
+- Config: new `proactive:` block in `config.yaml`; env overrides under the
+  `VECTR_PROACTIVE*` prefix. All off by default; with nothing set, behavior is
+  unchanged.
+
 ## 1.0.3 — 2026-07-11
 
 - Added the MCP Registry ownership marker (`mcp-name: io.github.swapnanil/vectr`) to the README as an HTML comment — required by registry.modelcontextprotocol.io to validate that the PyPI package and the registry entry belong to the same publisher.

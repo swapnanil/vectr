@@ -445,3 +445,127 @@ proactive:
 Env overrides follow the established pattern (deployment/runtime → env), e.g.
 `VECTR_PROACTIVE=1`, `VECTR_PROACTIVE_MIN_SIMILARITY`, `VECTR_PROACTIVE_MAX_ITEMS`. Keys are
 read at request/startup time; none are persisted beyond `config.yaml` defaults.
+
+The Phase-3 proxy + caching add a `proxy:` and a `cache:` sub-block (both under
+`proactive:`, so the `VECTR_PROACTIVE_*` env prefix stays consistent):
+
+```yaml
+proactive:
+  proxy:
+    enabled: false
+    host: 127.0.0.1                 # localhost only; a non-loopback bind is refused
+    port: 8785
+    upstream_base_url: https://api.anthropic.com
+    inject: true
+    inject_budget_ms: 40            # fail-open soft budget for the whole injection lookup
+  cache:
+    enabled: false
+    max_entries: 2048
+    ttl_seconds: 0                  # 0 = invalidation by index epoch only
+    similarity_threshold: 1.0       # 1.0 = exact-identity keying (provably correct)
+    response_cache:
+      enabled: false                # exact-match byte-identical LLM response cache (proxy)
+      ttl_seconds: 60
+      max_entries: 256
+```
+
+---
+
+## 14. Org-wide caching + telemetry (the shared-cache capability)
+
+With team mode (a central shared vectr instance, `security-features-design.md` §7) plus a
+proxy on each developer's machine, the org gains a **shared layer**. This section is the
+rigorous possibilities map and the safe/unsafe decision for each — implement what is provably
+correct, design (and refuse) the rest honestly.
+
+### 14.1 The possibility map
+
+| Capability | What is shared | Safety | Verdict |
+|---|---|---|---|
+| **Injection** (Phase 3, §6) | Nothing shared; each proxy injects locally from its own daemon | Safe (deterministic, additive, cache-append) | **SHIP** |
+| **Org-wide vectr-artifact cache** | Search results, recall results, embedding computations computed on the team instance | Safe when keyed by exact identity + index epoch | **SHIP (exact keying)** |
+| **Approximate artifact reuse** | A cached artifact reused for an embedding-similar (not identical) query | Trades exactness for hit-rate; documented staleness | **SHIP the mechanism, default OFF** |
+| **Org-level telemetry** | "What are our agents asking", attributed, local/team-only | Safe (metadata, opt-in audit, never transmitted) | **SHIP via existing audit + metrics** |
+| **LLM-response cache — exact** | Byte-identical full request → cached upstream response within a TTL | Safe (same request = valid sample) | **SHIP, off by default, local only** |
+| **LLM-response cache — semantic** | A cached response served for a semantically-similar-but-not-identical request | **UNSAFE** — a wrong hit silently corrupts a stateful conversation | **DO NOT BUILD** |
+
+### 14.2 Org-wide vectr-artifact cache (SAFE — the shippable value)
+
+The team instance computes each artifact once and every connected client benefits, because
+they all query the same daemon. What is cached: `/v1/search` results, scored recall results,
+and embedding computations — the expensive, deterministic vectr-layer outputs.
+
+**Cache-correctness guarantees shipped:**
+
+1. **Exact-identity keying (default, `similarity_threshold: 1.0`).** The key is
+   `sha256(kind + canonical(args) + index_epoch)`. Identical inputs against the same index
+   produce the same key and therefore the same result. This is not a heuristic reuse; it is
+   memoisation of a pure function.
+2. **Invalidation-aware.** The key includes an **index epoch**: for code artifacts it is
+   `total_chunks · last_indexed · embed_model · version_stamp`; for note artifacts it is a
+   monotonic **notes-mutation sequence** bumped on every `remember`/`forget`/`forget_all`. A
+   re-index or any note change changes the epoch, so a stale artifact can never be served — a
+   cache miss, never a wrong answer. Staleness window = zero for exact keying: the moment the
+   underlying state changes, prior keys stop matching.
+3. **Bounded + expiry-aware.** LRU-bounded (`max_entries`), optional wall-clock TTL
+   (`ttl_seconds`, `0` = rely on the epoch alone). No unbounded growth.
+4. **Attributed + authenticated.** On a team instance the cache lives behind the same API-key
+   auth as every other route, and the `X-Vectr-Client` attribution already threads through the
+   audit log — so a shared hit is still recorded against the client that issued the query.
+5. **Measurable.** Hits, misses, hit-rate, entries, evictions, bytes served, and an estimated
+   tokens-saved figure are exposed on `/v1/status` (and summarised in `vectr status`), so the
+   value is measured, not asserted.
+
+**Approximate reuse (mechanism shipped, default OFF).** Setting `similarity_threshold < 1.0`
+enables a deterministic nearest-above-threshold match: among cached entries carrying a key
+vector, the one with the highest cosine similarity to the probe that clears the threshold wins,
+ties broken by cache-key string ascending. This is fully deterministic and correct *as
+specified* (it returns the nearest cached query's result), but its **residual** is that a
+near-but-not-identical query receives an approximate result. That is a real correctness/quality
+trade, so it is **off by default** (threshold `1.0`, exact) and its staleness semantics are
+documented rather than enabled silently. The default daemon wiring uses exact keying only.
+
+**No-query-heuristics compliance.** Cache keys are content-identity hashes and numeric cosine
+thresholds — never a keyword/regex classification of the query, never a branch that routes on
+what the query is "about". This is the same discipline as the rest of the design (§7).
+
+### 14.3 LLM-response caching — the safety analysis
+
+Agentic requests are context-heavy and stateful: the conversation grows monotonically, tools
+have side effects, and a response is consumed as the next step of an ongoing plan. Serving the
+**wrong** cached response does not degrade a result — it silently corrupts the conversation
+from that turn on. Therefore:
+
+- **Semantic-similarity response caching is NOT offered.** There is no threshold at which "this
+  request is close enough to that one" is safe for stateful agent traffic: two requests that
+  differ only in the last tool_result are "similar" yet must get different continuations. A
+  wrong hit is undetectable to the agent and unrecoverable. We build none of it, and say so.
+- **The one provably-safe class is exact match.** A **byte-identical full request within a
+  short TTL** may be served a cached upstream response, because it *is* the same request — the
+  cached response is a valid sample of the same distribution. Shipped as the proxy's
+  `response_cache`: keyed on the exact forwarded bytes (+ path + cache-relevant headers),
+  streaming responses cached as the exact ordered SSE byte chunks so a replay is byte-identical.
+  It is **off by default**, **local to each proxy** (never shared org-wide — an org-wide LLM
+  response cache multiplies the blast radius of any wrong hit), and expected to hit rarely
+  (agentic requests are almost never byte-identical because the transcript grows every turn).
+  We ship it for the narrow, safe, honest case and document that it will seldom fire.
+
+### 14.4 Org-level telemetry
+
+"What are our agents asking" is answered by the **existing** opt-in audit log
+(`VECTR_AUDIT_LOG`) plus the new `PROACTIVE_INJECT` event and the cache metrics — all
+metadata, all local/team-only, never transmitted off the host. The audit records query text
+(that is what an audit log is for) only when the operator turns it on; `PROACTIVE_INJECT`
+records ids/scores/counts only, never conversation text or note bodies (§9). No new telemetry
+subsystem, no phone-home.
+
+### 14.5 What is shipped vs deferred
+
+- **Shipped:** exact-keyed artifact cache (search + scored recall) with index-epoch
+  invalidation and metrics; the approximate-reuse mechanism (default off); the exact-match
+  local response cache (default off); proactive injection through the proxy; metrics on status.
+- **Deferred (honest):** turning approximate artifact reuse on by default (needs a
+  threshold-vs-quality study); caching `/v1/locate`/`/v1/trace` artifacts (symbol-graph
+  outputs are already sub-millisecond, so the cache would rarely pay for itself); a distributed/
+  shared-across-hosts response cache (rejected on the blast-radius argument above, not merely
+  deferred).

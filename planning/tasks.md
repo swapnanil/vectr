@@ -530,3 +530,71 @@ refusal (same gates as UPG-PRO-6) apply to the proxy too.
   recall/search/locate (PRO-4).
 - Phase 2 has no code tasks by design; Phase 3 is independent and can be scheduled after Phase 1
   proves the economics via UPG-PRO-13.
+
+---
+
+## Phase-3 implementation status (branch `feature/experimental-godMode`)
+
+Phase 3 (the localhost proxy + injection + org-wide caching) is **implemented**. Because Phase 3
+was built before the Phase-1 engine landed, the minimal honest subset of the shared engine was
+built alongside it rather than the full Phase-1 backlog. Exact status:
+
+### UPG-PRO-14 — proxy skeleton — **DONE**
+`agent/proactive/proxy.py`. Custom Anthropic-shaped proxy (not LiteLLM). Transparent
+pass-through of streaming SSE + tool_use (byte-exact relay via `httpx` `aiter_raw`) and
+non-streaming; forwards the upstream key untouched (never stored/logged; excluded from the
+hop-by-hop strip only, i.e. always passed through); fail-open on upstream error (honest
+upstream-shaped 502) and on injection error/timeout; localhost-only listener (refuses a
+non-loopback bind); off by default. `vectr proxy` CLI (`main.py`) wires it with the documented
+bypass/caveat story.
+
+### UPG-PRO-15 — proxy injection (cache-append) — **DONE**
+`agent/proactive/request_window.py` (`append_context_block` + `cache_prefix_signature`) appends
+injected context after the last `cache_control` breakpoint, never mutating/reordering earlier
+messages; a golden test asserts the protected prefix is byte-identical with and without
+injection. Injection reuses the single matcher+gate engine (`matcher.py` + `gate.py`) via the
+daemon `POST /v1/proactive` route — no second matching engine. Empty/over-budget selection →
+request forwarded unchanged.
+
+### UPG-PRO-16 — proxy opt-in + wiring + bypass — **DONE**
+Opt-in via config (`proactive.proxy`) + the `vectr proxy` command; localhost-only + team-mode
+refusal enforced; the non-first-party-host caveats (`ENABLE_TOOL_SEARCH`, Remote-Control) and
+the unset-`ANTHROPIC_BASE_URL` bypass are printed on start and documented in README.
+
+### Phase-1 subset built to serve Phase 3 (not the full Phase-1 backlog)
+- **UPG-PRO-1 (scored recall) — DONE** at the store (`recall_scored` + `_semantic_recall(return_scores)`)
+  and service level; powers the semantic-note matcher. The `/v1/recall` route `with_scores` flag
+  is **deferred** (the proxy path does not need it; the injection source uses `service.recall_scored`
+  directly).
+- **UPG-PRO-4 (matchers) — PARTIAL/DONE for the subset.** M1 structural file→note and M3 semantic
+  note ship as the default injection source; M4 code-search ships behind a static toggle
+  (`proactive.matchers.code_search`, default off). **M2 (symbol-definition via locate) is deferred**
+  — it is another matcher + threshold, not a content classifier.
+- **UPG-PRO-5 (gate) — DONE** (`gate.py`): floor / budget / dedup+cooldown / deterministic pack.
+- **UPG-PRO-6 (config + localhost guard) — DONE** (`settings.py`, `config.yaml`, `config.py`):
+  `proactive:` block + `VECTR_PROACTIVE*` env overrides + two-gate `proactive_enabled` /
+  `enforce_proactive_bind` reusing the enterpriseV1 `_is_loopback_host` helper.
+- **UPG-PRO-7 (daemon endpoint) — DONE** as `POST /v1/proactive` (structured window in → packed
+  context out), the minimal subset the proxy needs. The **window assembly** for the proxy is done
+  in-process from the request body (`request_window.assemble_window`), not from a transcript file —
+  the proxy already has the full canonical conversation, so the transcript-tail reader (UPG-PRO-2/3)
+  is **not needed for the proxy** and remains a Phase-1 (hook-path) task.
+
+### New capability: org-wide caching (design §14)
+- **Artifact cache — DONE** (`agent/proactive/cache.py` `ArtifactCache`; wired into `service.search`
+  and `service.recall_scored`). Exact-identity keying + index-epoch invalidation (code epoch;
+  notes-mutation sequence). Approximate-reuse mechanism present, default off (`similarity_threshold`).
+  Metrics on `/v1/status`.
+- **Response cache — DONE** (`ResponseCache`, exact-match byte-identical, TTL, off by default, local
+  only). Semantic-similarity response caching intentionally **not built** (design §14.3).
+
+### Deferred / new tasks this work exposes
+- **UPG-PRO-2/3 (transcript window reader + extractors)** — still required for the **hook** delivery
+  seam (Phase 1); the proxy sidesteps them. When built, they feed the same `/v1/proactive` endpoint.
+- **UPG-PRO-1 route flag** (`/v1/recall?with_scores`) — deferred; do when a non-proxy caller needs
+  structured scores over REST.
+- **UPG-PRO-M2** — symbol-definition matcher via `locate` (a matcher + threshold).
+- **UPG-PRO-CACHE-APPROX-STUDY** — measure the approximate-artifact-reuse threshold-vs-quality
+  trade before considering enabling it by default (design §14.2).
+- **UPG-PRO-13 (metrics/economics harness)** — the proxy exposes injection counts + cache metrics
+  on status; the offline precision/kill-criteria harness is still Phase-1 work.
