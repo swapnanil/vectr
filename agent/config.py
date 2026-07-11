@@ -646,3 +646,43 @@ EMBEDDING_MAX_SEQ_LENGTH: int = int(_cfg["embedding"]["max_seq_length"])
 # ---------------------------------------------------------------------------
 
 FETCH_MAX_IDS_PER_CALL: int = int(_cfg["fetch"]["max_ids_per_call"])
+
+# ---------------------------------------------------------------------------
+# Proactive context — bundled defaults (UPG-PRO). Runtime/deployment toggles
+# come from env vars (VECTR_PROACTIVE*), applied over these defaults by
+# agent/proactive/settings.py. These are the product-behaviour defaults only.
+# ---------------------------------------------------------------------------
+
+_pro_cfg: dict[str, Any] = _cfg["proactive"]
+
+PROACTIVE_ENABLED: bool = bool(_pro_cfg["enabled"])
+PROACTIVE_MIN_SIMILARITY: float = float(_pro_cfg["min_similarity"])
+PROACTIVE_MAX_ITEMS_PER_EVENT: int = int(_pro_cfg["max_items_per_event"])
+PROACTIVE_MAX_CHARS_PER_EVENT: int = int(_pro_cfg["max_chars_per_event"])
+PROACTIVE_COOLDOWN_ITEMS: int = int(_pro_cfg["cooldown_items"])
+
+_pro_matchers_cfg: dict[str, Any] = _pro_cfg["matchers"]
+PROACTIVE_MATCHER_STRUCTURAL_NOTE: bool = bool(_pro_matchers_cfg["structural_note"])
+PROACTIVE_MATCHER_SEMANTIC_NOTE: bool = bool(_pro_matchers_cfg["semantic_note"])
+PROACTIVE_MATCHER_CODE_SEARCH: bool = bool(_pro_matchers_cfg["code_search"])
+
+_proxy_cfg: dict[str, Any] = _pro_cfg["proxy"]
+PROACTIVE_PROXY_ENABLED: bool = bool(_proxy_cfg["enabled"])
+PROACTIVE_PROXY_HOST: str = str(_proxy_cfg["host"])
+PROACTIVE_PROXY_PORT: int = int(_proxy_cfg["port"])
+PROACTIVE_PROXY_UPSTREAM_BASE_URL: str = str(_proxy_cfg["upstream_base_url"])
+PROACTIVE_PROXY_CONNECT_TIMEOUT_S: float = float(_proxy_cfg["connect_timeout_s"])
+PROACTIVE_PROXY_READ_TIMEOUT_S: float = float(_proxy_cfg["read_timeout_s"])
+PROACTIVE_PROXY_INJECT: bool = bool(_proxy_cfg["inject"])
+PROACTIVE_PROXY_INJECT_BUDGET_MS: int = int(_proxy_cfg["inject_budget_ms"])
+
+_cache_cfg: dict[str, Any] = _pro_cfg["cache"]
+PROACTIVE_CACHE_ENABLED: bool = bool(_cache_cfg["enabled"])
+PROACTIVE_CACHE_MAX_ENTRIES: int = int(_cache_cfg["max_entries"])
+PROACTIVE_CACHE_TTL_SECONDS: float = float(_cache_cfg["ttl_seconds"])
+PROACTIVE_CACHE_SIMILARITY_THRESHOLD: float = float(_cache_cfg["similarity_threshold"])
+
+_resp_cache_cfg: dict[str, Any] = _cache_cfg["response_cache"]
+PROACTIVE_RESPONSE_CACHE_ENABLED: bool = bool(_resp_cache_cfg["enabled"])
+PROACTIVE_RESPONSE_CACHE_TTL_SECONDS: float = float(_resp_cache_cfg["ttl_seconds"])
+PROACTIVE_RESPONSE_CACHE_MAX_ENTRIES: int = int(_resp_cache_cfg["max_entries"])

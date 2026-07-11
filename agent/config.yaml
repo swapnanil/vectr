@@ -1151,3 +1151,89 @@ fetch:
   # many ids a single call may request, so a caller can't turn the re-fetch
   # surface into an unbounded bulk-export of the whole index.
   max_ids_per_call: 20
+
+proactive:
+  # UPG-PRO — "Proactive context" (experimental). Deterministically surface the
+  # relevant working-memory note / structural match at a sanctioned delivery
+  # moment, instead of waiting for the agent to ask. These are DEFAULTS
+  # (product behaviour); deployment/runtime toggles live in env vars
+  # (VECTR_PROACTIVE, VECTR_PROACTIVE_*), which override every value here.
+  #
+  # Master opt-in. Off by default. Also requires a loopback bind: team /
+  # non-loopback (shared-instance) mode forces proactive OFF by construction
+  # (it reads the conversation, the most sensitive data on the machine — see
+  # _proactive_enabled in main.py). Never on without the user turning it on.
+  enabled: false
+
+  # Semantic floor for note injection (reuses the recall UPG-5.1 cutoff shape).
+  # A candidate note whose cosine similarity to the assembled window is below
+  # this is dropped, so an off-topic conversation injects nothing. Structural
+  # (exact file-path) matches bypass the floor — an exact match is not a guess.
+  # A numeric threshold, never keyword logic (no-query-heuristics hard rule).
+  min_similarity: 0.35
+
+  # Per-delivery injection budget. At most this many items, and at most this
+  # many characters, are ever injected in one delivery moment. Higher-confidence
+  # candidates fill the budget first; ties break deterministically. Keeps every
+  # injection worth more than the tokens + attention (and prompt-cache churn) it
+  # costs.
+  max_items_per_event: 3
+  max_chars_per_event: 800
+
+  # Dedup / cooldown ledger size: the last N injected anchor ids per session are
+  # suppressed, so the same note is not re-injected turn after turn.
+  cooldown_items: 30
+
+  # Matchers — each runs unconditionally on every window (no content branch
+  # chooses which to run); enabling/disabling one is a STATIC toggle here, never
+  # a runtime read of the conversation. Turning code_search on requires a built
+  # code index; it degrades to nothing when none exists.
+  matchers:
+    structural_note: true    # M1: exact file-path -> anchored note (score 1.0)
+    semantic_note: true      # M3: cosine note recall above min_similarity
+    code_search: false       # M4: hybrid code search (opt-in; needs an index)
+
+  # Phase 3 — localhost Anthropic-shaped API proxy. The literal "vectr in the
+  # middle" of the wire: point the agent harness at it with
+  # ANTHROPIC_BASE_URL, and it forwards to the real API while appending
+  # deterministic context AFTER the last prompt-cache breakpoint.
+  proxy:
+    enabled: false                 # opt-in listener; off by default
+    host: 127.0.0.1                # localhost only; a non-loopback host is refused
+    port: 8785                     # proxy listener port (distinct from any daemon port)
+    upstream_base_url: https://api.anthropic.com   # the real API the proxy forwards to
+    connect_timeout_s: 10.0        # upstream connect timeout
+    read_timeout_s: 600.0          # upstream read timeout (long-running streams)
+    inject: true                   # append proactive context to proxied requests
+    # Internal soft budget for the whole injection lookup (assemble window +
+    # match + gate). If it is not ready within this many milliseconds, the
+    # request is forwarded UNMODIFIED — a slow intelligence layer never delays
+    # or blocks a real model call (fail-open).
+    inject_budget_ms: 40
+
+  # Org-wide caching of vectr-layer artifacts (semantic search results, recall
+  # results, embedding computations) — SAFE, invalidation-aware, attributed.
+  # On a team/central instance this cache is shared by every connected client,
+  # so the org computes each artifact once. Keyed by exact artifact identity +
+  # the current index-state epoch, so a re-index invalidates automatically.
+  # Off by default; the default search/recall path is byte-identical when off.
+  cache:
+    enabled: false
+    max_entries: 2048              # LRU bound across all cached artifact kinds
+    ttl_seconds: 0                 # 0 = no wall-clock TTL; invalidation is by index epoch only
+    # Cache-key similarity threshold. 1.0 (default) = EXACT-identity keying:
+    # a cached artifact is reused only for a byte-identical normalized request
+    # against the same index epoch — provably the same result. Lowering below
+    # 1.0 enables APPROXIMATE reuse (a cached result for an embedding-similar
+    # but not identical query); this trades exactness for hit-rate and its
+    # staleness semantics are documented — leave at 1.0 unless you accept that.
+    similarity_threshold: 1.0
+    # Exact-match LLM-response cache (proxy only). Serves a cached upstream
+    # response ONLY for a byte-identical full request within the TTL. Off by
+    # default and deliberately narrow: semantic-similarity response caching is
+    # NOT offered (a wrong hit silently corrupts a stateful conversation) — see
+    # the design doc's cache-safety analysis.
+    response_cache:
+      enabled: false
+      ttl_seconds: 60
+      max_entries: 256
