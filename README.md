@@ -305,15 +305,49 @@ HTTP routes (Flask/FastAPI decorators, Express `app.get()`, Spring `@GetMapping`
 
 ## Security
 
-Vectr v1 is designed for a **solo developer on a personal machine**.
+The default is unchanged and stays the headline: **local, no API key, zero
+config** — a solo developer on a personal machine. Out of the box, the daemon
+binds to `127.0.0.1` only, CORS is restricted to localhost origins, each
+workspace gets its own isolated DB directory, port, and process (owner-only
+`0700` on POSIX), and the index and notes persist locally in `~/.cache/vectr/`.
 
-- MCP server binds to `127.0.0.1` only — not reachable from other hosts
-- CORS restricted to localhost origins
-- Each workspace gets its own isolated DB directory, port, and process
-- No API key authentication in v1 — any local process can query
-- Index and notes persist locally in `~/.cache/vectr/`
+Everything below is **opt-in**; enabling nothing changes nothing.
 
-Multi-user, authentication, and encryption at rest are out of scope for v1.
+**Authentication** — set `VECTR_API_KEY` and every request to `/v1/*` and
+`/mcp` must carry it (`X-Api-Key: <key>` or `Authorization: Bearer <key>`;
+constant-time comparison; `/v1/health` stays open for liveness probes).
+Generate a key with `vectr key`. When the key is set at start time, the editor
+MCP configs vectr writes include the header automatically.
+
+**Encryption at rest** — set `VECTR_ENCRYPT_KEY` (or store a passphrase in the
+OS keychain: service `vectr`, username `encrypt-key`; requires
+`pip install vectr[encryption]`) and note content, note titles, and snapshot
+payloads are encrypted (Fernet, PBKDF2-derived key). Honest boundary: the
+**code index is not encrypted** — the search engine needs readable chunk text
+and vectors; protect it with OS full-disk encryption. Note tags/metadata stay
+plaintext, and note embedding vectors (a lossy projection of note text) are
+kept for semantic recall unless you set
+`VECTR_ENCRYPT_DISABLE_NOTE_VECTORS=1`.
+
+**Retention and audit** — notes are kept until you delete them; set
+`VECTR_NOTES_TTL_DAYS` to auto-purge older notes at startup.
+`vectr_forget(all=true)` / `vectr forget --all` delete notes, snapshots, and
+note vectors — everything means everything. Set `VECTR_AUDIT_LOG=<path>` for a
+rotating local log of index/search/remember/recall events (off by default; it
+records query text — that is its purpose — and is never transmitted). Full
+policy: [docs/data-handling.md](docs/data-handling.md).
+
+**Team mode (shared instance)** — one central daemon can serve a team on one
+repo: `VECTR_API_KEY=<key> vectr start --host 0.0.0.0` on the server (a
+non-loopback bind **refuses to start without a key**), then
+`vectr connect --url http://<host>:<port> --api-key <key> --label <you>` on
+each client to point the editor at it. Working memory is shared: a note one
+agent stores, every connected agent can recall; `--label` attributes notes and
+audit lines. Plain limits: one shared key means every holder is an equal,
+trusted peer (no roles, no per-user permissions); the server operator can read
+everything; search results reference the **server's** checkout, which may
+differ from your local tree; vectr speaks plain HTTP — put TLS at a reverse
+proxy or tunnel if the network isn't trusted.
 
 ---
 
