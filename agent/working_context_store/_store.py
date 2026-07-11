@@ -30,6 +30,11 @@ _NOTES_EMBED_MODEL_KEY = "embed_model"
 # embed_fn per call during a one-time startup migration.
 _NOTES_REEMBED_BATCH_SIZE = 256
 
+# SQLite busy-wait for a contended write lock (team mode: concurrent clients +
+# the CLI can share one workspace's notes DB). Intentionally NOT in config.yaml
+# — a robustness/timeout knob, same category as the throughput constants above.
+_SQLITE_BUSY_TIMEOUT_S = 5.0
+
 
 class WorkingContextStore:
     """
@@ -101,9 +106,15 @@ class WorkingContextStore:
                 )
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path))
+        conn = sqlite3.connect(str(self._db_path), timeout=_SQLITE_BUSY_TIMEOUT_S)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        # Team mode: several clients (and the CLI) can hit one workspace's notes
+        # DB concurrently. WAL allows concurrent readers + one writer; busy_timeout
+        # makes a would-be second writer wait for the lock instead of immediately
+        # raising "database is locked". note_id is AUTOINCREMENT, so IDs stay
+        # unique under concurrent inserts once writes are serialized by the lock.
+        conn.execute(f"PRAGMA busy_timeout={int(_SQLITE_BUSY_TIMEOUT_S * 1000)}")
         return conn
 
     def _init_db(self) -> None:

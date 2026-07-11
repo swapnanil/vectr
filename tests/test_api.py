@@ -496,3 +496,55 @@ class TestApiKeyEnforcement:
         assert resp_prefix.status_code == 401
         assert resp_short.status_code == 401
         assert resp_exact.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Team mode: client attribution via the X-Vectr-Client header
+# ---------------------------------------------------------------------------
+
+class TestClientAttributionHeader:
+    """A team client's label (X-Vectr-Client, written by `vectr connect --label`)
+    becomes the default note author when vectr_remember declares no `agent`."""
+
+    def _remember_call(self, client, headers, arguments):
+        # The working-memory layer must be enabled for the remember branch to run.
+        from api import app
+        app.state.service.search_only = False
+        app.state.service.remember.return_value = 7
+        return client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "vectr_remember", "arguments": arguments},
+            },
+            headers=headers,
+        )
+
+    def test_client_label_becomes_author(self, client) -> None:
+        from api import app
+        svc = app.state.service
+        resp = self._remember_call(
+            client, {"X-Vectr-Client": "bob"}, {"content": "a team finding"},
+        )
+        assert resp.status_code == 200
+        _, kwargs = svc.remember.call_args
+        assert kwargs["agent"] == "bob"
+
+    def test_explicit_agent_wins_over_client_label(self, client) -> None:
+        from api import app
+        svc = app.state.service
+        resp = self._remember_call(
+            client, {"X-Vectr-Client": "bob"},
+            {"content": "a finding", "agent": "coder-2"},
+        )
+        assert resp.status_code == 200
+        _, kwargs = svc.remember.call_args
+        assert kwargs["agent"] == "coder-2"
+
+    def test_no_header_no_attribution(self, client) -> None:
+        from api import app
+        svc = app.state.service
+        resp = self._remember_call(client, {}, {"content": "a solo finding"})
+        assert resp.status_code == 200
+        _, kwargs = svc.remember.call_args
+        assert kwargs["agent"] == ""

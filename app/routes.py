@@ -420,7 +420,10 @@ async def mcp_jsonrpc(request: Request, response: Response, body: dict = Body(..
         if not tool_name:
             return _err(-32602, "Missing required param: name")
         svc = _service(request)
-        return _ok(handle_tools_call(tool_name, arguments, svc, session_id=session_id))
+        client_label = request.headers.get("X-Vectr-Client", "") or ""
+        return _ok(handle_tools_call(
+            tool_name, arguments, svc, session_id=session_id, client_label=client_label,
+        ))
 
     return _err(-32601, f"Method not found: {method}")
 
@@ -443,4 +446,7 @@ async def mcp_tools_call(request: Request, body: dict = Body(...)) -> dict:
         )
     svc = _service(request)
     session_id = request.headers.get("X-Session-ID") or None
-    return handle_tools_call(tool_name, arguments, svc, session_id=session_id)
+    client_label = request.headers.get("X-Vectr-Client", "") or ""
+    return handle_tools_call(
+        tool_name, arguments, svc, session_id=session_id, client_label=client_label,
+    )

@@ -138,6 +138,97 @@ class TestWorkspaceIsolation:
 
 
 # ---------------------------------------------------------------------------
+# Team mode: concurrent multi-client access + shared visibility
+# ---------------------------------------------------------------------------
+
+class TestTeamModeConcurrency:
+    """One central daemon serves many agents. Note-ID allocation, counting, and
+    recall must stay correct when several clients write the same workspace's
+    notes DB concurrently (busy_timeout + AUTOINCREMENT)."""
+
+    def test_concurrent_remember_allocates_unique_ids(self, tmp_path) -> None:
+        import threading
+        store = _store(tmp_path)
+        ws = "/team/repo"
+        ids: list[int] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def worker(i: int) -> None:
+            try:
+                nid = store.remember(ws, f"concurrent finding {i}", author_id=f"dev-{i % 3}")
+                with lock:
+                    ids.append(nid)
+            except Exception as exc:  # pragma: no cover - failure path
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(24)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        assert len(ids) == 24
+        assert len(set(ids)) == 24          # every note got a distinct id
+        assert store.count_notes(ws) == 24  # nothing lost under contention
+
+    def test_concurrent_recall_during_writes(self, tmp_path) -> None:
+        import threading
+        store = _store(tmp_path)
+        ws = "/team/repo"
+        for i in range(10):
+            store.remember(ws, f"seed note {i}")
+
+        recalled_counts: list[int] = []
+        stop = threading.Event()
+
+        def writer() -> None:
+            i = 0
+            while not stop.is_set():
+                store.remember(ws, f"live note {i}")
+                i += 1
+
+        def reader() -> None:
+            for _ in range(15):
+                recalled_counts.append(len(store.recall(ws)))
+
+        w = threading.Thread(target=writer)
+        w.start()
+        r = threading.Thread(target=reader)
+        r.start()
+        r.join()
+        stop.set()
+        w.join()
+
+        # Every recall returned a consistent, non-empty snapshot (never crashed).
+        assert all(c >= 10 for c in recalled_counts)
+
+
+class TestSharedMemoryVisibility:
+    """Shared working memory: any connected agent sees any other agent's notes
+    for the workspace — there are no per-user silos."""
+
+    def test_note_by_one_author_recallable_without_filter(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = "/team/repo"
+        store.remember(ws, "parser rewrite lives in parse/core.py", author_id="alice")
+        notes = store.recall(ws)  # no author/session filter
+        assert any("parser rewrite" in n.content for n in notes)
+        assert notes[0].author_id == "alice"
+
+    def test_second_client_sees_first_clients_note(self, tmp_path) -> None:
+        # Two store objects on the same db_dir model two clients of one daemon.
+        client_a = _store(tmp_path)
+        client_b = _store(tmp_path)
+        ws = "/team/repo"
+        client_a.remember(ws, "dev A: the retry bug is in queue.py", author_id="alice")
+        notes = client_b.recall(ws)
+        assert any("retry bug" in n.content for n in notes)
+
+
+# ---------------------------------------------------------------------------
 # CRUD operations
 # ---------------------------------------------------------------------------
 

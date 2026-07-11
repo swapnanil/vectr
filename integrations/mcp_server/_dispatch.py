@@ -67,8 +67,14 @@ def handle_tools_call(
     arguments: dict,
     service: Any,
     session_id: str | None = None,
+    client_label: str = "",
 ) -> dict:
-    """Dispatch an MCP tool call. `service` is the VectrService instance."""
+    """Dispatch an MCP tool call. `service` is the VectrService instance.
+
+    `client_label` (team mode) is the connecting client's attribution label,
+    read from the `X-Vectr-Client` request header. It becomes the default note
+    author when a `vectr_remember` call does not declare its own `agent`.
+    """
     # Count every tool call — used by the tool-call-count eviction trigger.
     # Reads the calling session's own advisor (UPG-EVICT-SESSION-SCOPE).
     try:
@@ -484,7 +490,9 @@ def handle_tools_call(
         title = arguments.get("title", "") or ""
         # UPG-SUBAGENT-MEMORY: optional caller-declared agent/subagent
         # identifier for multi-agent shared-memory attribution — never inferred.
-        agent = arguments.get("agent", "") or ""
+        # In team mode, fall back to the connecting client's label (X-Vectr-Client
+        # header) when the call itself does not declare an agent.
+        agent = (arguments.get("agent", "") or "") or client_label
         note_id = service.remember(content=content, tags=tags, priority=priority, kind=kind, title=title, agent=agent)
         # reset the turn-count nudge, the eviction advisor's remember-fatigue
         # counter (UPG-REMEMBER-BANNER-FATIGUE), and enable memory tools
