@@ -8,13 +8,13 @@
     "source": "github"
   },
   "websiteUrl": "https://swapnanilsaha.com/tools/vectr",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "vectr",
-      "version": "1.0.3",
+      "version": "1.1.0",
       "transport": {
         "type": "streamable-http",
         "url": "http://localhost:{VECTR_PORT}/mcp"

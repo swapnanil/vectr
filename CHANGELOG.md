@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 — 2026-07-11
 
 Security and shared-deployment features. All opt-in; with none of the new
 environment variables or flags set, behavior is unchanged — local, keyless,
