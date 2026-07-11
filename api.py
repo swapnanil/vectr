@@ -1,6 +1,7 @@
 """FastAPI application entry point. Port: 8765."""
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 
@@ -71,9 +72,10 @@ app.add_middleware(
 
 # Optional API key enforcement — only active when VECTR_API_KEY is set.
 # Solo dev / personal machine: no key required by default.
-# For shared/enterprise use: set VECTR_API_KEY and communicate it to IDE users.
-# Middleware reads the env var at request time (not import time) so the key can
-# be changed without restarting and tests can patch os.environ cleanly.
+# For shared-host or team (central instance) use: set VECTR_API_KEY and share it
+# with connecting clients. Middleware reads the env var at request time (not
+# import time) so the key can be changed without restarting and tests can patch
+# os.environ cleanly.
 @app.middleware("http")
 async def require_api_key(request: Request, call_next) -> Response:
     api_key = os.getenv("VECTR_API_KEY", "")
@@ -89,7 +91,10 @@ async def require_api_key(request: Request, call_next) -> Response:
         request.headers.get("X-Api-Key", "")
         or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
     )
-    if provided != api_key:
+    # Constant-time comparison — never a plain `==`/`!=`, which leaks the key
+    # length and prefix via response timing. compare_digest requires both
+    # operands be the same type; encode to bytes so a unicode key is handled.
+    if not hmac.compare_digest(provided.encode("utf-8"), api_key.encode("utf-8")):
         return Response(
             content='{"error":"unauthorized","detail":"Set X-Api-Key or Authorization: Bearer <VECTR_API_KEY>"}',
             status_code=401,

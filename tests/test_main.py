@@ -2860,3 +2860,77 @@ class TestTopLevelDescription:
         import api
         assert "memory" in api.app.description.lower()
         assert "search" in api.app.description.lower()
+
+
+# ---------------------------------------------------------------------------
+# Authentication: key generation + editor-config header emission
+# ---------------------------------------------------------------------------
+
+class TestMcpHeaderInjection:
+    """Unit tests for the header-injection helpers used by both the local
+    authenticated-config path and `vectr connect`."""
+
+    def test_no_headers_returns_config_unchanged(self) -> None:
+        original = m._MCP_JSON.format(port=8765)
+        assert m._inject_mcp_headers(original, {}) == original
+
+    def test_headers_added_to_mcpservers_entry(self) -> None:
+        out = m._inject_mcp_headers(m._MCP_JSON.format(port=8765), {"X-Api-Key": "k"})
+        data = json.loads(out)
+        assert data["mcpServers"]["vectr"]["headers"] == {"X-Api-Key": "k"}
+        assert data["mcpServers"]["vectr"]["url"].endswith(":8765/mcp")
+
+    def test_headers_added_to_servers_entry_vscode(self) -> None:
+        out = m._inject_mcp_headers(m._VSCODE_MCP_JSON.format(port=8765), {"X-Api-Key": "k"})
+        data = json.loads(out)
+        assert data["servers"]["vectr"]["headers"] == {"X-Api-Key": "k"}
+
+    def test_auth_headers_builder(self) -> None:
+        assert m._mcp_auth_headers() == {}
+        assert m._mcp_auth_headers(api_key="k") == {"X-Api-Key": "k"}
+        assert m._mcp_auth_headers(api_key="k", client_label="alice") == {
+            "X-Api-Key": "k",
+            "X-Vectr-Client": "alice",
+        }
+
+
+class TestAuthConfigWriters:
+    """When VECTR_API_KEY is set, the local editor MCP configs must carry the
+    key header so the editor can still reach its own authenticated daemon."""
+
+    def test_no_key_writes_header_free_config(self, tmp_path) -> None:
+        with patch.dict(os.environ, {"VECTR_API_KEY": ""}, clear=False):
+            m._write_workspace_config(str(tmp_path), 8765)
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        assert "headers" not in mcp["mcpServers"]["vectr"]
+
+    def test_key_set_emits_header_in_all_three_configs(self, tmp_path) -> None:
+        with patch.dict(os.environ, {"VECTR_API_KEY": "team-secret"}, clear=False):
+            m._write_workspace_config(str(tmp_path), 8765)
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        cursor = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
+        vscode = json.loads((tmp_path / ".vscode" / "mcp.json").read_text())
+        assert mcp["mcpServers"]["vectr"]["headers"]["X-Api-Key"] == "team-secret"
+        assert cursor["mcpServers"]["vectr"]["headers"]["X-Api-Key"] == "team-secret"
+        assert vscode["servers"]["vectr"]["headers"]["X-Api-Key"] == "team-secret"
+
+
+class TestCmdKey:
+    def test_key_command_prints_urlsafe_token_to_stdout(self, capsys) -> None:
+        args = argparse.Namespace()
+        m.cmd_key(args)
+        captured = capsys.readouterr()
+        key = captured.out.strip()
+        # secrets.token_urlsafe(32) → ~43 URL-safe chars, one line on stdout.
+        assert len(key) >= 40
+        assert "\n" not in key
+        assert all(c.isalnum() or c in "-_" for c in key)
+        # Usage guidance goes to stderr, never the key generator's stdout.
+        assert "vectr connect" in captured.err
+
+    def test_key_command_generates_distinct_keys(self, capsys) -> None:
+        m.cmd_key(argparse.Namespace())
+        first = capsys.readouterr().out.strip()
+        m.cmd_key(argparse.Namespace())
+        second = capsys.readouterr().out.strip()
+        assert first != second

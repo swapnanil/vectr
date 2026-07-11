@@ -460,3 +460,39 @@ class TestApiKeyEnforcement:
         with patch.dict("os.environ", {"VECTR_API_KEY": ""}):
             resp = client.get("/v1/status")
         assert resp.status_code == 200
+
+    def test_mcp_endpoint_requires_key(self, client) -> None:
+        """The MCP surface (what the editor's LLM actually talks to) is protected
+        by the same middleware, not just the REST /v1 routes."""
+        with patch.dict("os.environ", {"VECTR_API_KEY": "test-secret-key"}):
+            resp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        assert resp.status_code == 401
+
+    def test_mcp_endpoint_passes_with_key(self, client) -> None:
+        with patch.dict("os.environ", {"VECTR_API_KEY": "test-secret-key"}):
+            resp = client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                headers={"X-Api-Key": "test-secret-key"},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["result"]["serverInfo"]["name"]
+
+    def test_401_body_never_leaks_key(self, client) -> None:
+        """A rejection must never echo the configured key or the provided key."""
+        with patch.dict("os.environ", {"VECTR_API_KEY": "super-secret-value-123"}):
+            resp = client.get("/v1/status", headers={"X-Api-Key": "attacker-guess-456"})
+        assert resp.status_code == 401
+        assert "super-secret-value-123" not in resp.text
+        assert "attacker-guess-456" not in resp.text
+
+    def test_constant_time_comparator_rejects_prefix_match(self, client) -> None:
+        """A key sharing a long prefix but differing at the end is still rejected
+        — the comparison covers the full value, not an early-exit prefix check."""
+        with patch.dict("os.environ", {"VECTR_API_KEY": "abcdefghijklmnop"}):
+            resp_prefix = client.get("/v1/status", headers={"X-Api-Key": "abcdefghijklmnoZ"})
+            resp_short = client.get("/v1/status", headers={"X-Api-Key": "abcdefghij"})
+            resp_exact = client.get("/v1/status", headers={"X-Api-Key": "abcdefghijklmnop"})
+        assert resp_prefix.status_code == 401
+        assert resp_short.status_code == 401
+        assert resp_exact.status_code == 200

@@ -206,6 +206,31 @@ def _write_cursor_rules(workspace: str, *, search_only: bool = False) -> None:
         print(f"  {'Updated' if existed else 'Created'} {path}", file=sys.stderr)
 
 
+def _mcp_auth_headers(api_key: str = "", client_label: str = "") -> dict[str, str]:
+    """Build the header block an MCP client must send to an authenticated vectr
+    instance: the shared API key, plus an optional client-attribution label."""
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["X-Api-Key"] = api_key
+    if client_label:
+        headers["X-Vectr-Client"] = client_label
+    return headers
+
+
+def _inject_mcp_headers(config_json: str, headers: dict[str, str]) -> str:
+    """Add a `headers` block to the vectr server entry of a rendered MCP config
+    JSON string. Returns config_json unchanged when `headers` is empty, so the
+    default keyless output stays byte-for-byte identical to before."""
+    if not headers:
+        return config_json
+    data = json.loads(config_json)
+    servers = data.get("mcpServers") or data.get("servers") or {}
+    entry = servers.get("vectr")
+    if isinstance(entry, dict):
+        entry["headers"] = headers
+    return json.dumps(data, indent=2) + "\n"
+
+
 def _api_base(port: int) -> str:
     return f"http://localhost:{port}"
 
@@ -450,9 +475,14 @@ def _write_workspace_config(workspace: str, port: int, *, search_only: bool = Fa
     )
     _write_cursor_rules(workspace, search_only=search_only)
 
-    _write_or_update(root / ".mcp.json", _MCP_JSON.format(port=port), f"port {port}")
-    _write_or_update(root / ".cursor" / "mcp.json", _CURSOR_MCP_JSON.format(port=port), f"port {port}")
-    _write_or_update(root / ".vscode" / "mcp.json", _VSCODE_MCP_JSON.format(port=port), f"port {port}")
+    # When this workspace's daemon runs with authentication enabled
+    # (VECTR_API_KEY set), the local editor's MCP config must carry the key
+    # header too, or the editor can no longer reach its own daemon. Keyless
+    # daemons (the default) get the unchanged, header-free config.
+    headers = _mcp_auth_headers(api_key=os.getenv("VECTR_API_KEY", ""))
+    _write_or_update(root / ".mcp.json", _inject_mcp_headers(_MCP_JSON.format(port=port), headers), f"port {port}")
+    _write_or_update(root / ".cursor" / "mcp.json", _inject_mcp_headers(_CURSOR_MCP_JSON.format(port=port), headers), f"port {port}")
+    _write_or_update(root / ".vscode" / "mcp.json", _inject_mcp_headers(_VSCODE_MCP_JSON.format(port=port), headers), f"port {port}")
 
     # Merge-safe (not create-only): UPG-11.5 reordered `vectr init --hooks` to
     # write hooks before workspace config in the same run, so settings.json can
@@ -941,6 +971,25 @@ def _get_port_for_workspace(workspace: str, fallback: int) -> int:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
+def cmd_key(args: argparse.Namespace) -> None:
+    """Print a fresh high-entropy API key for authenticated / team deployments.
+
+    The key goes to stdout (so `KEY=$(vectr key)` works); usage guidance goes
+    to stderr. Vectr never persists the key — the operator sets it in the
+    server's environment (VECTR_API_KEY) and shares it with clients out of band.
+    """
+    import secrets
+    key = secrets.token_urlsafe(32)
+    print(key)
+    print(
+        "\nShared key for authenticated / team (central instance) deployments:\n"
+        "  server:  VECTR_API_KEY=<key> vectr start --host 0.0.0.0 --path /srv/repo\n"
+        "  client:  vectr connect --url http://<server-host>:<port> --api-key <key>\n"
+        "Store it in each client's environment or MCP config; vectr never persists it.",
+        file=sys.stderr,
+    )
+
 
 def cmd_start(args: argparse.Namespace) -> None:
     memory_only = getattr(args, "memory_only", False)
@@ -2011,6 +2060,11 @@ def main() -> None:
     p_status.add_argument("--port", type=int, default=_default_port)
     p_status.add_argument("--all", action="store_true", help="List all running instances")
 
+    sub.add_parser(
+        "key",
+        help="Print a fresh high-entropy API key for authenticated / team deployments",
+    )
+
     args = parser.parse_args()
     dispatch = {
         "start":   cmd_start,
@@ -2026,6 +2080,7 @@ def main() -> None:
         "remember": cmd_remember,
         "recall":  cmd_recall,
         "hook":    cmd_hook,
+        "key":     cmd_key,
     }
     if args.command in dispatch:
         dispatch[args.command](args)
