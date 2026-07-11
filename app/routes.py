@@ -18,6 +18,8 @@ from app.models import (
     LocateResponse,
     MapSaveRequest,
     MapSaveResponse,
+    ProactiveRequest,
+    ProactiveResponse,
     RecallRequest,
     RecallResponse,
     RememberRequest,
@@ -300,6 +302,39 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
     )
     return RecallResponse(
         notes=notes_text,
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/proactive", response_model=ProactiveResponse)
+async def proactive(body: ProactiveRequest, request: Request) -> ProactiveResponse:
+    """Packed proactive context for an assembled window (UPG-PRO-7 subset).
+
+    Hook-facing / proxy-facing: never errors the caller. When proactive is
+    disabled, the memory layer is absent, or nothing clears the floor + budget,
+    it returns an empty result so the caller forwards the request unmodified.
+    """
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        # No working-memory layer to draw from; inject nothing (never 503 here).
+        return ProactiveResponse(processing_ms=int((time.monotonic() - t0) * 1000))
+    try:
+        result = svc.proactive_context(
+            text=body.text,
+            file_paths=body.file_paths,
+            symbols=body.symbols,
+            session_id=body.session_id,
+            channel=body.channel,
+            structural_only=body.structural_only,
+        )
+    except Exception:
+        result = {"context": "", "item_count": 0, "anchor_ids": [], "scores": []}
+    return ProactiveResponse(
+        context=result["context"],
+        item_count=result["item_count"],
+        anchor_ids=result["anchor_ids"],
+        scores=result["scores"],
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

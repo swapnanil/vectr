@@ -425,6 +425,41 @@ class WorkingContextStore:
               method="sql")
         return notes
 
+    def recall_scored(
+        self,
+        workspace: str,
+        query: str | None = None,
+        tags: list[str] | None = None,
+        priority: str | None = None,
+        limit: int = 10,
+        include_superseded: bool = False,
+        kind: str | None = None,
+        min_similarity: float | None = None,
+        max_age_days: float | None = None,
+        sort_by: str = "relevance",
+    ) -> list[tuple[WorkingNote, float | None]]:
+        """Like recall(), but each note is paired with its cosine similarity
+        (UPG-PRO-1) so a gating layer can budget/threshold on it.
+
+        Semantic path returns real similarities (1 - cosine distance). The SQL
+        LIKE fallback has no cosine to report and returns None per note — never
+        a fabricated number. Ordering matches the scoreless recall() exactly.
+        """
+        if query and self._notes_col is not None and self._embed_fn is not None:
+            try:
+                return self._semantic_recall(
+                    workspace, query, tags, priority, limit, include_superseded, kind,
+                    min_similarity, max_age_days, sort_by, return_scores=True,
+                )
+            except Exception:
+                pass  # fall through to SQL LIKE (scoreless)
+        notes = self.recall(
+            workspace, query=query, tags=tags, priority=priority, limit=limit,
+            include_superseded=include_superseded, kind=kind,
+            min_similarity=min_similarity, max_age_days=max_age_days, sort_by=sort_by,
+        )
+        return [(n, None) for n in notes]
+
     def _semantic_recall(
         self,
         workspace: str,
@@ -437,7 +472,8 @@ class WorkingContextStore:
         min_similarity: float | None = None,
         max_age_days: float | None = None,
         sort_by: str = "relevance",
-    ) -> list[WorkingNote]:
+        return_scores: bool = False,
+    ) -> list:
         """Find the most relevant notes by cosine similarity, then fetch from SQLite.
 
         When min_similarity is set (UPG-5.1), candidates whose cosine similarity
@@ -464,6 +500,13 @@ class WorkingContextStore:
         raw_ids = results["ids"][0]
         distances = (results.get("distances") or [[None] * len(raw_ids)])[0]
         candidate_ids = [int(id_) for id_ in raw_ids]
+        # Per-note cosine similarity (1 - distance), kept for the scored recall
+        # path (UPG-PRO-1). Computed here where the distances are still in hand;
+        # None when ChromaDB returned no distance for a candidate.
+        id_to_sim: dict[int, float | None] = {
+            int(i): (1.0 - d) if d is not None else None
+            for i, d in zip(raw_ids, distances)
+        }
 
         # Relevance cutoff (UPG-5.1) — withhold candidates below the similarity floor.
         if min_similarity is not None:
@@ -527,6 +570,8 @@ class WorkingContextStore:
                     [time.time(), *ids],
                 )
 
+        if return_scores:
+            return [(n, id_to_sim.get(n.note_id)) for n in notes]
         return notes
 
     # ------------------------------------------------------------------

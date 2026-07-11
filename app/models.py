@@ -167,6 +167,13 @@ class StatusResponse(BaseModel):
     # RecallRequest.hook_event); direct vectr_recall/`vectr recall` calls are
     # never counted here. Empty dict means no hook has injected notes yet.
     hook_injection_counts: dict[str, int] = {}
+    # Proactive-context injection counters (UPG-PRO): how many times each
+    # channel (e.g. "proxy") actually injected packed context since startup.
+    # Empty until proactive context has injected anything.
+    proactive_injection_counts: dict[str, int] = {}
+    # Org-wide artifact-cache metrics (UPG-PRO caching): hits / misses /
+    # hit_rate / entries / est_tokens_saved, or None when the cache is off.
+    artifact_cache: dict | None = None
 
 
 class HealthResponse(BaseModel):
@@ -303,6 +310,27 @@ class RecallRequest(BaseModel):
 class RecallResponse(BaseModel):
     notes: str
     processing_ms: int
+
+
+class ProactiveRequest(BaseModel):
+    """An already-assembled proactive window (UPG-PRO-7). The caller (the proxy,
+    or a future hook adapter) extracts the window; the daemon does the matching
+    and gating. Kept structured — no raw request body is sent here."""
+
+    text: str = Field(default="", description="Assembled recent-conversation text (the semantic query)")
+    file_paths: list[str] = Field(default_factory=list, description="Deterministic file-path anchors from tool traffic")
+    symbols: list[str] = Field(default_factory=list, description="Deterministic symbol anchors from tool traffic")
+    session_id: str = Field(default="", description="Per-conversation id for dedup/cooldown")
+    channel: str = Field(default="proxy", description="Delivery channel label (e.g. 'proxy'); used for per-channel policy + metrics")
+    structural_only: bool = Field(default=False, description="Emit only exact structural matches (a static per-channel policy, not a content decision)")
+
+
+class ProactiveResponse(BaseModel):
+    context: str = Field(default="", description="Packed context to inject ('' = inject nothing)")
+    item_count: int = 0
+    anchor_ids: list[str] = Field(default_factory=list)
+    scores: list[float] = Field(default_factory=list)
+    processing_ms: int = 0
 
 
 class ForgetRequest(BaseModel):

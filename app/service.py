@@ -213,6 +213,32 @@ class VectrService:
         self._hook_injection_counts: dict[str, int] = {}
         self._hook_injection_lock = threading.Lock()
 
+        # Proactive context (UPG-PRO) — per-channel injection counters (like the
+        # hook counters above) + a per-session dedup ledger shared across the
+        # matcher/gate for the lifetime of this process. Lazily built.
+        self._proactive_injection_counts: dict[str, int] = {}
+        self._proactive_injection_lock = threading.Lock()
+        self._proactive_ledger = None  # agent.proactive.gate.LedgerStore
+
+        # Org-wide vectr-artifact cache (UPG-PRO caching) — off unless enabled.
+        # Bumped monotonically on every note mutation so recall artifacts keyed
+        # by the notes epoch invalidate the moment a note changes.
+        self._notes_mutation_seq = 0
+        self._notes_mutation_lock = threading.Lock()
+        self._artifact_cache = None  # agent.proactive.cache.ArtifactCache
+        try:
+            from agent.proactive.settings import ProactiveSettings
+            _pro = ProactiveSettings.from_env()
+            if _pro.cache_enabled:
+                from agent.proactive.cache import ArtifactCache
+                self._artifact_cache = ArtifactCache(
+                    max_entries=_pro.cache_max_entries,
+                    ttl_seconds=_pro.cache_ttl_seconds,
+                    similarity_threshold=_pro.cache_similarity_threshold,
+                )
+        except Exception:
+            self._artifact_cache = None
+
         # Adaptive strategy — computed after first index, defaults until then
         from agent.strategy_selector import RetrievalStrategy
         self._strategy: RetrievalStrategy | None = None
@@ -501,17 +527,41 @@ class VectrService:
         `record_results`). A REST `/v1/search` caller has no session_id and
         gets pure retrieval with no eviction-tracking side effect.
         """
+        from agent.working_context_store import audit as _audit
+
+        # Org-wide artifact cache (UPG-PRO): identical query against the same
+        # code index -> identical results. Keyed by the code index epoch, so a
+        # re-index invalidates. Off unless proactive.cache is enabled. The
+        # "what was queried" audit still fires on a hit (the query was issued),
+        # but query_ms is reported 0 to reflect that no search actually ran.
+        cache = self._artifact_cache
+        key = ""
+        if cache is not None:
+            from agent.proactive.cache import canonical_key
+            key = canonical_key(
+                "search",
+                {"query": query, "n_results": n_results, "language": language},
+                self._index_epoch("code"),
+            )
+            found, cached = cache.get(key)
+            if found:
+                results, _ = cached
+                _audit("SEARCH", workspace=self._workspace_root,
+                       query=query[:200], results=len(results))
+                return results, 0
+
         sem_w = self._strategy.semantic_weight if self._strategy else STRATEGY_DEFAULT_SEMANTIC_WEIGHT
         results, query_ms = self._searcher.search(
             query, n_results=n_results, language=language, semantic_weight=sem_w
         )
         # Audit "what was queried" (opt-in; the query text is the whole point of
         # an audit log, so it is only recorded when the operator enables one).
-        from agent.working_context_store import audit as _audit
         _audit(
             "SEARCH", workspace=self._workspace_root,
             query=query[:200], results=len(results),
         )
+        if cache is not None:
+            cache.put(key, (results, query_ms))
         return results, query_ms
 
     def record_results(self, results: list, session_id: str | None = None) -> None:
@@ -697,6 +747,8 @@ class VectrService:
             **strategy_info,
             **self._watcher.watcher_status(),
             "hook_injection_counts": self.get_hook_injection_counts(),
+            "proactive_injection_counts": self.get_proactive_injection_counts(),
+            "artifact_cache": self.cache_metrics(),
         }
 
     def _symbol_graph_status(self) -> dict:
@@ -821,7 +873,7 @@ class VectrService:
         needed) and surfaced as an attribution tag in recall index lines when
         present. Absent (default "") renders exactly as before this feature."""
         self._require_memory_layer()
-        return self._context_store.remember(
+        note_id = self._context_store.remember(
             workspace=self._workspace_root,
             content=content,
             tags=tags,
@@ -831,6 +883,8 @@ class VectrService:
             title=title,
             author_id=agent,
         )
+        self._bump_notes_epoch()
+        return note_id
 
     def get_note(self, note_id: int):
         """Fetch a single note by ID (UPG-RECALL-HIERARCHY expand path)."""
@@ -952,11 +1006,206 @@ class VectrService:
 
     def forget_note(self, note_id: int) -> bool:
         self._require_memory_layer()
-        return self._context_store.forget(self._workspace_root, note_id)
+        ok = self._context_store.forget(self._workspace_root, note_id)
+        if ok:
+            self._bump_notes_epoch()
+        return ok
 
     def forget_all(self) -> int:
         self._require_memory_layer()
-        return self._context_store.forget_all(self._workspace_root)
+        n = self._context_store.forget_all(self._workspace_root)
+        self._bump_notes_epoch()
+        return n
+
+    # ------------------------------------------------------------------
+    # Proactive context (UPG-PRO) + org-wide artifact cache
+    # ------------------------------------------------------------------
+
+    def _bump_notes_epoch(self) -> None:
+        """Advance the notes-mutation sequence so any recall artifact cached
+        under the previous notes epoch can never be served after a change."""
+        with self._notes_mutation_lock:
+            self._notes_mutation_seq += 1
+
+    def _index_epoch(self, scope: str) -> str:
+        """Identity of the current index state for a cache scope. A change here
+        invalidates every artifact keyed under it. `scope='code'` ties to the
+        code index (chunks + last-indexed + embed model + version); `scope='notes'`
+        ties to the notes-mutation sequence."""
+        if scope == "notes":
+            with self._notes_mutation_lock:
+                return f"notes:{self._notes_mutation_seq}"
+        return (
+            f"code:{self._indexer.total_chunks}:{self.last_indexed}:"
+            f"{self._embed_model}:{self._version_stamp}"
+        )
+
+    def recall_scored(
+        self,
+        query: str | None = None,
+        tags: list[str] | None = None,
+        priority: str | None = None,
+        limit: int = 10,
+        kind: str | None = None,
+        min_similarity: float | None = None,
+        max_age_days: float | None = None,
+        sort_by: str = "relevance",
+    ) -> list:
+        """Structured scored recall (UPG-PRO-1): list[(WorkingNote, score|None)].
+
+        Consults the org-wide artifact cache when enabled (keyed by args + the
+        current notes epoch, so a note change invalidates it). The SQL fallback
+        yields None scores — never a fabricated number.
+        """
+        self._require_memory_layer()
+
+        def _compute():
+            return self._context_store.recall_scored(
+                workspace=self._workspace_root, query=query, tags=tags,
+                priority=priority, limit=limit, kind=kind,
+                min_similarity=min_similarity, max_age_days=max_age_days, sort_by=sort_by,
+            )
+
+        cache = self._artifact_cache
+        if cache is None:
+            return _compute()
+        from agent.proactive.cache import canonical_key
+        args = {
+            "query": query, "tags": tags, "priority": priority, "limit": limit,
+            "kind": kind, "min_similarity": min_similarity,
+            "max_age_days": max_age_days, "sort_by": sort_by,
+        }
+        key = canonical_key("recall_scored", args, self._index_epoch("notes"))
+        found, cached = cache.get(key)
+        if found:
+            return cached
+        result = _compute()
+        cache.put(key, result)
+        return result
+
+    def _proactive_gate(self, settings):
+        from agent.proactive.gate import LedgerStore, ProactiveGate
+        if self._proactive_ledger is None:
+            self._proactive_ledger = LedgerStore(settings.cooldown_items)
+        return ProactiveGate(
+            min_similarity=settings.min_similarity,
+            max_items_per_event=settings.max_items_per_event,
+            max_chars_per_event=settings.max_chars_per_event,
+            cooldown_items=settings.cooldown_items,
+            ledger_store=self._proactive_ledger,
+        )
+
+    def proactive_context(
+        self,
+        *,
+        text: str = "",
+        file_paths: list[str] | None = None,
+        symbols: list[str] | None = None,
+        session_id: str = "",
+        channel: str = "proxy",
+        structural_only: bool = False,
+    ) -> dict:
+        """Run the matcher + gate over an already-assembled window and return
+        packed proactive context (UPG-PRO-7 subset serving the proxy).
+
+        Honors the master opt-in and the memory layer being present. Returns an
+        empty result (never an error) when disabled or when nothing clears the
+        floor + budget, so a caller can always forward unmodified. Records a
+        metadata-only PROACTIVE_INJECT audit event on a real injection.
+        """
+        empty = {"context": "", "item_count": 0, "anchor_ids": [], "scores": []}
+        if self._search_only:
+            # No working-memory layer in search-only mode; nothing to inject.
+            return empty
+        from agent.proactive.settings import ProactiveSettings
+        settings = ProactiveSettings.from_env()
+        if not settings.enabled:
+            return empty
+        from agent.proactive.matcher import ProactiveMatcher
+        from agent.proactive.types import ProactiveWindow
+
+        window = ProactiveWindow(
+            text=text or "",
+            file_paths=list(file_paths or []),
+            symbols=list(symbols or []),
+        )
+        if window.is_empty():
+            return empty
+
+        service = self
+
+        class _ServiceMatchSource:
+            def structural_notes(self, paths):
+                seen: dict[int, object] = {}
+                for p in paths:
+                    try:
+                        for note in service._context_store.recall_for_path(
+                            service._workspace_root, p, limit=settings.max_items_per_event * 2
+                        ):
+                            seen.setdefault(note.note_id, note)
+                    except Exception:
+                        continue
+                return list(seen.values())
+
+            def semantic_notes(self, wtext, min_similarity, limit):
+                scored = service.recall_scored(
+                    query=wtext, limit=limit, min_similarity=min_similarity,
+                )
+                return [(n, s) for (n, s) in scored if s is not None]
+
+            def code_search(self, wtext, n_results):
+                if service._memory_only:
+                    return []
+                try:
+                    results, _ms = service.search(wtext, n_results=n_results)
+                    return list(results)
+                except Exception:
+                    return []
+
+        matcher = ProactiveMatcher(
+            _ServiceMatchSource(),
+            min_similarity=settings.min_similarity,
+            max_chars_per_event=settings.max_chars_per_event,
+            structural_note=settings.matcher_structural_note,
+            semantic_note=settings.matcher_semantic_note,
+            code_search=settings.matcher_code_search,
+            note_limit=max(settings.max_items_per_event * 2, settings.max_items_per_event),
+        )
+        candidates = matcher.match(window)
+        result = self._proactive_gate(settings).select(
+            candidates, session_id=session_id, structural_only=structural_only
+        )
+        if not result.is_empty():
+            self._record_proactive_injection(channel, result)
+        return {
+            "context": result.context,
+            "item_count": result.item_count,
+            "anchor_ids": list(result.anchor_ids),
+            "scores": list(result.scores),
+        }
+
+    def _record_proactive_injection(self, channel: str, result) -> None:
+        with self._proactive_injection_lock:
+            self._proactive_injection_counts[channel] = (
+                self._proactive_injection_counts.get(channel, 0) + 1
+            )
+        # Metadata-only audit (design §9): ids + scores + counts, never the
+        # conversation text or note bodies.
+        from agent.working_context_store import audit as _audit
+        _audit(
+            "PROACTIVE_INJECT", workspace=self._workspace_root, channel=channel,
+            items=result.item_count, anchors=",".join(result.anchor_ids),
+        )
+
+    def get_proactive_injection_counts(self) -> dict:
+        with self._proactive_injection_lock:
+            return dict(self._proactive_injection_counts)
+
+    def cache_metrics(self) -> dict | None:
+        """Org-wide artifact-cache metrics for `status` (None when off)."""
+        if self._artifact_cache is None:
+            return None
+        return self._artifact_cache.metrics()
 
     def snapshot_session(self, label: str, session_id: str | None = None) -> str:
         self._require_memory_layer()
