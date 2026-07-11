@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.swapnanil/vectr -->
+
 # Vectr
 
 > **Semantic search and persistent memory for AI code editors.**
@@ -5,10 +7,10 @@
 [![CI](https://github.com/swapnanil/vectr/actions/workflows/ci.yml/badge.svg)](https://github.com/swapnanil/vectr/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version 1.0.0](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![Version 1.0.3](https://img.shields.io/badge/version-1.0.3-blue.svg)](CHANGELOG.md)
 [![MCP: 14 tools](https://img.shields.io/badge/MCP-14%20tools-blue.svg)](#14-mcp-tools)
 
-Version 1.0.0 · Last updated 2026-07-08 · [CHANGELOG](CHANGELOG.md)
+Version 1.0.3 · Last updated 2026-07-11 · [CHANGELOG](CHANGELOG.md)
 
 Vectr gives AI code editors two things they lack: **semantic codebase search** and **persistent working memory** — both served over MCP with zero configuration.
 
@@ -110,7 +112,7 @@ vectr start
 - Ubuntu/Debian: `sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt install python3.14 python3.14-venv`
 - Windows: [python.org/downloads](https://www.python.org/downloads/)
 
-`vectr start` returns immediately. Indexing runs in the background — run `vectr status` to check progress. On first run the embedding model downloads once (~440 MB). Restart your AI code editor once to pick up the new MCP config.
+`vectr start` returns immediately. Indexing runs in the background — run `vectr status` to check progress. On first run the embedding model downloads once (~290 MB). Restart your AI code editor once to pick up the new MCP config.
 
 **Docker (CI/servers)**
 
@@ -290,7 +292,7 @@ HTTP routes (Flask/FastAPI decorators, Express `app.get()`, Spring `@GetMapping`
 
 | | Cost |
 |---|---|
-| Embedding model | $0.00 — one-time ~440 MB download, cached at `~/.cache/vectr/` |
+| Embedding model | $0.00 — one-time ~290 MB download, cached at `~/.cache/vectr/` |
 | Re-index (10k files, first run) | ~10 min on CPU; <5 sec on subsequent runs (mtime cache) |
 | Incremental re-index per changed file | ~0.5 sec |
 | vectr_search / vectr_recall | $0.00 — local inference only |

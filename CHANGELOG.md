@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.3 — 2026-07-11
+
+- Added the MCP Registry ownership marker (`mcp-name: io.github.swapnanil/vectr`) to the README as an HTML comment — required by registry.modelcontextprotocol.io to validate that the PyPI package and the registry entry belong to the same publisher.
+- `server.json` added for the Official MCP Registry listing (`pypi` package, `streamable-http` transport at `http://localhost:{port}/mcp`).
+- README version badge and version line corrected (still said 1.0.0).
+
 ## 1.0.2 — 2026-07-11
 
 - PyPI project page now renders the README (`readme` was missing from package metadata), plus license, author, and project URL metadata.

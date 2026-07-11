@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Vectr — Semantic Codebase Indexer | llm-tools by Swapnanil Saha</title>
-  <meta name="description" content="Zero-config codebase indexer with layered memory. AST-aware search, symbol graph, working notes, and context eviction via MCP — for Claude Code, Cursor, and Copilot.">
+  <meta name="description" content="Semantic codebase search + persistent working memory for AI code editors. AST-aware search, symbol graph, working notes, and context eviction via MCP. Local, zero-config, no API key.">
   <link rel="canonical" href="https://swapnanilsaha.com/tools/vectr/">
   <meta property="og:title" content="Vectr — Semantic Codebase Indexer">
   <meta property="og:description" content="Zero-config local indexer that maps your codebase, finds symbols, remembers what your AI assistant learned, and tells it what to forget — automatically, via MCP.">
@@ -135,7 +135,7 @@
 <span class="fn">vectr</span> start
 <span class="cmt"># Indexes workspace + builds symbol graph in background.</span>
 <span class="cmt"># Writes MCP config for your AI code editor.</span>
-<span class="cmt"># 12 tools available — no extra steps.</span>
+<span class="cmt"># 14 tools available — no extra steps.</span>
 <span class="cmt">✓ Indexed 847 files → 14,523 chunks (9m 12s)</span>
 <span class="cmt">✓ Symbol graph: 6,841 symbols, 22,104 edges</span>
 <span class="cmt">✓ MCP ready at http://localhost:8765/mcp</span>
@@ -193,7 +193,7 @@
       <div class="layer-card">
         <div class="layer-label">Layer 3</div>
         <div class="layer-name">Content Search</div>
-        <div class="layer-desc">AST-aware chunks embedded with Snowflake/snowflake-arctic-embed-m-v1.5 (local, no API key). Adaptive hybrid search: vector + BM25 weights tuned per codebase fingerprint. Returns exact function bodies with file paths and line numbers.</div>
+        <div class="layer-desc">AST-aware chunks embedded with ibm-granite/granite-embedding-english-r2 (local, no API key). Adaptive hybrid search: vector + BM25 weights tuned per codebase fingerprint. Returns exact function bodies with file paths and line numbers.</div>
         <div class="layer-tools">
           <span class="tag tag-cyan">vectr_search</span>
         </div>
@@ -217,12 +217,12 @@
       <div class="arch-step reveal">
         <div class="arch-num">03</div>
         <div class="arch-title">Embed</div>
-        <div class="arch-desc">Each chunk is embedded with Snowflake/snowflake-arctic-embed-m-v1.5. Runs locally — no API key needed, downloaded once (~440MB) and cached. A file watcher re-embeds only changed files on save. Override with <code style="font-family:var(--mono);font-size:11px">VECTR_EMBED_MODEL=&lt;hf-model-id&gt;</code> for any sentence-transformers compatible model.</div>
+        <div class="arch-desc">Each chunk is embedded with ibm-granite/granite-embedding-english-r2. Runs locally — no API key needed, downloaded once (~290MB) and cached. A file watcher re-embeds only changed files on save. Override with <code style="font-family:var(--mono);font-size:11px">VECTR_EMBED_MODEL=&lt;hf-model-id&gt;</code> for any sentence-transformers compatible model.</div>
       </div>
       <div class="arch-step reveal">
         <div class="arch-num">04</div>
         <div class="arch-title">Serve</div>
-        <div class="arch-desc">12 MCP tools at <code style="font-family:var(--mono);font-size:11px">localhost:8765/mcp</code>. Map, locate, search, remember, recall, evict, snapshot, forget. Any MCP-compatible AI code editor connects with two lines of JSON config.</div>
+        <div class="arch-desc">14 MCP tools at <code style="font-family:var(--mono);font-size:11px">localhost:8765/mcp</code>. Map, locate, search, trace, remember, recall, evict, snapshot, forget. Any MCP-compatible AI code editor connects with two lines of JSON config.</div>
       </div>
     </div>
   </div>
@@ -258,7 +258,7 @@
       </div>
       <div class="feature-card reveal">
         <div class="feature-title">Zero-config, zero cloud</div>
-        <div class="feature-desc">Run <code style="font-family:var(--mono);font-size:12px">vectr start</code>. Vectr detects your git root, indexes the workspace, and writes config files for Claude Code, Cursor, VSCode/Copilot, and Windsurf automatically. The embedding model runs locally — no API key required anywhere. See the <a href="https://github.com/swapnanil/vectr" target="_blank" style="color:var(--cyan);text-decoration:none;">README</a> for the full list.</div>
+        <div class="feature-desc">Run <code style="font-family:var(--mono);font-size:12px">vectr start</code>. Vectr detects your git root, indexes the workspace, and writes config files for Claude Code, Cursor, and VS Code/Copilot automatically (Windsurf, Cline, and Continue: manual setup documented in the README). The embedding model runs locally — no API key required anywhere. See the <a href="https://github.com/swapnanil/vectr" target="_blank" style="color:var(--cyan);text-decoration:none;">README</a> for the full list.</div>
       </div>
     </div>
   </div>
@@ -270,7 +270,7 @@
     <div class="section-header reveal">
       <div class="section-tag">Quickstart</div>
       <h2 class="section-title">Up in Under 15 Minutes</h2>
-      <p class="section-sub">First run downloads the embedding model (~440MB). Restart your AI editor once after <code style="font-family:var(--mono);font-size:13px">vectr start</code> — the installed CLAUDE.md will guide it through the first-session passport setup automatically.</p>
+      <p class="section-sub">First run downloads the embedding model (~290MB). Restart your AI editor once after <code style="font-family:var(--mono);font-size:13px">vectr start</code> — the installed CLAUDE.md will guide it through the first-session passport setup automatically.</p>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:32px;">
       <div class="arch-step reveal" style="border-top:2px solid var(--gold);">
