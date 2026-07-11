@@ -154,7 +154,7 @@ class ProactiveRefused(RuntimeError):
 
 
 def _is_loopback(host: str) -> bool:
-    """Loopback check — reuses the enterpriseV1 bind-guard helper rather than
+    """Loopback check — reuses the daemon's bind-guard helper rather than
     forking a second implementation (imported lazily to avoid an import cycle
     with main.py, which imports this package for `vectr proxy`)."""
     from main import _is_loopback_host
