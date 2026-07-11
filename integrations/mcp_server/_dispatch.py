@@ -73,8 +73,16 @@ def handle_tools_call(
 
     `client_label` (team mode) is the connecting client's attribution label,
     read from the `X-Vectr-Client` request header. It becomes the default note
-    author when a `vectr_remember` call does not declare its own `agent`.
+    author when a `vectr_remember` call does not declare its own `agent`, and
+    attributes every audit event this call triggers (search/index/recall too).
     """
+    # Attribute audit events (opt-in audit log) to the connecting client. Set
+    # unconditionally — including to "" — so a subsequent call in the same task
+    # never inherits a previous call's label. Task-local via ContextVar, so
+    # concurrent clients never cross-attribute.
+    from agent.working_context_store import set_audit_client
+    set_audit_client(client_label)
+
     # Count every tool call — used by the tool-call-count eviction trigger.
     # Reads the calling session's own advisor (UPG-EVICT-SESSION-SCOPE).
     try:

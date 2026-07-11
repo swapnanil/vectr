@@ -462,6 +462,8 @@ class VectrService:
                 self._build_symbol_graph()
                 self._refresh_strategy()
             elapsed = int((time.monotonic() - t0) * 1000)
+            from agent.working_context_store import audit as _audit
+            _audit("INDEX", workspace=self._workspace_root, files=files, chunks=chunks)
             return files, chunks, elapsed
 
     def _advisor_for(self, session_id: str | None) -> EvictionAdvisor:
@@ -502,6 +504,13 @@ class VectrService:
         sem_w = self._strategy.semantic_weight if self._strategy else STRATEGY_DEFAULT_SEMANTIC_WEIGHT
         results, query_ms = self._searcher.search(
             query, n_results=n_results, language=language, semantic_weight=sem_w
+        )
+        # Audit "what was queried" (opt-in; the query text is the whole point of
+        # an audit log, so it is only recorded when the operator enables one).
+        from agent.working_context_store import audit as _audit
+        _audit(
+            "SEARCH", workspace=self._workspace_root,
+            query=query[:200], results=len(results),
         )
         return results, query_ms
 

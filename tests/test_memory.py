@@ -205,6 +205,92 @@ class TestTeamModeConcurrency:
         # Every recall returned a consistent, non-empty snapshot (never crashed).
         assert all(c >= 10 for c in recalled_counts)
 
+    def test_concurrent_snapshots_all_persisted(self, tmp_path) -> None:
+        import threading
+        store = _store(tmp_path)
+        ws = "/team/repo"
+        store.remember(ws, "shared finding")
+        errors: list[Exception] = []
+
+        def snap(i: int) -> None:
+            try:
+                store.snapshot(ws, label=f"checkpoint-{i}")
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        threads = [threading.Thread(target=snap, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        labels = {s["label"] for s in store.list_snapshots(ws)}
+        assert labels == {f"checkpoint-{i}" for i in range(8)}
+
+    def test_ttl_sweep_safe_alongside_concurrent_writes(self, tmp_path) -> None:
+        import threading
+        import time as _time
+        store = _store(tmp_path)
+        ws = "/team/repo"
+        # Seed expired notes (back-dated 10 days).
+        old_ids = [store.remember(ws, f"old note {i}") for i in range(5)]
+        cutoff = _time.time() - 10 * 86400
+        with store._conn() as conn:
+            conn.execute(
+                "UPDATE notes SET created_at = ? WHERE note_id IN ({})".format(
+                    ",".join("?" * len(old_ids))
+                ),
+                [cutoff] + old_ids,
+            )
+        errors: list[Exception] = []
+
+        def writer() -> None:
+            try:
+                for i in range(10):
+                    store.remember(ws, f"fresh note {i}")
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        def sweeper() -> None:
+            try:
+                store.purge_expired_notes(ws, ttl_days=5.0)
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        w = threading.Thread(target=writer)
+        s = threading.Thread(target=sweeper)
+        w.start(); s.start()
+        w.join(); s.join()
+
+        assert errors == []
+        remaining = store.recall(ws, limit=50)
+        # All 5 expired notes purged; all 10 fresh notes intact.
+        assert len(remaining) == 10
+        assert all("fresh note" in n.content for n in remaining)
+
+    def test_audit_log_intact_under_concurrent_writes(self, tmp_path, monkeypatch) -> None:
+        import logging
+        import threading
+        log_file = tmp_path / "audit.log"
+        monkeypatch.setenv("VECTR_AUDIT_LOG", str(log_file))
+        logging.getLogger("vectr.audit").handlers.clear()
+        store = _store(tmp_path)
+        ws = "/team/repo"
+
+        def worker(i: int) -> None:
+            store.remember(ws, f"audited note {i}")
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        logging.getLogger("vectr.audit").handlers.clear()
+        lines = [ln for ln in log_file.read_text().splitlines() if "REMEMBER" in ln]
+        # One well-formed line per write — no interleaved/torn lines.
+        assert len(lines) == 12
+        assert all("note_id=" in ln for ln in lines)
+
 
 class TestSharedMemoryVisibility:
     """Shared working memory: any connected agent sees any other agent's notes
@@ -837,6 +923,38 @@ class TestT17DataRetention:
         assert store.count_notes("/workspace/a") == 0
         assert store.count_notes("/workspace/b") == 0
 
+    # --- Purge story: "delete everything" includes snapshots ---
+
+    def test_forget_all_deletes_snapshots_too(self, tmp_path) -> None:
+        """Snapshots embed full note contents; a purge must not leave them."""
+        store, ws = self._store(tmp_path)
+        store.remember(ws, "sensitive finding to purge")
+        snap_id = store.snapshot(ws, label="pre-purge")
+        assert store.list_snapshots(ws) != []
+        store.forget_all(ws)
+        assert store.list_snapshots(ws) == []
+        assert store.restore_snapshot(snap_id) is None
+
+    def test_forget_all_workspaces_deletes_all_snapshots(self, tmp_path) -> None:
+        store, _ = self._store(tmp_path)
+        store.remember("/workspace/a", "note a")
+        store.remember("/workspace/b", "note b")
+        store.snapshot("/workspace/a", label="a-snap")
+        store.snapshot("/workspace/b", label="b-snap")
+        store.forget_all_workspaces()
+        assert store.list_snapshots("/workspace/a") == []
+        assert store.list_snapshots("/workspace/b") == []
+
+    def test_forget_all_scoped_snapshots_of_other_workspace_survive(self, tmp_path) -> None:
+        store, _ = self._store(tmp_path)
+        store.remember("/workspace/a", "note a")
+        store.remember("/workspace/b", "note b")
+        store.snapshot("/workspace/a", label="a-snap")
+        store.snapshot("/workspace/b", label="b-snap")
+        store.forget_all("/workspace/a")
+        assert store.list_snapshots("/workspace/a") == []
+        assert [s["label"] for s in store.list_snapshots("/workspace/b")] == ["b-snap"]
+
     def test_audit_log_disabled_with_empty_env(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("VECTR_AUDIT_LOG", "")
         from agent.working_context_store import audit, _get_audit_logger
@@ -864,6 +982,46 @@ class TestT17DataRetention:
         if log_file.exists():
             content = log_file.read_text()
             assert "INDEX" in content or len(content) >= 0  # file was written
+
+    def test_audit_disabled_by_default_unset_env(self, monkeypatch) -> None:
+        """Audit is OFF unless VECTR_AUDIT_LOG names a path — no silent default."""
+        import logging
+        from agent.working_context_store import _get_audit_logger, audit
+        monkeypatch.delenv("VECTR_AUDIT_LOG", raising=False)
+        logging.getLogger("vectr.audit").handlers.clear()
+        logger = _get_audit_logger()
+        assert len(logger.handlers) == 1
+        assert isinstance(logger.handlers[0], logging.NullHandler)
+        audit("SHOULD_NOT_APPEAR", key="v")  # no raise, no file
+        logging.getLogger("vectr.audit").handlers.clear()
+
+    def test_audit_records_remember_and_recall_when_enabled(self, tmp_path, monkeypatch) -> None:
+        import logging
+        log_file = tmp_path / "audit.log"
+        monkeypatch.setenv("VECTR_AUDIT_LOG", str(log_file))
+        logging.getLogger("vectr.audit").handlers.clear()
+        store, ws = self._store(tmp_path)
+        store.remember(ws, "a finding about the parser")
+        store.recall(ws, query="parser")
+        logging.getLogger("vectr.audit").handlers.clear()
+        content = log_file.read_text()
+        assert "REMEMBER" in content
+        assert "RECALL" in content
+
+    def test_audit_client_attribution_appended(self, tmp_path, monkeypatch) -> None:
+        import logging
+        log_file = tmp_path / "audit.log"
+        monkeypatch.setenv("VECTR_AUDIT_LOG", str(log_file))
+        logging.getLogger("vectr.audit").handlers.clear()
+        from agent.working_context_store import audit, set_audit_client, reset_audit_client
+        token = set_audit_client("alice")
+        audit("SEARCH", query="x")
+        reset_audit_client(token)
+        audit("SEARCH", query="y")  # no client label now
+        logging.getLogger("vectr.audit").handlers.clear()
+        lines = log_file.read_text().splitlines()
+        assert any("query=x" in ln and "client=alice" in ln for ln in lines)
+        assert any("query=y" in ln and "client=" not in ln for ln in lines)
 
     def test_remember_increments_count(self, tmp_path) -> None:
         store, ws = self._store(tmp_path)
@@ -1098,6 +1256,47 @@ class TestT16Encryption:
             notes_chroma_client=fake_client,
         )
         assert store._notes_col is not None
+
+    # --- Snapshot payload encryption (snapshots embed decrypted note text) ---
+
+    def test_snapshot_payload_encrypted_in_db(self, tmp_path) -> None:
+        store = self._store_with_key(tmp_path, "snap-key")
+        ws = str(tmp_path)
+        store.remember(ws, "SNAPSHOT-SECRET finding body")
+        store.snapshot(ws, label="checkpoint")
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "working_context.sqlite"))
+        row = conn.execute("SELECT payload FROM snapshots LIMIT 1").fetchone()
+        conn.close()
+        assert "SNAPSHOT-SECRET" not in row[0]  # ciphertext, not plaintext JSON
+
+    def test_snapshot_roundtrip_with_encryption(self, tmp_path) -> None:
+        store = self._store_with_key(tmp_path, "snap-key")
+        ws = str(tmp_path)
+        store.remember(ws, "SNAPSHOT-SECRET finding body")
+        snap_id = store.snapshot(ws, label="checkpoint")
+        restored = store.restore_snapshot(snap_id)
+        assert restored is not None
+        assert any("SNAPSHOT-SECRET" in n["content"] for n in restored["notes"])
+
+    def test_legacy_plaintext_snapshot_restorable_after_encryption(self, tmp_path) -> None:
+        store_plain = self._store_no_key(tmp_path)
+        ws = str(tmp_path)
+        store_plain.remember(ws, "legacy body")
+        snap_id = store_plain.snapshot(ws, label="old")
+        store_enc = self._store_with_key(tmp_path, "later-key")
+        restored = store_enc.restore_snapshot(snap_id)  # tolerant decrypt passthrough
+        assert restored is not None
+        assert any("legacy body" in n["content"] for n in restored["notes"])
+
+    def test_encrypted_snapshot_unreadable_without_key_returns_none(self, tmp_path) -> None:
+        store_enc = self._store_with_key(tmp_path, "the-key")
+        ws = str(tmp_path)
+        store_enc.remember(ws, "protected")
+        snap_id = store_enc.snapshot(ws, label="locked")
+        store_plain = self._store_no_key(tmp_path)
+        # Without the key the payload is ciphertext — not restorable, no crash.
+        assert store_plain.restore_snapshot(snap_id) is None
 
 
 # ---------------------------------------------------------------------------

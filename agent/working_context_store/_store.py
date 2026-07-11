@@ -780,11 +780,17 @@ class WorkingContextStore:
         return row[0] if row else 0
 
     def forget_all(self, workspace: str) -> int:
-        """Clear all notes for a workspace."""
+        """Clear all notes AND snapshots for a workspace.
+
+        Snapshots embed full note contents in their payload, so a purge that
+        deleted only the notes table would silently keep every note's text
+        alive in `snapshots` — "delete everything" must mean everything,
+        including the note embedding vectors in the Chroma collection."""
         with self._conn() as conn:
             deleted = conn.execute(
                 "DELETE FROM notes WHERE workspace = ?", (workspace,)
             ).rowcount
+            conn.execute("DELETE FROM snapshots WHERE workspace = ?", (workspace,))
         if deleted > 0 and self._notes_col is not None:
             try:
                 existing_ids = self._notes_col.get(include=[])["ids"]
@@ -796,13 +802,23 @@ class WorkingContextStore:
         return deleted
 
     def forget_all_workspaces(self) -> int:
-        """Delete ALL notes across ALL workspaces in this SQLite file.
+        """Delete ALL notes, snapshots, and note vectors across ALL workspaces
+        in this SQLite file.
 
-        Used by `vectr forget --all` to give a global clean slate.
+        Used by `vectr forget --all` to give a global clean slate — the same
+        "everything means everything" contract as forget_all above.
         Audit entry logged per deletion.
         """
         with self._conn() as conn:
             deleted = conn.execute("DELETE FROM notes").rowcount
+            conn.execute("DELETE FROM snapshots")
+        if self._notes_col is not None:
+            try:
+                existing_ids = self._notes_col.get(include=[])["ids"]
+                if existing_ids:
+                    self._notes_col.delete(ids=existing_ids)
+            except Exception:
+                pass
         audit("FORGET_ALL_WORKSPACES", deleted=deleted)
         return deleted
 
@@ -875,6 +891,11 @@ class WorkingContextStore:
             "retrieved_chunks": retrieved_chunks or [],
             "session_id": session_id,
         })
+        # The payload embeds decrypted note contents (recall() decrypts), so a
+        # plaintext snapshots table would bypass note encryption entirely.
+        # Encrypt the whole payload under the same key as note content.
+        if self._encryptor:
+            payload = self._encryptor.encrypt(payload)
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO snapshots (snapshot_id, workspace, label, payload, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -897,7 +918,18 @@ class WorkingContextStore:
             ).fetchone()
         if row is None:
             return None
-        return json.loads(row["payload"])
+        payload = row["payload"]
+        if self._encryptor:
+            # Tolerant decrypt: snapshots written before payload encryption (or
+            # before a key was configured) pass through unchanged.
+            payload = self._encryptor.decrypt(payload)
+        try:
+            return json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            # Ciphertext without the (correct) key configured — unreadable by
+            # design; treat as not restorable rather than crashing the caller.
+            logger.warning("snapshot %s payload is not readable (encrypted with a different key?)", snapshot_id)
+            return None
 
     # ------------------------------------------------------------------
     # Eviction hints — which chunks can vectr re-retrieve in <50ms?
