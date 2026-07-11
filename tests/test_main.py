@@ -3048,3 +3048,16 @@ class TestCmdKey:
         m.cmd_key(argparse.Namespace())
         second = capsys.readouterr().out.strip()
         assert first != second
+
+    def test_key_never_starts_with_dash(self, capsys, monkeypatch) -> None:
+        # A leading '-' makes `--api-key <key>` parse as a flag; cmd_key must
+        # regenerate until the first character is safe.
+        import secrets
+
+        vals = iter(["-Ld0PGVoOJdtIPCtvsRBQVfMEHzSY1FJ6uk3Q9y1AbM",
+                     "sAfEkEy0OJdtIPCtvsRBQVfMEHzSY1FJ6uk3Q9y1AbM"])
+        monkeypatch.setattr(secrets, "token_urlsafe", lambda n: next(vals))
+        m.cmd_key(argparse.Namespace())
+        key = capsys.readouterr().out.strip()
+        assert not key.startswith("-")
+        assert key == "sAfEkEy0OJdtIPCtvsRBQVfMEHzSY1FJ6uk3Q9y1AbM"

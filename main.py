@@ -1084,11 +1084,15 @@ def cmd_key(args: argparse.Namespace) -> None:
     """
     import secrets
     key = secrets.token_urlsafe(32)
+    # A leading '-' makes the key parse as a flag in `--api-key <key>` and
+    # most other CLI contexts; regenerate until the first character is safe.
+    while key.startswith("-"):
+        key = secrets.token_urlsafe(32)
     print(key)
     print(
         "\nShared key for authenticated / team (central instance) deployments:\n"
         "  server:  VECTR_API_KEY=<key> vectr start --host 0.0.0.0 --path /srv/repo\n"
-        "  client:  vectr connect --url http://<server-host>:<port> --api-key <key>\n"
+        "  client:  vectr connect --url http://<server-host>:<port> --api-key=<key>\n"
         "Store it in each client's environment or MCP config; vectr never persists it.\n"
         "Configs that embed the key (.mcp.json, .cursor/mcp.json, .vscode/mcp.json)\n"
         "hold it in plaintext — treat them as secrets and keep them out of shared or\n"

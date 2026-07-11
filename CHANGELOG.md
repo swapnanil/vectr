@@ -12,7 +12,9 @@ zero-config stays the default.
   protects both the REST `/v1` routes and the `/mcp` endpoint; `/v1/health`
   stays open for liveness probes; the key is never echoed in responses or logs.
 - New `vectr key` command prints a fresh high-entropy key (stdout) with usage
-  guidance (stderr); vectr never persists it.
+  guidance (stderr); vectr never persists it. Generated keys never start with
+  `-` (a leading dash made `--api-key <key>` parse as a flag and fail); the
+  usage guidance shows the always-safe `--api-key=<key>` form.
 - When `VECTR_API_KEY` is set at start time, the editor MCP configs vectr
   writes (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`) include the
   `X-Api-Key` header so the editor keeps reaching its own authenticated daemon.
