@@ -12,7 +12,7 @@ from pathlib import Path
 import chromadb
 import numpy as np
 
-from agent.chunk_quality import build_purpose_text
+from agent.chunk_quality import build_purpose_text, is_symbol_bearing_chunk
 from agent.config import DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED
 from agent.config import EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL
 from agent.indexer._constants import (
@@ -29,6 +29,42 @@ from agent.indexer._chunking import chunk_file
 from agent.indexer._types import CodeChunk
 
 logger = logging.getLogger(__name__)
+
+
+def _chunk_metadata(c: CodeChunk) -> dict:
+    """The metadata dict stored alongside a chunk's vector (body or purpose
+    collection — same shape for both). Factored out so the streaming embed/
+    upsert loops (UPG-INDEX-MEM-STREAMING) build it per-batch instead of once
+    per corpus."""
+    return {
+        "file_path": c.file_path,
+        "language": c.language,
+        "node_type": c.node_type,
+        "start_line": c.start_line,
+        "end_line": c.end_line,
+        "symbol_name": c.symbol_name,
+    }
+
+
+def _upsert_in_batches(
+    collection,
+    ids: list[str],
+    documents: list[str],
+    metadatas: list[dict],
+    embeddings: list[list[float]],
+    batch_size: int,
+) -> None:
+    """Upsert one embed-batch's rows into `collection` in `batch_size` slices
+    (SQLite's 999-variable limit: 6 metadata fields x 100 rows = 600 <= 999).
+    Bounded to a single embed-batch's worth of rows by every caller, so this
+    never itself becomes an O(corpus) structure."""
+    for j in range(0, len(ids), batch_size):
+        collection.upsert(
+            ids=ids[j: j + batch_size],
+            documents=documents[j: j + batch_size],
+            metadatas=metadatas[j: j + batch_size],
+            embeddings=embeddings[j: j + batch_size],
+        )
 
 
 class CodeIndexer:
@@ -285,45 +321,32 @@ class CodeIndexer:
         logger.info("  stale-chunk sweep done: %d files in %.0fs",
                     len(new_mtimes), time.time() - phase_start)
 
-        # Phase 3: global batched embed + upsert
-        # Embed in large batches (256) for BLAS efficiency, upsert in smaller batches (100)
-        # to stay within SQLite's 999-variable limit (6 metadata fields × 100 rows = 600).
-        ids = [c.chunk_id for c in all_chunks]
-        documents = [c.content for c in all_chunks]
-        metadatas = [
-            {
-                "file_path": c.file_path,
-                "language": c.language,
-                "node_type": c.node_type,
-                "start_line": c.start_line,
-                "end_line": c.end_line,
-                "symbol_name": c.symbol_name,
-            }
-            for c in all_chunks
-        ]
-
-        total = len(ids)
-        all_embeddings: list[list[float]] = []
+        # Phase 3: streaming batched embed + upsert (UPG-INDEX-MEM-STREAMING).
+        # Embed in large batches (256) for BLAS efficiency, upsert each embed
+        # batch immediately in smaller sub-batches (100, SQLite's 999-variable
+        # limit: 6 metadata fields x 100 rows = 600) before embedding the next
+        # batch. Peak memory is O(_EMBED_BATCH_SIZE) embeddings, never
+        # O(corpus) — a full-corpus `all_embeddings` list was the dominant
+        # memory cost on large workspaces (~4 GB of Python floats at 170k
+        # chunks), and doubled while the purpose pass built its own full-
+        # corpus list concurrently. ids/documents/metadatas are built per
+        # batch from the `all_chunks` slice rather than once for the whole
+        # corpus, for the same reason.
+        total = len(all_chunks)
         phase_start = time.time()
         for i in range(0, total, _EMBED_BATCH_SIZE):
-            batch_docs = documents[i: i + _EMBED_BATCH_SIZE]
-            all_embeddings.extend(self._embed_provider.embed(batch_docs))
+            batch = all_chunks[i: i + _EMBED_BATCH_SIZE]
+            batch_ids = [c.chunk_id for c in batch]
+            batch_docs = [c.content for c in batch]
+            batch_metas = [_chunk_metadata(c) for c in batch]
+            batch_embeddings = self._embed_provider.embed(batch_docs)
+            _upsert_in_batches(
+                self._collection, batch_ids, batch_docs, batch_metas,
+                batch_embeddings, _UPSERT_BATCH_SIZE,
+            )
             if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
                 logger.info("  embedded %d/%d chunks...", i, total)
-        logger.info("  content embed done: %d chunks in %.0fs",
-                    total, time.time() - phase_start)
-
-        phase_start = time.time()
-        for i in range(0, total, _UPSERT_BATCH_SIZE):
-            self._collection.upsert(
-                ids=ids[i: i + _UPSERT_BATCH_SIZE],
-                documents=documents[i: i + _UPSERT_BATCH_SIZE],
-                metadatas=metadatas[i: i + _UPSERT_BATCH_SIZE],
-                embeddings=all_embeddings[i: i + _UPSERT_BATCH_SIZE],
-            )
-            if i % (50 * _UPSERT_BATCH_SIZE) == 0 and i > 0:
-                logger.info("  upserted %d/%d chunks...", i, total)
-        logger.info("  content upsert done: %d chunks in %.0fs",
+        logger.info("  content embed+upsert done: %d chunks in %.0fs",
                     total, time.time() - phase_start)
 
         self._upsert_purpose_vectors(all_chunks)
@@ -357,35 +380,23 @@ class CodeIndexer:
         # Remove old chunks for this file before re-indexing
         self.delete_file(file_path)
 
-        ids = [c.chunk_id for c in chunks]
-        documents = [c.content for c in chunks]
-        metadatas = [
-            {
-                "file_path": c.file_path,
-                "language": c.language,
-                "node_type": c.node_type,
-                "start_line": c.start_line,
-                "end_line": c.end_line,
-                "symbol_name": c.symbol_name,
-            }
-            for c in chunks
-        ]
-
-        # Embed in batches
-        all_embeddings: list[list[float]] = []
-        for i in range(0, len(documents), _FILE_BATCH_SIZE):
-            batch = documents[i: i + _FILE_BATCH_SIZE]
-            all_embeddings.extend(self._embed_provider.embed(batch))
-        assert len(all_embeddings) == len(ids), (
-            f"Embed provider returned {len(all_embeddings)} embeddings for {len(ids)} chunks"
-        )
-
-        for i in range(0, len(ids), _FILE_BATCH_SIZE):
-            self._collection.upsert(
-                ids=ids[i: i + _FILE_BATCH_SIZE],
-                documents=documents[i: i + _FILE_BATCH_SIZE],
-                metadatas=metadatas[i: i + _FILE_BATCH_SIZE],
-                embeddings=all_embeddings[i: i + _FILE_BATCH_SIZE],
+        # Streaming embed + upsert (same helper as index_workspace's Phase 3,
+        # UPG-INDEX-MEM-STREAMING) — a single file's chunk count is already
+        # small, but reusing the shared helper keeps the two paths' upsert
+        # batching identical rather than a second hand-maintained copy.
+        for i in range(0, len(chunks), _FILE_BATCH_SIZE):
+            batch = chunks[i: i + _FILE_BATCH_SIZE]
+            batch_ids = [c.chunk_id for c in batch]
+            batch_docs = [c.content for c in batch]
+            batch_metas = [_chunk_metadata(c) for c in batch]
+            batch_embeddings = self._embed_provider.embed(batch_docs)
+            assert len(batch_embeddings) == len(batch_ids), (
+                f"Embed provider returned {len(batch_embeddings)} embeddings "
+                f"for {len(batch_ids)} chunks"
+            )
+            _upsert_in_batches(
+                self._collection, batch_ids, batch_docs, batch_metas,
+                batch_embeddings, _FILE_BATCH_SIZE,
             )
 
         self._upsert_purpose_vectors(chunks)
@@ -420,48 +431,46 @@ class CodeIndexer:
         on) — reduces to the pre-ARCH-4 body-only index. Non-symbol chunks
         (`build_purpose_text` returns None) are not written — the purpose
         collection stays a strict subset of the body collection's ids.
+
+        Streaming, same shape as index_workspace's Phase 3 (UPG-INDEX-MEM-
+        STREAMING): `build_purpose_text` is called per _EMBED_BATCH_SIZE
+        batch of `chunks` (not once up front for the whole corpus), and each
+        batch's embeddings are upserted immediately, keeping peak memory
+        O(batch). Previously this ran while the body pass's own full-corpus
+        `all_embeddings`/`documents`/`metadatas` were still live in the
+        caller's frame — the two full-corpus embedding lists held concurrently
+        were the dominant swap driver on large workspaces.
         """
         if not _DUAL_VECTOR_ENABLED or not chunks:
             return
-        ids: list[str] = []
-        documents: list[str] = []
-        metadatas: list[dict] = []
-        for c in chunks:
-            purpose_text = build_purpose_text(c.content, c.symbol_name, c.node_type, c.language)
-            if purpose_text is None:
-                continue
-            ids.append(c.chunk_id)
-            documents.append(purpose_text)
-            metadatas.append({
-                "file_path": c.file_path,
-                "language": c.language,
-                "node_type": c.node_type,
-                "start_line": c.start_line,
-                "end_line": c.end_line,
-                "symbol_name": c.symbol_name,
-            })
-        if not ids:
+        total = sum(1 for c in chunks if is_symbol_bearing_chunk(c.symbol_name, c.node_type))
+        if total == 0:
             return
 
-        total = len(ids)
-        all_embeddings: list[list[float]] = []
         phase_start = time.time()
-        for i in range(0, total, _EMBED_BATCH_SIZE):
-            all_embeddings.extend(self._embed_provider.embed(documents[i: i + _EMBED_BATCH_SIZE]))
+        done = 0
+        for i in range(0, len(chunks), _EMBED_BATCH_SIZE):
+            batch = chunks[i: i + _EMBED_BATCH_SIZE]
+            batch_ids: list[str] = []
+            batch_docs: list[str] = []
+            batch_metas: list[dict] = []
+            for c in batch:
+                purpose_text = build_purpose_text(c.content, c.symbol_name, c.node_type, c.language)
+                if purpose_text is None:
+                    continue
+                batch_ids.append(c.chunk_id)
+                batch_docs.append(purpose_text)
+                batch_metas.append(_chunk_metadata(c))
+            if batch_ids:
+                batch_embeddings = self._embed_provider.embed(batch_docs)
+                _upsert_in_batches(
+                    self._purpose_collection, batch_ids, batch_docs, batch_metas,
+                    batch_embeddings, _UPSERT_BATCH_SIZE,
+                )
+                done += len(batch_ids)
             if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
-                logger.info("  purpose-embedded %d/%d symbol chunks...", i, total)
-        logger.info("  purpose embed done: %d symbol chunks in %.0fs",
-                    total, time.time() - phase_start)
-
-        phase_start = time.time()
-        for i in range(0, total, _UPSERT_BATCH_SIZE):
-            self._purpose_collection.upsert(
-                ids=ids[i: i + _UPSERT_BATCH_SIZE],
-                documents=documents[i: i + _UPSERT_BATCH_SIZE],
-                metadatas=metadatas[i: i + _UPSERT_BATCH_SIZE],
-                embeddings=all_embeddings[i: i + _UPSERT_BATCH_SIZE],
-            )
-        logger.info("  purpose upsert done: %d symbol chunks in %.0fs",
+                logger.info("  purpose-embedded %d/%d symbol chunks...", done, total)
+        logger.info("  purpose embed+upsert done: %d symbol chunks in %.0fs",
                     total, time.time() - phase_start)
 
     # ------------------------------------------------------------------

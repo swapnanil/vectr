@@ -1862,6 +1862,95 @@ class TestDualVectorPurposeCollection:
         assert idx._purpose_collection.count() == 0
 
 
+# ---------------------------------------------------------------------------
+# UPG-INDEX-MEM-STREAMING — embed/upsert must stream in O(batch) memory,
+# never accumulate a full-corpus embedding list before writing anything.
+# ---------------------------------------------------------------------------
+
+class TestStreamingEmbedUpsert:
+    """Peak indexing memory must be O(batch), not O(corpus): embed a batch,
+    upsert it immediately, drop it, embed the next — never hold the whole
+    corpus's embeddings (or the ids/documents/metadatas built from it) at
+    once. Proven here by shrinking the batch-size constants and recording
+    embed/upsert call order and sizes against a real CodeIndexer + real
+    ChromaDB collection (only the embed provider is swapped, for a
+    deterministic vector without a model download — it still returns REAL
+    768-dim float vectors and REAL chunk ids/documents/metadatas flow through
+    `collection.upsert`, never `[]`/`{}` stand-ins)."""
+
+    def test_body_pass_interleaves_embed_and_upsert_in_small_batches(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        # Small batch sizes so a modest number of chunks still produces
+        # several batches — proves the streaming shape without indexing a
+        # large corpus.
+        monkeypatch.setattr("agent.indexer._core._EMBED_BATCH_SIZE", 4)
+        monkeypatch.setattr("agent.indexer._core._UPSERT_BATCH_SIZE", 2)
+
+        call_log: list[tuple[str, int]] = []
+        real_provider = _DummyEmbedProvider()
+
+        class _RecordingEmbedProvider:
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                call_log.append(("embed", len(texts)))
+                return real_provider.embed(texts)  # real 768-dim vectors
+
+            def embed_query(self, texts: list[str]) -> list[list[float]]:
+                return real_provider.embed_query(texts)
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _RecordingEmbedProvider())
+
+        from agent.indexer import CodeIndexer
+        idx = CodeIndexer(workspace_root=str(tmp_path), db_path=str(tmp_path / "chroma"))
+        # Pre-write the embed-model stamp so index_workspace() doesn't detect
+        # a (harmless, unrelated) model mismatch and call
+        # _recreate_collections() — which would replace `idx._collection`
+        # with a fresh object and silently drop the patch installed below.
+        idx._write_embed_model_stamp()
+
+        real_upsert = idx._collection.upsert
+
+        def _recording_upsert(**kwargs):
+            call_log.append(("upsert", len(kwargs["ids"])))
+            return real_upsert(**kwargs)
+
+        monkeypatch.setattr(idx._collection, "upsert", _recording_upsert)
+
+        for i in range(20):
+            make_py(tmp_path, f"mod_{i}.py", f"def fn_{i}(x): return x + {i}")
+
+        idx.index_workspace()
+
+        embed_calls = [n for kind, n in call_log if kind == "embed"]
+        upsert_calls = [n for kind, n in call_log if kind == "upsert"]
+        assert embed_calls, "no embed calls recorded"
+        assert upsert_calls, "no upsert calls recorded"
+
+        # No single embed/upsert call ever carries more than the configured
+        # batch size worth of rows — the whole-corpus list this fix removes
+        # would instead have shown up as one oversized call at the end.
+        assert all(n <= 4 for n in embed_calls), embed_calls
+        assert all(n <= 2 for n in upsert_calls), upsert_calls
+
+        # Interleaving: at least one upsert must land strictly between the
+        # first and second embed call — i.e. a batch is written before the
+        # next batch is even embedded, not only after the whole corpus has
+        # been embedded.
+        embed_positions = [i for i, (kind, _) in enumerate(call_log) if kind == "embed"]
+        upsert_positions = [i for i, (kind, _) in enumerate(call_log) if kind == "upsert"]
+        assert len(embed_positions) >= 2, f"expected multiple embed batches: {call_log}"
+        assert any(embed_positions[0] < u < embed_positions[1] for u in upsert_positions), (
+            f"upsert did not happen between the first two embed batches: {call_log}"
+        )
+
+        # The index itself is still correct — streaming changes WHEN rows are
+        # written, never WHAT is written.
+        assert idx.total_chunks == 20
+
+
 class TestFetchChunks:
     """Deterministic re-fetch by chunk id (UPG-CTX-EVICT part a)."""
 
