@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.1 — 2026-07-12
+
+### Indexing
+- Indexing now streams embeddings into the vector store batch by batch
+  instead of accumulating every embedding for the whole workspace in memory
+  before writing. Both embedding passes (content and purpose vectors)
+  previously held full-workspace embedding lists concurrently — gigabytes of
+  memory on large workspaces, pushing memory-constrained machines into swap
+  and slowing the second pass several-fold while it paged. Peak memory for
+  this step is now one embedding batch. Indexed content is unchanged: chunk
+  ids, documents, metadata, and embedding values are identical, so existing
+  indexes remain valid and no reindex is required.
+
 ## 1.1.0 — 2026-07-11
 
 Security and shared-deployment features. All opt-in; with none of the new
