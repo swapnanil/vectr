@@ -35,6 +35,12 @@ def _mock_indexer(workspace_root: str = "/workspace"):
     indexer = MagicMock()
     indexer.workspace_root = workspace_root
     indexer.all_roots = [Path(workspace_root)]
+    # Real CodeIndexer.index_file/delete_file return int chunk counts (see
+    # agent/indexer/_core.py) — the batch worker's per-batch chunk-count
+    # diagnostic does arithmetic on these return values, so the mock must
+    # return the real type, not an unconfigured MagicMock.
+    indexer.index_file.return_value = 0
+    indexer.delete_file.return_value = 0
     return indexer
 
 
@@ -204,6 +210,53 @@ class TestIsExcluded:
         watcher = CodeWatcher(indexer)
         assert watcher._is_excluded(str(extra / "tmp" / "poc" / "lib.rs")) is True
 
+    def test_gitignore_filename_glob_excluded(self, tmp_path):
+        # UPG-REST-STARVATION diagnostics: a .gitignore glob (not present in
+        # .vectrignore) must exclude a matching file for the live watcher,
+        # the same way should_index_file already excludes it for a full
+        # reindex — a gitignored build artifact must never enter the live
+        # watch/index set either.
+        (tmp_path / ".gitignore").write_text("*.log\n", encoding="utf-8")
+        watcher = CodeWatcher(_mock_indexer(str(tmp_path)))
+        assert watcher._is_excluded(str(tmp_path / "run.log")) is True
+        assert watcher._is_excluded(str(tmp_path / "src" / "main.py")) is False
+
+    def test_gitignore_directory_pattern_excluded(self, tmp_path):
+        (tmp_path / ".gitignore").write_text("dist/\n", encoding="utf-8")
+        watcher = CodeWatcher(_mock_indexer(str(tmp_path)))
+        assert watcher._is_excluded(str(tmp_path / "dist" / "bundle.js")) is True
+
+    def test_gitignore_scoped_per_root_not_cross_applied(self, tmp_path):
+        # A .gitignore pattern from one root must not be evaluated against a
+        # different (sibling) root's tree — mirrors the existing per-root
+        # regex isolation test (test_regex_scoped_per_root_not_cross_applied).
+        from pathlib import Path
+        root_a = tmp_path / "root_a"
+        root_b = tmp_path / "root_b"
+        root_a.mkdir()
+        root_b.mkdir()
+        (root_b / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+        indexer = MagicMock()
+        indexer.workspace_root = str(root_a)
+        indexer.all_roots = [Path(root_a), Path(root_b)]
+        watcher = CodeWatcher(indexer)
+        assert watcher._is_excluded(str(root_b / "mod.pyc")) is True
+        assert watcher._is_excluded(str(root_a / "mod.pyc")) is False
+
+    def test_gitignore_parity_with_bulk_index_walk(self, tmp_path):
+        # The exact parity contract: a file should_index_file() would skip
+        # for a full reindex must also be excluded by the live watcher — the
+        # two paths share one matching predicate (matches_gitignore_pattern)
+        # precisely so this can never drift.
+        from integrations.workspace_detect import get_gitignore_patterns, should_index_file
+        (tmp_path / ".gitignore").write_text("*.generated.js\n", encoding="utf-8")
+        target = tmp_path / "out.generated.js"
+        watcher = CodeWatcher(_mock_indexer(str(tmp_path)))
+        assert should_index_file(
+            str(target), get_gitignore_patterns(str(tmp_path)), workspace_root=str(tmp_path)
+        ) is False
+        assert watcher._is_excluded(str(target)) is True
+
 
 # ---------------------------------------------------------------------------
 # CodeWatcher — event handlers
@@ -267,21 +320,38 @@ class TestOnCreated:
 
 
 class TestOnDeleted:
-    def test_indexable_file_calls_delete_immediately(self):
+    # UPG-REST-STARVATION: deletes now flow through the same debounce/burst/
+    # single-worker pipeline as create/modify instead of calling
+    # indexer.delete_file() + a synchronous searcher refresh immediately on
+    # the FSEvents callback thread (which, at scale, meant one full-corpus
+    # BM25 rebuild per deleted file — the root cause of the reported
+    # multi-minute REST starvation during a large revert/delete storm).
+
+    def test_indexable_file_schedules_debounced_delete(self):
         indexer = _mock_indexer()
         watcher = CodeWatcher(indexer)
+        watcher._debounce = MagicMock()
         watcher.on_deleted(_mock_event("/ws/old.py"))
-        indexer.delete_file.assert_called_once_with("/ws/old.py")
+        watcher._debounce.schedule.assert_called_once_with("/ws/old.py", "delete")
+        indexer.delete_file.assert_not_called()  # deferred until the debounce fires
 
-    def test_delete_calls_searcher_refresh(self):
+    def test_delete_calls_searcher_refresh_after_debounce(self):
+        indexer = _mock_indexer()
         refresh = MagicMock()
-        watcher = CodeWatcher(_mock_indexer(), searcher_refresh_fn=refresh)
+        watcher = CodeWatcher(indexer, searcher_refresh_fn=refresh)
+        watcher._debounce = _DebounceTimer(0.05, watcher._handle_change)
         watcher.on_deleted(_mock_event("/ws/old.py"))
+        time.sleep(0.2)
+        indexer.delete_file.assert_called_once_with("/ws/old.py")
         refresh.assert_called_once()
 
     def test_delete_no_refresh_fn_no_error(self):
-        watcher = CodeWatcher(_mock_indexer(), searcher_refresh_fn=None)
+        indexer = _mock_indexer()
+        watcher = CodeWatcher(indexer, searcher_refresh_fn=None)
+        watcher._debounce = _DebounceTimer(0.05, watcher._handle_change)
         watcher.on_deleted(_mock_event("/ws/old.py"))  # should not raise
+        time.sleep(0.2)
+        indexer.delete_file.assert_called_once_with("/ws/old.py")
 
     def test_delete_directory_still_calls_delete(self):
         indexer = _mock_indexer()
@@ -298,15 +368,30 @@ class TestOnDeleted:
         watcher.on_deleted(_mock_event("/ws/data.csv"))
         indexer.delete_file.assert_not_called()
 
+    def test_excluded_dir_file_not_scheduled(self):
+        # UPG-WATCH-REVERT-CHURN: exclusion must be symmetric between
+        # indexing and de-indexing — a delete under an excluded dir (e.g. a
+        # nested build/venv directory regenerated in bulk) was previously
+        # scheduled into the watcher pipeline even though the file was never
+        # indexed in the first place, inflating burst/batch volume for no
+        # benefit.
+        watcher = CodeWatcher(_mock_indexer())
+        watcher._debounce = MagicMock()
+        watcher.on_deleted(_mock_event("/ws/node_modules/pkg/index.js"))
+        watcher._debounce.schedule.assert_not_called()
+
 
 class TestOnMoved:
     def test_rename_into_place_indexes_dest(self):
         # The case that mattered: atomic save / Write tool creates a file via
-        # rename, so the new path must be scheduled for indexing.
+        # rename, so the new path must be scheduled for indexing. The old
+        # (indexable) src name is scheduled for removal too — UPG-REST-
+        # STARVATION routes it through the same debounced pipeline as dest.
         watcher = CodeWatcher(_mock_indexer())
         watcher._debounce = MagicMock()
         watcher.on_moved(_mock_move_event("/ws/new_module.py", "/ws/dest.py"))
-        watcher._debounce.schedule.assert_called_once_with("/ws/dest.py", "move")
+        watcher._debounce.schedule.assert_any_call("/ws/dest.py", "move")
+        watcher._debounce.schedule.assert_any_call("/ws/new_module.py", "delete")
 
     def test_temp_rename_indexes_only_dest(self):
         # Editor atomic save: temp file (non-indexable) renamed onto real .py
@@ -317,32 +402,54 @@ class TestOnMoved:
         watcher._debounce.schedule.assert_called_once_with("/ws/main.py", "move")
         indexer.delete_file.assert_not_called()  # temp src was never indexed
 
-    def test_rename_removes_old_indexable_src(self):
+    def test_rename_schedules_delete_for_old_src_and_move_for_dest(self):
+        # UPG-REST-STARVATION: the old src path is scheduled through the same
+        # debounce/burst pipeline as the new dest path, not deleted
+        # synchronously on the FSEvents callback thread.
         indexer = _mock_indexer()
         watcher = CodeWatcher(indexer)
         watcher._debounce = MagicMock()
         watcher.on_moved(_mock_move_event("/ws/old.py", "/ws/renamed.py"))
-        indexer.delete_file.assert_called_once_with("/ws/old.py")
-        watcher._debounce.schedule.assert_called_once_with("/ws/renamed.py", "move")
+        watcher._debounce.schedule.assert_any_call("/ws/old.py", "delete")
+        watcher._debounce.schedule.assert_any_call("/ws/renamed.py", "move")
+        indexer.delete_file.assert_not_called()  # deferred until the debounce fires
 
-    def test_src_delete_triggers_searcher_refresh(self):
+    def test_src_and_dest_debounce_trigger_searcher_refresh(self):
+        indexer = _mock_indexer()
         refresh = MagicMock()
-        watcher = CodeWatcher(_mock_indexer(), searcher_refresh_fn=refresh)
-        watcher._debounce = MagicMock()
+        watcher = CodeWatcher(indexer, searcher_refresh_fn=refresh)
+        watcher._debounce = _DebounceTimer(0.05, watcher._handle_change)
         watcher.on_moved(_mock_move_event("/ws/old.py", "/ws/new.py"))
-        refresh.assert_called_once()
+        time.sleep(0.2)
+        indexer.delete_file.assert_called_once_with("/ws/old.py")
+        indexer.index_file.assert_called_once_with("/ws/new.py")
+        assert refresh.call_count == 2  # one per debounced change firing
 
     def test_non_indexable_dest_not_scheduled(self):
+        # dest (.csv) is never scheduled; src (.py, indexable) still gets a
+        # debounced delete for its old chunks.
         watcher = CodeWatcher(_mock_indexer())
         watcher._debounce = MagicMock()
         watcher.on_moved(_mock_move_event("/ws/page.py", "/ws/data.csv"))
-        watcher._debounce.schedule.assert_not_called()
+        watcher._debounce.schedule.assert_called_once_with("/ws/page.py", "delete")
 
     def test_excluded_dest_not_scheduled(self):
+        # dest under an excluded dir is never scheduled; src (.py, indexable,
+        # not excluded) still gets a debounced delete for its old chunks.
         watcher = CodeWatcher(_mock_indexer())
         watcher._debounce = MagicMock()
         watcher.on_moved(_mock_move_event("/ws/x.py", "/ws/node_modules/pkg/y.js"))
-        watcher._debounce.schedule.assert_not_called()
+        watcher._debounce.schedule.assert_called_once_with("/ws/x.py", "delete")
+
+    def test_excluded_src_not_scheduled_for_delete(self):
+        # UPG-WATCH-REVERT-CHURN: symmetric with the dest-side exclusion
+        # check above — a move whose OLD path lived under an excluded dir
+        # must not schedule a delete for it, even though the (non-excluded)
+        # dest path is still scheduled as usual.
+        watcher = CodeWatcher(_mock_indexer())
+        watcher._debounce = MagicMock()
+        watcher.on_moved(_mock_move_event("/ws/node_modules/pkg/x.js", "/ws/y.js"))
+        watcher._debounce.schedule.assert_called_once_with("/ws/y.js", "move")
 
     def test_directory_move_ignored(self):
         indexer = _mock_indexer()
@@ -733,6 +840,32 @@ class TestBurstCoalescing:
         }
         assert watcher._burst_mode is False
 
+    def test_delete_burst_coalesces_into_one_batch_and_one_refresh(self):
+        # UPG-REST-STARVATION: this is the actual reported failure mode — a
+        # large delete/revert storm (e.g. reverting one agent session's edits
+        # across thousands of files) must coalesce into ONE batch pass with
+        # ONE searcher refresh, not N synchronous per-file deletes each
+        # triggering its own full-corpus BM25 rebuild on the FSEvents
+        # callback thread.
+        indexer = _mock_indexer()
+        refresh = MagicMock()
+        watcher = CodeWatcher(indexer, searcher_refresh_fn=refresh)
+        with patch("agent.watcher.WATCHER_BURST_FILES_THRESHOLD", 3), \
+             patch("agent.watcher.WATCHER_BURST_QUIET_SECONDS", 0.05):
+            for i in range(5):
+                watcher.on_deleted(_mock_event(f"/ws/f{i}.py"))
+
+            assert watcher._burst_mode is True
+            indexer.delete_file.assert_not_called()
+
+            time.sleep(0.25)  # well past the 0.05s quiet window
+
+        assert {c.args[0] for c in indexer.delete_file.call_args_list} == {
+            f"/ws/f{i}.py" for i in range(5)
+        }
+        assert watcher._burst_mode is False
+        refresh.assert_called_once()
+
     def test_second_storm_during_running_batch_queues_into_one_pending_batch(self):
         indexer = _mock_indexer()
         started = threading.Event()
@@ -741,6 +874,7 @@ class TestBurstCoalescing:
         def slow_index_file(path):
             started.set()
             release.wait(2)
+            return 0
 
         indexer.index_file.side_effect = slow_index_file
         watcher = CodeWatcher(indexer)

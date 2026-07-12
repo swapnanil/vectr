@@ -5,6 +5,7 @@ import time
 import uuid
 
 from fastapi import APIRouter, Body, HTTPException, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 from app.models import (
     FetchEntry,
@@ -68,7 +69,12 @@ async def index(body: IndexRequest, request: Request) -> IndexResponse:
         from app.service import _MEMORY_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
     try:
-        files, chunks, elapsed = svc.index(body.path, force=body.force)
+        # UPG-REST-STARVATION requirement #1: a full-workspace index is
+        # bulk chroma/embedding work — run it off the event-loop thread so a
+        # large `/v1/index` call never blocks every other request for its
+        # full duration (previously `svc.index()` ran directly on the async
+        # handler, holding the event loop for as long as indexing took).
+        files, chunks, elapsed = await run_in_threadpool(svc.index, body.path, force=body.force)
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"error": "index_failed", "detail": str(exc)})
     return IndexResponse(

@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -87,7 +88,27 @@ class CodeIndexer:
         self._create_collections()
         self._last_indexed: float = 0.0
         self._indexed_files: set[str] = set()
-        self._lang_cache: tuple[int, dict[str, dict[str, int]]] | None = None  # (chunk_count, per-lang stats) — UPG-3.1/3.3
+        # Incrementally-maintained per-language stats (UPG-3.1/3.3,
+        # UPG-REST-STARVATION). Seeded once (lazily, on first read) by a full
+        # metadata scan, then updated by `_apply_chunk_delta` on every
+        # subsequent insert/delete instead of ever re-scanning the collection
+        # — see `_ensure_stats_seeded`'s docstring for why this replaced a
+        # count-keyed rescan-on-change cache that re-scanned the whole
+        # collection on every call while the chunk count was still changing
+        # (i.e. throughout a bulk reindex), making `indexed_language_stats()`
+        # an O(corpus) operation contending with the writer.
+        #
+        # `total_chunks` itself is NOT tracked here — it reads
+        # `self._collection.count()` directly (a cheap native count, not a
+        # metadata scan), so it is always ground truth even if a chunk is
+        # removed by something other than `index_file`/`delete_file`/
+        # `index_workspace` (e.g. a caller mutating `_collection` directly).
+        # Only the per-language breakdown needs incremental tracking, since
+        # there is no equivalent cheap native call for it.
+        self._stats_lock = threading.Lock()
+        self._stats_seeded = False
+        self._lang_chunk_counts: dict[str, int] = {}
+        self._lang_files: dict[str, set[str]] = {}
 
         # Deferred: look up get_embed_provider through the package namespace so that
         # test-time monkeypatching of agent.indexer.get_embed_provider is honoured
@@ -144,7 +165,12 @@ class CodeIndexer:
             except Exception:
                 pass  # collection may not exist yet — nothing to drop
         self._create_collections()
-        self._lang_cache = None
+        # Both collections are freshly (re)created and empty — no scan needed
+        # to know that; mark stats seeded directly (UPG-REST-STARVATION).
+        with self._stats_lock:
+            self._lang_chunk_counts = {}
+            self._lang_files = {}
+            self._stats_seeded = True
 
     @property
     def all_roots(self) -> list[Path]:
@@ -259,7 +285,7 @@ class CodeIndexer:
             self._write_embed_model_stamp()  # cheap no-op when already current
             logger.info("All %d files up to date — nothing to re-index", len(all_files))
             self._last_indexed = time.time()
-            return len(self._indexed_files), self._collection.count()
+            return len(self._indexed_files), self.total_chunks
 
         logger.info(
             "Indexing %d/%d files (%d unchanged, skipped)...",
@@ -296,28 +322,19 @@ class CodeIndexer:
 
         if not all_chunks:
             self._last_indexed = time.time()
-            return len(self._indexed_files), self._collection.count()
+            return len(self._indexed_files), self.total_chunks
 
         # Phase 2: delete stale chunks for re-indexed files (no-op for brand-new files).
         # Under force, mtime_cache is empty, so delete by file_path unconditionally
-        # to avoid leaving stale chunks whose ids no longer match (UPG-8.6). The
-        # purpose collection (ARCH-4) is keyed by the same file_path metadata, so
-        # its stale entries are dropped alongside the body collection's.
+        # to avoid leaving stale chunks whose ids no longer match (UPG-8.6).
+        # `_delete_chunks_for_file` handles both collections (the purpose
+        # collection, ARCH-4, is keyed by the same file_path metadata) and
+        # applies the incremental stats delta — same helper `delete_file()`
+        # and the watcher's batched deletes use (UPG-REST-STARVATION).
         phase_start = time.time()
         for fpath_str in new_mtimes:
             if force or fpath_str in mtime_cache:  # previously indexed → delete old chunks
-                try:
-                    existing = self._collection.get(where={"file_path": fpath_str})
-                    if existing["ids"]:
-                        self._collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                try:
-                    existing_p = self._purpose_collection.get(where={"file_path": fpath_str})
-                    if existing_p["ids"]:
-                        self._purpose_collection.delete(ids=existing_p["ids"])
-                except Exception:
-                    pass
+                self._delete_chunks_for_file(fpath_str)
         logger.info("  stale-chunk sweep done: %d files in %.0fs",
                     len(new_mtimes), time.time() - phase_start)
 
@@ -344,6 +361,7 @@ class CodeIndexer:
                 self._collection, batch_ids, batch_docs, batch_metas,
                 batch_embeddings, _UPSERT_BATCH_SIZE,
             )
+            self._apply_chunk_delta(batch_metas, sign=1)
             if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
                 logger.info("  embedded %d/%d chunks...", i, total)
         logger.info("  content embed+upsert done: %d chunks in %.0fs",
@@ -359,7 +377,7 @@ class CodeIndexer:
         self._write_embed_model_stamp()
 
         self._last_indexed = time.time()
-        return len(self._indexed_files), self._collection.count()
+        return len(self._indexed_files), self.total_chunks
 
     def index_file(self, file_path: str) -> int:
         """Chunk and embed a single file. Returns number of chunks indexed."""
@@ -398,19 +416,39 @@ class CodeIndexer:
                 self._collection, batch_ids, batch_docs, batch_metas,
                 batch_embeddings, _FILE_BATCH_SIZE,
             )
+            self._apply_chunk_delta(batch_metas, sign=1)
 
         self._upsert_purpose_vectors(chunks)
 
         self._indexed_files.add(file_path)
         return len(chunks)
 
-    def delete_file(self, file_path: str) -> None:
-        """Remove all chunks belonging to a file (body + purpose collections)."""
+    def delete_file(self, file_path: str) -> int:
+        """Remove all chunks belonging to a file (body + purpose collections).
+
+        Returns the number of body-collection chunks removed — used by the
+        watcher's batch worker for its per-batch churn diagnostic
+        (UPG-WATCH-REVERT-CHURN)."""
+        removed = self._delete_chunks_for_file(file_path)
+        self._indexed_files.discard(file_path)
+        return removed
+
+    def _delete_chunks_for_file(self, file_path: str) -> int:
+        """Remove chunks for `file_path` from both collections and apply the
+        incremental stats delta (UPG-REST-STARVATION). Internal: unlike
+        `delete_file()`, does not touch `_indexed_files` — used by
+        `index_workspace`'s stale-chunk sweep, where the file is about to be
+        immediately re-indexed within the same call, not removed from the
+        index. Returns the number of body-collection chunks removed.
+        """
+        removed = 0
         try:
             existing = self._collection.get(where={"file_path": file_path})
-            if existing["ids"]:
-                self._collection.delete(ids=existing["ids"])
-            self._indexed_files.discard(file_path)
+            ids = existing["ids"]
+            if ids:
+                self._collection.delete(ids=ids)
+                self._apply_chunk_delta(existing.get("metadatas") or [], sign=-1)
+                removed = len(ids)
         except Exception:
             pass
         try:
@@ -419,6 +457,7 @@ class CodeIndexer:
                 self._purpose_collection.delete(ids=existing_p["ids"])
         except Exception:
             pass
+        return removed
 
     # ------------------------------------------------------------------
     # Purpose vectors (ARCH-4 dual-vector pool entry)
@@ -592,11 +631,98 @@ class CodeIndexer:
         return len(orphaned)
 
     # ------------------------------------------------------------------
-    # Stats
+    # Stats — incrementally maintained, never a full-collection rescan on
+    # the hot path (UPG-REST-STARVATION). See `_apply_chunk_delta` and
+    # `_ensure_stats_seeded` for the mechanism.
     # ------------------------------------------------------------------
+
+    def _ensure_stats_seeded(self) -> None:
+        """One-time full metadata scan seeding `_lang_chunk_counts`/
+        `_lang_files`, run at most once per collection generation
+        (`_recreate_collections` re-arms it without a rescan, since a
+        freshly (re)created collection is known-empty). Every insert/delete
+        after this updates the counters directly via `_apply_chunk_delta`,
+        so `indexed_language_stats()` never re-scans the collection again on
+        a later call — this is what previously made a `/v1/status` call
+        during a bulk reindex pay for a full paginated metadata scan of
+        `self._collection` on every single call (the old cache was keyed on
+        chunk count, which was still changing on every watcher write),
+        directly contending with the collection the watcher was writing to.
+
+        `total_chunks` deliberately does NOT use this cache (see its
+        docstring) — it reads `self._collection.count()` directly, which
+        is both cheap and always ground truth.
+        """
+        if self._stats_seeded:
+            return
+        with self._stats_lock:
+            if self._stats_seeded:  # re-check inside the lock
+                return
+            _PAGE = 1000
+            chunks: dict[str, int] = {}
+            files: dict[str, set[str]] = {}
+            offset = 0
+            while True:
+                page = self._collection.get(include=["metadatas"], limit=_PAGE, offset=offset)
+                ids = page["ids"]
+                if not ids:
+                    break
+                for meta in page["metadatas"]:
+                    lang = meta.get("language")
+                    if not lang:
+                        continue
+                    chunks[lang] = chunks.get(lang, 0) + 1
+                    fp = meta.get("file_path")
+                    if fp:
+                        files.setdefault(lang, set()).add(fp)
+                offset += len(ids)
+                if len(ids) < _PAGE:
+                    break
+            self._lang_chunk_counts = chunks
+            self._lang_files = files
+            self._stats_seeded = True
+
+    def _apply_chunk_delta(self, metadatas: list[dict], sign: int) -> None:
+        """Incrementally update the in-memory per-language stats cache from a
+        batch of chunk metadata just inserted (`sign=1`) or removed
+        (`sign=-1`) from the body collection. Held only around O(1) dict
+        arithmetic — never around a ChromaDB or embedding call — so this
+        lock is never the thing a request handler waits on
+        (UPG-REST-STARVATION).
+        """
+        if not metadatas:
+            return
+        with self._stats_lock:
+            for meta in metadatas:
+                lang = meta.get("language")
+                if not lang:
+                    continue
+                self._lang_chunk_counts[lang] = max(
+                    0, self._lang_chunk_counts.get(lang, 0) + sign
+                )
+                fp = meta.get("file_path")
+                if sign > 0:
+                    if fp:
+                        self._lang_files.setdefault(lang, set()).add(fp)
+                elif fp:
+                    files = self._lang_files.get(lang)
+                    if files is not None:
+                        files.discard(fp)
 
     @property
     def total_chunks(self) -> int:
+        """Total chunk count in the body collection.
+
+        Reads `self._collection.count()` directly rather than any
+        maintained cache: ChromaDB's native count is already O(1) (not a
+        metadata scan), so there is nothing to gain by caching it, and
+        caching it would mean `total_chunks` could go stale relative to
+        the real collection if anything ever mutates `_collection` outside
+        `index_file`/`delete_file`/`index_workspace` (tests simulating a
+        desync, an external tool, a future maintenance script). Only the
+        per-language breakdown below is incrementally cached, since there
+        is no equivalent cheap native call for it.
+        """
         return self._collection.count()
 
     @property
@@ -615,41 +741,21 @@ class CodeIndexer:
     def indexed_language_stats(self) -> dict[str, dict[str, int]]:
         """Per-language coverage in the collection: `{lang: {"files", "chunks"}}`.
 
-        The ground truth for what the index actually contains — derived from chunk
-        metadata, not a fixed allow-list. One metadata-only paginated scan, cached
-        against the live chunk count so it only rescans when the index changes.
-        UPG-3.1 (which languages exist) and UPG-3.3 (per-language coverage +
-        symbol availability) both read from this single source.
+        The ground truth for what the index actually contains — derived from
+        chunk metadata, not a fixed allow-list. Reads the incrementally-
+        maintained cache (`_ensure_stats_seeded` / `_apply_chunk_delta`) —
+        O(languages present), never a re-scan of the collection, so this stays
+        cheap to call even while a bulk reindex is concurrently writing to the
+        same collection (UPG-REST-STARVATION). UPG-3.1 (which languages exist)
+        and UPG-3.3 (per-language coverage + symbol availability) both read
+        from this single source.
         """
-        count = self.total_chunks
-        if self._lang_cache is not None and self._lang_cache[0] == count:
-            return self._lang_cache[1]
-        _PAGE = 1000
-        chunks: dict[str, int] = {}
-        files: dict[str, set[str]] = {}
-        offset = 0
-        while True:
-            page = self._collection.get(include=["metadatas"], limit=_PAGE, offset=offset)
-            ids = page["ids"]
-            if not ids:
-                break
-            for meta in page["metadatas"]:
-                lang = meta.get("language")
-                if not lang:
-                    continue
-                chunks[lang] = chunks.get(lang, 0) + 1
-                fp = meta.get("file_path")
-                if fp:
-                    files.setdefault(lang, set()).add(fp)
-            offset += len(ids)
-            if len(ids) < _PAGE:
-                break
-        stats = {
-            lang: {"files": len(files.get(lang, ())), "chunks": n}
-            for lang, n in chunks.items()
-        }
-        self._lang_cache = (count, stats)
-        return stats
+        self._ensure_stats_seeded()
+        with self._stats_lock:
+            return {
+                lang: {"files": len(self._lang_files.get(lang, ())), "chunks": n}
+                for lang, n in self._lang_chunk_counts.items()
+            }
 
     def indexed_languages(self) -> list[str]:
         """Distinct, sorted `language` values currently in the collection (UPG-3.1)."""

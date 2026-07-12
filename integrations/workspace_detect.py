@@ -195,6 +195,31 @@ def write_vectrignore(workspace_root: str, dirs: list[str]) -> None:
     vectrignore.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def matches_gitignore_pattern(path: Path, gitignore_patterns: list[str]) -> bool:
+    """True if `path` matches any of the given raw .gitignore/.vectrignore-glob
+    lines — matched against the bare filename, the path string as given, and
+    (for a directory-only entry ending in "/") any path component.
+
+    Extracted as a standalone predicate so every caller that needs to honor
+    ignore-file patterns (the bulk workspace walk in `should_index_file`
+    below, and the live file-watcher's per-event exclusion check) shares
+    exactly one matching implementation — a pattern added to a project's
+    .gitignore is honored identically whether a file appears via a full
+    reindex or a live create/modify/delete/move event.
+    """
+    name = path.name
+    rel = str(path)
+    for pattern in gitignore_patterns:
+        if fnmatch.fnmatch(name, pattern):
+            return True
+        if fnmatch.fnmatch(rel, pattern):
+            return True
+        if pattern.endswith("/"):
+            if pattern.rstrip("/") in path.parts:
+                return True
+    return False
+
+
 def should_index_file(
     file_path: str,
     gitignore_patterns: list[str],
@@ -244,16 +269,7 @@ def should_index_file(
             if regex.search(rel_posix):
                 return False
 
-    # check gitignore patterns
-    name = path.name
-    rel = str(path)
-    for pattern in gitignore_patterns:
-        if fnmatch.fnmatch(name, pattern):
-            return False
-        if fnmatch.fnmatch(rel, pattern):
-            return False
-        if pattern.endswith("/"):
-            if pattern.rstrip("/") in path.parts:
-                return False
+    if matches_gitignore_pattern(path, gitignore_patterns):
+        return False
 
     return True

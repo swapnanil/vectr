@@ -78,6 +78,7 @@ class CodeWatcher(FileSystemEventHandler):
         self._excluded_dirs = self._collect_excluded_dirs()
         self._excluded_file_globs = self._collect_excluded_globs()
         self._excluded_regexes = self._collect_excluded_regexes()
+        self._gitignore_patterns = self._collect_gitignore_patterns()
         # path -> ObservedWatch returned by Observer.schedule(), so a watch can
         # be individually unscheduled when its dir is added to .vectrignore
         # mid-session (UPG-13.3).
@@ -103,6 +104,17 @@ class CodeWatcher(FileSystemEventHandler):
         # Paths collected while in burst mode, waiting for repo-wide silence.
         self._burst_pending: set[str] = set()
         self._burst_quiet_timer: threading.Timer | None = None
+        # path -> most-recently-scheduled action ("modify"/"create"/"move"/
+        # "delete"). Needed because burst mode collapses `_debounce_pending_paths`
+        # and `_burst_pending` into bare path sets (the per-file `_debounce`
+        # timers carrying the action are cancelled on entering burst — see
+        # `_schedule_change`), so the eventual batch worker must look the
+        # action back up per path rather than assuming "index" (UPG-REST-
+        # STARVATION: delete events now flow through this same pipeline
+        # instead of running a synchronous full-corpus BM25 rebuild per
+        # event). Entries are popped once consumed, bounding this dict's size
+        # to "currently pending", not the lifetime of the daemon.
+        self._pending_actions: dict[str, str] = {}
 
         # Single bounded worker for watcher-triggered batch re-index — never
         # parallel with itself; a batch that arrives while one is already
@@ -165,9 +177,34 @@ class CodeWatcher(FileSystemEventHandler):
                 regexes[str(root)] = root_regexes
         return regexes
 
+    def _collect_gitignore_patterns(self) -> dict[str, list[str]]:
+        """Raw .gitignore glob lines per workspace root.
+
+        Kept per-root — like `_collect_excluded_regexes` — because a pattern
+        from one root's .gitignore must never be evaluated against another
+        root's tree. `should_index_file` (the bulk `index_workspace()` walk)
+        already honors .gitignore; without this, a live create/modify event
+        for a file matching only a .gitignore pattern (not .vectrignore)
+        would still be picked up by the watcher and indexed, even though a
+        full reindex would have excluded it — and a live delete event for
+        such a file would never fire in the first place, since watchdog
+        itself has no ignore-file awareness, so nothing prunes it from the
+        index once it slips in this way.
+        """
+        from integrations.workspace_detect import get_gitignore_patterns
+        patterns: dict[str, list[str]] = {}
+        for root in self._indexer.all_roots:
+            try:
+                root_patterns = get_gitignore_patterns(str(root))
+            except Exception:
+                root_patterns = []
+            if root_patterns:
+                patterns[str(root)] = root_patterns
+        return patterns
+
     def _is_excluded(self, path: str) -> bool:
         """True if a path is under an excluded dir, matches an excluded file
-        glob, or matches an excluded path regex.
+        glob or .gitignore pattern, or matches an excluded path regex.
 
         Directory and regex matching are scoped to path components/paths
         BELOW a workspace root. Matching the absolute prefix too would
@@ -175,7 +212,15 @@ class CodeWatcher(FileSystemEventHandler):
         named like an excluded one — e.g. any repo checked out under /tmp on
         Linux (the prefix contains 'tmp'), or a path containing
         'build'/'target'. (Paths outside every root fall back to all parts.)
+
+        Applied identically for every event kind (create/modify/delete/move)
+        via `on_created`/`on_modified`/`on_deleted`/`on_moved`, so a file the
+        bulk indexer would never index is also never scheduled by a live
+        event, and a chunk it never gained is never spuriously scheduled for
+        deletion either — see `_collect_gitignore_patterns`.
         """
+        from integrations.workspace_detect import matches_gitignore_pattern
+
         p = Path(path)
         if self._excluded_file_globs and any(
             fnmatch.fnmatch(p.name, pat) for pat in self._excluded_file_globs
@@ -190,6 +235,9 @@ class CodeWatcher(FileSystemEventHandler):
                 return True
             root_regexes = self._excluded_regexes.get(str(root))
             if root_regexes and any(rx.search(rel.as_posix()) for rx in root_regexes):
+                return True
+            root_gitignore = self._gitignore_patterns.get(str(root))
+            if root_gitignore and matches_gitignore_pattern(p, root_gitignore):
                 return True
             return False
         return bool(set(p.parts) & self._excluded_dirs)
@@ -225,13 +273,19 @@ class CodeWatcher(FileSystemEventHandler):
             # re-creation of the same name gets re-scheduled (UPG-13.1).
             self._watched_dirs.pop(event.src_path, None)
             return
-        if self._is_indexable(event.src_path):
-            with self._lock:
-                self._debounce_pending_paths.discard(event.src_path)
-                self._burst_pending.discard(event.src_path)
-            self._indexer.delete_file(event.src_path)
-            if self._searcher_refresh:
-                self._searcher_refresh()
+        # Routed through the same debounce/burst/single-worker pipeline as
+        # create/modify (UPG-REST-STARVATION) — a large delete storm (e.g. a
+        # revert that removes thousands of files) now coalesces into one
+        # bounded batch instead of firing `delete_file()` + a full-corpus
+        # `refresh_bm25()` rebuild synchronously, once per file, on this
+        # FSEvents callback thread. `_is_excluded` is also checked here now,
+        # matching on_created/on_modified: a delete under an excluded dir
+        # (e.g. a nested build/venv directory regenerated in bulk) never
+        # touches the index in the first place, so scheduling its removal is
+        # pure wasted batch volume — see `_is_excluded`'s docstring for why
+        # this is a path-membership check, not a query-side heuristic.
+        if self._is_indexable(event.src_path) and not self._is_excluded(event.src_path):
+            self._schedule_change(event.src_path, "delete")
 
     def on_moved(self, event: FileSystemEvent) -> None:
         # A rename/move fires here — NOT on_created or on_modified. Editors and
@@ -242,14 +296,10 @@ class CodeWatcher(FileSystemEventHandler):
             return
         src = getattr(event, "src_path", None)
         dest = getattr(event, "dest_path", None)
-        # The old path leaves the index (if it was something we indexed).
-        if src and self._is_indexable(src):
-            with self._lock:
-                self._debounce_pending_paths.discard(src)
-                self._burst_pending.discard(src)
-            self._indexer.delete_file(src)
-            if self._searcher_refresh:
-                self._searcher_refresh()
+        # The old path leaves the index (if it was something we indexed) —
+        # same debounced/batched delete path as on_deleted (UPG-REST-STARVATION).
+        if src and self._is_indexable(src) and not self._is_excluded(src):
+            self._schedule_change(src, "delete")
         # The new path is indexed like a create/modify (debounced) unless excluded.
         if dest and self._is_indexable(dest) and not self._is_excluded(dest):
             self._schedule_change(dest, "move")
@@ -257,7 +307,11 @@ class CodeWatcher(FileSystemEventHandler):
     def _handle_change(self, path: str, action: str = "modify") -> None:
         with self._lock:
             self._debounce_pending_paths.discard(path)
-        self._indexer.index_file(path)
+            self._pending_actions.pop(path, None)
+        if action == "delete":
+            self._indexer.delete_file(path)
+        else:
+            self._indexer.index_file(path)
         if self._searcher_refresh:
             self._searcher_refresh()
 
@@ -278,6 +332,12 @@ class CodeWatcher(FileSystemEventHandler):
     def _schedule_change(self, path: str, action: str) -> None:
         enter_burst = False
         with self._lock:
+            # Most-recent action wins — a delete scheduled for a path that
+            # still has a pending create/modify (or vice versa) overwrites it
+            # here; the per-file `_debounce.schedule()` call below separately
+            # cancels-and-replaces that path's pending Timer, so the two stay
+            # consistent below the burst threshold too.
+            self._pending_actions[path] = action
             if self._burst_mode:
                 self._burst_pending.add(path)
                 enter_burst = True  # still in burst mode — reset the quiet timer below
@@ -353,11 +413,27 @@ class CodeWatcher(FileSystemEventHandler):
     def _launch_batch_thread(self, paths: set[str]) -> None:
         def run() -> None:
             t0 = time.monotonic()
+            with self._lock:
+                actions = {p: self._pending_actions.pop(p, "modify") for p in paths}
+            indexed_files = deleted_files = 0
+            indexed_chunks = deleted_chunks = 0
             for p in sorted(paths):
                 try:
-                    self._indexer.index_file(p)
+                    if actions.get(p) == "delete":
+                        deleted_chunks += self._indexer.delete_file(p)
+                        deleted_files += 1
+                    else:
+                        indexed_chunks += self._indexer.index_file(p)
+                        indexed_files += 1
                 except Exception:
                     logger.exception("watcher: batch re-index failed for %s", p)
+                # Cooperative yield between files (UPG-REST-STARVATION requirement
+                # #1's "explicit yields") — this worker already runs off the
+                # request-handling thread, but ceding the GIL between files gives
+                # request handlers a scheduling opportunity on every iteration of
+                # a large batch rather than only between embed sub-batches deep
+                # inside index_file/delete_file.
+                time.sleep(0)
             if self._searcher_refresh:
                 self._searcher_refresh()
             with self._batch_lock:
@@ -365,6 +441,15 @@ class CodeWatcher(FileSystemEventHandler):
                 self._batch_running = False
                 next_paths = self._pending_batch
                 self._pending_batch = set()
+            # UPG-WATCH-REVERT-CHURN diagnostics: one line per debounced churn
+            # job with its size, so a large watcher-driven reindex is visible
+            # in the log instead of a silent multi-minute gap.
+            logger.info(
+                "watcher: churn batch done — %d files ingested (%d chunks re-embedded), "
+                "%d files de-indexed (%d chunks deleted), %.1fs",
+                indexed_files, indexed_chunks, deleted_files, deleted_chunks,
+                self._last_batch_duration_s,
+            )
             if next_paths:
                 self._maybe_run_or_defer(next_paths)
 
@@ -471,6 +556,7 @@ class CodeWatcher(FileSystemEventHandler):
         self._excluded_dirs = self._collect_excluded_dirs()
         self._excluded_file_globs = self._collect_excluded_globs()
         self._excluded_regexes = self._collect_excluded_regexes()
+        self._gitignore_patterns = self._collect_gitignore_patterns()
         self._reschedule_watches()
 
     def _reschedule_watches(self) -> None:

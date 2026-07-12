@@ -231,6 +231,43 @@ class TestShouldIndexFile:
 
 
 # ---------------------------------------------------------------------------
+# matches_gitignore_pattern — shared predicate behind should_index_file's
+# gitignore check AND agent.watcher.CodeWatcher's live exclusion check
+# (UPG-REST-STARVATION diagnostics: verifying/fixing gitignore parity
+# between the bulk index walk and the live watcher).
+# ---------------------------------------------------------------------------
+
+class TestMatchesGitignorePattern:
+    def test_filename_glob_matches(self) -> None:
+        from integrations.workspace_detect import matches_gitignore_pattern
+        assert matches_gitignore_pattern(Path("/ws/app.log"), ["*.log"]) is True
+
+    def test_filename_glob_no_match(self) -> None:
+        from integrations.workspace_detect import matches_gitignore_pattern
+        assert matches_gitignore_pattern(Path("/ws/app.py"), ["*.log"]) is False
+
+    def test_directory_only_pattern_matches_by_component(self) -> None:
+        from integrations.workspace_detect import matches_gitignore_pattern
+        assert matches_gitignore_pattern(Path("/ws/dist/bundle.js"), ["dist/"]) is True
+
+    def test_no_patterns_never_matches(self) -> None:
+        from integrations.workspace_detect import matches_gitignore_pattern
+        assert matches_gitignore_pattern(Path("/ws/anything.py"), []) is False
+
+    def test_used_identically_by_should_index_file(self, tmp_path) -> None:
+        # should_index_file's own gitignore check must agree with the
+        # standalone predicate for the same inputs — same underlying call,
+        # so this can never drift between should_index_file and any other
+        # caller (e.g. the watcher) that also calls matches_gitignore_pattern.
+        from integrations.workspace_detect import matches_gitignore_pattern
+        f = tmp_path / "build.log"
+        f.touch()
+        patterns = ["*.log"]
+        assert matches_gitignore_pattern(f, patterns) is True
+        assert should_index_file(str(f), patterns) is False
+
+
+# ---------------------------------------------------------------------------
 # T19: .vectrignore support
 # ---------------------------------------------------------------------------
 

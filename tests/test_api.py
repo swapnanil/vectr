@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -302,9 +304,60 @@ def test_index_happy_path(client) -> None:
     assert "processing_ms" in data
 
 
+def test_index_does_not_block_concurrent_status(client) -> None:
+    """UPG-REST-STARVATION: POST /v1/index runs svc.index() in a threadpool
+    (see app/routes.py) instead of directly on the event-loop thread, so a
+    slow/bulk index call must never block GET /v1/status from answering
+    promptly on a concurrent request."""
+    svc = client.app.state.service
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_index(path, force=False):
+        entered.set()
+        assert release.wait(timeout=5), "test never released the slow index call"
+        return (12, 500, 240)
+
+    svc.index.side_effect = slow_index
+
+    results: dict[str, object] = {}
+
+    def do_index() -> None:
+        results["resp"] = client.post("/v1/index", json={"path": ".", "force": False})
+
+    t = threading.Thread(target=do_index)
+    t.start()
+    assert entered.wait(timeout=2), "slow /v1/index handler never started"
+
+    t0 = time.monotonic()
+    status_resp = client.get("/v1/status")
+    elapsed = time.monotonic() - t0
+
+    release.set()
+    t.join(timeout=5)
+
+    assert status_resp.status_code == 200
+    assert elapsed < 1.0, f"/v1/status took {elapsed:.2f}s while /v1/index was running"
+    assert results["resp"].status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
+
+def test_status_reindex_in_progress_field_present(client) -> None:
+    """UPG-REST-STARVATION requirement #2: /v1/status always carries a
+    reindex_in_progress flag (defaults to False when the service doesn't
+    report otherwise, and surfaces True when it does)."""
+    resp = client.get("/v1/status")
+    assert resp.status_code == 200
+    assert resp.json()["reindex_in_progress"] is False
+
+    svc = client.app.state.service
+    svc.status.return_value = {**svc.status.return_value, "reindex_in_progress": True}
+    resp = client.get("/v1/status")
+    assert resp.json()["reindex_in_progress"] is True
+
 
 def test_status(client) -> None:
     resp = client.get("/v1/status")

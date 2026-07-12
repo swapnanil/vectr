@@ -88,6 +88,100 @@ class TestConcurrentIndexing:
 
 
 # ---------------------------------------------------------------------------
+# /v1/status stays fast + reports reindex_in_progress during bulk index work
+# (UPG-REST-STARVATION)
+# ---------------------------------------------------------------------------
+
+class TestReindexInProgressFlag:
+    def test_status_reports_reindex_in_progress_while_index_lock_held(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """status()['reindex_in_progress'] reflects a held _index_lock, and
+        status() itself never tries to acquire that lock — if it did, this
+        call would deadlock (the lock is not reentrant and this thread
+        already holds it) rather than merely being slow."""
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "a.py", "def foo(): pass\n")
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+
+        assert svc.status()["reindex_in_progress"] is False
+
+        svc._index_lock.acquire()
+        try:
+            t0 = time.monotonic()
+            data = svc.status()
+            elapsed = time.monotonic() - t0
+        finally:
+            svc._index_lock.release()
+
+        assert data["reindex_in_progress"] is True
+        assert elapsed < 1.0, f"status() took {elapsed:.2f}s while _index_lock was held"
+        assert svc.status()["reindex_in_progress"] is False
+
+    def test_status_answers_fast_during_slow_bulk_index(self, tmp_path, monkeypatch) -> None:
+        """End-to-end: a genuinely slow bulk index() call (simulating a large
+        synthetic change set / debounced churn job) runs on a background
+        thread while a concurrent status() call must still answer quickly
+        and report reindex_in_progress=True for the duration."""
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "a.py", "def foo(): pass\n")
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+
+        real_index_workspace = svc._indexer.index_workspace
+
+        def _slow_index_workspace(*a, **kw):
+            time.sleep(1.5)
+            return real_index_workspace(*a, **kw)
+
+        monkeypatch.setattr(svc._indexer, "index_workspace", _slow_index_workspace)
+
+        started = threading.Event()
+        done = threading.Event()
+        errors: list[Exception] = []
+
+        def run_index() -> None:
+            try:
+                started.set()
+                svc.index(str(tmp_path))
+            except Exception as e:  # pragma: no cover - surfaced via assertion below
+                errors.append(e)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=run_index, daemon=True)
+        t.start()
+        assert started.wait(timeout=2), "index thread never started"
+        time.sleep(0.3)  # let the slow index acquire _index_lock
+
+        t0 = time.monotonic()
+        data = svc.status()
+        elapsed = time.monotonic() - t0
+
+        assert data["reindex_in_progress"] is True
+        assert elapsed < 1.0, f"status() took {elapsed:.2f}s during a slow bulk index()"
+
+        assert done.wait(timeout=10), "slow index() never finished"
+        assert errors == [], f"index() raised: {errors}"
+        assert svc.status()["reindex_in_progress"] is False
+
+
+# ---------------------------------------------------------------------------
 # Eager reranker warm-up at startup (UPG-RERANKER-HF-NETWORK)
 #
 # Moves the cross-encoder's model-load cost out of the first vectr_search

@@ -178,6 +178,11 @@ class StatusResponse(BaseModel):
     # Org-wide artifact-cache metrics (UPG-PRO caching): hits / misses /
     # hit_rate / entries / est_tokens_saved, or None when the cache is off.
     artifact_cache: dict | None = None
+    # UPG-REST-STARVATION: true while bulk index work (an explicit
+    # index()/startup index, or the watcher's coalesced batch worker) is
+    # running. Backed by a non-blocking lock read + in-memory watcher flags —
+    # this field is always cheap to compute, even mid-reindex.
+    reindex_in_progress: bool = False
 
 
 class HealthResponse(BaseModel):

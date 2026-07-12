@@ -235,7 +235,8 @@ class TestCodeIndexer:
         assert "javascript" not in indexer.indexed_languages()
         js = tmp_path / "b.js"; js.write_text("function y() {}")
         indexer.index_file(str(js))
-        # chunk count changed → cache recomputed, js now present
+        # index_file() applies an incremental delta to the stats cache
+        # (UPG-REST-STARVATION) — js is present without any collection rescan.
         assert "javascript" in indexer.indexed_languages()
 
     def test_indexed_language_stats_files_and_chunks(self, indexer, tmp_path) -> None:
@@ -250,6 +251,48 @@ class TestCodeIndexer:
         assert stats["javascript"]["files"] == 1
         # indexed_languages() derives from the same source
         assert indexer.indexed_languages() == sorted(stats)
+
+    def test_stats_do_not_rescan_collection_after_seed(self, indexer, tmp_path) -> None:
+        """UPG-REST-STARVATION: indexed_language_stats() must be O(1) after
+        the one-time lazy seed — never a full paginated collection.get()
+        scan on every call, which previously made a status read during a
+        bulk reindex contend with the writer for the whole collection (see
+        agent/indexer/_core.py's _ensure_stats_seeded / _apply_chunk_delta).
+
+        total_chunks deliberately reads ChromaDB's native `.count()` instead
+        (cheap, and always ground truth even across an out-of-band
+        collection mutation — see test_force_rebuilds_after_collection_desync),
+        so it is exercised alongside indexed_language_stats() here to
+        confirm it never routes through the paginated scan either.
+
+        `indexer._collection` is a real ChromaDB collection, so the
+        paginated stats-scan signature (a `limit=` page kwarg, distinct from
+        the `where=`-filtered per-file lookups index_file/delete_file also
+        issue) is spied on via a wrapping side_effect rather than asserting
+        on an unconfigured mock.
+        """
+        indexer.index_file(make_py(tmp_path, "a.py", "def x(): pass"))
+        indexer.indexed_language_stats()  # seeds the per-language cache
+        assert indexer._stats_seeded is True
+
+        real_get = indexer._collection.get
+        scan_calls: list[dict] = []
+
+        def _tracking_get(*args, **kwargs):
+            if "limit" in kwargs:
+                scan_calls.append(kwargs)
+            return real_get(*args, **kwargs)
+
+        with patch.object(indexer._collection, "get", side_effect=_tracking_get):
+            indexer.index_file(make_py(tmp_path, "b.py", "def y(): pass"))
+            for _ in range(5):
+                indexer.total_chunks
+                indexer.indexed_language_stats()
+
+        assert scan_calls == [], (
+            "indexed_language_stats() triggered a paginated collection scan "
+            "instead of reading the incrementally-maintained cache"
+        )
 
     def test_get_all_documents_returns_indexed_content(self, indexer, tmp_path) -> None:
         make_py(tmp_path, "fn.py", """

@@ -724,6 +724,17 @@ class VectrService:
             mode = "search-only"
         else:
             mode = "full"
+        # UPG-REST-STARVATION requirement #2: a truthful, lock-free signal
+        # that bulk index work is running right now — `Lock.locked()` is a
+        # non-blocking read (never acquires), and `watcher_status()` reads
+        # only in-memory counters/flags, so neither call can itself wait on
+        # the bulk work it's reporting about. True while either an explicit
+        # `index()`/startup index holds `_index_lock`, or the watcher's
+        # coalesced batch worker is actively re-indexing/de-indexing.
+        watcher_status = self._watcher.watcher_status()
+        reindex_in_progress = (
+            self._index_lock.locked() or watcher_status.get("watcher_batch_running", False)
+        )
         return {
             "indexed_files": self._indexer.indexed_file_count,
             "total_chunks": self._indexer.total_chunks,
@@ -736,6 +747,7 @@ class VectrService:
             "grammars_unavailable": missing,
             "mode": mode,
             "version_stamp": self._version_stamp,
+            "reindex_in_progress": reindex_in_progress,
             # UPG-NOTES-EMBED-MIGRATION: normally None — migration runs
             # synchronously at startup, so this only surfaces a mid-failure
             # state (e.g. the embedder was unavailable during migration).
@@ -745,7 +757,7 @@ class VectrService:
             ),
             **self._symbol_graph_status(),
             **strategy_info,
-            **self._watcher.watcher_status(),
+            **watcher_status,
             "hook_injection_counts": self.get_hook_injection_counts(),
             "proactive_injection_counts": self.get_proactive_injection_counts(),
             # Effective ambient (hook-channel) master opt-in, visible BEFORE any
