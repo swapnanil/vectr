@@ -1403,6 +1403,30 @@ class TestCmdForget:
         call_url = mock_post.call_args[0][0]
         assert "/v1/memory/clear" in call_url
 
+    def test_forget_all_sweeps_current_and_legacy_cache_layouts(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # Regression: --all used to glob only the legacy ~/.cache/vectr/db/<hash>/
+        # layout, deleting nothing for workspaces on the current
+        # ~/.cache/vectr/<hash>/ layout while still reporting success.
+        import argparse
+        from agent.working_context_store import WorkingContextStore
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        current = tmp_path / ".cache" / "vectr" / "aaaa1111bbbb"
+        legacy = tmp_path / ".cache" / "vectr" / "db" / "cccc2222dddd"
+        for d in (current, legacy):
+            d.mkdir(parents=True)
+            WorkingContextStore(str(d)).remember("/ws", f"note under {d}")
+
+        args = argparse.Namespace(path=str(tmp_path), port=8765, all=True)
+        m.cmd_forget(args)
+
+        out = capsys.readouterr().out
+        assert "Deleted 2 working-memory notes" in out
+        for d in (current, legacy):
+            assert WorkingContextStore(str(d)).forget_all_workspaces() == 0
+
     def test_forget_prints_deleted_count(self, tmp_path, capsys):
         import httpx
         import argparse

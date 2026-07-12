@@ -1936,9 +1936,16 @@ def cmd_forget(args: argparse.Namespace) -> None:
     # bypassing the running server (server may be down, or multiple instances).
     if getattr(args, "all", False):
         from agent.working_context_store import WorkingContextStore
-        import glob
-        cache_root = Path.home() / ".cache" / "vectr" / "db"
-        db_files = list(cache_root.glob("*/working_context.sqlite"))
+        cache_root = Path.home() / ".cache" / "vectr"
+        # Layout of record: ~/.cache/vectr/<workspace-hash>/working_context.sqlite
+        # (app.service._default_db_dir). Earlier builds nested the same file under
+        # ~/.cache/vectr/db/<hash>/ — sweep both layouts so --all cannot silently
+        # miss notes and report success having deleted nothing.
+        db_files = sorted(
+            set(cache_root.glob("*/working_context.sqlite"))
+            | set(cache_root.glob("db/*/working_context.sqlite"))
+        )
+        print("--all sweeps every workspace database on this machine (--port/--path ignored).")
         total = 0
         for db_file in db_files:
             store = WorkingContextStore(str(db_file.parent))
