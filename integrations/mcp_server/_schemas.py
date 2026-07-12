@@ -3,7 +3,7 @@ from __future__ import annotations
 
 MCP_SERVER_INFO = {
     "name": "vectr",
-    "version": "2.0.0",
+    "version": "1.1.1",
     "description": "Zero-config semantic code search + persistent working memory for AI agents",
     "capabilities": {"tools": {}},
 }
@@ -13,6 +13,12 @@ _EXPLORATION_TOOLS = [
     # ---- L3: content retrieval ----
     {
         "name": "vectr_search",
+        "annotations": {
+            "title": "Semantic code search",
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "Use when you know WHAT you're looking for but not WHERE it is or WHAT it's called. "
             "Hybrid semantic + BM25 search — finds code by concept, behaviour, or description. "
@@ -45,6 +51,12 @@ _EXPLORATION_TOOLS = [
     },
     {
         "name": "vectr_fetch",
+        "annotations": {
+            "title": "Restore code chunks by id",
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "Deterministic re-fetch of a code chunk by its exact id — no embedding, "
             "no rerank, just the chunk. Every vectr_search/vectr_locate/vectr_trace "
@@ -69,6 +81,12 @@ _EXPLORATION_TOOLS = [
     },
     {
         "name": "vectr_status",
+        "annotations": {
+            "title": "Index and memory status",
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "Returns index health (files, chunks, embed model) AND notes_count (number of notes "
             "stored — earlier in this session or in prior sessions). "
@@ -84,6 +102,12 @@ _EXPLORATION_TOOLS = [
     # ---- L1: codebase map ----
     {
         "name": "vectr_map",
+        "annotations": {
+            "title": "Codebase overview",
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "Use at the start of a session on an UNFAMILIAR codebase to get a structural overview "
             "without reading any files. "
@@ -97,6 +121,13 @@ _EXPLORATION_TOOLS = [
     },
     {
         "name": "vectr_map_save",
+        "annotations": {
+            "title": "Save codebase passport",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "Save your synthesised codebase summary as the permanent passport. "
             "Call this ONLY after vectr_map returned raw metadata — i.e. on your first visit to a codebase. "
@@ -125,6 +156,12 @@ _EXPLORATION_TOOLS = [
     # ---- L2: symbol graph ----
     {
         "name": "vectr_locate",
+        "annotations": {
+            "title": "Locate symbol definition",
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "Use when you know the SYMBOL NAME but not which file it's in. "
             "Returns file path + line number + kind for every matching definition. "
@@ -155,6 +192,12 @@ _EXPLORATION_TOOLS = [
     },
     {
         "name": "vectr_trace",
+        "annotations": {
+            "title": "Symbol call graph",
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "Use when you know the SYMBOL NAME and need to understand its callers or callees "
             "before modifying it. Traverses the call graph in both directions. "
@@ -201,6 +244,13 @@ _EXPLORATION_TOOLS = [
 _MEMORY_WRITE_TOOLS = [
     {
         "name": "vectr_remember",
+        "annotations": {
+            "title": "Store working-memory note",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "description": (
             "Save a working note and recall it on demand in <50ms — "
             "whether later this session, through context compaction, or in a future session. "
@@ -273,6 +323,12 @@ _MEMORY_WRITE_TOOLS = [
     },
     {
         "name": "vectr_evict_hint",
+        "annotations": {
+            "title": "List re-retrievable chunks",
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "Lists the code chunks retrieved by THIS session that are safe to drop from "
             "context — each is re-fetchable verbatim in one deterministic call, and the "
@@ -292,6 +348,12 @@ _MEMORY_WRITE_TOOLS = [
 _MEMORY_TOOLS = [
     {
         "name": "vectr_recall",
+        "annotations": {
+            "title": "Recall working-memory notes",
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "Retrieve notes stored earlier in this session or in prior sessions. "
             "TWO-TIER RECALL (UPG-RECALL-HIERARCHY): "
@@ -383,6 +445,13 @@ _MEMORY_TOOLS = [
     },
     {
         "name": "vectr_snapshot",
+        "annotations": {
+            "title": "Checkpoint working memory",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "description": (
             "Seal all current vectr_remember() notes as a named checkpoint. "
             "Use when you've stored multiple notes and want to mark a milestone you can return to "
@@ -408,6 +477,12 @@ _MEMORY_TOOLS = [
     },
     {
         "name": "vectr_snapshot_list",
+        "annotations": {
+            "title": "List memory checkpoints",
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "List all saved session snapshots for this workspace, newest first. "
             "Use at session start to find an existing checkpoint if vectr_recall returned nothing "
@@ -417,6 +492,13 @@ _MEMORY_TOOLS = [
     },
     {
         "name": "vectr_forget",
+        "annotations": {
+            "title": "Delete working-memory notes",
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": (
             "Delete working-memory notes. Pass note_id to delete ONE note — the usual case, "
             "when a note is stale or superseded (ids are the [#N] shown by vectr_recall). "
@@ -445,6 +527,13 @@ _MEMORY_TOOLS = [
 _UTILITY_TOOLS = [
     {
         "name": "vectr_ingest_traces",
+        "annotations": {
+            "title": "Ingest runtime call edges",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "description": (
             "Import runtime trace events into the symbol graph to enrich static call analysis. "
             "Use when you have runtime profiling data (Python sys.settrace output, JSON trace logs) "

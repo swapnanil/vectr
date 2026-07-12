@@ -1359,6 +1359,22 @@ class TestVectrForget:
         names = {t["name"] for t in handle_tools_list()["tools"]}
         assert "vectr_forget" in names
 
+    def test_all_tools_env_flag_exposes_full_surface(self, monkeypatch) -> None:
+        # Hosted/registry inspectors connect with a fresh session and zero
+        # notes; VECTR_MCP_ALL_TOOLS=1 must expose the complete tool surface
+        # (memory read tools included) without any note existing.
+        monkeypatch.setenv("VECTR_MCP_ALL_TOOLS", "1")
+        tools = handle_tools_list(session_id="fresh-session-no-notes")["tools"]
+        names = {t["name"] for t in tools}
+        assert len(tools) == 14
+        assert {"vectr_recall", "vectr_forget", "vectr_snapshot", "vectr_snapshot_list"} <= names
+
+    def test_all_tools_env_flag_off_keeps_gating(self, monkeypatch) -> None:
+        monkeypatch.delenv("VECTR_MCP_ALL_TOOLS", raising=False)
+        tools = handle_tools_list(session_id="fresh-session-no-notes")["tools"]
+        names = {t["name"] for t in tools}
+        assert "vectr_recall" not in names
+
 
 # ---------------------------------------------------------------------------
 # Unknown tool
