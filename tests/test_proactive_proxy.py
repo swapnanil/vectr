@@ -274,3 +274,31 @@ async def test_concurrent_requests_all_succeed():
         ])
     assert all(r.status_code == 200 for r in results)
     assert up.call_count == 10
+
+
+# -- startup banner (UPG-PROXY-HIDDEN-MASTER-SWITCH) -------------------------
+
+def test_banner_injection_off_single_line():
+    from main import _render_injection_lines
+    lines = _render_injection_lines(False, "http://localhost:8766", None)
+    assert lines == ["  Injection : off (transparent pass-through)"]
+
+
+def test_banner_daemon_unreachable_warns_fail_open():
+    from main import _render_injection_lines
+    lines = _render_injection_lines(True, "http://localhost:8766", None)
+    assert len(lines) == 1
+    assert "WARNING" in lines[0] and "fail open" in lines[0]
+
+
+def test_banner_proxy_channel_consent_with_master_switch_off():
+    from main import _render_injection_lines
+    lines = _render_injection_lines(True, "http://localhost:8766", {"proactive_enabled": False})
+    assert "launch consent" in lines[0]
+    assert len(lines) == 2 and "ambient (hook) injection is off" in lines[1]
+
+
+def test_banner_master_switch_on_single_line():
+    from main import _render_injection_lines
+    lines = _render_injection_lines(True, "http://localhost:8766", {"proactive_enabled": True})
+    assert len(lines) == 1 and "launch consent" in lines[0]

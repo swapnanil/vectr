@@ -1262,7 +1262,15 @@ def cmd_proxy(args: argparse.Namespace) -> None:
     print("Vectr proxy (experimental — Proactive context) starting.", file=sys.stderr)
     print(f"  Listening : {base}", file=sys.stderr)
     print(f"  Upstream  : {upstream}", file=sys.stderr)
-    print(f"  Injection : {'on (daemon ' + _api_base(daemon_port) + ')' if inject else 'off (transparent pass-through)'}", file=sys.stderr)
+    daemon_status = None
+    if inject:
+        try:
+            import httpx as _httpx
+            daemon_status = _httpx.get(f"{_api_base(daemon_port)}/v1/status", timeout=2.0).json()
+        except Exception:
+            daemon_status = None
+    for _line in _render_injection_lines(inject, _api_base(daemon_port), daemon_status):
+        print(_line, file=sys.stderr)
     print(f"  Resp cache: {'on' if response_cache is not None else 'off'}", file=sys.stderr)
     print("  Wire it up:", file=sys.stderr)
     print(f"    export ANTHROPIC_BASE_URL={base}", file=sys.stderr)
@@ -1696,6 +1704,28 @@ def _hook_injection_line(data: dict) -> str | None:
         return None
     parts = ", ".join(f"{kind} {n}" for kind, n in counts.items())
     return f"Hook injections : {parts}"
+
+
+def _render_injection_lines(inject: bool, daemon_base: str, daemon_status: dict | None) -> list[str]:
+    """Proxy-banner lines describing the END-TO-END injection state
+    (UPG-PROXY-HIDDEN-MASTER-SWITCH): the proxy-side flag alone used to print
+    "on" while the daemon returned empty context for every request. The banner
+    now reflects what will actually happen. Metadata only — daemon_status is
+    the /v1/status payload or None when unreachable."""
+    if not inject:
+        return ["  Injection : off (transparent pass-through)"]
+    if daemon_status is None:
+        return [
+            f"  Injection : on (daemon {daemon_base}) — WARNING: daemon unreachable;"
+            " injections fail open (requests forward unmodified) until it is up."
+        ]
+    lines = [f"  Injection : on (daemon {daemon_base}, proxy-channel launch consent)"]
+    if not daemon_status.get("proactive_enabled", False):
+        lines.append(
+            "              ambient (hook) injection is off daemon-side; the proxy"
+            " channel injects because you launched it."
+        )
+    return lines
 
 
 def _proactive_injection_line(data: dict) -> str | None:

@@ -29,12 +29,34 @@ def _service(tmp_path, monkeypatch, **env):
 
 # -- proactive_context ------------------------------------------------------
 
-def test_proactive_disabled_returns_empty(tmp_path, monkeypatch):
+def test_proactive_disabled_returns_empty_for_hook_channel(tmp_path, monkeypatch):
+    # The master opt-in still gates AMBIENT surfaces: hook-channel requests
+    # inject nothing while proactive.enabled is off.
     monkeypatch.delenv("VECTR_PROACTIVE", raising=False)
     svc = _service(tmp_path, monkeypatch)
     svc.remember("resolver.py: the lock drops on scope exit", kind="gotcha")
-    out = svc.proactive_context(text="lock", file_paths=["/x/resolver.py"])
+    out = svc.proactive_context(text="lock", file_paths=["/x/resolver.py"], channel="hook")
     assert out == {"context": "", "item_count": 0, "anchor_ids": [], "scores": []}
+
+
+def test_proactive_proxy_channel_injects_without_master_switch(tmp_path, monkeypatch):
+    # UPG-PROXY-HIDDEN-MASTER-SWITCH: launching the proxy IS the consent for
+    # the proxy channel — it must inject even with the master opt-in unset.
+    monkeypatch.delenv("VECTR_PROACTIVE", raising=False)
+    svc = _service(tmp_path, monkeypatch)
+    nid = svc.remember("resolver.py holds the workspace lock; drops on scope exit", kind="gotcha")
+    out = svc.proactive_context(text="", file_paths=["/abs/resolver.py"], session_id="s1", channel="proxy")
+    assert out["item_count"] >= 1
+    assert f"note:{nid}" in out["anchor_ids"]
+    assert svc.get_proactive_injection_counts().get("proxy", 0) == 1
+
+
+def test_status_exposes_proactive_enabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("VECTR_PROACTIVE", raising=False)
+    svc = _service(tmp_path, monkeypatch)
+    assert svc.status()["proactive_enabled"] is False
+    monkeypatch.setenv("VECTR_PROACTIVE", "1")
+    assert svc.status()["proactive_enabled"] is True
 
 
 def test_proactive_structural_note_injected(tmp_path, monkeypatch):

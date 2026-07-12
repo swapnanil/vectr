@@ -171,6 +171,10 @@ class StatusResponse(BaseModel):
     # channel (e.g. "proxy") actually injected packed context since startup.
     # Empty until proactive context has injected anything.
     proactive_injection_counts: dict[str, int] = {}
+    # Effective ambient (hook-channel) proactive master opt-in, visible before
+    # any injection has happened. The proxy channel injects by launch consent
+    # regardless of this flag (UPG-PROXY-HIDDEN-MASTER-SWITCH).
+    proactive_enabled: bool = False
     # Org-wide artifact-cache metrics (UPG-PRO caching): hits / misses /
     # hit_rate / entries / est_tokens_saved, or None when the cache is off.
     artifact_cache: dict | None = None

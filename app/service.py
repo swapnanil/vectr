@@ -748,8 +748,17 @@ class VectrService:
             **self._watcher.watcher_status(),
             "hook_injection_counts": self.get_hook_injection_counts(),
             "proactive_injection_counts": self.get_proactive_injection_counts(),
+            # Effective ambient (hook-channel) master opt-in, visible BEFORE any
+            # injection has happened — the counts above only appear after the
+            # fact. The proxy channel injects by launch consent regardless.
+            "proactive_enabled": self._proactive_master_enabled(),
             "artifact_cache": self.cache_metrics(),
         }
+
+    @staticmethod
+    def _proactive_master_enabled() -> bool:
+        from agent.proactive.settings import ProactiveSettings
+        return ProactiveSettings.from_env().enabled
 
     def _symbol_graph_status(self) -> dict:
         """Symbol-graph build trust signals for `status` (UPG-8.7): whether the
@@ -1119,7 +1128,14 @@ class VectrService:
             return empty
         from agent.proactive.settings import ProactiveSettings
         settings = ProactiveSettings.from_env()
-        if not settings.enabled:
+        # The master opt-in gates AMBIENT surfaces (hooks read the transcript
+        # without any per-session user action). The proxy channel is different:
+        # the user explicitly launched `vectr proxy` with injection enabled and
+        # pointed their client at it — that launch IS the consent for this
+        # channel. The daemon is localhost-only and already serves notes to
+        # local callers ungated (recall/search), so honoring the proxy channel
+        # here adds no exposure beyond existing endpoints.
+        if not settings.enabled and channel != "proxy":
             return empty
         from agent.proactive.matcher import ProactiveMatcher
         from agent.proactive.types import ProactiveWindow
