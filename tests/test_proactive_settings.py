@@ -6,6 +6,7 @@ import pytest
 from agent.proactive.settings import (
     ProactiveRefused,
     ProactiveSettings,
+    derive_provider_timeout_s,
     enforce_proactive_bind,
     proactive_enabled,
 )
@@ -58,3 +59,60 @@ def test_enforce_refuses_non_loopback_when_enabled():
     # Loopback is fine; config-off is fine even on non-loopback (nothing to refuse).
     enforce_proactive_bind("127.0.0.1", True)
     enforce_proactive_bind("0.0.0.0", False)
+
+
+# -- provider-timeout / outer-budget ordering invariant (UPG-PROXY-BUDGET-40MS) --
+
+
+def _settings(**over):
+    """Full ProactiveSettings from the bundled defaults, with fields overridden
+    for the ordering test — avoids repeating every field just to vary one or two."""
+    import dataclasses
+
+    return dataclasses.replace(ProactiveSettings.from_env(), **over)
+
+
+def test_bundled_default_derives_below_budget(monkeypatch):
+    for k in list(__import__("os").environ):
+        if k.startswith("VECTR_PROACTIVE"):
+            monkeypatch.delenv(k, raising=False)
+    # The shipped default (config.yaml) must already satisfy the invariant.
+    s = ProactiveSettings.from_env()
+    derived = derive_provider_timeout_s(s)
+    budget_s = s.proxy_inject_budget_ms / 1000.0
+    assert derived < budget_s
+    assert s.proxy_inject_budget_ms >= 750  # UPG-PROXY-BUDGET-40MS: no longer self-defeating
+
+
+def test_derived_timeout_strictly_below_budget_across_configs():
+    for budget_ms, fraction, cap_s in [
+        (750, 0.8, 2.0),
+        (40, 0.8, 2.0),   # a tight, misconfigured-small budget
+        (100, 1.0, 100.0),  # fraction/cap misconfigured to be permissive
+        (5000, 0.5, 0.2),  # cap binds well below fraction * budget
+    ]:
+        s = _settings(
+            proxy_inject_budget_ms=budget_ms,
+            proxy_inject_provider_timeout_fraction=fraction,
+            proxy_inject_provider_timeout_max_s=cap_s,
+        )
+        derived = derive_provider_timeout_s(s)
+        budget_s = max(budget_ms, 1) / 1000.0
+        assert derived < budget_s, (budget_ms, fraction, cap_s, derived)
+        assert derived > 0
+
+
+def test_derived_timeout_respects_fraction_and_cap():
+    s = _settings(
+        proxy_inject_budget_ms=1000, proxy_inject_provider_timeout_fraction=0.5,
+        proxy_inject_provider_timeout_max_s=2.0,
+    )
+    # fraction * budget (0.5s) is below the cap (2.0s), so fraction governs.
+    assert derive_provider_timeout_s(s) == pytest.approx(0.5)
+
+    s = _settings(
+        proxy_inject_budget_ms=10_000, proxy_inject_provider_timeout_fraction=0.9,
+        proxy_inject_provider_timeout_max_s=1.0,
+    )
+    # fraction * budget (9s) exceeds the cap (1.0s), so the cap governs.
+    assert derive_provider_timeout_s(s) == pytest.approx(1.0)

@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from agent.proactive.provider import DaemonInjectionProvider
+from agent.proactive.settings import ProactiveSettings, derive_provider_timeout_s
 from agent.proactive.types import ProactiveWindow
 
 
@@ -75,3 +76,29 @@ async def test_provider_unreachable_is_fail_open():
     result = await prov.inject(ProactiveWindow(text="x"), session_id="", channel="proxy")
     assert result.is_empty()
     await prov.aclose()
+
+
+# -- budget-ordering invariant (UPG-PROXY-BUDGET-40MS) ----------------------
+#
+# main.py's `cmd_proxy` builds DaemonInjectionProvider with
+# `timeout_s=derive_provider_timeout_s(settings)` — this is the same wiring,
+# exercised end-to-end from settings through to the constructed instance.
+
+
+def test_provider_constructed_via_wiring_has_timeout_below_budget():
+    settings = ProactiveSettings(
+        enabled=True, min_similarity=0.35, max_items_per_event=3, max_chars_per_event=800,
+        cooldown_items=30, matcher_structural_note=True, matcher_semantic_note=True,
+        matcher_code_search=False, proxy_enabled=True, proxy_host="127.0.0.1",
+        proxy_port=8785, proxy_upstream_base_url="https://api.anthropic.com",
+        proxy_connect_timeout_s=10.0, proxy_read_timeout_s=600.0, proxy_inject=True,
+        proxy_inject_budget_ms=750, proxy_inject_provider_timeout_fraction=0.8,
+        proxy_inject_provider_timeout_max_s=2.0, cache_enabled=False, cache_max_entries=2048,
+        cache_ttl_seconds=0.0, cache_similarity_threshold=1.0, response_cache_enabled=False,
+        response_cache_ttl_seconds=60.0, response_cache_max_entries=256,
+    )
+    # The exact construction main.py performs.
+    timeout_s = derive_provider_timeout_s(settings)
+    prov = DaemonInjectionProvider("http://daemon", timeout_s=timeout_s)
+    assert prov._timeout == timeout_s
+    assert prov._timeout < settings.proxy_inject_budget_ms / 1000.0

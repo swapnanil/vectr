@@ -1208,8 +1208,22 @@ proactive:
     # Internal soft budget for the whole injection lookup (assemble window +
     # match + gate). If it is not ready within this many milliseconds, the
     # request is forwarded UNMODIFIED — a slow intelligence layer never delays
-    # or blocks a real model call (fail-open).
-    inject_budget_ms: 40
+    # or blocks a real model call (fail-open). Must comfortably exceed one
+    # daemon round trip, including latency spikes during watcher re-index
+    # bursts, or the outer backstop below trips before the daemon provider
+    # ever gets to return its own graceful "nothing to inject" result.
+    inject_budget_ms: 750
+    # The provider's own httpx timeout for the daemon round trip is DERIVED
+    # from inject_budget_ms (never hardcoded), as this fraction of the budget,
+    # capped by inject_provider_timeout_max_s. It is enforced to sit strictly
+    # BELOW inject_budget_ms so the provider's own fail-open path — a clean
+    # empty result — has a chance to fire before the outer asyncio.wait_for
+    # backstop cancels the coroutine outright. The outer wait_for exists only
+    # to bound failure modes the provider's own timeout cannot see (e.g. a
+    # hang before the httpx clock starts); it is a backstop, not the primary
+    # timeout mechanism.
+    inject_provider_timeout_fraction: 0.8
+    inject_provider_timeout_max_s: 2.0
 
   # Org-wide caching of vectr-layer artifacts (semantic search results, recall
   # results, embedding computations) — SAFE, invalidation-aware, attributed.

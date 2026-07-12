@@ -27,7 +27,9 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
@@ -41,6 +43,11 @@ from agent.proactive.cache import ResponseCache
 from agent.proactive.request_window import append_context_block, assemble_window
 from agent.proactive.settings import ProactiveSettings
 from agent.proactive.types import InjectionResult, ProactiveWindow
+
+# Metadata only — NEVER the request/response body, message content, or auth
+# headers. Every log call below is restricted to counters, elapsed-ms figures,
+# exception class names, and short fixed reason strings.
+logger = logging.getLogger(__name__)
 
 # Headers vectr must not forward verbatim: hop-by-hop and length/encoding fields
 # it recomputes. The Authorization / x-api-key headers are NOT here — they pass
@@ -209,42 +216,60 @@ class VectrProxy:
     async def _maybe_inject(self, forward_bytes: bytes) -> tuple[bytes, bool]:
         """Return (forward_bytes, injected). Fail-open at every step: a parse
         error, a provider error, or a budget overrun forwards the original bytes
-        unmodified."""
+        unmodified.
+
+        Every skip/bypass path logs a short, metadata-only reason (never the
+        request/response body, message content, or auth headers), so a run of
+        silent fail-opens is diagnosable from the log alone."""
         if not (self._settings.proxy_inject and self._provider is not None):
             self.metrics.bump("inject_skipped")
+            logger.debug("proactive inject skipped: inject disabled")
             return forward_bytes, False
         try:
             body = json.loads(forward_bytes)
         except Exception:
             self.metrics.bump("inject_skipped")
+            logger.debug("proactive inject skipped: unparseable body")
             return forward_bytes, False
         if not isinstance(body, dict) or not body.get("messages"):
             self.metrics.bump("inject_skipped")
+            logger.debug("proactive inject skipped: no messages")
             return forward_bytes, False
 
         window = assemble_window(body)
         if window.is_empty():
             self.metrics.bump("inject_skipped")
+            logger.debug("proactive inject skipped: empty window")
             return forward_bytes, False
 
         session = _session_id(body)
         budget_s = max(self._settings.proxy_inject_budget_ms, 1) / 1000.0
+        started = time.monotonic()
         try:
             result = await asyncio.wait_for(
                 self._provider.inject(window, session_id=session, channel="proxy"),
                 timeout=budget_s,
             )
-        except (asyncio.TimeoutError, Exception):
+        except (asyncio.TimeoutError, Exception) as exc:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
             self.metrics.bump("inject_bypassed_error")
+            logger.warning(
+                "proactive inject bypassed (fail-open): %s after %.1fms (budget %dms)",
+                type(exc).__name__,
+                elapsed_ms,
+                self._settings.proxy_inject_budget_ms,
+            )
             return forward_bytes, False
 
         if result is None or result.is_empty():
             self.metrics.bump("inject_skipped")
+            logger.debug("proactive inject skipped: empty result")
             return forward_bytes, False
 
         new_body, ok = append_context_block(body, result.context)
         if not ok:
             self.metrics.bump("inject_skipped")
+            logger.debug("proactive inject skipped: append failed")
             return forward_bytes, False
         self.metrics.bump("injected")
         return json.dumps(new_body).encode("utf-8"), True

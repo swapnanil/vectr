@@ -675,6 +675,12 @@ PROACTIVE_PROXY_CONNECT_TIMEOUT_S: float = float(_proxy_cfg["connect_timeout_s"]
 PROACTIVE_PROXY_READ_TIMEOUT_S: float = float(_proxy_cfg["read_timeout_s"])
 PROACTIVE_PROXY_INJECT: bool = bool(_proxy_cfg["inject"])
 PROACTIVE_PROXY_INJECT_BUDGET_MS: int = int(_proxy_cfg["inject_budget_ms"])
+PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_FRACTION: float = float(
+    _proxy_cfg["inject_provider_timeout_fraction"]
+)
+PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_MAX_S: float = float(
+    _proxy_cfg["inject_provider_timeout_max_s"]
+)
 
 _cache_cfg: dict[str, Any] = _pro_cfg["cache"]
 PROACTIVE_CACHE_ENABLED: bool = bool(_cache_cfg["enabled"])

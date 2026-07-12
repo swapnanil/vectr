@@ -27,6 +27,7 @@ _BASE = dict(
     matcher_code_search=False, proxy_enabled=True, proxy_host="127.0.0.1", proxy_port=19000,
     proxy_upstream_base_url="http://upstream", proxy_connect_timeout_s=10.0,
     proxy_read_timeout_s=600.0, proxy_inject=True, proxy_inject_budget_ms=40,
+    proxy_inject_provider_timeout_fraction=0.8, proxy_inject_provider_timeout_max_s=2.0,
     cache_enabled=False, cache_max_entries=2048, cache_ttl_seconds=0.0,
     cache_similarity_threshold=1.0, response_cache_enabled=False,
     response_cache_ttl_seconds=60.0, response_cache_max_entries=256,
@@ -163,6 +164,66 @@ async def test_injection_timeout_is_fail_open():
     forwarded = up.last_request["json"]
     assert forwarded["messages"][-1]["content"] == [{"type": "text", "text": "explain the lock"}]
     assert app.state.proxy.metrics.as_dict()["inject_bypassed_error"] == 1
+
+
+# -- bypass diagnostics (UPG-PROXY-SILENT-BYPASS) ----------------------------
+
+
+async def test_bypass_error_logs_one_warning_with_exception_and_elapsed_ms(caplog):
+    import logging
+
+    up = MockUpstream()
+    prov = _Provider(raise_exc=True)
+    app = build_proxy_app(_settings(), injection_provider=prov, client_factory=up.client_factory())
+    with caplog.at_level(logging.WARNING, logger="agent.proactive.proxy"):
+        resp = await _drive(app)
+    assert resp.status_code == 200  # original bytes still forwarded (fail-open)
+    forwarded = up.last_request["json"]
+    assert forwarded["messages"][-1]["content"] == [{"type": "text", "text": "explain the lock"}]
+    assert app.state.proxy.metrics.as_dict()["inject_bypassed_error"] == 1
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "RuntimeError" in msg          # exception class name
+    assert "ms" in msg                    # elapsed-ms figure present
+    # Metadata only — never the conversation content or the provider's context.
+    assert "explain the lock" not in msg
+    assert "PROACTIVE" not in msg
+
+
+async def test_bypass_timeout_logs_one_warning_with_timeout_error_and_elapsed_ms(caplog):
+    import logging
+
+    up = MockUpstream()
+    prov = _Provider(context="LATE", delay=0.5)  # 500ms > 20ms budget
+    app = build_proxy_app(
+        _settings(proxy_inject_budget_ms=20), injection_provider=prov,
+        client_factory=up.client_factory(),
+    )
+    with caplog.at_level(logging.WARNING, logger="agent.proactive.proxy"):
+        resp = await _drive(app)
+    assert resp.status_code == 200
+    assert app.state.proxy.metrics.as_dict()["inject_bypassed_error"] == 1
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "TimeoutError" in msg
+    assert "ms" in msg
+
+
+async def test_skip_branches_log_debug_reason_no_warning(caplog):
+    import logging
+
+    up = MockUpstream()
+    prov = _Provider(context="")  # provider returns nothing to inject
+    app = build_proxy_app(_settings(), injection_provider=prov, client_factory=up.client_factory())
+    with caplog.at_level(logging.DEBUG, logger="agent.proactive.proxy"):
+        await _drive(app)
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+    debugs = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("empty result" in m for m in debugs)
 
 
 # -- key hygiene ------------------------------------------------------------

@@ -74,6 +74,8 @@ class ProactiveSettings:
     proxy_read_timeout_s: float
     proxy_inject: bool
     proxy_inject_budget_ms: int
+    proxy_inject_provider_timeout_fraction: float
+    proxy_inject_provider_timeout_max_s: float
 
     cache_enabled: bool
     cache_max_entries: int
@@ -125,6 +127,14 @@ class ProactiveSettings:
             proxy_inject_budget_ms=_env_int(
                 "VECTR_PROACTIVE_PROXY_INJECT_BUDGET_MS", _c.PROACTIVE_PROXY_INJECT_BUDGET_MS
             ),
+            proxy_inject_provider_timeout_fraction=_env_float(
+                "VECTR_PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_FRACTION",
+                _c.PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_FRACTION,
+            ),
+            proxy_inject_provider_timeout_max_s=_env_float(
+                "VECTR_PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_MAX_S",
+                _c.PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_MAX_S,
+            ),
             cache_enabled=_env_bool("VECTR_PROACTIVE_CACHE", _c.PROACTIVE_CACHE_ENABLED),
             cache_max_entries=_env_int(
                 "VECTR_PROACTIVE_CACHE_MAX_ENTRIES", _c.PROACTIVE_CACHE_MAX_ENTRIES
@@ -146,6 +156,36 @@ class ProactiveSettings:
                 _c.PROACTIVE_RESPONSE_CACHE_MAX_ENTRIES,
             ),
         )
+
+
+def derive_provider_timeout_s(settings: ProactiveSettings) -> float:
+    """The daemon-provider's own httpx timeout for one injection round trip.
+
+    Two timeouts guard `_maybe_inject`: this one, inside the provider's httpx
+    call, and the proxy's outer `asyncio.wait_for(budget)` backstop. They must
+    not be equal or inverted — if the outer backstop can fire at or before the
+    provider's own timeout, `asyncio.wait_for` cancels the coroutine mid-flight
+    on every slow daemon response, which the proxy can only record as an abrupt
+    bypass (`inject_bypassed_error`, logged as a WARNING). If the provider's own
+    timeout fires first instead, its `except` clause returns a clean
+    `InjectionResult.empty()` — the proxy records a graceful `inject_skipped`
+    with no warning, and forwarding still fails open.
+
+    So the provider timeout is always derived as a strict fraction of the
+    outer budget (config: `inject_provider_timeout_fraction`), capped at a
+    sensible absolute ceiling (`inject_provider_timeout_max_s`) so a large
+    budget never produces an unreasonably long per-request stall, and clamped
+    a final time so it is always strictly below the outer budget regardless of
+    how fraction/cap are configured.
+    """
+    budget_s = max(settings.proxy_inject_budget_ms, 1) / 1000.0
+    derived = min(
+        budget_s * settings.proxy_inject_provider_timeout_fraction,
+        settings.proxy_inject_provider_timeout_max_s,
+    )
+    # Invariant clamp: strictly below the outer backstop no matter what
+    # fraction/cap are configured to.
+    return min(derived, budget_s * 0.95)
 
 
 class ProactiveRefused(RuntimeError):

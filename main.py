@@ -1205,7 +1205,7 @@ def cmd_proxy(args: argparse.Namespace) -> None:
     """
     import dataclasses
 
-    from agent.proactive.settings import ProactiveSettings
+    from agent.proactive.settings import ProactiveSettings, derive_provider_timeout_s
     from agent.proactive.proxy import build_proxy_app
     from agent.proactive.provider import DaemonInjectionProvider
     from agent.proactive.cache import ResponseCache
@@ -1240,7 +1240,11 @@ def cmd_proxy(args: argparse.Namespace) -> None:
     if inject:
         provider = DaemonInjectionProvider(
             _api_base(daemon_port),
-            timeout_s=max(settings.proxy_inject_budget_ms, 1) / 1000.0,
+            # Strictly below proxy_inject_budget_ms (see derive_provider_timeout_s):
+            # the provider's own timeout must trip before the proxy's outer
+            # wait_for backstop, so a slow daemon resolves to a clean, logged
+            # "nothing to inject" rather than an abrupt mid-flight cancellation.
+            timeout_s=derive_provider_timeout_s(settings),
             api_key=api_key,
         )
     response_cache = None
