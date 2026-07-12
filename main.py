@@ -1264,11 +1264,16 @@ def cmd_proxy(args: argparse.Namespace) -> None:
     print(f"  Upstream  : {upstream}", file=sys.stderr)
     daemon_status = None
     if inject:
-        try:
-            import httpx as _httpx
-            daemon_status = _httpx.get(f"{_api_base(daemon_port)}/v1/status", timeout=2.0).json()
-        except Exception:
-            daemon_status = None
+        import httpx as _httpx
+        # Two attempts with a generous timeout: the first /v1/status call on a
+        # freshly started daemon computes language stats and can exceed a short
+        # timeout, which would falsely print the unreachable warning.
+        for _ in range(2):
+            try:
+                daemon_status = _httpx.get(f"{_api_base(daemon_port)}/v1/status", timeout=5.0).json()
+                break
+            except Exception:
+                daemon_status = None
     for _line in _render_injection_lines(inject, _api_base(daemon_port), daemon_status):
         print(_line, file=sys.stderr)
     print(f"  Resp cache: {'on' if response_cache is not None else 'off'}", file=sys.stderr)
