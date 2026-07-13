@@ -1782,3 +1782,127 @@ class TestNotesEmbedModelMigration:
         # re-running __init__'s migration path.
         store._embed_model = "model-c"
         assert store.embed_model_stamp_mismatch() == "model-a"
+
+
+# ---------------------------------------------------------------------------
+# UPG-STDIO-MEMORY-READY — attach_embedder() + backfill_missing_vectors()
+# ---------------------------------------------------------------------------
+
+class TestAttachEmbedder:
+    """A store constructed with embed_fn=None (memory tools live before the
+    embedding model has loaded) can be upgraded later via attach_embedder(),
+    which backfills a vector for every note recorded during the window it
+    had none — without any note being re-written by the caller."""
+
+    def test_embedderless_store_reports_not_ready(self, tmp_path) -> None:
+        from agent.working_context_store import WorkingContextStore
+        store = WorkingContextStore(str(tmp_path))
+        assert store.embedder_ready is False
+
+    def test_remember_before_attach_then_recall_falls_back_to_sql(self, tmp_path) -> None:
+        from agent.working_context_store import WorkingContextStore
+        store = WorkingContextStore(str(tmp_path))
+        ws = "/repo"
+        store.remember(ws, "note written before the embedder was ready")
+        notes = store.recall(ws, query="embedder was ready")
+        assert len(notes) == 1  # SQL LIKE fallback — no embedder yet
+
+    def test_attach_embedder_flips_embedder_ready(self, tmp_path) -> None:
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        store = WorkingContextStore(str(tmp_path))
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store.attach_embedder(_dummy_embed, client, embed_model="model-a")
+        assert store.embedder_ready is True
+
+    def test_note_written_pre_attach_is_semantically_recallable_post_attach(self, tmp_path) -> None:
+        """End-to-end proof (UPG-STDIO-MEMORY-READY reinforcement): a note
+        stored while there was no embedder at all becomes recallable via the
+        semantic path — not just the SQL fallback — the moment an embedder
+        attaches, with no re-write of the note itself."""
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        store = WorkingContextStore(str(tmp_path))
+        ws = "/repo"
+        content = "handle_legacy_finalizers appends to gc.garbage when tp_del is set"
+        note_id = store.remember(ws, content)
+
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store.attach_embedder(_dummy_embed, client, embed_model="model-a")
+
+        # The backfill ran unconditionally at attach time — the vector exists
+        # without any explicit re-embed call from the test.
+        assert store._notes_col.count() == 1
+        vec = store._notes_col.get(ids=[str(note_id)], include=["embeddings"])["embeddings"][0]
+        assert vec is not None and len(vec) > 0
+
+        # Semantic recall now finds it via cosine similarity, not SQL LIKE —
+        # querying with the exact content gives cosine 1.0, the top result.
+        notes = store.recall(ws, query=content)
+        assert len(notes) == 1
+        assert notes[0].content == content
+
+    def test_backfill_is_idempotent_for_notes_already_vectored(self, tmp_path) -> None:
+        """A note that already has a current vector is never re-embedded by
+        a subsequent backfill call — only genuinely missing vectors are
+        embedded."""
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        store = WorkingContextStore(str(tmp_path))
+        ws = "/repo"
+        store.remember(ws, "already vectored note")
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store.attach_embedder(_dummy_embed, client, embed_model="model-a")
+        assert store._notes_col.count() == 1
+
+        calls: list[list[str]] = []
+        store._embed_fn = _counting_embed([0.0, 1.0], calls)
+        backfilled = store.backfill_missing_vectors()
+        assert backfilled == 0
+        assert calls == []  # nothing re-embedded — the note already had a vector
+
+    def test_backfill_covers_only_notes_missing_a_vector(self, tmp_path) -> None:
+        """A mix of pre-attach (no vector yet) and post-attach (already
+        vectored) notes — backfill embeds only the ones missing a vector."""
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        store = WorkingContextStore(str(tmp_path))
+        ws = "/repo"
+        pre_attach_id = store.remember(ws, "written before the embedder attached")
+
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store.attach_embedder(_dummy_embed, client, embed_model="model-a")
+        post_attach_id = store.remember(ws, "written after the embedder attached")
+
+        assert store._notes_col.count() == 2
+        existing_ids = set(store._notes_col.get(include=[])["ids"])
+        assert {str(pre_attach_id), str(post_attach_id)} == existing_ids
+
+    def test_attach_embedder_is_idempotent(self, tmp_path) -> None:
+        """A second attach_embedder() call is a no-op once an embedder is
+        already attached — never swaps in a different embed_fn silently."""
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        store = WorkingContextStore(str(tmp_path))
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store.attach_embedder(_dummy_embed, client, embed_model="model-a")
+        first_fn = store._embed_fn
+
+        calls: list[list[str]] = []
+        store.attach_embedder(_counting_embed([0.0, 1.0], calls), client, embed_model="model-b")
+        assert store._embed_fn is first_fn  # unchanged — second call was a no-op
+        assert calls == []
+
+    def test_attach_embedder_noop_when_embed_fn_none(self, tmp_path) -> None:
+        import chromadb
+        from agent.working_context_store import WorkingContextStore
+        store = WorkingContextStore(str(tmp_path))
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store.attach_embedder(None, client, embed_model="model-a")
+        assert store.embedder_ready is False
+
+    def test_backfill_with_no_embedder_returns_zero(self, tmp_path) -> None:
+        from agent.working_context_store import WorkingContextStore
+        store = WorkingContextStore(str(tmp_path))
+        store.remember("/repo", "a note with no embedder at all")
+        assert store.backfill_missing_vectors() == 0

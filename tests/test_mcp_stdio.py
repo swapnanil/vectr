@@ -188,6 +188,108 @@ class TestDispatchLine:
 
 
 # ---------------------------------------------------------------------------
+# UPG-STDIO-MEMORY-READY: memory tools dispatch as soon as the service object
+# exists (phase 1), independent of `service.fully_ready` (phase 2 — embedder/
+# indexer/searcher/watcher/symbol graph); search-side tools still wait for
+# `fully_ready`. Gating is keyed on tool NAME + service STATE only.
+# ---------------------------------------------------------------------------
+
+_MEMORY_TOOL_ARGS = {
+    "vectr_remember": {"content": "a note stored during the phase-2 warm-up window"},
+    "vectr_recall": {},
+    "vectr_forget": {"all": True},
+    "vectr_status": {},
+    "vectr_snapshot": {"label": "warm-up-checkpoint"},
+    "vectr_snapshot_list": {},
+}
+
+_SEARCH_TOOL_ARGS = {
+    "vectr_search": {"query": "auth flow"},
+    "vectr_locate": {"name": "verify_token"},
+    "vectr_trace": {"name": "verify_token"},
+    "vectr_map": {},
+    "vectr_fetch": {"ids": ["src/auth.py:10-30"]},
+    "vectr_ingest_traces": {"events": []},
+    "vectr_evict_hint": {},
+}
+
+
+class TestMemoryReadyGating:
+    def _handle_not_fully_ready(self):
+        from integrations.mcp_server import ServiceHandle
+        handle = ServiceHandle()
+        svc = _base_mock_service()
+        svc.fully_ready = False  # phase 1 done, phase 2 (embedder/indexer/...) not
+        handle.set_service(svc)
+        return handle
+
+    def _handle_fully_ready(self):
+        from integrations.mcp_server import ServiceHandle
+        handle = ServiceHandle()
+        svc = _base_mock_service()
+        svc.fully_ready = True
+        handle.set_service(svc)
+        return handle
+
+    @pytest.mark.parametrize("tool_name", sorted(_MEMORY_TOOL_ARGS))
+    def test_memory_tool_served_while_not_fully_ready(self, tool_name) -> None:
+        from integrations.mcp_server import dispatch_line
+        handle = self._handle_not_fully_ready()
+        resp = dispatch_line(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": tool_name, "arguments": _MEMORY_TOOL_ARGS[tool_name]}},
+            handle, "s",
+        )
+        text = resp["result"]["content"][0]["text"]
+        assert "starting up" not in text, f"{tool_name} was gated but should be memory-ready"
+
+    @pytest.mark.parametrize("tool_name", sorted(_SEARCH_TOOL_ARGS))
+    def test_search_tool_gated_while_not_fully_ready(self, tool_name) -> None:
+        from integrations.mcp_server import dispatch_line
+        handle = self._handle_not_fully_ready()
+        resp = dispatch_line(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": tool_name, "arguments": _SEARCH_TOOL_ARGS[tool_name]}},
+            handle, "s",
+        )
+        assert resp["result"]["isError"] is False
+        assert "starting up" in resp["result"]["content"][0]["text"]
+
+    @pytest.mark.parametrize("tool_name", sorted(_SEARCH_TOOL_ARGS))
+    def test_search_tool_dispatches_once_fully_ready(self, tool_name) -> None:
+        """Same tools, `fully_ready=True` — must reach the real service (mocked
+        here) rather than the still-starting-up placeholder."""
+        from integrations.mcp_server import dispatch_line
+        handle = self._handle_fully_ready()
+        resp = dispatch_line(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": tool_name, "arguments": _SEARCH_TOOL_ARGS[tool_name]}},
+            handle, "s",
+        )
+        assert "starting up" not in resp["result"]["content"][0]["text"]
+
+    def test_initialize_tools_list_ping_unaffected_by_fully_ready(self) -> None:
+        """The three fast, model-independent methods must answer identically
+        whether `fully_ready` is True or False — they never touch it."""
+        from integrations.mcp_server import dispatch_line
+        handle = self._handle_not_fully_ready()
+
+        init_resp = dispatch_line(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1.0"}}},
+            handle, "s",
+        )
+        assert init_resp["result"]["protocolVersion"] == "2024-11-05"
+
+        list_resp = dispatch_line({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, handle, "s")
+        assert "tools" in list_resp["result"]
+
+        ping_resp = dispatch_line({"jsonrpc": "2.0", "id": 3, "method": "ping"}, handle, "s")
+        assert ping_resp["result"] == {}
+
+
+# ---------------------------------------------------------------------------
 # run_stdio_loop — the read/dispatch/write loop, in-process
 # ---------------------------------------------------------------------------
 

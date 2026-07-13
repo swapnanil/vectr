@@ -40,12 +40,43 @@ from integrations.mcp_server import (
     handle_tools_call,
     handle_tools_list,
 )
+from integrations.mcp_server._schemas import MEMORY_READY_TOOLS
 
 router = APIRouter()
 
 
 def _service(request: Request):
     return request.app.state.service
+
+
+def _require_fully_ready(svc) -> None:
+    """503 gate for search-touching REST routes (UPG-STDIO-MEMORY-READY):
+    index/search/fetch/locate/trace/map/evict-hint all read the indexer,
+    searcher, watcher, or symbol graph, which only exist once phase 2 of
+    `VectrService` construction has completed. Working-memory routes
+    (remember/recall/forget/snapshot/status) never call this — they are
+    servable from process start. Keyed purely on service state, mirroring
+    the existing memory_only/search_only 503 pattern below."""
+    if not getattr(svc, "fully_ready", True):
+        from app.service import _STILL_INITIALIZING_MSG
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "still_initialising", "detail": _STILL_INITIALIZING_MSG},
+        )
+
+
+def _mcp_tool_still_initialising(svc, tool_name: str) -> dict | None:
+    """Per-tool readiness gate for the MCP transport (UPG-STDIO-MEMORY-READY),
+    keyed on TOOL NAME and service STATE only, never on call arguments.
+    Working-memory tools (`MEMORY_READY_TOOLS`) are servable the moment the
+    service object exists (phase 1); every other tool additionally needs
+    `svc.fully_ready` (phase 2 — embedder/indexer/searcher/watcher/symbol
+    graph). Returns the graceful tool-call response to send verbatim when
+    still gated, or None when the call may proceed."""
+    if tool_name in MEMORY_READY_TOOLS or getattr(svc, "fully_ready", True):
+        return None
+    from app.service import _STILL_INITIALIZING_MSG
+    return {"content": [{"type": "text", "text": _STILL_INITIALIZING_MSG}], "isError": False}
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +96,7 @@ async def health(request: Request) -> HealthResponse:
 @router.post("/v1/index", response_model=IndexResponse)
 async def index(body: IndexRequest, request: Request) -> IndexResponse:
     svc = _service(request)
+    _require_fully_ready(svc)
     if getattr(svc, "memory_only", False):
         from app.service import _MEMORY_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
@@ -88,6 +120,7 @@ async def index(body: IndexRequest, request: Request) -> IndexResponse:
 async def search(body: SearchRequest, request: Request) -> SearchResponse:
     t0 = time.monotonic()
     svc = _service(request)
+    _require_fully_ready(svc)
     if getattr(svc, "memory_only", False):
         from app.service import _MEMORY_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
@@ -124,6 +157,7 @@ async def fetch(body: FetchRequest, request: Request) -> FetchResponse:
     embedding, no rerank, just the exact chunk(s) named by id."""
     t0 = time.monotonic()
     svc = _service(request)
+    _require_fully_ready(svc)
     if getattr(svc, "memory_only", False):
         from app.service import _MEMORY_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
@@ -182,6 +216,7 @@ async def reset_call_counts(request: Request) -> dict:
 @router.get("/v1/map")
 async def map_workspace(request: Request) -> dict:
     svc = _service(request)
+    _require_fully_ready(svc)
     return {"map": svc.get_map()}
 
 
@@ -189,6 +224,7 @@ async def map_workspace(request: Request) -> dict:
 async def map_save(body: MapSaveRequest, request: Request) -> MapSaveResponse:
     t0 = time.monotonic()
     svc = _service(request)
+    _require_fully_ready(svc)
     result = svc.save_map(body.summary, overwrite=body.overwrite)
     if not result["saved"]:
         return MapSaveResponse(
@@ -215,6 +251,7 @@ async def map_save(body: MapSaveRequest, request: Request) -> MapSaveResponse:
 async def locate(body: LocateRequest, request: Request) -> LocateResponse:
     t0 = time.monotonic()
     svc = _service(request)
+    _require_fully_ready(svc)
     if getattr(svc, "memory_only", False):
         from app.service import _MEMORY_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
@@ -240,6 +277,7 @@ async def locate(body: LocateRequest, request: Request) -> LocateResponse:
 async def trace(body: TraceRequest, request: Request) -> TraceResponse:
     t0 = time.monotonic()
     svc = _service(request)
+    _require_fully_ready(svc)
     if getattr(svc, "memory_only", False):
         from app.service import _MEMORY_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
@@ -392,6 +430,7 @@ async def forget(body: ForgetRequest, request: Request) -> dict:
 @router.get("/v1/evict-hint")
 async def evict_hint(request: Request) -> dict:
     svc = _service(request)
+    _require_fully_ready(svc)
     hint = svc.eviction_hint()
     return {"hint": hint or "No retrieved chunks to evict.", "should_evict": svc.should_evict()}
 
@@ -461,6 +500,9 @@ async def mcp_jsonrpc(request: Request, response: Response, body: dict = Body(..
         if not tool_name:
             return _err(-32602, "Missing required param: name")
         svc = _service(request)
+        still_initialising = _mcp_tool_still_initialising(svc, tool_name)
+        if still_initialising is not None:
+            return _ok(still_initialising)
         client_label = request.headers.get("X-Vectr-Client", "") or ""
         return _ok(handle_tools_call(
             tool_name, arguments, svc, session_id=session_id, client_label=client_label,
@@ -486,6 +528,9 @@ async def mcp_tools_call(request: Request, body: dict = Body(...)) -> dict:
             detail={"error": "missing_tool_name", "detail": "Request body must include 'name'"},
         )
     svc = _service(request)
+    still_initialising = _mcp_tool_still_initialising(svc, tool_name)
+    if still_initialising is not None:
+        return still_initialising
     session_id = request.headers.get("X-Session-ID") or None
     client_label = request.headers.get("X-Vectr-Client", "") or ""
     return handle_tools_call(

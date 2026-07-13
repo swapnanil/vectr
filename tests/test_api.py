@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from api import app
 from agent.searcher import SearchResult
 from agent.symbol_graph import LocateResult, Symbol
+from tests.conftest import _base_mock_service
 
 
 def _make_service():
@@ -601,3 +602,175 @@ class TestClientAttributionHeader:
         assert resp.status_code == 200
         _, kwargs = svc.remember.call_args
         assert kwargs["agent"] == ""
+
+
+# ---------------------------------------------------------------------------
+# UPG-STDIO-MEMORY-READY: HTTP-transport readiness gating.
+#
+# `svc.fully_ready` models phase 2 of VectrService construction (embedder,
+# indexer, searcher, watcher, symbol graph) not having completed yet.
+# Search-touching REST routes and non-memory-ready MCP tools must 503/
+# graceful-degrade in that state; memory routes and memory-ready MCP tools
+# must serve normally, keyed on route/tool identity + service state only.
+# ---------------------------------------------------------------------------
+
+def _not_fully_ready_client():
+    """A fresh TestClient wired to a mocked service with fully_ready=False —
+    independent of the module-level `client` fixture so each test gets its
+    own isolated mock (no cross-test state bleed from a shared instance).
+    Returns (client, svc, client) — the third element is the same object,
+    kept only so call sites can `ctx.__exit__(...)` symmetrically with the
+    other constructors in this file."""
+    svc = _make_service()
+    svc.fully_ready = False
+    c = TestClient(app, raise_server_exceptions=True)
+    with patch("app.service.VectrService", return_value=svc):
+        c.__enter__()
+    app.state.service = svc
+    return c, svc, c
+
+
+class TestSearchRoutesGatedWhileNotFullyReady:
+    @pytest.mark.parametrize("method,path,json_body", [
+        ("post", "/v1/index", {"path": ".", "force": False}),
+        ("post", "/v1/search", {"query": "auth"}),
+        ("post", "/v1/fetch", {"ids": ["a.py:1-2"]}),
+        ("get", "/v1/map", None),
+        ("post", "/v1/map", {"summary": "a summary"}),
+        ("post", "/v1/locate", {"name": "foo"}),
+        ("post", "/v1/trace", {"name": "foo"}),
+        ("get", "/v1/evict-hint", None),
+    ])
+    def test_returns_503_still_initialising(self, method, path, json_body) -> None:
+        c, svc, ctx = _not_fully_ready_client()
+        try:
+            fn = getattr(c, method)
+            resp = fn(path, json=json_body) if json_body is not None else fn(path)
+            assert resp.status_code == 503
+            assert resp.json()["detail"]["error"] == "still_initialising"
+        finally:
+            ctx.__exit__(None, None, None)
+
+    @pytest.mark.parametrize("method,path,json_body", [
+        ("post", "/v1/index", {"path": ".", "force": False}),
+        ("post", "/v1/search", {"query": "auth"}),
+        ("post", "/v1/locate", {"name": "foo"}),
+        ("post", "/v1/trace", {"name": "foo"}),
+    ])
+    def test_returns_200_once_fully_ready(self, method, path, json_body) -> None:
+        """Same routes, `fully_ready=True` (the default mock state) — must
+        behave exactly as every other test in this file (no 503)."""
+        svc = _make_service()
+        svc.fully_ready = True
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=True) as c:
+                app.state.service = svc
+                fn = getattr(c, method)
+                resp = fn(path, json=json_body) if json_body is not None else fn(path)
+        assert resp.status_code == 200
+
+
+def _not_fully_ready_memory_client():
+    """Same shape as `_not_fully_ready_client` but built on `_base_mock_service`
+    (conftest), which already stubs realistic remember/recall/snapshot_session/
+    forget_all/list_snapshots return values — the local `_make_service` above
+    is search-route-focused and leaves those unset."""
+    svc = _base_mock_service()
+    svc.fully_ready = False
+    c = TestClient(app, raise_server_exceptions=True)
+    with patch("app.service.VectrService", return_value=svc):
+        c.__enter__()
+    app.state.service = svc
+    return c, svc, c
+
+
+class TestMemoryRoutesServeWhileNotFullyReady:
+    @pytest.mark.parametrize("method,path,json_body", [
+        ("post", "/v1/remember", {"content": "note stored during warm-up"}),
+        ("post", "/v1/recall", {}),
+        ("post", "/v1/snapshot", {"label": "warm-up-checkpoint"}),
+        ("post", "/v1/forget", {"all": True}),
+        ("get", "/v1/status", None),
+        ("post", "/v1/memory/clear", {}),
+    ])
+    def test_returns_200_not_gated(self, method, path, json_body) -> None:
+        c, svc, ctx = _not_fully_ready_memory_client()
+        try:
+            fn = getattr(c, method)
+            resp = fn(path, json=json_body) if json_body is not None else fn(path)
+            assert resp.status_code == 200
+        finally:
+            ctx.__exit__(None, None, None)
+
+    def test_status_reflects_fully_ready_false(self) -> None:
+        c, svc, ctx = _not_fully_ready_memory_client()
+        try:
+            svc.status.return_value = {**svc.status.return_value, "fully_ready": False, "embedder_ready": False}
+            data = c.get("/v1/status").json()
+            assert data["fully_ready"] is False
+            assert data["embedder_ready"] is False
+        finally:
+            ctx.__exit__(None, None, None)
+
+
+class TestMcpToolReadinessGating:
+    """Both MCP surfaces (POST /mcp JSON-RPC and POST /mcp/tools/call REST)
+    share the same `_mcp_tool_still_initialising` gate — verify each."""
+
+    @pytest.mark.parametrize("endpoint,payload_fn", [
+        ("/mcp", lambda name, args: {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args},
+        }),
+        ("/mcp/tools/call", lambda name, args: {"name": name, "arguments": args}),
+    ])
+    def test_memory_tool_dispatches_while_not_fully_ready(self, endpoint, payload_fn) -> None:
+        c, svc, ctx = _not_fully_ready_memory_client()
+        try:
+            resp = c.post(endpoint, json=payload_fn("vectr_status", {}))
+            assert resp.status_code == 200
+            body = resp.json()["result"] if endpoint == "/mcp" else resp.json()
+            assert "starting up" not in body["content"][0]["text"].lower()
+        finally:
+            ctx.__exit__(None, None, None)
+
+    @pytest.mark.parametrize("endpoint,payload_fn", [
+        ("/mcp", lambda name, args: {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args},
+        }),
+        ("/mcp/tools/call", lambda name, args: {"name": name, "arguments": args}),
+    ])
+    def test_search_tool_gated_while_not_fully_ready(self, endpoint, payload_fn) -> None:
+        c, svc, ctx = _not_fully_ready_client()
+        try:
+            resp = c.post(endpoint, json=payload_fn("vectr_search", {"query": "auth"}))
+            assert resp.status_code == 200
+            body = resp.json()["result"] if endpoint == "/mcp" else resp.json()
+            assert body["isError"] is False
+            assert "starting up" in body["content"][0]["text"].lower()
+        finally:
+            ctx.__exit__(None, None, None)
+
+    def test_search_tool_dispatches_once_fully_ready(self) -> None:
+        svc = _make_service()
+        svc.fully_ready = True
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=True) as c:
+                app.state.service = svc
+                resp = c.post("/mcp", json={
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "vectr_search", "arguments": {"query": "auth"}},
+                })
+        assert resp.status_code == 200
+        text = resp.json()["result"]["content"][0]["text"]
+        assert "starting up" not in text.lower()
+
+    def test_tools_list_unaffected_by_fully_ready(self) -> None:
+        c, svc, ctx = _not_fully_ready_client()
+        try:
+            resp = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+            assert resp.status_code == 200
+            assert "tools" in resp.json()["result"]
+        finally:
+            ctx.__exit__(None, None, None)

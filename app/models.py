@@ -183,6 +183,16 @@ class StatusResponse(BaseModel):
     # running. Backed by a non-blocking lock read + in-memory watcher flags —
     # this field is always cheap to compute, even mid-reindex.
     reindex_in_progress: bool = False
+    # UPG-STDIO-MEMORY-READY: additive warm-up signals. `fully_ready` is True
+    # once phase 2 (embedder/indexer/searcher/watcher/symbol-graph) has
+    # completed — search/locate/trace/map/fetch are gated on it across every
+    # transport. `embedder_ready` is True once the embedding model has
+    # loaded/attached — vectr_recall's lexical-fallback notice is gated on
+    # it. Both default True so an older/partial mock in a test still
+    # validates, and both are True immediately for any daemon that wasn't
+    # constructed with defer_search_init=True.
+    fully_ready: bool = True
+    embedder_ready: bool = True
 
 
 class HealthResponse(BaseModel):

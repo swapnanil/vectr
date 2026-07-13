@@ -56,6 +56,39 @@ _SEARCH_ONLY_MSG = (
     "trace and map are active."
 )
 
+# UPG-STDIO-MEMORY-READY: shown by the REST/MCP-HTTP transport (see routes.py)
+# for search-touching endpoints called before phase 2 (embedder/indexer/
+# searcher/watcher/symbol-graph construction) finishes. Memory tools
+# (remember/recall/forget/status/snapshot) never show this — they work from
+# process start, on every transport, because the working-memory store is
+# constructed without an embedder in phase 1. Mirrors stdio transport's own
+# "_STILL_STARTING_MSG" (integrations/mcp_server/_stdio.py) for the same
+# state, kept as a separate constant since the two transports' callers never
+# share a code path.
+_STILL_INITIALIZING_MSG = (
+    "vectr is still starting up (loading the embedding model / building the "
+    "workspace index) — search, locate, trace, and map are not yet available. "
+    "Memory tools (remember/recall/forget/snapshot/status) are ready now. Try "
+    "again in a few moments."
+)
+
+# UPG-STDIO-MEMORY-READY: appended to a vectr_recall(query=...) result when
+# the call landed during the phase-2 warm-up window — the embedding model is
+# still loading/downloading in the background, so this result used the
+# lexical (SQL LIKE) fallback rather than semantic ranking. State-based only
+# (gated on VectrService.embedder_ready, never on the query's content):
+# recall() already chooses lexical vs. semantic purely from whether an
+# embedder is attached, so this notice reports that same state truthfully
+# rather than re-deriving it. Never appears once the embedder has attached —
+# `recall(query=None)` (index/list mode) never appends it either, since
+# there is no ranking to degrade.
+_EMBEDDER_LOADING_RECALL_NOTICE = (
+    "\n\n[semantic ranking unavailable: the embedding model is still loading "
+    "or downloading in the background — these are lexical (keyword) matches "
+    "only. Re-run this same vectr_recall query later for semantically-ranked "
+    "results.]"
+)
+
 # UPG-CTX-EVICT: shared note appended to a vectr_fetch/`/v1/fetch` response
 # whenever at least one requested id came back missing — the file most
 # likely changed since indexing (edited, moved, or deleted), shifting or
@@ -80,14 +113,23 @@ class VectrService:
         search_only: bool = False,
         workspace_explicit: bool = False,
         configure_ide: bool = True,
+        defer_search_init: bool = False,
     ) -> None:
-        from agent.indexer import CodeIndexer
-        from agent.searcher import CodeSearcher
-        from agent.watcher import CodeWatcher
-        from agent.cartographer import PassportStore
+        """`defer_search_init` (UPG-STDIO-MEMORY-READY): when True, this
+        constructor runs ONLY the fast, synchronous phase below — no
+        embedding model load, no code indexer/searcher/watcher/symbol-graph
+        construction, no IDE-config writes. Working-memory tools (remember/
+        recall/forget/status/snapshot/snapshot_list) are fully usable the
+        moment the constructor returns. The caller must then call
+        `complete_search_init()` (typically on a background thread) to run
+        the deferred phase 2. Defaults to False so every existing caller —
+        including the 17+ test modules that construct this class directly —
+        gets today's fully-synchronous, single-phase behavior unchanged;
+        only the stdio transport (main.py) and the HTTP daemon (api.py)
+        opt in, since only they need memory tools to answer before the
+        embedding model finishes loading/downloading.
+        """
         from agent.working_context_store import WorkingContextStore
-        from agent.symbol_graph import SymbolGraph
-        from integrations.vscode_bridge import configure_all
         from integrations.workspace_detect import find_workspace_root
 
         # UPG-WS-ROOT-MISDETECT: an explicitly-given workspace path (CLI
@@ -102,6 +144,7 @@ class VectrService:
             self._workspace_root = find_workspace_root(workspace_root)
         self._extra_roots: list[str] = list(extra_roots or [])
         self._port = port
+        self._configure_ide = configure_ide
         # Some embedding models are asymmetric — search queries must be embedded
         # via the provider's embed_query (registered "query" prompt), never embed().
         # See agent/indexer/_types.py:LocalEmbedProvider for the query/document split,
@@ -120,6 +163,15 @@ class VectrService:
             )
 
         db_dir = os.getenv(_DB_DIR_ENV) or _default_db_dir(self._workspace_root)
+        # UPG-STDIO-MEMORY-READY: the working-memory store (below) is now the
+        # FIRST thing constructed against db_dir — previously CodeIndexer ran
+        # first and its ChromaDB PersistentClient happened to create the
+        # directory as a side effect. `_default_db_dir` already creates it
+        # via `secure_dir`, but a VECTR_DB_DIR override (e.g. a hosted
+        # deployment's mounted volume) may point at a path that doesn't exist
+        # yet — ensure it explicitly rather than depend on construction order.
+        from agent.fs_permissions import secure_dir
+        secure_dir(db_dir)
         self._db_dir = db_dir
 
         logger.info("Initialising Vectr for workspace: %s (db: %s)", self._workspace_root, db_dir)
@@ -130,62 +182,33 @@ class VectrService:
         # source upgrade the CLI now sees on disk.
         self._version_stamp = compute_version_stamp()
 
-        # L3 — content retrieval (existing)
-        # db_path scopes ChromaDB under the same configured db_dir as all other stores
-        self._indexer = CodeIndexer(
-            self._workspace_root,
-            embed_model=self._embed_model,
-            db_path=str(Path(db_dir) / "chroma"),
-            extra_roots=self._extra_roots,
-        )
-        self._searcher = CodeSearcher(self._indexer)
-        self._watcher = CodeWatcher(self._indexer, searcher_refresh_fn=self._searcher.refresh_bm25)
-        # UPG-RERANKER-HF-NETWORK: warm the reranker at startup, alongside the
-        # embedder already loaded synchronously above (CodeIndexer's constructor
-        # instantiates the embed provider). This moves the cross-encoder's
-        # model-load cost out of the first vectr_search call. Skipped in
-        # memory-only mode: there is no code index, search is disabled, and
-        # there is nothing to rerank.
-        if not self._memory_only:
-            self._searcher.warm_reranker()
+        # Phase-2 objects (UPG-STDIO-MEMORY-READY): None until
+        # _init_search_layer() runs — inline below by default, or later via
+        # complete_search_init() when defer_search_init=True. Every reader
+        # of these (status(), last_indexed, search/locate/trace/fetch/map)
+        # either tolerates None (memory-facing code never touches them) or
+        # is itself gated on `fully_ready` by the caller (MCP dispatch / REST
+        # routes), so a phase-1-only service never raises — it just reports
+        # "not built yet" truthfully.
+        self._indexer = None
+        self._searcher = None
+        self._watcher = None
+        self._passport_store = None
+        self._symbol_graph = None
 
-        # L1 — codebase passport (AI-written, stored by vectr_map_save)
-        self._passport_store = PassportStore(db_dir)
-
-        # L2 — symbol graph
-        self._symbol_graph = SymbolGraph(db_dir)
-        # ARCH-1b: seed the searcher's importance prior from the persisted
-        # symbol_importance table so a restart over an already-indexed workspace
-        # ranks with importance immediately (empty until ARCH-1a has run once).
-        self._searcher.set_file_importance(
-            self._symbol_graph.file_importance(self._workspace_root)
-        )
-        # ARCH-2: seed the searcher's class-importance prior from the persisted
-        # class_importance table the same way (empty until ARCH-2 has run once).
-        self._searcher.set_class_importance(
-            self._symbol_graph.class_importance(self._workspace_root)
-        )
-        # UPG-TESTPATH-FRAMEWORK-MISCLASS (F58): seed the searcher's test-framework
-        # fan-in exemption map from the persisted file_fan_in table the same way
-        # (empty until it has run once).
-        self._searcher.set_file_fan_in(
-            self._symbol_graph.file_fan_in(self._workspace_root)
-        )
-
-        # Memory layer — semantic recall enabled via the same embedder + ChromaDB client
-        # used by the code index, so no extra model load or second DB process.
-        # In search-only mode the store is never constructed at all (UPG-SEARCH-ONLY-MODE):
-        # no notes DB file and no 'working_memory' Chroma collection are created for a
-        # workspace that never writes a note.
+        # Memory layer — constructed WITHOUT an embedder (UPG-STDIO-MEMORY-READY):
+        # remember/recall/forget/status/snapshot work immediately, on every
+        # transport, before the embedding model has loaded. Semantic ranking
+        # (and the note-vector store, sharing the code index's ChromaDB
+        # client) attaches once phase 2 completes — see _init_search_layer()
+        # and WorkingContextStore.attach_embedder(). Until then, recall()
+        # transparently uses its existing lexical SQL LIKE fallback. In
+        # search-only mode the store is never constructed at all
+        # (UPG-SEARCH-ONLY-MODE): no notes DB file and no 'working_memory'
+        # Chroma collection are created for a workspace that never writes a note.
         self._context_store: WorkingContextStore | None = None
         if not self._search_only:
-            self._context_store = WorkingContextStore(
-                db_dir,
-                embed_fn=self._indexer.embed_texts,
-                embed_query_fn=self._indexer.embed_query_batch,
-                notes_chroma_client=self._indexer.chroma_client,
-                embed_model=self._indexer.embed_model,
-            )
+            self._context_store = WorkingContextStore(db_dir)
 
         # Eviction advisor (UPG-EVICT-SESSION-SCOPE): one advisor per calling
         # MCP session, so one session never sees chunks retrieved by another.
@@ -244,13 +267,122 @@ class VectrService:
         from agent.strategy_selector import RetrievalStrategy
         self._strategy: RetrievalStrategy | None = None
 
+        # Phase-2 readiness signals (UPG-STDIO-MEMORY-READY): `embedder_ready`
+        # flips the moment CodeIndexer's embed provider finishes loading
+        # (inside _init_search_layer, before the slower searcher/watcher/
+        # symbol-graph work) — used to gate the vectr_recall lexical-fallback
+        # notice. `fully_ready` flips once ALL of phase 2 has completed — used
+        # to gate search/locate/trace/map/fetch across every transport. Both
+        # are set before this constructor returns in the default
+        # (defer_search_init=False) path, so existing callers never observe
+        # a not-ready state.
+        self._embedder_ready = threading.Event()
+        self._fully_ready = threading.Event()
+
+        if not defer_search_init:
+            self._init_search_layer()
+
+    def _init_search_layer(self) -> None:
+        """Phase 2 (UPG-STDIO-MEMORY-READY): the slow, model-loading half of
+        construction — CodeIndexer (embedding model), CodeSearcher,
+        CodeWatcher, reranker warm-up, the L1 passport store, the L2 symbol
+        graph, and (unless search-only) attaching the now-loaded embedder to
+        the already-live working-memory store. Runs inline from __init__ by
+        default; deferred callers (stdio, HTTP daemon) run it explicitly via
+        `complete_search_init()`, typically on a background thread, after
+        phase 1 has already made memory tools available.
+        """
+        from agent.indexer import CodeIndexer
+        from agent.searcher import CodeSearcher
+        from agent.watcher import CodeWatcher
+        from agent.cartographer import PassportStore
+        from agent.symbol_graph import SymbolGraph
+        from integrations.vscode_bridge import configure_all
+
+        # L3 — content retrieval (existing)
+        # db_path scopes ChromaDB under the same configured db_dir as all other stores
+        self._indexer = CodeIndexer(
+            self._workspace_root,
+            embed_model=self._embed_model,
+            db_path=str(Path(self._db_dir) / "chroma"),
+            extra_roots=self._extra_roots,
+        )
+        # The embedding model has now loaded. Attach it to the memory layer
+        # immediately — before the slower searcher/watcher/symbol-graph work
+        # below — so notes written during the warm-up window get semantic
+        # recall, and any note missing a vector gets backfilled, as soon as
+        # possible rather than only once the rest of phase 2 finishes.
+        if self._context_store is not None:
+            self._context_store.attach_embedder(
+                embed_fn=self._indexer.embed_texts,
+                embed_query_fn=self._indexer.embed_query_batch,
+                notes_chroma_client=self._indexer.chroma_client,
+                embed_model=self._indexer.embed_model,
+            )
+        self._embedder_ready.set()
+
+        self._searcher = CodeSearcher(self._indexer)
+        self._watcher = CodeWatcher(self._indexer, searcher_refresh_fn=self._searcher.refresh_bm25)
+        # UPG-RERANKER-HF-NETWORK: warm the reranker at startup, alongside the
+        # embedder already loaded synchronously above (CodeIndexer's constructor
+        # instantiates the embed provider). This moves the cross-encoder's
+        # model-load cost out of the first vectr_search call. Skipped in
+        # memory-only mode: there is no code index, search is disabled, and
+        # there is nothing to rerank.
+        if not self._memory_only:
+            self._searcher.warm_reranker()
+
+        # L1 — codebase passport (AI-written, stored by vectr_map_save)
+        self._passport_store = PassportStore(self._db_dir)
+
+        # L2 — symbol graph
+        self._symbol_graph = SymbolGraph(self._db_dir)
+        # ARCH-1b: seed the searcher's importance prior from the persisted
+        # symbol_importance table so a restart over an already-indexed workspace
+        # ranks with importance immediately (empty until ARCH-1a has run once).
+        self._searcher.set_file_importance(
+            self._symbol_graph.file_importance(self._workspace_root)
+        )
+        # ARCH-2: seed the searcher's class-importance prior from the persisted
+        # class_importance table the same way (empty until ARCH-2 has run once).
+        self._searcher.set_class_importance(
+            self._symbol_graph.class_importance(self._workspace_root)
+        )
+        # UPG-TESTPATH-FRAMEWORK-MISCLASS (F58): seed the searcher's test-framework
+        # fan-in exemption map from the persisted file_fan_in table the same way
+        # (empty until it has run once).
+        self._searcher.set_file_fan_in(
+            self._symbol_graph.file_fan_in(self._workspace_root)
+        )
+
         # IDE config files point at this process's HTTP port — meaningless for a
         # caller that has no HTTP port (e.g. the stdio transport) and potentially
         # disruptive for a workspace it doesn't own (e.g. a hosting platform's
         # mounted container filesystem). Callers without a real port opt out.
-        if configure_ide:
+        if self._configure_ide:
             for root in self._indexer.all_roots:
-                configure_all(str(root), port)
+                configure_all(str(root), self._port)
+
+        self._fully_ready.set()
+
+    def complete_search_init(self) -> None:
+        """Run phase 2 for a service constructed with `defer_search_init=True`
+        (UPG-STDIO-MEMORY-READY). Callers (stdio transport, HTTP daemon
+        lifespan) invoke this once, typically on a background thread, right
+        after phase 1 has already made memory tools available.
+
+        Idempotent: a no-op if phase 2 has already completed — either because
+        this was already called once, or because the service was constructed
+        with `defer_search_init=False` (the default) and phase 2 already ran
+        inline in `__init__`. Without this guard, a caller that (accidentally,
+        or via test/dependency-injection wiring) invokes this on an
+        already-`fully_ready` service would reconstruct the indexer/searcher/
+        watcher a second time and leak the discarded watcher's background
+        threads.
+        """
+        if self._fully_ready.is_set():
+            return
+        self._init_search_layer()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -266,6 +398,26 @@ class VectrService:
         """True when this daemon runs in search-only mode (no working-memory layer)."""
         return self._search_only
 
+    @property
+    def fully_ready(self) -> bool:
+        """True once phase 2 (embedder/indexer/searcher/watcher/symbol-graph
+        construction) has completed (UPG-STDIO-MEMORY-READY). Search-touching
+        tools/endpoints (search/locate/trace/map/fetch/evict-hint) are gated
+        on this across every transport. Memory tools are never gated on it —
+        they work from phase 1. Always True immediately once a
+        `defer_search_init=False` (the default) construction returns."""
+        return self._fully_ready.is_set()
+
+    @property
+    def embedder_ready(self) -> bool:
+        """True once the embedding model has loaded and been attached to the
+        working-memory store (UPG-STDIO-MEMORY-READY) — flips before the rest
+        of phase 2 (searcher/watcher/symbol-graph) finishes. Used to gate the
+        vectr_recall lexical-fallback notice: state-based only, never
+        query-content-based. Always True immediately once a
+        `defer_search_init=False` (the default) construction returns."""
+        return self._embedder_ready.is_set()
+
     def start_background_index(self) -> None:
         """Kick off workspace indexing in a background thread.
 
@@ -275,6 +427,11 @@ class VectrService:
         Otherwise, the notes-TTL purge runs so expired notes are cleaned up at
         startup.
         """
+        if self._watcher is None:
+            raise RuntimeError(
+                "start_background_index() called before phase 2 completed — "
+                "call complete_search_init() first (see defer_search_init)"
+            )
         if self._indexing:
             return
         self._indexing = True
@@ -408,7 +565,18 @@ class VectrService:
         return {"saved": True, "existing_summary": None}
 
     def shutdown(self) -> None:
-        self._watcher.stop()
+        # UPG-STDIO-MEMORY-READY: a service constructed with
+        # defer_search_init=True can be asked to shut down (e.g. stdin EOF)
+        # while still in the phase-2 background-construction window, before
+        # the watcher/indexer exist — nothing to stop/close yet, not an error.
+        if self._watcher is not None:
+            self._watcher.stop()
+        # Release the indexer's ChromaDB client (and the notes store's, which
+        # shares the same underlying client — see attach_embedder above).
+        # Without this, every VectrService that ever reaches phase 2 leaks a
+        # native worker-thread pool for the rest of the process's life.
+        if self._indexer is not None:
+            self._indexer.close()
 
     # ------------------------------------------------------------------
     # Call counters — all callers (parent + sub-agents) hit the same server,
@@ -692,8 +860,11 @@ class VectrService:
 
         Used by both `status()` and the `/v1/health` route so the two
         endpoints never disagree on freshness (UPG-8.2).
+
+        "never" before phase 2 has built the indexer (UPG-STDIO-MEMORY-READY)
+        — truthful, not an error: nothing has been indexed yet.
         """
-        last_ts = self._indexer.last_indexed_ts
+        last_ts = self._indexer.last_indexed_ts if self._indexer is not None else None
         return (
             datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             if last_ts
@@ -737,17 +908,32 @@ class VectrService:
         # the bulk work it's reporting about. True while either an explicit
         # `index()`/startup index holds `_index_lock`, or the watcher's
         # coalesced batch worker is actively re-indexing/de-indexing.
-        watcher_status = self._watcher.watcher_status()
+        # UPG-STDIO-MEMORY-READY: before phase 2 has built the watcher, there
+        # is truthfully nothing pending/running yet — the same all-False/zero
+        # shape `CodeWatcher.watcher_status()` itself returns for a quiet
+        # workspace, so `status()`'s output shape never changes across the
+        # phase-1/phase-2 boundary.
+        watcher_status = (
+            self._watcher.watcher_status() if self._watcher is not None else {
+                "watcher_burst_mode": False,
+                "watcher_pending_files": 0,
+                "watcher_batch_running": False,
+                "watcher_last_batch_duration_ms": 0,
+            }
+        )
         reindex_in_progress = (
             self._index_lock.locked() or watcher_status.get("watcher_batch_running", False)
         )
         return {
-            "indexed_files": self._indexer.indexed_file_count,
-            "total_chunks": self._indexer.total_chunks,
+            "indexed_files": self._indexer.indexed_file_count if self._indexer else 0,
+            "total_chunks": self._indexer.total_chunks if self._indexer else 0,
             "last_indexed": self.last_indexed,
             "embed_model": self._embed_model,
             "workspace_root": self._workspace_root,
-            "symbol_count": self._symbol_graph.symbol_count(self._workspace_root),
+            "symbol_count": (
+                self._symbol_graph.symbol_count(self._workspace_root)
+                if self._symbol_graph is not None else 0
+            ),
             "languages": self._language_coverage(),
             "notes_count": self.count_notes(),
             "grammars_unavailable": missing,
@@ -771,6 +957,13 @@ class VectrService:
             # fact. The proxy channel injects by launch consent regardless.
             "proactive_enabled": self._proactive_master_enabled(),
             "artifact_cache": self.cache_metrics(),
+            # UPG-STDIO-MEMORY-READY: additive warm-up signals. Both True
+            # immediately for every existing (non-deferred) caller — a
+            # deferred caller (stdio/HTTP daemon) sees `fully_ready=False`
+            # (and possibly `embedder_ready=False`) only during the phase-2
+            # background-construction window.
+            "fully_ready": self.fully_ready,
+            "embedder_ready": self.embedder_ready,
         }
 
     @staticmethod
@@ -782,7 +975,13 @@ class VectrService:
         """Symbol-graph build trust signals for `status` (UPG-8.7): whether the
         persisted graph is complete (no files failed extraction) and built by the
         current toolchain. Lets a benchmark/user confirm locate/trace coverage is
-        trustworthy rather than a silently-partial graph."""
+        trustworthy rather than a silently-partial graph.
+
+        Returns the same "nothing built yet" shape before phase 2 has
+        constructed the symbol graph (UPG-STDIO-MEMORY-READY) as it does for
+        a workspace that has never been indexed."""
+        if self._symbol_graph is None:
+            return {"symbol_graph_complete": False, "symbol_graph_failed_files": 0}
         meta = self._symbol_graph.graph_meta(self._workspace_root)
         if not meta:
             return {"symbol_graph_complete": False, "symbol_graph_failed_files": 0}
@@ -800,7 +999,12 @@ class VectrService:
         environment (grammar_available check) — prevents advertising locate/trace
         for a language whose grammar package is missing.
         Ordered by file count (dominant language first).
+
+        Empty before phase 2 has built the indexer (UPG-STDIO-MEMORY-READY) —
+        nothing has been walked/indexed yet, same as an empty workspace.
         """
+        if self._indexer is None:
+            return []
         from agent.symbol_graph import supports_symbols, grammar_available
         stats = self._indexer.indexed_language_stats()
         return [
@@ -1029,7 +1233,20 @@ class VectrService:
             sort_by=sort_by,
         )
         stale = self._context_store.check_staleness(notes, self._workspace_root)
-        return self._context_store.format_notes_for_llm(notes, stale_warnings=stale, detail=detail, surface=surface)
+        formatted = self._context_store.format_notes_for_llm(
+            notes, stale_warnings=stale, detail=detail, surface=surface
+        )
+        # UPG-STDIO-MEMORY-READY: a query-bearing recall that lands before the
+        # embedder has attached used the lexical SQL LIKE fallback — tell the
+        # caller LLM plainly, so it knows to retry later for semantic ranking
+        # rather than assuming these are the best-ranked matches available.
+        # Gated purely on `embedder_ready` state (never on `query`'s content)
+        # and only when a query was given at all — index/list-mode recall
+        # (query=None) has no ranking to degrade, so it is never appended
+        # there, and it never appears once the embedder has attached.
+        if query and not self.embedder_ready:
+            formatted += _EMBEDDER_LOADING_RECALL_NOTICE
+        return formatted
 
     def forget_note(self, note_id: int) -> bool:
         self._require_memory_layer()

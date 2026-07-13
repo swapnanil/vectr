@@ -571,3 +571,20 @@ _UTILITY_TOOLS = [
 
 # Full list for serialization / backwards compat
 MCP_TOOLS = _EXPLORATION_TOOLS + _MEMORY_WRITE_TOOLS + _MEMORY_TOOLS + _UTILITY_TOOLS
+
+# UPG-STDIO-MEMORY-READY: tools backed entirely by WorkingContextStore (SQLite
+# write path + best-effort embedding). These never need the embedder,
+# indexer, searcher, watcher, or symbol graph, so they are servable as soon
+# as phase 1 of VectrService construction completes -- long before phase 2
+# (model load, indexing) finishes. Transports key dispatch on the TOOL NAME
+# below and on service readiness state only, never on query text content.
+MEMORY_READY_TOOLS = frozenset(
+    {
+        "vectr_remember",
+        "vectr_recall",
+        "vectr_forget",
+        "vectr_status",
+        "vectr_snapshot",
+        "vectr_snapshot_list",
+    }
+)

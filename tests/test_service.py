@@ -774,3 +774,144 @@ class TestAuditEvents:
 
         logging.getLogger("vectr.audit").handlers.clear()
         assert not (tmp_path / "audit.log").exists()
+
+
+# ---------------------------------------------------------------------------
+# UPG-STDIO-MEMORY-READY: two-phase VectrService construction.
+# `defer_search_init=True` runs only phase 1 (fast, no model load) — working-
+# memory tools are usable immediately; `complete_search_init()` then runs
+# phase 2 (embedder/indexer/searcher/watcher/symbol graph) explicitly,
+# mirroring what a background thread does on the stdio/HTTP transports.
+# ---------------------------------------------------------------------------
+
+class TestDeferSearchInit:
+    def _make_deferred(self, tmp_path, monkeypatch, memory_only: bool = False):
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "a.py", "def foo(): pass\n")
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            svc = VectrService(
+                workspace_root=str(tmp_path), memory_only=memory_only, defer_search_init=True,
+            )
+        return svc
+
+    def test_not_fully_ready_and_embedder_not_ready_before_phase2(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        assert svc.fully_ready is False
+        assert svc.embedder_ready is False
+
+    def test_memory_tools_work_before_phase2(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        note_id = svc.remember("a note recorded before the embedder is ready")
+        assert isinstance(note_id, int)
+        notes_text = svc.recall(query="recorded before the embedder")
+        assert "note recorded before the embedder is ready" in notes_text
+        assert svc.count_notes() == 1
+        status = svc.status()
+        assert status["fully_ready"] is False
+        assert status["embedder_ready"] is False
+        snap_id = svc.snapshot_session(label="pre-phase2")
+        assert isinstance(snap_id, str) and snap_id
+        assert svc.forget_note(note_id) is True
+
+    def test_complete_search_init_flips_both_flags(self, tmp_path, monkeypatch) -> None:
+        with patch("integrations.vscode_bridge.configure_all"):
+            svc = self._make_deferred(tmp_path, monkeypatch)
+            svc.complete_search_init()
+        try:
+            assert svc.fully_ready is True
+            assert svc.embedder_ready is True
+        finally:
+            svc.shutdown()  # release the phase-2 indexer's ChromaDB client
+
+    def test_search_works_after_complete_search_init(self, tmp_path, monkeypatch) -> None:
+        with patch("integrations.vscode_bridge.configure_all"):
+            svc = self._make_deferred(tmp_path, monkeypatch)
+            svc.complete_search_init()
+            svc.index(str(svc._workspace_root))
+            results, _ = svc.search("foo")
+        try:
+            assert svc.total_chunks > 0
+        finally:
+            svc.shutdown()  # release the phase-2 indexer's ChromaDB client
+
+    def test_recall_notice_present_before_embedder_ready(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        svc.remember("a note recorded before the embedder is ready")
+        notes_text = svc.recall(query="recorded before the embedder")
+        assert "semantic ranking unavailable" in notes_text
+
+    def test_recall_no_notice_without_query_before_embedder_ready(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        svc.remember("a note recorded before the embedder is ready")
+        notes_text = svc.recall()  # index/list mode — no query
+        assert "semantic ranking unavailable" not in notes_text
+
+    def test_recall_no_notice_after_embedder_ready(self, tmp_path, monkeypatch) -> None:
+        with patch("integrations.vscode_bridge.configure_all"):
+            svc = self._make_deferred(tmp_path, monkeypatch)
+            svc.remember("a note recorded before the embedder is ready")
+            svc.complete_search_init()
+            notes_text = svc.recall(query="recorded before the embedder")
+        try:
+            assert "semantic ranking unavailable" not in notes_text
+        finally:
+            svc.shutdown()  # release the phase-2 indexer's ChromaDB client
+
+    def test_backfill_ran_after_complete_search_init(self, tmp_path, monkeypatch) -> None:
+        """The mid-task reinforcement's headline case: a note stored before
+        the embedder existed gets a vector, unconditionally, the moment
+        phase 2 completes — no re-write, no lazy on-next-recall trigger."""
+        with patch("integrations.vscode_bridge.configure_all"):
+            svc = self._make_deferred(tmp_path, monkeypatch)
+            note_id = svc.remember("gc finalizer tp_del legacy garbage deferral path")
+            svc.complete_search_init()
+        try:
+            notes_col = svc._context_store._notes_col
+            assert notes_col is not None
+            assert str(note_id) in set(notes_col.get(include=[])["ids"])
+        finally:
+            svc.shutdown()  # release the phase-2 indexer's ChromaDB client
+
+    def test_memory_only_defer_search_init_never_blocks(self, tmp_path, monkeypatch) -> None:
+        """Requirement #5: memory-only mode must never block on the embedder
+        — memory tools work immediately, and the embedder still loads (in
+        the background, in real deployments) for semantic recall."""
+        svc = self._make_deferred(tmp_path, monkeypatch, memory_only=True)
+        assert svc.fully_ready is False
+        assert svc.embedder_ready is False
+        note_id = svc.remember("memory-only note before phase 2")
+        assert isinstance(note_id, int)
+        assert "memory-only note before phase 2" in svc.recall(query="before phase 2")
+        with patch("integrations.vscode_bridge.configure_all"):
+            svc.complete_search_init()
+        try:
+            assert svc.fully_ready is True
+            assert svc.embedder_ready is True
+        finally:
+            svc.shutdown()  # release the phase-2 indexer's ChromaDB client
+
+    def test_shutdown_before_phase2_does_not_raise(self, tmp_path, monkeypatch) -> None:
+        """A service asked to shut down (e.g. stdin EOF) while still in the
+        phase-2 background-construction window has no watcher yet — this
+        must be a no-op, not an AttributeError."""
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        svc.shutdown()  # must not raise
+
+    def test_shutdown_closes_indexer_chroma_client(self, tmp_path, monkeypatch) -> None:
+        """A CodeIndexer's ChromaDB client holds a native worker-thread pool
+        open for the process's lifetime unless explicitly closed — confirmed
+        empirically (an unclosed chromadb.PersistentClient adds ~13 OS
+        threads that never get reclaimed). VectrService.shutdown() must
+        release it once phase 2 has constructed a real indexer."""
+        with patch("integrations.vscode_bridge.configure_all"):
+            svc = self._make_deferred(tmp_path, monkeypatch)
+            svc.complete_search_init()
+        with patch.object(svc._indexer, "close", wraps=svc._indexer.close) as spy_close:
+            svc.shutdown()
+        spy_close.assert_called_once()

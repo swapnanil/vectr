@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -86,16 +87,15 @@ class WorkingContextStore:
         self._embed_query_fn = embed_query_fn or embed_fn  # query-mode embed, defaults to embed_fn
         self._embed_model = embed_model  # current model name, for the embed-model stamp/migration
         self._notes_col = None
-        # Strict encryption posture (VECTR_ENCRYPT_DISABLE_NOTE_VECTORS): when
-        # encryption is on, the note embedding vectors are a lossy plaintext
-        # projection of note content living in the Chroma store. Setting this
-        # omits them entirely — recall falls back to lexical SQL LIKE — so no
-        # representation of note content leaves the encrypted SQLite column.
-        strict_no_vectors = (
-            self._encryptor is not None
-            and os.getenv("VECTR_ENCRYPT_DISABLE_NOTE_VECTORS", "") == "1"
-        )
-        if embed_fn is not None and notes_chroma_client is not None and not strict_no_vectors:
+        # Guards attach_embedder() (UPG-STDIO-MEMORY-READY): the store can be
+        # constructed with embed_fn=None (memory tools live before the
+        # embedding model has loaded) and upgraded to a real embedder later,
+        # from a background thread, once phase-2 service init completes. The
+        # lock makes that upgrade idempotent and keeps a concurrent
+        # remember()/recall() from ever observing self._notes_col set while
+        # self._embed_fn is still the old value (or vice versa).
+        self._attach_lock = threading.Lock()
+        if embed_fn is not None and notes_chroma_client is not None and not self._vectors_disabled():
             try:
                 self._notes_col = notes_chroma_client.get_or_create_collection(
                     name="working_memory",
@@ -114,6 +114,99 @@ class WorkingContextStore:
                     "will retry on next startup",
                     exc_info=True,
                 )
+
+    def _vectors_disabled(self) -> bool:
+        """Strict encryption posture (VECTR_ENCRYPT_DISABLE_NOTE_VECTORS): when
+        encryption is on, the note embedding vectors are a lossy plaintext
+        projection of note content living in the Chroma store. Setting this
+        omits them entirely — recall falls back to lexical SQL LIKE — so no
+        representation of note content leaves the encrypted SQLite column.
+        Shared by __init__ and attach_embedder() so both paths honor it the
+        same way regardless of when the embedder becomes available."""
+        return (
+            self._encryptor is not None
+            and os.getenv("VECTR_ENCRYPT_DISABLE_NOTE_VECTORS", "") == "1"
+        )
+
+    @property
+    def embedder_ready(self) -> bool:
+        """True once an embedder is attached — either passed to __init__ or
+        via a later attach_embedder() call (UPG-STDIO-MEMORY-READY).
+
+        False means remember()/recall() are lexical/SQL-only for now: notes
+        still write and read correctly, just without semantic ranking or
+        vectors, until an embedder attaches."""
+        return self._embed_fn is not None
+
+    def attach_embedder(
+        self,
+        embed_fn,
+        notes_chroma_client,
+        embed_query_fn=None,
+        embed_model: str | None = None,
+    ) -> None:
+        """Upgrade an embedder-less store (constructed with embed_fn=None) to
+        semantic recall, once an embedding model becomes available
+        (UPG-STDIO-MEMORY-READY).
+
+        Lets memory tools (remember/recall/forget/status/snapshot) work from
+        process start, before the embedding model has finished loading or
+        downloading, on every transport — the store itself never needs an
+        embedder to read or write a note. This method is how the store is
+        upgraded once phase-2 service init (CodeIndexer's embed provider)
+        completes in the background, without re-writing or losing any note
+        recorded during the window it was missing.
+
+        Idempotent: a second call is a no-op once an embedder is already
+        attached. Thread-safe: `self._notes_col` and `self._embed_fn` are
+        only ever set together inside `_attach_lock`, and `self._embed_fn`
+        (the field every reader gates on) is set last — a concurrent
+        remember()/recall() either sees the fully-attached state or the
+        original embedder-less state, never a half-attached mix.
+
+        After attaching, runs the existing embed-model stamp reconcile (in
+        case the configured model differs from what a previous run stamped)
+        and then backfills a vector for every note that doesn't have one yet
+        — the notes written during the window this store had no embedder at
+        all. Both steps are best-effort: a failure here never raises, since
+        the store is already fully usable via the SQL fallback.
+        """
+        with self._attach_lock:
+            if self._embed_fn is not None:
+                return  # already attached
+            if embed_fn is None or notes_chroma_client is None or self._vectors_disabled():
+                return
+            try:
+                notes_col = notes_chroma_client.get_or_create_collection(
+                    name="working_memory",
+                    metadata={"hnsw:space": "cosine"},
+                )
+            except Exception:
+                return  # embedding still unavailable — stay on SQL LIKE fallback
+            self._embed_query_fn = embed_query_fn or embed_fn
+            self._embed_model = embed_model
+            self._notes_col = notes_col
+            self._embed_fn = embed_fn
+
+        if self._embed_model:
+            try:
+                self._reconcile_embed_model_stamp()
+            except Exception:
+                logger.warning(
+                    "vectr: working-memory embed-model migration failed after "
+                    "attach — note vectors may still be in a stale embedding "
+                    "space; will retry on next startup",
+                    exc_info=True,
+                )
+        try:
+            self.backfill_missing_vectors()
+        except Exception:
+            logger.warning(
+                "vectr: working-memory vector backfill failed after attach — "
+                "notes written before the embedder was ready may not be "
+                "semantically recallable until the next restart",
+                exc_info=True,
+            )
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path), timeout=_SQLITE_BUSY_TIMEOUT_S)
@@ -681,6 +774,60 @@ class WorkingContextStore:
             batch_contents = contents[start:start + _NOTES_REEMBED_BATCH_SIZE]
             vectors = self._embed_fn(batch_contents)
             self._notes_col.upsert(ids=batch_ids, embeddings=vectors)
+        return len(contents)
+
+    def backfill_missing_vectors(self) -> int:
+        """Embed and store a vector for every note that doesn't have one yet
+        (UPG-STDIO-MEMORY-READY).
+
+        A note can be missing a vector entirely — as opposed to having a
+        stale one (`_reembed_all_notes` above) — when it was written while
+        `self._embed_fn` was still None, i.e. during the window between
+        process start and the embedding model finishing load/download. Those
+        notes are never lost (they wrote to SQLite immediately, per
+        remember()'s "embedding failure never blocks the write path"
+        contract) but they need this pass once an embedder becomes available
+        so they become semantically recallable without any re-write.
+
+        Idempotent: a note already present in the 'working_memory'
+        collection's id set is left untouched and never re-embedded — safe
+        to call after every attach_embedder(), and more than once. Same
+        cross-workspace scope as `_reembed_all_notes`: the collection keys
+        vectors by note_id alone, with no workspace scoping, and includes
+        superseded notes for the same reason (see that method's docstring).
+        """
+        if self._notes_col is None or self._embed_fn is None:
+            return 0
+        with self._conn() as conn:
+            rows = conn.execute("SELECT note_id, content FROM notes").fetchall()
+        if not rows:
+            return 0
+
+        existing_ids: set[str] = set(self._notes_col.get(include=[])["ids"])
+
+        ids: list[str] = []
+        contents: list[str] = []
+        for row in rows:
+            note_id = str(row["note_id"])
+            if note_id in existing_ids:
+                continue  # already has a current vector — never re-embedded
+            content = row["content"]
+            if self._encryptor:
+                try:
+                    content = self._encryptor.decrypt(content)
+                except Exception:
+                    continue  # skip a row that can't be decrypted rather than abort the backfill
+            ids.append(note_id)
+            contents.append(content)
+        if not contents:
+            return 0
+
+        for start in range(0, len(contents), _NOTES_REEMBED_BATCH_SIZE):
+            batch_ids = ids[start:start + _NOTES_REEMBED_BATCH_SIZE]
+            batch_contents = contents[start:start + _NOTES_REEMBED_BATCH_SIZE]
+            vectors = self._embed_fn(batch_contents)
+            self._notes_col.upsert(ids=batch_ids, embeddings=vectors)
+        logger.info("vectr: backfilled %d working-memory note vector(s)", len(contents))
         return len(contents)
 
     def embed_model_stamp_mismatch(self) -> str | None:

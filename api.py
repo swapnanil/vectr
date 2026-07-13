@@ -26,6 +26,7 @@ async def lifespan(application: FastAPI):
     from app.service import VectrService
 
     import json as _json
+    import threading
     workspace = os.getenv("VECTR_WORKSPACE", ".")
     port = int(os.getenv("VECTR_PORT", "8765"))
     extra_roots = _json.loads(os.getenv("VECTR_EXTRA_ROOTS", "[]"))
@@ -43,9 +44,36 @@ async def lifespan(application: FastAPI):
         workspace_root=workspace, port=port, extra_roots=extra_roots,
         memory_only=memory_only, search_only=search_only,
         workspace_explicit=workspace_explicit, configure_ide=configure_ide,
+        # UPG-STDIO-MEMORY-READY: phase 1 only here — the server binds and
+        # starts accepting connections right after this call returns, well
+        # before the embedder/indexer/watcher/symbol graph (phase 2) finish
+        # loading in the background thread below. Working-memory routes
+        # (remember/recall/forget/status/snapshot) serve immediately;
+        # search-touching routes (index/search/fetch/locate/trace/map) stay
+        # gated on `svc.fully_ready` until phase 2 completes.
+        defer_search_init=True,
     )
-    svc.start_background_index()
     application.state.service = svc
+
+    def _finish_startup() -> None:
+        try:
+            svc.complete_search_init()
+            svc.start_background_index()
+        except BaseException:
+            # Phase 2 failed — working-memory routes already serve (phase 1
+            # succeeded above) and must keep serving. `fully_ready` simply
+            # never flips, so search routes keep reporting the same
+            # still-initialising response rather than the process crashing.
+            logging.getLogger(__name__).exception(
+                "vectr daemon: phase 2 (search layer) initialisation failed — "
+                "working-memory routes remain available; search routes will "
+                "keep reporting still-initialising"
+            )
+
+    threading.Thread(
+        target=_finish_startup, daemon=True, name="vectr-http-service-init",
+    ).start()
+
     # No internal LLM call at startup. The AI editor calls vectr_map on first use;
     # if no passport is cached, vectr returns raw metadata and prompts the AI to
     # call vectr_map_save with its synthesised summary.

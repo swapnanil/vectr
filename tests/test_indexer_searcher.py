@@ -161,6 +161,40 @@ class TestCodeIndexer:
         assert len(vec) == 768  # DummyEmbedProvider mirrors nomic-embed-code dim
         assert all(isinstance(v, float) for v in vec)
 
+    def test_close_releases_chroma_client(self, indexer) -> None:
+        """CodeIndexer.close() must release the underlying ChromaDB client
+        (its System, including the native worker-thread pool ChromaDB starts
+        per client) — otherwise every CodeIndexer built over a process's
+        lifetime leaks native OS threads that never get reclaimed."""
+        with patch.object(indexer.chroma_client, "close", wraps=indexer.chroma_client.close) as spy:
+            indexer.close()
+        spy.assert_called_once()
+
+    def test_close_is_idempotent(self, indexer) -> None:
+        indexer.close()
+        indexer.close()  # must not raise the second time
+
+    def test_del_closes_chroma_client(self, tmp_path, monkeypatch) -> None:
+        """A CodeIndexer that falls out of scope without an explicit
+        shutdown call (e.g. a fixture, a script) must still release its
+        ChromaDB client via __del__ — the safety net for the many callers
+        that don't own a VectrService.shutdown() path. Constructed directly
+        (not via the `indexer` fixture) so this test — not pytest's
+        function-scoped fixture cache — holds the only reference."""
+        import gc
+
+        from agent import indexer as idx_module
+        from agent.indexer import CodeIndexer
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _model: _DummyEmbedProvider())
+        local_indexer = CodeIndexer(workspace_root=str(tmp_path), db_path=str(tmp_path / "chroma"))
+        client = local_indexer.chroma_client
+        with patch.object(client, "close", wraps=client.close) as spy:
+            del local_indexer
+            gc.collect()
+        spy.assert_called_once()
+
     def test_query_vector_returns_results_after_index(self, indexer, tmp_path) -> None:
         path = make_py(tmp_path, "search_me.py", """
             def rate_limit_check(ip: str) -> bool:

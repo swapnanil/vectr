@@ -17,7 +17,7 @@ import threading
 from typing import Any, TextIO
 
 from integrations.mcp_server._dispatch import handle_tools_call, handle_tools_list
-from integrations.mcp_server._schemas import MCP_SERVER_INFO
+from integrations.mcp_server._schemas import MCP_SERVER_INFO, MEMORY_READY_TOOLS
 
 _PROTOCOL_VERSION = "2024-11-05"
 
@@ -37,6 +37,14 @@ class ServiceHandle:
     holder and returns a graceful "still starting up" response — mirroring the
     existing "still indexing" degradation in `handle_tools_call`'s
     `vectr_search` branch — until construction finishes.
+
+    `is_ready` flips as soon as `set_service` is called, which happens right
+    after phase 1 of `VectrService` construction (fast: no embedder/indexer
+    load) — see `app/service.py`'s `defer_search_init`. From that point,
+    working-memory tools (`MEMORY_READY_TOOLS`) are dispatched immediately;
+    search-side tools additionally wait for `service.fully_ready` (phase 2:
+    embedder, indexer, searcher, watcher, symbol graph) before dispatching —
+    keyed on tool NAME and service STATE only, never on request content.
     """
 
     def __init__(self) -> None:
@@ -102,6 +110,14 @@ def dispatch_line(body: dict, handle: ServiceHandle, session_id: str) -> dict | 
                 "isError": True,
             })
         if not handle.is_ready:
+            return _ok(jsonrpc_id, {
+                "content": [{"type": "text", "text": _STILL_STARTING_MSG}],
+                "isError": False,
+            })
+        # UPG-STDIO-MEMORY-READY: working-memory tools are servable as soon as
+        # the service object exists (phase 1 done); search-side tools still
+        # wait for phase 2 (embedder/indexer/searcher/watcher/symbol graph).
+        if tool_name not in MEMORY_READY_TOOLS and not getattr(handle.service, "fully_ready", True):
             return _ok(jsonrpc_id, {
                 "content": [{"type": "text", "text": _STILL_STARTING_MSG}],
                 "isError": False,

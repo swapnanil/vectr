@@ -298,6 +298,26 @@ def handle_tools_call(
                 "snapshot) are disabled; search, locate, trace and map are active"
             )
 
+        # UPG-STDIO-MEMORY-READY: additive warm-up indicator — only shown
+        # while phase 2 (embedder/indexer/searcher/watcher/symbol-graph) is
+        # still building. Memory tools (this one included) are already fully
+        # usable at this point; only search/locate/trace/map/fetch are not.
+        if not status.get("fully_ready", True):
+            if not status.get("embedder_ready", True):
+                lines.append(
+                    "  → still starting up: the embedding model is loading (or "
+                    "downloading) in the background — search/locate/trace/map "
+                    "are not yet available; memory tools work now, but "
+                    "vectr_recall semantic ranking is temporarily lexical-only "
+                    "until the model finishes loading"
+                )
+            else:
+                lines.append(
+                    "  → still starting up: indexing and the symbol graph are "
+                    "still building — search/locate/trace/map are not yet "
+                    "available; memory tools are fully ready"
+                )
+
         # UPG-NOTES-EMBED-MIGRATION: surfaces a mid-failure state only — the
         # migration that keeps note vectors and the configured embed model in
         # sync runs synchronously at startup, so this is normally absent.

@@ -131,6 +131,7 @@ def real_service_client(tmp_path_factory):
             yield c, svc, str(tmp)
         finally:
             c.__exit__(None, None, None)
+            svc.shutdown()  # release the indexer's ChromaDB client at session end
 
 
 # ---------------------------------------------------------------------------

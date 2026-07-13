@@ -790,6 +790,37 @@ class CodeIndexer:
         """The underlying ChromaDB client — shared with the working memory collection."""
         return self._client
 
+    def close(self) -> None:
+        """Release the underlying ChromaDB client's resources (its System —
+        connections, and the native worker-thread pool ChromaDB's Rust
+        bindings start per client). `chromadb`'s own `.close()` is already
+        idempotent, so calling this more than once (or after `__del__` has
+        already run it) is safe.
+
+        Every `CodeIndexer` — hence every real `VectrService` — otherwise
+        leaks a fixed-size native thread pool for the life of the process:
+        confirmed empirically, a fresh `chromadb.PersistentClient()` left
+        unclosed adds ~13 OS threads that `threading.active_count()` never
+        sees (native, not Python-managed) and that never get reclaimed.
+        Harmless for a single short-lived process, but a real leak for any
+        long-running process — or test suite — that constructs many
+        `CodeIndexer` instances over its lifetime. `VectrService.shutdown()`
+        calls this; `__del__` below is a safety net for callers (tests,
+        scripts) that construct a `CodeIndexer` directly and let it fall out
+        of scope without an explicit shutdown path."""
+        client = getattr(self, "_client", None)
+        if client is not None:
+            client.close()
+
+    def __del__(self) -> None:
+        # Best-effort only — must never raise, especially during interpreter
+        # shutdown when module globals this depends on may already be torn
+        # down (attribute lookups can fail in that window).
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def get_all_documents(self) -> tuple[list[str], list[str], list[dict]]:
         """Return (ids, documents, metadatas) for all stored chunks — used by BM25 index.
 

@@ -2121,6 +2121,14 @@ def cmd_mcp_stdio(args: argparse.Namespace) -> None:
     `notifications/initialized`, `ping`, and `tools/list` all answer before
     the workspace index (or even the service itself) is ready; `tools/call`
     reports "still starting up" gracefully until it is.
+
+    `VectrService` itself is constructed with `defer_search_init=True`
+    (UPG-STDIO-MEMORY-READY): phase 1 (fast — no model load) finishes almost
+    immediately, `handle.set_service()` is called right there, and
+    working-memory tools (remember/recall/forget/status/snapshot/
+    snapshot_list) become servable well before the embedder/indexer/
+    watcher/symbol-graph (phase 2) finish loading. `tools/call` for the
+    remaining (search-side) tools still waits for `service.fully_ready`.
     """
     import logging
 
@@ -2161,12 +2169,32 @@ def cmd_mcp_stdio(args: argparse.Namespace) -> None:
                 # files that point at one would be meaningless, and possibly
                 # disruptive for a hosting platform's mounted workspace.
                 configure_ide=False,
+                # UPG-STDIO-MEMORY-READY: phase 1 only here — working-memory
+                # tools become servable as soon as `set_service` below
+                # returns, well before the embedder/indexer/watcher/symbol
+                # graph (phase 2) finish loading in the background.
+                defer_search_init=True,
             )
-            svc.start_background_index()
-            handle.set_service(svc)
         except BaseException as exc:  # a background thread must never crash silently
             logging.getLogger(__name__).exception("mcp-stdio: service construction failed")
             handle.set_error(exc)
+            return
+
+        handle.set_service(svc)
+        try:
+            svc.complete_search_init()
+            svc.start_background_index()
+        except BaseException:
+            # Phase 2 (embedder/indexer/watcher/symbol graph) failed to come
+            # up. Working-memory tools already work (phase 1 succeeded above)
+            # — never fail the whole service for this. `fully_ready` simply
+            # never flips, so search-side tools keep answering "still
+            # starting up" rather than the process crashing outright.
+            logging.getLogger(__name__).exception(
+                "mcp-stdio: phase 2 (search layer) initialisation failed — "
+                "working-memory tools remain available; search tools will "
+                "keep reporting still-starting-up"
+            )
 
     threading.Thread(
         target=_build_service, daemon=True, name="vectr-mcp-stdio-service-init",
