@@ -1442,6 +1442,351 @@ class TestP4TeamNotes:
 
 
 # ---------------------------------------------------------------------------
+# TRIGGER-ENGINE wave 1 (bm2-design-skeleton.md §1/§2/§5) — store-level
+# integration: schema migration, remember()'s new params, promote(), anchor
+# staleness caveats, explicit supersedes tombstoning, and fire().
+# ---------------------------------------------------------------------------
+
+class TestTriggerEngineSchemaMigration:
+    def test_migration_adds_trigger_engine_columns_to_legacy_db(self, tmp_path) -> None:
+        """An existing DB predating TRIGGER-ENGINE (has 'title' but none of
+        the wave-1 columns) upgrades without data loss; old rows behave
+        exactly as a brand-new note with no explicit triggers/anchors would."""
+        import sqlite3
+        import time as _t
+        db_path = tmp_path / "working_context.sqlite"
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                """CREATE TABLE notes (
+                    note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace TEXT NOT NULL, content TEXT NOT NULL,
+                    tags TEXT NOT NULL DEFAULT '[]', priority TEXT NOT NULL DEFAULT 'medium',
+                    kind TEXT NOT NULL DEFAULT 'finding',
+                    created_at REAL NOT NULL, last_accessed REAL NOT NULL,
+                    session_id TEXT, decay_score REAL NOT NULL DEFAULT 1.0,
+                    title TEXT NOT NULL DEFAULT '')"""
+            )
+            now = _t.time()
+            conn.execute(
+                "INSERT INTO notes (workspace, content, kind, created_at, last_accessed) VALUES (?,?,?,?,?)",
+                ("/repo", "pre-trigger-engine note", "directive", now, now),
+            )
+        store = _store(tmp_path)
+        cols = {r[1] for r in sqlite3.connect(str(db_path)).execute("PRAGMA table_info(notes)").fetchall()}
+        for col in ("triggers", "provenance", "scope", "anchors", "supersedes", "superseded_by_note_id", "last_fired"):
+            assert col in cols
+        notes = store.recall("/repo")
+        assert len(notes) == 1
+        note = notes[0]
+        assert note.content == "pre-trigger-engine note"
+        assert note.triggers == []
+        assert note.provenance == "agent"
+        assert note.scope == "workspace"
+        assert note.anchors == []
+        assert note.supersedes is None
+        assert note.superseded_by_note_id is None
+        assert note.last_fired is None
+        # A pre-existing directive note with no explicit triggers gets exactly
+        # the same kind-default bundle a brand-new one would.
+        from agent.trigger_engine import evaluate_note
+        assert evaluate_note(note, event="session-start").fired is True
+
+
+class TestRememberTriggerEngineParams:
+    def test_default_provenance_is_agent(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a finding")
+        note = store.recall(ws)[0]
+        assert note.provenance == "agent"
+
+    def test_default_scope_is_workspace(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a finding")
+        note = store.recall(ws)[0]
+        assert note.scope == "workspace"
+
+    def test_invalid_provenance_rejected(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        with pytest.raises(ValueError):
+            store.remember(ws, "bad note", provenance="not-a-real-provenance")
+
+    def test_invalid_scope_rejected(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        with pytest.raises(ValueError):
+            store.remember(ws, "bad note", scope="not-a-real-scope")
+
+    def test_auto_provenance_rejected_on_directive_kind(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        with pytest.raises(ValueError, match="auto"):
+            store.remember(ws, "an unreviewed standing rule", kind="directive", provenance="auto")
+
+    def test_auto_provenance_allowed_on_other_kinds(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "auto-captured finding", kind="finding", provenance="auto")
+        note = store.get_note(ws, note_id)
+        assert note.provenance == "auto"
+
+    def test_malformed_trigger_rejected(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        with pytest.raises(ValueError):
+            store.remember(ws, "note", triggers=[{"not_before": 1.0}])
+
+    def test_valid_explicit_triggers_stored(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        triggers = [{"path": "src/api/**", "event": "pre-edit"}]
+        note_id = store.remember(ws, "note", triggers=triggers)
+        note = store.get_note(ws, note_id)
+        assert note.triggers == triggers
+
+    def test_anchors_are_hashed_at_write_time(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "src" / "auth.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("original content")
+        note_id = store.remember(ws, "a gotcha about auth.py", anchors=["src/auth.py"])
+        note = store.get_note(ws, note_id)
+        assert len(note.anchors) == 1
+        assert note.anchors[0][0] == "src/auth.py"
+        assert note.anchors[0][1] is not None  # a real hash was computed
+
+    def test_anchor_to_nonexistent_file_gets_null_hash_not_an_error(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a gotcha about a future file", anchors=["not/created/yet.py"])
+        note = store.get_note(ws, note_id)
+        assert note.anchors == [["not/created/yet.py", None]]
+
+    def test_supersedes_tombstones_the_target_note(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        old_id = store.remember(ws, "old finding")
+        new_id = store.remember(ws, "corrected finding", supersedes=old_id)
+        old = store.get_note(ws, old_id)
+        assert old.valid_until is not None
+        assert old.superseded_by_note_id == new_id
+        # Excluded from default recall, retained for audit via include_superseded.
+        active = store.recall(ws)
+        assert all(n.note_id != old_id for n in active)
+        full_history = store.recall(ws, include_superseded=True)
+        assert any(n.note_id == old_id for n in full_history)
+
+    def test_supersedes_nonexistent_note_rejected(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        with pytest.raises(ValueError):
+            store.remember(ws, "note", supersedes=999999)
+
+    def test_supersedes_never_fires_again(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        old_id = store.remember(ws, "old directive", kind="directive")
+        store.remember(ws, "new directive", kind="directive", supersedes=old_id)
+        old = store.get_note(ws, old_id)
+        from agent.trigger_engine import evaluate_note
+        result = evaluate_note(old, event="session-start")
+        assert result.fired is False
+        assert "superseded" in result.explanation
+
+    def test_existing_code_hash_supersede_path_unaffected(self, tmp_path) -> None:
+        """The pre-existing `superseded_by` (author_id) column and its
+        code_hash-conflict path are untouched by the new `supersedes` param —
+        both mechanisms can coexist without interfering with each other."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "original", author_id="alice", code_hash="shared-hash")
+        store.remember(ws, "updated", author_id="bob", code_hash="shared-hash")
+        all_notes = store.recall(ws, include_superseded=True)
+        old = next(n for n in all_notes if n.content == "original")
+        assert old.superseded_by == "bob"
+        assert old.superseded_by_note_id is None  # untouched by the explicit-supersedes path
+
+
+class TestPromote:
+    def test_promote_auto_to_agent(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "auto note", provenance="auto")
+        assert store.promote(ws, note_id, "agent") is True
+        note = store.get_note(ws, note_id)
+        assert note.provenance == "agent"
+
+    def test_promote_agent_to_human(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "agent note")  # default provenance='agent'
+        assert store.promote(ws, note_id, "human") is True
+        note = store.get_note(ws, note_id)
+        assert note.provenance == "human"
+
+    def test_promote_cannot_skip_a_rank(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "auto note", provenance="auto")
+        with pytest.raises(ValueError):
+            store.promote(ws, note_id, "human")  # auto -> human skips 'agent'
+
+    def test_promote_cannot_demote(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "human note")
+        store.promote(ws, note_id, "human")  # no-op path isn't reached; set via remember instead
+        with pytest.raises(ValueError):
+            store.promote(ws, note_id, "agent")
+
+    def test_promote_rejects_unrecognised_target(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", provenance="auto")
+        with pytest.raises(ValueError):
+            store.promote(ws, note_id, "not-a-real-provenance")
+
+    def test_promote_nonexistent_note_returns_false(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        assert store.promote(ws, 999999, "agent") is False
+
+
+class TestAnchorStaleness:
+    def test_anchor_change_adds_visible_caveat_but_never_drops_the_note(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "src" / "auth.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("original content")
+        note_id = store.remember(ws, "a gotcha about auth.py", kind="gotcha", anchors=["src/auth.py"])
+
+        f.write_text("changed content")  # anchor path's content now differs
+        notes = store.recall(ws)
+        assert any(n.note_id == note_id for n in notes)  # still recalled, never silently dropped
+        stale = store.check_staleness(notes, ws)
+        assert note_id in stale
+        assert any("src/auth.py" in r and "anchor_changed" in r for r in stale[note_id])
+
+    def test_unchanged_anchor_is_not_flagged(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "src" / "auth.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("stable content")
+        note_id = store.remember(ws, "a gotcha", kind="gotcha", anchors=["src/auth.py"])
+        notes = store.recall(ws)
+        stale = store.check_staleness(notes, ws)
+        assert note_id not in stale
+
+    def test_anchor_with_no_baseline_hash_never_flagged(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a gotcha about a future file", kind="gotcha", anchors=["not/created/yet.py"])
+        (tmp_path / "not" / "created").mkdir(parents=True)
+        (tmp_path / "not" / "created" / "yet.py").write_text("now it exists")
+        notes = store.recall(ws)
+        stale = store.check_staleness(notes, ws)
+        assert note_id not in stale  # no hash-at-write to compare against
+
+
+class TestFormatNotesForLlmProvenanceFraming:
+    def test_full_tier_marks_provenance_on_every_block(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a finding")  # default provenance='agent'
+        notes = store.recall(ws)
+        output = store.format_notes_for_llm(notes, detail="full")
+        assert "[agent]" in output
+
+    def test_human_directive_gets_imperative_framing_in_output(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "always run tests before committing", kind="directive")
+        store.promote(ws, note_id, "human")
+        notes = store.recall(ws, include_superseded=True)
+        output = store.format_notes_for_llm(notes, detail="full")
+        assert "DIRECTIVE" in output
+        assert "follow it" in output
+
+    def test_auto_provenance_gets_weakest_framing_in_output(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "an auto-captured finding", provenance="auto")
+        notes = store.recall(ws)
+        output = store.format_notes_for_llm(notes, detail="full")
+        assert "weakest" in output.lower() or "no reviewing judgment" in output.lower()
+
+    def test_index_tier_output_unaffected(self, tmp_path) -> None:
+        """Provenance framing is additive to the full-tier render only — the
+        index-tier one-liner keeps its pre-existing compact format."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a finding")
+        notes = store.recall(ws)
+        output = store.format_notes_for_llm(notes, detail="index")
+        assert "[agent]" not in output
+
+    def test_superseded_marker_uses_note_id_fallback_for_explicit_supersedes(self, tmp_path) -> None:
+        """The explicit `supersedes` path has no author_id badge (unlike the
+        code_hash-conflict path) — the superseded marker must still render,
+        naming the superseding note by id rather than crashing/omitting it."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        old_id = store.remember(ws, "old finding")
+        new_id = store.remember(ws, "corrected finding", supersedes=old_id)
+        all_notes = store.recall(ws, include_superseded=True)
+        stale = store.check_staleness(all_notes, ws)
+        output = store.format_notes_for_llm(all_notes, stale_warnings=stale, detail="full")
+        assert f"superseded by @note#{new_id}" in output
+
+
+class TestFireEvaluation:
+    def test_fire_returns_only_fired_notes(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a directive", kind="directive")
+        store.remember(ws, "a plain finding")  # no default bundle, never fires
+        results = store.fire(ws, event="session-start")
+        assert len(results) == 1
+        assert results[0].fired is True
+
+    def test_fire_orders_by_total_order(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a task", kind="task")
+        store.remember(ws, "a directive", kind="directive")
+        results = store.fire(ws, event="session-start")
+        fired_kinds = [store.get_note(ws, r.note_id).kind for r in results]
+        assert fired_kinds == ["directive", "task"]
+
+    def test_fire_folds_in_staleness_caveats(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "src" / "auth.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("original")
+        store.remember(ws, "a gotcha about auth.py", kind="gotcha", anchors=["src/auth.py"])
+        f.write_text("changed")
+        results = store.fire(ws, event="pre-edit", file_path="src/auth.py")
+        assert len(results) == 1
+        assert any("anchor_changed" in r for r in results[0].stale_paths)
+
+    def test_fire_never_fires_a_tombstoned_note(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        old_id = store.remember(ws, "old directive", kind="directive")
+        store.remember(ws, "new directive", kind="directive", supersedes=old_id)
+        results = store.fire(ws, event="session-start")
+        assert all(r.note_id != old_id for r in results)
+
+    def test_fire_stamps_last_fired_for_cooldown(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a directive", kind="directive")
+        store.fire(ws, event="session-start")
+        note = store.get_note(ws, note_id)
+        assert note.last_fired is not None
+
+    def test_fire_with_ledger_suppresses_same_axis_re_fire(self, tmp_path) -> None:
+        from agent.trigger_engine import TriggerFireLedger
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a directive", kind="directive")
+        ledger = TriggerFireLedger()
+        first = store.fire(ws, event="session-start", ledger=ledger)
+        second = store.fire(ws, event="session-start", ledger=ledger)
+        assert len(first) == 1
+        assert len(second) == 0  # same axis already fired this "session"
+
+    def test_fire_with_ledger_allows_a_different_axis(self, tmp_path) -> None:
+        from agent.trigger_engine import TriggerFireLedger
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a directive", kind="directive")
+        ledger = TriggerFireLedger()
+        store.fire(ws, event="session-start", ledger=ledger)
+        after_compaction = store.fire(ws, event="post-compaction", ledger=ledger)
+        assert len(after_compaction) == 1  # a different trigger index — not suppressed
+
+    def test_fire_without_ledger_never_suppresses(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a directive", kind="directive")
+        first = store.fire(ws, event="session-start")
+        second = store.fire(ws, event="session-start")
+        assert len(first) == 1
+        assert len(second) == 1
+
+
+# ---------------------------------------------------------------------------
 # B9: Semantic recall — embed_fn + ChromaDB cosine similarity
 # ---------------------------------------------------------------------------
 

@@ -3,6 +3,7 @@ WorkingContextStore — SQLite-backed store for LLM working notes and session sn
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -13,9 +14,35 @@ from pathlib import Path
 
 from agent.working_context_store._audit import audit
 from agent.working_context_store._encryption import _build_encryptor, _extract_file_paths, _NoteEncryptor
-from agent.working_context_store._types import DEFAULT_KIND, VALID_KINDS, SnapshotEntry, WorkingNote
+from agent.working_context_store._types import (
+    DEFAULT_KIND,
+    DEFAULT_PROVENANCE,
+    DEFAULT_SCOPE,
+    PROVENANCE_VALUES,
+    SCOPE_VALUES,
+    VALID_KINDS,
+    SnapshotEntry,
+    WorkingNote,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _hash_path_content(root: Path, raw_path: str) -> str | None:
+    """sha256[:16] of a workspace-relative (or absolute) path's current file
+    content, or None if it cannot be read (missing, directory, permission
+    error). Shared by `remember()`'s anchor-hash-at-write and
+    `check_staleness()`'s anchor re-hash-at-fire-time (TRIGGER-ENGINE wave 1,
+    bm2-design-skeleton.md §5) so both apply the exact same rule — this is
+    the same sha256[:16] shape as the pre-existing `code_hash` staleness
+    check just below, generalised to any anchor path rather than one
+    extension allowlist."""
+    path = Path(raw_path)
+    resolved = path if path.is_absolute() else root / path
+    try:
+        return hashlib.sha256(resolved.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return None
 
 # Metadata key stamped on the 'working_memory' ChromaDB collection recording
 # the embed model that produced its CURRENT vectors (UPG-NOTES-EMBED-MIGRATION).
@@ -278,6 +305,23 @@ class WorkingContextStore:
                 "kind":               "TEXT NOT NULL DEFAULT 'finding'",
                 # UPG-RECALL-HIERARCHY: per-note title for index-tier display.
                 "title":              "TEXT NOT NULL DEFAULT ''",
+                # TRIGGER-ENGINE wave 1 (bm2-design-skeleton.md §1) — additive,
+                # fully backward-compatible columns. Existing rows default to
+                # DEFAULT_PROVENANCE/DEFAULT_SCOPE/no triggers/no anchors, so an
+                # existing note's evaluation-time behaviour is unchanged: empty
+                # triggers falls back to its kind's default bundle exactly as a
+                # brand-new note with no explicit triggers would.
+                "triggers":              "TEXT NOT NULL DEFAULT '[]'",
+                "provenance":            "TEXT NOT NULL DEFAULT 'agent'",
+                "scope":                 "TEXT NOT NULL DEFAULT 'workspace'",
+                "anchors":               "TEXT NOT NULL DEFAULT '[]'",
+                "supersedes":            "INTEGER",
+                # Distinct from the existing `superseded_by` (TEXT author_id,
+                # set by the code_hash-conflict path above) — this records the
+                # note_id of the memory that explicitly superseded this one via
+                # the new `supersedes` write-time parameter.
+                "superseded_by_note_id": "INTEGER",
+                "last_fired":            "REAL",
             }
             for col, typedef in p4_cols.items():
                 if col not in existing_cols:
@@ -303,6 +347,11 @@ class WorkingContextStore:
         code_hash: str = "",
         kind: str = DEFAULT_KIND,
         title: str = "",
+        triggers: list[dict] | None = None,
+        provenance: str = DEFAULT_PROVENANCE,
+        scope: str = DEFAULT_SCOPE,
+        anchors: list[str] | None = None,
+        supersedes: int | None = None,
     ) -> int:
         """Store a working note. Returns the note_id.
 
@@ -316,11 +365,65 @@ class WorkingContextStore:
         `title` is a short label for index-tier display (UPG-RECALL-HIERARCHY).
         When empty, a fallback is derived from the first non-empty line of content,
         stripped and truncated to 80 characters.
+
+        Trigger engine wave 1 (TRIGGER-ENGINE, bm2-design-skeleton.md §1/§2/§5)
+        — all additive, all optional, one call, zero trigger literacy required:
+
+        `triggers`: explicit P/E/T trigger overrides (see agent/trigger_engine
+        .validate_trigger for the shape). Raises ValueError if malformed.
+        Omitted/empty means "use this kind's default bundle at evaluation
+        time" — evaluation-time, never baked into storage.
+
+        `provenance`: one of PROVENANCE_VALUES ("human"|"agent"|"auto").
+        Raises ValueError if not one of those, OR if provenance="auto" and
+        kind="directive" — an unreviewed standing rule is a contradiction in
+        terms and is rejected outright rather than silently downgraded.
+
+        `scope`: one of SCOPE_VALUES. Raises ValueError if not recognised.
+
+        `anchors`: a list of workspace-relative (or absolute) file paths this
+        note is anchored to. Each path's current content hash is computed
+        HERE, at write time (never supplied by the caller) and stored
+        alongside the path — `check_staleness()` re-hashes at fire/recall
+        time and raises a visible (never silent) staleness caveat on
+        mismatch. A path that cannot be read yet (e.g. a file not created
+        yet) stores a null hash and is simply never flagged stale until it
+        exists.
+
+        `supersedes`: the note_id this note explicitly tombstones. The
+        target note (looked up in this workspace) has `valid_until`/
+        `superseded_at` set (excluding it from recall() by default and from
+        ever firing again, per evaluate_note) and `superseded_by_note_id` set
+        to this new note's id — kept for audit, never deleted. Raises
+        ValueError if the target note does not exist in this workspace.
+        Distinct from the pre-existing `superseded_by` (author_id) column,
+        which is set only by the unrelated code_hash-conflict path above.
         """
+        from agent.trigger_engine import validate_triggers
+
         now = time.time()
         tags_json = json.dumps(tags or [])
         if kind not in VALID_KINDS:
             kind = DEFAULT_KIND
+
+        if provenance not in PROVENANCE_VALUES:
+            raise ValueError(f"provenance must be one of: {', '.join(PROVENANCE_VALUES)}")
+        if provenance == "auto" and kind == "directive":
+            raise ValueError(
+                "provenance='auto' is not allowed on kind='directive' — an "
+                "unreviewed standing rule is a contradiction in terms; use "
+                "provenance='agent' (or have a human endorse it) instead"
+            )
+        if scope not in SCOPE_VALUES:
+            raise ValueError(f"scope must be one of: {', '.join(SCOPE_VALUES)}")
+
+        triggers_list = validate_triggers(triggers)
+        triggers_json = json.dumps(triggers_list)
+
+        root = Path(workspace)
+        anchor_pairs = [[p, _hash_path_content(root, p)] for p in (anchors or [])]
+        anchors_json = json.dumps(anchor_pairs)
+
         # Derive title fallback from first non-empty content line (80-char cap).
         if not title:
             for line in content.splitlines():
@@ -339,6 +442,16 @@ class WorkingContextStore:
             stored_title = title
 
         with self._conn() as conn:
+            # supersedes (TRIGGER-ENGINE): validate the target BEFORE insert so
+            # a bad note_id never leaves a half-applied write.
+            if supersedes is not None:
+                target = conn.execute(
+                    "SELECT note_id FROM notes WHERE workspace = ? AND note_id = ?",
+                    (workspace, supersedes),
+                ).fetchone()
+                if target is None:
+                    raise ValueError(f"supersedes references note #{supersedes}, which does not exist in this workspace")
+
             # conflict resolution: if another note anchors the same code block, supersede it
             if code_hash:
                 conflicting = conn.execute(
@@ -359,13 +472,26 @@ class WorkingContextStore:
                 INSERT INTO notes (workspace, content, tags, priority, kind, created_at,
                                    last_accessed, session_id, decay_score,
                                    author_id, author_trust_score, valid_from,
-                                   valid_until, code_hash, title)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?)
+                                   valid_until, code_hash, title,
+                                   triggers, provenance, scope, anchors, supersedes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (workspace, stored_content, tags_json, priority, kind, now, now, session_id,
-                 author_id, now, code_hash, stored_title),
+                 author_id, now, code_hash, stored_title,
+                 triggers_json, provenance, scope, anchors_json, supersedes),
             )
             note_id = cur.lastrowid
+
+            # Explicit tombstone (TRIGGER-ENGINE §1): the superseded note is
+            # excluded from recall() by default (valid_until IS NULL filter,
+            # pre-existing) and never fires again (evaluate_note checks
+            # valid_until), but is retained with its full provenance for audit.
+            if supersedes is not None:
+                conn.execute(
+                    """UPDATE notes SET valid_until = ?, superseded_at = ?, superseded_by_note_id = ?
+                       WHERE workspace = ? AND note_id = ?""",
+                    (now, now, note_id, workspace, supersedes),
+                )
 
             # update author trust score registry (Bayesian: count-weighted)
             if author_id:
@@ -389,8 +515,44 @@ class WorkingContextStore:
 
         audit("REMEMBER", workspace=workspace, note_id=note_id, priority=priority,
               kind=kind, author_id=author_id, code_hash=code_hash[:8] if code_hash else "",
-              tags=",".join(tags or []), chars=len(content))
+              tags=",".join(tags or []), chars=len(content), provenance=provenance, scope=scope)
         return note_id  # type: ignore[return-value]
+
+    def promote(self, workspace: str, note_id: int, to: str) -> bool:
+        """Explicit provenance promotion (bm2-design-skeleton.md §5):
+        auto -> agent -> human only, one step at a time. Provenance is
+        immutable at write; this is the one sanctioned, explicit way to
+        raise it after the fact (e.g. a human reviews and endorses an
+        agent-authored note). Demotion is impossible — `to` must be exactly
+        one rank above the note's current provenance.
+
+        Returns True if promoted, False if the note does not exist. Raises
+        ValueError if `to` is not a valid single-step promotion from the
+        note's current provenance.
+        """
+        note = self.get_note(workspace, note_id)
+        if note is None:
+            return False
+        order = PROVENANCE_VALUES[::-1]  # ("auto", "agent", "human") — promotion direction
+        try:
+            current_rank = order.index(note.provenance)
+        except ValueError:
+            current_rank = 0
+        if to not in PROVENANCE_VALUES:
+            raise ValueError(f"'to' must be one of: {', '.join(PROVENANCE_VALUES)}")
+        to_rank = order.index(to)
+        if to_rank != current_rank + 1:
+            raise ValueError(
+                f"promote() only allows a single step up from '{note.provenance}' "
+                f"(auto -> agent -> human); '{to}' is not that step"
+            )
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE notes SET provenance = ? WHERE workspace = ? AND note_id = ?",
+                (to, workspace, note_id),
+            )
+        audit("PROMOTE", workspace=workspace, note_id=note_id, provenance=to)
+        return True
 
     def recall(
         self,
@@ -1181,10 +1343,15 @@ class WorkingContextStore:
           - A referenced file's mtime > note.created_at (original mtime check)
           - note.code_hash != sha256[:16] of the current file content (code moved/changed)
           - Note is marked superseded (valid_until is set)
+          - A declared anchor's (TRIGGER-ENGINE wave 1, bm2-design-skeleton.md
+            §5) content hash no longer matches its hash-at-write — this is a
+            VISIBLE caveat only, never a silent drop: the memory still fires/
+            recalls, this dict just flags it. Reuses `_hash_path_content()`,
+            the same sha256[:16] helper `remember()` uses to compute the
+            anchor's original hash, so both sides apply the identical rule.
 
         Returns {note_id: [stale_path/reason, ...]} — only stale notes included.
         """
-        import hashlib
         root = Path(workspace_root)
         stale: dict[int, list[str]] = {}
 
@@ -1193,7 +1360,9 @@ class WorkingContextStore:
 
             # superseded notes are always stale
             if note.valid_until is not None:
-                sup_by = note.superseded_by or "unknown"
+                sup_by = note.superseded_by or (
+                    f"note#{note.superseded_by_note_id}" if note.superseded_by_note_id else "unknown"
+                )
                 reasons.append(f"[superseded by @{sup_by}]")
 
             for raw_path in _extract_file_paths(note.content):
@@ -1219,10 +1388,102 @@ class WorkingContextStore:
                     except OSError:
                         pass
 
+            # Declarative anchor re-hash (TRIGGER-ENGINE §5) — independent of
+            # the content-prose path extraction above; anchors are structured
+            # (path, hash) pairs set explicitly at write time.
+            for anchor in note.anchors:
+                if not anchor or len(anchor) < 2:
+                    continue
+                anchor_path, anchor_hash = anchor[0], anchor[1]
+                if not anchor_path or not anchor_hash:
+                    continue  # no baseline recorded at write time — nothing to compare
+                current_hash = _hash_path_content(root, anchor_path)
+                if current_hash is not None and current_hash != anchor_hash:
+                    reasons.append(f"{anchor_path}[anchor_changed]")
+
             if reasons:
                 stale[note.note_id] = reasons
 
         return stale
+
+    def fire(
+        self,
+        workspace: str,
+        *,
+        event: str | None = None,
+        file_path: str | None = None,
+        ledger: "TriggerFireLedger | None" = None,
+        now: float | None = None,
+    ) -> list["FireResult"]:
+        """Live evaluation entry point (TRIGGER-ENGINE wave 1,
+        bm2-design-skeleton.md §2/§4): evaluate every non-tombstoned note in
+        `workspace` against one lifecycle moment (`event` and/or `file_path`
+        at time `now`), fold in `check_staleness()`'s anchor/file caveats, and
+        return only the notes that fired — ordered by the single shared
+        `total_order_key` (fire precedence == injection ordering == budget
+        eviction order, per the design doc's "one total order").
+
+        `ledger`, if given (a per-session `TriggerFireLedger` — see
+        `VectrService`'s per-session registry, mirroring its existing
+        per-session `EvictionAdvisor` pattern), suppresses a note whose
+        matched trigger index already fired this session on that SAME axis; a
+        fresh fire is recorded into the ledger before returning. Passing no
+        ledger evaluates statelessly with no suppression (used by tests and
+        any one-shot caller that manages its own dedup).
+
+        Every note that actually fires has its `last_fired` column stamped to
+        `now` — this is what makes a trigger's `cooldown` T-modifier
+        meaningful on the NEXT evaluation (evaluate_note() reads `last_fired`
+        directly off the note)."""
+        from agent.trigger_engine import evaluate_note, total_order_key
+
+        if now is None:
+            now = time.time()
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL",
+                (workspace,),
+            ).fetchall()
+        notes = [self._row_to_note(row) for row in rows]
+        notes_by_id = {n.note_id: n for n in notes}
+
+        stale = self.check_staleness(notes, workspace)
+
+        fired_ids: list[int] = []
+        results = []
+        for note in notes:
+            result = evaluate_note(note, event=event, file_path=file_path, now=now)
+            if not result.fired:
+                continue
+            if (
+                ledger is not None
+                and result.trigger_index is not None
+                and not ledger.eligible(note.note_id, result.trigger_index)
+            ):
+                continue
+            result.stale_paths = stale.get(note.note_id, [])
+            results.append(result)
+            fired_ids.append(note.note_id)
+            if ledger is not None and result.trigger_index is not None:
+                ledger.record_fire(note.note_id, result.trigger_index)
+
+        results.sort(key=lambda r: total_order_key(notes_by_id[r.note_id]))
+
+        if fired_ids:
+            with self._conn() as conn:
+                conn.execute(
+                    "UPDATE notes SET last_fired = ? WHERE note_id IN ({})".format(
+                        ",".join("?" * len(fired_ids))
+                    ),
+                    [now] + fired_ids,
+                )
+
+        audit(
+            "TRIGGER_FIRE", workspace=workspace, trigger_event=event or "",
+            file_path=file_path or "", fired=len(results),
+        )
+        return results
 
     def get_author_trust(self, workspace: str, author_id: str) -> float:
         """Return the Bayesian trust score for an author in this workspace."""
@@ -1275,6 +1536,14 @@ class WorkingContextStore:
             superseded_by=row["superseded_by"] if "superseded_by" in keys else None,
             superseded_at=row["superseded_at"] if "superseded_at" in keys else None,
             title=title,
+            # TRIGGER-ENGINE wave 1 fields — guarded for pre-migration DBs.
+            triggers=json.loads(row["triggers"]) if "triggers" in keys and row["triggers"] else [],
+            provenance=row["provenance"] if "provenance" in keys and row["provenance"] else DEFAULT_PROVENANCE,
+            scope=row["scope"] if "scope" in keys and row["scope"] else DEFAULT_SCOPE,
+            anchors=json.loads(row["anchors"]) if "anchors" in keys and row["anchors"] else [],
+            supersedes=row["supersedes"] if "supersedes" in keys else None,
+            superseded_by_note_id=row["superseded_by_note_id"] if "superseded_by_note_id" in keys else None,
+            last_fired=row["last_fired"] if "last_fired" in keys else None,
         )
 
     def format_notes_for_llm(
@@ -1366,19 +1635,32 @@ class WorkingContextStore:
 
             # superseded badge
             superseded_marker = ""
-            if n.valid_until is not None and n.superseded_by:
-                import datetime as _dt
-                sup_date = _dt.datetime.fromtimestamp(n.superseded_at or n.valid_until).strftime("%Y-%m-%d")
-                superseded_marker = f" [superseded by @{n.superseded_by}, {sup_date}]"
+            if n.valid_until is not None:
+                sup_by = n.superseded_by or (
+                    f"note#{n.superseded_by_note_id}" if n.superseded_by_note_id else None
+                )
+                if sup_by:
+                    import datetime as _dt
+                    sup_date = _dt.datetime.fromtimestamp(n.superseded_at or n.valid_until).strftime("%Y-%m-%d")
+                    superseded_marker = f" [superseded by @{sup_by}, {sup_date}]"
 
             # Surface the kind when it carries injection semantics (UPG-9.3) —
             # 'finding' is the default and adds no signal, so it's left implicit.
             kind_marker = f" [{n.kind.upper()}]" if n.kind and n.kind != DEFAULT_KIND else ""
+            # Provenance class (TRIGGER-ENGINE wave 1, bm2-design-skeleton.md
+            # §5) — marked on every full-tier block, unlike kind_marker above,
+            # since the caller's trust posture depends on it regardless of
+            # whether provenance is the default ("agent").
+            provenance_marker = f" [{n.provenance}]"
             lines.append(
-                f"[{n.note_id}] [{n.priority.upper()}]{kind_marker}{tag_str}{author_str}  ({age_str})"
+                f"[{n.note_id}] [{n.priority.upper()}]{kind_marker}{provenance_marker}{tag_str}{author_str}  ({age_str})"
                 f"{stale_marker}{superseded_marker}"
             )
-            lines.append(f"  {n.content}")
+            # Provenance framing (§5): only a human-provenance directive ever
+            # renders as an unhedged imperative; agent-provenance is framed as
+            # memory to verify; auto-provenance carries the weakest framing.
+            from agent.trigger_engine import frame_prefix
+            lines.append(f"  {frame_prefix(n.provenance, n.kind)}{n.content}")
             if stale_files:
                 changed = ", ".join(stale_files)
                 lines.append(f"  WARNING: These files changed after this note was written: {changed}")

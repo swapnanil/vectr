@@ -16,6 +16,41 @@ from dataclasses import dataclass
 VALID_KINDS: tuple[str, ...] = ("directive", "task", "gotcha", "finding", "reference")
 DEFAULT_KIND = "finding"
 
+# Trigger engine wave 1 (TRIGGER-ENGINE, bm2-design-skeleton.md §2/§5) — closed
+# protocol vocabularies, not tunable thresholds, so these live beside VALID_KINDS
+# as plain constants rather than in config.yaml (same reasoning as VALID_KINDS
+# itself: a caller either uses one of these values or the write is rejected;
+# there is nothing here for an operator to retune).
+#
+# EVENT_VALUES: the E trigger primitive's enum. Every value is a real lifecycle
+# moment; none has a live hook caller into fire()/evaluate_note() yet this wave
+# (see agent/trigger_engine.py's module docstring for the exact wiring status)
+# — an event with no live caller is simply never evaluated, never an error
+# ("declared but inert" per the design doc, not a defect).
+EVENT_VALUES: tuple[str, ...] = (
+    "session-start", "prompt-submit", "pre-edit", "pre-run", "pre-commit", "post-compaction",
+)
+
+# SCOPE_VALUES: how broadly a memory's declared triggers apply. Wave 1 stores
+# and validates every value; "workspace" is the default and is a true no-op
+# (today's unfiltered behaviour, unchanged). Every other value — "repo",
+# "path-subtree", "branch", and "session" — is recorded faithfully at write
+# time for forward compatibility but NOT YET enforced by recall()/fire() this
+# wave (recall() has no scope-aware filtering yet); enforcing them is
+# follow-up work, not silently claimed here.
+SCOPE_VALUES: tuple[str, ...] = ("workspace", "repo", "path-subtree", "branch", "session")
+DEFAULT_SCOPE = "workspace"
+
+# PROVENANCE_VALUES: trust/endorsement class (bm2-design-skeleton.md §5).
+# "human" = a person recorded or endorsed this; only imperative directive
+# framing is ever allowed for it. "agent" (default for vectr_remember) = an AI
+# session recorded this; rendered as memory-to-verify. "auto" = captured by a
+# mechanism with no reviewing judgment; weakest framing, and never allowed on
+# kind="directive" (rejected at write time — an unreviewed standing rule is a
+# contradiction in terms).
+PROVENANCE_VALUES: tuple[str, ...] = ("human", "agent", "auto")
+DEFAULT_PROVENANCE = "agent"
+
 
 @dataclass
 class WorkingNote:
@@ -35,9 +70,23 @@ class WorkingNote:
     valid_from: float = 0.0          # bi-temporal: when the note became valid
     valid_until: float | None = None # bi-temporal: None = still valid; float = superseded
     code_hash: str = ""              # sha256[:16] of the anchored code block at write time
-    superseded_by: str | None = None  # author_id that superseded this note
+    superseded_by: str | None = None  # author_id that superseded this note (code_hash conflict path)
     superseded_at: float | None = None
     title: str = ""                    # short label for index-tier display (UPG-RECALL-HIERARCHY)
+    # Trigger engine wave 1 (TRIGGER-ENGINE) — additive memory-object fields.
+    triggers: list[dict] = None        # type: ignore[assignment]  # explicit P/E/T trigger overrides; [] = use the kind's default bundle
+    provenance: str = DEFAULT_PROVENANCE  # human | agent | auto (bm2-design-skeleton.md §5)
+    scope: str = DEFAULT_SCOPE            # workspace | repo | path-subtree | branch | session
+    anchors: list[list[str]] = None    # type: ignore[assignment]  # [[path, content_hash_at_write_or_None], ...]
+    supersedes: int | None = None      # note_id THIS note explicitly tombstones at write time
+    superseded_by_note_id: int | None = None  # reciprocal: set on the OLD note by the explicit-supersedes path (distinct from `superseded_by`'s code_hash-conflict/author_id semantics)
+    last_fired: float | None = None    # last time the trigger engine actually fired this note (T:cooldown + total-order tie-break)
+
+    def __post_init__(self) -> None:
+        if self.triggers is None:
+            self.triggers = []
+        if self.anchors is None:
+            self.anchors = []
 
 
 @dataclass

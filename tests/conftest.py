@@ -211,6 +211,7 @@ def _base_mock_service():
     svc.should_evict.return_value = False
     svc.eviction_hint.return_value = ""
     svc.remember.return_value = 1
+    svc.promote_note.return_value = True
     svc.recall.return_value = "# Working Notes (1 entries)\n\n[1] [HIGH] test content\n"
     svc.snapshot_session.return_value = "snap_abc123"
     svc.list_snapshots.return_value = [{"snapshot_id": "snap_abc123", "label": "test", "created_at": 0.0}]
@@ -246,8 +247,17 @@ def client_real_memory(tmp_path):
     real_store = WorkingContextStore(str(tmp_path))
     ws = str(tmp_path)
 
-    svc.remember.side_effect = lambda content, tags=None, priority="medium", session_id=None, kind="finding", title="", agent="": \
-        real_store.remember(ws, content, tags, priority, session_id, kind=kind, title=title, author_id=agent)
+    def _remember(content, tags=None, priority="medium", session_id=None, kind="finding", title="",
+                  agent="", triggers=None, provenance="agent", scope="workspace", anchors=None,
+                  supersedes=None):
+        return real_store.remember(
+            ws, content, tags, priority, session_id, kind=kind, title=title, author_id=agent,
+            triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
+            supersedes=supersedes,
+        )
+
+    svc.remember.side_effect = _remember
+    svc.promote_note.side_effect = lambda note_id, to: real_store.promote(ws, note_id, to)
 
     def _recall(query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
                 min_similarity=None, file_path=None, max_age_days=None, sort_by="relevance",

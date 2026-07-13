@@ -22,6 +22,7 @@ from agent.config import (
     HOOKS_LOG_CHARS_PER_TOKEN,
 )
 from agent.eviction_advisor import EvictionAdvisor
+from agent.trigger_engine import TriggerFireLedger
 from agent.version_stamp import compute_version_stamp
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,14 @@ class VectrService:
             eviction_threshold_tokens=self._eviction_threshold_tokens
         )
         self._session_advisors: dict[str, EvictionAdvisor] = {}
+
+        # Per-session trigger fire ledger (TRIGGER-ENGINE wave 1,
+        # bm2-design-skeleton.md §3) — mirrors the EvictionAdvisor registry
+        # immediately above. Unlike that registry there is no daemon-global
+        # fallback ledger: fire-dedup is only meaningful within one session's
+        # identity, so a caller with no session_id (see `_ledger_for`) simply
+        # gets no suppression rather than sharing state across callers.
+        self._trigger_ledgers: dict[str, TriggerFireLedger] = {}
 
         self._indexing = False
         self._index_thread: threading.Thread | None = None
@@ -690,6 +699,62 @@ class VectrService:
             self._session_advisors[session_id] = advisor
         return advisor
 
+    def _ledger_for(self, session_id: str | None) -> TriggerFireLedger | None:
+        """Look up (or create) the per-session `TriggerFireLedger` (TRIGGER-
+        ENGINE wave 1, bm2-design-skeleton.md §3), mirroring `_advisor_for`
+        immediately above. `session_id=None` returns None rather than a
+        shared fallback ledger — fire-dedup only makes sense within one
+        session's identity; a caller with no session_id gets no suppression
+        at all, never cross-session suppression. LRU-bounded to the same
+        EVICTION_MAX_TRACKED_SESSIONS cap for the same reason as the advisor
+        registry (a long-running daemon serving many short-lived sessions)."""
+        if not session_id:
+            return None
+        ledger = self._trigger_ledgers.get(session_id)
+        if ledger is None:
+            if len(self._trigger_ledgers) >= EVICTION_MAX_TRACKED_SESSIONS:
+                oldest_id = next(iter(self._trigger_ledgers))
+                del self._trigger_ledgers[oldest_id]
+            ledger = TriggerFireLedger()
+            self._trigger_ledgers[session_id] = ledger
+        else:
+            del self._trigger_ledgers[session_id]
+            self._trigger_ledgers[session_id] = ledger
+        return ledger
+
+    def reset_trigger_ledger(self, session_id: str | None) -> None:
+        """Reset one session's fire-dedup ledger (TRIGGER-ENGINE
+        bm2-design-skeleton.md §3: "cleared on compaction"). A caller with no
+        session_id, or a session that has never fired a trigger yet, is a
+        no-op."""
+        if session_id and session_id in self._trigger_ledgers:
+            self._trigger_ledgers[session_id].reset()
+
+    def fire_triggers(
+        self,
+        event: str | None = None,
+        file_path: str | None = None,
+        session_id: str | None = None,
+    ):
+        """Live per-memory trigger evaluation (TRIGGER-ENGINE wave 1) for one
+        lifecycle moment. Returns the ordered list of `agent.trigger_engine
+        .FireResult` for every note that fires — see
+        `WorkingContextStore.fire()` for the full contract (evaluation,
+        staleness caveats folded in, the one shared total order, per-session
+        dedup via `_ledger_for`, and the `last_fired` cooldown stamp).
+
+        This is the engine's core evaluation entry point at the service
+        layer; it has no live caller in this wave's hook subprocess pipeline
+        (declared but callable, same category as the `pre-run`/`pre-commit`
+        E values) — see agent/trigger_engine.py's module docstring."""
+        self._require_memory_layer()
+        return self._context_store.fire(
+            self._workspace_root,
+            event=event,
+            file_path=file_path,
+            ledger=self._ledger_for(session_id),
+        )
+
     def search(
         self, query: str, n_results: int = 10, language: str | None = None
     ) -> tuple[list, int]:
@@ -1096,13 +1161,27 @@ class VectrService:
         kind: str = "finding",
         title: str = "",
         agent: str = "",
+        triggers: list[dict] | None = None,
+        provenance: str = "agent",
+        scope: str = "workspace",
+        anchors: list[str] | None = None,
+        supersedes: int | None = None,
     ) -> int:
         """`agent` (UPG-SUBAGENT-MEMORY): optional caller-declared identifier
         for the agent/subagent authoring this note (e.g. "coder-2") — never
         inferred. Stored on the note's existing `author_id` column (already
         documented there as a "developer/agent identifier"; no schema change
         needed) and surfaced as an attribution tag in recall index lines when
-        present. Absent (default "") renders exactly as before this feature."""
+        present. Absent (default "") renders exactly as before this feature.
+
+        `triggers`/`provenance`/`scope`/`anchors`/`supersedes` (TRIGGER-ENGINE
+        wave 1, bm2-design-skeleton.md §1/§2/§5): additive, all optional,
+        passed straight through to `WorkingContextStore.remember()` — see its
+        docstring for exact validation (raises ValueError on malformed
+        triggers, an unrecognised provenance/scope, provenance="auto" on
+        kind="directive", or a `supersedes` target that does not exist in
+        this workspace). This method does no validation of its own so the
+        store stays the single source of truth for these rules."""
         self._require_memory_layer()
         note_id = self._context_store.remember(
             workspace=self._workspace_root,
@@ -1113,9 +1192,26 @@ class VectrService:
             kind=kind,
             title=title,
             author_id=agent,
+            triggers=triggers,
+            provenance=provenance,
+            scope=scope,
+            anchors=anchors,
+            supersedes=supersedes,
         )
         self._bump_notes_epoch()
         return note_id
+
+    def promote_note(self, note_id: int, to: str) -> bool:
+        """Explicit provenance promotion (TRIGGER-ENGINE wave 1,
+        bm2-design-skeleton.md §5): auto -> agent -> human, one step at a
+        time. See `WorkingContextStore.promote()` for the exact contract
+        (raises ValueError on an invalid/out-of-order transition; returns
+        False if the note does not exist)."""
+        self._require_memory_layer()
+        promoted = self._context_store.promote(self._workspace_root, note_id, to)
+        if promoted:
+            self._bump_notes_epoch()
+        return promoted
 
     def get_note(self, note_id: int):
         """Fetch a single note by ID (UPG-RECALL-HIERARCHY expand path)."""

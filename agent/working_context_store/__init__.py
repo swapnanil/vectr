@@ -43,6 +43,11 @@ from agent.working_context_store._audit import (
 # Types and constants
 from agent.working_context_store._types import (
     DEFAULT_KIND,
+    DEFAULT_PROVENANCE,
+    DEFAULT_SCOPE,
+    EVENT_VALUES,
+    PROVENANCE_VALUES,
+    SCOPE_VALUES,
     VALID_KINDS,
     SnapshotEntry,
     WorkingNote,
@@ -68,6 +73,12 @@ __all__ = [
     # Types and constants
     "DEFAULT_KIND",
     "VALID_KINDS",
+    # TRIGGER-ENGINE wave 1 (bm2-design-skeleton.md §1/§2/§5)
+    "EVENT_VALUES",
+    "SCOPE_VALUES",
+    "DEFAULT_SCOPE",
+    "PROVENANCE_VALUES",
+    "DEFAULT_PROVENANCE",
     "SnapshotEntry",
     "WorkingNote",
     # Encryption

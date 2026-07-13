@@ -317,6 +317,65 @@ _MEMORY_WRITE_TOOLS = [
                     ),
                     "default": "",
                 },
+                "triggers": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Optional: explicit overrides for WHEN this note should resurface. Each "
+                        "entry may declare 'path' (a glob, e.g. 'src/api/**') and/or 'event' "
+                        "(one of: session-start, prompt-submit, pre-edit, pre-run, pre-commit, "
+                        "post-compaction), plus optional 'not_before' (epoch seconds), "
+                        "'expires_visibility' (epoch seconds after which the note fades in "
+                        "ranking but still fires), and 'cooldown' (seconds between re-fires). "
+                        "Entries are OR'd together. Omit this entirely (recommended) and the "
+                        "note's kind gets a sensible default: 'directive' fires at session-start "
+                        "and after context compaction; 'task' fires at session-start; 'gotcha' "
+                        "fires when the anchored file is about to be edited."
+                    ),
+                },
+                "provenance": {
+                    "type": "string",
+                    "description": (
+                        "How much to trust this note when it resurfaces (default 'agent'): "
+                        "'agent' = you recorded this yourself, framed as memory to verify; "
+                        "'auto' = captured with no reviewing judgment at all, weakest framing, "
+                        "and not allowed together with kind='directive'. 'human' is not settable "
+                        "here — a note only becomes 'human'-provenance via an explicit promotion "
+                        "after a person reviews it."
+                    ),
+                    "default": "agent",
+                    "enum": ["agent", "auto"],
+                },
+                "scope": {
+                    "type": "string",
+                    "description": (
+                        "Intended visibility scope (default 'workspace' — visible everywhere, "
+                        "unchanged behaviour, the only value actually enforced so far): "
+                        "'repo' | 'path-subtree' | 'branch' | 'session' record where this note is "
+                        "meant to apply, for forward compatibility — recall does not yet filter "
+                        "on these narrower scopes."
+                    ),
+                    "default": "workspace",
+                    "enum": ["workspace", "repo", "path-subtree", "branch", "session"],
+                },
+                "anchors": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional: file paths this note is about. Each path's current content is "
+                        "hashed now; if that file changes later, the note still recalls/fires but "
+                        "carries a visible staleness caveat naming the changed path."
+                    ),
+                },
+                "supersedes": {
+                    "type": "integer",
+                    "description": (
+                        "Optional: the note_id this new note replaces. The old note is retired "
+                        "(excluded from recall and from ever firing again) but kept for audit — "
+                        "use this instead of vectr_forget when you want the old note's history "
+                        "preserved."
+                    ),
+                },
             },
             "required": ["content"],
         },
@@ -521,6 +580,38 @@ _MEMORY_TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "vectr_promote",
+        "annotations": {
+            "title": "Promote a note's provenance",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        "description": (
+            "Raise a note's trust class one step: auto -> agent -> human. Use this after a "
+            "person has reviewed and endorsed a note — e.g. an auto-captured note that turned "
+            "out correct, or an agent-authored finding a human has confirmed. Provenance is "
+            "immutable at write time; this is the only way to change it afterward, and it only "
+            "moves one step at a time (never skips a rank, never demotes)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "integer",
+                    "description": "ID of the note to promote (the [#N] id from vectr_recall)",
+                },
+                "to": {
+                    "type": "string",
+                    "description": "Target provenance — must be exactly one step above the note's current provenance",
+                    "enum": ["agent", "human"],
+                },
+            },
+            "required": ["note_id", "to"],
+        },
+    },
 ]  # end _MEMORY_TOOLS
 
 # ingest_traces — not gated by session memory (always available)
@@ -583,6 +674,7 @@ MEMORY_READY_TOOLS = frozenset(
         "vectr_remember",
         "vectr_recall",
         "vectr_forget",
+        "vectr_promote",
         "vectr_status",
         "vectr_snapshot",
         "vectr_snapshot_list",

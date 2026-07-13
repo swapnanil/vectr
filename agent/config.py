@@ -692,3 +692,23 @@ _resp_cache_cfg: dict[str, Any] = _cache_cfg["response_cache"]
 PROACTIVE_RESPONSE_CACHE_ENABLED: bool = bool(_resp_cache_cfg["enabled"])
 PROACTIVE_RESPONSE_CACHE_TTL_SECONDS: float = float(_resp_cache_cfg["ttl_seconds"])
 PROACTIVE_RESPONSE_CACHE_MAX_ENTRIES: int = int(_resp_cache_cfg["max_entries"])
+
+# ---------------------------------------------------------------------------
+# Trigger engine wave 1 (TRIGGER-ENGINE, bm2-design-skeleton.md §2/§3) —
+# total order + injection budgets. See agent/trigger_engine.py.
+# ---------------------------------------------------------------------------
+
+_trig_cfg: dict[str, Any] = _cfg["memory_triggers"]
+_trig_order_cfg: dict[str, Any] = _trig_cfg["total_order"]
+
+MEMORY_TRIGGER_KIND_PRIORITY: tuple[str, ...] = tuple(
+    str(k) for k in _trig_order_cfg["kind_priority"]
+)
+MEMORY_TRIGGER_PRIORITY_RANK: tuple[str, ...] = tuple(
+    str(p) for p in _trig_order_cfg["priority_rank"]
+)
+
+_trig_inject_cfg: dict[str, Any] = _trig_cfg["injection"]
+MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP: int = int(_trig_inject_cfg["per_injection_token_cap"])
+MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP: int = int(_trig_inject_cfg["per_session_token_cap"])
+MEMORY_TRIGGER_CHARS_PER_TOKEN: int = int(_trig_inject_cfg["chars_per_token"])

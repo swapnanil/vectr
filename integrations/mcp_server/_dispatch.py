@@ -46,7 +46,7 @@ def handle_tools_list(session_id: str | None = None, service: Any = None) -> dic
     """Return tools appropriate for this session.
 
     Always shown: exploration tools + vectr_remember + vectr_evict_hint.
-    Gated on notes existing: vectr_recall, vectr_forget, vectr_snapshot, vectr_snapshot_list.
+    Gated on notes existing: vectr_recall, vectr_forget, vectr_promote, vectr_snapshot, vectr_snapshot_list.
     """
     # Hosted/registry deployments (e.g. a catalog's containerised inspector)
     # start with an empty note store but must still advertise the complete
@@ -531,7 +531,30 @@ def handle_tools_call(
         # In team mode, fall back to the connecting client's label (X-Vectr-Client
         # header) when the call itself does not declare an agent.
         agent = (arguments.get("agent", "") or "") or client_label
-        note_id = service.remember(content=content, tags=tags, priority=priority, kind=kind, title=title, agent=agent)
+        # TRIGGER-ENGINE wave 1 (bm2-design-skeleton.md §1/§2/§5) — all
+        # optional, all additive; omitting every one of these reproduces
+        # exactly the pre-wave-1 vectr_remember call.
+        triggers = arguments.get("triggers") or None
+        provenance = arguments.get("provenance", "agent") or "agent"
+        scope = arguments.get("scope", "workspace") or "workspace"
+        anchors = arguments.get("anchors") or None
+        supersedes = arguments.get("supersedes")
+        if supersedes is not None:
+            try:
+                supersedes = int(supersedes)
+            except (TypeError, ValueError):
+                return _mcp_error("supersedes must be an integer note_id")
+        try:
+            note_id = service.remember(
+                content=content, tags=tags, priority=priority, kind=kind, title=title, agent=agent,
+                triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
+                supersedes=supersedes,
+            )
+        except ValueError as exc:
+            # Malformed triggers, an unrecognised provenance/scope, or a
+            # supersedes target that does not exist — a caller input error,
+            # surfaced plainly rather than raised as an unhandled exception.
+            return _mcp_error(str(exc))
         # reset the turn-count nudge, the eviction advisor's remember-fatigue
         # counter (UPG-REMEMBER-BANNER-FATIGUE), and enable memory tools
         _reset_calls_since_save(session_id)
@@ -660,6 +683,34 @@ def handle_tools_call(
         return _mcp_error(
             "Pass note_id=<N> to delete one note, or all=true to clear every note for this workspace."
         )
+
+    # ---- vectr_promote ----
+    if tool_name == "vectr_promote":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
+        note_id = arguments.get("note_id")
+        to = arguments.get("to", "")
+        if note_id is None:
+            return _mcp_error("note_id is required (the [#N] id shown by vectr_recall)")
+        try:
+            nid = int(note_id)
+        except (TypeError, ValueError):
+            return _mcp_error("note_id must be an integer (the [#N] id shown by vectr_recall)")
+        if not to:
+            return _mcp_error("to is required ('agent' or 'human')")
+        try:
+            promoted = service.promote_note(nid, to)
+        except ValueError as exc:
+            return _mcp_error(str(exc))
+        if not promoted:
+            return _mcp_error(f"Note #{nid} not found.")
+        return {
+            "content": [{"type": "text", "text": f"Promoted note #{nid} to provenance='{to}'."}],
+            "isError": False,
+        }
 
     # ---- vectr_ingest_traces ----
     if tool_name == "vectr_ingest_traces":

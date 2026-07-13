@@ -21,6 +21,8 @@ from app.models import (
     MapSaveResponse,
     ProactiveRequest,
     ProactiveResponse,
+    PromoteRequest,
+    PromoteResponse,
     RecallRequest,
     RecallResponse,
     RememberRequest,
@@ -302,15 +304,27 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
     if getattr(svc, "search_only", False):
         from app.service import _SEARCH_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
-    note_id = svc.remember(
-        content=body.content,
-        tags=body.tags,
-        priority=body.priority,
-        session_id=body.session_id,
-        kind=body.kind,
-        title=body.title,
-        agent=body.agent,
-    )
+    try:
+        note_id = svc.remember(
+            content=body.content,
+            tags=body.tags,
+            priority=body.priority,
+            session_id=body.session_id,
+            kind=body.kind,
+            title=body.title,
+            agent=body.agent,
+            triggers=body.triggers,
+            provenance=body.provenance,
+            scope=body.scope,
+            anchors=body.anchors,
+            supersedes=body.supersedes,
+        )
+    except ValueError as exc:
+        # TRIGGER-ENGINE wave 1: malformed triggers, an unrecognised
+        # provenance/scope combination (e.g. provenance='auto' +
+        # kind='directive'), or a `supersedes` target that does not exist —
+        # all caller input errors, never a server fault.
+        raise HTTPException(status_code=422, detail={"error": "invalid_memory_object", "detail": str(exc)})
     return RememberResponse(
         note_id=note_id,
         # CLI-form hint (UPG-CLI-RECALL-HINT): this route is the CLI's `vectr
@@ -346,6 +360,30 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
     )
     return RecallResponse(
         notes=notes_text,
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/promote", response_model=PromoteResponse)
+async def promote(body: PromoteRequest, request: Request) -> PromoteResponse:
+    """Explicit provenance promotion (TRIGGER-ENGINE wave 1,
+    bm2-design-skeleton.md §5): auto -> agent -> human, one step at a time.
+    Provenance is immutable at write; this is the one sanctioned way to raise
+    it afterward."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    try:
+        promoted = svc.promote_note(body.note_id, body.to)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": "invalid_promotion", "detail": str(exc)})
+    if not promoted:
+        raise HTTPException(status_code=404, detail={"error": "note_not_found", "detail": f"Note #{body.note_id} not found."})
+    return PromoteResponse(
+        note_id=body.note_id,
+        provenance=body.to,
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

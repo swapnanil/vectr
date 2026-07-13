@@ -1000,11 +1000,21 @@ class TestVectrFetch:
 # vectr_remember
 # ---------------------------------------------------------------------------
 
+# Default TRIGGER-ENGINE wave 1 params (bm2-design-skeleton.md §1/§2/§5) that
+# every vectr_remember dispatch appends when the caller omits them — kept as
+# one constant so existing assert_called_once_with() calls below stay
+# readable as the additive surface grows.
+_DEFAULT_TRIGGER_PARAMS = dict(triggers=None, provenance="agent", scope="workspace", anchors=None, supersedes=None)
+
+
 class TestVectrRemember:
     def test_remember_calls_service(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "Found auth bug"}, svc)
-        svc.remember.assert_called_once_with(content="Found auth bug", tags=None, priority="medium", kind="finding", title="", agent="")
+        svc.remember.assert_called_once_with(
+            content="Found auth bug", tags=None, priority="medium", kind="finding", title="", agent="",
+            **_DEFAULT_TRIGGER_PARAMS,
+        )
 
     def test_remember_returns_note_id(self) -> None:
         svc = _mock_service()
@@ -1026,6 +1036,7 @@ class TestVectrRemember:
             kind="finding",
             title="",
             agent="",
+            **_DEFAULT_TRIGGER_PARAMS,
         )
 
     def test_remember_missing_content_returns_error(self) -> None:
@@ -1036,14 +1047,20 @@ class TestVectrRemember:
     def test_remember_invalid_priority_clamps_to_medium(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "note", "priority": "urgent"}, svc)
-        svc.remember.assert_called_once_with(content="note", tags=None, priority="medium", kind="finding", title="", agent="")
+        svc.remember.assert_called_once_with(
+            content="note", tags=None, priority="medium", kind="finding", title="", agent="",
+            **_DEFAULT_TRIGGER_PARAMS,
+        )
 
     def test_remember_passes_kind_through(self) -> None:
         """UPG-9.3: an explicit kind reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "never push to main", "kind": "directive"}, svc)
-        svc.remember.assert_called_once_with(content="never push to main", tags=None,
-                                             priority="medium", kind="directive", title="", agent="")
+        svc.remember.assert_called_once_with(
+            content="never push to main", tags=None,
+            priority="medium", kind="directive", title="", agent="",
+            **_DEFAULT_TRIGGER_PARAMS,
+        )
 
     def test_remember_passes_title_through(self) -> None:
         """UPG-RECALL-HIERARCHY: explicit title reaches the service."""
@@ -1054,6 +1071,7 @@ class TestVectrRemember:
         svc.remember.assert_called_once_with(
             content="def acquire_lock(): ...", tags=None, priority="medium",
             kind="finding", title="workspace lock acquisition", agent="",
+            **_DEFAULT_TRIGGER_PARAMS,
         )
 
     def test_remember_passes_agent_through(self) -> None:
@@ -1065,7 +1083,54 @@ class TestVectrRemember:
         svc.remember.assert_called_once_with(
             content="found the bug in the parser", tags=None, priority="medium",
             kind="finding", title="", agent="coder-2",
+            **_DEFAULT_TRIGGER_PARAMS,
         )
+
+    # -- TRIGGER-ENGINE wave 1 (bm2-design-skeleton.md §1/§2/§5) --------------
+
+    def test_remember_passes_triggers_provenance_scope_anchors_through(self) -> None:
+        svc = _mock_service()
+        handle_tools_call("vectr_remember", {
+            "content": "a gotcha about auth.py",
+            "kind": "gotcha",
+            "triggers": [{"path": "src/auth.py", "event": "pre-edit"}],
+            "provenance": "auto",
+            "scope": "repo",
+            "anchors": ["src/auth.py"],
+        }, svc)
+        svc.remember.assert_called_once_with(
+            content="a gotcha about auth.py", tags=None, priority="medium",
+            kind="gotcha", title="", agent="",
+            triggers=[{"path": "src/auth.py", "event": "pre-edit"}],
+            provenance="auto", scope="repo", anchors=["src/auth.py"], supersedes=None,
+        )
+
+    def test_remember_passes_supersedes_as_int(self) -> None:
+        svc = _mock_service()
+        handle_tools_call("vectr_remember", {"content": "corrected finding", "supersedes": "7"}, svc)
+        svc.remember.assert_called_once_with(
+            content="corrected finding", tags=None, priority="medium",
+            kind="finding", title="", agent="",
+            triggers=None, provenance="agent", scope="workspace", anchors=None, supersedes=7,
+        )
+
+    def test_remember_non_integer_supersedes_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_remember", {"content": "note", "supersedes": "not-a-number"}, svc)
+        assert result["isError"] is True
+        svc.remember.assert_not_called()
+
+    def test_remember_value_error_from_service_returns_mcp_error(self) -> None:
+        """A malformed trigger, bad provenance/scope combo, or a supersedes
+        target that doesn't exist all surface as `isError: True`, not a
+        raised exception reaching the dispatch caller."""
+        svc = _mock_service()
+        svc.remember.side_effect = ValueError("provenance='auto' is not allowed on kind='directive'")
+        result = handle_tools_call("vectr_remember", {
+            "content": "an unreviewed standing rule", "kind": "directive", "provenance": "auto",
+        }, svc)
+        assert result["isError"] is True
+        assert "provenance" in result["content"][0]["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -1366,14 +1431,75 @@ class TestVectrForget:
         monkeypatch.setenv("VECTR_MCP_ALL_TOOLS", "1")
         tools = handle_tools_list(session_id="fresh-session-no-notes")["tools"]
         names = {t["name"] for t in tools}
-        assert len(tools) == 14
-        assert {"vectr_recall", "vectr_forget", "vectr_snapshot", "vectr_snapshot_list"} <= names
+        assert len(tools) == 15
+        assert {"vectr_recall", "vectr_forget", "vectr_promote", "vectr_snapshot", "vectr_snapshot_list"} <= names
 
     def test_all_tools_env_flag_off_keeps_gating(self, monkeypatch) -> None:
         monkeypatch.delenv("VECTR_MCP_ALL_TOOLS", raising=False)
         tools = handle_tools_list(session_id="fresh-session-no-notes")["tools"]
         names = {t["name"] for t in tools}
         assert "vectr_recall" not in names
+
+
+# ---------------------------------------------------------------------------
+# vectr_promote (TRIGGER-ENGINE wave 1, bm2-design-skeleton.md §5)
+# ---------------------------------------------------------------------------
+
+class TestVectrPromote:
+    def test_promote_calls_service(self) -> None:
+        svc = _mock_service()
+        svc.promote_note.return_value = True
+        result = handle_tools_call("vectr_promote", {"note_id": 12, "to": "human"}, svc)
+        svc.promote_note.assert_called_once_with(12, "human")
+        assert result["isError"] is False
+        assert "#12" in result["content"][0]["text"]
+        assert "human" in result["content"][0]["text"]
+
+    def test_promote_missing_note_id_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_promote", {"to": "agent"}, svc)
+        assert result["isError"] is True
+        svc.promote_note.assert_not_called()
+
+    def test_promote_missing_to_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_promote", {"note_id": 12}, svc)
+        assert result["isError"] is True
+        svc.promote_note.assert_not_called()
+
+    def test_promote_non_integer_note_id_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_promote", {"note_id": "abc", "to": "agent"}, svc)
+        assert result["isError"] is True
+        svc.promote_note.assert_not_called()
+
+    def test_promote_not_found_returns_error(self) -> None:
+        svc = _mock_service()
+        svc.promote_note.return_value = False
+        result = handle_tools_call("vectr_promote", {"note_id": 999, "to": "agent"}, svc)
+        assert result["isError"] is True
+        assert "not found" in result["content"][0]["text"].lower()
+
+    def test_promote_value_error_from_service_returns_mcp_error(self) -> None:
+        """An invalid single-step promotion (e.g. auto -> human, skipping
+        'agent') surfaces as isError: True, never an unhandled exception."""
+        svc = _mock_service()
+        svc.promote_note.side_effect = ValueError("promote() only allows a single step up")
+        result = handle_tools_call("vectr_promote", {"note_id": 12, "to": "human"}, svc)
+        assert result["isError"] is True
+        assert "single step" in result["content"][0]["text"]
+
+    def test_promote_in_tools_list(self) -> None:
+        names = {t["name"] for t in handle_tools_list()["tools"]}
+        assert "vectr_promote" in names
+
+    def test_promote_gated_with_other_memory_read_tools(self) -> None:
+        """vectr_promote is a pure SQLite write needing no embedder/indexer —
+        same gating group as vectr_forget/vectr_recall (notes-exist gate),
+        not the always-visible write-side group vectr_remember lives in."""
+        assert "vectr_promote" in {t["name"] for t in _MEMORY_TOOLS}
+        write_names = {t["name"] for t in _MEMORY_WRITE_TOOLS}
+        assert "vectr_promote" not in write_names
 
 
 # ---------------------------------------------------------------------------

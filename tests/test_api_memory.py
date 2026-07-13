@@ -56,6 +56,60 @@ class TestRememberRoute:
         resp = client.post("/v1/remember", json={"content": "no agent set"})
         assert resp.status_code == 200
 
+    # -- TRIGGER-ENGINE wave 1 (bm2-design-skeleton.md §1/§2/§5) --------------
+
+    def test_remember_accepts_trigger_engine_params(self, client) -> None:
+        """All new params are additive/optional and round-trip through the
+        mocked service without changing the pre-existing response shape."""
+        resp = client.post("/v1/remember", json={
+            "content": "a gotcha about auth.py",
+            "kind": "gotcha",
+            "triggers": [{"path": "src/auth.py", "event": "pre-edit"}],
+            "provenance": "auto",
+            "scope": "repo",
+            "anchors": ["src/auth.py"],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["note_id"] is not None
+
+    def test_remember_omitting_trigger_engine_params_is_unchanged(self, client) -> None:
+        """No new params present reproduces exactly the pre-wave-1 call."""
+        resp = client.post("/v1/remember", json={"content": "plain note, no trigger params"})
+        assert resp.status_code == 200
+
+    def test_remember_invalid_provenance_rejected_at_rest_boundary(self, client) -> None:
+        # 'human' is not settable via REST (only via /v1/promote).
+        resp = client.post("/v1/remember", json={"content": "x", "provenance": "human"})
+        assert resp.status_code == 422
+
+    def test_remember_invalid_scope_rejected_at_rest_boundary(self, client) -> None:
+        resp = client.post("/v1/remember", json={"content": "x", "scope": "not-a-real-scope"})
+        assert resp.status_code == 422
+
+    def test_remember_malformed_triggers_returns_422(self, client_real_memory) -> None:
+        """A malformed trigger reaches the store's ValueError and surfaces as
+        a 422 (caller input error), not a 500."""
+        resp = client_real_memory.post("/v1/remember", json={
+            "content": "note", "triggers": [{"not_before": 1.0}],
+        })
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["error"] == "invalid_memory_object"
+
+    def test_remember_auto_provenance_rejected_on_directive_via_rest(self, client_real_memory) -> None:
+        resp = client_real_memory.post("/v1/remember", json={
+            "content": "an unreviewed standing rule", "kind": "directive", "provenance": "auto",
+        })
+        assert resp.status_code == 422
+
+    def test_remember_supersedes_round_trips_via_rest(self, client_real_memory) -> None:
+        client = client_real_memory
+        old = client.post("/v1/remember", json={"content": "old finding"}).json()["note_id"]
+        new = client.post("/v1/remember", json={"content": "corrected finding", "supersedes": old}).json()["note_id"]
+        assert new != old
+        active = client.post("/v1/recall", json={"detail": "full"}).json()["notes"]
+        assert "corrected finding" in active
+        assert "old finding" not in active
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/recall
@@ -362,3 +416,43 @@ class TestForgetRoute:
         remaining = client_real_memory.post(
             "/v1/recall", json={"detail": "full"}).json()["notes"]
         assert "survivor note" in remaining
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/promote (TRIGGER-ENGINE wave 1, bm2-design-skeleton.md §5)
+# ---------------------------------------------------------------------------
+
+class TestPromoteRoute:
+    def test_promote_returns_200_with_mocked_service(self, client) -> None:
+        resp = client.post("/v1/promote", json={"note_id": 1, "to": "agent"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["note_id"] == 1
+        assert data["provenance"] == "agent"
+        assert "processing_ms" in data
+
+    def test_promote_invalid_to_value_returns_422(self, client) -> None:
+        resp = client.post("/v1/promote", json={"note_id": 1, "to": "not-a-real-provenance"})
+        assert resp.status_code == 422
+
+    def test_promote_auto_to_agent_via_rest(self, client_real_memory) -> None:
+        client = client_real_memory
+        note_id = client.post(
+            "/v1/remember", json={"content": "auto note", "provenance": "auto"}
+        ).json()["note_id"]
+        resp = client.post("/v1/promote", json={"note_id": note_id, "to": "agent"})
+        assert resp.status_code == 200
+        assert resp.json()["provenance"] == "agent"
+
+    def test_promote_skip_a_rank_returns_422(self, client_real_memory) -> None:
+        client = client_real_memory
+        note_id = client.post(
+            "/v1/remember", json={"content": "auto note", "provenance": "auto"}
+        ).json()["note_id"]
+        resp = client.post("/v1/promote", json={"note_id": note_id, "to": "human"})
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["error"] == "invalid_promotion"
+
+    def test_promote_nonexistent_note_returns_404(self, client_real_memory) -> None:
+        resp = client_real_memory.post("/v1/promote", json={"note_id": 999999, "to": "agent"})
+        assert resp.status_code == 404

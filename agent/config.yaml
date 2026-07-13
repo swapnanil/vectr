@@ -1152,6 +1152,40 @@ fetch:
   # surface into an unbounded bulk-export of the whole index.
   max_ids_per_call: 20
 
+memory_triggers:
+  # TRIGGER-ENGINE wave 1 (bm2-design-skeleton.md §2/§3) — per-memory P/E/T
+  # triggers: one deterministic total order, reused for fire precedence,
+  # injection ordering, AND budget eviction (agent/trigger_engine.py).
+  total_order:
+    # Kind precedence, highest first. Governs which kind wins a tie in fire
+    # order, injection order, and (from the bottom) eviction order.
+    kind_priority:
+      - directive
+      - gotcha
+      - task
+      - finding
+      - reference
+    # Note priority precedence, highest first.
+    priority_rank:
+      - high
+      - medium
+      - low
+
+  injection:
+    # Per-injected-memory token cap (full-text tier: directive/gotcha). A
+    # memory over this cap is NEVER partially truncated — it either injects
+    # whole or drops to its index-tier one-liner (never a half-cut body).
+    per_injection_token_cap: 1500
+    # Cumulative token cap for everything injected in one delivery moment
+    # (one hook firing / one fire-evaluation call). Notes are packed in total-
+    # order; once the budget is exhausted, remaining notes are evicted from
+    # the bottom of that same order.
+    per_session_token_cap: 8000
+    # Chars-per-token estimate used to size injected text against the two
+    # caps above (same rough ratio as hooks.log_chars_per_token; kept as a
+    # separate key since the two domains may need to diverge later).
+    chars_per_token: 4
+
 proactive:
   # UPG-PRO — "Proactive context" (experimental). Deterministically surface the
   # relevant working-memory note / structural match at a sanctioned delivery

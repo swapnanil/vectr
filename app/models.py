@@ -228,6 +228,19 @@ class MapSaveResponse(BaseModel):
 
 _VALID_KINDS = ("directive", "task", "gotcha", "finding", "reference")
 
+# TRIGGER-ENGINE wave 1 (bm2-design-skeleton.md §1/§2/§5) — mirrors
+# agent.working_context_store._types.SCOPE_VALUES/PROVENANCE_VALUES. Kept as
+# a local closed-vocabulary tuple here rather than imported, matching this
+# module's existing convention for _VALID_KINDS above (the REST/MCP request
+# schema validates independently of the store's own internal validation).
+_SCOPE_VALUES = ("workspace", "repo", "path-subtree", "branch", "session")
+_PROVENANCE_VALUES = ("human", "agent", "auto")
+# 'human' is not settable via vectr_remember/RememberRequest — only 'agent'
+# (default) or 'auto' may be declared at write time; promoting to 'human' is
+# a separate, explicit call (PromoteRequest below) once a person has endorsed
+# the note.
+_REST_PROVENANCE_VALUES = ("agent", "auto")
+
 
 class RememberRequest(BaseModel):
     content: str = Field(..., min_length=1, description="Working note to store")
@@ -245,6 +258,49 @@ class RememberRequest(BaseModel):
             "'[#12] task/high (coder-2) · title'); absent renders exactly as before."
         ),
     )
+    triggers: list[dict] | None = Field(
+        default=None,
+        description=(
+            "TRIGGER-ENGINE wave 1: explicit P/E/T trigger overrides. Each "
+            "entry declares 'path' (glob) and/or 'event' (session-start | "
+            "prompt-submit | pre-edit | pre-run | pre-commit | "
+            "post-compaction) plus optional 'not_before' / "
+            "'expires_visibility' / 'cooldown' (T modifiers, never fire "
+            "alone). Entries are OR'd together across the list; omitted or "
+            "empty uses this note's kind's default trigger bundle, computed "
+            "at evaluation time."
+        ),
+    )
+    provenance: str = Field(
+        default="agent",
+        description=(
+            "Trust/endorsement class (TRIGGER-ENGINE wave 1): 'agent' "
+            "(default — an AI session recorded this, framed as memory to "
+            "verify) or 'auto' (captured with no reviewing judgment, weakest "
+            "framing; not allowed on kind='directive'). 'human' is not "
+            "settable from this tool — see the separate promote call."
+        ),
+    )
+    scope: str = Field(default="workspace", description="workspace (default, no filtering) | repo | path-subtree | branch | session")
+    anchors: list[str] | None = Field(
+        default=None,
+        description=(
+            "Workspace-relative (or absolute) file paths this note is "
+            "anchored to. Each path's current content hash is computed at "
+            "write time and re-checked at recall/fire time — a mismatch adds "
+            "a visible staleness caveat, the note still fires/recalls "
+            "(never silently dropped)."
+        ),
+    )
+    supersedes: int | None = Field(
+        default=None,
+        description=(
+            "note_id this new note explicitly tombstones. The target note "
+            "is excluded from recall/fire from now on but retained, "
+            "unchanged, for audit. Rejected if the target does not exist in "
+            "this workspace."
+        ),
+    )
 
     @field_validator("priority")
     @classmethod
@@ -258,6 +314,23 @@ class RememberRequest(BaseModel):
     def validate_kind(cls, v: str) -> str:
         if v not in _VALID_KINDS:
             raise ValueError(f"kind must be one of: {', '.join(_VALID_KINDS)}")
+        return v
+
+    @field_validator("provenance")
+    @classmethod
+    def validate_provenance(cls, v: str) -> str:
+        if v not in _REST_PROVENANCE_VALUES:
+            raise ValueError(
+                f"provenance must be one of: {', '.join(_REST_PROVENANCE_VALUES)} "
+                "('human' is not settable here — promote a note to 'human' separately)"
+            )
+        return v
+
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, v: str) -> str:
+        if v not in _SCOPE_VALUES:
+            raise ValueError(f"scope must be one of: {', '.join(_SCOPE_VALUES)}")
         return v
 
 
@@ -355,6 +428,30 @@ class ProactiveResponse(BaseModel):
 class ForgetRequest(BaseModel):
     note_id: int | None = Field(default=None, description="Delete this one note (the [#N] id from recall)")
     all: bool = Field(default=False, description="Delete ALL notes for this workspace. Irreversible.")
+
+
+class PromoteRequest(BaseModel):
+    """Explicit provenance promotion (TRIGGER-ENGINE wave 1,
+    bm2-design-skeleton.md §5): auto -> agent -> human, one step at a time.
+    Provenance is immutable at write; this is the one sanctioned way to raise
+    it afterward (e.g. a human reviews and endorses an agent-authored note).
+    Demotion is impossible."""
+
+    note_id: int = Field(..., description="Note to promote")
+    to: str = Field(..., description="Target provenance — must be exactly one step above the note's current provenance (auto -> agent -> human)")
+
+    @field_validator("to")
+    @classmethod
+    def validate_to(cls, v: str) -> str:
+        if v not in _PROVENANCE_VALUES:
+            raise ValueError(f"to must be one of: {', '.join(_PROVENANCE_VALUES)}")
+        return v
+
+
+class PromoteResponse(BaseModel):
+    note_id: int
+    provenance: str
+    processing_ms: int
 
 
 class SnapshotRequest(BaseModel):
