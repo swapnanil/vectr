@@ -369,7 +369,15 @@ async def promote(body: PromoteRequest, request: Request) -> PromoteResponse:
     """Explicit provenance promotion (TRIGGER-ENGINE wave 1,
     bm2-design-skeleton.md §5): auto -> agent -> human, one step at a time.
     Provenance is immutable at write; this is the one sanctioned way to raise
-    it afterward."""
+    it afterward.
+
+    This is the user-side promotion surface — a CLI/UI a person operates
+    calls this route directly, so it supports the full one-step chain
+    including the final agent -> human step. The MCP tool (`vectr_promote`,
+    the AI's own surface) deliberately does NOT expose that last step: an
+    agent deciding on its own that a person has endorsed a note would reopen
+    the trust-inversion hole §5 closes structurally, so it only allows
+    auto -> agent and returns a tool error for 'human'."""
     t0 = time.monotonic()
     svc = _service(request)
     if getattr(svc, "search_only", False):

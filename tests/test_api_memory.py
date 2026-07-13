@@ -456,3 +456,16 @@ class TestPromoteRoute:
     def test_promote_nonexistent_note_returns_404(self, client_real_memory) -> None:
         resp = client_real_memory.post("/v1/promote", json={"note_id": 999999, "to": "agent"})
         assert resp.status_code == 404
+
+    def test_promote_agent_to_human_via_rest(self, client_real_memory) -> None:
+        """REST is the user-side promotion surface (a CLI/UI a person operates),
+        so unlike the MCP tool it supports the full one-step chain, including
+        the final agent -> human step (bm2-design-skeleton.md §5)."""
+        client = client_real_memory
+        note_id = client.post(
+            "/v1/remember", json={"content": "auto note", "provenance": "auto"}
+        ).json()["note_id"]
+        client.post("/v1/promote", json={"note_id": note_id, "to": "agent"})
+        resp = client.post("/v1/promote", json={"note_id": note_id, "to": "human"})
+        assert resp.status_code == 200
+        assert resp.json()["provenance"] == "human"

@@ -590,11 +590,12 @@ _MEMORY_TOOLS = [
             "openWorldHint": False,
         },
         "description": (
-            "Raise a note's trust class one step: auto -> agent -> human. Use this after a "
-            "person has reviewed and endorsed a note — e.g. an auto-captured note that turned "
-            "out correct, or an agent-authored finding a human has confirmed. Provenance is "
-            "immutable at write time; this is the only way to change it afterward, and it only "
-            "moves one step at a time (never skips a rank, never demotes)."
+            "Raise an auto-captured note's trust class to 'agent' — e.g. after this session "
+            "has reviewed an auto-captured note and confirmed it still holds. This tool only "
+            "takes that one step (auto -> agent); it never promotes a note to 'human', because "
+            "deciding that a person has endorsed something is not the agent's call to make. "
+            "Human endorsement happens on a user-side surface instead (a CLI/UI a person "
+            "operates), not through this tool."
         ),
         "inputSchema": {
             "type": "object",
@@ -605,8 +606,8 @@ _MEMORY_TOOLS = [
                 },
                 "to": {
                     "type": "string",
-                    "description": "Target provenance — must be exactly one step above the note's current provenance",
-                    "enum": ["agent", "human"],
+                    "description": "Target provenance. Only 'agent' is available via this tool (auto -> agent); promoting to 'human' is a user-side action, not available here.",
+                    "enum": ["agent"],
                 },
             },
             "required": ["note_id", "to"],

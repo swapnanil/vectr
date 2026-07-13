@@ -1449,11 +1449,27 @@ class TestVectrPromote:
     def test_promote_calls_service(self) -> None:
         svc = _mock_service()
         svc.promote_note.return_value = True
-        result = handle_tools_call("vectr_promote", {"note_id": 12, "to": "human"}, svc)
-        svc.promote_note.assert_called_once_with(12, "human")
+        result = handle_tools_call("vectr_promote", {"note_id": 12, "to": "agent"}, svc)
+        svc.promote_note.assert_called_once_with(12, "agent")
         assert result["isError"] is False
         assert "#12" in result["content"][0]["text"]
-        assert "human" in result["content"][0]["text"]
+        assert "agent" in result["content"][0]["text"]
+
+    def test_promote_to_human_rejected_at_mcp_layer(self) -> None:
+        """The MCP tool is the AGENT's own surface (bm2-design-skeleton.md §5:
+        "promotion is an explicit user act"). An agent must never raise its own
+        note straight to provenance='human' -- that would let it decide, on its
+        own, that a person endorsed something, reopening the trust-inversion
+        hole §5 closes structurally. Only auto -> agent is reachable here; the
+        store is never even called. (Full auto -> agent -> human semantics
+        remain available on the user-side REST /v1/promote route.)"""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_promote", {"note_id": 12, "to": "human"}, svc)
+        assert result["isError"] is True
+        text = result["content"][0]["text"].lower()
+        assert "human" in text
+        assert "user-side" in text or "person" in text
+        svc.promote_note.assert_not_called()
 
     def test_promote_missing_note_id_returns_error(self) -> None:
         svc = _mock_service()
@@ -1481,11 +1497,13 @@ class TestVectrPromote:
         assert "not found" in result["content"][0]["text"].lower()
 
     def test_promote_value_error_from_service_returns_mcp_error(self) -> None:
-        """An invalid single-step promotion (e.g. auto -> human, skipping
-        'agent') surfaces as isError: True, never an unhandled exception."""
+        """An invalid single-step promotion (e.g. a note already at 'agent' or
+        'human' targeted with 'agent' again) surfaces as isError: True, never
+        an unhandled exception. Uses to='agent' since 'human' is rejected
+        before the store is ever called (see test_promote_to_human_rejected_at_mcp_layer)."""
         svc = _mock_service()
         svc.promote_note.side_effect = ValueError("promote() only allows a single step up")
-        result = handle_tools_call("vectr_promote", {"note_id": 12, "to": "human"}, svc)
+        result = handle_tools_call("vectr_promote", {"note_id": 12, "to": "agent"}, svc)
         assert result["isError"] is True
         assert "single step" in result["content"][0]["text"]
 

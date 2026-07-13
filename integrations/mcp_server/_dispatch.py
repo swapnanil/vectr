@@ -700,7 +700,23 @@ def handle_tools_call(
         except (TypeError, ValueError):
             return _mcp_error("note_id must be an integer (the [#N] id shown by vectr_recall)")
         if not to:
-            return _mcp_error("to is required ('agent' or 'human')")
+            return _mcp_error("to is required (only 'agent' is available via this tool)")
+        if to == "human":
+            # The MCP surface is the AGENT's surface (bm2-design-skeleton.md §5:
+            # "promotion is an explicit user act"). Letting an agent raise its own
+            # note straight to provenance='human' would let it decide, on its own,
+            # that a person endorsed something -- reopening the trust-inversion
+            # hole §5 closes structurally (only human-authored/endorsed notes get
+            # the unhedged imperative directive framing in format_notes_for_llm()).
+            # Human endorsement happens on a user-side surface instead (the REST
+            # POST /v1/promote route a person's own CLI/UI calls), never here.
+            return _mcp_error(
+                "Promotion to provenance='human' is not available via this tool -- "
+                "human endorsement happens on a user-side surface (e.g. a CLI/UI a "
+                "person operates), not through the AI's own MCP tools. This tool "
+                "only supports the auto -> agent step; ask the person to promote "
+                "the note to 'human' themselves if it warrants that trust level."
+            )
         try:
             promoted = service.promote_note(nid, to)
         except ValueError as exc:
