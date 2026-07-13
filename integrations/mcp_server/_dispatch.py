@@ -1,6 +1,7 @@
 """MCP tool dispatch — handle_tools_call and handle_tools_list."""
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from agent.config import SYMBOL_NAME_PARAM_ALIASES
@@ -47,6 +48,15 @@ def handle_tools_list(session_id: str | None = None, service: Any = None) -> dic
     Always shown: exploration tools + vectr_remember + vectr_evict_hint.
     Gated on notes existing: vectr_recall, vectr_forget, vectr_snapshot, vectr_snapshot_list.
     """
+    # Hosted/registry deployments (e.g. a catalog's containerised inspector)
+    # start with an empty note store but must still advertise the complete
+    # tool surface — the memory read tools would otherwise stay hidden until
+    # the first note exists. Default-off; editor sessions are unaffected.
+    if os.getenv("VECTR_MCP_ALL_TOOLS", "") == "1":
+        return {
+            "tools": _EXPLORATION_TOOLS + _MEMORY_WRITE_TOOLS + _UTILITY_TOOLS + _MEMORY_TOOLS
+        }
+
     # Pre-enable memory read tools if notes already exist
     if session_id and service and not is_memory_enabled(session_id):
         try:
