@@ -3,7 +3,7 @@ from __future__ import annotations
 
 MCP_SERVER_INFO = {
     "name": "vectr",
-    "version": "1.1.1",
+    "version": "1.2.0",
     "description": "Zero-config semantic code search + persistent working memory for AI agents",
     "capabilities": {"tools": {}},
 }

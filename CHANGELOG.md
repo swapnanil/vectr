@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.2.0 — 2026-07-13
+
+Proactive context injection and daemon availability under load. All new
+behavior is opt-in; with no new flags or consent given, behavior is
+unchanged.
+
+### Proactive context (new, opt-in)
+- New `vectr proxy` command: a localhost, Anthropic-API-shaped proxy that
+  deterministically injects relevant working-memory notes into an AI
+  agent's request context when their trigger conditions match — no reliance
+  on the agent voluntarily calling recall. Injection is consent-gated (a
+  proactive master switch plus per-launch consent for the proxy channel)
+  and fully observable: injection counts and end-to-end state are exposed
+  in `/v1/status` and rendered in the proxy banner.
+- Scored recall behind a new `/v1/proactive` endpoint; injections are
+  budgeted, deduplicated, and fail open (an injection-path error never
+  blocks the underlying request — it is logged and bypassed).
+- Org-wide artifact cache and exact-match response cache wired into the
+  proactive path.
+
+### Daemon availability
+- `/v1/index` now runs off the event loop (threadpool), so a full-workspace
+  index call no longer blocks every other request for its duration.
+- New `reindex_in_progress` field in `/v1/status`: a lock-free, always-cheap
+  signal that bulk index work (an explicit index or the watcher's coalesced
+  batch) is running right now.
+- Per-language index statistics no longer trigger a full metadata scan on
+  every status call while the index is changing; chunk totals read the
+  vector store's native count directly.
+
+### Watcher
+- Live file events now honor `.gitignore` exactly like the bulk indexer
+  (previously only `.vectrignore` was consulted on create/modify/delete/move
+  events, so a gitignored file could enter the index through a live edit).
+
+### Fixes
+- `vectr forget --all` sweeps the current cache layout, not only the legacy
+  nested layout.
+- The proxy banner's status probe retries with a longer timeout instead of
+  reporting a transient failure.
+
 ## 1.1.1 — 2026-07-12
 
 ### Indexing
