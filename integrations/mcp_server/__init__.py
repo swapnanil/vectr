@@ -7,6 +7,8 @@ Package layout:
                  _session_calls_since_save), nudge helpers, enable/is_memory_enabled
   _dispatch.py — handle_tools_list, handle_tools_call, _format_search_results,
                  _mcp_error
+  _stdio.py    — stdio transport: ServiceHandle, dispatch_line, run_stdio_loop
+                 (newline-delimited JSON-RPC on stdin/stdout, reuses _dispatch.py)
 """
 from __future__ import annotations
 
@@ -42,6 +44,12 @@ from integrations.mcp_server._dispatch import (
     _mcp_error,
 )
 
+from integrations.mcp_server._stdio import (
+    ServiceHandle,
+    dispatch_line,
+    run_stdio_loop,
+)
+
 __all__ = [
     # Server info
     "MCP_SERVER_INFO",
@@ -70,4 +78,8 @@ __all__ = [
     # Formatting helpers
     "_format_search_results",
     "_mcp_error",
+    # Stdio transport
+    "ServiceHandle",
+    "dispatch_line",
+    "run_stdio_loop",
 ]

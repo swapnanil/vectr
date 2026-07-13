@@ -112,7 +112,7 @@ class TestCmdStart:
 
         mock_do_start.assert_called_once_with(
             ws, 8765, wh, extra_roots=[], memory_only=False, search_only=False, workspace_explicit=True,
-            code_workspace_file=None, host="127.0.0.1",
+            code_workspace_file=None, host="127.0.0.1", no_ide_config=False,
         )
 
     def test_prunes_dead_entries_before_starting(self, tmp_path):
@@ -2776,7 +2776,7 @@ class TestMultiRoot:
 
         mock_do_start.assert_called_once_with(
             ws_a, 8765, wh, extra_roots=[ws_b], memory_only=False, search_only=False, workspace_explicit=True,
-            code_workspace_file=None, host="127.0.0.1",
+            code_workspace_file=None, host="127.0.0.1", no_ide_config=False,
         )
 
 

@@ -79,6 +79,7 @@ class VectrService:
         memory_only: bool = False,
         search_only: bool = False,
         workspace_explicit: bool = False,
+        configure_ide: bool = True,
     ) -> None:
         from agent.indexer import CodeIndexer
         from agent.searcher import CodeSearcher
@@ -243,8 +244,13 @@ class VectrService:
         from agent.strategy_selector import RetrievalStrategy
         self._strategy: RetrievalStrategy | None = None
 
-        for root in self._indexer.all_roots:
-            configure_all(str(root), port)
+        # IDE config files point at this process's HTTP port — meaningless for a
+        # caller that has no HTTP port (e.g. the stdio transport) and potentially
+        # disruptive for a workspace it doesn't own (e.g. a hosting platform's
+        # mounted container filesystem). Callers without a real port opt out.
+        if configure_ide:
+            for root in self._indexer.all_roots:
+                configure_all(str(root), port)
 
     # ------------------------------------------------------------------
     # Lifecycle

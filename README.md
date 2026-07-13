@@ -176,6 +176,16 @@ Exposes port 8765. Docker does not auto-write IDE config files — use local ins
 
 </details>
 
+### Stdio transport
+
+The editors above connect over HTTP (`vectr start` + `POST /mcp`). For MCP clients and hosting platforms that spawn the server as a subprocess and speak MCP over its stdin/stdout instead of opening an HTTP connection, run:
+
+```bash
+vectr mcp-stdio [WORKSPACE]
+```
+
+No port, no daemon — a single foreground process framed as newline-delimited JSON-RPC 2.0 (one JSON object per line on each of stdin/stdout, no `Content-Length` headers). `initialize` and `tools/list` answer immediately; the embedding model load and initial indexing happen on a background thread, and a `tools/call` made before that finishes gets a graceful "still starting up" response instead of hanging. Stdout carries protocol JSON only — all logging goes to stderr. The process exits cleanly on stdin EOF (the client closing the pipe). `--memory-only` and `--search-only` behave the same as on `vectr start`.
+
 ---
 
 ## How it works
@@ -241,6 +251,7 @@ vectr init --path .                   # write CLAUDE.md + MCP config without sta
 vectr init --exclude vendor           # exclude directories from indexing
 vectr forget --path .                 # delete all working-memory notes
 vectr proxy                           # experimental: localhost API proxy (see below)
+vectr mcp-stdio                       # foreground stdio MCP transport, no port/daemon (see above)
 ```
 
 ---

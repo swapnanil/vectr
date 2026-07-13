@@ -8,6 +8,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -969,6 +970,7 @@ def _do_start(
     workspace_explicit: bool = False,
     code_workspace_file: str | None = None,
     host: str = "127.0.0.1",
+    no_ide_config: bool = False,
 ) -> None:
     if memory_only and search_only:
         raise ValueError("Cannot start vectr in both --memory-only and --search-only mode simultaneously")
@@ -992,6 +994,14 @@ def _do_start(
         # UPG-WS-ROOT-MISDETECT: tells VectrService to trust `workspace`
         # verbatim instead of walking up to the nearest enclosing .git root.
         env["VECTR_WORKSPACE_EXPLICIT"] = "1"
+    if no_ide_config:
+        # UPG-CLI-WRITES-DISCLOSURE follow-through: `--no-ide-config` skipped
+        # this process's own 7-file `_write_workspace_config` write, but the
+        # daemon subprocess's `VectrService.__init__` used to call
+        # `configure_all()` unconditionally regardless — silently writing
+        # .cursor/mcp.json and .claude/settings.json anyway. Propagate the
+        # choice across the subprocess boundary so the opt-out actually holds.
+        env["VECTR_CONFIGURE_IDE"] = "0"
     vectr_dir = Path(__file__).resolve().parent
     with open(log_path, "a") as log_file:
         proc = subprocess.Popen(
@@ -1190,6 +1200,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         workspace, port, ws_hash, extra_roots=extra_roots,
         memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
         code_workspace_file=_code_workspace_file_arg(args), host=host,
+        no_ide_config=getattr(args, "no_ide_config", False),
     )
 
 
@@ -1926,6 +1937,7 @@ def cmd_restart(args: argparse.Namespace) -> None:
         workspace, port, ws_hash, extra_roots=extra_roots,
         memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
         code_workspace_file=_code_workspace_file_arg(args), host=host,
+        no_ide_config=getattr(args, "no_ide_config", False),
     )
 
 
@@ -2088,6 +2100,87 @@ def cmd_watch(args: argparse.Namespace) -> None:
     finally:
         watcher.stop()
         print("\nWatcher stopped.", file=sys.stderr)
+
+
+def cmd_mcp_stdio(args: argparse.Namespace) -> None:
+    """Run the MCP server on stdio: newline-delimited JSON-RPC 2.0 on stdin/
+    stdout, no daemon, no port. For MCP clients and hosting platforms that
+    spawn the server as a subprocess rather than connecting to a listening
+    HTTP port.
+
+    Stdout discipline is critical: stdout must carry ONLY protocol JSON, or a
+    single stray byte corrupts the stream for whatever spawned this process.
+    The real stdout is captured before anything else touches the stream, then
+    `sys.stdout` is redirected to stderr for the rest of the process — a
+    defense-in-depth net against a stray `print()` or third-party logging
+    default (e.g. during model loading) landing on stdout.
+
+    `VectrService` construction (embedder + reranker model loads) is slow —
+    seconds, not milliseconds — so it runs on a background thread via
+    `ServiceHandle` while the stdio read loop starts immediately: `initialize`,
+    `notifications/initialized`, `ping`, and `tools/list` all answer before
+    the workspace index (or even the service itself) is ready; `tools/call`
+    reports "still starting up" gracefully until it is.
+    """
+    import logging
+
+    protocol_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        stream=sys.stderr,
+        force=True,
+    )
+
+    from integrations.mcp_server import ServiceHandle, run_stdio_loop
+
+    memory_only = getattr(args, "memory_only", False)
+    search_only = getattr(args, "search_only", False)
+    if memory_only and search_only:
+        print("Error: --memory-only and --search-only are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+
+    roots = _resolve_workspace_roots(args)
+    workspace = roots[0]
+    extra_roots = roots[1:]
+    explicit = _is_explicit_workspace(args)
+
+    handle = ServiceHandle()
+
+    def _build_service() -> None:
+        try:
+            from app.service import VectrService
+            svc = VectrService(
+                workspace_root=workspace,
+                extra_roots=extra_roots,
+                memory_only=memory_only,
+                search_only=search_only,
+                workspace_explicit=explicit,
+                # No HTTP port exists on this transport — writing IDE config
+                # files that point at one would be meaningless, and possibly
+                # disruptive for a hosting platform's mounted workspace.
+                configure_ide=False,
+            )
+            svc.start_background_index()
+            handle.set_service(svc)
+        except BaseException as exc:  # a background thread must never crash silently
+            logging.getLogger(__name__).exception("mcp-stdio: service construction failed")
+            handle.set_error(exc)
+
+    threading.Thread(
+        target=_build_service, daemon=True, name="vectr-mcp-stdio-service-init",
+    ).start()
+
+    print(f"vectr mcp-stdio: workspace={workspace}", file=sys.stderr)
+    try:
+        run_stdio_loop(handle, stdin=sys.stdin, stdout=protocol_stdout)
+    finally:
+        if handle.service is not None:
+            try:
+                handle.service.shutdown()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -2266,6 +2359,24 @@ def main() -> None:
     p_watch.add_argument("workspace", nargs="?", default=None,
         help="Path to a .code-workspace file or a single workspace directory")
     p_watch.add_argument("--path", action="append", dest="paths", metavar="DIR")
+
+    p_mcp_stdio = sub.add_parser(
+        "mcp-stdio",
+        help="Run the MCP server on stdio (no daemon, no port)",
+        description=(
+            "Foreground MCP server using the stdio transport: newline-delimited "
+            "JSON-RPC 2.0 on stdin/stdout, one JSON object per line, no daemon "
+            "and no port. For MCP clients and hosting platforms that spawn the "
+            "server as a subprocess. Workspace defaults to VECTR_WORKSPACE or "
+            "the current directory."
+        ),
+    )
+    p_mcp_stdio.add_argument("workspace", nargs="?", default=None,
+        help="Path to a workspace directory (default: $VECTR_WORKSPACE or cwd)")
+    p_mcp_stdio.add_argument("--memory-only", action="store_true", default=False,
+        dest="memory_only", help="Disable code indexing/watcher; memory tools only")
+    p_mcp_stdio.add_argument("--search-only", action="store_true", default=False,
+        dest="search_only", help="Disable the working-memory layer; search/locate/trace/map only")
 
     p_init = sub.add_parser(
         "init",
@@ -2449,6 +2560,7 @@ def main() -> None:
         "start":   cmd_start,
         "restart": cmd_restart,
         "watch":   cmd_watch,
+        "mcp-stdio": cmd_mcp_stdio,
         "init":    cmd_init,
         "index":   cmd_index,
         "search":  cmd_search,

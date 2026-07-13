@@ -35,10 +35,14 @@ async def lifespan(application: FastAPI):
     # gave an explicit workspace path — that path must win over the
     # git-toplevel walk-up VectrService otherwise applies.
     workspace_explicit = os.getenv("VECTR_WORKSPACE_EXPLICIT", "") == "1"
+    # UPG-CLI-WRITES-DISCLOSURE follow-through: `vectr start/restart --no-ide-config`
+    # sets this to "0" so the daemon's own IDE-config writes (.cursor/mcp.json,
+    # .claude/settings.json) honor the same opt-out as the CLI's own 7-file write.
+    configure_ide = os.getenv("VECTR_CONFIGURE_IDE", "1") == "1"
     svc = VectrService(
         workspace_root=workspace, port=port, extra_roots=extra_roots,
         memory_only=memory_only, search_only=search_only,
-        workspace_explicit=workspace_explicit,
+        workspace_explicit=workspace_explicit, configure_ide=configure_ide,
     )
     svc.start_background_index()
     application.state.service = svc
