@@ -138,7 +138,7 @@ def _scope_filter(
     notes: list[WorkingNote],
     *,
     session_id: str | None = None,
-    file_path: str | None = None,
+    file_path: str | tuple[str, ...] | None = None,
 ) -> list[WorkingNote]:
     """Recall-side scope enforcement (TRIGGER-ENGINE wave 2a,
     bm2-design-skeleton.md §1) — a pure post-filter over an already-fetched
@@ -154,7 +154,13 @@ def _scope_filter(
     recall() path. "path-subtree" is enforced ONLY when the caller has a
     `file_path` to filter against (recall_for_path()); plain query-based
     recall() has no file context, so a path-subtree-scoped note is left
-    unfiltered there.
+    unfiltered there. `file_path` accepts either a single string or a tuple
+    of candidate forms for the same file (as-given plus workspace-relative,
+    same shape `fire()`'s `_path_trigger_candidates()` produces) — a real
+    hook/tool call sends an ABSOLUTE path while anchors are naturally
+    authored workspace-relative, so `recall_for_path()` passes both forms
+    to give `scope_permits()`'s path-subtree check a relative form to
+    match against.
 
     Accepted trade-off: called AFTER a SQL LIMIT at every call site, so
     excluding a scoped note here may return fewer than `limit` results —
@@ -1441,15 +1447,19 @@ class WorkingContextStore:
         session_id: scope="session" enforcement, same as recall(). `file_path`
         (already a parameter here) also enforces scope="path-subtree" — the
         one recall path where that's free, since the file context already
-        exists (TRIGGER-ENGINE wave 2a, §1).
+        exists (TRIGGER-ENGINE wave 2a, §1). A real caller (e.g. the
+        PreToolUse hook) sends an ABSOLUTE `file_path`; `_path_trigger_
+        candidates()` (shared with `fire()`) resolves its workspace-relative
+        form too, so a path-subtree-scoped note anchored the natural,
+        workspace-relative way still matches (F1b — the same abs/rel
+        candidate-matching fix as the P trigger primitive, applied here to
+        the scope check).
         """
         basename = Path(file_path).name
         if not basename:
             return []
-        try:
-            relpath = str(Path(file_path).resolve().relative_to(Path(workspace).resolve()))
-        except (ValueError, OSError):
-            relpath = ""
+        path_candidates = _path_trigger_candidates(workspace, file_path)
+        relpath = next((c for c in (path_candidates or ()) if c != file_path), "")
 
         sql = ("SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
                "AND (content LIKE ? OR content LIKE ?)")
@@ -1473,7 +1483,7 @@ class WorkingContextStore:
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
         notes = [self._row_to_note(r) for r in rows]
-        notes = _scope_filter(notes, session_id=session_id, file_path=file_path)
+        notes = _scope_filter(notes, session_id=session_id, file_path=path_candidates)
         audit("RECALL", workspace=workspace, query=basename, notes_returned=len(notes), method="path")
         return notes
 

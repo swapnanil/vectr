@@ -398,15 +398,30 @@ class TestEvaluateNotePathCandidates:
         note = _note(triggers=[{"path": "src/api/**"}])
         assert evaluate_note(note, file_path=()).fired is False
 
-    def test_scope_path_subtree_uses_first_candidate_as_primary(self) -> None:
-        """Non-P uses of the path (scope's path-subtree check here) use the
-        FIRST candidate — the path exactly as the caller gave it."""
+    def test_scope_path_subtree_matches_any_candidate_not_just_the_first(self) -> None:
+        """F1b: scope_permits()'s path-subtree check now receives the FULL
+        candidate tuple (mirroring the P primitive), not just the first
+        (as-given) candidate — an absolute hook path that has no relative
+        match itself still fires when a LATER candidate (the workspace-
+        relative form) is under the declared anchor's directory."""
         note = _note(
             kind="gotcha", scope="path-subtree", anchors=[["src/api/x.py", None]],
             triggers=[{"path": "src/api/**"}],
         )
-        result = evaluate_note(note, file_path=("src/api/x.py", "src/api/x.py"))
+        result = evaluate_note(
+            note, file_path=("/abs/workspace/src/api/x.py", "src/api/x.py"),
+        )
         assert result.fired is True
+
+    def test_scope_path_subtree_excluded_when_no_candidate_matches(self) -> None:
+        note = _note(
+            kind="gotcha", scope="path-subtree", anchors=[["src/api/x.py", None]],
+            triggers=[{"path": "src/api/**"}],
+        )
+        result = evaluate_note(
+            note, file_path=("/abs/workspace/src/other/y.py", "src/other/y.py"),
+        )
+        assert result.fired is False
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +470,24 @@ class TestScopePermits:
         assert scope_permits(note, file_path="src/api/y.py")[0] is True   # same directory
         assert scope_permits(note, file_path="src/other/z.py")[0] is False
         assert scope_permits(note)[0] is False  # no file_path supplied at all
+
+    def test_path_subtree_scope_accepts_a_candidate_tuple_matching_any_form(self) -> None:
+        """F1b — mirrors the P primitive's abs/rel fix: a real hook sends an
+        ABSOLUTE file_path while anchors are naturally authored workspace-
+        relative, so a single-string, first-candidate-only check silently
+        never permits a relatively-anchored note. `file_path` now accepts a
+        tuple of candidate forms and matches if ANY of them falls under the
+        anchor's directory — an absolute-only single string with no relative
+        form still correctly fails (it has nothing else to try)."""
+        note = _note(scope="path-subtree", anchors=[["src/api/x.py", None]])
+        assert scope_permits(
+            note, file_path=("/abs/workspace/src/api/x.py", "src/api/x.py"),
+        )[0] is True
+        assert scope_permits(
+            note, file_path=("/abs/workspace/src/other/z.py", "src/other/z.py"),
+        )[0] is False
+        assert scope_permits(note, file_path="/abs/workspace/src/api/x.py")[0] is False
+        assert scope_permits(note, file_path=())[0] is False
 
     def test_path_subtree_scope_with_no_anchors_is_never_permitted(self) -> None:
         note = _note(scope="path-subtree", anchors=[])

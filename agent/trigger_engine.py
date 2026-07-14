@@ -280,7 +280,7 @@ def scope_permits(
     *,
     session_id: str | None = None,
     branch: str | None = None,
-    file_path: str | None = None,
+    file_path: str | tuple[str, ...] | None = None,
 ) -> tuple[bool, str]:
     """Whether `note`'s declared `scope` (bm2-design-skeleton.md §1) permits it
     to be considered at all for the given lifecycle context. Operates ONLY on
@@ -293,9 +293,17 @@ def scope_permits(
     scope. "session" and "branch" need the caller to supply the matching
     lifecycle value; if the caller doesn't supply one (e.g. plain recall()
     with no branch context), the note is excluded rather than guessed open.
+
     "path-subtree" checks `file_path` against the directory of each declared
-    anchor path — a note with no anchors or no file_path is excluded (there is
-    no declared subtree to match against)."""
+    anchor path. `file_path` accepts either a single path string or a tuple
+    of equivalent candidate forms for the SAME file (mirroring
+    `evaluate_note`'s `file_path`/`_trigger_matches`'s P primitive, e.g. the
+    real hook path as given plus its workspace-relative form, both computed
+    by the caller — this module never resolves or normalizes a path itself)
+    — the subtree matches if ANY candidate falls under ANY declared anchor's
+    directory. A note with no anchors, or given no candidate at all, is
+    excluded (there is no declared subtree to match against, or nothing to
+    match it against)."""
     scope = note.scope or DEFAULT_SCOPE
     if scope in ("workspace", "repo"):
         return True, ""
@@ -308,16 +316,23 @@ def scope_permits(
             return True, ""
         return False, f"scope 'branch' — recorded on {note.branch or 'unknown'!r}, current is {branch or 'unknown'!r}"
     if scope == "path-subtree":
-        if not file_path or not note.anchors:
+        if isinstance(file_path, str):
+            candidates: tuple[str, ...] = (file_path,)
+        elif file_path:
+            candidates = tuple(file_path)
+        else:
+            candidates = ()
+        if not candidates or not note.anchors:
             return False, "scope 'path-subtree' — no file path or no declared anchor subtree"
-        candidate = file_path.replace("\\", "/").lstrip("./")
-        for anchor in note.anchors:
-            if not anchor or not anchor[0]:
-                continue
-            anchor_path = str(anchor[0]).replace("\\", "/").lstrip("./")
-            anchor_dir = anchor_path.rsplit("/", 1)[0] if "/" in anchor_path else ""
-            if candidate == anchor_path or (anchor_dir and (candidate == anchor_dir or candidate.startswith(anchor_dir + "/"))):
-                return True, ""
+        for raw_candidate in candidates:
+            candidate = raw_candidate.replace("\\", "/").lstrip("./")
+            for anchor in note.anchors:
+                if not anchor or not anchor[0]:
+                    continue
+                anchor_path = str(anchor[0]).replace("\\", "/").lstrip("./")
+                anchor_dir = anchor_path.rsplit("/", 1)[0] if "/" in anchor_path else ""
+                if candidate == anchor_path or (anchor_dir and (candidate == anchor_dir or candidate.startswith(anchor_dir + "/"))):
+                    return True, ""
         return False, "scope 'path-subtree' — file not under the note's declared subtree"
     return True, ""  # unrecognised scope value never blocks
 
@@ -353,12 +368,16 @@ def evaluate_note(
     `file_path` accepts either a single path string (the common/legacy case —
     a caller with only one path form) or a tuple of equivalent candidate
     forms for the SAME file (e.g. `WorkingContextStore.fire()` passes
-    `(as_given, workspace_relative)` — see its docstring) — the P primitive
-    matches a trigger's `path` glob against ANY candidate (`_trigger_matches`
-    docstring). Non-P uses of the path (scope's path-subtree check, the fire
-    explanation) use the FIRST candidate — the path exactly as the caller
-    gave it — by convention; this module still never resolves or normalizes
-    a path itself, that is entirely the caller's job (purity invariant).
+    `(as_given, workspace_relative)` — see its docstring). The FULL candidate
+    tuple is forwarded to both path-matching consumers: the P primitive
+    (`_trigger_matches` docstring) and `scope_permits()`'s `path-subtree`
+    check (its own docstring) each match against ANY candidate — an absolute
+    hook path and a workspace-relative anchor/pattern are both given a
+    chance, never just the first form. The one-line fire explanation never
+    touches the resolved path text at all (it renders the trigger's own
+    declared glob pattern, e.g. "path src/api/**"), so no convention is
+    needed there. This module still never resolves or normalizes a path
+    itself, that is entirely the caller's job (purity invariant).
 
     `resolved_symbols` (TRIGGER-ENGINE wave 2b) is passed straight through to
     `_trigger_matches()` for the S primitive — see its docstring; this
@@ -373,12 +392,11 @@ def evaluate_note(
         path_candidates: tuple[str, ...] | None = (file_path,) if file_path is not None else None
     else:
         path_candidates = tuple(file_path) if file_path else None
-    primary_path = path_candidates[0] if path_candidates else None
 
     if note.valid_until is not None:
         return FireResult(note.note_id, False, "superseded — a tombstoned memory never fires")
 
-    permitted, scope_reason = scope_permits(note, session_id=session_id, branch=branch, file_path=primary_path)
+    permitted, scope_reason = scope_permits(note, session_id=session_id, branch=branch, file_path=path_candidates)
     if not permitted:
         return FireResult(note.note_id, False, scope_reason)
 

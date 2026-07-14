@@ -2335,6 +2335,26 @@ class TestFireScopeEnforcement:
         assert len(store.fire(ws, event="pre-edit", file_path="src/api/x.py")) == 1
         assert len(store.fire(ws, event="pre-edit", file_path="src/other/y.py")) == 0
 
+    def test_path_subtree_scope_fires_for_an_absolute_hook_path_against_a_relative_anchor(
+        self, tmp_path,
+    ) -> None:
+        """Same defect class the P primitive's abs/rel fix closed, but in
+        scope_permits()'s own path-subtree gate: a real hook sends an
+        ABSOLUTE file_path while the anchor is naturally authored workspace-
+        relative. scope_permits() is checked BEFORE the trigger loop, so
+        even though the P primitive itself would match, an absolute-only
+        scope check silently excluded the note before the trigger ever ran."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        (tmp_path / "src" / "api").mkdir(parents=True)
+        store.remember(
+            ws, "a scoped gotcha", kind="gotcha", scope="path-subtree",
+            anchors=["src/api/x.py"],
+        )
+        abs_path = str(tmp_path / "src" / "api" / "x.py")
+        assert len(store.fire(ws, event="pre-edit", file_path=abs_path)) == 1
+        outside = str(tmp_path / "src" / "other" / "y.py")
+        assert len(store.fire(ws, event="pre-edit", file_path=outside)) == 0
+
     def test_branch_scope_fires_only_on_the_recorded_branch(self, tmp_path, monkeypatch) -> None:
         import agent.working_context_store._store as store_mod
         store, ws = _store(tmp_path), str(tmp_path)
@@ -2371,6 +2391,23 @@ class TestFireScopeEnforcement:
         )
         assert len(store.recall_for_path(ws, "src/auth.py")) == 1
         assert len(store.recall_for_path(ws, "src/other.py")) == 0
+
+    def test_recall_for_path_scope_check_matches_an_absolute_hook_path(self, tmp_path) -> None:
+        """F1b's fix also covers recall_for_path() -- a PreToolUse hook sends
+        an ABSOLUTE path, and the anchor is naturally authored workspace-
+        relative; recall_for_path() already resolves the workspace-relative
+        form for its own content match, this reuses that same resolution for
+        the scope check instead of dropping it."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        (tmp_path / "src").mkdir()
+        store.remember(
+            ws, "a subtree note mentioning auth.py", kind="gotcha",
+            scope="path-subtree", anchors=["src/auth.py"],
+        )
+        abs_path = str(tmp_path / "src" / "auth.py")
+        assert len(store.recall_for_path(ws, abs_path)) == 1
+        abs_other = str(tmp_path / "src" / "other.py")
+        assert len(store.recall_for_path(ws, abs_other)) == 0
 
     def test_pre_wave_notes_with_no_scope_declared_are_backward_compatible(self, tmp_path) -> None:
         """A note written before scope existed (or by any caller that never
