@@ -20,20 +20,20 @@ S (symbol) and M (semantic/embedding) trigger primitives, executable
 predicates, and write-time contradiction detection are wave-2 scope
 (bm2-design-skeleton.md §8) and are deliberately absent here.
 
-Live delivery surface this wave: `evaluate_note()`/`fire()` below and
-`WorkingContextStore.fire()` (agent/working_context_store/_store.py) are
-complete and unit-tested, and `VectrService.fire_triggers()` (app/service.py)
-wires them to the store and a per-session `TriggerFireLedger` — but no caller
-invokes `fire_triggers()` yet. `main.py`'s `cmd_hook` (the live
-SessionStart/UserPromptSubmit/PreToolUse/PreCompact hook surface) predates
-this module and calls the pre-existing recall()/boot_recall()/snapshot() path
-instead, on its own event-name vocabulary (`session-start`,
-`user-prompt-submit`, `pre-tool-use`, `pre-compact` — distinct strings from
-EVENT_VALUES). Wiring `fire_triggers()` into that hook surface is follow-up
-work, not done here. Every EVENT_VALUES member is therefore "declared but
-inert" this wave — evaluable and fully tested via direct calls to
-`evaluate_note()`/`fire()`, but with no live hook caller (never an error —
-bm2-design-skeleton.md §2).
+Live delivery surface (TRIGGER-ENGINE wave 2a): `evaluate_note()`/`fire()`
+below, `WorkingContextStore.fire()`/`fire_and_format()`
+(agent/working_context_store/_store.py), and `VectrService.fire_triggers()`/
+`fire_and_recall()` (app/service.py) are wired into the live hook pipeline.
+`main.py`'s `cmd_hook` maps its own hook-name vocabulary (`session-start`,
+`user-prompt-submit`, `pre-tool-use`, `pre-compact`) onto this module's
+EVENT_VALUES (`session-start`, `prompt-submit`, `pre-edit`, `pre-run`,
+`pre-commit`, `post-compaction`) and calls `/v1/recall` (boot mode, now
+engine-driven) and `/v1/trigger/reset` (PreCompact) — see `cmd_hook`'s
+docstring for the exact mapping table and rationale. `pre-run`/`pre-commit`
+have no live hook caller yet (no lifecycle moment maps to them this wave —
+"declared but inert", never an error, bm2-design-skeleton.md §2) — a note
+with an explicit `triggers=[{"event": "pre-run"}]` override simply never
+fires today, exactly like an unrecognised kind falls back to its default.
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ from agent.config import (
     MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP,
     MEMORY_TRIGGER_PRIORITY_RANK,
 )
-from agent.working_context_store._types import EVENT_VALUES, WorkingNote
+from agent.working_context_store._types import DEFAULT_SCOPE, EVENT_VALUES, WorkingNote
 
 # Kinds that inject full-text (design doc §3 two-tier budget); every other
 # kind injects its index-tier one-liner. Not config.yaml: this is the kind
@@ -103,13 +103,28 @@ def validate_triggers(triggers: list[dict] | None) -> list[dict]:
 # Kind-default bundles (bm2-design-skeleton.md §1)
 # ---------------------------------------------------------------------------
 
-def default_bundle_for_kind(kind: str, anchors: list[list[str]] | None) -> list[dict]:
+def default_bundle_for_kind(
+    kind: str,
+    anchors: list[list[str]] | None,
+    priority: str | None = None,
+) -> list[dict]:
     """The trigger bundle a note gets when it declares no explicit `triggers[]`
     override, computed fresh at evaluation time (never baked into storage, so
     a future default-bundle change applies retroactively).
 
-    - directive: fires at session-start AND post-compaction (must-never-miss).
-    - task:      fires at session-start (current-work state), until closed.
+    - directive: fires at session-start AND post-compaction (must-never-miss),
+                 at ANY priority — matches the legacy `boot_recall()`'s own
+                 unfiltered directive query.
+    - task:      fires at session-start (current-work state), until closed —
+                 but ONLY at priority=='high' (TRIGGER-ENGINE wave 2a fix):
+                 the legacy `boot_recall()` this bundle replaces filters task
+                 notes with `AND priority = 'high'` in SQL; a medium/low
+                 priority task gets NO default trigger here (an explicit
+                 `triggers[]` override can still make it fire — this only
+                 narrows the IMPLICIT default to match what boot_recall()
+                 has always surfaced, not a new restriction on the note
+                 itself). `priority` is a caller-resolved note property
+                 (never a query string) — same category as `anchors` below.
     - gotcha:    one path trigger per declared anchor, at pre-edit — the
                  symbol-ref half of this bundle (§1: "path-match on anchor
                  OR symbol-ref on anchor") is wave-2 (S primitive). A gotcha
@@ -124,7 +139,7 @@ def default_bundle_for_kind(kind: str, anchors: list[list[str]] | None) -> list[
     if kind == "directive":
         return [{"event": "session-start"}, {"event": "post-compaction"}]
     if kind == "task":
-        return [{"event": "session-start"}]
+        return [{"event": "session-start"}] if priority == "high" else []
     if kind == "gotcha":
         return [
             {"path": anchor[0], "event": "pre-edit"}
@@ -177,18 +192,70 @@ def _trigger_matches(trigger: dict, event: str | None, file_path: str | None) ->
     return True, desc
 
 
+def scope_permits(
+    note: WorkingNote,
+    *,
+    session_id: str | None = None,
+    branch: str | None = None,
+    file_path: str | None = None,
+) -> tuple[bool, str]:
+    """Whether `note`'s declared `scope` (bm2-design-skeleton.md §1) permits it
+    to be considered at all for the given lifecycle context. Operates ONLY on
+    the note's own stored scope/session_id/branch/anchors plus caller-resolved
+    lifecycle state (a session id, a branch name, a file path) — never a query
+    string (no-query-heuristics rule).
+
+    "workspace" (default) and "repo" are true no-ops this wave — see
+    SCOPE_VALUES in _types.py for why "repo" isn't yet a real cross-store
+    scope. "session" and "branch" need the caller to supply the matching
+    lifecycle value; if the caller doesn't supply one (e.g. plain recall()
+    with no branch context), the note is excluded rather than guessed open.
+    "path-subtree" checks `file_path` against the directory of each declared
+    anchor path — a note with no anchors or no file_path is excluded (there is
+    no declared subtree to match against)."""
+    scope = note.scope or DEFAULT_SCOPE
+    if scope in ("workspace", "repo"):
+        return True, ""
+    if scope == "session":
+        if session_id and note.session_id and session_id == note.session_id:
+            return True, ""
+        return False, "scope 'session' — not the writing session"
+    if scope == "branch":
+        if branch and note.branch and branch == note.branch:
+            return True, ""
+        return False, f"scope 'branch' — recorded on {note.branch or 'unknown'!r}, current is {branch or 'unknown'!r}"
+    if scope == "path-subtree":
+        if not file_path or not note.anchors:
+            return False, "scope 'path-subtree' — no file path or no declared anchor subtree"
+        candidate = file_path.replace("\\", "/").lstrip("./")
+        for anchor in note.anchors:
+            if not anchor or not anchor[0]:
+                continue
+            anchor_path = str(anchor[0]).replace("\\", "/").lstrip("./")
+            anchor_dir = anchor_path.rsplit("/", 1)[0] if "/" in anchor_path else ""
+            if candidate == anchor_path or (anchor_dir and (candidate == anchor_dir or candidate.startswith(anchor_dir + "/"))):
+                return True, ""
+        return False, "scope 'path-subtree' — file not under the note's declared subtree"
+    return True, ""  # unrecognised scope value never blocks
+
+
 def evaluate_note(
     note: WorkingNote,
     *,
     event: str | None = None,
     file_path: str | None = None,
     now: float | None = None,
+    session_id: str | None = None,
+    branch: str | None = None,
 ) -> FireResult:
     """Deterministic, total (never raises for well-formed input), linear-in-
     triggers evaluation of whether `note` fires for the given lifecycle state.
 
     A tombstoned note (`valid_until` set — explicitly superseded, §1) never
-    fires. Otherwise: explicit `triggers[]` fully replace the kind's default
+    fires. A note whose declared `scope` does not permit this lifecycle
+    context (`scope_permits()`, §1) never fires either — checked before the
+    trigger loop, since an out-of-scope note has nothing to evaluate.
+    Otherwise: explicit `triggers[]` fully replace the kind's default
     bundle; an empty/absent `triggers[]` falls back to
     `default_bundle_for_kind()`. Each trigger in the (possibly default)
     bundle is tried in order; the FIRST one whose P/E conjunction matches AND
@@ -203,7 +270,11 @@ def evaluate_note(
     if note.valid_until is not None:
         return FireResult(note.note_id, False, "superseded — a tombstoned memory never fires")
 
-    triggers = note.triggers if note.triggers else default_bundle_for_kind(note.kind, note.anchors)
+    permitted, scope_reason = scope_permits(note, session_id=session_id, branch=branch, file_path=file_path)
+    if not permitted:
+        return FireResult(note.note_id, False, scope_reason)
+
+    triggers = note.triggers if note.triggers else default_bundle_for_kind(note.kind, note.anchors, note.priority)
     if not triggers:
         return FireResult(note.note_id, False, "no triggers declared for this note/kind")
 
@@ -243,7 +314,20 @@ def total_order_key(note: WorkingNote) -> tuple[int, int, float, int]:
     which would reorder ties on the very next identical call). `last_fired`
     (set only by this engine's own fires, never by a plain vectr_recall) is
     preferred over `last_accessed` for "last_used" so a direct recall doesn't
-    quietly reorder trigger-fire precedence."""
+    quietly reorder trigger-fire precedence.
+
+    kind='task' exception (UPG-TASK-NOTE-INJECTION-RECENCY, matching
+    recall()/recall_for_path()'s own SQL ordering for this kind): every note
+    that fires together in one `fire()` call is stamped with the SAME
+    `last_fired` reading (one shared clock per evaluation, by design — see
+    `WorkingContextStore.fire()`), which silently ties `last_used` between
+    two task notes the moment BOTH have ever fired once — collapsing to the
+    ascending note_id tie-break below, which is backwards for "current
+    checkpoint" state (a task note is current-work state, not a
+    relevance-ranked learning; an older task note must never outrank a newer
+    one). So kind='task' orders on note_id DESCENDING directly — an
+    immutable, monotonic recency proxy immune to the shared-clock tie —
+    instead of last_used. Every other kind is unaffected."""
     try:
         kind_rank = MEMORY_TRIGGER_KIND_PRIORITY.index(note.kind)
     except ValueError:
@@ -252,6 +336,8 @@ def total_order_key(note: WorkingNote) -> tuple[int, int, float, int]:
         priority_rank = MEMORY_TRIGGER_PRIORITY_RANK.index(note.priority)
     except ValueError:
         priority_rank = len(MEMORY_TRIGGER_PRIORITY_RANK)
+    if note.kind == "task":
+        return (kind_rank, priority_rank, 0.0, -note.note_id)
     last_used = note.last_fired if note.last_fired is not None else note.last_accessed
     return (kind_rank, priority_rank, -last_used, note.note_id)
 
@@ -275,10 +361,20 @@ class TriggerFireLedger:
     `reset()` clears all suppression state for this session — call it on a
     compaction event (pre-compact/post-compaction resets eligibility, §3).
     A brand-new session simply gets a brand-new ledger instance, so session
-    end needs no explicit handling here."""
+    end needs no explicit handling here.
+
+    Also tracks the per-session CUMULATIVE injection spend (§3): the
+    per-session token cap bounds the total tokens injected across every
+    `fire_triggers`/`fire_and_format` call in one session, not each call in
+    isolation. `record_spend()` is called once per delivery with however many
+    tokens that delivery actually packed; `remaining_budget()` is what the
+    next delivery has left to spend. `reset()` also zeroes the spend —
+    compaction makes the whole budget available again, consistent with
+    previously-fired memories becoming re-eligible."""
 
     def __init__(self) -> None:
         self._fired: dict[int, set[int]] = {}
+        self._spent_tokens: int = 0
 
     def eligible(self, note_id: int, trigger_index: int) -> bool:
         return trigger_index not in self._fired.get(note_id, set())
@@ -286,8 +382,15 @@ class TriggerFireLedger:
     def record_fire(self, note_id: int, trigger_index: int) -> None:
         self._fired.setdefault(note_id, set()).add(trigger_index)
 
+    def remaining_budget(self) -> int:
+        return max(0, MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP - self._spent_tokens)
+
+    def record_spend(self, tokens: int) -> None:
+        self._spent_tokens += max(0, tokens)
+
     def reset(self) -> None:
         self._fired.clear()
+        self._spent_tokens = 0
 
 
 # ---------------------------------------------------------------------------
@@ -331,18 +434,28 @@ class PackedItem:
     tier: str  # "full" | "index"
 
 
-def pack_injection(items: list[tuple[WorkingNote, str, str]]) -> list[PackedItem]:
+def pack_injection(
+    items: list[tuple[WorkingNote, str, str]],
+    *,
+    budget: int | None = None,
+) -> list[PackedItem]:
     """Two-tier budget pack: directive/gotcha prefer full text, every other
     kind injects its index-tier one-liner. `items` is
     [(note, full_text, index_text), ...] in any order; this function sorts
-    by the shared `total_order_key` and packs greedily, spending the
-    per-session cap. A memory is NEVER partially truncated — it injects
-    whole (subject to its own per-injection cap, else it drops to its
+    by the shared `total_order_key` and packs greedily, spending the given
+    `budget` (defaults to the full per-session cap when omitted/None — a
+    single call in isolation, e.g. a direct unit-test call or a fresh
+    session's first delivery). A memory is NEVER partially truncated — it
+    injects whole (subject to its own per-injection cap, else it drops to its
     index-tier line), or is evicted entirely if even the index-tier line
     does not fit. Eviction is always from the BOTTOM of the shared total
-    order — the lowest-precedence notes are the ones dropped first."""
+    order — the lowest-precedence notes are the ones dropped first.
+
+    Passing the session ledger's `remaining_budget()` here is what makes the
+    per-session cap CUMULATIVE across every `fire_triggers`/`fire_and_format`
+    call in one session (§3) rather than a fresh allowance each call."""
     ordered = sorted(items, key=lambda triple: total_order_key(triple[0]))
-    budget = MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP
+    budget = MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP if budget is None else max(0, budget)
     packed: list[PackedItem] = []
     for note, full_text, index_text in ordered:
         prefer_full = note.kind in FULL_TEXT_KINDS

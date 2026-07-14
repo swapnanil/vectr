@@ -235,6 +235,10 @@ _VALID_KINDS = ("directive", "task", "gotcha", "finding", "reference")
 # schema validates independently of the store's own internal validation).
 _SCOPE_VALUES = ("workspace", "repo", "path-subtree", "branch", "session")
 _PROVENANCE_VALUES = ("human", "agent", "auto")
+# TRIGGER-ENGINE wave 2a — mirrors
+# agent.working_context_store._types.EVENT_VALUES, same local-tuple
+# convention as _SCOPE_VALUES/_PROVENANCE_VALUES above.
+_EVENT_VALUES = ("session-start", "prompt-submit", "pre-edit", "pre-run", "pre-commit", "post-compaction")
 # 'human' is not settable via vectr_remember/RememberRequest — only 'agent'
 # (default) or 'auto' may be declared at write time; promoting to 'human' is
 # a separate, explicit call (PromoteRequest below) once a person has endorsed
@@ -376,6 +380,33 @@ class RecallRequest(BaseModel):
             "harness-injected recall is counted."
         ),
     )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "TRIGGER-ENGINE wave 2a: the calling session's identity — for a "
+            "hook-injected call this is the harness's own hook-JSON session "
+            "id (the same id across a /compact). Enforces scope='session' "
+            "notes, threads into the per-session cumulative injection "
+            "budget and fire-dedup ledger, and (combined with the current "
+            "git branch) enforces scope='branch' notes. None (the default) "
+            "reproduces today's ledger-less, budget-less, scope-unenforced "
+            "behaviour exactly."
+        ),
+    )
+    events: list[str] | None = Field(
+        default=None,
+        description=(
+            "TRIGGER-ENGINE wave 2a: lifecycle event(s) this recall stands "
+            "in for, OR'd together — e.g. ['session-start', "
+            "'post-compaction'] for the first SessionStart call after a "
+            "/compact, or ['prompt-submit'] for a per-turn recall. Only "
+            "notes with an EXPLICIT triggers[] override on one of these "
+            "events (or, in boot mode, a kind-default bundle) fire; absent "
+            "(the default), boot mode implies ['session-start'] and every "
+            "other mode fires nothing extra beyond its own query/file_path "
+            "match."
+        ),
+    )
 
     @field_validator("kind")
     @classmethod
@@ -396,6 +427,15 @@ class RecallRequest(BaseModel):
     def validate_hook_event(cls, v: str | None) -> str | None:
         if v is not None and v not in ("SessionStart", "UserPromptSubmit", "PreToolUse"):
             raise ValueError("hook_event must be one of: SessionStart, UserPromptSubmit, PreToolUse")
+        return v
+
+    @field_validator("events")
+    @classmethod
+    def validate_events(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            for ev in v:
+                if ev not in _EVENT_VALUES:
+                    raise ValueError(f"each event must be one of: {', '.join(_EVENT_VALUES)}")
         return v
 
 
@@ -462,6 +502,24 @@ class SnapshotRequest(BaseModel):
 class SnapshotResponse(BaseModel):
     snapshot_id: str
     label: str
+    processing_ms: int
+
+
+class TriggerResetRequest(BaseModel):
+    """Reset one session's trigger-engine state (TRIGGER-ENGINE wave 2a,
+    bm2-design-skeleton.md §3: "cleared on compaction"): the per-session fire
+    ledger (so a previously-fired memory becomes re-eligible) and the
+    cumulative injection token budget both zero out. Called by the
+    PreCompact hook, right before the SessionStart hook that follows a
+    /compact re-delivers the boot set. A session_id with no tracked ledger
+    yet (or None) is a no-op, never an error — mirrors
+    `VectrService.reset_trigger_ledger()`'s own contract."""
+
+    session_id: str | None = Field(default=None)
+
+
+class TriggerResetResponse(BaseModel):
+    reset: bool
     processing_ms: int
 
 

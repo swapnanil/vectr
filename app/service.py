@@ -736,24 +736,60 @@ class VectrService:
         file_path: str | None = None,
         session_id: str | None = None,
     ):
-        """Live per-memory trigger evaluation (TRIGGER-ENGINE wave 1) for one
+        """Live per-memory trigger evaluation (TRIGGER-ENGINE) for one
         lifecycle moment. Returns the ordered list of `agent.trigger_engine
         .FireResult` for every note that fires — see
         `WorkingContextStore.fire()` for the full contract (evaluation,
         staleness caveats folded in, the one shared total order, per-session
-        dedup via `_ledger_for`, and the `last_fired` cooldown stamp).
+        dedup via `_ledger_for`, scope enforcement, and the `last_fired`
+        cooldown stamp).
 
-        This is the engine's core evaluation entry point at the service
-        layer; it has no live caller in this wave's hook subprocess pipeline
-        (declared but callable, same category as the `pre-run`/`pre-commit`
-        E values) — see agent/trigger_engine.py's module docstring."""
+        Raw evaluation entry point — returns `FireResult`s, not rendered
+        text; `fire_and_recall()` below is the rendering wrapper the live
+        hook pipeline (main.py's `cmd_hook`) actually calls. Kept as a
+        separate, still-callable capability for any caller that wants the
+        unrendered results directly."""
         self._require_memory_layer()
         return self._context_store.fire(
             self._workspace_root,
             event=event,
             file_path=file_path,
             ledger=self._ledger_for(session_id),
+            session_id=session_id,
         )
+
+    def fire_and_recall(
+        self,
+        event: str | None = None,
+        events: list[str] | None = None,
+        file_path: str | None = None,
+        session_id: str | None = None,
+        surface: str = "mcp",
+        hook_event: str | None = None,
+    ) -> str:
+        """Rendering wrapper around `WorkingContextStore.fire_and_format()`
+        (TRIGGER-ENGINE wave 2a) — evaluate one or more lifecycle events,
+        pack the fired notes against the per-session cumulative injection
+        budget, and return the rendered text ready for hook injection.
+
+        `hook_event`, if given, records the delivery via `_record_hook_injection`
+        (UPG-HOOK-INJECT-OBSERVABILITY) — the same counter `recall()`'s own
+        `hook_event` parameter feeds — so a trigger-fired delivery shows up
+        in `status()`'s hook injection counts exactly like a semantic-recall
+        hook delivery does."""
+        self._require_memory_layer()
+        text, _ = self._context_store.fire_and_format(
+            self._workspace_root,
+            event=event,
+            events=events,
+            file_path=file_path,
+            session_id=session_id,
+            ledger=self._ledger_for(session_id),
+            surface=surface,
+        )
+        if hook_event is not None:
+            self._record_hook_injection(hook_event, text)
+        return text
 
     def search(
         self, query: str, n_results: int = 10, language: str | None = None
@@ -1234,6 +1270,8 @@ class VectrService:
         note_id: int | None = None,
         surface: str = "mcp",
         hook_event: str | None = None,
+        session_id: str | None = None,
+        events: list[str] | None = None,
     ) -> str:
         """`surface` selects the expand-hint phrasing rendered by
         `format_notes_for_llm` — 'mcp' (default: the MCP dispatch path, and
@@ -1247,12 +1285,23 @@ class VectrService:
         'PreToolUse'. When set and this call actually returns notes, counts
         one injection under that hook kind (see `status()`). None (the
         default — direct vectr_recall/`vectr recall` calls) records nothing.
+
+        `session_id`/`events` (TRIGGER-ENGINE wave 2a, bm2-design-skeleton.md
+        §3): the calling session's identity and the lifecycle event(s) this
+        recall is standing in for. Threaded into the `boot`/`file_path`
+        branches below so per-memory triggers (declared via
+        `vectr_remember(triggers=..., scope=...)`) fire through the live
+        engine — ledgered per session, budget-packed, scope-enforced —
+        alongside (boot) or merged with (file_path) the legacy delivery
+        paths those branches already provide. Both default to None, which
+        reproduces today's ledger-less, budget-less, scope-unenforced
+        behaviour exactly for any caller that predates this wave.
         """
         notes = self._recall_impl(
             query=query, tags=tags, priority=priority, limit=limit, kind=kind,
             boot=boot, min_similarity=min_similarity, file_path=file_path,
             max_age_days=max_age_days, sort_by=sort_by, detail=detail,
-            note_id=note_id, surface=surface,
+            note_id=note_id, surface=surface, session_id=session_id, events=events,
         )
         if hook_event is not None:
             self._record_hook_injection(hook_event, notes)
@@ -1273,6 +1322,8 @@ class VectrService:
         detail: str = "index",
         note_id: int | None = None,
         surface: str = "mcp",
+        session_id: str | None = None,
+        events: list[str] | None = None,
     ) -> str:
         self._require_memory_layer()
         # Single-note expand: note_id overrides everything else (UPG-RECALL-HIERARCHY).
@@ -1283,39 +1334,79 @@ class VectrService:
             stale = self._context_store.check_staleness([note], self._workspace_root)
             return self._context_store.format_notes_for_llm([note], stale_warnings=stale, detail="full", surface=surface)
 
-        # Boot mode (UPG-9.2): unconditional directive + high-task set for
-        # harness-injected recall. Ignores query/tags/priority/kind/limit and
-        # returns "" (never the "no notes" placeholder) so a SessionStart hook
-        # injects nothing on a fresh workspace rather than noise.
-        # Boot always renders index tier (directives at full, tasks at index) — see below.
+        # Boot mode (UPG-9.2 contract; TRIGGER-ENGINE wave 2a rewires the
+        # mechanism onto the live engine). Ignores query/tags/priority/kind/
+        # limit and returns "" (never the "no notes" placeholder) so a
+        # SessionStart hook injects nothing on a fresh workspace rather than
+        # noise. The directive/task kind-default trigger bundles (see
+        # agent/trigger_engine.py's kind-default table) reproduce the old
+        # `boot_recall()`'s unconditional-directive + high-task coverage
+        # exactly, so `fire_and_format()` fully replaces that dump — with a
+        # genuine improvement: an explicit session-start trigger declared on
+        # any OTHER kind (finding/reference/gotcha) now also fires here,
+        # where `boot_recall()` silently ignored it (kind-gated, not
+        # trigger-gated). `events` lets a caller merge post-compaction
+        # eligibility into the same boot fire (see main.py's `cmd_hook`);
+        # absent that, the implicit event is `["session-start"]`.
         if boot:
-            notes = self._context_store.boot_recall(self._workspace_root)
-            if not notes:
-                return ""
-            stale = self._context_store.check_staleness(notes, self._workspace_root)
-            # Directives carry imperative text that matters verbatim — render full.
-            # High-priority tasks and others render as index (token-bounded).
-            directive_notes = [n for n in notes if n.kind == "directive"]
-            other_notes = [n for n in notes if n.kind != "directive"]
-            parts: list[str] = []
-            if directive_notes:
-                parts.append(self._context_store.format_notes_for_llm(
-                    directive_notes, stale_warnings=stale, detail="full", surface=surface))
-            if other_notes:
-                parts.append(self._context_store.format_notes_for_llm(
-                    other_notes, stale_warnings=stale, detail="index", surface=surface))
-            return "\n".join(parts)
+            events_to_fire = events if events else ["session-start"]
+            fire_text, _ = self._context_store.fire_and_format(
+                self._workspace_root,
+                events=events_to_fire,
+                session_id=session_id,
+                ledger=self._ledger_for(session_id),
+                surface=surface,
+            )
+            return fire_text
 
-        # Path-anchored mode (UPG-9.6): notes recorded against a specific file,
-        # for the PreToolUse gotcha hook. Returns "" when none, so editing a file
-        # with no recorded caveat injects nothing.
+        # Path-anchored mode (UPG-9.6 contract; TRIGGER-ENGINE wave 2a adds
+        # the live engine alongside it). A gotcha with a structured trigger
+        # (anchors[]/triggers[]) now fires through the engine — §3 block
+        # format, provenance frame, staleness caveat, budget pack — and is
+        # excluded from the legacy `recall_for_path()` pass below by
+        # note_id, so the same note is never rendered twice. A gotcha with
+        # no anchors (matched only by `recall_for_path()`'s path/content
+        # heuristics) keeps the legacy path unchanged — the engine does not
+        # cover it this wave.
         if file_path:
-            notes = self._context_store.recall_for_path(
-                self._workspace_root, file_path, kind=kind, limit=limit)
-            if not notes:
-                return ""
-            stale = self._context_store.check_staleness(notes, self._workspace_root)
-            return self._context_store.format_notes_for_llm(notes, stale_warnings=stale, detail=detail, surface=surface)
+            fire_text, fired_ids = self._context_store.fire_and_format(
+                self._workspace_root,
+                event="pre-edit",
+                file_path=file_path,
+                session_id=session_id,
+                ledger=self._ledger_for(session_id),
+                surface=surface,
+            )
+            legacy_notes = self._context_store.recall_for_path(
+                self._workspace_root, file_path, kind=kind, limit=limit, session_id=session_id)
+            legacy_notes = [n for n in legacy_notes if n.note_id not in fired_ids]
+            legacy_text = ""
+            if legacy_notes:
+                stale = self._context_store.check_staleness(legacy_notes, self._workspace_root)
+                legacy_text = self._context_store.format_notes_for_llm(
+                    legacy_notes, stale_warnings=stale, detail=detail, surface=surface)
+            if fire_text and legacy_text:
+                return fire_text + "\n\n" + legacy_text
+            return fire_text or legacy_text
+
+        # Generic query mode (TRIGGER-ENGINE wave 2a): `events`, when given,
+        # is the same opt-in merge the file_path branch above always applies
+        # — e.g. main.py's UserPromptSubmit hook passes events=["prompt-
+        # submit"] alongside its query. Only an EXPLICIT `triggers[]`
+        # override ever matches "prompt-submit" (no kind's default bundle
+        # does), so this is a no-op for every note that predates an
+        # explicit override; absent `events` entirely (the default — every
+        # other caller: direct vectr_recall, `vectr recall`, etc.) this
+        # branch behaves exactly as before the engine existed.
+        fire_text, fired_ids = "", set()
+        if events:
+            fire_text, fired_ids = self._context_store.fire_and_format(
+                self._workspace_root,
+                events=events,
+                session_id=session_id,
+                ledger=self._ledger_for(session_id),
+                surface=surface,
+            )
 
         notes = self._context_store.recall(
             workspace=self._workspace_root,
@@ -1327,7 +1418,10 @@ class VectrService:
             min_similarity=min_similarity,
             max_age_days=max_age_days,
             sort_by=sort_by,
+            session_id=session_id,
         )
+        if fired_ids:
+            notes = [n for n in notes if n.note_id not in fired_ids]
         stale = self._context_store.check_staleness(notes, self._workspace_root)
         formatted = self._context_store.format_notes_for_llm(
             notes, stale_warnings=stale, detail=detail, surface=surface
@@ -1342,7 +1436,9 @@ class VectrService:
         # there, and it never appears once the embedder has attached.
         if query and not self.embedder_ready:
             formatted += _EMBEDDER_LOADING_RECALL_NOTICE
-        return formatted
+        if fire_text and formatted:
+            return fire_text + "\n\n" + formatted
+        return fire_text or formatted
 
     def forget_note(self, note_id: int) -> bool:
         self._require_memory_layer()

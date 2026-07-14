@@ -1524,6 +1524,27 @@ def _post_snapshot(port: int, label: str) -> bool:
         return False
 
 
+def _post_trigger_reset(port: int, session_id: str) -> bool:
+    """POST /v1/trigger/reset; True on success, False on any failure (never
+    raises).
+
+    Used by the PreCompact hook (TRIGGER-ENGINE wave 2a,
+    bm2-design-skeleton.md §3: "cleared on compaction") to clear this
+    session's per-session fire ledger and cumulative injection budget —
+    a reset failure must never block compaction, mirroring `_post_snapshot`
+    immediately above.
+    """
+    import httpx
+    try:
+        resp = httpx.post(
+            f"{_api_base(port)}/v1/trigger/reset", json={"session_id": session_id}, timeout=30,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
 def _read_hook_stdin() -> dict:
     """Read the Claude Code hook event JSON from stdin; {} if absent/invalid."""
     try:
@@ -1573,12 +1594,37 @@ def _resolve_hook_instance(cwd: str) -> dict | None:
 
 
 def cmd_hook(args: argparse.Namespace) -> None:
-    """Emit Claude Code hook output for harness-injected vectr memory (UPG-9.4+).
+    """Emit hook output for harness-injected vectr memory (UPG-9.4+;
+    TRIGGER-ENGINE wave 2a wires the per-memory trigger engine into every
+    branch below).
 
     Invoked by the hook entries that `vectr init --hooks` writes — not meant to
-    be called by hand. Resolves the workspace from the event's cwd (Claude runs
-    hooks at the project root), then injects the right memory for the event.
-    ALWAYS exits 0 and never raises: a hook must never break the session.
+    be called by hand. Resolves the workspace from the event's cwd (the harness
+    runs hooks at the project root), then injects the right memory for the
+    event. ALWAYS exits 0 and never raises: a hook must never break the session.
+
+    Event mapping onto `agent.trigger_engine.EVENT_VALUES` (each hook JSON's
+    own `session_id` — the same id across a `/compact` — threads through as
+    the engine's per-session identity; absent, the call degrades to today's
+    ledger-less/budget-less/scope-unenforced behaviour, never an error):
+
+    | this hook event   | harness source(s)             | engine event(s)                    | REST call |
+    |-------------------|-------------------------------|-------------------------------------|-----------|
+    | session-start     | any `source`                  | session-start                       | POST /v1/recall {boot, session_id, hook_event} |
+    | session-start     | `source == "compact"`          | session-start + post-compaction     | POST /v1/recall {..., events: [both]} |
+    | user-prompt-submit| —                              | prompt-submit                       | POST /v1/recall {query, ..., events: [prompt-submit], session_id, hook_event} |
+    | pre-tool-use      | file-bearing tool (Edit/Write/Read) | pre-edit + that file's path   | POST /v1/recall {file_path, kind: gotcha, session_id, hook_event} |
+    | pre-tool-use      | command-running tool           | pre-run                             | no live caller this wave — PreToolUse's matcher (`_write_claude_hooks`) only reaches Edit/Write/Read, so a command-running tool call never reaches this hook yet |
+    | pre-compact       | any `trigger`                  | ledger reset (§3)                   | POST /v1/snapshot (unchanged) + POST /v1/trigger/reset {session_id} |
+
+    `session-start` with `source == "compact"` is the deterministic first
+    delivery point after PreCompact's reset: it is the SAME lifecycle moment
+    that already re-delivers the boot set (UPG-9.4's `compact` matcher), so a
+    note whose ONLY explicit trigger is `post-compaction` (not covered by the
+    directive kind-default bundle, which already includes `session-start`) is
+    folded into that one call rather than inventing a new delivery point.
+    `pre-run`/`pre-commit` remain declared-but-inert this wave (no lifecycle
+    moment maps to them — never an error, bm2-design-skeleton.md §2).
     """
     try:
         event = _read_hook_stdin()
@@ -1587,6 +1633,15 @@ def cmd_hook(args: argparse.Namespace) -> None:
         if entry is None:
             return  # no daemon serves this workspace → inject nothing
         port = entry["port"]
+        # TRIGGER-ENGINE wave 2a: the harness's own hook-JSON `session_id` —
+        # present on every real hook invocation, stable across a /compact —
+        # is the per-session identity the engine's fire ledger, cumulative
+        # injection budget, and scope="session"/"branch" enforcement key on.
+        # Reused, not invented: the same field the harness already threads
+        # through its transcript_path/session lifecycle. Omitted from the
+        # outgoing payload entirely when absent (older/stubbed callers), so
+        # the wire shape is unchanged for them.
+        session_id = (event.get("session_id") or "").strip() or None
 
         if args.hook_event == "session-start":
             # Unconditional boot set: directives + high-priority tasks (UPG-9.2),
@@ -1596,7 +1651,13 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # hook_event (UPG-HOOK-INJECT-OBSERVABILITY) is the wire that makes this
             # firing visible in `vectr status` — without it, the daemon has no way
             # to tell a harness-injected recall apart from a direct one.
-            notes = _fetch_recall(port, {"boot": True, "hook_event": "SessionStart"})
+            payload = {"boot": True, "hook_event": "SessionStart"}
+            if session_id:
+                payload["session_id"] = session_id
+            source = (event.get("source") or "").strip()
+            if source == "compact":
+                payload["events"] = ["session-start", "post-compaction"]
+            notes = _fetch_recall(port, payload)
             _emit_hook_context("SessionStart", notes)
 
         elif args.hook_event == "user-prompt-submit":
@@ -1604,15 +1665,22 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # and inject them before the model sees it. The relevance cutoff
             # (UPG-5.1) keeps an off-topic prompt from injecting anything.
             # detail="index" keeps the injected context token-bounded (UPG-RECALL-HIERARCHY).
+            # events=["prompt-submit"] (TRIGGER-ENGINE wave 2a) additionally
+            # fires any note with an EXPLICIT prompt-submit trigger override
+            # (no kind's default bundle uses this event) — merged with, and
+            # deduped against, the semantic query results server-side.
             prompt = (event.get("prompt") or "").strip()
             if not prompt:
                 return
             limit = int(os.getenv("VECTR_HOOK_RECALL_LIMIT", str(_HOOK_RECALL_LIMIT)))
             min_sim = float(os.getenv("VECTR_HOOK_MIN_SIMILARITY", str(_HOOK_MIN_SIMILARITY)))
-            notes = _fetch_recall(port, {
+            payload = {
                 "query": prompt, "limit": limit, "min_similarity": min_sim, "detail": "index",
-                "hook_event": "UserPromptSubmit",
-            })
+                "hook_event": "UserPromptSubmit", "events": ["prompt-submit"],
+            }
+            if session_id:
+                payload["session_id"] = session_id
+            notes = _fetch_recall(port, payload)
             _emit_hook_context("UserPromptSubmit", notes)
 
         elif args.hook_event == "pre-tool-use":
@@ -1622,11 +1690,16 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # `file_path` extraction is deterministic and tool-agnostic (Read, Edit,
             # Write, ... all put the target path under tool_input.file_path) — which
             # tool names actually reach this hook is a matcher decision made by
-            # `_write_claude_hooks`, not a content-based guess made here.
+            # `_write_claude_hooks`, not a content-based guess made here. The
+            # engine's pre-edit event (TRIGGER-ENGINE wave 2a) is merged in
+            # server-side alongside this same file_path recall.
             file_path = ((event.get("tool_input") or {}).get("file_path") or "").strip()
             if not file_path:
                 return
-            notes = _fetch_recall(port, {"file_path": file_path, "kind": "gotcha", "hook_event": "PreToolUse"})
+            payload = {"file_path": file_path, "kind": "gotcha", "hook_event": "PreToolUse"}
+            if session_id:
+                payload["session_id"] = session_id
+            notes = _fetch_recall(port, payload)
             _emit_hook_context("PreToolUse", notes)
 
         elif args.hook_event == "pre-compact":
@@ -1636,6 +1709,13 @@ def cmd_hook(args: argparse.Namespace) -> None:
             trigger = (event.get("trigger") or "manual").strip() or "manual"
             label = f"pre-compact-{trigger}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
             _post_snapshot(port, label)
+            # TRIGGER-ENGINE wave 2a (§3 "cleared on compaction"): reset this
+            # session's fire ledger + cumulative injection budget so the
+            # SessionStart `compact` call above gets a fresh budget and
+            # re-eligibility for every trigger axis. A session with no
+            # tracked ledger (or no session_id at all) is a no-op.
+            if session_id:
+                _post_trigger_reset(port, session_id)
     except Exception:
         pass  # hook safety: never propagate
 

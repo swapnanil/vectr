@@ -8,9 +8,11 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from agent.working_context_store._audit import audit
 from agent.working_context_store._encryption import _build_encryptor, _extract_file_paths, _NoteEncryptor
@@ -43,6 +45,172 @@ def _hash_path_content(root: Path, raw_path: str) -> str | None:
         return hashlib.sha256(resolved.read_bytes()).hexdigest()[:16]
     except OSError:
         return None
+
+
+def _current_git_branch(
+    root: Path,
+    *,
+    _run_git: Callable[..., "subprocess.CompletedProcess"] | None = None,
+) -> str | None:
+    """Current git branch name for `root`, or None when `root` isn't inside a
+    git work tree, git is unavailable, or HEAD is detached (`rev-parse` then
+    returns the literal string "HEAD", which is never treated as a branch
+    name). Mirrors `agent.version_stamp._git_short_sha`'s exact subprocess
+    pattern (injectable `_run_git` for testability, 2s timeout, never raises)
+    — all failure is swallowed here, the caller degrades to no branch
+    context rather than raising.
+
+    Used by `remember()` (write-time capture for scope="branch") and by
+    `fire()` (current-branch check at evaluation time, TRIGGER-ENGINE
+    wave 2a, bm2-design-skeleton.md §1)."""
+    run = _run_git or subprocess.run
+    try:
+        result = run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    branch = result.stdout.strip()
+    if not branch or branch == "HEAD":
+        return None
+    return branch
+
+
+def _scope_filter(
+    notes: list[WorkingNote],
+    *,
+    session_id: str | None = None,
+    file_path: str | None = None,
+) -> list[WorkingNote]:
+    """Recall-side scope enforcement (TRIGGER-ENGINE wave 2a,
+    bm2-design-skeleton.md §1) — a pure post-filter over an already-fetched
+    note list, reusing `scope_permits()`.
+
+    Only "session" scope is enforced unconditionally here: an ephemeral note
+    must never surface outside its writing session via ANY read path, not
+    just trigger firing. "branch" is deliberately never enforced at the
+    recall side (see the SCOPE_VALUES comment in _types.py) — only fire()
+    enforces it, since branch scope is about bounding ambient trigger noise,
+    not about hiding a note from a deliberate recall query, and this also
+    avoids a git subprocess call on the hot, frequently-called plain
+    recall() path. "path-subtree" is enforced ONLY when the caller has a
+    `file_path` to filter against (recall_for_path()); plain query-based
+    recall() has no file context, so a path-subtree-scoped note is left
+    unfiltered there.
+
+    Accepted trade-off: called AFTER a SQL LIMIT at every call site, so
+    excluding a scoped note here may return fewer than `limit` results —
+    the same class of trade-off the pre-existing min_similarity cutoff
+    already accepts, not a new one."""
+    from agent.trigger_engine import scope_permits
+
+    out = []
+    for note in notes:
+        if note.scope == "session":
+            permitted, _ = scope_permits(note, session_id=session_id)
+            if not permitted:
+                continue
+        elif note.scope == "path-subtree" and file_path is not None:
+            permitted, _ = scope_permits(note, file_path=file_path)
+            if not permitted:
+                continue
+        out.append(note)
+    return out
+
+
+def _age_str(created_at: float) -> str:
+    """`created_at`'s age as a compact human string ("3h", "2d") — hoisted to
+    module level (was a closure inside `format_notes_for_llm`) so
+    `_format_index_line`/`_format_full_block` (and `fire_and_format()`,
+    TRIGGER-ENGINE wave 2a) can share it."""
+    age_h = (time.time() - created_at) / 3600
+    return f"{age_h:.0f}h" if age_h < 48 else f"{age_h / 24:.0f}d"
+
+
+def _format_index_line(
+    note: WorkingNote,
+    stale_warnings: dict[int, list[str]],
+    *,
+    surface: str = "mcp",
+) -> str:
+    """One note's single index-tier line — hoisted from
+    `format_notes_for_llm()`'s detail='index' loop body (unchanged rendering)
+    so `fire_and_format()` (TRIGGER-ENGINE wave 2a) can render the same
+    index-tier line for a trigger-fired note without duplicating the
+    format."""
+    n = note
+    kind_label = n.kind if n.kind else DEFAULT_KIND
+    title = n.title or (n.content.strip().splitlines()[0][:80] if n.content.strip() else "(no title)")
+    stale_marker = " [STALE]" if n.note_id in stale_warnings else ""
+    id_str = f"#{n.note_id}" if surface == "mcp" else f"{n.note_id}"
+    # UPG-SUBAGENT-MEMORY: caller-declared agent/subagent attribution
+    # (author_id) — never inferred. Absent renders exactly as before.
+    agent_marker = f" ({n.author_id})" if n.author_id else ""
+    return (
+        f"[{id_str}] {kind_label}/{n.priority}{agent_marker} · {title}"
+        f"  ({_age_str(n.created_at)}){stale_marker}"
+    )
+
+
+def _format_full_block(note: WorkingNote, stale_warnings: dict[int, list[str]]) -> str:
+    """One note's multi-line 'full' detail block (age, tags, author,
+    kind/provenance markers, provenance-framed content, staleness warnings)
+    — hoisted from `format_notes_for_llm()`'s detail='full' loop body
+    (unchanged rendering) so `fire_and_format()` (TRIGGER-ENGINE wave 2a) can
+    render the same block for a trigger-fired note. Ends with a trailing
+    blank line (its own line list's last element is "") so that joining
+    several blocks with "\\n" reproduces the exact spacing
+    `format_notes_for_llm`'s original flat per-line loop produced."""
+    from agent.trigger_engine import frame_prefix
+
+    n = note
+    age_str = _age_str(n.created_at) + " ago"
+    tag_str = f"  [{', '.join(n.tags)}]" if n.tags else ""
+    author_str = f"  @{n.author_id}" if n.author_id else ""
+    stale_files = stale_warnings.get(n.note_id, [])
+    stale_marker = " [STALE]" if stale_files else ""
+
+    # superseded badge
+    superseded_marker = ""
+    if n.valid_until is not None:
+        sup_by = n.superseded_by or (
+            f"note#{n.superseded_by_note_id}" if n.superseded_by_note_id else None
+        )
+        if sup_by:
+            import datetime as _dt
+            sup_date = _dt.datetime.fromtimestamp(n.superseded_at or n.valid_until).strftime("%Y-%m-%d")
+            superseded_marker = f" [superseded by @{sup_by}, {sup_date}]"
+
+    # Surface the kind when it carries injection semantics (UPG-9.3) —
+    # 'finding' is the default and adds no signal, so it's left implicit.
+    kind_marker = f" [{n.kind.upper()}]" if n.kind and n.kind != DEFAULT_KIND else ""
+    # Provenance class (TRIGGER-ENGINE, bm2-design-skeleton.md §5) — marked
+    # on every full-tier block, unlike kind_marker above, since the caller's
+    # trust posture depends on it regardless of whether provenance is the
+    # default ("agent").
+    provenance_marker = f" [{n.provenance}]"
+
+    lines = [
+        f"[{n.note_id}] [{n.priority.upper()}]{kind_marker}{provenance_marker}{tag_str}{author_str}  ({age_str})"
+        f"{stale_marker}{superseded_marker}",
+        # Provenance framing (§5): only a human-provenance directive ever
+        # renders as an unhedged imperative; agent-provenance is framed as
+        # memory to verify; auto-provenance carries the weakest framing.
+        f"  {frame_prefix(n.provenance, n.kind)}{n.content}",
+    ]
+    if stale_files:
+        changed = ", ".join(stale_files)
+        lines.append(f"  WARNING: These files changed after this note was written: {changed}")
+        lines.append(f"  WARNING: Verify this note is still accurate before relying on it.")
+    lines.append("")
+    return "\n".join(lines)
+
 
 # Metadata key stamped on the 'working_memory' ChromaDB collection recording
 # the embed model that produced its CURRENT vectors (UPG-NOTES-EMBED-MIGRATION).
@@ -322,6 +490,10 @@ class WorkingContextStore:
                 # the new `supersedes` write-time parameter.
                 "superseded_by_note_id": "INTEGER",
                 "last_fired":            "REAL",
+                # TRIGGER-ENGINE wave 2a: git branch recorded at write time
+                # when scope=="branch"; "" for every other scope, for notes
+                # written before this wave, or when git is unavailable.
+                "branch":                "TEXT NOT NULL DEFAULT ''",
             }
             for col, typedef in p4_cols.items():
                 if col not in existing_cols:
@@ -380,6 +552,15 @@ class WorkingContextStore:
         terms and is rejected outright rather than silently downgraded.
 
         `scope`: one of SCOPE_VALUES. Raises ValueError if not recognised.
+        When scope=="branch", the current git branch (`_current_git_branch()`)
+        is captured HERE, at write time, and stored on the note — `fire()`
+        compares it against the branch current at evaluation time (empty
+        string when git is unavailable or `root` isn't a git checkout; such a
+        note then never matches, since an empty recorded branch never equals
+        a real current branch name). bm2-design-skeleton.md §1's Default
+        bundles table lists "branch" as `task`'s typical scope; this wave
+        enforces whatever scope a note declares (including "branch") but does
+        NOT auto-assign it from `kind` — see UPG-TRIGGER-SCOPE-KIND-DEFAULTS.
 
         `anchors`: a list of workspace-relative (or absolute) file paths this
         note is anchored to. Each path's current content hash is computed
@@ -423,6 +604,7 @@ class WorkingContextStore:
         root = Path(workspace)
         anchor_pairs = [[p, _hash_path_content(root, p)] for p in (anchors or [])]
         anchors_json = json.dumps(anchor_pairs)
+        branch_value = _current_git_branch(root) or "" if scope == "branch" else ""
 
         # Derive title fallback from first non-empty content line (80-char cap).
         if not title:
@@ -473,12 +655,12 @@ class WorkingContextStore:
                                    last_accessed, session_id, decay_score,
                                    author_id, author_trust_score, valid_from,
                                    valid_until, code_hash, title,
-                                   triggers, provenance, scope, anchors, supersedes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                                   triggers, provenance, scope, anchors, supersedes, branch)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (workspace, stored_content, tags_json, priority, kind, now, now, session_id,
                  author_id, now, code_hash, stored_title,
-                 triggers_json, provenance, scope, anchors_json, supersedes),
+                 triggers_json, provenance, scope, anchors_json, supersedes, branch_value),
             )
             note_id = cur.lastrowid
 
@@ -566,6 +748,7 @@ class WorkingContextStore:
         min_similarity: float | None = None,
         max_age_days: float | None = None,
         sort_by: str = "relevance",
+        session_id: str | None = None,
     ) -> list[WorkingNote]:
         """Retrieve working notes.
 
@@ -596,13 +779,19 @@ class WorkingContextStore:
         (created_at DESC), or 'priority' (high>medium>low, then created_at DESC).
         In the semantic path, recency/priority are applied as a re-sort after
         candidate fetch (relevance = semantic order is unchanged).
+
+        session_id: enforces scope="session" notes (TRIGGER-ENGINE wave 2a,
+        §1) — a note scoped to a different session (or to none, when
+        session_id is omitted here) is excluded from the result. Applied as
+        a post-filter after the SQL LIMIT, so it may return fewer than
+        `limit` results — the same trade-off min_similarity already accepts.
         """
         # Semantic path: embed the query, find cosine-nearest notes, then fetch from SQLite.
         if query and self._notes_col is not None and self._embed_fn is not None:
             try:
                 notes = self._semantic_recall(
                     workspace, query, tags, priority, limit, include_superseded, kind,
-                    min_similarity, max_age_days, sort_by,
+                    min_similarity, max_age_days, sort_by, session_id=session_id,
                 )
                 audit("RECALL", workspace=workspace, query=query, notes_returned=len(notes),
                       method="semantic")
@@ -667,6 +856,7 @@ class WorkingContextStore:
             rows = conn.execute(sql, params).fetchall()
 
         notes = [self._row_to_note(r) for r in rows]
+        notes = _scope_filter(notes, session_id=session_id)
 
         if notes:
             ids = [n.note_id for n in notes]
@@ -692,6 +882,7 @@ class WorkingContextStore:
         min_similarity: float | None = None,
         max_age_days: float | None = None,
         sort_by: str = "relevance",
+        session_id: str | None = None,
     ) -> list[tuple[WorkingNote, float | None]]:
         """Like recall(), but each note is paired with its cosine similarity
         (UPG-PRO-1) so a gating layer can budget/threshold on it.
@@ -704,7 +895,7 @@ class WorkingContextStore:
             try:
                 return self._semantic_recall(
                     workspace, query, tags, priority, limit, include_superseded, kind,
-                    min_similarity, max_age_days, sort_by, return_scores=True,
+                    min_similarity, max_age_days, sort_by, session_id=session_id, return_scores=True,
                 )
             except Exception:
                 pass  # fall through to SQL LIKE (scoreless)
@@ -712,6 +903,7 @@ class WorkingContextStore:
             workspace, query=query, tags=tags, priority=priority, limit=limit,
             include_superseded=include_superseded, kind=kind,
             min_similarity=min_similarity, max_age_days=max_age_days, sort_by=sort_by,
+            session_id=session_id,
         )
         return [(n, None) for n in notes]
 
@@ -727,6 +919,7 @@ class WorkingContextStore:
         min_similarity: float | None = None,
         max_age_days: float | None = None,
         sort_by: str = "relevance",
+        session_id: str | None = None,
         return_scores: bool = False,
     ) -> list:
         """Find the most relevant notes by cosine similarity, then fetch from SQLite.
@@ -739,6 +932,8 @@ class WorkingContextStore:
         max_age_days: applied as a SQL filter after candidate fetch (UPG-RECALL-HIERARCHY).
         sort_by: 'relevance' preserves semantic order; 'recency'/'priority' re-sorts
         the candidate set after fetch (UPG-RECALL-HIERARCHY).
+        session_id: scope="session" enforcement (TRIGGER-ENGINE wave 2a) —
+        see recall()'s docstring; the same post-LIMIT trade-off applies.
         """
         # Cap n_results at collection size to avoid ChromaDB errors on small collections
         col_count = self._notes_col.count()
@@ -816,6 +1011,8 @@ class WorkingContextStore:
                 _prio_rank = {"high": 0, "medium": 1, "low": 2}
                 all_notes.sort(key=lambda n: (_prio_rank.get(n.priority, 1), -n.created_at))
             notes = all_notes[:limit]
+
+        notes = _scope_filter(notes, session_id=session_id)
 
         if notes:
             ids = [n.note_id for n in notes]
@@ -1068,6 +1265,7 @@ class WorkingContextStore:
         file_path: str,
         kind: str | None = None,
         limit: int = 10,
+        session_id: str | None = None,
     ) -> list[WorkingNote]:
         """Recall notes anchored to a specific file (UPG-9.6).
 
@@ -1077,6 +1275,11 @@ class WorkingContextStore:
         `kind="gotcha"` this powers the PreToolUse hook: editing a file surfaces
         the caveat recorded against it, and an unrelated file matches nothing.
         Not semantic — a substring anchor avoids false "nearby file" hits.
+
+        session_id: scope="session" enforcement, same as recall(). `file_path`
+        (already a parameter here) also enforces scope="path-subtree" — the
+        one recall path where that's free, since the file context already
+        exists (TRIGGER-ENGINE wave 2a, §1).
         """
         basename = Path(file_path).name
         if not basename:
@@ -1108,6 +1311,7 @@ class WorkingContextStore:
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
         notes = [self._row_to_note(r) for r in rows]
+        notes = _scope_filter(notes, session_id=session_id, file_path=file_path)
         audit("RECALL", workspace=workspace, query=basename, notes_returned=len(notes), method="path")
         return notes
 
@@ -1414,14 +1618,15 @@ class WorkingContextStore:
         file_path: str | None = None,
         ledger: "TriggerFireLedger | None" = None,
         now: float | None = None,
+        session_id: str | None = None,
     ) -> list["FireResult"]:
-        """Live evaluation entry point (TRIGGER-ENGINE wave 1,
-        bm2-design-skeleton.md §2/§4): evaluate every non-tombstoned note in
-        `workspace` against one lifecycle moment (`event` and/or `file_path`
-        at time `now`), fold in `check_staleness()`'s anchor/file caveats, and
-        return only the notes that fired — ordered by the single shared
-        `total_order_key` (fire precedence == injection ordering == budget
-        eviction order, per the design doc's "one total order").
+        """Live evaluation entry point (TRIGGER-ENGINE, bm2-design-skeleton.md
+        §2/§4): evaluate every non-tombstoned note in `workspace` against one
+        lifecycle moment (`event` and/or `file_path` at time `now`), fold in
+        `check_staleness()`'s anchor/file caveats, and return only the notes
+        that fired — ordered by the single shared `total_order_key` (fire
+        precedence == injection ordering == budget eviction order, per the
+        design doc's "one total order").
 
         `ledger`, if given (a per-session `TriggerFireLedger` — see
         `VectrService`'s per-session registry, mirroring its existing
@@ -1431,6 +1636,12 @@ class WorkingContextStore:
         ledger evaluates statelessly with no suppression (used by tests and
         any one-shot caller that manages its own dedup).
 
+        `session_id` enforces scope="session" notes and, combined with a
+        current-branch lookup computed ONCE per call, scope="branch" notes
+        (TRIGGER-ENGINE wave 2a, §1) — full scope enforcement, unlike
+        recall()/recall_for_path()'s partial enforcement (see the
+        SCOPE_VALUES comment in _types.py for the split and why).
+
         Every note that actually fires has its `last_fired` column stamped to
         `now` — this is what makes a trigger's `cooldown` T-modifier
         meaningful on the NEXT evaluation (evaluate_note() reads `last_fired`
@@ -1439,6 +1650,8 @@ class WorkingContextStore:
 
         if now is None:
             now = time.time()
+
+        branch = _current_git_branch(Path(workspace))
 
         with self._conn() as conn:
             rows = conn.execute(
@@ -1453,7 +1666,10 @@ class WorkingContextStore:
         fired_ids: list[int] = []
         results = []
         for note in notes:
-            result = evaluate_note(note, event=event, file_path=file_path, now=now)
+            result = evaluate_note(
+                note, event=event, file_path=file_path, now=now,
+                session_id=session_id, branch=branch,
+            )
             if not result.fired:
                 continue
             if (
@@ -1484,6 +1700,89 @@ class WorkingContextStore:
             file_path=file_path or "", fired=len(results),
         )
         return results
+
+    def fire_and_format(
+        self,
+        workspace: str,
+        *,
+        events: list[str] | None = None,
+        event: str | None = None,
+        file_path: str | None = None,
+        session_id: str | None = None,
+        ledger: "TriggerFireLedger | None" = None,
+        surface: str = "mcp",
+        now: float | None = None,
+    ) -> tuple[str, set[int]]:
+        """Live hook-delivery entry point (TRIGGER-ENGINE wave 2a,
+        bm2-design-skeleton.md §2/§3/§4): call `fire()` for one or more
+        lifecycle events, merge + dedup the results, render them through the
+        §3 two-tier budget pack, and return `(rendered_text, note_ids)`.
+
+        `events`, if given, is evaluated as an OR across the whole list —
+        e.g. `["session-start", "post-compaction"]` right after a `/compact`,
+        so a directive whose default bundle fires on EITHER axis is rendered
+        exactly once (first-seen wins across the merged event list) rather
+        than twice. `event` (singular) is a convenience for the common
+        one-event case; when both are omitted, `fire()` is called once with
+        `event=None` (matches its own default, e.g. a plain PreToolUse
+        file_path-only check with no event name).
+
+        The returned `note_ids` set lets a caller merging this with a
+        legacy/unrelated recall path (e.g. `recall_for_path`'s content-
+        substring match) exclude notes already delivered here, preventing
+        the SAME note from being injected twice through two different
+        mechanisms (double-injection prevention, wave 2a deliverable).
+
+        `ledger`, if given, also makes the per-session injection budget
+        CUMULATIVE across every call in one session (§3): the budget spent
+        by earlier deliveries this session is subtracted before packing this
+        one, and this delivery's own spend is recorded back into the ledger
+        before returning."""
+        from agent.trigger_engine import pack_injection, token_estimate, total_order_key
+
+        event_list = events if events else ([event] if event is not None else [None])
+        if now is None:
+            now = time.time()
+
+        seen: dict[int, "FireResult"] = {}
+        for ev in event_list:
+            for r in self.fire(
+                workspace, event=ev, file_path=file_path, session_id=session_id,
+                ledger=ledger, now=now,
+            ):
+                if r.note_id not in seen:
+                    seen[r.note_id] = r
+
+        if not seen:
+            return "", set()
+
+        notes_by_id: dict[int, WorkingNote] = {}
+        for note_id in seen:
+            note = self.get_note(workspace, note_id)
+            if note is not None:
+                notes_by_id[note_id] = note
+
+        ordered_ids = sorted(notes_by_id, key=lambda nid: total_order_key(notes_by_id[nid]))
+        stale_by_id = {nid: r.stale_paths for nid, r in seen.items() if r.stale_paths}
+
+        items = []
+        for note_id in ordered_ids:
+            note = notes_by_id[note_id]
+            full_text = _format_full_block(note, stale_by_id)
+            index_text = _format_index_line(note, stale_by_id, surface=surface)
+            items.append((note, full_text, index_text))
+
+        budget = ledger.remaining_budget() if ledger is not None else None
+        packed = pack_injection(items, budget=budget)
+        if not packed:
+            return "", set()
+        if ledger is not None:
+            spent = sum(token_estimate(p.text) for p in packed)
+            ledger.record_spend(spent)
+
+        header = f"# Triggered Memory ({len(packed)} fired)\n"
+        text = header + "\n\n".join(p.text for p in packed)
+        return text, {p.note_id for p in packed}
 
     def get_author_trust(self, workspace: str, author_id: str) -> float:
         """Return the Bayesian trust score for an author in this workspace."""
@@ -1544,6 +1843,7 @@ class WorkingContextStore:
             supersedes=row["supersedes"] if "supersedes" in keys else None,
             superseded_by_note_id=row["superseded_by_note_id"] if "superseded_by_note_id" in keys else None,
             last_fired=row["last_fired"] if "last_fired" in keys else None,
+            branch=row["branch"] if "branch" in keys and row["branch"] else "",
         )
 
     def format_notes_for_llm(
@@ -1593,10 +1893,6 @@ class WorkingContextStore:
 
         stale_warnings = stale_warnings or {}
 
-        def _age_str(created_at: float) -> str:
-            age_h = (time.time() - created_at) / 3600
-            return f"{age_h:.0f}h" if age_h < 48 else f"{age_h / 24:.0f}d"
-
         if detail == "index":
             if surface == "mcp":
                 expand_hint = "use vectr_recall(note_id=N) to expand"
@@ -1605,17 +1901,7 @@ class WorkingContextStore:
             header = f"# Working Notes — index ({len(notes)} entries; {expand_hint})\n"
             lines = [header]
             for n in notes:
-                kind_label = n.kind if n.kind else DEFAULT_KIND
-                title = n.title or (n.content.strip().splitlines()[0][:80] if n.content.strip() else "(no title)")
-                stale_marker = " [STALE]" if n.note_id in stale_warnings else ""
-                id_str = f"#{n.note_id}" if surface == "mcp" else f"{n.note_id}"
-                # UPG-SUBAGENT-MEMORY: caller-declared agent/subagent attribution
-                # (author_id) — never inferred. Absent renders exactly as before.
-                agent_marker = f" ({n.author_id})" if n.author_id else ""
-                lines.append(
-                    f"[{id_str}] {kind_label}/{n.priority}{agent_marker} · {title}"
-                    f"  ({_age_str(n.created_at)}){stale_marker}"
-                )
+                lines.append(_format_index_line(n, stale_warnings, surface=surface))
             return "\n".join(lines)
 
         # detail == "full" (original behaviour, with stale warnings)
@@ -1627,43 +1913,5 @@ class WorkingContextStore:
 
         lines = [header]
         for n in notes:
-            age_str = _age_str(n.created_at) + " ago"
-            tag_str = f"  [{', '.join(n.tags)}]" if n.tags else ""
-            author_str = f"  @{n.author_id}" if n.author_id else ""
-            stale_files = stale_warnings.get(n.note_id, [])
-            stale_marker = " [STALE]" if stale_files else ""
-
-            # superseded badge
-            superseded_marker = ""
-            if n.valid_until is not None:
-                sup_by = n.superseded_by or (
-                    f"note#{n.superseded_by_note_id}" if n.superseded_by_note_id else None
-                )
-                if sup_by:
-                    import datetime as _dt
-                    sup_date = _dt.datetime.fromtimestamp(n.superseded_at or n.valid_until).strftime("%Y-%m-%d")
-                    superseded_marker = f" [superseded by @{sup_by}, {sup_date}]"
-
-            # Surface the kind when it carries injection semantics (UPG-9.3) —
-            # 'finding' is the default and adds no signal, so it's left implicit.
-            kind_marker = f" [{n.kind.upper()}]" if n.kind and n.kind != DEFAULT_KIND else ""
-            # Provenance class (TRIGGER-ENGINE wave 1, bm2-design-skeleton.md
-            # §5) — marked on every full-tier block, unlike kind_marker above,
-            # since the caller's trust posture depends on it regardless of
-            # whether provenance is the default ("agent").
-            provenance_marker = f" [{n.provenance}]"
-            lines.append(
-                f"[{n.note_id}] [{n.priority.upper()}]{kind_marker}{provenance_marker}{tag_str}{author_str}  ({age_str})"
-                f"{stale_marker}{superseded_marker}"
-            )
-            # Provenance framing (§5): only a human-provenance directive ever
-            # renders as an unhedged imperative; agent-provenance is framed as
-            # memory to verify; auto-provenance carries the weakest framing.
-            from agent.trigger_engine import frame_prefix
-            lines.append(f"  {frame_prefix(n.provenance, n.kind)}{n.content}")
-            if stale_files:
-                changed = ", ".join(stale_files)
-                lines.append(f"  WARNING: These files changed after this note was written: {changed}")
-                lines.append(f"  WARNING: Verify this note is still accurate before relying on it.")
-            lines.append("")
+            lines.append(_format_full_block(n, stale_warnings))
         return "\n".join(lines)

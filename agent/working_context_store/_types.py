@@ -31,13 +31,28 @@ EVENT_VALUES: tuple[str, ...] = (
     "session-start", "prompt-submit", "pre-edit", "pre-run", "pre-commit", "post-compaction",
 )
 
-# SCOPE_VALUES: how broadly a memory's declared triggers apply. Wave 1 stores
-# and validates every value; "workspace" is the default and is a true no-op
-# (today's unfiltered behaviour, unchanged). Every other value — "repo",
-# "path-subtree", "branch", and "session" — is recorded faithfully at write
-# time for forward compatibility but NOT YET enforced by recall()/fire() this
-# wave (recall() has no scope-aware filtering yet); enforcing them is
-# follow-up work, not silently claimed here.
+# SCOPE_VALUES: how broadly a memory's declared triggers apply.
+# "workspace" (default) is a true no-op — today's unfiltered behaviour.
+# "repo" is currently a no-op identical to "workspace": true cross-worktree/
+# cross-clone sharing needs the store keyed by git-common-dir instead of by
+# workspace path, which is a larger storage change (see
+# UPG-TRIGGER-SCOPE-REPO-CROSSSTORE); recorded faithfully at write time so the
+# value round-trips once that lands. "session", "branch", and "path-subtree"
+# are enforced (TRIGGER-ENGINE wave 2a, `scope_permits()` in
+# agent/trigger_engine.py):
+#   - "session": enforced in BOTH fire() and recall()/recall_for_path() —
+#     an ephemeral note must never surface outside its writing session via
+#     any path, not just trigger firing.
+#   - "branch": enforced ONLY in fire() — bounds ambient trigger noise (a
+#     branch-bound task stops nagging on the wrong branch); a deliberate
+#     vectr_recall query is never blocked by branch, and this avoids a git
+#     subprocess call on the hot, frequently-called plain recall() path.
+#   - "path-subtree": enforced in fire() (against the note's declared
+#     anchors[]) and in recall_for_path() (file_path is already a parameter
+#     there — free); not enforced in the general query-based recall(), which
+#     has no file context to filter against.
+# Notes written before this wave carry scope="workspace" (the dataclass
+# default) and are therefore unaffected — this is backward compatible.
 SCOPE_VALUES: tuple[str, ...] = ("workspace", "repo", "path-subtree", "branch", "session")
 DEFAULT_SCOPE = "workspace"
 
@@ -81,6 +96,7 @@ class WorkingNote:
     supersedes: int | None = None      # note_id THIS note explicitly tombstones at write time
     superseded_by_note_id: int | None = None  # reciprocal: set on the OLD note by the explicit-supersedes path (distinct from `superseded_by`'s code_hash-conflict/author_id semantics)
     last_fired: float | None = None    # last time the trigger engine actually fired this note (T:cooldown + total-order tie-break)
+    branch: str = ""                   # git branch recorded at write time when scope=="branch" (TRIGGER-ENGINE wave 2a); "" for every other scope or when git is unavailable
 
     def __post_init__(self) -> None:
         if self.triggers is None:

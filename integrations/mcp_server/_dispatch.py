@@ -548,7 +548,7 @@ def handle_tools_call(
             note_id = service.remember(
                 content=content, tags=tags, priority=priority, kind=kind, title=title, agent=agent,
                 triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
-                supersedes=supersedes,
+                supersedes=supersedes, session_id=session_id,
             )
         except ValueError as exc:
             # Malformed triggers, an unrecognised provenance/scope, or a
@@ -595,6 +595,7 @@ def handle_tools_call(
         text = service.recall(
             query=query, tags=tags, priority=priority, limit=limit, kind=kind, boot=boot,
             detail=detail, sort_by=sort_by, max_age_days=max_age_days, note_id=note_id_arg,
+            session_id=session_id,
         )
         hint = service.auto_eviction_hint(session_id=session_id)  # UPG-7.1: gated, not every response
         if hint:

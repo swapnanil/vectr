@@ -34,6 +34,8 @@ from app.models import (
     StatusResponse,
     TraceRequest,
     TraceResponse,
+    TriggerResetRequest,
+    TriggerResetResponse,
     CodeChunkResult,
     SymbolResult,
 )
@@ -357,6 +359,8 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
         note_id=body.note_id,
         surface=body.surface,
         hook_event=body.hook_event,
+        session_id=body.session_id,
+        events=body.events,
     )
     return RecallResponse(
         notes=notes_text,
@@ -440,6 +444,22 @@ async def snapshot(body: SnapshotRequest, request: Request) -> SnapshotResponse:
     return SnapshotResponse(
         snapshot_id=snapshot_id,
         label=body.label,
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/trigger/reset", response_model=TriggerResetResponse)
+async def trigger_reset(body: TriggerResetRequest, request: Request) -> TriggerResetResponse:
+    """Reset one session's trigger-engine state (TRIGGER-ENGINE wave 2a) —
+    called by the PreCompact hook right before the SessionStart hook that
+    follows a /compact re-delivers the boot set. Never 503s even in
+    search-only mode: the per-session ledger lives in `VectrService` itself,
+    not the working-memory store, so there is nothing to gate on."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    svc.reset_trigger_ledger(body.session_id)
+    return TriggerResetResponse(
+        reset=True,
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

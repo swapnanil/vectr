@@ -349,11 +349,14 @@ _MEMORY_WRITE_TOOLS = [
                 "scope": {
                     "type": "string",
                     "description": (
-                        "Intended visibility scope (default 'workspace' — visible everywhere, "
-                        "unchanged behaviour, the only value actually enforced so far): "
-                        "'repo' | 'path-subtree' | 'branch' | 'session' record where this note is "
-                        "meant to apply, for forward compatibility — recall does not yet filter "
-                        "on these narrower scopes."
+                        "Visibility scope, enforced at recall/trigger time (default 'workspace' "
+                        "— visible everywhere in this workspace): 'branch' restricts firing to "
+                        "the git branch this note was written on (useful for kind='task' — open "
+                        "work that only matters on the branch it describes); 'path-subtree' "
+                        "restricts firing to paths under an anchored directory; 'session' "
+                        "restricts it to the writing session only; 'repo' behaves like "
+                        "'workspace' (cross-worktree sharing is not yet a distinct store "
+                        "boundary)."
                     ),
                     "default": "workspace",
                     "enum": ["workspace", "repo", "path-subtree", "branch", "session"],
