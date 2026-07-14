@@ -84,6 +84,23 @@ class TestValidateTrigger:
         with pytest.raises(ValueError, match="path.*or.*event|never fires alone"):
             validate_trigger({"not_before": 100.0})
 
+    def test_symbol_only_is_valid(self) -> None:
+        validate_trigger({"symbol": "WorkspaceLock"})
+
+    def test_symbol_and_path_is_valid(self) -> None:
+        validate_trigger({"symbol": "WorkspaceLock", "path": "src/api/**"})
+
+    def test_symbol_and_event_is_valid(self) -> None:
+        validate_trigger({"symbol": "WorkspaceLock", "event": "pre-edit"})
+
+    def test_non_string_symbol_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            validate_trigger({"symbol": 123})
+
+    def test_empty_string_symbol_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            validate_trigger({"symbol": ""})
+
     def test_non_dict_rejected(self) -> None:
         with pytest.raises(ValueError):
             validate_trigger("not a dict")  # type: ignore[arg-type]
@@ -214,6 +231,44 @@ class TestEvaluateNote:
         result = evaluate_note(note, event="pre-edit", file_path="src/api/x.py")
         assert result.fired is True
         assert "path src/api/** at pre-edit" in result.explanation
+
+    def test_symbol_only_trigger_matches_when_symbol_is_resolved(self) -> None:
+        note = _note(triggers=[{"symbol": "WorkspaceLock"}])
+        result = evaluate_note(
+            note, file_path="src/api/resolver.py",
+            resolved_symbols=frozenset({"WorkspaceLock", "acquire_lock"}),
+        )
+        assert result.fired is True
+        assert "symbol WorkspaceLock" in result.explanation
+
+    def test_symbol_only_trigger_does_not_match_an_unresolved_symbol(self) -> None:
+        note = _note(triggers=[{"symbol": "WorkspaceLock"}])
+        result = evaluate_note(
+            note, file_path="src/api/resolver.py",
+            resolved_symbols=frozenset({"some_other_symbol"}),
+        )
+        assert result.fired is False
+
+    def test_symbol_trigger_never_fires_when_resolved_symbols_is_none(self) -> None:
+        """Degradation (bm2-design-skeleton.md §2): a memory-only daemon or a
+        warm-up window before the symbol graph is built has no resolved
+        symbols at all — a symbol trigger deterministically does not fire,
+        never an error."""
+        note = _note(triggers=[{"symbol": "WorkspaceLock"}])
+        result = evaluate_note(note, file_path="src/api/resolver.py", resolved_symbols=None)
+        assert result.fired is False
+
+    def test_symbol_and_path_conjunction_requires_both(self) -> None:
+        note = _note(triggers=[{"symbol": "WorkspaceLock", "path": "src/api/**"}])
+        both = frozenset({"WorkspaceLock"})
+        # symbol resolves, path doesn't
+        assert evaluate_note(note, file_path="src/other/x.py", resolved_symbols=both).fired is False
+        # path matches, symbol doesn't resolve
+        assert evaluate_note(note, file_path="src/api/x.py", resolved_symbols=frozenset()).fired is False
+        # both match
+        result = evaluate_note(note, file_path="src/api/x.py", resolved_symbols=both)
+        assert result.fired is True
+        assert "path src/api/** + symbol WorkspaceLock" in result.explanation
 
     def test_or_composition_first_match_wins(self) -> None:
         note = _note(triggers=[{"event": "pre-run"}, {"event": "pre-edit"}])

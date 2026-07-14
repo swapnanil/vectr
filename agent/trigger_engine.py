@@ -62,18 +62,28 @@ FULL_TEXT_KINDS: tuple[str, ...] = ("directive", "gotcha")
 # ---------------------------------------------------------------------------
 
 def validate_trigger(trigger: dict) -> None:
-    """Raise ValueError if `trigger` is not a well-formed P/E/T primitive.
+    """Raise ValueError if `trigger` is not a well-formed P/E/S/T primitive.
 
-    A trigger must declare at least one of 'path' (P) or 'event' (E) — T
+    A trigger must declare at least one of 'path' (P), 'event' (E), or
+    'symbol' (S — TRIGGER-ENGINE wave 2b, bm2-design-skeleton.md §2) — T
     (not_before/expires_visibility/cooldown) is a modifier only and can never
-    fire a trigger by itself (bm2-design-skeleton.md §2)."""
+    fire a trigger by itself.
+
+    'symbol' names a code symbol resolved at fire time against the pre-built
+    code symbol graph (the same store `vectr_locate`/`vectr_trace` use) — it
+    matches when that symbol is defined in, or referenced by, the file
+    targeted by the current lifecycle moment. It composes with 'path'/'event'
+    under the SAME conjunction rule those two already use (every declared
+    axis in one trigger dict must ALL match); a trigger may declare at most
+    one value per axis by construction (each axis is a single dict key)."""
     if not isinstance(trigger, dict):
-        raise ValueError("each trigger must be an object with 'path' and/or 'event' keys")
+        raise ValueError("each trigger must be an object with 'path', 'event', and/or 'symbol' keys")
     path = trigger.get("path")
     event = trigger.get("event")
-    if path is None and event is None:
+    symbol = trigger.get("symbol")
+    if path is None and event is None and symbol is None:
         raise ValueError(
-            "a trigger must declare at least one of 'path' or 'event' — "
+            "a trigger must declare at least one of 'path', 'event', or 'symbol' — "
             "T (not_before/expires_visibility/cooldown) is a modifier only "
             "and never fires alone"
         )
@@ -81,6 +91,8 @@ def validate_trigger(trigger: dict) -> None:
         raise ValueError("trigger 'path' must be a glob string")
     if event is not None and event not in EVENT_VALUES:
         raise ValueError(f"trigger 'event' must be one of: {', '.join(EVENT_VALUES)}")
+    if symbol is not None and (not isinstance(symbol, str) or not symbol):
+        raise ValueError("trigger 'symbol' must be a non-empty string naming a code symbol")
     for key in ("not_before", "expires_visibility", "cooldown"):
         value = trigger.get(key)
         if value is not None and not isinstance(value, (int, float)):
@@ -168,13 +180,31 @@ class FireResult:
     stale_paths: list[str] = field(default_factory=list)
 
 
-def _trigger_matches(trigger: dict, event: str | None, file_path: str | None) -> tuple[bool, str]:
-    """Conjunction check for ONE trigger's declared P/E primitives against
+def _trigger_matches(
+    trigger: dict,
+    event: str | None,
+    file_path: str | None,
+    *,
+    resolved_symbols: frozenset[str] | None = None,
+) -> tuple[bool, str]:
+    """Conjunction check for ONE trigger's declared P/E/S primitives against
     the current lifecycle state. Returns (matched, human-readable description)
-    — the description feeds the one-line fire explanation."""
+    — the description feeds the one-line fire explanation.
+
+    `resolved_symbols` is the set of symbol names defined in or referenced by
+    the current lifecycle's target file — resolved ONCE per `fire()` call by
+    the caller (a single symbol-graph lookup, TRIGGER-ENGINE wave 2b §2),
+    never here: this function only ever does an O(1) set-membership check, no
+    graph access. `resolved_symbols=None` means the symbol graph is
+    unavailable this call (a memory-only daemon, a warm-up window before the
+    graph finishes building, or no `file_path` was given) — a trigger
+    declaring 'symbol' then deterministically does not match; never an
+    error, never a fuzzy/near-miss guess (exact-resolution only, per the
+    no-query-heuristics rule's carve-out for symbol-graph lookups)."""
     path_pattern = trigger.get("path")
     want_event = trigger.get("event")
-    if path_pattern is None and want_event is None:
+    want_symbol = trigger.get("symbol")
+    if path_pattern is None and want_event is None and want_symbol is None:
         return False, ""  # malformed (should have been rejected by validate_trigger)
 
     if path_pattern is not None:
@@ -182,13 +212,18 @@ def _trigger_matches(trigger: dict, event: str | None, file_path: str | None) ->
             return False, ""
     if want_event is not None and want_event != event:
         return False, ""
+    if want_symbol is not None:
+        if resolved_symbols is None or want_symbol not in resolved_symbols:
+            return False, ""
 
-    if path_pattern is not None and want_event is not None:
-        desc = f"path {path_pattern} at {want_event}"
-    elif path_pattern is not None:
-        desc = f"path {path_pattern}"
-    else:
-        desc = f"event {want_event}"
+    parts = []
+    if path_pattern is not None:
+        parts.append(f"path {path_pattern}")
+    if want_symbol is not None:
+        parts.append(f"symbol {want_symbol}")
+    desc = " + ".join(parts) if parts else ""
+    if want_event is not None:
+        desc = f"{desc} at {want_event}" if desc else f"event {want_event}"
     return True, desc
 
 
@@ -247,6 +282,7 @@ def evaluate_note(
     now: float | None = None,
     session_id: str | None = None,
     branch: str | None = None,
+    resolved_symbols: frozenset[str] | None = None,
 ) -> FireResult:
     """Deterministic, total (never raises for well-formed input), linear-in-
     triggers evaluation of whether `note` fires for the given lifecycle state.
@@ -258,12 +294,17 @@ def evaluate_note(
     Otherwise: explicit `triggers[]` fully replace the kind's default
     bundle; an empty/absent `triggers[]` falls back to
     `default_bundle_for_kind()`. Each trigger in the (possibly default)
-    bundle is tried in order; the FIRST one whose P/E conjunction matches AND
-    whose T modifiers (not_before, cooldown) do not withhold it wins — OR
+    bundle is tried in order; the FIRST one whose P/E/S conjunction matches
+    AND whose T modifiers (not_before, cooldown) do not withhold it wins — OR
     composition across the list. `not_before` and `cooldown` withhold a fire
     outright; `expires_visibility` never withholds — it only marks the result
     `faded` for ranking (T is a modifier, and a modifier only gates through
-    not_before/cooldown; visibility fade is a ranking signal, not a gate)."""
+    not_before/cooldown; visibility fade is a ranking signal, not a gate).
+
+    `resolved_symbols` (TRIGGER-ENGINE wave 2b) is passed straight through to
+    `_trigger_matches()` for the S primitive — see its docstring; this
+    function never touches the symbol graph itself, only a caller-resolved
+    set of names."""
     if now is None:
         now = time.time()
 
@@ -279,7 +320,7 @@ def evaluate_note(
         return FireResult(note.note_id, False, "no triggers declared for this note/kind")
 
     for idx, trig in enumerate(triggers):
-        matched, desc = _trigger_matches(trig, event, file_path)
+        matched, desc = _trigger_matches(trig, event, file_path, resolved_symbols=resolved_symbols)
         if not matched:
             continue
         not_before = trig.get("not_before")
