@@ -96,6 +96,10 @@ class CodeWatcher(FileSystemEventHandler):
         # the real process; defaults to the stdlib-only reader above.
         self._rss_reader = _default_rss_mb
         self._lock = threading.Lock()
+        # Serializes start()/stop() and makes stop-then-start a no-op
+        # (UPG-SHUTDOWN-INIT-RACE) — see start()'s comment for the race.
+        self._lifecycle_lock = threading.Lock()
+        self._stop_requested = False
         # Distinct paths currently outstanding on the per-file _debounce timer
         # (mirrors _debounce._pending's keys — tracked separately so this
         # logic works even when a test replaces self._debounce with a mock).
@@ -579,23 +583,40 @@ class CodeWatcher(FileSystemEventHandler):
                 self._schedule_dir(Path(path))
 
     def start(self) -> None:
-        self._observer = Observer()
-        for root in self._indexer.all_roots:
-            for d in self._top_level_included_dirs(Path(root)):
-                self._schedule_dir(d)
-        self._observer.start()
-        self._running = True
+        # Serialized against stop() (UPG-SHUTDOWN-INIT-RACE): the directory
+        # walk between constructing the Observer and starting it takes real
+        # time on a large workspace, and a concurrent stop() landing in that
+        # window used to join() a never-started thread (RuntimeError). Under
+        # the lifecycle lock, stop() blocks until the observer is actually
+        # started; a stop() that already ran makes this start() a no-op
+        # instead of orphaning a freshly-started observer thread.
+        with self._lifecycle_lock:
+            if self._stop_requested:
+                return
+            self._observer = Observer()
+            for root in self._indexer.all_roots:
+                for d in self._top_level_included_dirs(Path(root)):
+                    self._schedule_dir(d)
+            self._observer.start()
+            self._running = True
         self._rescan_top_level()
 
     def stop(self) -> None:
-        self._running = False
-        if self._rescan_timer is not None:
-            self._rescan_timer.cancel()
-        with self._lock:
-            if self._burst_quiet_timer is not None:
-                self._burst_quiet_timer.cancel()
-                self._burst_quiet_timer = None
-        self._debounce.cancel_all()
-        if self._observer:
-            self._observer.stop()
-            self._observer.join()
+        with self._lifecycle_lock:
+            self._stop_requested = True
+            self._running = False
+            if self._rescan_timer is not None:
+                self._rescan_timer.cancel()
+            with self._lock:
+                if self._burst_quiet_timer is not None:
+                    self._burst_quiet_timer.cancel()
+                    self._burst_quiet_timer = None
+            self._debounce.cancel_all()
+            if self._observer:
+                self._observer.stop()
+                # is_alive() is False only when the thread never started —
+                # possible if start() raised mid-walk; join() would then
+                # raise rather than no-op. A started-and-finished thread
+                # reads True→join returns immediately, so no fire is missed.
+                if self._observer.is_alive():
+                    self._observer.join()

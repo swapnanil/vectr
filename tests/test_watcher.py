@@ -542,6 +542,31 @@ class TestStartStop:
         watcher._observer = None
         watcher.stop()  # should not raise
 
+    def test_stop_with_unstarted_real_observer_no_error(self):
+        # UPG-SHUTDOWN-INIT-RACE: an observer that was constructed but never
+        # started (start() raised mid-directory-walk, or a caller reached in
+        # directly) used to make stop() call join() on a never-started
+        # thread — RuntimeError("cannot join thread before it is started"),
+        # the exact CI-teardown crash. stop() must skip the join.
+        from agent.watcher import Observer
+        watcher = CodeWatcher(_mock_indexer())
+        watcher._observer = Observer()  # constructed, never started
+        watcher.stop()  # must not raise
+
+    def test_start_after_stop_is_noop(self):
+        # UPG-SHUTDOWN-INIT-RACE: a service shutdown that lands before the
+        # phase-2 thread reaches watcher.start() must make that late start()
+        # a no-op — a fresh observer thread started after stop() would have
+        # no owner left to ever stop it.
+        watcher = CodeWatcher(_mock_indexer())
+        watcher.stop()
+        mock_observer = MagicMock()
+        with patch("agent.watcher.Observer", return_value=mock_observer):
+            watcher.start()
+        mock_observer.start.assert_not_called()
+        assert watcher._observer is None
+        assert watcher._running is False
+
 
 # ---------------------------------------------------------------------------
 # CodeWatcher — _rescan_top_level (UPG-13.1: new top-level dirs / loose files)
