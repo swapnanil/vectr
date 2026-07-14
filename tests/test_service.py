@@ -862,6 +862,49 @@ class TestDeferSearchInit:
         finally:
             svc.shutdown()  # release the phase-2 indexer's ChromaDB client
 
+    def test_recall_with_prompt_submit_events_threads_query_through(self, tmp_path, monkeypatch) -> None:
+        """TRIGGER-ENGINE wave 2b, §8: prompt-submit is the M (semantic)
+        primitive's one fire point — recall()'s generic-query-mode branch
+        must forward the actual prompt text into fire_and_format alongside
+        `events`, not just `events` alone (the gap this wave closes)."""
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        with patch.object(
+            svc._context_store, "fire_and_format", wraps=svc._context_store.fire_and_format,
+        ) as spy:
+            svc.recall(query="check the retry budget", events=["prompt-submit"])
+        spy.assert_called_once()
+        assert spy.call_args.kwargs["query"] == "check the retry budget"
+
+    def test_recall_without_events_never_calls_fire_and_format(self, tmp_path, monkeypatch) -> None:
+        """Every caller that predates this wave (no `events`) is unaffected
+        — the generic-query-mode branch's `fire_and_format` call is gated on
+        `events` being truthy, same as before wiring `query` through it."""
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        with patch.object(
+            svc._context_store, "fire_and_format", wraps=svc._context_store.fire_and_format,
+        ) as spy:
+            svc.recall(query="check the retry budget")
+        spy.assert_not_called()
+
+    def test_semantic_trigger_fires_end_to_end_through_recall(self, tmp_path, monkeypatch) -> None:
+        """Full VectrService.recall() -> _recall_impl() -> fire_and_format()
+        path, with a real embedder attached: a note declaring an explicit
+        semantic trigger fires on an identical-text prompt-submit query even
+        though a `kind` filter that excludes the note's own kind would make
+        the SEPARATE plain-recall semantic search omit it — isolating that
+        the match came from the M primitive, not the unrelated recall()
+        content search that happens to run in the same call."""
+        with patch("integrations.vscode_bridge.configure_all"):
+            svc = self._make_deferred(tmp_path, monkeypatch)
+            svc.complete_search_init()
+        try:
+            content = "always check the retry budget before a network call"
+            svc.remember(content, kind="gotcha", triggers=[{"semantic": True}])
+            notes_text = svc.recall(query=content, kind="directive", events=["prompt-submit"])
+            assert "retry budget" in notes_text
+        finally:
+            svc.shutdown()  # release the phase-2 indexer's ChromaDB client
+
     def test_recall_no_notice_without_query_before_embedder_ready(self, tmp_path, monkeypatch) -> None:
         svc = self._make_deferred(tmp_path, monkeypatch)
         svc.remember("a note recorded before the embedder is ready")

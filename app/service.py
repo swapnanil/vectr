@@ -1437,11 +1437,17 @@ class VectrService:
         # explicit override; absent `events` entirely (the default — every
         # other caller: direct vectr_recall, `vectr recall`, etc.) this
         # branch behaves exactly as before the engine existed.
+        #
+        # `query` is forwarded here too (wave 2b, §8): a prompt-submit event
+        # is the M (semantic) primitive's one fire point — this is the only
+        # `fire_and_format()` call site in this file that ever has both an
+        # `events` list AND the actual prompt text available together.
         fire_text, fired_ids = "", set()
         if events:
             fire_text, fired_ids = self._context_store.fire_and_format(
                 self._workspace_root,
                 events=events,
+                query=query,
                 session_id=session_id,
                 ledger=self._ledger_for(session_id),
                 surface=surface,
