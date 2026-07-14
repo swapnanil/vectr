@@ -245,6 +245,13 @@ HOOKS_LOG_CHARS_PER_TOKEN : int
     Divisor for the approximate token count written to the optional hook
     injection log above (UPG-HOOK-INJECT-OBSERVABILITY).
 
+HOOKS_MIN_SIMILARITY : float
+    Per-turn UserPromptSubmit recall relevance floor (UPG-9.5). Raised from
+    0.35 to 0.72 (adversarial-review measurement, 2026-07-15): at 0.35 the
+    hook injected 3 irrelevant notes on 8/8 deliberately off-topic prompts;
+    the M trigger primitive's own per-kind thetas (0.72-0.80) had 0/8 false
+    fires on the identical prompts.
+
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT : float
 STRATEGY_DEFAULT_BM25_WEIGHT : float
     Fallback hybrid-search weights used before the first index-time codebase
@@ -566,6 +573,7 @@ _hooks_cfg: dict[str, Any] = _cfg["hooks"]
 
 HOOKS_LOG_INJECTIONS: bool = bool(_hooks_cfg["log_injections"])
 HOOKS_LOG_CHARS_PER_TOKEN: int = int(_hooks_cfg["log_chars_per_token"])
+HOOKS_MIN_SIMILARITY: float = float(_hooks_cfg["min_similarity"])
 
 # ---------------------------------------------------------------------------
 # ingest_traces unresolved-caller/callee warning cap (UPG-7.3)

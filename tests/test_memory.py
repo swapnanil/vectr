@@ -1573,6 +1573,46 @@ class TestRememberTriggerEngineParams:
         with pytest.raises(ValueError):
             store.remember(ws, "note", supersedes=999999)
 
+    def test_agent_provenance_write_cannot_supersede_a_human_provenance_note(self, tmp_path) -> None:
+        """Write-boundary guard: an agent (or auto) write must never tombstone
+        a genuine human-reviewed directive — that would let an agent-authored
+        note silently permanently mute a human note without ever minting
+        provenance='human' itself."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        human_id = store.remember(ws, "a human directive", kind="directive", provenance="human")
+        with pytest.raises(ValueError, match="human"):
+            store.remember(ws, "an agent note", supersedes=human_id, provenance="agent")
+        # the target must be untouched — the write was rejected outright
+        human_note = store.get_note(ws, human_id)
+        assert human_note.valid_until is None
+
+    def test_auto_provenance_write_cannot_supersede_a_human_provenance_note(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        human_id = store.remember(ws, "a human finding", provenance="human")
+        with pytest.raises(ValueError, match="human"):
+            store.remember(ws, "an auto note", supersedes=human_id, provenance="auto")
+
+    def test_human_provenance_write_can_supersede_a_human_provenance_note(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        human_id = store.remember(ws, "an old human directive", kind="directive", provenance="human")
+        new_id = store.remember(
+            ws, "a corrected human directive", kind="directive",
+            supersedes=human_id, provenance="human",
+        )
+        old = store.get_note(ws, human_id)
+        assert old.valid_until is not None
+        assert old.superseded_by_note_id == new_id
+
+    def test_agent_provenance_write_can_still_supersede_an_agent_provenance_note(self, tmp_path) -> None:
+        """The guard is scoped to human-provenance TARGETS only — the common
+        agent-supersedes-agent case (unaffected by this fix) still works."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        old_id = store.remember(ws, "old finding", provenance="agent")
+        new_id = store.remember(ws, "corrected finding", supersedes=old_id, provenance="agent")
+        old = store.get_note(ws, old_id)
+        assert old.valid_until is not None
+        assert old.superseded_by_note_id == new_id
+
     def test_supersedes_never_fires_again(self, tmp_path) -> None:
         store, ws = _store(tmp_path), str(tmp_path)
         old_id = store.remember(ws, "old directive", kind="directive")
@@ -2193,6 +2233,78 @@ class TestFireEvaluation:
         assert len(second) == 1
 
 
+class TestFirePathPrimitiveAbsoluteRelative:
+    """P (path) trigger primitive must match a trigger's glob `path` pattern
+    against EITHER the file_path exactly as given OR its workspace-relative
+    form — a real hook (every AI code editor) sends an ABSOLUTE file_path
+    while anchors/triggers are naturally authored workspace-relative (a
+    gotcha's kind-default bundle generates them straight from anchors)."""
+
+    def test_relative_anchor_fires_on_absolute_hook_path(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "agent" / "trigger_engine.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("content")
+        store.remember(
+            ws, "a gotcha about trigger_engine.py", kind="gotcha",
+            anchors=["agent/trigger_engine.py"],
+        )
+        results = store.fire(ws, event="pre-edit", file_path=str(f))
+        assert len(results) == 1
+        assert results[0].fired is True
+
+    def test_absolute_pattern_still_fires_against_absolute_path(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "agent" / "trigger_engine.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("content")
+        absolute_path = str(f)
+        store.remember(
+            ws, "an absolutely-anchored gotcha", kind="gotcha",
+            triggers=[{"path": absolute_path, "event": "pre-edit"}],
+        )
+        results = store.fire(ws, event="pre-edit", file_path=absolute_path)
+        assert len(results) == 1
+
+    def test_relative_pattern_still_fires_against_relative_path(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(
+            ws, "a relatively-anchored gotcha", kind="gotcha",
+            anchors=["src/api/handlers.py"],
+        )
+        results = store.fire(ws, event="pre-edit", file_path="src/api/handlers.py")
+        assert len(results) == 1
+
+    def test_glob_pattern_matches_absolute_path_via_relative_form(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "src" / "api" / "handlers.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("content")
+        store.remember(
+            ws, "a glob-anchored gotcha", kind="gotcha",
+            triggers=[{"path": "src/api/**", "event": "pre-edit"}],
+        )
+        results = store.fire(ws, event="pre-edit", file_path=str(f))
+        assert len(results) == 1
+
+    def test_file_outside_workspace_root_matches_absolute_only(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        outside = str(tmp_path.parent / "outside_the_workspace.py")
+        store.remember(
+            ws, "an absolutely-anchored gotcha outside the workspace",
+            kind="gotcha", triggers=[{"path": outside, "event": "pre-edit"}],
+        )
+        results = store.fire(ws, event="pre-edit", file_path=outside)
+        assert len(results) == 1
+        # a relative pattern never matches a file that has no relative form
+        store.remember(
+            ws, "a relatively-anchored gotcha that cannot reach outside",
+            kind="gotcha", triggers=[{"path": "outside_the_workspace.py", "event": "pre-edit"}],
+        )
+        results = store.fire(ws, event="pre-edit", file_path=outside)
+        assert len(results) == 1  # still only the absolute-pattern note
+
+
 class TestFireScopeEnforcement:
     """TRIGGER-ENGINE wave 2a, bm2-design-skeleton.md §1 — all five
     SCOPE_VALUES enforced through the real store (SQLite round-trip), not
@@ -2222,6 +2334,26 @@ class TestFireScopeEnforcement:
         )
         assert len(store.fire(ws, event="pre-edit", file_path="src/api/x.py")) == 1
         assert len(store.fire(ws, event="pre-edit", file_path="src/other/y.py")) == 0
+
+    def test_path_subtree_scope_fires_for_an_absolute_hook_path_against_a_relative_anchor(
+        self, tmp_path,
+    ) -> None:
+        """Same defect class the P primitive's abs/rel fix closed, but in
+        scope_permits()'s own path-subtree gate: a real hook sends an
+        ABSOLUTE file_path while the anchor is naturally authored workspace-
+        relative. scope_permits() is checked BEFORE the trigger loop, so
+        even though the P primitive itself would match, an absolute-only
+        scope check silently excluded the note before the trigger ever ran."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        (tmp_path / "src" / "api").mkdir(parents=True)
+        store.remember(
+            ws, "a scoped gotcha", kind="gotcha", scope="path-subtree",
+            anchors=["src/api/x.py"],
+        )
+        abs_path = str(tmp_path / "src" / "api" / "x.py")
+        assert len(store.fire(ws, event="pre-edit", file_path=abs_path)) == 1
+        outside = str(tmp_path / "src" / "other" / "y.py")
+        assert len(store.fire(ws, event="pre-edit", file_path=outside)) == 0
 
     def test_branch_scope_fires_only_on_the_recorded_branch(self, tmp_path, monkeypatch) -> None:
         import agent.working_context_store._store as store_mod
@@ -2259,6 +2391,23 @@ class TestFireScopeEnforcement:
         )
         assert len(store.recall_for_path(ws, "src/auth.py")) == 1
         assert len(store.recall_for_path(ws, "src/other.py")) == 0
+
+    def test_recall_for_path_scope_check_matches_an_absolute_hook_path(self, tmp_path) -> None:
+        """F1b's fix also covers recall_for_path() -- a PreToolUse hook sends
+        an ABSOLUTE path, and the anchor is naturally authored workspace-
+        relative; recall_for_path() already resolves the workspace-relative
+        form for its own content match, this reuses that same resolution for
+        the scope check instead of dropping it."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        (tmp_path / "src").mkdir()
+        store.remember(
+            ws, "a subtree note mentioning auth.py", kind="gotcha",
+            scope="path-subtree", anchors=["src/auth.py"],
+        )
+        abs_path = str(tmp_path / "src" / "auth.py")
+        assert len(store.recall_for_path(ws, abs_path)) == 1
+        abs_other = str(tmp_path / "src" / "other.py")
+        assert len(store.recall_for_path(ws, abs_other)) == 0
 
     def test_pre_wave_notes_with_no_scope_declared_are_backward_compatible(self, tmp_path) -> None:
         """A note written before scope existed (or by any caller that never

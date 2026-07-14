@@ -47,6 +47,36 @@ def _hash_path_content(root: Path, raw_path: str) -> str | None:
         return None
 
 
+def _path_trigger_candidates(workspace_root: str, file_path: str | None) -> tuple[str, ...] | None:
+    """The P (path) trigger primitive's candidate forms for one lifecycle
+    file_path: the path exactly as given, plus its workspace-relative form
+    when computable — the SAME resolve()/relative_to() normalization
+    `recall_for_path()` already uses just above. A real hook (every AI code
+    editor) sends an ABSOLUTE file_path, while triggers/anchors are naturally
+    authored workspace-relative (a gotcha's kind-default bundle generates
+    them straight from anchors — `default_bundle_for_kind()`); matching only
+    the as-given form would silently never fire a relatively-anchored
+    trigger against a real hook event. `trigger_engine.py` itself stays free
+    of filesystem/workspace knowledge (its purity invariant) — this
+    normalization lives here, at the `fire()` boundary, which is the one
+    place that already knows the workspace root.
+
+    A file outside `workspace_root` simply has no relative form — the
+    as-given form is still returned, just without a second candidate, never
+    an error. Returns None only when `file_path` itself is None (no path
+    this call)."""
+    if file_path is None:
+        return None
+    candidates = [file_path]
+    try:
+        relpath = str(Path(file_path).resolve().relative_to(Path(workspace_root).resolve()))
+    except (ValueError, OSError):
+        relpath = None
+    if relpath and relpath not in candidates:
+        candidates.append(relpath)
+    return tuple(candidates)
+
+
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Plain dot-product cosine similarity between two equal-length vectors.
     Used only by the M (semantic) trigger primitive (TRIGGER-ENGINE wave 2b,
@@ -108,7 +138,7 @@ def _scope_filter(
     notes: list[WorkingNote],
     *,
     session_id: str | None = None,
-    file_path: str | None = None,
+    file_path: str | tuple[str, ...] | None = None,
 ) -> list[WorkingNote]:
     """Recall-side scope enforcement (TRIGGER-ENGINE wave 2a,
     bm2-design-skeleton.md §1) — a pure post-filter over an already-fetched
@@ -124,7 +154,13 @@ def _scope_filter(
     recall() path. "path-subtree" is enforced ONLY when the caller has a
     `file_path` to filter against (recall_for_path()); plain query-based
     recall() has no file context, so a path-subtree-scoped note is left
-    unfiltered there.
+    unfiltered there. `file_path` accepts either a single string or a tuple
+    of candidate forms for the same file (as-given plus workspace-relative,
+    same shape `fire()`'s `_path_trigger_candidates()` produces) — a real
+    hook/tool call sends an ABSOLUTE path while anchors are naturally
+    authored workspace-relative, so `recall_for_path()` passes both forms
+    to give `scope_permits()`'s path-subtree check a relative form to
+    match against.
 
     Accepted trade-off: called AFTER a SQL LIMIT at every call site, so
     excluding a scoped note here may return fewer than `limit` results —
@@ -657,7 +693,13 @@ class WorkingContextStore:
         `superseded_at` set (excluding it from recall() by default and from
         ever firing again, per evaluate_note) and `superseded_by_note_id` set
         to this new note's id — kept for audit, never deleted. Raises
-        ValueError if the target note does not exist in this workspace.
+        ValueError if the target note does not exist in this workspace, OR if
+        the target's provenance is "human" while THIS write's own provenance
+        is not — a write-boundary guard, surface-agnostic and provenance-
+        based: only a provenance="human" write may tombstone a genuine
+        human-reviewed directive; an agent/auto write may not silently
+        permanently-mute one this way. A provenance="human" write may still
+        supersede anything, including another human note.
         Distinct from the pre-existing `superseded_by` (author_id) column,
         which is set only by the unrelated code_hash-conflict path above.
         """
@@ -709,11 +751,30 @@ class WorkingContextStore:
             # a bad note_id never leaves a half-applied write.
             if supersedes is not None:
                 target = conn.execute(
-                    "SELECT note_id FROM notes WHERE workspace = ? AND note_id = ?",
+                    "SELECT note_id, provenance FROM notes WHERE workspace = ? AND note_id = ?",
                     (workspace, supersedes),
                 ).fetchone()
                 if target is None:
                     raise ValueError(f"supersedes references note #{supersedes}, which does not exist in this workspace")
+                # Write-boundary guard (companion to the MCP vectr_remember
+                # provenance='human' rejection): a write whose OWN provenance
+                # is not "human" may never tombstone a note whose provenance
+                # IS "human" -- otherwise an agent-authored write could
+                # silently supersede (and so permanently stop firing) a
+                # genuine human-reviewed directive, without ever minting
+                # provenance='human' itself. Surface-agnostic (applies to
+                # REST and any future caller identically, not just MCP) and
+                # provenance-based, not surface-based -- a human-provenance
+                # write may still supersede anything, including another
+                # human note.
+                target_provenance = target[1]
+                if target_provenance == "human" and provenance != "human":
+                    raise ValueError(
+                        f"supersedes references note #{supersedes}, which is "
+                        "provenance='human' -- a write whose own provenance "
+                        "is not 'human' may not supersede a human-provenance "
+                        "note (only a human-provenance write may)"
+                    )
 
             # conflict resolution: if another note anchors the same code block, supersede it
             if code_hash:
@@ -1386,15 +1447,19 @@ class WorkingContextStore:
         session_id: scope="session" enforcement, same as recall(). `file_path`
         (already a parameter here) also enforces scope="path-subtree" — the
         one recall path where that's free, since the file context already
-        exists (TRIGGER-ENGINE wave 2a, §1).
+        exists (TRIGGER-ENGINE wave 2a, §1). A real caller (e.g. the
+        PreToolUse hook) sends an ABSOLUTE `file_path`; `_path_trigger_
+        candidates()` (shared with `fire()`) resolves its workspace-relative
+        form too, so a path-subtree-scoped note anchored the natural,
+        workspace-relative way still matches (F1b — the same abs/rel
+        candidate-matching fix as the P trigger primitive, applied here to
+        the scope check).
         """
         basename = Path(file_path).name
         if not basename:
             return []
-        try:
-            relpath = str(Path(file_path).resolve().relative_to(Path(workspace).resolve()))
-        except (ValueError, OSError):
-            relpath = ""
+        path_candidates = _path_trigger_candidates(workspace, file_path)
+        relpath = next((c for c in (path_candidates or ()) if c != file_path), "")
 
         sql = ("SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
                "AND (content LIKE ? OR content LIKE ?)")
@@ -1418,7 +1483,7 @@ class WorkingContextStore:
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
         notes = [self._row_to_note(r) for r in rows]
-        notes = _scope_filter(notes, session_id=session_id, file_path=file_path)
+        notes = _scope_filter(notes, session_id=session_id, file_path=path_candidates)
         audit("RECALL", workspace=workspace, query=basename, notes_returned=len(notes), method="path")
         return notes
 
@@ -1804,6 +1869,13 @@ class WorkingContextStore:
         wiring) — then compared by cosine against each candidate note's own
         already-stored vector, never re-embedding the note.
 
+        `file_path` is normalized into its P-primitive candidate forms
+        (`_path_trigger_candidates()`: as-given plus workspace-relative)
+        exactly once here — the only place that knows `workspace` is a
+        filesystem root — and that tuple, not the raw string, is what gets
+        passed into `evaluate_note()`; `trigger_engine.py` never resolves a
+        path itself (purity invariant).
+
         Every note that actually fires has its `last_fired` column stamped to
         `now` — this is what makes a trigger's `cooldown` T-modifier
         meaningful on the NEXT evaluation (evaluate_note() reads `last_fired`
@@ -1815,6 +1887,7 @@ class WorkingContextStore:
             now = time.time()
 
         branch = _current_git_branch(Path(workspace))
+        path_candidates = _path_trigger_candidates(workspace, file_path)
 
         with self._conn() as conn:
             rows = conn.execute(
@@ -1897,7 +1970,7 @@ class WorkingContextStore:
         results = []
         for note in notes:
             result = evaluate_note(
-                note, event=event, file_path=file_path, now=now,
+                note, event=event, file_path=path_candidates, now=now,
                 session_id=session_id, branch=branch,
                 resolved_symbols=resolved_symbols,
                 semantic_matched=semantic_matched_by_id.get(note.note_id),

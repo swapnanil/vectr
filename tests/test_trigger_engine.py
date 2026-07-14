@@ -363,6 +363,67 @@ class TestEvaluateNote:
         assert "scope" in result.explanation
 
 
+class TestEvaluateNotePathCandidates:
+    """`file_path` accepts either a single string (legacy/common case) or a
+    tuple of equivalent candidate forms for the SAME file — the P primitive
+    matches a trigger's `path` glob against ANY candidate
+    (`WorkingContextStore.fire()`'s real caller passes (as_given,
+    workspace_relative); this pure-logic test exercises evaluate_note()'s own
+    handling of that tuple without any filesystem/workspace involved)."""
+
+    def test_single_string_file_path_still_works(self) -> None:
+        note = _note(triggers=[{"path": "src/api/**"}])
+        assert evaluate_note(note, file_path="src/api/handlers.py").fired is True
+
+    def test_pattern_matches_second_candidate_in_the_tuple(self) -> None:
+        """Simulates the exact bug this fixes: a relatively-anchored pattern
+        against an absolute-looking first candidate that only the SECOND
+        (workspace-relative) candidate satisfies."""
+        note = _note(triggers=[{"path": "src/api/**", "event": "pre-edit"}])
+        result = evaluate_note(
+            note, event="pre-edit",
+            file_path=("/abs/workspace/src/api/handlers.py", "src/api/handlers.py"),
+        )
+        assert result.fired is True
+
+    def test_no_candidate_matches_never_fires(self) -> None:
+        note = _note(triggers=[{"path": "src/api/**", "event": "pre-edit"}])
+        result = evaluate_note(
+            note, event="pre-edit",
+            file_path=("/abs/workspace/src/other/x.py", "src/other/x.py"),
+        )
+        assert result.fired is False
+
+    def test_empty_tuple_never_fires_a_path_trigger(self) -> None:
+        note = _note(triggers=[{"path": "src/api/**"}])
+        assert evaluate_note(note, file_path=()).fired is False
+
+    def test_scope_path_subtree_matches_any_candidate_not_just_the_first(self) -> None:
+        """F1b: scope_permits()'s path-subtree check now receives the FULL
+        candidate tuple (mirroring the P primitive), not just the first
+        (as-given) candidate — an absolute hook path that has no relative
+        match itself still fires when a LATER candidate (the workspace-
+        relative form) is under the declared anchor's directory."""
+        note = _note(
+            kind="gotcha", scope="path-subtree", anchors=[["src/api/x.py", None]],
+            triggers=[{"path": "src/api/**"}],
+        )
+        result = evaluate_note(
+            note, file_path=("/abs/workspace/src/api/x.py", "src/api/x.py"),
+        )
+        assert result.fired is True
+
+    def test_scope_path_subtree_excluded_when_no_candidate_matches(self) -> None:
+        note = _note(
+            kind="gotcha", scope="path-subtree", anchors=[["src/api/x.py", None]],
+            triggers=[{"path": "src/api/**"}],
+        )
+        result = evaluate_note(
+            note, file_path=("/abs/workspace/src/other/y.py", "src/other/y.py"),
+        )
+        assert result.fired is False
+
+
 # ---------------------------------------------------------------------------
 # scope_permits — the five SCOPE_VALUES (bm2-design-skeleton.md §1)
 # ---------------------------------------------------------------------------
@@ -409,6 +470,24 @@ class TestScopePermits:
         assert scope_permits(note, file_path="src/api/y.py")[0] is True   # same directory
         assert scope_permits(note, file_path="src/other/z.py")[0] is False
         assert scope_permits(note)[0] is False  # no file_path supplied at all
+
+    def test_path_subtree_scope_accepts_a_candidate_tuple_matching_any_form(self) -> None:
+        """F1b — mirrors the P primitive's abs/rel fix: a real hook sends an
+        ABSOLUTE file_path while anchors are naturally authored workspace-
+        relative, so a single-string, first-candidate-only check silently
+        never permits a relatively-anchored note. `file_path` now accepts a
+        tuple of candidate forms and matches if ANY of them falls under the
+        anchor's directory — an absolute-only single string with no relative
+        form still correctly fails (it has nothing else to try)."""
+        note = _note(scope="path-subtree", anchors=[["src/api/x.py", None]])
+        assert scope_permits(
+            note, file_path=("/abs/workspace/src/api/x.py", "src/api/x.py"),
+        )[0] is True
+        assert scope_permits(
+            note, file_path=("/abs/workspace/src/other/z.py", "src/other/z.py"),
+        )[0] is False
+        assert scope_permits(note, file_path="/abs/workspace/src/api/x.py")[0] is False
+        assert scope_permits(note, file_path=())[0] is False
 
     def test_path_subtree_scope_with_no_anchors_is_never_permitted(self) -> None:
         note = _note(scope="path-subtree", anchors=[])
@@ -667,3 +746,20 @@ class TestPackInjection:
 
     def test_empty_items_returns_empty_list(self) -> None:
         assert pack_injection([]) == []
+
+    def test_eviction_stops_packing_lower_precedence_items_never_backfill(self) -> None:
+        from agent.config import MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP, MEMORY_TRIGGER_CHARS_PER_TOKEN
+        # The top-order item is oversized even at its index tier (it does
+        # not fit in the whole per-session budget), so it is evicted. A
+        # lower-order item that would otherwise fit easily in the freed-up
+        # budget must NOT be packed in its place: eviction is a stop signal,
+        # not a skip, so nothing lower-precedence ever ships while
+        # something higher-precedence was dropped.
+        oversized = "D" * (MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP * MEMORY_TRIGGER_CHARS_PER_TOKEN * 2)
+        huge_directive = _note(note_id=1, kind="directive")
+        small_finding = _note(note_id=2, kind="finding")
+        packed = pack_injection([
+            (small_finding, "full finding text", "idx finding"),
+            (huge_directive, oversized, oversized),
+        ])
+        assert packed == []

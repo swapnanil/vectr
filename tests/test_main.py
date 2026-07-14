@@ -1793,6 +1793,18 @@ class TestCmdHookUserPromptSubmit:
         assert "min_similarity" in payload      # relevance cutoff applied (UPG-5.1)
         assert payload["limit"] == m._HOOK_RECALL_LIMIT
 
+    def test_min_similarity_is_config_driven_not_hardcoded_low(self, monkeypatch, capsys):
+        """The per-turn recall floor is agent/config.yaml's hooks.min_similarity,
+        not a low hardcoded constant. Raised from 0.35 to 0.72 (adversarial
+        review, 2026-07-15): at 0.35 the hook injected 3 irrelevant notes on
+        8/8 deliberately off-topic prompts; 0.72 (matching the M primitive's
+        own lowest per-kind theta) had 0/8 false fires on the same prompts."""
+        from agent.config import HOOKS_MIN_SIMILARITY
+        _, mock_fetch = self._run('{"cwd": "/p", "prompt": "lock flow"}', "x", monkeypatch, capsys)
+        payload = mock_fetch.call_args[0][1]
+        assert payload["min_similarity"] == HOOKS_MIN_SIMILARITY
+        assert HOOKS_MIN_SIMILARITY == pytest.approx(0.72)
+
     def test_empty_prompt_injects_nothing(self, monkeypatch, capsys):
         out, mock_fetch = self._run('{"cwd": "/p", "prompt": "   "}', "x", monkeypatch, capsys)
         mock_fetch.assert_not_called()

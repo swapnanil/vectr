@@ -201,7 +201,7 @@ class FireResult:
 def _trigger_matches(
     trigger: dict,
     event: str | None,
-    file_path: str | None,
+    path_candidates: tuple[str, ...] | None,
     *,
     resolved_symbols: frozenset[str] | None = None,
     semantic_matched: bool | None = None,
@@ -209,6 +209,18 @@ def _trigger_matches(
     """Conjunction check for ONE trigger's declared P/E/S/M primitives
     against the current lifecycle state. Returns (matched, human-readable
     description) — the description feeds the one-line fire explanation.
+
+    `path_candidates` is every equivalent form of the current lifecycle's
+    target file the CALLER already resolved — e.g. the path exactly as given
+    plus its workspace-relative form (`WorkingContextStore.fire()` computes
+    both; this module never touches a filesystem or a workspace root, so it
+    never resolves paths itself). The P primitive matches the trigger's glob
+    `path` pattern against ANY candidate — a real hook sends an ABSOLUTE
+    file_path while triggers are naturally authored workspace-relative (a
+    gotcha's default bundle generates them straight from anchors), so
+    matching only one form would silently never fire a relatively-anchored
+    trigger against a real hook event. `None`/empty means no file path this
+    call — a trigger declaring 'path' then deterministically does not match.
 
     `resolved_symbols` is the set of symbol names defined in or referenced by
     the current lifecycle's target file — resolved ONCE per `fire()` call by
@@ -237,7 +249,9 @@ def _trigger_matches(
         return False, ""  # malformed (should have been rejected by validate_trigger)
 
     if path_pattern is not None:
-        if not file_path or not fnmatch.fnmatch(file_path, path_pattern):
+        if not path_candidates or not any(
+            fnmatch.fnmatch(candidate, path_pattern) for candidate in path_candidates
+        ):
             return False, ""
     if want_event is not None and want_event != event:
         return False, ""
@@ -266,7 +280,7 @@ def scope_permits(
     *,
     session_id: str | None = None,
     branch: str | None = None,
-    file_path: str | None = None,
+    file_path: str | tuple[str, ...] | None = None,
 ) -> tuple[bool, str]:
     """Whether `note`'s declared `scope` (bm2-design-skeleton.md §1) permits it
     to be considered at all for the given lifecycle context. Operates ONLY on
@@ -279,9 +293,17 @@ def scope_permits(
     scope. "session" and "branch" need the caller to supply the matching
     lifecycle value; if the caller doesn't supply one (e.g. plain recall()
     with no branch context), the note is excluded rather than guessed open.
+
     "path-subtree" checks `file_path` against the directory of each declared
-    anchor path — a note with no anchors or no file_path is excluded (there is
-    no declared subtree to match against)."""
+    anchor path. `file_path` accepts either a single path string or a tuple
+    of equivalent candidate forms for the SAME file (mirroring
+    `evaluate_note`'s `file_path`/`_trigger_matches`'s P primitive, e.g. the
+    real hook path as given plus its workspace-relative form, both computed
+    by the caller — this module never resolves or normalizes a path itself)
+    — the subtree matches if ANY candidate falls under ANY declared anchor's
+    directory. A note with no anchors, or given no candidate at all, is
+    excluded (there is no declared subtree to match against, or nothing to
+    match it against)."""
     scope = note.scope or DEFAULT_SCOPE
     if scope in ("workspace", "repo"):
         return True, ""
@@ -294,16 +316,23 @@ def scope_permits(
             return True, ""
         return False, f"scope 'branch' — recorded on {note.branch or 'unknown'!r}, current is {branch or 'unknown'!r}"
     if scope == "path-subtree":
-        if not file_path or not note.anchors:
+        if isinstance(file_path, str):
+            candidates: tuple[str, ...] = (file_path,)
+        elif file_path:
+            candidates = tuple(file_path)
+        else:
+            candidates = ()
+        if not candidates or not note.anchors:
             return False, "scope 'path-subtree' — no file path or no declared anchor subtree"
-        candidate = file_path.replace("\\", "/").lstrip("./")
-        for anchor in note.anchors:
-            if not anchor or not anchor[0]:
-                continue
-            anchor_path = str(anchor[0]).replace("\\", "/").lstrip("./")
-            anchor_dir = anchor_path.rsplit("/", 1)[0] if "/" in anchor_path else ""
-            if candidate == anchor_path or (anchor_dir and (candidate == anchor_dir or candidate.startswith(anchor_dir + "/"))):
-                return True, ""
+        for raw_candidate in candidates:
+            candidate = raw_candidate.replace("\\", "/").lstrip("./")
+            for anchor in note.anchors:
+                if not anchor or not anchor[0]:
+                    continue
+                anchor_path = str(anchor[0]).replace("\\", "/").lstrip("./")
+                anchor_dir = anchor_path.rsplit("/", 1)[0] if "/" in anchor_path else ""
+                if candidate == anchor_path or (anchor_dir and (candidate == anchor_dir or candidate.startswith(anchor_dir + "/"))):
+                    return True, ""
         return False, "scope 'path-subtree' — file not under the note's declared subtree"
     return True, ""  # unrecognised scope value never blocks
 
@@ -312,7 +341,7 @@ def evaluate_note(
     note: WorkingNote,
     *,
     event: str | None = None,
-    file_path: str | None = None,
+    file_path: str | tuple[str, ...] | None = None,
     now: float | None = None,
     session_id: str | None = None,
     branch: str | None = None,
@@ -336,6 +365,20 @@ def evaluate_note(
     `faded` for ranking (T is a modifier, and a modifier only gates through
     not_before/cooldown; visibility fade is a ranking signal, not a gate).
 
+    `file_path` accepts either a single path string (the common/legacy case —
+    a caller with only one path form) or a tuple of equivalent candidate
+    forms for the SAME file (e.g. `WorkingContextStore.fire()` passes
+    `(as_given, workspace_relative)` — see its docstring). The FULL candidate
+    tuple is forwarded to both path-matching consumers: the P primitive
+    (`_trigger_matches` docstring) and `scope_permits()`'s `path-subtree`
+    check (its own docstring) each match against ANY candidate — an absolute
+    hook path and a workspace-relative anchor/pattern are both given a
+    chance, never just the first form. The one-line fire explanation never
+    touches the resolved path text at all (it renders the trigger's own
+    declared glob pattern, e.g. "path src/api/**"), so no convention is
+    needed there. This module still never resolves or normalizes a path
+    itself, that is entirely the caller's job (purity invariant).
+
     `resolved_symbols` (TRIGGER-ENGINE wave 2b) is passed straight through to
     `_trigger_matches()` for the S primitive — see its docstring; this
     function never touches the symbol graph itself, only a caller-resolved
@@ -345,10 +388,15 @@ def evaluate_note(
     if now is None:
         now = time.time()
 
+    if isinstance(file_path, str) or file_path is None:
+        path_candidates: tuple[str, ...] | None = (file_path,) if file_path is not None else None
+    else:
+        path_candidates = tuple(file_path) if file_path else None
+
     if note.valid_until is not None:
         return FireResult(note.note_id, False, "superseded — a tombstoned memory never fires")
 
-    permitted, scope_reason = scope_permits(note, session_id=session_id, branch=branch, file_path=file_path)
+    permitted, scope_reason = scope_permits(note, session_id=session_id, branch=branch, file_path=path_candidates)
     if not permitted:
         return FireResult(note.note_id, False, scope_reason)
 
@@ -358,7 +406,7 @@ def evaluate_note(
 
     for idx, trig in enumerate(triggers):
         matched, desc = _trigger_matches(
-            trig, event, file_path,
+            trig, event, path_candidates,
             resolved_symbols=resolved_symbols, semantic_matched=semantic_matched,
         )
         if not matched:
@@ -530,7 +578,11 @@ def pack_injection(
     injects whole (subject to its own per-injection cap, else it drops to its
     index-tier line), or is evicted entirely if even the index-tier line
     does not fit. Eviction is always from the BOTTOM of the shared total
-    order — the lowest-precedence notes are the ones dropped first.
+    order — the lowest-precedence notes are the ones dropped first. The
+    moment any item is evicted for not fitting even at the index tier,
+    packing STOPS entirely: nothing lower-precedence is ever allowed to
+    ship while something higher-precedence was dropped, even if it would
+    have fit in the leftover budget.
 
     Passing the session ledger's `remaining_budget()` here is what makes the
     per-session cap CUMULATIVE across every `fire_triggers`/`fire_and_format`
@@ -550,7 +602,7 @@ def pack_injection(
             if tier == "full":
                 text, tier, tokens = index_text, "index", token_estimate(index_text)
             if tokens > budget:
-                continue  # evicted — does not fit even at index tier
+                break  # evicted — stop packing so nothing lower-precedence backfills
 
         packed.append(PackedItem(note_id=note.note_id, text=text, tier=tier))
         budget -= tokens
