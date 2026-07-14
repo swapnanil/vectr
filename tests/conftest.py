@@ -242,6 +242,7 @@ def client_real_memory(tmp_path):
     """
     from api import app
     from agent.working_context_store import WorkingContextStore
+    from agent.trigger_engine import TriggerFireLedger
 
     svc = _base_mock_service()
     real_store = WorkingContextStore(str(tmp_path))
@@ -259,9 +260,28 @@ def client_real_memory(tmp_path):
     svc.remember.side_effect = _remember
     svc.promote_note.side_effect = lambda note_id, to: real_store.promote(ws, note_id, to)
 
+    # TRIGGER-ENGINE wave 2a: a minimal per-session ledger registry mirroring
+    # `VectrService._ledger_for`/`reset_trigger_ledger` so REST-level tests
+    # against this REAL store can exercise fire-dedup and cumulative budget
+    # through the actual `/v1/recall` request/response cycle, not just a
+    # stand-in that silently accepts and drops `session_id`/`events`.
+    _ledgers: dict[str, TriggerFireLedger] = {}
+
+    def _ledger_for(session_id):
+        if not session_id:
+            return None
+        return _ledgers.setdefault(session_id, TriggerFireLedger())
+
+    def _reset_trigger_ledger(session_id):
+        if session_id and session_id in _ledgers:
+            _ledgers[session_id].reset()
+
+    svc.reset_trigger_ledger.side_effect = _reset_trigger_ledger
+
     def _recall(query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
                 min_similarity=None, file_path=None, max_age_days=None, sort_by="relevance",
-                detail="index", note_id=None, surface="mcp", hook_event=None):
+                detail="index", note_id=None, surface="mcp", hook_event=None,
+                session_id=None, events=None):
         if note_id is not None:
             note = real_store.get_note(ws, note_id)
             if note is None:
@@ -269,27 +289,37 @@ def client_real_memory(tmp_path):
             stale = real_store.check_staleness([note], ws)
             return real_store.format_notes_for_llm([note], stale_warnings=stale, detail="full", surface=surface)
         if boot:
-            boot_notes = real_store.boot_recall(ws)
-            if not boot_notes:
-                return ""
-            stale = real_store.check_staleness(boot_notes, ws)
-            directive_notes = [n for n in boot_notes if n.kind == "directive"]
-            other_notes = [n for n in boot_notes if n.kind != "directive"]
-            parts = []
-            if directive_notes:
-                parts.append(real_store.format_notes_for_llm(directive_notes, stale_warnings=stale, detail="full", surface=surface))
-            if other_notes:
-                parts.append(real_store.format_notes_for_llm(other_notes, stale_warnings=stale, detail="index", surface=surface))
-            return "\n".join(parts)
+            events_to_fire = events if events else ["session-start"]
+            fire_text, _ = real_store.fire_and_format(
+                ws, events=events_to_fire, session_id=session_id,
+                ledger=_ledger_for(session_id), surface=surface,
+            )
+            return fire_text
         if file_path:
-            path_notes = real_store.recall_for_path(ws, file_path, kind=kind, limit=limit)
-            return real_store.format_notes_for_llm(path_notes, detail=detail, surface=surface) if path_notes else ""
-        return real_store.format_notes_for_llm(
-            real_store.recall(ws, query, tags, priority, limit, kind=kind, min_similarity=min_similarity,
-                              max_age_days=max_age_days, sort_by=sort_by),
-            detail=detail,
-            surface=surface,
-        )
+            fire_text, fired_ids = real_store.fire_and_format(
+                ws, event="pre-edit", file_path=file_path, session_id=session_id,
+                ledger=_ledger_for(session_id), surface=surface,
+            )
+            path_notes = real_store.recall_for_path(ws, file_path, kind=kind, limit=limit, session_id=session_id)
+            path_notes = [n for n in path_notes if n.note_id not in fired_ids]
+            legacy_text = real_store.format_notes_for_llm(path_notes, detail=detail, surface=surface) if path_notes else ""
+            if fire_text and legacy_text:
+                return fire_text + "\n\n" + legacy_text
+            return fire_text or legacy_text
+        fire_text, fired_ids = "", set()
+        if events:
+            fire_text, fired_ids = real_store.fire_and_format(
+                ws, events=events, session_id=session_id,
+                ledger=_ledger_for(session_id), surface=surface,
+            )
+        notes = real_store.recall(ws, query, tags, priority, limit, kind=kind, min_similarity=min_similarity,
+                                  max_age_days=max_age_days, sort_by=sort_by, session_id=session_id)
+        if fired_ids:
+            notes = [n for n in notes if n.note_id not in fired_ids]
+        formatted = real_store.format_notes_for_llm(notes, detail=detail, surface=surface)
+        if fire_text and formatted:
+            return fire_text + "\n\n" + formatted
+        return fire_text or formatted
 
     svc.recall.side_effect = _recall
     svc.forget_note.side_effect = lambda note_id: real_store.forget(ws, note_id)

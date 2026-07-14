@@ -163,12 +163,37 @@ class TestRecallRoute:
             query=None, tags=None, priority=None, limit=10, kind=None, boot=True,
             min_similarity=None, file_path=None, max_age_days=None, sort_by="relevance",
             detail="index", note_id=None, surface="mcp", hook_event="SessionStart",
+            session_id=None, events=None,
         )
 
     def test_recall_without_hook_event_forwards_none(self, client) -> None:
         client.post("/v1/recall", json={})
         from api import app
         assert app.state.service.recall.call_args.kwargs["hook_event"] is None
+
+    # TRIGGER-ENGINE wave 2a: session_id/events (RecallRequest, app/models.py).
+    @pytest.mark.parametrize("event", ["session-start", "prompt-submit", "pre-edit", "pre-run", "pre-commit", "post-compaction"])
+    def test_recall_valid_event_accepted(self, client, event) -> None:
+        resp = client.post("/v1/recall", json={"events": [event]})
+        assert resp.status_code == 200
+
+    def test_recall_invalid_event_rejected(self, client) -> None:
+        resp = client.post("/v1/recall", json={"events": ["not-a-real-event"]})
+        assert resp.status_code == 422
+
+    def test_recall_forwards_session_id_and_events_to_service(self, client) -> None:
+        client.post("/v1/recall", json={"session_id": "sess-1", "events": ["prompt-submit"]})
+        from api import app
+        kwargs = app.state.service.recall.call_args.kwargs
+        assert kwargs["session_id"] == "sess-1"
+        assert kwargs["events"] == ["prompt-submit"]
+
+    def test_recall_without_session_id_or_events_forwards_none(self, client) -> None:
+        client.post("/v1/recall", json={})
+        from api import app
+        kwargs = app.state.service.recall.call_args.kwargs
+        assert kwargs["session_id"] is None
+        assert kwargs["events"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +219,41 @@ class TestSnapshotRoute:
     def test_snapshot_processing_ms_present(self, client) -> None:
         resp = client.post("/v1/snapshot", json={"label": "test"})
         assert "processing_ms" in resp.json()
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/trigger/reset (TRIGGER-ENGINE wave 2a)
+# ---------------------------------------------------------------------------
+
+class TestTriggerResetRoute:
+    def test_reset_returns_reset_true(self, client) -> None:
+        resp = client.post("/v1/trigger/reset", json={"session_id": "sess-1"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["reset"] is True
+        assert "processing_ms" in data
+
+    def test_reset_forwards_session_id_to_service(self, client) -> None:
+        client.post("/v1/trigger/reset", json={"session_id": "sess-1"})
+        from api import app
+        app.state.service.reset_trigger_ledger.assert_called_with("sess-1")
+
+    def test_reset_with_no_session_id_is_a_no_op_not_an_error(self, client) -> None:
+        resp = client.post("/v1/trigger/reset", json={})
+        assert resp.status_code == 200
+        from api import app
+        app.state.service.reset_trigger_ledger.assert_called_with(None)
+
+    def test_reset_never_503s_in_search_only_mode(self, client) -> None:
+        """The per-session ledger lives in VectrService itself, not the
+        working-memory store — there is nothing to gate on search-only mode."""
+        from api import app
+        app.state.service.search_only = True
+        try:
+            resp = client.post("/v1/trigger/reset", json={"session_id": "sess-1"})
+            assert resp.status_code == 200
+        finally:
+            app.state.service.search_only = False
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +432,89 @@ class TestMemoryCrossRequest:
         assert "never push to main" in notes
         assert "sprint goal" in notes
         assert "an ordinary finding" not in notes
+
+
+# ---------------------------------------------------------------------------
+# TRIGGER-ENGINE wave 2a — the live engine, end to end through REST
+# (client_real_memory: real WorkingContextStore, no daemon/hook involved —
+# these tests stand in for the hook-pipeline's REST leg; main.py's cmd_hook
+# tests in tests/test_main.py cover the stdin-JSON -> payload leg.)
+# ---------------------------------------------------------------------------
+
+class TestTriggerEngineLiveViaRest:
+    def test_post_compaction_only_trigger_is_silent_on_plain_boot_but_fires_when_merged(self, client_real_memory) -> None:
+        """A note whose ONLY explicit trigger is post-compaction is not part
+        of any kind-default bundle — a plain SessionStart (events omitted,
+        implying ['session-start']) must not deliver it; merging
+        events=['session-start','post-compaction'] (the compact-source
+        SessionStart call) must."""
+        client = client_real_memory
+        client.post("/v1/remember", json={
+            "content": "post-compaction-only reminder",
+            "kind": "finding", "triggers": [{"event": "post-compaction"}],
+        })
+        plain = client.post("/v1/recall", json={"boot": True}).json()["notes"]
+        assert "post-compaction-only reminder" not in plain
+
+        merged = client.post(
+            "/v1/recall", json={"boot": True, "events": ["session-start", "post-compaction"]},
+        ).json()["notes"]
+        assert "post-compaction-only reminder" in merged
+
+    def test_pre_edit_gotcha_with_explicit_trigger_is_not_double_injected(self, client_real_memory) -> None:
+        """The engine (explicit pre-edit trigger) and the legacy content-match
+        recall_for_path() would BOTH match this note (it mentions auth.py) —
+        the note_id dedup must render it exactly once, not twice."""
+        client = client_real_memory
+        client.post("/v1/remember", json={
+            "content": "auth.py: verify_token() must check expiry before signature",
+            "kind": "gotcha", "anchors": ["src/auth.py"],
+            "triggers": [{"path": "src/auth.py", "event": "pre-edit"}],
+        })
+        notes = client.post("/v1/recall", json={"file_path": "src/auth.py"}).json()["notes"]
+        assert notes.count("verify_token() must check expiry") == 1
+
+    def test_explicit_prompt_submit_trigger_fires_via_events_merged_with_query(self, client_real_memory) -> None:
+        """No kind's default bundle uses 'prompt-submit' — only an explicit
+        override does, and only when the caller passes events=['prompt-submit']
+        (main.py's UserPromptSubmit hook)."""
+        client = client_real_memory
+        client.post("/v1/remember", json={
+            "content": "always check the retry budget before a network call",
+            "kind": "finding", "triggers": [{"event": "prompt-submit"}],
+        })
+        without_events = client.post(
+            "/v1/recall", json={"query": "totally unrelated topic"},
+        ).json()["notes"]
+        assert "retry budget" not in without_events
+
+        with_events = client.post(
+            "/v1/recall", json={"query": "totally unrelated topic", "events": ["prompt-submit"]},
+        ).json()["notes"]
+        assert "retry budget" in with_events
+
+    def test_events_is_a_no_op_for_a_note_with_no_matching_explicit_trigger(self, client_real_memory) -> None:
+        """Passing events=[...] must never change behaviour for a note that
+        has no explicit trigger for that event — every caller that predates
+        this wave (events always None) is completely unaffected."""
+        client = client_real_memory
+        client.post("/v1/remember", json={"content": "plain finding with no triggers"})
+        notes = client.post(
+            "/v1/recall", json={"query": "plain finding", "events": ["prompt-submit"]},
+        ).json()["notes"]
+        assert "plain finding with no triggers" in notes
+
+    def test_session_scope_note_is_visible_only_to_its_writing_session_via_rest(self, client_real_memory) -> None:
+        client = client_real_memory
+        client.post("/v1/remember", json={
+            "content": "ephemeral scratch note", "session_id": "sess-a", "scope": "session",
+        })
+        assert "ephemeral scratch note" in client.post(
+            "/v1/recall", json={"session_id": "sess-a"}).json()["notes"]
+        assert "ephemeral scratch note" not in client.post(
+            "/v1/recall", json={"session_id": "sess-b"}).json()["notes"]
+        assert "ephemeral scratch note" not in client.post(
+            "/v1/recall", json={}).json()["notes"]
 
 
 # ---------------------------------------------------------------------------

@@ -1708,6 +1708,53 @@ class TestCmdHookSessionStart:
             m.cmd_hook(argparse.Namespace(hook_event="session-start"))
         assert capsys.readouterr().out.strip() == ""
 
+    # TRIGGER-ENGINE wave 2a: session_id threading + post-compaction merge.
+    def test_threads_session_id_into_boot_payload(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            '{"cwd": "/project/a", "session_id": "abc-123"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._fetch_recall", return_value="x") as mock_fetch:
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="session-start"))
+        assert mock_fetch.call_args[0][1]["session_id"] == "abc-123"
+
+    def test_omits_session_id_from_payload_when_absent(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/project/a"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._fetch_recall", return_value="x") as mock_fetch:
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="session-start"))
+        assert "session_id" not in mock_fetch.call_args[0][1]
+
+    def test_compact_source_merges_post_compaction_into_events(self, monkeypatch, capsys):
+        """The compact-source SessionStart call is the deterministic first
+        delivery point after PreCompact's reset — it must additionally cover
+        post-compaction-only triggers, not just session-start."""
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            '{"cwd": "/project/a", "source": "compact"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._fetch_recall", return_value="x") as mock_fetch:
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="session-start"))
+        assert mock_fetch.call_args[0][1]["events"] == ["session-start", "post-compaction"]
+
+    def test_non_compact_source_does_not_merge_post_compaction(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            '{"cwd": "/project/a", "source": "startup"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._fetch_recall", return_value="x") as mock_fetch:
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="session-start"))
+        assert "events" not in mock_fetch.call_args[0][1]
+
 
 class TestCmdHookUserPromptSubmit:
     def _run(self, stdin_json: str, recall_text: str, monkeypatch, capsys):
@@ -1761,6 +1808,20 @@ class TestCmdHookUserPromptSubmit:
         count a UserPromptSubmit injection — without it, counters never increment."""
         _, mock_fetch = self._run('{"cwd": "/p", "prompt": "lock flow"}', "x", monkeypatch, capsys)
         assert mock_fetch.call_args[0][1]["hook_event"] == "UserPromptSubmit"
+
+    # TRIGGER-ENGINE wave 2a
+    def test_always_merges_prompt_submit_event(self, monkeypatch, capsys):
+        _, mock_fetch = self._run('{"cwd": "/p", "prompt": "lock flow"}', "x", monkeypatch, capsys)
+        assert mock_fetch.call_args[0][1]["events"] == ["prompt-submit"]
+
+    def test_threads_session_id_into_payload(self, monkeypatch, capsys):
+        _, mock_fetch = self._run(
+            '{"cwd": "/p", "prompt": "lock flow", "session_id": "abc-123"}', "x", monkeypatch, capsys)
+        assert mock_fetch.call_args[0][1]["session_id"] == "abc-123"
+
+    def test_omits_session_id_from_payload_when_absent(self, monkeypatch, capsys):
+        _, mock_fetch = self._run('{"cwd": "/p", "prompt": "lock flow"}', "x", monkeypatch, capsys)
+        assert "session_id" not in mock_fetch.call_args[0][1]
 
 
 class TestCmdHookPreToolUse:
@@ -1819,6 +1880,18 @@ class TestCmdHookPreToolUse:
         out, _ = self._run(stdin, "", monkeypatch, capsys)
         assert out.strip() == ""
 
+    # TRIGGER-ENGINE wave 2a
+    def test_threads_session_id_into_payload(self, monkeypatch, capsys):
+        stdin = ('{"cwd": "/p", "tool_input": {"file_path": "/p/agent/symbol_graph.py"}, '
+                  '"session_id": "abc-123"}')
+        _, mock_fetch = self._run(stdin, "x", monkeypatch, capsys)
+        assert mock_fetch.call_args[0][1]["session_id"] == "abc-123"
+
+    def test_omits_session_id_from_payload_when_absent(self, monkeypatch, capsys):
+        stdin = '{"cwd": "/p", "tool_input": {"file_path": "/p/agent/symbol_graph.py"}}'
+        _, mock_fetch = self._run(stdin, "x", monkeypatch, capsys)
+        assert "session_id" not in mock_fetch.call_args[0][1]
+
 
 class TestCmdHookPreCompact:
     def test_snapshots_with_trigger_in_label_and_emits_nothing(self, monkeypatch, capsys):
@@ -1840,6 +1913,41 @@ class TestCmdHookPreCompact:
         monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/p", "trigger": "manual"}'))
         with patch("main.InstanceRegistry") as MockReg, \
              patch("main._post_snapshot", return_value=False):
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))  # must not raise
+
+    # TRIGGER-ENGINE wave 2a (§3 "cleared on compaction")
+    def test_calls_trigger_reset_when_session_id_present(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._post_snapshot", return_value=True), \
+             patch("main._post_trigger_reset", return_value=True) as mock_reset:
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
+        mock_reset.assert_called_once_with(8765, "abc-123")
+
+    def test_does_not_call_trigger_reset_when_session_id_absent(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/p", "trigger": "auto"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._post_snapshot", return_value=True), \
+             patch("main._post_trigger_reset", return_value=True) as mock_reset:
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
+        mock_reset.assert_not_called()
+
+    def test_trigger_reset_failure_does_not_raise(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._post_snapshot", return_value=True), \
+             patch("main._post_trigger_reset", return_value=False):
             MockReg.return_value.get.return_value = {"port": 8765}
             m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))  # must not raise
 

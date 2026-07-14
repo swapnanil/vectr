@@ -1727,7 +1727,10 @@ class TestFireEvaluation:
 
     def test_fire_orders_by_total_order(self, tmp_path) -> None:
         store, ws = _store(tmp_path), str(tmp_path)
-        store.remember(ws, "a task", kind="task")
+        # priority="high" — task's default session-start bundle only applies
+        # at high priority (matches the legacy boot_recall() SQL filter this
+        # bundle replaces; TRIGGER-ENGINE wave 2a).
+        store.remember(ws, "a task", kind="task", priority="high")
         store.remember(ws, "a directive", kind="directive")
         results = store.fire(ws, event="session-start")
         fired_kinds = [store.get_note(ws, r.note_id).kind for r in results]
@@ -1784,6 +1787,149 @@ class TestFireEvaluation:
         second = store.fire(ws, event="session-start")
         assert len(first) == 1
         assert len(second) == 1
+
+
+class TestFireScopeEnforcement:
+    """TRIGGER-ENGINE wave 2a, bm2-design-skeleton.md §1 — all five
+    SCOPE_VALUES enforced through the real store (SQLite round-trip), not
+    just the pure `scope_permits()` unit tests in test_trigger_engine.py."""
+
+    def test_workspace_scope_default_fires_for_any_caller(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a directive", kind="directive")  # scope defaults to "workspace"
+        assert len(store.fire(ws, event="session-start")) == 1
+        assert len(store.fire(ws, event="session-start", session_id="anyone")) == 1
+
+    def test_session_scope_fires_only_for_the_writing_session(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(
+            ws, "an ephemeral note", kind="directive", session_id="writer-session",
+            scope="session", triggers=[{"event": "session-start"}],
+        )
+        assert len(store.fire(ws, event="session-start", session_id="writer-session")) == 1
+        assert len(store.fire(ws, event="session-start", session_id="other-session")) == 0
+        assert len(store.fire(ws, event="session-start")) == 0  # no session_id at all
+
+    def test_path_subtree_scope_fires_only_under_the_declared_anchor(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(
+            ws, "a scoped gotcha", kind="gotcha", scope="path-subtree",
+            anchors=["src/api/x.py"],
+        )
+        assert len(store.fire(ws, event="pre-edit", file_path="src/api/x.py")) == 1
+        assert len(store.fire(ws, event="pre-edit", file_path="src/other/y.py")) == 0
+
+    def test_branch_scope_fires_only_on_the_recorded_branch(self, tmp_path, monkeypatch) -> None:
+        import agent.working_context_store._store as store_mod
+        store, ws = _store(tmp_path), str(tmp_path)
+        monkeypatch.setattr(store_mod, "_current_git_branch", lambda root: "feature/x")
+        note_id = store.remember(
+            ws, "a branch-bound task", kind="task", scope="branch",
+            triggers=[{"event": "session-start"}],
+        )
+        assert store.get_note(ws, note_id).branch == "feature/x"
+        assert len(store.fire(ws, event="session-start")) == 1  # still on feature/x
+        monkeypatch.setattr(store_mod, "_current_git_branch", lambda root: "main")
+        assert len(store.fire(ws, event="session-start")) == 0  # switched branches
+
+    def test_repo_scope_is_a_no_op_like_workspace_through_the_real_store(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a directive", kind="directive", scope="repo")
+        assert len(store.fire(ws, event="session-start")) == 1
+
+    def test_recall_enforces_session_scope_not_just_fire(self, tmp_path) -> None:
+        """§1: scope="session" must be enforced on EVERY read path, not only
+        trigger firing — an ephemeral note must never leak into a plain
+        vectr_recall from a different session."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "an ephemeral finding", session_id="writer-session", scope="session")
+        assert len(store.recall(ws, session_id="writer-session")) == 1
+        assert len(store.recall(ws, session_id="other-session")) == 0
+        assert len(store.recall(ws)) == 0
+
+    def test_recall_for_path_enforces_path_subtree_scope(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(
+            ws, "a subtree note mentioning auth.py", kind="gotcha",
+            scope="path-subtree", anchors=["src/auth.py"],
+        )
+        assert len(store.recall_for_path(ws, "src/auth.py")) == 1
+        assert len(store.recall_for_path(ws, "src/other.py")) == 0
+
+    def test_pre_wave_notes_with_no_scope_declared_are_backward_compatible(self, tmp_path) -> None:
+        """A note written before scope existed (or by any caller that never
+        passes scope=) gets the dataclass default "workspace" — fires and
+        recalls exactly as it did before this wave."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "an old-style directive", kind="directive")
+        assert store.get_note(ws, note_id).scope == "workspace"
+        assert len(store.fire(ws, event="session-start")) == 1
+        assert len(store.recall(ws)) == 1
+
+
+class TestFireAndFormat:
+    """`WorkingContextStore.fire_and_format()` (TRIGGER-ENGINE wave 2a,
+    bm2-design-skeleton.md §2/§3/§4) — the live hook-delivery entry point:
+    multi-event OR-merge, dedup, budget pack, cumulative session spend."""
+
+    def test_renders_a_fired_note_with_a_triggered_memory_header(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "never push to main", kind="directive")
+        text, note_ids = store.fire_and_format(ws, event="session-start")
+        assert "Triggered Memory" in text
+        assert "never push to main" in text
+        assert len(note_ids) == 1
+
+    def test_empty_when_nothing_fires(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a plain finding")  # no default bundle
+        text, note_ids = store.fire_and_format(ws, event="session-start")
+        assert text == ""
+        assert note_ids == set()
+
+    def test_events_list_ors_across_multiple_lifecycle_moments_without_double_rendering(self, tmp_path) -> None:
+        """A directive's default bundle covers BOTH session-start and
+        post-compaction — merging events=[both] must render it exactly once,
+        not twice, per note_id (first-seen wins)."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "never push to main", kind="directive")
+        text, note_ids = store.fire_and_format(ws, events=["session-start", "post-compaction"])
+        assert len(note_ids) == 1
+        assert text.count("never push to main") == 1
+
+    def test_ledger_makes_the_injection_budget_cumulative_across_calls(self, tmp_path) -> None:
+        from agent.trigger_engine import MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP, TriggerFireLedger
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "never push to main", kind="directive")
+        ledger = TriggerFireLedger()
+        store.fire_and_format(ws, event="session-start", ledger=ledger)
+        assert ledger.remaining_budget() < MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP
+
+    def test_ledger_suppresses_the_same_note_on_a_second_identical_fire(self, tmp_path) -> None:
+        from agent.trigger_engine import TriggerFireLedger
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "never push to main", kind="directive")
+        ledger = TriggerFireLedger()
+        first_text, first_ids = store.fire_and_format(ws, event="session-start", ledger=ledger)
+        second_text, second_ids = store.fire_and_format(ws, event="session-start", ledger=ledger)
+        assert first_ids == {list(first_ids)[0]}
+        assert second_text == ""
+        assert second_ids == set()
+
+    def test_resetting_the_ledger_restores_re_eligibility(self, tmp_path) -> None:
+        """§3 "cleared on compaction": after reset(), a previously-suppressed
+        note fires again — mirrors PreCompact -> SessionStart re-delivering
+        the boot set."""
+        from agent.trigger_engine import TriggerFireLedger
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "never push to main", kind="directive")
+        ledger = TriggerFireLedger()
+        store.fire_and_format(ws, event="session-start", ledger=ledger)
+        assert store.fire_and_format(ws, event="session-start", ledger=ledger)[1] == set()  # suppressed
+        ledger.reset()
+        text, note_ids = store.fire_and_format(ws, event="session-start", ledger=ledger)
+        assert len(note_ids) == 1
+        assert "never push to main" in text
 
 
 # ---------------------------------------------------------------------------

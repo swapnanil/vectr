@@ -1004,7 +1004,9 @@ class TestVectrFetch:
 # every vectr_remember dispatch appends when the caller omits them — kept as
 # one constant so existing assert_called_once_with() calls below stay
 # readable as the additive surface grows.
-_DEFAULT_TRIGGER_PARAMS = dict(triggers=None, provenance="agent", scope="workspace", anchors=None, supersedes=None)
+_DEFAULT_TRIGGER_PARAMS = dict(
+    triggers=None, provenance="agent", scope="workspace", anchors=None, supersedes=None, session_id=None,
+)
 
 
 class TestVectrRemember:
@@ -1102,7 +1104,7 @@ class TestVectrRemember:
             content="a gotcha about auth.py", tags=None, priority="medium",
             kind="gotcha", title="", agent="",
             triggers=[{"path": "src/auth.py", "event": "pre-edit"}],
-            provenance="auto", scope="repo", anchors=["src/auth.py"], supersedes=None,
+            provenance="auto", scope="repo", anchors=["src/auth.py"], supersedes=None, session_id=None,
         )
 
     def test_remember_passes_supersedes_as_int(self) -> None:
@@ -1111,7 +1113,7 @@ class TestVectrRemember:
         svc.remember.assert_called_once_with(
             content="corrected finding", tags=None, priority="medium",
             kind="finding", title="", agent="",
-            triggers=None, provenance="agent", scope="workspace", anchors=None, supersedes=7,
+            triggers=None, provenance="agent", scope="workspace", anchors=None, supersedes=7, session_id=None,
         )
 
     def test_remember_non_integer_supersedes_returns_error(self) -> None:
@@ -1238,7 +1240,7 @@ class TestVectrRecall:
         handle_tools_call("vectr_recall", {}, svc)
         svc.recall.assert_called_once_with(
             query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=None,
+            detail="index", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
         )
 
     def test_recall_with_filters(self) -> None:
@@ -1246,7 +1248,7 @@ class TestVectrRecall:
         handle_tools_call("vectr_recall", {"query": "auth", "tags": ["wip"], "priority": "high", "limit": 5}, svc)
         svc.recall.assert_called_once_with(
             query="auth", tags=["wip"], priority="high", limit=5, kind=None, boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=None,
+            detail="index", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
         )
 
     def test_recall_passes_kind_filter(self) -> None:
@@ -1255,7 +1257,7 @@ class TestVectrRecall:
         handle_tools_call("vectr_recall", {"kind": "directive"}, svc)
         svc.recall.assert_called_once_with(
             query=None, tags=None, priority=None, limit=10, kind="directive", boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=None,
+            detail="index", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
         )
 
     def test_recall_passes_detail_full(self) -> None:
@@ -1264,7 +1266,7 @@ class TestVectrRecall:
         handle_tools_call("vectr_recall", {"detail": "full"}, svc)
         svc.recall.assert_called_once_with(
             query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="full", sort_by="relevance", max_age_days=None, note_id=None,
+            detail="full", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
         )
 
     def test_recall_passes_note_id(self) -> None:
@@ -1273,7 +1275,7 @@ class TestVectrRecall:
         handle_tools_call("vectr_recall", {"note_id": 7}, svc)
         svc.recall.assert_called_once_with(
             query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=7,
+            detail="index", sort_by="relevance", max_age_days=None, note_id=7, session_id=None,
         )
 
     def test_recall_passes_sort_by_and_max_age(self) -> None:
@@ -1282,7 +1284,7 @@ class TestVectrRecall:
         handle_tools_call("vectr_recall", {"sort_by": "recency", "max_age_days": 7.0}, svc)
         svc.recall.assert_called_once_with(
             query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="index", sort_by="recency", max_age_days=7.0, note_id=None,
+            detail="index", sort_by="recency", max_age_days=7.0, note_id=None, session_id=None,
         )
 
     def test_recall_returns_notes_text(self) -> None:

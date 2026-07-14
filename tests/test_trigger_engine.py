@@ -15,6 +15,7 @@ import pytest
 
 from agent.trigger_engine import (
     FULL_TEXT_KINDS,
+    MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP,
     FireResult,
     PackedItem,
     TriggerFireLedger,
@@ -22,6 +23,7 @@ from agent.trigger_engine import (
     evaluate_note,
     frame_prefix,
     pack_injection,
+    scope_permits,
     token_estimate,
     total_order_key,
     validate_trigger,
@@ -40,6 +42,9 @@ def _note(
     valid_until: float | None = None,
     last_fired: float | None = None,
     last_accessed: float = 100.0,
+    scope: str = "workspace",
+    session_id: str | None = None,
+    branch: str = "",
 ) -> WorkingNote:
     return WorkingNote(
         note_id=note_id,
@@ -55,6 +60,9 @@ def _note(
         provenance=provenance,
         valid_until=valid_until,
         last_fired=last_fired,
+        scope=scope,
+        session_id=session_id,
+        branch=branch,
     )
 
 
@@ -125,9 +133,19 @@ class TestDefaultBundleForKind:
         events = {t["event"] for t in bundle}
         assert events == {"session-start", "post-compaction"}
 
-    def test_task_fires_session_start(self) -> None:
-        bundle = default_bundle_for_kind("task", None)
+    def test_task_fires_session_start_at_high_priority(self) -> None:
+        bundle = default_bundle_for_kind("task", None, priority="high")
         assert bundle == [{"event": "session-start"}]
+
+    @pytest.mark.parametrize("priority", ["medium", "low", None])
+    def test_task_gets_no_default_bundle_below_high_priority(self, priority) -> None:
+        """TRIGGER-ENGINE wave 2a fix: the legacy `boot_recall()` this bundle
+        replaces filters task notes with `AND priority = 'high'` in SQL — a
+        medium/low/unset-priority task note must get NO default session-start
+        trigger, or `fire()` would inject strictly MORE task notes than
+        boot_recall() ever did (an unintended widening, not the documented
+        "reproduces ... exactly")."""
+        assert default_bundle_for_kind("task", None, priority=priority) == []
 
     def test_gotcha_with_anchors_gets_one_pre_edit_trigger_per_anchor(self) -> None:
         anchors = [["src/api/x.py", "abc123"], ["src/api/y.py", None]]
@@ -240,6 +258,71 @@ class TestEvaluateNote:
         r2 = evaluate_note(note, event="session-start", now=42.0)
         assert r1 == r2
 
+    def test_out_of_scope_note_never_fires_even_with_a_matching_trigger(self) -> None:
+        """Scope is checked BEFORE the trigger loop (bm2-design-skeleton.md §1)
+        — a trigger that would otherwise match must never fire a note whose
+        scope excludes this lifecycle context."""
+        note = _note(kind="directive", scope="session", session_id="writer-session")
+        result = evaluate_note(note, event="session-start", session_id="other-session")
+        assert result.fired is False
+        assert "scope" in result.explanation
+
+
+# ---------------------------------------------------------------------------
+# scope_permits — the five SCOPE_VALUES (bm2-design-skeleton.md §1)
+# ---------------------------------------------------------------------------
+
+class TestScopePermits:
+    def test_workspace_scope_is_always_permitted(self) -> None:
+        note = _note(scope="workspace")
+        assert scope_permits(note)[0] is True
+        assert scope_permits(note, session_id="s1", branch="main", file_path="a.py")[0] is True
+
+    def test_repo_scope_is_a_no_op_like_workspace(self) -> None:
+        """UPG-TRIGGER-SCOPE-REPO-CROSSSTORE: "repo" is recorded faithfully at
+        write time but enforced identically to "workspace" until the store is
+        keyed by git-common-dir instead of by workspace path."""
+        note = _note(scope="repo")
+        assert scope_permits(note)[0] is True
+
+    def test_notes_written_before_this_wave_default_to_workspace_scope(self) -> None:
+        """Backward compat: the WorkingNote dataclass default (and every note
+        written before scope existed) is scope="workspace" — unaffected by
+        enforcement, never newly excluded."""
+        note = WorkingNote(
+            note_id=99, workspace="/tmp/ws", content="pre-wave note", tags=[],
+            priority="medium", created_at=1.0, last_accessed=1.0,
+        )
+        assert note.scope == "workspace"
+        assert scope_permits(note)[0] is True
+
+    def test_session_scope_permits_only_the_writing_session(self) -> None:
+        note = _note(scope="session", session_id="writer-session")
+        assert scope_permits(note, session_id="writer-session")[0] is True
+        assert scope_permits(note, session_id="other-session")[0] is False
+        assert scope_permits(note)[0] is False  # no session_id supplied at all
+
+    def test_branch_scope_permits_only_the_recorded_branch(self) -> None:
+        note = _note(scope="branch", branch="feature/x")
+        assert scope_permits(note, branch="feature/x")[0] is True
+        assert scope_permits(note, branch="main")[0] is False
+        assert scope_permits(note)[0] is False  # no branch supplied at all
+
+    def test_path_subtree_scope_permits_files_under_a_declared_anchor(self) -> None:
+        note = _note(scope="path-subtree", anchors=[["src/api/x.py", None]])
+        assert scope_permits(note, file_path="src/api/x.py")[0] is True
+        assert scope_permits(note, file_path="src/api/y.py")[0] is True   # same directory
+        assert scope_permits(note, file_path="src/other/z.py")[0] is False
+        assert scope_permits(note)[0] is False  # no file_path supplied at all
+
+    def test_path_subtree_scope_with_no_anchors_is_never_permitted(self) -> None:
+        note = _note(scope="path-subtree", anchors=[])
+        assert scope_permits(note, file_path="src/api/x.py")[0] is False
+
+    def test_unrecognised_scope_value_never_blocks(self) -> None:
+        note = _note(scope="bogus-future-value")
+        assert scope_permits(note)[0] is True
+
 
 # ---------------------------------------------------------------------------
 # total_order_key — one implementation, reused for fire/injection/eviction
@@ -292,6 +375,31 @@ class TestTotalOrderKey:
         ordered = sorted([weird, normal], key=total_order_key)
         assert [n.note_id for n in ordered] == [2, 1]
 
+    def test_task_kind_orders_newest_note_id_first_even_on_shared_last_fired(self) -> None:
+        """UPG-TASK-NOTE-INJECTION-RECENCY: fire() stamps every note that
+        fires together in one call with the SAME last_fired reading (one
+        shared clock per evaluation), which ties last_used between two task
+        notes the moment both have fired once. A task note is current-work
+        state — the newer checkpoint (higher note_id) must still outrank the
+        older one after that tie, unlike the generic ascending tie-break
+        every other kind uses (test_note_id_is_the_final_deterministic_tiebreak
+        above)."""
+        older = _note(note_id=1, kind="task", priority="high", last_fired=500.0, last_accessed=500.0)
+        newer = _note(note_id=2, kind="task", priority="high", last_fired=500.0, last_accessed=500.0)
+        ordered = sorted([older, newer], key=total_order_key)
+        assert [n.note_id for n in ordered] == [2, 1]
+
+    def test_task_kind_ignores_last_used_entirely_older_last_fired_still_loses(self) -> None:
+        """Even when the OLDER task note has a strictly greater last_fired/
+        last_accessed than the newer one (e.g. it was re-fired in a later,
+        separate session-start call after the newer note's own last fire),
+        note_id recency still wins — task ordering never depends on
+        last_used, exactly mirroring recall()'s SQL ordering for this kind."""
+        older_but_refired = _note(note_id=1, kind="task", priority="high", last_fired=999.0)
+        newer = _note(note_id=2, kind="task", priority="high", last_fired=100.0)
+        ordered = sorted([older_but_refired, newer], key=total_order_key)
+        assert [n.note_id for n in ordered] == [2, 1]
+
 
 # ---------------------------------------------------------------------------
 # TriggerFireLedger — per-session dedup
@@ -322,6 +430,34 @@ class TestTriggerFireLedger:
         ledger.record_fire(note_id=1, trigger_index=0)
         ledger.reset()
         assert ledger.eligible(note_id=1, trigger_index=0) is True
+
+    def test_fresh_ledger_has_the_full_per_session_budget(self) -> None:
+        ledger = TriggerFireLedger()
+        assert ledger.remaining_budget() == MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP
+
+    def test_spend_is_cumulative_across_multiple_record_spend_calls(self) -> None:
+        """§3: the per-session token cap bounds the TOTAL tokens injected across
+        every fire_and_format call in one session, not each call in isolation —
+        a second delivery must see less budget than the first."""
+        ledger = TriggerFireLedger()
+        ledger.record_spend(100)
+        ledger.record_spend(50)
+        assert ledger.remaining_budget() == MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP - 150
+
+    def test_spend_never_drives_remaining_budget_negative(self) -> None:
+        ledger = TriggerFireLedger()
+        ledger.record_spend(MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP + 5_000)
+        assert ledger.remaining_budget() == 0
+
+    def test_reset_also_zeroes_cumulative_spend(self) -> None:
+        """Compaction (§3 "cleared on compaction") must restore the full budget,
+        not just fire-dedup eligibility — a stale spend total would leave a
+        post-compaction session permanently under-budget."""
+        ledger = TriggerFireLedger()
+        ledger.record_spend(MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP)
+        assert ledger.remaining_budget() == 0
+        ledger.reset()
+        assert ledger.remaining_budget() == MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP
 
 
 # ---------------------------------------------------------------------------
