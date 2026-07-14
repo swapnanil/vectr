@@ -1599,17 +1599,27 @@ class TestRememberTriggerEngineParams:
 class _FakeSymbolResolver:
     """Minimal duck-typed stand-in for SymbolGraph — only the two methods
     attach_symbol_resolver()/remember()/fire() actually call (TRIGGER-ENGINE
-    wave 2b). Real end-to-end coverage against the genuine SymbolGraph lives
-    in TestSymbolTriggerIndexLiveGraph below."""
+    wave 2b). `_hashes` is mutable so a test can mutate it in place to
+    simulate a symbol's definition changing between remember() and a later
+    check_staleness()/fire() call, without needing to swap the attached
+    resolver (attach_symbol_resolver() is intentionally idempotent, so a
+    second attach on the same store is a no-op). `touching_calls` counts
+    symbols_touching_file() invocations, so a test can assert fire()'s
+    write-time existence-check actually skips the (expensive) resolver call
+    when a workspace has no symbol-triggered notes at all. Real end-to-end
+    coverage against the genuine SymbolGraph lives in
+    TestSymbolTriggerIndexLiveGraph below."""
 
     def __init__(self, hashes: dict | None = None, touching: frozenset | None = None) -> None:
         self._hashes = hashes or {}
         self._touching = touching if touching is not None else frozenset()
+        self.touching_calls = 0
 
     def signature_hash(self, workspace, name):
         return self._hashes.get(name)
 
     def symbols_touching_file(self, workspace, file_path):
+        self.touching_calls += 1
         return self._touching
 
 
@@ -1662,6 +1672,160 @@ class TestSymbolTriggersWriteTimeIndex:
         note_id = store.remember(ws, "note", triggers=[{"symbol": "X"}])
         store.forget_all_workspaces()
         assert self._symtrig_rows(tmp_path, note_id) == []
+
+
+class TestFireSymbolPrimitive:
+    """Fire-time S resolution (TRIGGER-ENGINE wave 2b): fire() resolves the
+    target file's touched symbols ONCE per call and threads the same
+    frozenset into every note's evaluate_note(), rather than querying the
+    graph per note. Uses the fake resolver — real-graph coverage is in
+    TestSymbolTriggerIndexLiveGraph below."""
+
+    def test_fires_when_the_target_file_touches_the_declared_symbol(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(touching=frozenset({"WorkspaceLock"})))
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        results = store.fire(ws, event="pre-edit", file_path="src/resolver.py")
+        assert len(results) == 1
+
+    def test_does_not_fire_when_the_target_file_does_not_touch_the_symbol(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(touching=frozenset()))
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        results = store.fire(ws, event="pre-edit", file_path="src/resolver.py")
+        assert len(results) == 0
+
+    def test_never_fires_without_a_resolver_attached(self, tmp_path) -> None:
+        """Degradation gate: memory-only daemons and the warm-up window
+        before attach_symbol_resolver() runs have no resolver at all — a
+        symbol trigger deterministically does not fire, never an error."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        results = store.fire(ws, event="pre-edit", file_path="src/resolver.py")
+        assert results == []
+
+    def test_never_fires_without_a_file_path(self, tmp_path) -> None:
+        """No target file means nothing to resolve symbols against — even
+        with a resolver attached and the symbol technically resolvable
+        elsewhere, an S trigger only ever matches at a pre-edit moment with
+        a concrete file_path."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(touching=frozenset({"WorkspaceLock"})))
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        results = store.fire(ws, event="pre-edit")
+        assert results == []
+
+    def test_existence_check_skips_the_resolver_call_when_no_symbol_triggers_exist(self, tmp_path) -> None:
+        """Performance gate: a workspace with zero symbol-triggered notes
+        must never pay for a live symbols_touching_file() graph call."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        resolver = _FakeSymbolResolver(touching=frozenset({"WorkspaceLock"}))
+        store.attach_symbol_resolver(resolver)
+        store.remember(ws, "a plain finding")  # no triggers at all
+        store.fire(ws, event="pre-edit", file_path="src/resolver.py")
+        assert resolver.touching_calls == 0
+
+    def test_resolver_call_happens_once_per_fire_call_when_relevant(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        resolver = _FakeSymbolResolver(touching=frozenset({"WorkspaceLock"}))
+        store.attach_symbol_resolver(resolver)
+        store.remember(ws, "gotcha one", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        store.remember(ws, "gotcha two", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        store.fire(ws, event="pre-edit", file_path="src/resolver.py")
+        assert resolver.touching_calls == 1  # once for the whole call, not once per note
+
+
+class TestSymbolAnchorStaleness:
+    """check_staleness()'s symbol-signature re-hash (TRIGGER-ENGINE wave
+    2b) — the S-primitive equivalent of TestAnchorStaleness's path anchors:
+    never a silent drop, just a visible `[symbol_changed]` caveat."""
+
+    def test_signature_change_adds_a_visible_caveat_but_never_drops_the_note(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        resolver = _FakeSymbolResolver(hashes={"WorkspaceLock": "hash_v1"})
+        store.attach_symbol_resolver(resolver)
+        note_id = store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        resolver._hashes["WorkspaceLock"] = "hash_v2"  # the definition changed since write time
+        notes = store.recall(ws)
+        assert any(n.note_id == note_id for n in notes)  # still recalled, never silently dropped
+        stale = store.check_staleness(notes, ws)
+        assert note_id in stale
+        assert any("WorkspaceLock" in r and "symbol_changed" in r for r in stale[note_id])
+
+    def test_unchanged_signature_is_not_flagged(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(hashes={"WorkspaceLock": "stable_hash"}))
+        note_id = store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        notes = store.recall(ws)
+        stale = store.check_staleness(notes, ws)
+        assert note_id not in stale
+
+    def test_no_baseline_hash_at_write_time_is_never_flagged(self, tmp_path) -> None:
+        """Note written before any resolver was attached stores a NULL
+        signature_hash (nothing to compare against) — attaching a resolver
+        afterward must not retroactively flag it."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "X"}])
+        store.attach_symbol_resolver(_FakeSymbolResolver(hashes={"X": "some_hash"}))
+        notes = store.recall(ws)
+        stale = store.check_staleness(notes, ws)
+        assert note_id not in stale
+
+    def test_no_resolver_attached_degrades_to_no_check(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        notes = store.recall(ws)
+        stale = store.check_staleness(notes, ws)  # never raises with no resolver attached
+        assert note_id not in stale
+
+
+class TestSymbolTriggerIndexLiveGraph:
+    """End-to-end coverage against the genuine SymbolGraph — the real
+    construction path app/service.py wires: a SymbolGraph indexes the
+    workspace and gets attach_symbol_resolver()'d onto the store, then a
+    symbol trigger fires/re-hashes against real indexed code."""
+
+    def test_fires_when_the_edited_file_defines_the_symbol(self, tmp_path) -> None:
+        from agent.symbol_graph import SymbolGraph
+        store, ws = _store(tmp_path), str(tmp_path)
+        graph = SymbolGraph(str(tmp_path))
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        graph.index_file(ws, str(f))
+        store.attach_symbol_resolver(graph)
+        store.remember(ws, "a gotcha about locking", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        results = store.fire(ws, event="pre-edit", file_path=str(f))
+        assert len(results) == 1
+
+    def test_does_not_fire_for_an_unrelated_file(self, tmp_path) -> None:
+        from agent.symbol_graph import SymbolGraph
+        store, ws = _store(tmp_path), str(tmp_path)
+        graph = SymbolGraph(str(tmp_path))
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        graph.index_file(ws, str(f))
+        store.attach_symbol_resolver(graph)
+        store.remember(ws, "a gotcha about locking", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        other = tmp_path / "unrelated.py"
+        other.write_text("x = 1\n")
+        graph.index_file(ws, str(other))
+        results = store.fire(ws, event="pre-edit", file_path=str(other))
+        assert len(results) == 0
+
+    def test_signature_change_surfaces_a_staleness_caveat_on_fire(self, tmp_path) -> None:
+        from agent.symbol_graph import SymbolGraph
+        store, ws = _store(tmp_path), str(tmp_path)
+        graph = SymbolGraph(str(tmp_path))
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        graph.index_file(ws, str(f))
+        store.attach_symbol_resolver(graph)
+        store.remember(ws, "a gotcha about locking", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        return True\n")
+        graph.index_file(ws, str(f))  # re-index so signature_hash reflects the new body
+        results = store.fire(ws, event="pre-edit", file_path=str(f))
+        assert len(results) == 1
+        assert any("symbol_changed" in r for r in results[0].stale_paths)
 
 
 class TestPromote:

@@ -1703,6 +1703,41 @@ class WorkingContextStore:
             if reasons:
                 stale[note.note_id] = reasons
 
+        # Declarative symbol-anchor re-hash (TRIGGER-ENGINE wave 2b, S
+        # primitive) — independent of the content-prose/anchor checks above.
+        # A note whose trigger declared `symbol` records that symbol's
+        # signature hash at write time (remember() populates
+        # `symbol_triggers`); here we re-hash the CURRENT canonical
+        # definition and surface a caveat on drift, same shape as the
+        # path-anchor check above: never a silent drop, just a visible
+        # `f"{symbol_name}[symbol_changed]"` string appended to `stale`.
+        # Degrades to a no-op when no symbol resolver is attached
+        # (memory-only daemons, warm-up windows) — never an error.
+        if self._symbol_resolver is not None and notes:
+            note_ids = [n.note_id for n in notes]
+            with self._conn() as conn:
+                sym_rows = conn.execute(
+                    "SELECT note_id, symbol_name, signature_hash FROM symbol_triggers "
+                    "WHERE workspace = ? AND note_id IN ({})".format(
+                        ",".join("?" * len(note_ids))
+                    ),
+                    [workspace_root] + note_ids,
+                ).fetchall()
+            hash_cache: dict[str, str | None] = {}
+            for note_id, symbol_name, written_hash in sym_rows:
+                if not written_hash:
+                    continue  # no baseline recorded at write time — nothing to compare
+                if symbol_name not in hash_cache:
+                    hash_cache[symbol_name] = self._symbol_resolver.signature_hash(
+                        workspace_root, symbol_name
+                    )
+                current_hash = hash_cache[symbol_name]
+                if current_hash is not None and current_hash != written_hash:
+                    caveat = f"{symbol_name}[symbol_changed]"
+                    reasons_for_note = stale.setdefault(note_id, [])
+                    if caveat not in reasons_for_note:
+                        reasons_for_note.append(caveat)
+
         return stale
 
     def fire(
@@ -1758,12 +1793,36 @@ class WorkingContextStore:
 
         stale = self.check_staleness(notes, workspace)
 
+        # S (symbol) primitive (TRIGGER-ENGINE wave 2b): resolve the target
+        # file's defined/referenced symbols ONCE per call, never per note —
+        # and only when there is a `file_path` to resolve against, a symbol
+        # resolver is attached, AND this workspace has at least one
+        # symbol-triggered note (a cheap existence check against the
+        # write-time `symbol_triggers` index, avoiding a live graph query
+        # for the common case of no symbol triggers at all). Degrades to
+        # `None` — meaning "no symbol matches this call" — whenever any of
+        # those conditions is unmet (memory-only daemons and warm-up windows
+        # have no resolver attached at all): a symbol trigger then
+        # deterministically does not fire, never an error.
+        resolved_symbols: frozenset[str] | None = None
+        if file_path is not None and self._symbol_resolver is not None:
+            with self._conn() as conn:
+                has_symbol_trigger = conn.execute(
+                    "SELECT 1 FROM symbol_triggers WHERE workspace = ? LIMIT 1",
+                    (workspace,),
+                ).fetchone()
+            if has_symbol_trigger is not None:
+                resolved_symbols = self._symbol_resolver.symbols_touching_file(
+                    workspace, file_path
+                )
+
         fired_ids: list[int] = []
         results = []
         for note in notes:
             result = evaluate_note(
                 note, event=event, file_path=file_path, now=now,
                 session_id=session_id, branch=branch,
+                resolved_symbols=resolved_symbols,
             )
             if not result.fired:
                 continue

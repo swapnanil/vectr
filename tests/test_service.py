@@ -846,6 +846,22 @@ class TestDeferSearchInit:
         notes_text = svc.recall(query="recorded before the embedder")
         assert "semantic ranking unavailable" in notes_text
 
+    def test_symbol_resolver_unattached_before_phase2(self, tmp_path, monkeypatch) -> None:
+        """TRIGGER-ENGINE wave 2b: the S primitive has nothing to resolve
+        against until phase 2 builds the symbol graph — degrades cleanly,
+        never an error, during this window."""
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        assert svc._context_store._symbol_resolver is None
+
+    def test_complete_search_init_attaches_symbol_resolver_to_context_store(self, tmp_path, monkeypatch) -> None:
+        with patch("integrations.vscode_bridge.configure_all"):
+            svc = self._make_deferred(tmp_path, monkeypatch)
+            svc.complete_search_init()
+        try:
+            assert svc._context_store._symbol_resolver is svc._symbol_graph
+        finally:
+            svc.shutdown()  # release the phase-2 indexer's ChromaDB client
+
     def test_recall_no_notice_without_query_before_embedder_ready(self, tmp_path, monkeypatch) -> None:
         svc = self._make_deferred(tmp_path, monkeypatch)
         svc.remember("a note recorded before the embedder is ready")
