@@ -3,22 +3,26 @@ Trigger engine wave 1 (TRIGGER-ENGINE, bm2-design-skeleton.md §1/§2/§3/§5).
 
 vectr's working memory is not just a note store — each memory declares WHEN it
 is relevant to resurface, so the caller LLM does not have to guess or ask for
-it. This module is the pure, deterministic core of that mechanism: P (path)
-and E (event) trigger primitives, T (temporal) modifiers, composition
-(conjunction within one trigger, disjunction across a note's `triggers[]`),
-kind-default bundles, one shared total order (fire precedence, injection
-ordering, and budget eviction all reuse the SAME function), a per-session fire
-ledger, and the two-tier injection budget/pack.
+it. This module is the pure, deterministic core of that mechanism: P (path),
+E (event), S (symbol), and M (semantic) trigger primitives, T (temporal)
+modifiers, composition (conjunction within one trigger, disjunction across a
+note's `triggers[]`), kind-default bundles, one shared total order (fire
+precedence, injection ordering, and budget eviction all reuse the SAME
+function), a per-session fire ledger, and the two-tier injection budget/pack.
 
 Hard invariant (no-query-heuristics rule): every function here operates ONLY
 on a memory's own declared trigger data plus tool/lifecycle state that the
-CALLER already resolved (event name, a workspace-relative file path, a clock
-reading). Nothing in this module ever reads a user prompt or query string —
-there is no such parameter anywhere below.
+CALLER already resolved (event name, a workspace-relative file path, a
+caller-resolved symbol-graph set, a precomputed semantic-match boolean, a
+clock reading). Nothing in this module ever reads a user prompt or query
+string, parses text, or touches a vector — there is no such parameter
+anywhere below; S is exact set-membership against a symbol the caller already
+resolved, and M is a single precomputed boolean the caller already derived
+from a cosine-vs-threshold check (agent/working_context_store/_store.py's
+`fire()` — the only place a prompt or a vector is ever touched).
 
-S (symbol) and M (semantic/embedding) trigger primitives, executable
-predicates, and write-time contradiction detection are wave-2 scope
-(bm2-design-skeleton.md §8) and are deliberately absent here.
+Write-time contradiction detection (bm2-design-skeleton.md §8) remains
+out of scope this wave.
 
 Live delivery surface (TRIGGER-ENGINE wave 2a): `evaluate_note()`/`fire()`
 below, `WorkingContextStore.fire()`/`fire_and_format()`
