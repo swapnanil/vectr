@@ -47,6 +47,36 @@ def _hash_path_content(root: Path, raw_path: str) -> str | None:
         return None
 
 
+def _path_trigger_candidates(workspace_root: str, file_path: str | None) -> tuple[str, ...] | None:
+    """The P (path) trigger primitive's candidate forms for one lifecycle
+    file_path: the path exactly as given, plus its workspace-relative form
+    when computable — the SAME resolve()/relative_to() normalization
+    `recall_for_path()` already uses just above. A real hook (every AI code
+    editor) sends an ABSOLUTE file_path, while triggers/anchors are naturally
+    authored workspace-relative (a gotcha's kind-default bundle generates
+    them straight from anchors — `default_bundle_for_kind()`); matching only
+    the as-given form would silently never fire a relatively-anchored
+    trigger against a real hook event. `trigger_engine.py` itself stays free
+    of filesystem/workspace knowledge (its purity invariant) — this
+    normalization lives here, at the `fire()` boundary, which is the one
+    place that already knows the workspace root.
+
+    A file outside `workspace_root` simply has no relative form — the
+    as-given form is still returned, just without a second candidate, never
+    an error. Returns None only when `file_path` itself is None (no path
+    this call)."""
+    if file_path is None:
+        return None
+    candidates = [file_path]
+    try:
+        relpath = str(Path(file_path).resolve().relative_to(Path(workspace_root).resolve()))
+    except (ValueError, OSError):
+        relpath = None
+    if relpath and relpath not in candidates:
+        candidates.append(relpath)
+    return tuple(candidates)
+
+
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Plain dot-product cosine similarity between two equal-length vectors.
     Used only by the M (semantic) trigger primitive (TRIGGER-ENGINE wave 2b,
@@ -1804,6 +1834,13 @@ class WorkingContextStore:
         wiring) — then compared by cosine against each candidate note's own
         already-stored vector, never re-embedding the note.
 
+        `file_path` is normalized into its P-primitive candidate forms
+        (`_path_trigger_candidates()`: as-given plus workspace-relative)
+        exactly once here — the only place that knows `workspace` is a
+        filesystem root — and that tuple, not the raw string, is what gets
+        passed into `evaluate_note()`; `trigger_engine.py` never resolves a
+        path itself (purity invariant).
+
         Every note that actually fires has its `last_fired` column stamped to
         `now` — this is what makes a trigger's `cooldown` T-modifier
         meaningful on the NEXT evaluation (evaluate_note() reads `last_fired`
@@ -1815,6 +1852,7 @@ class WorkingContextStore:
             now = time.time()
 
         branch = _current_git_branch(Path(workspace))
+        path_candidates = _path_trigger_candidates(workspace, file_path)
 
         with self._conn() as conn:
             rows = conn.execute(
@@ -1897,7 +1935,7 @@ class WorkingContextStore:
         results = []
         for note in notes:
             result = evaluate_note(
-                note, event=event, file_path=file_path, now=now,
+                note, event=event, file_path=path_candidates, now=now,
                 session_id=session_id, branch=branch,
                 resolved_symbols=resolved_symbols,
                 semantic_matched=semantic_matched_by_id.get(note.note_id),

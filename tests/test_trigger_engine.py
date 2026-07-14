@@ -363,6 +363,52 @@ class TestEvaluateNote:
         assert "scope" in result.explanation
 
 
+class TestEvaluateNotePathCandidates:
+    """`file_path` accepts either a single string (legacy/common case) or a
+    tuple of equivalent candidate forms for the SAME file — the P primitive
+    matches a trigger's `path` glob against ANY candidate
+    (`WorkingContextStore.fire()`'s real caller passes (as_given,
+    workspace_relative); this pure-logic test exercises evaluate_note()'s own
+    handling of that tuple without any filesystem/workspace involved)."""
+
+    def test_single_string_file_path_still_works(self) -> None:
+        note = _note(triggers=[{"path": "src/api/**"}])
+        assert evaluate_note(note, file_path="src/api/handlers.py").fired is True
+
+    def test_pattern_matches_second_candidate_in_the_tuple(self) -> None:
+        """Simulates the exact bug this fixes: a relatively-anchored pattern
+        against an absolute-looking first candidate that only the SECOND
+        (workspace-relative) candidate satisfies."""
+        note = _note(triggers=[{"path": "src/api/**", "event": "pre-edit"}])
+        result = evaluate_note(
+            note, event="pre-edit",
+            file_path=("/abs/workspace/src/api/handlers.py", "src/api/handlers.py"),
+        )
+        assert result.fired is True
+
+    def test_no_candidate_matches_never_fires(self) -> None:
+        note = _note(triggers=[{"path": "src/api/**", "event": "pre-edit"}])
+        result = evaluate_note(
+            note, event="pre-edit",
+            file_path=("/abs/workspace/src/other/x.py", "src/other/x.py"),
+        )
+        assert result.fired is False
+
+    def test_empty_tuple_never_fires_a_path_trigger(self) -> None:
+        note = _note(triggers=[{"path": "src/api/**"}])
+        assert evaluate_note(note, file_path=()).fired is False
+
+    def test_scope_path_subtree_uses_first_candidate_as_primary(self) -> None:
+        """Non-P uses of the path (scope's path-subtree check here) use the
+        FIRST candidate — the path exactly as the caller gave it."""
+        note = _note(
+            kind="gotcha", scope="path-subtree", anchors=[["src/api/x.py", None]],
+            triggers=[{"path": "src/api/**"}],
+        )
+        result = evaluate_note(note, file_path=("src/api/x.py", "src/api/x.py"))
+        assert result.fired is True
+
+
 # ---------------------------------------------------------------------------
 # scope_permits — the five SCOPE_VALUES (bm2-design-skeleton.md §1)
 # ---------------------------------------------------------------------------

@@ -201,7 +201,7 @@ class FireResult:
 def _trigger_matches(
     trigger: dict,
     event: str | None,
-    file_path: str | None,
+    path_candidates: tuple[str, ...] | None,
     *,
     resolved_symbols: frozenset[str] | None = None,
     semantic_matched: bool | None = None,
@@ -209,6 +209,18 @@ def _trigger_matches(
     """Conjunction check for ONE trigger's declared P/E/S/M primitives
     against the current lifecycle state. Returns (matched, human-readable
     description) — the description feeds the one-line fire explanation.
+
+    `path_candidates` is every equivalent form of the current lifecycle's
+    target file the CALLER already resolved — e.g. the path exactly as given
+    plus its workspace-relative form (`WorkingContextStore.fire()` computes
+    both; this module never touches a filesystem or a workspace root, so it
+    never resolves paths itself). The P primitive matches the trigger's glob
+    `path` pattern against ANY candidate — a real hook sends an ABSOLUTE
+    file_path while triggers are naturally authored workspace-relative (a
+    gotcha's default bundle generates them straight from anchors), so
+    matching only one form would silently never fire a relatively-anchored
+    trigger against a real hook event. `None`/empty means no file path this
+    call — a trigger declaring 'path' then deterministically does not match.
 
     `resolved_symbols` is the set of symbol names defined in or referenced by
     the current lifecycle's target file — resolved ONCE per `fire()` call by
@@ -237,7 +249,9 @@ def _trigger_matches(
         return False, ""  # malformed (should have been rejected by validate_trigger)
 
     if path_pattern is not None:
-        if not file_path or not fnmatch.fnmatch(file_path, path_pattern):
+        if not path_candidates or not any(
+            fnmatch.fnmatch(candidate, path_pattern) for candidate in path_candidates
+        ):
             return False, ""
     if want_event is not None and want_event != event:
         return False, ""
@@ -312,7 +326,7 @@ def evaluate_note(
     note: WorkingNote,
     *,
     event: str | None = None,
-    file_path: str | None = None,
+    file_path: str | tuple[str, ...] | None = None,
     now: float | None = None,
     session_id: str | None = None,
     branch: str | None = None,
@@ -336,6 +350,16 @@ def evaluate_note(
     `faded` for ranking (T is a modifier, and a modifier only gates through
     not_before/cooldown; visibility fade is a ranking signal, not a gate).
 
+    `file_path` accepts either a single path string (the common/legacy case —
+    a caller with only one path form) or a tuple of equivalent candidate
+    forms for the SAME file (e.g. `WorkingContextStore.fire()` passes
+    `(as_given, workspace_relative)` — see its docstring) — the P primitive
+    matches a trigger's `path` glob against ANY candidate (`_trigger_matches`
+    docstring). Non-P uses of the path (scope's path-subtree check, the fire
+    explanation) use the FIRST candidate — the path exactly as the caller
+    gave it — by convention; this module still never resolves or normalizes
+    a path itself, that is entirely the caller's job (purity invariant).
+
     `resolved_symbols` (TRIGGER-ENGINE wave 2b) is passed straight through to
     `_trigger_matches()` for the S primitive — see its docstring; this
     function never touches the symbol graph itself, only a caller-resolved
@@ -345,10 +369,16 @@ def evaluate_note(
     if now is None:
         now = time.time()
 
+    if isinstance(file_path, str) or file_path is None:
+        path_candidates: tuple[str, ...] | None = (file_path,) if file_path is not None else None
+    else:
+        path_candidates = tuple(file_path) if file_path else None
+    primary_path = path_candidates[0] if path_candidates else None
+
     if note.valid_until is not None:
         return FireResult(note.note_id, False, "superseded — a tombstoned memory never fires")
 
-    permitted, scope_reason = scope_permits(note, session_id=session_id, branch=branch, file_path=file_path)
+    permitted, scope_reason = scope_permits(note, session_id=session_id, branch=branch, file_path=primary_path)
     if not permitted:
         return FireResult(note.note_id, False, scope_reason)
 
@@ -358,7 +388,7 @@ def evaluate_note(
 
     for idx, trig in enumerate(triggers):
         matched, desc = _trigger_matches(
-            trig, event, file_path,
+            trig, event, path_candidates,
             resolved_symbols=resolved_symbols, semantic_matched=semantic_matched,
         )
         if not matched:

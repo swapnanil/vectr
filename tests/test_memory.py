@@ -2193,6 +2193,78 @@ class TestFireEvaluation:
         assert len(second) == 1
 
 
+class TestFirePathPrimitiveAbsoluteRelative:
+    """P (path) trigger primitive must match a trigger's glob `path` pattern
+    against EITHER the file_path exactly as given OR its workspace-relative
+    form — a real hook (every AI code editor) sends an ABSOLUTE file_path
+    while anchors/triggers are naturally authored workspace-relative (a
+    gotcha's kind-default bundle generates them straight from anchors)."""
+
+    def test_relative_anchor_fires_on_absolute_hook_path(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "agent" / "trigger_engine.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("content")
+        store.remember(
+            ws, "a gotcha about trigger_engine.py", kind="gotcha",
+            anchors=["agent/trigger_engine.py"],
+        )
+        results = store.fire(ws, event="pre-edit", file_path=str(f))
+        assert len(results) == 1
+        assert results[0].fired is True
+
+    def test_absolute_pattern_still_fires_against_absolute_path(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "agent" / "trigger_engine.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("content")
+        absolute_path = str(f)
+        store.remember(
+            ws, "an absolutely-anchored gotcha", kind="gotcha",
+            triggers=[{"path": absolute_path, "event": "pre-edit"}],
+        )
+        results = store.fire(ws, event="pre-edit", file_path=absolute_path)
+        assert len(results) == 1
+
+    def test_relative_pattern_still_fires_against_relative_path(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(
+            ws, "a relatively-anchored gotcha", kind="gotcha",
+            anchors=["src/api/handlers.py"],
+        )
+        results = store.fire(ws, event="pre-edit", file_path="src/api/handlers.py")
+        assert len(results) == 1
+
+    def test_glob_pattern_matches_absolute_path_via_relative_form(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "src" / "api" / "handlers.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("content")
+        store.remember(
+            ws, "a glob-anchored gotcha", kind="gotcha",
+            triggers=[{"path": "src/api/**", "event": "pre-edit"}],
+        )
+        results = store.fire(ws, event="pre-edit", file_path=str(f))
+        assert len(results) == 1
+
+    def test_file_outside_workspace_root_matches_absolute_only(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        outside = str(tmp_path.parent / "outside_the_workspace.py")
+        store.remember(
+            ws, "an absolutely-anchored gotcha outside the workspace",
+            kind="gotcha", triggers=[{"path": outside, "event": "pre-edit"}],
+        )
+        results = store.fire(ws, event="pre-edit", file_path=outside)
+        assert len(results) == 1
+        # a relative pattern never matches a file that has no relative form
+        store.remember(
+            ws, "a relatively-anchored gotcha that cannot reach outside",
+            kind="gotcha", triggers=[{"path": "outside_the_workspace.py", "event": "pre-edit"}],
+        )
+        results = store.fire(ws, event="pre-edit", file_path=outside)
+        assert len(results) == 1  # still only the absolute-pattern note
+
+
 class TestFireScopeEnforcement:
     """TRIGGER-ENGINE wave 2a, bm2-design-skeleton.md §1 — all five
     SCOPE_VALUES enforced through the real store (SQLite round-trip), not
