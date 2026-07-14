@@ -62,28 +62,40 @@ FULL_TEXT_KINDS: tuple[str, ...] = ("directive", "gotcha")
 # ---------------------------------------------------------------------------
 
 def validate_trigger(trigger: dict) -> None:
-    """Raise ValueError if `trigger` is not a well-formed P/E/S/T primitive.
+    """Raise ValueError if `trigger` is not a well-formed P/S/M/E/T primitive.
 
-    A trigger must declare at least one of 'path' (P), 'event' (E), or
-    'symbol' (S — TRIGGER-ENGINE wave 2b, bm2-design-skeleton.md §2) — T
-    (not_before/expires_visibility/cooldown) is a modifier only and can never
-    fire a trigger by itself.
+    A trigger must declare at least one of 'path' (P), 'event' (E), 'symbol'
+    (S — TRIGGER-ENGINE wave 2b, bm2-design-skeleton.md §2), or 'semantic'
+    (M — wave 2b, §8) — T (not_before/expires_visibility/cooldown) is a
+    modifier only and can never fire a trigger by itself.
 
     'symbol' names a code symbol resolved at fire time against the pre-built
     code symbol graph (the same store `vectr_locate`/`vectr_trace` use) — it
     matches when that symbol is defined in, or referenced by, the file
-    targeted by the current lifecycle moment. It composes with 'path'/'event'
-    under the SAME conjunction rule those two already use (every declared
-    axis in one trigger dict must ALL match); a trigger may declare at most
-    one value per axis by construction (each axis is a single dict key)."""
+    targeted by the current lifecycle moment.
+
+    'semantic', when true, declares the M axis: at prompt-submit, the note
+    matches when cosine(activity embedding, note's own stored embedding) is
+    at or above a fixed per-kind threshold (config.yaml
+    `memory_triggers.semantic.theta_by_kind`) — the caller (which has the
+    embedder) computes that boolean; this module never touches the vector or
+    the prompt text itself (no-query-heuristics rule).
+
+    Both compose with 'path'/'event' under the SAME conjunction rule those
+    two already use (every declared axis in one trigger dict must ALL
+    match); a trigger may declare at most one value per axis by
+    construction (each axis is a single dict key)."""
     if not isinstance(trigger, dict):
-        raise ValueError("each trigger must be an object with 'path', 'event', and/or 'symbol' keys")
+        raise ValueError(
+            "each trigger must be an object with 'path', 'event', 'symbol', and/or 'semantic' keys"
+        )
     path = trigger.get("path")
     event = trigger.get("event")
     symbol = trigger.get("symbol")
-    if path is None and event is None and symbol is None:
+    semantic = trigger.get("semantic")
+    if path is None and event is None and symbol is None and semantic is None:
         raise ValueError(
-            "a trigger must declare at least one of 'path', 'event', or 'symbol' — "
+            "a trigger must declare at least one of 'path', 'event', 'symbol', or 'semantic' — "
             "T (not_before/expires_visibility/cooldown) is a modifier only "
             "and never fires alone"
         )
@@ -93,6 +105,8 @@ def validate_trigger(trigger: dict) -> None:
         raise ValueError(f"trigger 'event' must be one of: {', '.join(EVENT_VALUES)}")
     if symbol is not None and (not isinstance(symbol, str) or not symbol):
         raise ValueError("trigger 'symbol' must be a non-empty string naming a code symbol")
+    if semantic is not None and not isinstance(semantic, bool):
+        raise ValueError("trigger 'semantic' must be a boolean")
     for key in ("not_before", "expires_visibility", "cooldown"):
         value = trigger.get(key)
         if value is not None and not isinstance(value, (int, float)):
@@ -186,10 +200,11 @@ def _trigger_matches(
     file_path: str | None,
     *,
     resolved_symbols: frozenset[str] | None = None,
+    semantic_matched: bool | None = None,
 ) -> tuple[bool, str]:
-    """Conjunction check for ONE trigger's declared P/E/S primitives against
-    the current lifecycle state. Returns (matched, human-readable description)
-    — the description feeds the one-line fire explanation.
+    """Conjunction check for ONE trigger's declared P/E/S/M primitives
+    against the current lifecycle state. Returns (matched, human-readable
+    description) — the description feeds the one-line fire explanation.
 
     `resolved_symbols` is the set of symbol names defined in or referenced by
     the current lifecycle's target file — resolved ONCE per `fire()` call by
@@ -200,11 +215,21 @@ def _trigger_matches(
     graph finishes building, or no `file_path` was given) — a trigger
     declaring 'symbol' then deterministically does not match; never an
     error, never a fuzzy/near-miss guess (exact-resolution only, per the
-    no-query-heuristics rule's carve-out for symbol-graph lookups)."""
+    no-query-heuristics rule's carve-out for symbol-graph lookups).
+
+    `semantic_matched` is the precomputed cosine(activity, note_vector) >=
+    theta[kind] boolean for THIS note — computed once by the caller from ONE
+    per-call activity embedding and the note's own already-stored vector
+    (TRIGGER-ENGINE wave 2b §8); this function never sees a vector or prompt
+    text, only the boolean outcome. `None` means "not evaluated this call"
+    (no embedder attached, embedder still warming up, or the note declares
+    no semantic axis) — a trigger declaring 'semantic' then deterministically
+    does not match; never an error."""
     path_pattern = trigger.get("path")
     want_event = trigger.get("event")
     want_symbol = trigger.get("symbol")
-    if path_pattern is None and want_event is None and want_symbol is None:
+    want_semantic = trigger.get("semantic")
+    if path_pattern is None and want_event is None and want_symbol is None and want_semantic is None:
         return False, ""  # malformed (should have been rejected by validate_trigger)
 
     if path_pattern is not None:
@@ -215,12 +240,17 @@ def _trigger_matches(
     if want_symbol is not None:
         if resolved_symbols is None or want_symbol not in resolved_symbols:
             return False, ""
+    if want_semantic:
+        if semantic_matched is not True:
+            return False, ""
 
     parts = []
     if path_pattern is not None:
         parts.append(f"path {path_pattern}")
     if want_symbol is not None:
         parts.append(f"symbol {want_symbol}")
+    if want_semantic:
+        parts.append("semantic")
     desc = " + ".join(parts) if parts else ""
     if want_event is not None:
         desc = f"{desc} at {want_event}" if desc else f"event {want_event}"
@@ -283,6 +313,7 @@ def evaluate_note(
     session_id: str | None = None,
     branch: str | None = None,
     resolved_symbols: frozenset[str] | None = None,
+    semantic_matched: bool | None = None,
 ) -> FireResult:
     """Deterministic, total (never raises for well-formed input), linear-in-
     triggers evaluation of whether `note` fires for the given lifecycle state.
@@ -304,7 +335,9 @@ def evaluate_note(
     `resolved_symbols` (TRIGGER-ENGINE wave 2b) is passed straight through to
     `_trigger_matches()` for the S primitive — see its docstring; this
     function never touches the symbol graph itself, only a caller-resolved
-    set of names."""
+    set of names. `semantic_matched` (wave 2b, §8) is likewise passed
+    straight through for the M primitive — a single precomputed boolean for
+    this note, never a vector or prompt text."""
     if now is None:
         now = time.time()
 
@@ -320,7 +353,10 @@ def evaluate_note(
         return FireResult(note.note_id, False, "no triggers declared for this note/kind")
 
     for idx, trig in enumerate(triggers):
-        matched, desc = _trigger_matches(trig, event, file_path, resolved_symbols=resolved_symbols)
+        matched, desc = _trigger_matches(
+            trig, event, file_path,
+            resolved_symbols=resolved_symbols, semantic_matched=semantic_matched,
+        )
         if not matched:
             continue
         not_before = trig.get("not_before")

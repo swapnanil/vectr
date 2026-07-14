@@ -47,6 +47,28 @@ def _hash_path_content(root: Path, raw_path: str) -> str | None:
         return None
 
 
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Plain dot-product cosine similarity between two equal-length vectors.
+    Used only by the M (semantic) trigger primitive (TRIGGER-ENGINE wave 2b,
+    §8) to compare one prompt-submit activity embedding against a note's own
+    already-stored vector — no external numeric dependency needed for the
+    small, session-scoped candidate counts involved. Returns 0.0 for a
+    degenerate (zero-length) vector rather than raising ZeroDivisionError.
+
+    Always returns a plain Python float, even when `b` is a numpy array (as
+    Chroma's `.get(..., include=["embeddings"])` returns) — otherwise the
+    result silently becomes a numpy.float64/numpy.bool_ once compared, and
+    `numpy.True_ is True` is False (distinct objects), which would make the M
+    primitive's `semantic_matched is True` gate in trigger_engine.py never
+    fire for a real, Chroma-backed note even on an exact vector match."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return float(dot / (norm_a * norm_b))
+
+
 def _current_git_branch(
     root: Path,
     *,
@@ -1746,6 +1768,7 @@ class WorkingContextStore:
         *,
         event: str | None = None,
         file_path: str | None = None,
+        query: str | None = None,
         ledger: "TriggerFireLedger | None" = None,
         now: float | None = None,
         session_id: str | None = None,
@@ -1772,10 +1795,20 @@ class WorkingContextStore:
         recall()/recall_for_path()'s partial enforcement (see the
         SCOPE_VALUES comment in _types.py for the split and why).
 
+        `query`, when given (the prompt-submit text — the same string
+        already threaded as `recall(query=...)`'s semantic search input),
+        drives the M (semantic) primitive: ONE activity embedding is
+        computed for it here — never per note, and never inside
+        trigger_engine.py itself (no-query-heuristics rule: this is the
+        only place raw prompt text is ever touched by the trigger engine's
+        wiring) — then compared by cosine against each candidate note's own
+        already-stored vector, never re-embedding the note.
+
         Every note that actually fires has its `last_fired` column stamped to
         `now` — this is what makes a trigger's `cooldown` T-modifier
         meaningful on the NEXT evaluation (evaluate_note() reads `last_fired`
         directly off the note)."""
+        from agent.config import MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND
         from agent.trigger_engine import evaluate_note, total_order_key
 
         if now is None:
@@ -1816,6 +1849,50 @@ class WorkingContextStore:
                     workspace, file_path
                 )
 
+        # M (semantic) primitive (TRIGGER-ENGINE wave 2b, §8): embed the
+        # prompt ONCE per call (never per note), only when at least one note
+        # actually declares a semantic axis and the embedder has attached
+        # (degrades to "no match" during warm-up or in a memory-only
+        # daemon — never an error). Per-note cosine against each note's own
+        # already-stored vector (reused, never re-embedded) is gated by a
+        # fixed per-kind theta — no runtime adaptation, no query parsing.
+        semantic_matched_by_id: dict[int, bool] = {}
+        notes_wanting_semantic = [
+            n for n in notes if any(t.get("semantic") for t in n.triggers)
+        ]
+        if (
+            query
+            and notes_wanting_semantic
+            and self._notes_col is not None
+            and self._embed_query_fn is not None
+        ):
+            try:
+                activity_vector = self._embed_query_fn([query])[0]
+                fetched = self._notes_col.get(
+                    ids=[str(n.note_id) for n in notes_wanting_semantic],
+                    include=["embeddings"],
+                )
+                vector_by_id = dict(zip(fetched["ids"], fetched["embeddings"]))
+            except Exception:
+                activity_vector, vector_by_id = None, {}
+            if activity_vector is not None:
+                for n in notes_wanting_semantic:
+                    vec = vector_by_id.get(str(n.note_id))
+                    theta = MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND.get(n.kind)
+                    if vec is None or theta is None:
+                        continue
+                    similarity = _cosine_similarity(activity_vector, vec)
+                    # bool(...): a note's stored vector comes back from Chroma
+                    # as a numpy array, so `similarity` is a numpy.bool_, not a
+                    # plain Python bool — and `numpy.True_ is True` is False
+                    # (numpy scalars are never the same object as the builtin
+                    # singleton). _trigger_matches()'s gate is a strict `is
+                    # True` check (by design — it must tell "matched" apart
+                    # from "not evaluated" (`None`) using identity, not
+                    # truthiness), so an un-coerced numpy bool would silently
+                    # never fire a real semantic trigger.
+                    semantic_matched_by_id[n.note_id] = bool(similarity >= theta)
+
         fired_ids: list[int] = []
         results = []
         for note in notes:
@@ -1823,6 +1900,7 @@ class WorkingContextStore:
                 note, event=event, file_path=file_path, now=now,
                 session_id=session_id, branch=branch,
                 resolved_symbols=resolved_symbols,
+                semantic_matched=semantic_matched_by_id.get(note.note_id),
             )
             if not result.fired:
                 continue
@@ -1862,6 +1940,7 @@ class WorkingContextStore:
         events: list[str] | None = None,
         event: str | None = None,
         file_path: str | None = None,
+        query: str | None = None,
         session_id: str | None = None,
         ledger: "TriggerFireLedger | None" = None,
         surface: str = "mcp",
@@ -1880,6 +1959,13 @@ class WorkingContextStore:
         one-event case; when both are omitted, `fire()` is called once with
         `event=None` (matches its own default, e.g. a plain PreToolUse
         file_path-only check with no event name).
+
+        `query` (TRIGGER-ENGINE wave 2b, §8) is forwarded to every `fire()`
+        call unchanged — the M primitive's ONE activity embedding is
+        computed inside `fire()` itself, not duplicated per event in this
+        loop's OR list (a caller with more than one event in `events` still
+        only pays for one embed call per `fire()` invocation, one per event
+        as today, never one per note).
 
         The returned `note_ids` set lets a caller merging this with a
         legacy/unrelated recall path (e.g. `recall_for_path`'s content-
@@ -1901,7 +1987,7 @@ class WorkingContextStore:
         seen: dict[int, "FireResult"] = {}
         for ev in event_list:
             for r in self.fire(
-                workspace, event=ev, file_path=file_path, session_id=session_id,
+                workspace, event=ev, file_path=file_path, query=query, session_id=session_id,
                 ledger=ledger, now=now,
             ):
                 if r.note_id not in seen:

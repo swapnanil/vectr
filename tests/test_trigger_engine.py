@@ -101,6 +101,16 @@ class TestValidateTrigger:
         with pytest.raises(ValueError):
             validate_trigger({"symbol": ""})
 
+    def test_semantic_only_is_valid(self) -> None:
+        validate_trigger({"semantic": True})
+
+    def test_semantic_and_event_is_valid(self) -> None:
+        validate_trigger({"semantic": True, "event": "prompt-submit"})
+
+    def test_non_bool_semantic_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            validate_trigger({"semantic": "yes"})
+
     def test_non_dict_rejected(self) -> None:
         with pytest.raises(ValueError):
             validate_trigger("not a dict")  # type: ignore[arg-type]
@@ -269,6 +279,36 @@ class TestEvaluateNote:
         result = evaluate_note(note, file_path="src/api/x.py", resolved_symbols=both)
         assert result.fired is True
         assert "path src/api/** + symbol WorkspaceLock" in result.explanation
+
+    def test_semantic_only_trigger_matches_when_precomputed_true(self) -> None:
+        note = _note(triggers=[{"semantic": True}])
+        result = evaluate_note(note, event="prompt-submit", semantic_matched=True)
+        assert result.fired is True
+        assert "semantic" in result.explanation
+
+    def test_semantic_only_trigger_does_not_match_when_precomputed_false(self) -> None:
+        note = _note(triggers=[{"semantic": True}])
+        result = evaluate_note(note, event="prompt-submit", semantic_matched=False)
+        assert result.fired is False
+
+    def test_semantic_trigger_never_fires_when_semantic_matched_is_none(self) -> None:
+        """Degradation: no embedder attached, embedder still warming up, or
+        the caller never computed a cosine for this note — a semantic
+        trigger deterministically does not fire, never an error."""
+        note = _note(triggers=[{"semantic": True}])
+        result = evaluate_note(note, event="prompt-submit", semantic_matched=None)
+        assert result.fired is False
+
+    def test_semantic_and_event_conjunction_requires_both(self) -> None:
+        note = _note(triggers=[{"semantic": True, "event": "prompt-submit"}])
+        # semantic matches, event doesn't
+        assert evaluate_note(note, event="pre-edit", semantic_matched=True).fired is False
+        # event matches, semantic doesn't
+        assert evaluate_note(note, event="prompt-submit", semantic_matched=False).fired is False
+        # both match
+        result = evaluate_note(note, event="prompt-submit", semantic_matched=True)
+        assert result.fired is True
+        assert "semantic at prompt-submit" in result.explanation
 
     def test_or_composition_first_match_wins(self) -> None:
         note = _note(triggers=[{"event": "pre-run"}, {"event": "pre-edit"}])

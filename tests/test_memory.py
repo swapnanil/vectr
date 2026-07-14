@@ -1828,6 +1828,113 @@ class TestSymbolTriggerIndexLiveGraph:
         assert any("symbol_changed" in r for r in results[0].stale_paths)
 
 
+def _fixed_vector_store(tmp_path, note_vector: list[float], query_vector: list[float]):
+    """A store whose every note gets `note_vector` at write time and whose
+    every prompt-submit query gets `query_vector` — lets a test fix the
+    cosine similarity `fire()`'s M primitive computes exactly, rather than
+    relying on real semantic drift (TRIGGER-ENGINE wave 2b, §8)."""
+    import chromadb
+    from agent.working_context_store import WorkingContextStore
+    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+    return WorkingContextStore(
+        str(tmp_path),
+        embed_fn=_const_embed(note_vector),
+        embed_query_fn=_const_embed(query_vector),
+        notes_chroma_client=client,
+    )
+
+
+class TestFireSemanticPrimitive:
+    """Fire-time M resolution (TRIGGER-ENGINE wave 2b, §8): fire() computes
+    ONE activity embedding per call (never per note) and gates each
+    semantic-triggered note's own stored vector against a fixed per-kind
+    theta (config.yaml memory_triggers.semantic.theta_by_kind). gotcha's
+    theta is 0.72 — an identical unit vector (cosine 1.0) clears it, an
+    orthogonal one (cosine 0.0) does not."""
+
+    def test_fires_when_cosine_clears_theta(self, tmp_path) -> None:
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        ws = str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        results = store.fire(ws, event="prompt-submit", query="anything")
+        assert len(results) == 1
+
+    def test_does_not_fire_when_cosine_is_below_theta(self, tmp_path) -> None:
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [0.0, 1.0])
+        ws = str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        results = store.fire(ws, event="prompt-submit", query="anything")
+        assert len(results) == 0
+
+    def test_never_fires_without_a_query(self, tmp_path) -> None:
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        ws = str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        results = store.fire(ws, event="prompt-submit")
+        assert results == []
+
+    def test_two_semantic_matches_of_the_same_kind_rank_by_recency(self, tmp_path) -> None:
+        """Age-fade on rank only, theta never moves (TRIGGER-ENGINE wave 2b,
+        §8): among several M-fired notes of the same kind, the more recently
+        used one ranks first. This is NOT new sort logic — M-fired
+        FireResults flow through the exact same `total_order_key` call every
+        other primitive already uses, whose existing `-last_used` tie-break
+        (for every kind but 'task') already satisfies this requirement."""
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        ws = str(tmp_path)
+        older_id = store.remember(ws, "older gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        newer_id = store.remember(ws, "newer gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        with store._conn() as conn:
+            conn.execute(
+                "UPDATE notes SET last_accessed = ? WHERE note_id = ?",
+                (time.time() - 3600, older_id),
+            )
+        results = store.fire(ws, event="prompt-submit", query="anything")
+        assert [r.note_id for r in results] == [newer_id, older_id]
+
+    def test_never_fires_without_an_embedder_attached(self, tmp_path) -> None:
+        """Degradation gate: no embedder attached at all (a memory-only
+        daemon, or the warm-up window before attach_embedder() runs) — a
+        semantic trigger deterministically does not fire, never an error."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        results = store.fire(ws, event="prompt-submit", query="anything")
+        assert results == []
+
+    def test_never_embeds_the_query_when_no_note_declares_a_semantic_axis(self, tmp_path) -> None:
+        """Performance gate: a workspace with zero semantic-triggered notes
+        must never pay for an activity embedding call."""
+        calls: list[list[str]] = []
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        store._embed_query_fn = _counting_embed([1.0, 0.0], calls)
+        ws = str(tmp_path)
+        store.remember(ws, "a plain finding")  # no triggers at all
+        store.fire(ws, event="prompt-submit", query="anything")
+        assert calls == []
+
+    def test_only_one_activity_embedding_computed_per_fire_call(self, tmp_path) -> None:
+        calls: list[list[str]] = []
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        store._embed_query_fn = _counting_embed([1.0, 0.0], calls)
+        ws = str(tmp_path)
+        store.remember(ws, "gotcha one", kind="gotcha", triggers=[{"semantic": True}])
+        store.remember(ws, "gotcha two", kind="gotcha", triggers=[{"semantic": True}])
+        store.fire(ws, event="prompt-submit", query="anything")
+        assert len(calls) == 1  # once for the whole call, not once per note
+
+    def test_note_vector_is_reused_never_re_embedded_at_fire_time(self, tmp_path) -> None:
+        """The note's own document-side vector is stored once at remember()
+        time and read back as-is — fire() never calls the document embed_fn
+        again."""
+        calls: list[list[str]] = []
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        ws = str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        store._embed_fn = _counting_embed([1.0, 0.0], calls)
+        store.fire(ws, event="prompt-submit", query="anything")
+        assert calls == []
+
+
 class TestPromote:
     def test_promote_auto_to_agent(self, tmp_path) -> None:
         store, ws = _store(tmp_path), str(tmp_path)

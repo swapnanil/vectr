@@ -1186,6 +1186,29 @@ memory_triggers:
     # separate key since the two domains may need to diverge later).
     chars_per_token: 4
 
+  semantic:
+    # TRIGGER-ENGINE wave 2b (bm2-design-skeleton.md §8) — the M (semantic)
+    # primitive. A note may declare an explicit `{"semantic": true}` trigger
+    # axis, composable with path/event/symbol like every other axis (the
+    # same <=1-per-axis conjunction rule). At prompt-submit the caller
+    # computes ONE activity embedding for the prompt — never one per note,
+    # and a note's own vector (already stored at write time) is reused
+    # as-is, never re-embedded — and the axis matches when
+    # cosine(activity, note_vector) >= theta for THAT note's kind. Fixed
+    # per-kind constants only: no runtime adaptation, no query parsing (the
+    # no-query-heuristics rule — this is a numeric vector-similarity gate,
+    # not a keyword/regex classifier). Tune by editing these numbers, never
+    # by adding code. M is an explicit-trigger-only primitive this wave: no
+    # kind's default bundle includes it. One entry per memory kind
+    # (memory_triggers.total_order.kind_priority) is required — a missing
+    # kind fails at import (agent/config.py), never silently defaults.
+    theta_by_kind:
+      directive: 0.72
+      gotcha: 0.72
+      task: 0.75
+      finding: 0.78
+      reference: 0.80
+
 proactive:
   # UPG-PRO — "Proactive context" (experimental). Deterministically surface the
   # relevant working-memory note / structural match at a sanctioned delivery
