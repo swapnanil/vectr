@@ -287,6 +287,12 @@ class VectrService:
         # a not-ready state.
         self._embedder_ready = threading.Event()
         self._fully_ready = threading.Event()
+        # UPG-SHUTDOWN-INIT-RACE: set by shutdown(). Phase 2 runs on a
+        # background thread for deferred callers, so shutdown can arrive
+        # before or DURING _init_search_layer — this event makes a
+        # not-yet-started phase 2 a no-op and a mid-flight one tear down
+        # whatever it just constructed instead of orphaning it.
+        self._shutdown_requested = threading.Event()
 
         if not defer_search_init:
             self._init_search_layer()
@@ -372,6 +378,19 @@ class VectrService:
             for root in self._indexer.all_roots:
                 configure_all(str(root), self._port)
 
+        # UPG-SHUTDOWN-INIT-RACE: shutdown() raced this phase-2 run (e.g. an
+        # instant client disconnect during warm-up). Tear down what was just
+        # constructed rather than orphaning it — watcher.stop() and
+        # indexer.close() are both idempotent, so overlapping with
+        # shutdown()'s own stop/close pass is safe — and never report
+        # fully_ready on a shut-down service.
+        if self._shutdown_requested.is_set():
+            if self._watcher is not None:
+                self._watcher.stop()
+            if self._indexer is not None:
+                self._indexer.close()
+            return
+
         self._fully_ready.set()
 
     def complete_search_init(self) -> None:
@@ -388,7 +407,13 @@ class VectrService:
         already-`fully_ready` service would reconstruct the indexer/searcher/
         watcher a second time and leak the discarded watcher's background
         threads.
+
+        Also a no-op after shutdown() (UPG-SHUTDOWN-INIT-RACE): a service
+        that was shut down during the warm-up window must not go on to
+        construct the search layer it can no longer release.
         """
+        if self._shutdown_requested.is_set():
+            return
         if self._fully_ready.is_set():
             return
         self._init_search_layer()
@@ -578,6 +603,11 @@ class VectrService:
         # defer_search_init=True can be asked to shut down (e.g. stdin EOF)
         # while still in the phase-2 background-construction window, before
         # the watcher/indexer exist — nothing to stop/close yet, not an error.
+        # UPG-SHUTDOWN-INIT-RACE: the event must be set BEFORE the
+        # None-checks below — a phase 2 that assigns watcher/indexer after
+        # this read then sees the event at its own end and tears them down
+        # itself; whichever side observes the other's write cleans up.
+        self._shutdown_requested.set()
         if self._watcher is not None:
             self._watcher.stop()
         # Release the indexer's ChromaDB client (and the notes store's, which

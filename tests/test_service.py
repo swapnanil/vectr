@@ -903,6 +903,47 @@ class TestDeferSearchInit:
         svc = self._make_deferred(tmp_path, monkeypatch)
         svc.shutdown()  # must not raise
 
+    def test_complete_search_init_after_shutdown_is_noop(self, tmp_path, monkeypatch) -> None:
+        """UPG-SHUTDOWN-INIT-RACE: a service shut down during the warm-up
+        window (client disconnected before phase 2 began) must not go on to
+        construct the search layer it can no longer release."""
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        svc.shutdown()
+        with patch("integrations.vscode_bridge.configure_all"):
+            svc.complete_search_init()
+        assert svc.fully_ready is False
+        assert svc._indexer is None
+        assert svc._watcher is None
+
+    def test_shutdown_racing_phase2_tears_down_what_it_built(self, tmp_path, monkeypatch) -> None:
+        """UPG-SHUTDOWN-INIT-RACE, the mid-flight interleaving: shutdown()
+        lands after phase 2 has begun but before `self._indexer` is
+        assigned — shutdown's own None-checks find nothing to release, so
+        phase 2's end-of-run check must stop the watcher and close the
+        indexer it went on to construct, and never report fully_ready."""
+        import agent.indexer as idx_pkg
+        from agent.indexer import CodeIndexer
+
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        close_calls: list[bool] = []
+
+        class _RaceIndexer(CodeIndexer):
+            def __init__(self2, *args, **kwargs):
+                svc.shutdown()  # arrives before svc._indexer exists
+                super().__init__(*args, **kwargs)
+
+            def close(self2) -> None:
+                close_calls.append(True)
+                super().close()
+
+        monkeypatch.setattr(idx_pkg, "CodeIndexer", _RaceIndexer)
+        with patch("integrations.vscode_bridge.configure_all"):
+            svc.complete_search_init()
+        assert svc.fully_ready is False
+        assert close_calls, "phase 2 must close the indexer it built after a raced shutdown"
+        assert svc._watcher is not None
+        assert svc._watcher._running is False
+
     def test_shutdown_closes_indexer_chroma_client(self, tmp_path, monkeypatch) -> None:
         """A CodeIndexer's ChromaDB client holds a native worker-thread pool
         open for the process's lifetime unless explicitly closed — confirmed
