@@ -658,6 +658,72 @@ class TestGetSnippet:
 
 
 # ---------------------------------------------------------------------------
+# symbols_touching_file / signature_hash — TRIGGER-ENGINE wave 2b, the S
+# (symbol) trigger primitive's write-time and fire-time resolution.
+# ---------------------------------------------------------------------------
+
+class TestSymbolsTouchingFile:
+    def test_includes_symbols_defined_in_the_file(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        g.index_file("ws", str(f))
+        names = g.symbols_touching_file("ws", str(f))
+        assert "WorkspaceLock" in names
+
+    def test_includes_symbols_referenced_by_the_file(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        lib = tmp_path / "lock.py"
+        lib.write_text("def acquire_lock():\n    pass\n")
+        caller = tmp_path / "resolver.py"
+        caller.write_text("from lock import acquire_lock\n\ndef use_it():\n    acquire_lock()\n")
+        g.index_file("ws", str(lib))
+        g.index_file("ws", str(caller))
+        names = g.symbols_touching_file("ws", str(caller))
+        assert "acquire_lock" in names
+
+    def test_unindexed_file_returns_empty_frozenset(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        names = g.symbols_touching_file("ws", str(tmp_path / "never_indexed.py"))
+        assert names == frozenset()
+
+    def test_workspace_isolation(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    pass\n")
+        g.index_file("ws_a", str(f))
+        assert "WorkspaceLock" in g.symbols_touching_file("ws_a", str(f))
+        assert "WorkspaceLock" not in g.symbols_touching_file("ws_b", str(f))
+
+
+class TestSignatureHash:
+    def test_returns_a_stable_hash_for_an_unchanged_definition(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        g.index_file("ws", str(f))
+        h1 = g.signature_hash("ws", "WorkspaceLock")
+        h2 = g.signature_hash("ws", "WorkspaceLock")
+        assert h1 is not None
+        assert h1 == h2
+
+    def test_hash_changes_when_the_definition_body_changes(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        g.index_file("ws", str(f))
+        before = g.signature_hash("ws", "WorkspaceLock")
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        return True\n")
+        g.index_file("ws", str(f))
+        after = g.signature_hash("ws", "WorkspaceLock")
+        assert before != after
+
+    def test_unresolvable_symbol_returns_none(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        assert g.signature_hash("ws", "NoSuchSymbol") is None
+
+
+# ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
 

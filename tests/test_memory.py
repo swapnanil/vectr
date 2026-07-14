@@ -1596,6 +1596,410 @@ class TestRememberTriggerEngineParams:
         assert old.superseded_by_note_id is None  # untouched by the explicit-supersedes path
 
 
+class _FakeSymbolResolver:
+    """Minimal duck-typed stand-in for SymbolGraph — only the two methods
+    attach_symbol_resolver()/remember()/fire() actually call (TRIGGER-ENGINE
+    wave 2b). `_hashes` is mutable so a test can mutate it in place to
+    simulate a symbol's definition changing between remember() and a later
+    check_staleness()/fire() call, without needing to swap the attached
+    resolver (attach_symbol_resolver() is intentionally idempotent, so a
+    second attach on the same store is a no-op). `touching_calls` counts
+    symbols_touching_file() invocations, so a test can assert fire()'s
+    write-time existence-check actually skips the (expensive) resolver call
+    when a workspace has no symbol-triggered notes at all. Real end-to-end
+    coverage against the genuine SymbolGraph lives in
+    TestSymbolTriggerIndexLiveGraph below."""
+
+    def __init__(self, hashes: dict | None = None, touching: frozenset | None = None) -> None:
+        self._hashes = hashes or {}
+        self._touching = touching if touching is not None else frozenset()
+        self.touching_calls = 0
+
+    def signature_hash(self, workspace, name):
+        return self._hashes.get(name)
+
+    def symbols_touching_file(self, workspace, file_path):
+        self.touching_calls += 1
+        return self._touching
+
+
+class TestSymbolTriggersWriteTimeIndex:
+    def _symtrig_rows(self, tmp_path, note_id):
+        import sqlite3
+        with sqlite3.connect(str(tmp_path / "working_context.sqlite")) as conn:
+            return conn.execute(
+                "SELECT symbol_name, signature_hash FROM symbol_triggers WHERE note_id = ?",
+                (note_id,),
+            ).fetchall()
+
+    def test_no_resolver_attached_stores_null_signature_hash(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "WorkspaceLock"}])
+        assert self._symtrig_rows(tmp_path, note_id) == [("WorkspaceLock", None)]
+
+    def test_attached_resolver_stores_signature_hash_at_write_time(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(hashes={"WorkspaceLock": "abc123"}))
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "WorkspaceLock"}])
+        assert self._symtrig_rows(tmp_path, note_id) == [("WorkspaceLock", "abc123")]
+
+    def test_trigger_without_symbol_key_gets_no_index_row(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", triggers=[{"path": "src/api/**"}])
+        assert self._symtrig_rows(tmp_path, note_id) == []
+
+    def test_attach_symbol_resolver_is_idempotent(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(hashes={"X": "first"}))
+        store.attach_symbol_resolver(_FakeSymbolResolver(hashes={"X": "second"}))
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "X"}])
+        assert self._symtrig_rows(tmp_path, note_id) == [("X", "first")]
+
+    def test_forget_removes_symbol_trigger_index_rows(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "X"}])
+        store.forget(ws, note_id)
+        assert self._symtrig_rows(tmp_path, note_id) == []
+
+    def test_forget_all_clears_symbol_trigger_index(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "X"}])
+        store.forget_all(ws)
+        assert self._symtrig_rows(tmp_path, note_id) == []
+
+    def test_forget_all_workspaces_clears_symbol_trigger_index(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "X"}])
+        store.forget_all_workspaces()
+        assert self._symtrig_rows(tmp_path, note_id) == []
+
+
+class TestFireSymbolPrimitive:
+    """Fire-time S resolution (TRIGGER-ENGINE wave 2b): fire() resolves the
+    target file's touched symbols ONCE per call and threads the same
+    frozenset into every note's evaluate_note(), rather than querying the
+    graph per note. Uses the fake resolver — real-graph coverage is in
+    TestSymbolTriggerIndexLiveGraph below."""
+
+    def test_fires_when_the_target_file_touches_the_declared_symbol(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(touching=frozenset({"WorkspaceLock"})))
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        results = store.fire(ws, event="pre-edit", file_path="src/resolver.py")
+        assert len(results) == 1
+
+    def test_does_not_fire_when_the_target_file_does_not_touch_the_symbol(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(touching=frozenset()))
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        results = store.fire(ws, event="pre-edit", file_path="src/resolver.py")
+        assert len(results) == 0
+
+    def test_never_fires_without_a_resolver_attached(self, tmp_path) -> None:
+        """Degradation gate: memory-only daemons and the warm-up window
+        before attach_symbol_resolver() runs have no resolver at all — a
+        symbol trigger deterministically does not fire, never an error."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        results = store.fire(ws, event="pre-edit", file_path="src/resolver.py")
+        assert results == []
+
+    def test_never_fires_without_a_file_path(self, tmp_path) -> None:
+        """No target file means nothing to resolve symbols against — even
+        with a resolver attached and the symbol technically resolvable
+        elsewhere, an S trigger only ever matches at a pre-edit moment with
+        a concrete file_path."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(touching=frozenset({"WorkspaceLock"})))
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        results = store.fire(ws, event="pre-edit")
+        assert results == []
+
+    def test_existence_check_skips_the_resolver_call_when_no_symbol_triggers_exist(self, tmp_path) -> None:
+        """Performance gate: a workspace with zero symbol-triggered notes
+        must never pay for a live symbols_touching_file() graph call."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        resolver = _FakeSymbolResolver(touching=frozenset({"WorkspaceLock"}))
+        store.attach_symbol_resolver(resolver)
+        store.remember(ws, "a plain finding")  # no triggers at all
+        store.fire(ws, event="pre-edit", file_path="src/resolver.py")
+        assert resolver.touching_calls == 0
+
+    def test_resolver_call_happens_once_per_fire_call_when_relevant(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        resolver = _FakeSymbolResolver(touching=frozenset({"WorkspaceLock"}))
+        store.attach_symbol_resolver(resolver)
+        store.remember(ws, "gotcha one", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        store.remember(ws, "gotcha two", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        store.fire(ws, event="pre-edit", file_path="src/resolver.py")
+        assert resolver.touching_calls == 1  # once for the whole call, not once per note
+
+
+class TestSymbolAnchorStaleness:
+    """check_staleness()'s symbol-signature re-hash (TRIGGER-ENGINE wave
+    2b) — the S-primitive equivalent of TestAnchorStaleness's path anchors:
+    never a silent drop, just a visible `[symbol_changed]` caveat."""
+
+    def test_signature_change_adds_a_visible_caveat_but_never_drops_the_note(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        resolver = _FakeSymbolResolver(hashes={"WorkspaceLock": "hash_v1"})
+        store.attach_symbol_resolver(resolver)
+        note_id = store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        resolver._hashes["WorkspaceLock"] = "hash_v2"  # the definition changed since write time
+        notes = store.recall(ws)
+        assert any(n.note_id == note_id for n in notes)  # still recalled, never silently dropped
+        stale = store.check_staleness(notes, ws)
+        assert note_id in stale
+        assert any("WorkspaceLock" in r and "symbol_changed" in r for r in stale[note_id])
+
+    def test_unchanged_signature_is_not_flagged(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(hashes={"WorkspaceLock": "stable_hash"}))
+        note_id = store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        notes = store.recall(ws)
+        stale = store.check_staleness(notes, ws)
+        assert note_id not in stale
+
+    def test_no_baseline_hash_at_write_time_is_never_flagged(self, tmp_path) -> None:
+        """Note written before any resolver was attached stores a NULL
+        signature_hash (nothing to compare against) — attaching a resolver
+        afterward must not retroactively flag it."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "X"}])
+        store.attach_symbol_resolver(_FakeSymbolResolver(hashes={"X": "some_hash"}))
+        notes = store.recall(ws)
+        stale = store.check_staleness(notes, ws)
+        assert note_id not in stale
+
+    def test_no_resolver_attached_degrades_to_no_check(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        notes = store.recall(ws)
+        stale = store.check_staleness(notes, ws)  # never raises with no resolver attached
+        assert note_id not in stale
+
+
+class TestSymbolTriggerIndexLiveGraph:
+    """End-to-end coverage against the genuine SymbolGraph — the real
+    construction path app/service.py wires: a SymbolGraph indexes the
+    workspace and gets attach_symbol_resolver()'d onto the store, then a
+    symbol trigger fires/re-hashes against real indexed code."""
+
+    def test_fires_when_the_edited_file_defines_the_symbol(self, tmp_path) -> None:
+        from agent.symbol_graph import SymbolGraph
+        store, ws = _store(tmp_path), str(tmp_path)
+        graph = SymbolGraph(str(tmp_path))
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        graph.index_file(ws, str(f))
+        store.attach_symbol_resolver(graph)
+        store.remember(ws, "a gotcha about locking", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        results = store.fire(ws, event="pre-edit", file_path=str(f))
+        assert len(results) == 1
+
+    def test_does_not_fire_for_an_unrelated_file(self, tmp_path) -> None:
+        from agent.symbol_graph import SymbolGraph
+        store, ws = _store(tmp_path), str(tmp_path)
+        graph = SymbolGraph(str(tmp_path))
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        graph.index_file(ws, str(f))
+        store.attach_symbol_resolver(graph)
+        store.remember(ws, "a gotcha about locking", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        other = tmp_path / "unrelated.py"
+        other.write_text("x = 1\n")
+        graph.index_file(ws, str(other))
+        results = store.fire(ws, event="pre-edit", file_path=str(other))
+        assert len(results) == 0
+
+    def test_signature_change_surfaces_a_staleness_caveat_on_fire(self, tmp_path) -> None:
+        from agent.symbol_graph import SymbolGraph
+        store, ws = _store(tmp_path), str(tmp_path)
+        graph = SymbolGraph(str(tmp_path))
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        graph.index_file(ws, str(f))
+        store.attach_symbol_resolver(graph)
+        store.remember(ws, "a gotcha about locking", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        return True\n")
+        graph.index_file(ws, str(f))  # re-index so signature_hash reflects the new body
+        results = store.fire(ws, event="pre-edit", file_path=str(f))
+        assert len(results) == 1
+        assert any("symbol_changed" in r for r in results[0].stale_paths)
+
+
+def _fixed_vector_store(tmp_path, note_vector: list[float], query_vector: list[float]):
+    """A store whose every note gets `note_vector` at write time and whose
+    every prompt-submit query gets `query_vector` — lets a test fix the
+    cosine similarity `fire()`'s M primitive computes exactly, rather than
+    relying on real semantic drift (TRIGGER-ENGINE wave 2b, §8)."""
+    import chromadb
+    from agent.working_context_store import WorkingContextStore
+    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+    return WorkingContextStore(
+        str(tmp_path),
+        embed_fn=_const_embed(note_vector),
+        embed_query_fn=_const_embed(query_vector),
+        notes_chroma_client=client,
+    )
+
+
+class TestFireSemanticPrimitive:
+    """Fire-time M resolution (TRIGGER-ENGINE wave 2b, §8): fire() computes
+    ONE activity embedding per call (never per note) and gates each
+    semantic-triggered note's own stored vector against a fixed per-kind
+    theta (config.yaml memory_triggers.semantic.theta_by_kind). gotcha's
+    theta is 0.72 — an identical unit vector (cosine 1.0) clears it, an
+    orthogonal one (cosine 0.0) does not."""
+
+    def test_fires_when_cosine_clears_theta(self, tmp_path) -> None:
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        ws = str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        results = store.fire(ws, event="prompt-submit", query="anything")
+        assert len(results) == 1
+
+    def test_does_not_fire_when_cosine_is_below_theta(self, tmp_path) -> None:
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [0.0, 1.0])
+        ws = str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        results = store.fire(ws, event="prompt-submit", query="anything")
+        assert len(results) == 0
+
+    def test_never_fires_without_a_query(self, tmp_path) -> None:
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        ws = str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        results = store.fire(ws, event="prompt-submit")
+        assert results == []
+
+    def test_two_semantic_matches_of_the_same_kind_rank_by_recency(self, tmp_path) -> None:
+        """Age-fade on rank only, theta never moves (TRIGGER-ENGINE wave 2b,
+        §8): among several M-fired notes of the same kind, the more recently
+        used one ranks first. This is NOT new sort logic — M-fired
+        FireResults flow through the exact same `total_order_key` call every
+        other primitive already uses, whose existing `-last_used` tie-break
+        (for every kind but 'task') already satisfies this requirement."""
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        ws = str(tmp_path)
+        older_id = store.remember(ws, "older gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        newer_id = store.remember(ws, "newer gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        with store._conn() as conn:
+            conn.execute(
+                "UPDATE notes SET last_accessed = ? WHERE note_id = ?",
+                (time.time() - 3600, older_id),
+            )
+        results = store.fire(ws, event="prompt-submit", query="anything")
+        assert [r.note_id for r in results] == [newer_id, older_id]
+
+    def test_never_fires_without_an_embedder_attached(self, tmp_path) -> None:
+        """Degradation gate: no embedder attached at all (a memory-only
+        daemon, or the warm-up window before attach_embedder() runs) — a
+        semantic trigger deterministically does not fire, never an error."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        results = store.fire(ws, event="prompt-submit", query="anything")
+        assert results == []
+
+    def test_never_embeds_the_query_when_no_note_declares_a_semantic_axis(self, tmp_path) -> None:
+        """Performance gate: a workspace with zero semantic-triggered notes
+        must never pay for an activity embedding call."""
+        calls: list[list[str]] = []
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        store._embed_query_fn = _counting_embed([1.0, 0.0], calls)
+        ws = str(tmp_path)
+        store.remember(ws, "a plain finding")  # no triggers at all
+        store.fire(ws, event="prompt-submit", query="anything")
+        assert calls == []
+
+    def test_only_one_activity_embedding_computed_per_fire_call(self, tmp_path) -> None:
+        calls: list[list[str]] = []
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        store._embed_query_fn = _counting_embed([1.0, 0.0], calls)
+        ws = str(tmp_path)
+        store.remember(ws, "gotcha one", kind="gotcha", triggers=[{"semantic": True}])
+        store.remember(ws, "gotcha two", kind="gotcha", triggers=[{"semantic": True}])
+        store.fire(ws, event="prompt-submit", query="anything")
+        assert len(calls) == 1  # once for the whole call, not once per note
+
+    def test_note_vector_is_reused_never_re_embedded_at_fire_time(self, tmp_path) -> None:
+        """The note's own document-side vector is stored once at remember()
+        time and read back as-is — fire() never calls the document embed_fn
+        again."""
+        calls: list[list[str]] = []
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        ws = str(tmp_path)
+        store.remember(ws, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        store._embed_fn = _counting_embed([1.0, 0.0], calls)
+        store.fire(ws, event="prompt-submit", query="anything")
+        assert calls == []
+
+
+class TestSharedLedgerAcrossSymbolAndSemanticFires:
+    """The `TriggerFireLedger` passed into `fire()`/`fire_and_format()` never
+    branches on which primitive produced a `FireResult` (TRIGGER-ENGINE wave
+    2b) — one call with BOTH a `file_path` (S) and a `query` (M) set can
+    fire an S-triggered note and an M-triggered note together, and the
+    ledger's per-axis dedup plus the cumulative per-session token budget
+    apply identically to both, exactly as they already do for P/E fires."""
+
+    def _mixed_store(self, tmp_path):
+        import chromadb
+        from agent.symbol_graph import SymbolGraph
+        from agent.working_context_store import WorkingContextStore
+
+        ws = str(tmp_path)
+        graph = SymbolGraph(ws)
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        graph.index_file(ws, str(f))
+
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store = WorkingContextStore(
+            ws,
+            embed_fn=_const_embed([1.0, 0.0]),
+            embed_query_fn=_const_embed([1.0, 0.0]),
+            notes_chroma_client=client,
+        )
+        store.attach_symbol_resolver(graph)
+        return store, ws, str(f)
+
+    def test_one_call_fires_both_a_symbol_note_and_a_semantic_note(self, tmp_path) -> None:
+        store, ws, f = self._mixed_store(tmp_path)
+        sym_id = store.remember(ws, "a symbol gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        sem_id = store.remember(ws, "a semantic gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        results = store.fire(ws, event="pre-edit", file_path=f, query="anything")
+        assert {r.note_id for r in results} == {sym_id, sem_id}
+
+    def test_ledger_dedup_suppresses_both_axes_on_a_repeat_call(self, tmp_path) -> None:
+        from agent.trigger_engine import TriggerFireLedger
+
+        store, ws, f = self._mixed_store(tmp_path)
+        store.remember(ws, "a symbol gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        store.remember(ws, "a semantic gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        ledger = TriggerFireLedger()
+        first = store.fire(ws, event="pre-edit", file_path=f, query="anything", ledger=ledger)
+        assert len(first) == 2
+        second = store.fire(ws, event="pre-edit", file_path=f, query="anything", ledger=ledger)
+        assert second == []  # neither the S fire nor the M fire re-fires this session
+
+    def test_cumulative_budget_accounts_for_both_axes_together(self, tmp_path) -> None:
+        from agent.trigger_engine import MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP, TriggerFireLedger
+
+        store, ws, f = self._mixed_store(tmp_path)
+        sym_id = store.remember(ws, "a symbol gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        sem_id = store.remember(ws, "a semantic gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        ledger = TriggerFireLedger()
+        assert ledger.remaining_budget() == MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP
+        text, note_ids = store.fire_and_format(
+            ws, event="pre-edit", file_path=f, query="anything", ledger=ledger,
+        )
+        assert note_ids == {sym_id, sem_id}
+        assert "a symbol gotcha" in text
+        assert "a semantic gotcha" in text
+        assert ledger.remaining_budget() < MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP
+
+
 class TestPromote:
     def test_promote_auto_to_agent(self, tmp_path) -> None:
         store, ws = _store(tmp_path), str(tmp_path)

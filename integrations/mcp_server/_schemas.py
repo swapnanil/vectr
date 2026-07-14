@@ -322,15 +322,22 @@ _MEMORY_WRITE_TOOLS = [
                     "items": {"type": "object"},
                     "description": (
                         "Optional: explicit overrides for WHEN this note should resurface. Each "
-                        "entry may declare 'path' (a glob, e.g. 'src/api/**') and/or 'event' "
-                        "(one of: session-start, prompt-submit, pre-edit, pre-run, pre-commit, "
-                        "post-compaction), plus optional 'not_before' (epoch seconds), "
-                        "'expires_visibility' (epoch seconds after which the note fades in "
-                        "ranking but still fires), and 'cooldown' (seconds between re-fires). "
-                        "Entries are OR'd together. Omit this entirely (recommended) and the "
-                        "note's kind gets a sensible default: 'directive' fires at session-start "
-                        "and after context compaction; 'task' fires at session-start; 'gotcha' "
-                        "fires when the anchored file is about to be edited."
+                        "entry may declare 'path' (a glob, e.g. 'src/api/**'), 'event' (one of: "
+                        "session-start, prompt-submit, pre-edit, pre-run, pre-commit, "
+                        "post-compaction), 'symbol' (a code symbol name — matches when the file "
+                        "targeted by the current lifecycle moment defines or references it, "
+                        "resolved exactly against the same symbol graph vectr_locate/vectr_trace "
+                        "use), and/or 'semantic' (true — matches at prompt-submit when the "
+                        "prompt's meaning is close enough to this note's own content, judged by a "
+                        "fixed similarity threshold per kind; no keyword matching involved), plus "
+                        "optional 'not_before' (epoch seconds), 'expires_visibility' (epoch "
+                        "seconds after which the note fades in ranking but still fires), and "
+                        "'cooldown' (seconds between re-fires). Entries within one object are "
+                        "AND'd together (e.g. 'path' + 'symbol' both required); multiple entries "
+                        "in the array are OR'd. Omit this entirely (recommended) and the note's "
+                        "kind gets a sensible default: 'directive' fires at session-start and "
+                        "after context compaction; 'task' fires at session-start; 'gotcha' fires "
+                        "when the anchored file is about to be edited."
                     ),
                 },
                 "provenance": {

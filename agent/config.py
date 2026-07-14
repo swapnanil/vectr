@@ -712,3 +712,15 @@ _trig_inject_cfg: dict[str, Any] = _trig_cfg["injection"]
 MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP: int = int(_trig_inject_cfg["per_injection_token_cap"])
 MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP: int = int(_trig_inject_cfg["per_session_token_cap"])
 MEMORY_TRIGGER_CHARS_PER_TOKEN: int = int(_trig_inject_cfg["chars_per_token"])
+
+# Trigger engine wave 2b (TRIGGER-ENGINE, bm2-design-skeleton.md §8) — the M
+# (semantic) primitive's fixed per-kind cosine thresholds. Built by direct
+# subscript against every kind already enumerated in kind_priority above, so
+# a config.yaml missing an entry for any kind raises KeyError here at import
+# rather than silently defaulting a kind to "never matches" or "always
+# matches" at runtime.
+_trig_semantic_cfg: dict[str, Any] = _trig_cfg["semantic"]
+_trig_theta_cfg: dict[str, Any] = _trig_semantic_cfg["theta_by_kind"]
+MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND: dict[str, float] = {
+    kind: float(_trig_theta_cfg[kind]) for kind in MEMORY_TRIGGER_KIND_PRIORITY
+}

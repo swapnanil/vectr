@@ -84,6 +84,33 @@ class TestValidateTrigger:
         with pytest.raises(ValueError, match="path.*or.*event|never fires alone"):
             validate_trigger({"not_before": 100.0})
 
+    def test_symbol_only_is_valid(self) -> None:
+        validate_trigger({"symbol": "WorkspaceLock"})
+
+    def test_symbol_and_path_is_valid(self) -> None:
+        validate_trigger({"symbol": "WorkspaceLock", "path": "src/api/**"})
+
+    def test_symbol_and_event_is_valid(self) -> None:
+        validate_trigger({"symbol": "WorkspaceLock", "event": "pre-edit"})
+
+    def test_non_string_symbol_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            validate_trigger({"symbol": 123})
+
+    def test_empty_string_symbol_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            validate_trigger({"symbol": ""})
+
+    def test_semantic_only_is_valid(self) -> None:
+        validate_trigger({"semantic": True})
+
+    def test_semantic_and_event_is_valid(self) -> None:
+        validate_trigger({"semantic": True, "event": "prompt-submit"})
+
+    def test_non_bool_semantic_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            validate_trigger({"semantic": "yes"})
+
     def test_non_dict_rejected(self) -> None:
         with pytest.raises(ValueError):
             validate_trigger("not a dict")  # type: ignore[arg-type]
@@ -214,6 +241,74 @@ class TestEvaluateNote:
         result = evaluate_note(note, event="pre-edit", file_path="src/api/x.py")
         assert result.fired is True
         assert "path src/api/** at pre-edit" in result.explanation
+
+    def test_symbol_only_trigger_matches_when_symbol_is_resolved(self) -> None:
+        note = _note(triggers=[{"symbol": "WorkspaceLock"}])
+        result = evaluate_note(
+            note, file_path="src/api/resolver.py",
+            resolved_symbols=frozenset({"WorkspaceLock", "acquire_lock"}),
+        )
+        assert result.fired is True
+        assert "symbol WorkspaceLock" in result.explanation
+
+    def test_symbol_only_trigger_does_not_match_an_unresolved_symbol(self) -> None:
+        note = _note(triggers=[{"symbol": "WorkspaceLock"}])
+        result = evaluate_note(
+            note, file_path="src/api/resolver.py",
+            resolved_symbols=frozenset({"some_other_symbol"}),
+        )
+        assert result.fired is False
+
+    def test_symbol_trigger_never_fires_when_resolved_symbols_is_none(self) -> None:
+        """Degradation (bm2-design-skeleton.md §2): a memory-only daemon or a
+        warm-up window before the symbol graph is built has no resolved
+        symbols at all — a symbol trigger deterministically does not fire,
+        never an error."""
+        note = _note(triggers=[{"symbol": "WorkspaceLock"}])
+        result = evaluate_note(note, file_path="src/api/resolver.py", resolved_symbols=None)
+        assert result.fired is False
+
+    def test_symbol_and_path_conjunction_requires_both(self) -> None:
+        note = _note(triggers=[{"symbol": "WorkspaceLock", "path": "src/api/**"}])
+        both = frozenset({"WorkspaceLock"})
+        # symbol resolves, path doesn't
+        assert evaluate_note(note, file_path="src/other/x.py", resolved_symbols=both).fired is False
+        # path matches, symbol doesn't resolve
+        assert evaluate_note(note, file_path="src/api/x.py", resolved_symbols=frozenset()).fired is False
+        # both match
+        result = evaluate_note(note, file_path="src/api/x.py", resolved_symbols=both)
+        assert result.fired is True
+        assert "path src/api/** + symbol WorkspaceLock" in result.explanation
+
+    def test_semantic_only_trigger_matches_when_precomputed_true(self) -> None:
+        note = _note(triggers=[{"semantic": True}])
+        result = evaluate_note(note, event="prompt-submit", semantic_matched=True)
+        assert result.fired is True
+        assert "semantic" in result.explanation
+
+    def test_semantic_only_trigger_does_not_match_when_precomputed_false(self) -> None:
+        note = _note(triggers=[{"semantic": True}])
+        result = evaluate_note(note, event="prompt-submit", semantic_matched=False)
+        assert result.fired is False
+
+    def test_semantic_trigger_never_fires_when_semantic_matched_is_none(self) -> None:
+        """Degradation: no embedder attached, embedder still warming up, or
+        the caller never computed a cosine for this note — a semantic
+        trigger deterministically does not fire, never an error."""
+        note = _note(triggers=[{"semantic": True}])
+        result = evaluate_note(note, event="prompt-submit", semantic_matched=None)
+        assert result.fired is False
+
+    def test_semantic_and_event_conjunction_requires_both(self) -> None:
+        note = _note(triggers=[{"semantic": True, "event": "prompt-submit"}])
+        # semantic matches, event doesn't
+        assert evaluate_note(note, event="pre-edit", semantic_matched=True).fired is False
+        # event matches, semantic doesn't
+        assert evaluate_note(note, event="prompt-submit", semantic_matched=False).fired is False
+        # both match
+        result = evaluate_note(note, event="prompt-submit", semantic_matched=True)
+        assert result.fired is True
+        assert "semantic at prompt-submit" in result.explanation
 
     def test_or_composition_first_match_wins(self) -> None:
         note = _note(triggers=[{"event": "pre-run"}, {"event": "pre-edit"}])

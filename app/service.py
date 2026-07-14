@@ -352,6 +352,15 @@ class VectrService:
 
         # L2 — symbol graph
         self._symbol_graph = SymbolGraph(self._db_dir)
+        # TRIGGER-ENGINE wave 2b: upgrade the memory layer to the S (symbol)
+        # trigger primitive now that the symbol graph exists — mirrors the
+        # attach_embedder() upgrade-after-construction above. Memory-only
+        # daemons (self._context_store is not None but this phase never
+        # runs) and the warm-up window before this line executes both leave
+        # the store's resolver unattached, so a symbol trigger deterministically
+        # does not fire until this call lands — never an error.
+        if self._context_store is not None:
+            self._context_store.attach_symbol_resolver(self._symbol_graph)
         # ARCH-1b: seed the searcher's importance prior from the persisted
         # symbol_importance table so a restart over an already-indexed workspace
         # ranks with importance immediately (empty until ARCH-1a has run once).
@@ -1428,11 +1437,17 @@ class VectrService:
         # explicit override; absent `events` entirely (the default — every
         # other caller: direct vectr_recall, `vectr recall`, etc.) this
         # branch behaves exactly as before the engine existed.
+        #
+        # `query` is forwarded here too (wave 2b, §8): a prompt-submit event
+        # is the M (semantic) primitive's one fire point — this is the only
+        # `fire_and_format()` call site in this file that ever has both an
+        # `events` list AND the actual prompt text available together.
         fire_text, fired_ids = "", set()
         if events:
             fire_text, fired_ids = self._context_store.fire_and_format(
                 self._workspace_root,
                 events=events,
+                query=query,
                 session_id=session_id,
                 ledger=self._ledger_for(session_id),
                 surface=surface,
