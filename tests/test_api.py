@@ -367,6 +367,84 @@ def test_index_does_not_block_concurrent_status(client) -> None:
     assert results["resp"].status_code == 200
 
 
+def test_mcp_tools_call_does_not_block_concurrent_status(client) -> None:
+    """UPG-EMBED-THREAD-CONTENTION: POST /mcp's tools/call dispatch runs
+    handle_tools_call() in a threadpool (see app/routes.py), mirroring
+    /v1/index above — an embed-touching tool call (e.g. vectr_search) must
+    never block GET /v1/status from answering promptly on a concurrent
+    request, the same event-loop-starvation class as the index route."""
+    svc = client.app.state.service
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_search(query, n_results=5, language=None):
+        entered.set()
+        assert release.wait(timeout=5), "test never released the slow search call"
+        return ([], 0)
+
+    svc.search.side_effect = slow_search
+
+    results: dict[str, object] = {}
+
+    def do_tool_call() -> None:
+        results["resp"] = client.post("/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "vectr_search", "arguments": {"query": "rate limiter"}},
+        })
+
+    t = threading.Thread(target=do_tool_call)
+    t.start()
+    assert entered.wait(timeout=2), "slow /mcp tools/call handler never started"
+
+    t0 = time.monotonic()
+    status_resp = client.get("/v1/status")
+    elapsed = time.monotonic() - t0
+
+    release.set()
+    t.join(timeout=5)
+
+    assert status_resp.status_code == 200
+    assert elapsed < 1.0, f"/v1/status took {elapsed:.2f}s while /mcp tools/call was running"
+    assert results["resp"].status_code == 200
+    assert results["resp"].json()["result"]["isError"] is False
+
+
+def test_legacy_mcp_tools_call_does_not_block_concurrent_status(client) -> None:
+    """Same guard for the legacy POST /mcp/tools/call route."""
+    svc = client.app.state.service
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_search(query, n_results=5, language=None):
+        entered.set()
+        assert release.wait(timeout=5), "test never released the slow search call"
+        return ([], 0)
+
+    svc.search.side_effect = slow_search
+
+    results: dict[str, object] = {}
+
+    def do_tool_call() -> None:
+        results["resp"] = client.post(
+            "/mcp/tools/call", json={"name": "vectr_search", "arguments": {"query": "rate limiter"}},
+        )
+
+    t = threading.Thread(target=do_tool_call)
+    t.start()
+    assert entered.wait(timeout=2), "slow legacy /mcp/tools/call handler never started"
+
+    t0 = time.monotonic()
+    status_resp = client.get("/v1/status")
+    elapsed = time.monotonic() - t0
+
+    release.set()
+    t.join(timeout=5)
+
+    assert status_resp.status_code == 200
+    assert elapsed < 1.0, f"/v1/status took {elapsed:.2f}s while /mcp/tools/call was running"
+    assert results["resp"].status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
