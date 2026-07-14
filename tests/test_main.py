@@ -2888,6 +2888,38 @@ class TestMultiRoot:
         )
 
 
+class TestResolveWorkspaceRootsEnvValidation:
+    """UPG-WORKSPACE-ENV-VALIDATE: a typo'd VECTR_WORKSPACE must fail loudly
+    (SystemExit, non-zero) rather than silently falling back to cwd
+    detection. Only exercised when the caller gave no explicit --path/
+    positional workspace arg — that's the fallback branch these tests target.
+    """
+
+    def _no_explicit_args(self) -> argparse.Namespace:
+        return argparse.Namespace(workspace=None, paths=None, port=8765)
+
+    def test_nonexistent_env_path_exits_nonzero(self, tmp_path, monkeypatch, capsys):
+        bad_path = str(tmp_path / "typo-path")
+        monkeypatch.setenv("VECTR_WORKSPACE", bad_path)
+        with pytest.raises(SystemExit) as excinfo:
+            m._resolve_workspace_roots(self._no_explicit_args())
+        assert excinfo.value.code != 0
+        assert bad_path in capsys.readouterr().err
+
+    def test_unset_env_falls_back_to_cwd_unchanged(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VECTR_WORKSPACE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        roots = m._resolve_workspace_roots(self._no_explicit_args())
+        assert roots == [str(tmp_path.resolve())]
+
+    def test_valid_env_path_resolves_unchanged(self, tmp_path, monkeypatch):
+        real_dir = tmp_path / "real-workspace"
+        real_dir.mkdir()
+        monkeypatch.setenv("VECTR_WORKSPACE", str(real_dir))
+        roots = m._resolve_workspace_roots(self._no_explicit_args())
+        assert roots == [str(real_dir.resolve())]
+
+
 # ---------------------------------------------------------------------------
 # --exclude on `init` and `start` (UPG-EXCLUDE-REGEX)
 # ---------------------------------------------------------------------------

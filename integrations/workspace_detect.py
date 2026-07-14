@@ -36,6 +36,43 @@ def find_workspace_root(start_path: str) -> str:
     return str(p)
 
 
+class WorkspaceEnvError(RuntimeError):
+    """A workspace path (VECTR_WORKSPACE env var, or an equivalent explicit
+    CLI argument) names a path that doesn't exist or isn't a directory
+    (UPG-WORKSPACE-ENV-VALIDATE).
+
+    Raised at daemon/service startup, before find_workspace_root's git
+    walk-up ever runs, so a typo'd harness env fails loudly instead of
+    silently falling back to cwd-based detection — silently indexing the
+    wrong tree is worse than a startup crash naming the bad path.
+    """
+
+
+def validate_workspace_env(raw_path: str, *, env_var: str = "VECTR_WORKSPACE") -> None:
+    """Raise WorkspaceEnvError if raw_path is set but isn't an existing directory.
+
+    Called wherever a workspace path string sourced from an environment
+    variable is about to be trusted (currently: VECTR_WORKSPACE, read by both
+    api.py's daemon startup and main.py's CLI). An empty/falsy raw_path is a
+    no-op — callers pass the already-defaulted value (e.g. "." for "not
+    set"), and "." always resolves to the existing current directory, so the
+    unset case is unaffected by construction.
+    """
+    if not raw_path:
+        return
+    p = Path(raw_path)
+    if not p.exists():
+        raise WorkspaceEnvError(
+            f"{env_var}={raw_path!r} does not exist. Refusing to silently "
+            f"fall back to the current directory — fix or unset {env_var}."
+        )
+    if not p.is_dir():
+        raise WorkspaceEnvError(
+            f"{env_var}={raw_path!r} is not a directory. Refusing to silently "
+            f"fall back to the current directory — fix or unset {env_var}."
+        )
+
+
 def _read_ignore_lines(path: Path) -> list[str]:
     """Read non-blank, non-comment lines from an ignore file."""
     if not path.exists():

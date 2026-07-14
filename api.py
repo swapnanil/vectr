@@ -24,10 +24,15 @@ from app.routes import router
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     from app.service import VectrService
+    from integrations.workspace_detect import validate_workspace_env
 
     import json as _json
     import threading
     workspace = os.getenv("VECTR_WORKSPACE", ".")
+    # UPG-WORKSPACE-ENV-VALIDATE: a typo'd VECTR_WORKSPACE must fail daemon
+    # startup loudly, never silently fall back to cwd-based detection — a bad
+    # harness env would otherwise index the wrong tree with no visible error.
+    validate_workspace_env(workspace)
     port = int(os.getenv("VECTR_PORT", "8765"))
     extra_roots = _json.loads(os.getenv("VECTR_EXTRA_ROOTS", "[]"))
     memory_only = os.getenv("VECTR_MEMORY_ONLY", "") == "1"

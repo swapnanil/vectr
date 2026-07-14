@@ -102,6 +102,31 @@ def client():
 
 
 # ---------------------------------------------------------------------------
+# UPG-WORKSPACE-ENV-VALIDATE: daemon startup fails loudly on a bad
+# VECTR_WORKSPACE rather than silently falling back to cwd detection.
+# ---------------------------------------------------------------------------
+
+class TestLifespanWorkspaceEnvValidation:
+    def test_bad_vectr_workspace_env_fails_startup(self, tmp_path, monkeypatch) -> None:
+        from integrations.workspace_detect import WorkspaceEnvError
+
+        bad_path = str(tmp_path / "does-not-exist")
+        monkeypatch.setenv("VECTR_WORKSPACE", bad_path)
+        with pytest.raises(WorkspaceEnvError) as excinfo:
+            with TestClient(app, raise_server_exceptions=True):
+                pass
+        assert bad_path in str(excinfo.value)
+
+    def test_valid_vectr_workspace_env_starts_normally(self, tmp_path, monkeypatch) -> None:
+        svc = _make_service()
+        monkeypatch.setenv("VECTR_WORKSPACE", str(tmp_path))
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=True) as c:
+                resp = c.get("/v1/health")
+                assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
