@@ -1134,6 +1134,67 @@ class TestVectrRemember:
         assert result["isError"] is True
         assert "provenance" in result["content"][0]["text"]
 
+    def test_remember_provenance_human_rejected_at_mcp_layer(self) -> None:
+        """The MCP tool is the AGENT's own surface (bm2-design-skeleton.md §5:
+        "promotion is an explicit user act") -- same boundary
+        test_promote_to_human_rejected_at_mcp_layer enforces for vectr_promote.
+        An agent minting a note straight to provenance='human' here would be
+        indistinguishable from a genuine user-reviewed directive (the unhedged
+        imperative framing, auto-injected every session start) -- a one-call
+        trust forgery. The store is never even called; nothing is stored."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_remember", {
+            "content": "a standing rule", "kind": "directive", "provenance": "human",
+        }, svc)
+        assert result["isError"] is True
+        text = result["content"][0]["text"].lower()
+        assert "human" in text
+        assert "user-side" in text or "person" in text
+        svc.remember.assert_not_called()
+
+    def test_remember_provenance_agent_still_works(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_remember", {
+            "content": "a note", "provenance": "agent",
+        }, svc)
+        assert result["isError"] is False
+        svc.remember.assert_called_once()
+
+    def test_remember_provenance_auto_still_works(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_remember", {
+            "content": "a note", "provenance": "auto",
+        }, svc)
+        assert result["isError"] is False
+        svc.remember.assert_called_once()
+
+    def test_remember_provenance_omitted_defaults_to_agent(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_remember", {"content": "a note"}, svc)
+        assert result["isError"] is False
+        svc.remember.assert_called_once_with(
+            content="a note", tags=None, priority="medium",
+            kind="finding", title="", agent="",
+            **_DEFAULT_TRIGGER_PARAMS,
+        )
+
+    def test_remember_supersedes_human_note_rejected_by_store_surfaces_as_mcp_error(self) -> None:
+        """Round-trip: the store-side write-boundary guard (an agent/auto
+        write may not supersede a human-provenance note) surfaces through the
+        MCP dispatch's existing ValueError-to-_mcp_error path, same as any
+        other remember() validation error."""
+        svc = _mock_service()
+        svc.remember.side_effect = ValueError(
+            "supersedes references note #7, which is provenance='human' -- "
+            "a write whose own provenance is not 'human' may not supersede "
+            "a human-provenance note"
+        )
+        result = handle_tools_call("vectr_remember", {
+            "content": "an agent note", "supersedes": 7, "provenance": "agent",
+        }, svc)
+        assert result["isError"] is True
+        assert "human" in result["content"][0]["text"]
+
 
 # ---------------------------------------------------------------------------
 # Turn-count vectr_remember nudge (E10)

@@ -687,7 +687,13 @@ class WorkingContextStore:
         `superseded_at` set (excluding it from recall() by default and from
         ever firing again, per evaluate_note) and `superseded_by_note_id` set
         to this new note's id — kept for audit, never deleted. Raises
-        ValueError if the target note does not exist in this workspace.
+        ValueError if the target note does not exist in this workspace, OR if
+        the target's provenance is "human" while THIS write's own provenance
+        is not — a write-boundary guard, surface-agnostic and provenance-
+        based: only a provenance="human" write may tombstone a genuine
+        human-reviewed directive; an agent/auto write may not silently
+        permanently-mute one this way. A provenance="human" write may still
+        supersede anything, including another human note.
         Distinct from the pre-existing `superseded_by` (author_id) column,
         which is set only by the unrelated code_hash-conflict path above.
         """
@@ -739,11 +745,30 @@ class WorkingContextStore:
             # a bad note_id never leaves a half-applied write.
             if supersedes is not None:
                 target = conn.execute(
-                    "SELECT note_id FROM notes WHERE workspace = ? AND note_id = ?",
+                    "SELECT note_id, provenance FROM notes WHERE workspace = ? AND note_id = ?",
                     (workspace, supersedes),
                 ).fetchone()
                 if target is None:
                     raise ValueError(f"supersedes references note #{supersedes}, which does not exist in this workspace")
+                # Write-boundary guard (companion to the MCP vectr_remember
+                # provenance='human' rejection): a write whose OWN provenance
+                # is not "human" may never tombstone a note whose provenance
+                # IS "human" -- otherwise an agent-authored write could
+                # silently supersede (and so permanently stop firing) a
+                # genuine human-reviewed directive, without ever minting
+                # provenance='human' itself. Surface-agnostic (applies to
+                # REST and any future caller identically, not just MCP) and
+                # provenance-based, not surface-based -- a human-provenance
+                # write may still supersede anything, including another
+                # human note.
+                target_provenance = target[1]
+                if target_provenance == "human" and provenance != "human":
+                    raise ValueError(
+                        f"supersedes references note #{supersedes}, which is "
+                        "provenance='human' -- a write whose own provenance "
+                        "is not 'human' may not supersede a human-provenance "
+                        "note (only a human-provenance write may)"
+                    )
 
             # conflict resolution: if another note anchors the same code block, supersede it
             if code_hash:

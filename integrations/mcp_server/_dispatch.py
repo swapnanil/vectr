@@ -536,6 +536,26 @@ def handle_tools_call(
         # exactly the pre-wave-1 vectr_remember call.
         triggers = arguments.get("triggers") or None
         provenance = arguments.get("provenance", "agent") or "agent"
+        if provenance == "human":
+            # The MCP surface is the AGENT's own surface (bm2-design-skeleton
+            # .md §5: "promotion is an explicit user act") -- the same
+            # boundary vectr_promote's own to="human" rejection enforces
+            # below. Minting a note straight to provenance='human' here would
+            # let an agent decide, on its own, that a person endorsed
+            # something: a one-call trust forgery, since only human-
+            # provenance directives render with the unhedged imperative
+            # framing (format_notes_for_llm()) that gets auto-injected at
+            # every future session start. Human endorsement happens on a
+            # user-side surface instead (the REST /v1/remember or
+            # /v1/promote routes a person's own CLI/UI calls), never here.
+            return _mcp_error(
+                "provenance='human' is not available via this tool -- "
+                "human endorsement happens on a user-side surface (e.g. a "
+                "CLI/UI a person operates), not through the AI's own MCP "
+                "tools. Omit provenance (defaults to 'agent') or pass "
+                "'agent'/'auto'; ask the person to record it themselves, or "
+                "promote it later, if it warrants human endorsement."
+            )
         scope = arguments.get("scope", "workspace") or "workspace"
         anchors = arguments.get("anchors") or None
         supersedes = arguments.get("supersedes")

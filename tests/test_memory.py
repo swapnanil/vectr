@@ -1573,6 +1573,46 @@ class TestRememberTriggerEngineParams:
         with pytest.raises(ValueError):
             store.remember(ws, "note", supersedes=999999)
 
+    def test_agent_provenance_write_cannot_supersede_a_human_provenance_note(self, tmp_path) -> None:
+        """Write-boundary guard: an agent (or auto) write must never tombstone
+        a genuine human-reviewed directive — that would let an agent-authored
+        note silently permanently mute a human note without ever minting
+        provenance='human' itself."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        human_id = store.remember(ws, "a human directive", kind="directive", provenance="human")
+        with pytest.raises(ValueError, match="human"):
+            store.remember(ws, "an agent note", supersedes=human_id, provenance="agent")
+        # the target must be untouched — the write was rejected outright
+        human_note = store.get_note(ws, human_id)
+        assert human_note.valid_until is None
+
+    def test_auto_provenance_write_cannot_supersede_a_human_provenance_note(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        human_id = store.remember(ws, "a human finding", provenance="human")
+        with pytest.raises(ValueError, match="human"):
+            store.remember(ws, "an auto note", supersedes=human_id, provenance="auto")
+
+    def test_human_provenance_write_can_supersede_a_human_provenance_note(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        human_id = store.remember(ws, "an old human directive", kind="directive", provenance="human")
+        new_id = store.remember(
+            ws, "a corrected human directive", kind="directive",
+            supersedes=human_id, provenance="human",
+        )
+        old = store.get_note(ws, human_id)
+        assert old.valid_until is not None
+        assert old.superseded_by_note_id == new_id
+
+    def test_agent_provenance_write_can_still_supersede_an_agent_provenance_note(self, tmp_path) -> None:
+        """The guard is scoped to human-provenance TARGETS only — the common
+        agent-supersedes-agent case (unaffected by this fix) still works."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        old_id = store.remember(ws, "old finding", provenance="agent")
+        new_id = store.remember(ws, "corrected finding", supersedes=old_id, provenance="agent")
+        old = store.get_note(ws, old_id)
+        assert old.valid_until is not None
+        assert old.superseded_by_note_id == new_id
+
     def test_supersedes_never_fires_again(self, tmp_path) -> None:
         store, ws = _store(tmp_path), str(tmp_path)
         old_id = store.remember(ws, "old directive", kind="directive")
