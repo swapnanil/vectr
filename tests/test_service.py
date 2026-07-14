@@ -886,6 +886,19 @@ class TestDeferSearchInit:
             svc.recall(query="check the retry budget")
         spy.assert_not_called()
 
+    def test_semantic_trigger_does_not_fire_before_phase2(self, tmp_path, monkeypatch) -> None:
+        """The M-primitive mirror of test_symbol_resolver_unattached_before_
+        phase2: no embedder is attached to the context store until
+        complete_search_init() runs, so a semantic-triggered note must not
+        fire during the warm-up window even when both `query` and
+        `events=["prompt-submit"]` are supplied — deterministic no-fire,
+        never an error."""
+        svc = self._make_deferred(tmp_path, monkeypatch)
+        content = "always check the retry budget before a network call"
+        svc.remember(content, kind="gotcha", triggers=[{"semantic": True}])
+        notes_text = svc.recall(query=content, kind="directive", events=["prompt-submit"])
+        assert "retry budget" not in notes_text
+
     def test_semantic_trigger_fires_end_to_end_through_recall(self, tmp_path, monkeypatch) -> None:
         """Full VectrService.recall() -> _recall_impl() -> fire_and_format()
         path, with a real embedder attached: a note declaring an explicit

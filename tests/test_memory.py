@@ -1935,6 +1935,71 @@ class TestFireSemanticPrimitive:
         assert calls == []
 
 
+class TestSharedLedgerAcrossSymbolAndSemanticFires:
+    """The `TriggerFireLedger` passed into `fire()`/`fire_and_format()` never
+    branches on which primitive produced a `FireResult` (TRIGGER-ENGINE wave
+    2b) — one call with BOTH a `file_path` (S) and a `query` (M) set can
+    fire an S-triggered note and an M-triggered note together, and the
+    ledger's per-axis dedup plus the cumulative per-session token budget
+    apply identically to both, exactly as they already do for P/E fires."""
+
+    def _mixed_store(self, tmp_path):
+        import chromadb
+        from agent.symbol_graph import SymbolGraph
+        from agent.working_context_store import WorkingContextStore
+
+        ws = str(tmp_path)
+        graph = SymbolGraph(ws)
+        f = tmp_path / "resolver.py"
+        f.write_text("class WorkspaceLock:\n    def acquire(self):\n        pass\n")
+        graph.index_file(ws, str(f))
+
+        client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+        store = WorkingContextStore(
+            ws,
+            embed_fn=_const_embed([1.0, 0.0]),
+            embed_query_fn=_const_embed([1.0, 0.0]),
+            notes_chroma_client=client,
+        )
+        store.attach_symbol_resolver(graph)
+        return store, ws, str(f)
+
+    def test_one_call_fires_both_a_symbol_note_and_a_semantic_note(self, tmp_path) -> None:
+        store, ws, f = self._mixed_store(tmp_path)
+        sym_id = store.remember(ws, "a symbol gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        sem_id = store.remember(ws, "a semantic gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        results = store.fire(ws, event="pre-edit", file_path=f, query="anything")
+        assert {r.note_id for r in results} == {sym_id, sem_id}
+
+    def test_ledger_dedup_suppresses_both_axes_on_a_repeat_call(self, tmp_path) -> None:
+        from agent.trigger_engine import TriggerFireLedger
+
+        store, ws, f = self._mixed_store(tmp_path)
+        store.remember(ws, "a symbol gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        store.remember(ws, "a semantic gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        ledger = TriggerFireLedger()
+        first = store.fire(ws, event="pre-edit", file_path=f, query="anything", ledger=ledger)
+        assert len(first) == 2
+        second = store.fire(ws, event="pre-edit", file_path=f, query="anything", ledger=ledger)
+        assert second == []  # neither the S fire nor the M fire re-fires this session
+
+    def test_cumulative_budget_accounts_for_both_axes_together(self, tmp_path) -> None:
+        from agent.trigger_engine import MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP, TriggerFireLedger
+
+        store, ws, f = self._mixed_store(tmp_path)
+        sym_id = store.remember(ws, "a symbol gotcha", kind="gotcha", triggers=[{"symbol": "WorkspaceLock"}])
+        sem_id = store.remember(ws, "a semantic gotcha", kind="gotcha", triggers=[{"semantic": True}])
+        ledger = TriggerFireLedger()
+        assert ledger.remaining_budget() == MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP
+        text, note_ids = store.fire_and_format(
+            ws, event="pre-edit", file_path=f, query="anything", ledger=ledger,
+        )
+        assert note_ids == {sym_id, sem_id}
+        assert "a symbol gotcha" in text
+        assert "a semantic gotcha" in text
+        assert ledger.remaining_budget() < MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP
+
+
 class TestPromote:
     def test_promote_auto_to_agent(self, tmp_path) -> None:
         store, ws = _store(tmp_path), str(tmp_path)

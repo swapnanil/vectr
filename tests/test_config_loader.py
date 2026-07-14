@@ -264,3 +264,75 @@ class TestConfigLoaderHooks:
 
     def test_log_chars_per_token_is_int(self) -> None:
         assert isinstance(cfg.HOOKS_LOG_CHARS_PER_TOKEN, int)
+
+
+class TestConfigLoaderMemoryTriggerSemanticTheta:
+    """memory_triggers.semantic.theta_by_kind must load correctly from
+    config.yaml (TRIGGER-ENGINE wave 2b) — the M (semantic) primitive's
+    fixed per-kind cosine threshold has no hardcoded value anywhere in
+    agent/trigger_engine.py or agent/working_context_store/_store.py; every
+    kind's number comes from this dict, built by direct subscript."""
+
+    def test_one_entry_per_kind_in_priority_order(self) -> None:
+        """A config.yaml missing an entry for any kind enumerated in
+        memory_triggers.total_order.kind_priority would already have raised
+        KeyError at import time (agent/config.py) — this just confirms the
+        two sets line up 1:1 with no silent drops on either side."""
+        assert set(cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND) == set(cfg.MEMORY_TRIGGER_KIND_PRIORITY)
+
+    def test_all_are_floats(self) -> None:
+        for kind, theta in cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND.items():
+            assert isinstance(theta, float), f"theta for kind={kind!r} must be float"
+
+    def test_all_in_open_unit_interval(self) -> None:
+        for kind, theta in cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND.items():
+            assert 0 < theta <= 1.0, f"theta for kind={kind!r}={theta} must be in (0, 1]"
+
+    def test_directive_and_gotcha_default(self) -> None:
+        assert cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND["directive"] == 0.72
+        assert cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND["gotcha"] == 0.72
+
+    def test_task_default(self) -> None:
+        assert cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND["task"] == 0.75
+
+    def test_finding_default(self) -> None:
+        assert cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND["finding"] == 0.78
+
+    def test_reference_default(self) -> None:
+        assert cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND["reference"] == 0.80
+
+    def test_store_reads_theta_from_config_not_a_local_copy(self) -> None:
+        """agent/working_context_store/_store.py's fire() must import this
+        dict directly from agent.config at call time rather than defining
+        (or caching a stale copy of) its own thresholds — proven here by
+        mutating the config dict in place and observing fire()'s own
+        semantic-gate decision follow the new value."""
+        import chromadb
+
+        from agent.working_context_store import WorkingContextStore
+
+        def const_embed(vector: list[float]):
+            def _embed(texts: list[str]) -> list[list[float]]:
+                return [list(vector) for _ in texts]
+            return _embed
+
+        original = dict(cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND)
+        try:
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                client = chromadb.PersistentClient(path=f"{tmp_dir}/chroma")
+                store = WorkingContextStore(
+                    tmp_dir,
+                    embed_fn=const_embed([0.6, 0.8]),
+                    embed_query_fn=const_embed([1.0, 0.0]),
+                    notes_chroma_client=client,
+                )
+                store.remember(tmp_dir, "a gotcha", kind="gotcha", triggers=[{"semantic": True}])
+                # cosine([0.6, 0.8], [1.0, 0.0]) == 0.6 — below the 0.72 default, above a lowered one.
+                cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND["gotcha"] = 0.72
+                assert store.fire(tmp_dir, event="prompt-submit", query="anything") == []
+                cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND["gotcha"] = 0.5
+                assert len(store.fire(tmp_dir, event="prompt-submit", query="anything")) == 1
+        finally:
+            cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND.clear()
+            cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND.update(original)
