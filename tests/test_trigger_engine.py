@@ -713,3 +713,20 @@ class TestPackInjection:
 
     def test_empty_items_returns_empty_list(self) -> None:
         assert pack_injection([]) == []
+
+    def test_eviction_stops_packing_lower_precedence_items_never_backfill(self) -> None:
+        from agent.config import MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP, MEMORY_TRIGGER_CHARS_PER_TOKEN
+        # The top-order item is oversized even at its index tier (it does
+        # not fit in the whole per-session budget), so it is evicted. A
+        # lower-order item that would otherwise fit easily in the freed-up
+        # budget must NOT be packed in its place: eviction is a stop signal,
+        # not a skip, so nothing lower-precedence ever ships while
+        # something higher-precedence was dropped.
+        oversized = "D" * (MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP * MEMORY_TRIGGER_CHARS_PER_TOKEN * 2)
+        huge_directive = _note(note_id=1, kind="directive")
+        small_finding = _note(note_id=2, kind="finding")
+        packed = pack_injection([
+            (small_finding, "full finding text", "idx finding"),
+            (huge_directive, oversized, oversized),
+        ])
+        assert packed == []

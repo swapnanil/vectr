@@ -560,7 +560,11 @@ def pack_injection(
     injects whole (subject to its own per-injection cap, else it drops to its
     index-tier line), or is evicted entirely if even the index-tier line
     does not fit. Eviction is always from the BOTTOM of the shared total
-    order — the lowest-precedence notes are the ones dropped first.
+    order — the lowest-precedence notes are the ones dropped first. The
+    moment any item is evicted for not fitting even at the index tier,
+    packing STOPS entirely: nothing lower-precedence is ever allowed to
+    ship while something higher-precedence was dropped, even if it would
+    have fit in the leftover budget.
 
     Passing the session ledger's `remaining_budget()` here is what makes the
     per-session cap CUMULATIVE across every `fire_triggers`/`fire_and_format`
@@ -580,7 +584,7 @@ def pack_injection(
             if tier == "full":
                 text, tier, tokens = index_text, "index", token_estimate(index_text)
             if tokens > budget:
-                continue  # evicted — does not fit even at index tier
+                break  # evicted — stop packing so nothing lower-precedence backfills
 
         packed.append(PackedItem(note_id=note.note_id, text=text, tier=tier))
         budget -= tokens
