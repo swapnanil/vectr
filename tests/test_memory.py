@@ -1596,6 +1596,74 @@ class TestRememberTriggerEngineParams:
         assert old.superseded_by_note_id is None  # untouched by the explicit-supersedes path
 
 
+class _FakeSymbolResolver:
+    """Minimal duck-typed stand-in for SymbolGraph — only the two methods
+    attach_symbol_resolver()/remember()/fire() actually call (TRIGGER-ENGINE
+    wave 2b). Real end-to-end coverage against the genuine SymbolGraph lives
+    in TestSymbolTriggerIndexLiveGraph below."""
+
+    def __init__(self, hashes: dict | None = None, touching: frozenset | None = None) -> None:
+        self._hashes = hashes or {}
+        self._touching = touching if touching is not None else frozenset()
+
+    def signature_hash(self, workspace, name):
+        return self._hashes.get(name)
+
+    def symbols_touching_file(self, workspace, file_path):
+        return self._touching
+
+
+class TestSymbolTriggersWriteTimeIndex:
+    def _symtrig_rows(self, tmp_path, note_id):
+        import sqlite3
+        with sqlite3.connect(str(tmp_path / "working_context.sqlite")) as conn:
+            return conn.execute(
+                "SELECT symbol_name, signature_hash FROM symbol_triggers WHERE note_id = ?",
+                (note_id,),
+            ).fetchall()
+
+    def test_no_resolver_attached_stores_null_signature_hash(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "WorkspaceLock"}])
+        assert self._symtrig_rows(tmp_path, note_id) == [("WorkspaceLock", None)]
+
+    def test_attached_resolver_stores_signature_hash_at_write_time(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(hashes={"WorkspaceLock": "abc123"}))
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "WorkspaceLock"}])
+        assert self._symtrig_rows(tmp_path, note_id) == [("WorkspaceLock", "abc123")]
+
+    def test_trigger_without_symbol_key_gets_no_index_row(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", triggers=[{"path": "src/api/**"}])
+        assert self._symtrig_rows(tmp_path, note_id) == []
+
+    def test_attach_symbol_resolver_is_idempotent(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.attach_symbol_resolver(_FakeSymbolResolver(hashes={"X": "first"}))
+        store.attach_symbol_resolver(_FakeSymbolResolver(hashes={"X": "second"}))
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "X"}])
+        assert self._symtrig_rows(tmp_path, note_id) == [("X", "first")]
+
+    def test_forget_removes_symbol_trigger_index_rows(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "X"}])
+        store.forget(ws, note_id)
+        assert self._symtrig_rows(tmp_path, note_id) == []
+
+    def test_forget_all_clears_symbol_trigger_index(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "X"}])
+        store.forget_all(ws)
+        assert self._symtrig_rows(tmp_path, note_id) == []
+
+    def test_forget_all_workspaces_clears_symbol_trigger_index(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "note", triggers=[{"symbol": "X"}])
+        store.forget_all_workspaces()
+        assert self._symtrig_rows(tmp_path, note_id) == []
+
+
 class TestPromote:
     def test_promote_auto_to_agent(self, tmp_path) -> None:
         store, ws = _store(tmp_path), str(tmp_path)

@@ -3,6 +3,7 @@ SQLite-backed SymbolGraph: locate, trace, format, and persistence.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
@@ -1619,6 +1620,46 @@ class SymbolGraph:
         except OSError as exc:
             logger.warning("get_snippet: could not read %s — %s", file_path, exc)
             return ""
+
+    def symbols_touching_file(self, workspace: str, file_path: str) -> frozenset[str]:
+        """Every symbol name DEFINED IN or REFERENCED BY `file_path` — the
+        one-graph-lookup-per-target-file resolution the S (symbol) trigger
+        primitive needs (TRIGGER-ENGINE wave 2b, bm2-design-skeleton.md §2).
+        Called ONCE per lifecycle moment by the caller (`WorkingContextStore
+        .fire()`); every individual note's symbol trigger is then a plain
+        set-membership check against this result — never a separate graph
+        query per note."""
+        with self._conn() as conn:
+            defined = conn.execute(
+                "SELECT DISTINCT name FROM symbols WHERE workspace = ? AND file_path = ?",
+                (workspace, file_path),
+            ).fetchall()
+            referenced = conn.execute(
+                "SELECT DISTINCT to_symbol FROM edges WHERE workspace = ? AND from_file = ?",
+                (workspace, file_path),
+            ).fetchall()
+        return frozenset(r[0] for r in defined) | frozenset(r[0] for r in referenced)
+
+    def signature_hash(self, workspace: str, name: str) -> str | None:
+        """sha256[:16] of `name`'s canonical definition snippet — the
+        write-time anchor a symbol-triggered note records (TRIGGER-ENGINE
+        wave 2b §5, bm2-design-skeleton.md), mirroring `_hash_path_content()`
+        's content-hash path anchor in WorkingContextStore. Uses the SAME
+        "pick ONE definition" `_exact_definitions()` ordering `locate`/
+        `trace` already use, so the hash is stable across repeated calls
+        against an unchanged codebase. Returns None when `name` has no
+        resolvable definition (or its snippet reads back empty) — a note
+        recording a hash of None never raises a staleness caveat later
+        (nothing to compare against); only a genuine content change that WAS
+        captured at write time does."""
+        definitions = self._exact_definitions(workspace, name, limit=1)
+        if not definitions:
+            return None
+        d = definitions[0]
+        snippet = self.get_snippet(d.file_path, d.start_line, d.end_line)
+        if not snippet:
+            return None
+        return hashlib.sha256(snippet.encode("utf-8")).hexdigest()[:16]
 
     # ------------------------------------------------------------------
     # Formatting for LLM

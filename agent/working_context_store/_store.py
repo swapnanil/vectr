@@ -282,13 +282,22 @@ class WorkingContextStore:
         self._embed_query_fn = embed_query_fn or embed_fn  # query-mode embed, defaults to embed_fn
         self._embed_model = embed_model  # current model name, for the embed-model stamp/migration
         self._notes_col = None
+        # TRIGGER-ENGINE wave 2b — the S (symbol) primitive's resolver. None
+        # until attach_symbol_resolver() runs (phase-2 service init, once the
+        # code symbol graph is built); a memory-only daemon or a warm-up
+        # window before then simply never has one, and symbol triggers
+        # deterministically never fire — see attach_symbol_resolver()'s
+        # docstring, the same "attach after construction" shape as the
+        # embedder below.
+        self._symbol_resolver = None
         # Guards attach_embedder() (UPG-STDIO-MEMORY-READY): the store can be
         # constructed with embed_fn=None (memory tools live before the
         # embedding model has loaded) and upgraded to a real embedder later,
         # from a background thread, once phase-2 service init completes. The
         # lock makes that upgrade idempotent and keeps a concurrent
         # remember()/recall() from ever observing self._notes_col set while
-        # self._embed_fn is still the old value (or vice versa).
+        # self._embed_fn is still the old value (or vice versa). Also guards
+        # attach_symbol_resolver() (same idempotent-upgrade shape).
         self._attach_lock = threading.Lock()
         if embed_fn is not None and notes_chroma_client is not None and not self._vectors_disabled():
             try:
@@ -403,6 +412,35 @@ class WorkingContextStore:
                 exc_info=True,
             )
 
+    def attach_symbol_resolver(self, symbol_graph) -> None:
+        """Upgrade the store to the S (symbol) trigger primitive, once the
+        code symbol graph is built (TRIGGER-ENGINE wave 2b,
+        bm2-design-skeleton.md §2) — the same "attach after construction"
+        shape as `attach_embedder()` above, since `SymbolGraph` is built in
+        `VectrService`'s phase-2 search-layer init, after this store already
+        exists and is already serving remember/recall.
+
+        `symbol_graph` is duck-typed to `SymbolGraph`'s own
+        `symbols_touching_file(workspace, file_path)` / `signature_hash
+        (workspace, name)` methods — this store never imports SymbolGraph
+        itself, keeping the dependency direction the caller's choice (same
+        reasoning as accepting a bare `embed_fn` callable rather than an
+        indexer instance).
+
+        Idempotent: a second call is a no-op once a resolver is already
+        attached. Thread-safe: shares `_attach_lock` with `attach_embedder()`
+        since both are one-shot upgrades performed once from the same
+        phase-2 init path.
+
+        Before this is called (memory-only daemon, or the warm-up window
+        before phase-2 completes), `self._symbol_resolver` stays None — every
+        S trigger deterministically does not fire (see `fire()`), never an
+        error."""
+        with self._attach_lock:
+            if self._symbol_resolver is not None or symbol_graph is None:
+                return
+            self._symbol_resolver = symbol_graph
+
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path), timeout=_SQLITE_BUSY_TIMEOUT_S)
         conn.row_factory = sqlite3.Row
@@ -458,6 +496,27 @@ class WorkingContextStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_snap_workspace ON snapshots(workspace);
+
+                -- TRIGGER-ENGINE wave 2b (bm2-design-skeleton.md §2/§5) — the
+                -- S (symbol) primitive's write-time index: one row per
+                -- (note, trigger-with-a-'symbol'-key). Lets fire() skip the
+                -- symbol-graph lookup entirely when a workspace has no
+                -- symbol-triggered notes at all, and stores the signature
+                -- hash captured at write time for staleness re-checking
+                -- (check_staleness()) — mirroring path anchors' content hash,
+                -- generalised to code symbols instead of file paths.
+                CREATE TABLE IF NOT EXISTS symbol_triggers (
+                    workspace       TEXT NOT NULL,
+                    note_id         INTEGER NOT NULL,
+                    trigger_index   INTEGER NOT NULL,
+                    symbol_name     TEXT NOT NULL,
+                    signature_hash  TEXT,
+                    PRIMARY KEY (workspace, note_id, trigger_index)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_symtrig_workspace ON symbol_triggers(workspace);
+                CREATE INDEX IF NOT EXISTS idx_symtrig_name ON symbol_triggers(workspace, symbol_name);
+                CREATE INDEX IF NOT EXISTS idx_symtrig_note ON symbol_triggers(workspace, note_id);
             """)
             # P4: migrate existing databases that predate P4 columns
             existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)").fetchall()}
@@ -663,6 +722,32 @@ class WorkingContextStore:
                  triggers_json, provenance, scope, anchors_json, supersedes, branch_value),
             )
             note_id = cur.lastrowid
+
+            # TRIGGER-ENGINE wave 2b (bm2-design-skeleton.md §2/§5) — write-
+            # time symbol->note index + signature-hash anchor for every
+            # explicit trigger declaring a 'symbol' key (validate_triggers()
+            # above already confirmed each is a non-empty string). fire()
+            # uses this table to skip the symbol-graph lookup entirely when a
+            # workspace has no symbol-triggered notes at all; check_staleness
+            # ()re-hashes against it to raise a visible (never silent)
+            # staleness caveat, mirroring path anchors' content hash. A null
+            # hash (resolver not attached yet — memory-only daemon or warm-up
+            # window) is never a staleness caveat later, since there is
+            # nothing recorded to compare against.
+            for trig_idx, trig in enumerate(triggers_list):
+                symbol_name = trig.get("symbol")
+                if not symbol_name:
+                    continue
+                sig_hash = (
+                    self._symbol_resolver.signature_hash(workspace, symbol_name)
+                    if self._symbol_resolver is not None else None
+                )
+                conn.execute(
+                    """INSERT INTO symbol_triggers
+                       (workspace, note_id, trigger_index, symbol_name, signature_hash)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (workspace, note_id, trig_idx, symbol_name, sig_hash),
+                )
 
             # Explicit tombstone (TRIGGER-ENGINE §1): the superseded note is
             # excluded from recall() by default (valid_until IS NULL filter,
@@ -1322,6 +1407,14 @@ class WorkingContextStore:
                 "DELETE FROM notes WHERE workspace = ? AND note_id = ?",
                 (workspace, note_id),
             ).rowcount
+            # TRIGGER-ENGINE wave 2b: a deleted note's symbol-trigger index
+            # rows must go with it, or fire()'s "does this workspace have any
+            # symbol-triggered notes" existence check would keep resolving
+            # the symbol graph for a note that no longer exists.
+            conn.execute(
+                "DELETE FROM symbol_triggers WHERE workspace = ? AND note_id = ?",
+                (workspace, note_id),
+            )
         if count > 0 and self._notes_col is not None:
             try:
                 self._notes_col.delete(ids=[str(note_id)])
@@ -1349,6 +1442,7 @@ class WorkingContextStore:
                 "DELETE FROM notes WHERE workspace = ?", (workspace,)
             ).rowcount
             conn.execute("DELETE FROM snapshots WHERE workspace = ?", (workspace,))
+            conn.execute("DELETE FROM symbol_triggers WHERE workspace = ?", (workspace,))
         if deleted > 0 and self._notes_col is not None:
             try:
                 existing_ids = self._notes_col.get(include=[])["ids"]
@@ -1370,6 +1464,7 @@ class WorkingContextStore:
         with self._conn() as conn:
             deleted = conn.execute("DELETE FROM notes").rowcount
             conn.execute("DELETE FROM snapshots")
+            conn.execute("DELETE FROM symbol_triggers")
         if self._notes_col is not None:
             try:
                 existing_ids = self._notes_col.get(include=[])["ids"]
