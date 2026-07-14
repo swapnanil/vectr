@@ -19,6 +19,7 @@ from agent.config import (
     CLI_START_READY_POLL_TIMEOUT_S,
     CLI_START_READY_PROBE_TIMEOUT_S,
     CLI_VERSION_SKEW_PROBE_TIMEOUT_S,
+    HOOKS_MIN_SIMILARITY,
 )
 from agent.instance_registry import (
     InstanceRegistry,
@@ -38,8 +39,10 @@ _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 # Per-turn recall hook tuning (UPG-9.5). Small N + a relevance floor keep the
 # UserPromptSubmit injection tight: only notes genuinely related to the prompt,
 # nothing on an off-topic turn. Override via env without re-running init.
+# The relevance floor itself is config-driven (agent/config.yaml
+# hooks.min_similarity) rather than a hardcoded constant here — see that
+# key's comment for the measured rationale.
 _HOOK_RECALL_LIMIT = 3
-_HOOK_MIN_SIMILARITY = 0.35
 
 # UPG-11.5 — hook-injected notes announce themselves so the model doesn't also
 # self-call vectr_recall for the same purpose. Without this, SessionStart/
@@ -1673,7 +1676,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
             if not prompt:
                 return
             limit = int(os.getenv("VECTR_HOOK_RECALL_LIMIT", str(_HOOK_RECALL_LIMIT)))
-            min_sim = float(os.getenv("VECTR_HOOK_MIN_SIMILARITY", str(_HOOK_MIN_SIMILARITY)))
+            min_sim = float(os.getenv("VECTR_HOOK_MIN_SIMILARITY", str(HOOKS_MIN_SIMILARITY)))
             payload = {
                 "query": prompt, "limit": limit, "min_similarity": min_sim, "detail": "index",
                 "hook_event": "UserPromptSubmit", "events": ["prompt-submit"],

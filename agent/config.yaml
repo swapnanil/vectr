@@ -1120,6 +1120,16 @@ hooks:
   # rough sizing signal for the log, not a billing-accurate count.
   log_chars_per_token: 4
 
+  # Per-turn UserPromptSubmit recall relevance floor (UPG-9.5) — a candidate
+  # note's cosine similarity to the current prompt must clear this before
+  # the hook injects it at all. Raised from 0.35 to 0.72 (adversarial-review
+  # measurement, 2026-07-15): at 0.35 the hook injected 3 irrelevant notes
+  # on 8/8 deliberately off-topic prompts in the same adversarial set (about
+  # 140 wasted tokens every turn); the M trigger primitive's own per-kind
+  # thetas (memory_triggers.semantic.theta_by_kind, 0.72-0.80) had 0/8 false
+  # fires on the identical prompts. 0.72 matches the lowest of those thetas.
+  min_similarity: 0.72
+
 embedding:
   # Default local (sentence-transformers) embedding model for the L3 content
   # index (UPG-EMBEDDER-SWAP-GRANITE). Dimension-compatible drop-in for the
