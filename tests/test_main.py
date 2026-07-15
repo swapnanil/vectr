@@ -2977,6 +2977,32 @@ class TestExcludeFlag:
         content = (tmp_path / ".vectrignore").read_text(encoding="utf-8")
         assert "unclosed" not in content
 
+
+# ---------------------------------------------------------------------------
+# --style on `init` (UPG-TOOLSTYLE-LABEL-COLLISION)
+# ---------------------------------------------------------------------------
+
+class TestStyleFlag:
+    """The CLAUDE.md authoring-style label is "memory-first", not
+    "memory-only" (renamed so it never collides visually with the
+    unrelated memory_only *operating mode*). "memory-only" is still
+    accepted as CLI input for backward compatibility, but only the
+    current label is ever persisted to .vectr/style."""
+
+    def test_init_writes_current_label_verbatim(self, tmp_path):
+        with patch("main.InstanceRegistry") as MockReg:
+            MockReg.return_value.get.return_value = None
+            m.cmd_init(_make_args(path=str(tmp_path), style="memory-first"))
+        content = (tmp_path / ".vectr" / "style").read_text(encoding="utf-8")
+        assert content == "memory-first"
+
+    def test_init_normalizes_legacy_style_value_before_writing(self, tmp_path):
+        with patch("main.InstanceRegistry") as MockReg:
+            MockReg.return_value.get.return_value = None
+            m.cmd_init(_make_args(path=str(tmp_path), style="memory-only"))
+        content = (tmp_path / ".vectr" / "style").read_text(encoding="utf-8")
+        assert content == "memory-first"
+
     def test_start_writes_regex_entry(self, tmp_path):
         ws = str(tmp_path)
         reg = InstanceRegistry(registry_path=tmp_path / "instances.json")

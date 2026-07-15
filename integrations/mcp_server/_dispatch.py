@@ -412,10 +412,15 @@ def handle_tools_call(
         # inject adaptive instruction style hint at session start
         try:
             style = service.suggest_instruction_style()
+            # UPG-TOOLSTYLE-LABEL-COLLISION: this is a CLAUDE.md authoring-style
+            # label, unrelated to the "Mode" line above (full/memory-only/
+            # search-only, from service.status()) — "memory-first" (not
+            # "memory-only") so the two never render side by side looking
+            # contradictory, e.g. "Mode: full" next to "Tool style: [memory-only]".
             style_hints = {
-                "additive":    "Use vectr tools when they'd be faster than reading files — see CLAUDE.md.",
-                "directed":    "This is a large/unfamiliar codebase. Use vectr_map → vectr_search → vectr_locate before reading files.",
-                "memory-only": "Prior notes exist. Call vectr_recall(query=...) first; use search only to fill gaps.",
+                "additive":     "Use vectr tools when they'd be faster than reading files — see CLAUDE.md.",
+                "directed":     "This is a large/unfamiliar codebase. Use vectr_map → vectr_search → vectr_locate before reading files.",
+                "memory-first": "Prior notes exist. Call vectr_recall(query=...) first; use search only to fill gaps.",
             }
             hint = style_hints.get(style, "")
             if hint:

@@ -2166,8 +2166,14 @@ def cmd_init(args: argparse.Namespace) -> None:
     # write style override if --style is specified
     if getattr(args, "style", None):
         style = args.style
-        if style not in ("additive", "directed", "memory-only"):
-            print(f"Error: --style must be one of: additive, directed, memory-only", file=sys.stderr)
+        # UPG-TOOLSTYLE-LABEL-COLLISION: "memory-only" is accepted here for
+        # backward compatibility (argparse choices above) but always
+        # normalized to "memory-first" before being persisted — only the
+        # current label is ever written to .vectr/style.
+        if style == "memory-only":
+            style = "memory-first"
+        if style not in ("additive", "directed", "memory-first"):
+            print(f"Error: --style must be one of: additive, directed, memory-first", file=sys.stderr)
             sys.exit(1)
         style_dir = Path(workspace) / ".vectr"
         style_dir.mkdir(parents=True, exist_ok=True)
@@ -2549,7 +2555,12 @@ def main() -> None:
     )
     p_init.add_argument(
         "--style",
-        choices=["additive", "directed", "memory-only"],
+        # "memory-only" accepted for backward compatibility with pre-rename
+        # scripts/muscle memory (UPG-TOOLSTYLE-LABEL-COLLISION renamed this
+        # style label to "memory-first" so it never looks identical to the
+        # unrelated memory_only *operating mode*); always normalized before
+        # being written to .vectr/style — see cmd_init.
+        choices=["additive", "directed", "memory-first", "memory-only"],
         default=None,
         help="Override adaptive instruction style (T14). Stored in .vectr/style.",
     )

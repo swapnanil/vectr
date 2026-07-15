@@ -714,6 +714,27 @@ class TestVectrStatus:
         assert "vectr_recall" not in text.replace("skip vectr_recall", "").replace("no prior", ""), \
             "when notes_count == 0, must not prompt agent to call recall"
 
+    def test_tool_style_hint_shown_for_memory_first(self) -> None:
+        svc = _mock_service()
+        svc.suggest_instruction_style.return_value = "memory-first"
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "Tool style" in text
+        assert "[memory-first]" in text
+
+    def test_tool_style_label_never_collides_with_mode_label(self) -> None:
+        """UPG-TOOLSTYLE-LABEL-COLLISION: the CLAUDE.md authoring-style hint
+        ("Tool style") and the operating-mode line ("Mode") render in the
+        same vectr_status block — they must never share a literal value, or
+        "Mode: full" next to "Tool style: [memory-only]" reads as a
+        self-contradictory status (search enabled, yet "memory-only")."""
+        svc = _mock_service()
+        svc.status.return_value = {**svc.status.return_value, "mode": "full"}
+        svc.suggest_instruction_style.return_value = "memory-first"
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "Mode           : full" in text
+        assert "[memory-first]" in text
+        assert "memory-only" not in text
+
 
 # ---------------------------------------------------------------------------
 # vectr_map / vectr_map_save
