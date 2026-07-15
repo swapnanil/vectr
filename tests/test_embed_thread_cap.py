@@ -111,8 +111,15 @@ class TestOtherProvidersNoThreadCap:
     def test_openai_provider_construction_does_not_touch_torch(self):
         from agent.indexer._types import OpenAIEmbedProvider
 
+        # openai is an optional dependency, same as voyageai above — inject a
+        # stand-in module exposing the one attribute OpenAIEmbedProvider.
+        # __init__ touches (OpenAI), so this test never needs the real
+        # package installed.
+        fake_openai = types.ModuleType("openai")
+        fake_openai.OpenAI = MagicMock()
+
         with patch("torch.set_num_threads") as mock_set_threads, \
-             patch("openai.OpenAI"):
+             patch.dict(sys.modules, {"openai": fake_openai}):
             OpenAIEmbedProvider("text-embedding-3-small")
 
         mock_set_threads.assert_not_called()
