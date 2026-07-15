@@ -604,8 +604,26 @@ def handle_tools_call(
         _reset_calls_since_save(session_id)
         service.note_remembered(session_id=session_id)
         enable_memory_for_session(session_id)
+        # UPG-SCOPE-SURFACE-BACK: an omitted scope is resolved from `kind`'s
+        # default at write time (UPG-TRIGGER-SCOPE-KIND-DEFAULTS), but that
+        # resolution was write-only — the caller had no way to learn where
+        # the note actually landed without a separate vectr_recall(detail=
+        # "full") round trip. One cheap primary-key getter (the same one the
+        # vectr_recall expand path already uses) surfaces it in this same
+        # confirmation instead. Best-effort: a lookup failure just omits the
+        # scope suffix rather than failing the whole write confirmation.
+        scope_suffix = ""
+        try:
+            stored_note = service.get_note(note_id)
+        except Exception:
+            stored_note = None
+        if stored_note is not None:
+            if stored_note.scope == "branch" and stored_note.branch:
+                scope_suffix = f" (scope=branch ({stored_note.branch}))"
+            else:
+                scope_suffix = f" (scope={stored_note.scope})"
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}. Recall with vectr_recall — <50ms, verbatim, any time."}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time."}],
             "isError": False,
         }
 

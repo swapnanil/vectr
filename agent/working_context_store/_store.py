@@ -217,6 +217,19 @@ def _format_index_line(
     )
 
 
+def _scope_label(note: WorkingNote) -> str:
+    """Human-readable scope label for the 'full' detail render
+    (UPG-SCOPE-SURFACE-BACK): the bare scope value, or 'branch (<name>)' when
+    scope=='branch' and a branch was actually captured at write time. Lets a
+    caller diagnose why a scoped note does or doesn't fire (e.g. a note
+    scoped to a stale "branch (old-feature)" no longer matches the current
+    branch) without a separate lookup — a resolved scope was previously
+    write-only, visible nowhere after remember() returned the note id."""
+    if note.scope == "branch" and note.branch:
+        return f"branch ({note.branch})"
+    return note.scope
+
+
 def _format_full_block(note: WorkingNote, stale_warnings: dict[int, list[str]]) -> str:
     """One note's multi-line 'full' detail block (age, tags, author,
     kind/provenance markers, provenance-framed content, staleness warnings)
@@ -254,9 +267,13 @@ def _format_full_block(note: WorkingNote, stale_warnings: dict[int, list[str]]) 
     # trust posture depends on it regardless of whether provenance is the
     # default ("agent").
     provenance_marker = f" [{n.provenance}]"
+    # UPG-SCOPE-SURFACE-BACK: surface the RESOLVED scope (and, for
+    # scope=="branch", the captured branch) on every full-tier block —
+    # additive only, index-tier lines are untouched (token-budgeted).
+    scope_marker = f" [scope={_scope_label(n)}]"
 
     lines = [
-        f"[{n.note_id}] [{n.priority.upper()}]{kind_marker}{provenance_marker}{tag_str}{author_str}  ({age_str})"
+        f"[{n.note_id}] [{n.priority.upper()}]{kind_marker}{provenance_marker}{scope_marker}{tag_str}{author_str}  ({age_str})"
         f"{stale_marker}{superseded_marker}",
         # Provenance framing (§5): only a human-provenance directive ever
         # renders as an unhedged imperative; agent-provenance is framed as
