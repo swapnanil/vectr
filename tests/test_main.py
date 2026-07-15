@@ -1790,20 +1790,29 @@ class TestCmdHookUserPromptSubmit:
         _, mock_fetch = self._run('{"cwd": "/p", "prompt": "lock flow"}', "x", monkeypatch, capsys)
         payload = mock_fetch.call_args[0][1]
         assert payload["query"] == "lock flow"
-        assert "min_similarity" in payload      # relevance cutoff applied (UPG-5.1)
         assert payload["limit"] == m._HOOK_RECALL_LIMIT
 
-    def test_min_similarity_is_config_driven_not_hardcoded_low(self, monkeypatch, capsys):
-        """The per-turn recall floor is agent/config.yaml's hooks.min_similarity,
-        not a low hardcoded constant. Raised from 0.35 to 0.72 (adversarial
-        review, 2026-07-15): at 0.35 the hook injected 3 irrelevant notes on
-        8/8 deliberately off-topic prompts; 0.72 (matching the M primitive's
-        own lowest per-kind theta) had 0/8 false fires on the same prompts."""
-        from agent.config import HOOKS_MIN_SIMILARITY
+    def test_min_similarity_omitted_by_default_daemon_applies_config_floor(self, monkeypatch, capsys):
+        """UPG-HOOK-SUBPROCESS-IMPORT-TAX: the relevance cutoff (UPG-5.1) is
+        no longer sent explicitly by the CLI — VectrService.recall applies
+        agent/config.yaml's hooks.min_similarity server-side whenever
+        hook_event is set and min_similarity is omitted, so this hot path
+        never needs to import agent.config just to read one float. The
+        cutoff's actual value (raised 0.35 -> 0.72, adversarial review
+        2026-07-15) is covered where it's now applied:
+        tests/test_hook_injection_observability.py::
+        TestHookRecallMinSimilarityServerDefault."""
         _, mock_fetch = self._run('{"cwd": "/p", "prompt": "lock flow"}', "x", monkeypatch, capsys)
         payload = mock_fetch.call_args[0][1]
-        assert payload["min_similarity"] == HOOKS_MIN_SIMILARITY
-        assert HOOKS_MIN_SIMILARITY == pytest.approx(0.72)
+        assert "min_similarity" not in payload
+
+    def test_min_similarity_env_override_still_sent_explicitly(self, monkeypatch, capsys):
+        """VECTR_HOOK_MIN_SIMILARITY still threads an explicit override onto
+        the wire — only the *default* moved server-side, not the override."""
+        monkeypatch.setenv("VECTR_HOOK_MIN_SIMILARITY", "0.5")
+        _, mock_fetch = self._run('{"cwd": "/p", "prompt": "lock flow"}', "x", monkeypatch, capsys)
+        payload = mock_fetch.call_args[0][1]
+        assert payload["min_similarity"] == 0.5
 
     def test_empty_prompt_injects_nothing(self, monkeypatch, capsys):
         out, mock_fetch = self._run('{"cwd": "/p", "prompt": "   "}', "x", monkeypatch, capsys)

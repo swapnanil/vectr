@@ -20,6 +20,7 @@ from agent.config import (
     EVICTION_MAX_TRACKED_SESSIONS,
     HOOKS_LOG_INJECTIONS,
     HOOKS_LOG_CHARS_PER_TOKEN,
+    HOOKS_MIN_SIMILARITY,
     MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
 )
 from agent.eviction_advisor import EvictionAdvisor
@@ -1342,6 +1343,18 @@ class VectrService:
         one injection under that hook kind (see `status()`). None (the
         default — direct vectr_recall/`vectr recall` calls) records nothing.
 
+        `min_similarity` defaults to `HOOKS_MIN_SIMILARITY`
+        (agent/config.yaml `hooks.min_similarity`) whenever `hook_event` is
+        set and the caller omitted an explicit value (UPG-HOOK-SUBPROCESS-
+        IMPORT-TAX). The per-turn relevance floor lives in exactly one place
+        — here, where `agent.config` is already loaded once at daemon
+        startup — rather than being re-derived by the short-lived `vectr
+        hook` subprocess on every single turn, which would force it to pay
+        `agent.config`'s full import cost on its own hot path for a value it
+        can otherwise ask the daemon to apply by default. A direct
+        vectr_recall/`vectr recall` call (hook_event=None) is unaffected:
+        `min_similarity=None` there still means "no floor," as before.
+
         `session_id`/`events` (TRIGGER-ENGINE wave 2a, bm2-design-skeleton.md
         §3): the calling session's identity and the lifecycle event(s) this
         recall is standing in for. Threaded into the `boot`/`file_path`
@@ -1353,6 +1366,8 @@ class VectrService:
         reproduces today's ledger-less, budget-less, scope-unenforced
         behaviour exactly for any caller that predates this wave.
         """
+        if hook_event is not None and min_similarity is None:
+            min_similarity = HOOKS_MIN_SIMILARITY
         notes = self._recall_impl(
             query=query, tags=tags, priority=priority, limit=limit, kind=kind,
             boot=boot, min_similarity=min_similarity, file_path=file_path,
