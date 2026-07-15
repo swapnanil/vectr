@@ -291,7 +291,11 @@ _MEMORY_WRITE_TOOLS = [
                         "Memory kind, controlling how the note is injected (default 'finding'): "
                         "'directive' = a must-never-miss rule, injected unconditionally every session; "
                         "'task' = current-work context; 'gotcha' = a file/path-anchored caveat; "
-                        "'finding' = a relevance-ranked learning; 'reference' = a pointer (URL/ticket)."
+                        "'finding' = a relevance-ranked learning; 'reference' = a pointer (URL/ticket). "
+                        "When a new kind='task' note replaces an earlier checkpoint (the work moved on, "
+                        "the old note is no longer the current state), pass supersedes=<old note_id> so "
+                        "the stale checkpoint stops firing at every future session-start instead of "
+                        "piling up alongside the new one."
                     ),
                     "default": "finding",
                     "enum": ["directive", "task", "gotcha", "finding", "reference"],
@@ -356,16 +360,19 @@ _MEMORY_WRITE_TOOLS = [
                 "scope": {
                     "type": "string",
                     "description": (
-                        "Visibility scope, enforced at recall/trigger time (default 'workspace' "
-                        "— visible everywhere in this workspace): 'branch' restricts firing to "
-                        "the git branch this note was written on (useful for kind='task' — open "
-                        "work that only matters on the branch it describes); 'path-subtree' "
-                        "restricts firing to paths under an anchored directory; 'session' "
-                        "restricts it to the writing session only; 'repo' behaves like "
-                        "'workspace' (cross-worktree sharing is not yet a distinct store "
+                        "Visibility scope, enforced at recall/trigger time. Omit this to get "
+                        "the kind's own default: kind='task' defaults to 'branch' (a git branch "
+                        "was actually captured at write time; on a non-git workspace or "
+                        "detached HEAD it falls back to 'workspace' instead of silently never "
+                        "firing again), kind='gotcha' defaults to 'repo', every other kind "
+                        "defaults to 'workspace'. Pass a value explicitly to override the "
+                        "kind default, including passing 'workspace' explicitly: 'branch' "
+                        "restricts firing to the git branch this note was written on; "
+                        "'path-subtree' restricts firing to paths under an anchored directory; "
+                        "'session' restricts it to the writing session only; 'repo' behaves like "
+                        "'workspace' today (cross-worktree sharing is not yet a distinct store "
                         "boundary)."
                     ),
-                    "default": "workspace",
                     "enum": ["workspace", "repo", "path-subtree", "branch", "session"],
                 },
                 "anchors": {
@@ -383,7 +390,10 @@ _MEMORY_WRITE_TOOLS = [
                         "Optional: the note_id this new note replaces. The old note is retired "
                         "(excluded from recall and from ever firing again) but kept for audit — "
                         "use this instead of vectr_forget when you want the old note's history "
-                        "preserved."
+                        "preserved. Especially important for kind='task' checkpoints: a stale "
+                        "task note keeps firing at every session-start forever until it is "
+                        "explicitly superseded or forgotten, so pass the old note's id here "
+                        "whenever a new task note is really just an update to it."
                     ),
                 },
             },

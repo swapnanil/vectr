@@ -56,6 +56,28 @@ EVENT_VALUES: tuple[str, ...] = (
 SCOPE_VALUES: tuple[str, ...] = ("workspace", "repo", "path-subtree", "branch", "session")
 DEFAULT_SCOPE = "workspace"
 
+# KIND_DEFAULT_SCOPES (UPG-TRIGGER-SCOPE-KIND-DEFAULTS, bm2-design-skeleton.md
+# §1's Default bundles table): the scope a note gets WHEN ITS WRITE OMITS
+# `scope` entirely (None) -- an explicitly passed scope (including explicit
+# "workspace") always wins verbatim and never consults this table. Resolved
+# and BAKED INTO THE ROW at write time by `WorkingContextStore.remember()`
+# (unlike `default_bundle_for_kind()` in trigger_engine.py, which is
+# deliberately evaluation-time so trigger-bundle changes apply
+# retroactively -- scope is different: a note's scope is part of its
+# identity/visibility contract, not a re-computable ranking input, so
+# retroactivity is deliberately avoided here; a note written before this
+# table existed keeps whatever scope it was actually written with). Only the
+# two kinds the design skeleton's table assigns a non-default scope appear
+# here; every other kind (including any future kind) keeps DEFAULT_SCOPE.
+# Same rationale as VALID_KINDS/SCOPE_VALUES just above for living beside
+# them as a plain constant rather than in config.yaml: this is a closed
+# protocol mapping from the design doc, not an operator-tunable weight --
+# there is nothing here for an operator to retune.
+KIND_DEFAULT_SCOPES: dict[str, str] = {
+    "task": "branch",
+    "gotcha": "repo",
+}
+
 # PROVENANCE_VALUES: trust/endorsement class (bm2-design-skeleton.md §5).
 # "human" = a person recorded or endorsed this; only imperative directive
 # framing is ever allowed for it. "agent" (default for vectr_remember) = an AI

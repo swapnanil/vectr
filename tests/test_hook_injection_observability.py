@@ -166,6 +166,51 @@ class TestHookInjectionLogGating:
 
 
 # ---------------------------------------------------------------------------
+# (d) Server-side min_similarity default for hook-declared recalls
+#     (UPG-HOOK-SUBPROCESS-IMPORT-TAX)
+# ---------------------------------------------------------------------------
+
+class TestHookRecallMinSimilarityServerDefault:
+    """`vectr hook user-prompt-submit` used to send an explicit
+    `min_similarity=HOOKS_MIN_SIMILARITY` on every request, which meant the
+    hook subprocess had to import `agent.config` on its hottest path just to
+    read one float. `VectrService.recall` now applies that same floor itself
+    whenever `hook_event` is set and the caller omitted `min_similarity` —
+    the CLI can omit the field entirely and the daemon (which already pays
+    `agent.config`'s import cost once, at startup) fills in the canonical
+    default. This is the regression coverage for the value itself (raised
+    0.35 -> 0.72, adversarial review 2026-07-15) now that it is asserted
+    here rather than in the CLI's outbound payload (tests/test_main.py's
+    TestCmdHookUserPromptSubmit covers the CLI omitting the field)."""
+
+    def test_hook_event_with_omitted_min_similarity_uses_config_floor(self, tmp_path, monkeypatch):
+        svc = _make_service(tmp_path, monkeypatch)
+        with patch.object(svc, "_recall_impl", wraps=svc._recall_impl) as mock_impl:
+            svc.recall(query="lock flow", hook_event="UserPromptSubmit")
+        import agent.config as cfg
+        assert mock_impl.call_args.kwargs["min_similarity"] == cfg.HOOKS_MIN_SIMILARITY
+        assert cfg.HOOKS_MIN_SIMILARITY == pytest.approx(0.72)
+
+    def test_hook_event_with_explicit_min_similarity_is_not_overridden(self, tmp_path, monkeypatch):
+        """An explicit override (VECTR_HOOK_MIN_SIMILARITY env var, threaded
+        through by the CLI) still wins — the server only fills the gap, it
+        never clobbers a caller-supplied value."""
+        svc = _make_service(tmp_path, monkeypatch)
+        with patch.object(svc, "_recall_impl", wraps=svc._recall_impl) as mock_impl:
+            svc.recall(query="lock flow", hook_event="UserPromptSubmit", min_similarity=0.1)
+        assert mock_impl.call_args.kwargs["min_similarity"] == 0.1
+
+    def test_direct_recall_without_hook_event_still_means_no_floor(self, tmp_path, monkeypatch):
+        """A direct vectr_recall/`vectr recall` call (hook_event=None) is
+        unaffected — omitted min_similarity still means "no floor," exactly
+        as before this change."""
+        svc = _make_service(tmp_path, monkeypatch)
+        with patch.object(svc, "_recall_impl", wraps=svc._recall_impl) as mock_impl:
+            svc.recall(query="lock flow")
+        assert mock_impl.call_args.kwargs["min_similarity"] is None
+
+
+# ---------------------------------------------------------------------------
 # RecallRequest.hook_event validation (Pydantic model, no HTTP round trip)
 # ---------------------------------------------------------------------------
 

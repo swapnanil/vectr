@@ -20,6 +20,8 @@ from agent.config import (
     EVICTION_MAX_TRACKED_SESSIONS,
     HOOKS_LOG_INJECTIONS,
     HOOKS_LOG_CHARS_PER_TOKEN,
+    HOOKS_MIN_SIMILARITY,
+    MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
 )
 from agent.eviction_advisor import EvictionAdvisor
 from agent.trigger_engine import TriggerFireLedger
@@ -1064,6 +1066,10 @@ class VectrService:
         reindex_in_progress = (
             self._index_lock.locked() or watcher_status.get("watcher_batch_running", False)
         )
+        # UPG-TASK-SUPERSEDES-HYGIENE: a stale-task nudge, not a lifecycle
+        # change — surfaced unconditionally so the caller (MCP handler / REST
+        # consumer) decides whether the count clears the warn threshold.
+        stale_task_count, stale_task_oldest_id = self.stale_task_summary()
         return {
             "indexed_files": self._indexer.indexed_file_count if self._indexer else 0,
             "total_chunks": self._indexer.total_chunks if self._indexer else 0,
@@ -1076,6 +1082,13 @@ class VectrService:
             ),
             "languages": self._language_coverage(),
             "notes_count": self.count_notes(),
+            # UPG-TASK-SUPERSEDES-HYGIENE: count of live kind="task" notes
+            # older than MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS, plus the
+            # oldest such note's id (None if there are none). The MCP/REST
+            # surfaces append a one-line nudge once count clears
+            # MEMORY_HYGIENE_STALE_TASK_WARN_COUNT.
+            "stale_task_count": stale_task_count,
+            "stale_task_oldest_id": stale_task_oldest_id,
             "grammars_unavailable": missing,
             "mode": mode,
             "version_stamp": self._version_stamp,
@@ -1238,7 +1251,7 @@ class VectrService:
         agent: str = "",
         triggers: list[dict] | None = None,
         provenance: str = "agent",
-        scope: str = "workspace",
+        scope: str | None = None,
         anchors: list[str] | None = None,
         supersedes: int | None = None,
     ) -> int:
@@ -1256,7 +1269,12 @@ class VectrService:
         triggers, an unrecognised provenance/scope, provenance="auto" on
         kind="directive", or a `supersedes` target that does not exist in
         this workspace). This method does no validation of its own so the
-        store stays the single source of truth for these rules."""
+        store stays the single source of truth for these rules.
+
+        `scope`: None (the default) means OMITTED — the store resolves it to
+        this note's kind's default scope at write time
+        (UPG-TRIGGER-SCOPE-KIND-DEFAULTS). An explicitly passed scope,
+        including the literal string "workspace", always wins verbatim."""
         self._require_memory_layer()
         note_id = self._context_store.remember(
             workspace=self._workspace_root,
@@ -1325,6 +1343,18 @@ class VectrService:
         one injection under that hook kind (see `status()`). None (the
         default — direct vectr_recall/`vectr recall` calls) records nothing.
 
+        `min_similarity` defaults to `HOOKS_MIN_SIMILARITY`
+        (agent/config.yaml `hooks.min_similarity`) whenever `hook_event` is
+        set and the caller omitted an explicit value (UPG-HOOK-SUBPROCESS-
+        IMPORT-TAX). The per-turn relevance floor lives in exactly one place
+        — here, where `agent.config` is already loaded once at daemon
+        startup — rather than being re-derived by the short-lived `vectr
+        hook` subprocess on every single turn, which would force it to pay
+        `agent.config`'s full import cost on its own hot path for a value it
+        can otherwise ask the daemon to apply by default. A direct
+        vectr_recall/`vectr recall` call (hook_event=None) is unaffected:
+        `min_similarity=None` there still means "no floor," as before.
+
         `session_id`/`events` (TRIGGER-ENGINE wave 2a, bm2-design-skeleton.md
         §3): the calling session's identity and the lifecycle event(s) this
         recall is standing in for. Threaded into the `boot`/`file_path`
@@ -1336,6 +1366,8 @@ class VectrService:
         reproduces today's ledger-less, budget-less, scope-unenforced
         behaviour exactly for any caller that predates this wave.
         """
+        if hook_event is not None and min_similarity is None:
+            min_similarity = HOOKS_MIN_SIMILARITY
         notes = self._recall_impl(
             query=query, tags=tags, priority=priority, limit=limit, kind=kind,
             boot=boot, min_similarity=min_similarity, file_path=file_path,
@@ -1738,6 +1770,19 @@ class VectrService:
         if self._context_store is None:
             return 0
         return self._context_store.count_notes(self._workspace_root)
+
+    def stale_task_summary(self) -> tuple[int, int | None]:
+        """Count of live kind="task" notes older than
+        MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS, plus the oldest such note's
+        id (UPG-TASK-SUPERSEDES-HYGIENE). Feeds the `vectr_status`
+        memory-hygiene nudge. Search-only mode has no context store — always
+        (0, None), never an error.
+        """
+        if self._context_store is None:
+            return 0, None
+        return self._context_store.stale_task_summary(
+            self._workspace_root, MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS
+        )
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------

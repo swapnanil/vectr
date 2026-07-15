@@ -1,13 +1,36 @@
 """CLI entry point: vectr start / restart / stop / index / search / status / init."""
 from __future__ import annotations
 
+import sys
+
+# UPG-HOOK-SUBPROCESS-IMPORT-TAX — `vectr hook <event>` is the highest-
+# frequency invocation of this CLI: the editor harness spawns a fresh
+# subprocess for it on every SessionStart/UserPromptSubmit/PreToolUse/
+# PreCompact, so this module's own import cost (dotenv, the full
+# agent.config surface, argparse's subcommand tree) is pure per-turn latency
+# paid before a single byte of stdin is even read. Short-circuit to the
+# stdlib-only implementation in agent/hook_cli.py BEFORE any of those heavy
+# imports run, for exactly the well-formed `hook <event>` invocation the
+# installed console-script entry point (`vectr = "main:main"`) actually
+# produces. Any other shape of argv (missing/extra args, --help, an
+# unrecognized event) falls through unchanged to the normal argparse-driven
+# path below, which already handles it — this is a fast path alongside the
+# existing one, not a replacement for its validation. `agent.hook_cli`
+# reimplements the same 4 branches (see its module docstring for why this is
+# a second implementation, parity-tested against this file's `cmd_hook`,
+# rather than a shared import).
+_HOOK_EVENTS = ("session-start", "user-prompt-submit", "pre-tool-use", "pre-compact")
+if len(sys.argv) == 3 and sys.argv[1] == "hook" and sys.argv[2] in _HOOK_EVENTS:
+    from agent.hook_cli import run_hook
+    run_hook(sys.argv[2])
+    sys.exit(0)
+
 import argparse
 import json
 import os
 import re
 import signal
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -19,7 +42,6 @@ from agent.config import (
     CLI_START_READY_POLL_TIMEOUT_S,
     CLI_START_READY_PROBE_TIMEOUT_S,
     CLI_VERSION_SKEW_PROBE_TIMEOUT_S,
-    HOOKS_MIN_SIMILARITY,
 )
 from agent.instance_registry import (
     InstanceRegistry,
@@ -40,8 +62,10 @@ _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 # UserPromptSubmit injection tight: only notes genuinely related to the prompt,
 # nothing on an off-topic turn. Override via env without re-running init.
 # The relevance floor itself is config-driven (agent/config.yaml
-# hooks.min_similarity) rather than a hardcoded constant here — see that
-# key's comment for the measured rationale.
+# hooks.min_similarity) — applied server-side by `VectrService.recall`
+# whenever `hook_event` is set and the request omits `min_similarity`
+# (UPG-HOOK-SUBPROCESS-IMPORT-TAX), so this CLI never needs to import
+# agent.config just to send that one float on its hottest path.
 _HOOK_RECALL_LIMIT = 3
 
 # UPG-11.5 — hook-injected notes announce themselves so the model doesn't also
@@ -1686,11 +1710,18 @@ def cmd_hook(args: argparse.Namespace) -> None:
             if not prompt:
                 return
             limit = int(os.getenv("VECTR_HOOK_RECALL_LIMIT", str(_HOOK_RECALL_LIMIT)))
-            min_sim = float(os.getenv("VECTR_HOOK_MIN_SIMILARITY", str(HOOKS_MIN_SIMILARITY)))
             payload = {
-                "query": prompt, "limit": limit, "min_similarity": min_sim, "detail": "index",
+                "query": prompt, "limit": limit, "detail": "index",
                 "hook_event": "UserPromptSubmit", "events": ["prompt-submit"],
             }
+            # min_similarity is omitted here on purpose — the daemon applies
+            # its own HOOKS_MIN_SIMILARITY default whenever hook_event is set
+            # (see VectrService.recall), which is the single source of truth
+            # for that floor. VECTR_HOOK_MIN_SIMILARITY still overrides it
+            # explicitly, same as before.
+            env_min_sim = os.getenv("VECTR_HOOK_MIN_SIMILARITY")
+            if env_min_sim is not None:
+                payload["min_similarity"] = float(env_min_sim)
             if session_id:
                 payload["session_id"] = session_id
             notes = _fetch_recall(port, payload)
