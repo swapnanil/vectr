@@ -6,6 +6,7 @@ Tests verify the real ChromaDB storage and hybrid BM25+vector search pipeline.
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 import textwrap
@@ -1937,6 +1938,67 @@ class TestDualVectorPurposeCollection:
         idx.index_file(path)
         assert idx.total_chunks > 0
         assert idx._purpose_collection.count() == 0
+
+
+class TestGetChunkCosineSimilarities:
+    """get_chunk_cosine_similarities (UPG-11.12 forced-inclusion gate) is the
+    one place that reads ChromaDB's `.get(..., include=["embeddings"])` —
+    which returns a genuine `numpy.ndarray` of `numpy.float64` rows, not the
+    plain Python floats every other collection read (`distances`,
+    `metadatas`) already comes back as (empirically confirmed against this
+    installed chromadb; see UPG-NUMPY-SCALAR-IDENTITY-AUDIT). These tests
+    exercise the real `indexer` fixture's ChromaDB collection end to end —
+    no numpy mock standing in for the real numpy-typed return value — so a
+    regression that dropped the function's own `float()` casts would be
+    caught here, not first noticed as a `TypeError: Object of type float64
+    is not JSON serializable` at the REST/MCP response boundary this dict
+    eventually reaches."""
+
+    def test_returns_plain_python_floats_not_numpy_scalars(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "svc.py", """
+            def known_function():
+                return 42
+        """)
+        indexer.index_file(path)
+        body_ids, _, _ = indexer.get_all_documents()
+        query_embedding = indexer.embed_query("known_function")
+        result = indexer.get_chunk_cosine_similarities(query_embedding, body_ids)
+        assert result
+        for cid, score in result.items():
+            assert type(score) is float, f"{cid}: expected plain float, got {type(score)}"
+
+    def test_result_is_json_serializable(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "svc.py", """
+            def known_function():
+                return 42
+        """)
+        indexer.index_file(path)
+        body_ids, _, _ = indexer.get_all_documents()
+        query_embedding = indexer.embed_query("known_function")
+        result = indexer.get_chunk_cosine_similarities(query_embedding, body_ids)
+        json.dumps(result)  # must not raise TypeError on a numpy scalar
+
+    def test_self_similarity_of_the_exact_indexed_chunk_is_near_one(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "svc.py", """
+            def known_function():
+                return 42
+        """)
+        indexer.index_file(path)
+        body_ids, body_docs, _ = indexer.get_all_documents()
+        cid, doc = body_ids[0], body_docs[0]
+        query_embedding = indexer.embed_query(doc)
+        result = indexer.get_chunk_cosine_similarities(query_embedding, [cid])
+        assert result[cid] == pytest.approx(1.0, abs=0.01)
+
+    def test_missing_chunk_ids_absent_from_result(self, indexer) -> None:
+        assert indexer.get_chunk_cosine_similarities([0.1] * 768, ["does-not-exist"]) == {}
+
+    def test_empty_query_embedding_or_ids_returns_empty_dict(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "svc.py", "def f(): pass")
+        indexer.index_file(path)
+        body_ids, _, _ = indexer.get_all_documents()
+        assert indexer.get_chunk_cosine_similarities([], body_ids) == {}
+        assert indexer.get_chunk_cosine_similarities([0.1] * 768, []) == {}
 
 
 # ---------------------------------------------------------------------------
