@@ -249,7 +249,7 @@ def client_real_memory(tmp_path):
     ws = str(tmp_path)
 
     def _remember(content, tags=None, priority="medium", session_id=None, kind="finding", title="",
-                  agent="", triggers=None, provenance="agent", scope="workspace", anchors=None,
+                  agent="", triggers=None, provenance="agent", scope=None, anchors=None,
                   supersedes=None):
         return real_store.remember(
             ws, content, tags, priority, session_id, kind=kind, title=title, author_id=agent,

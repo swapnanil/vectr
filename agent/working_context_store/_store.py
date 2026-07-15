@@ -20,6 +20,7 @@ from agent.working_context_store._types import (
     DEFAULT_KIND,
     DEFAULT_PROVENANCE,
     DEFAULT_SCOPE,
+    KIND_DEFAULT_SCOPES,
     PROVENANCE_VALUES,
     SCOPE_VALUES,
     VALID_KINDS,
@@ -638,7 +639,7 @@ class WorkingContextStore:
         title: str = "",
         triggers: list[dict] | None = None,
         provenance: str = DEFAULT_PROVENANCE,
-        scope: str = DEFAULT_SCOPE,
+        scope: str | None = None,
         anchors: list[str] | None = None,
         supersedes: int | None = None,
     ) -> int:
@@ -668,16 +669,37 @@ class WorkingContextStore:
         kind="directive" — an unreviewed standing rule is a contradiction in
         terms and is rejected outright rather than silently downgraded.
 
-        `scope`: one of SCOPE_VALUES. Raises ValueError if not recognised.
+        `scope`: one of SCOPE_VALUES, or None (the default) to mean OMITTED.
+        An explicitly passed scope — including the literal string
+        "workspace" — always wins verbatim and is stored as given (raises
+        ValueError if not one of SCOPE_VALUES). Omitted (None) resolves HERE,
+        at write time, to the note's `kind`'s default scope per
+        bm2-design-skeleton.md §1's Default bundles table
+        (KIND_DEFAULT_SCOPES in _types.py: task -> "branch", gotcha ->
+        "repo"; every other kind keeps "workspace") and the RESOLVED value —
+        never a sentinel — is what gets stored on the row (write-time baked;
+        a note written before this wave, or under an explicit scope, is
+        untouched by any later change to the default table).
+
+        CRITICAL guard (UPG-TRIGGER-SCOPE-KIND-DEFAULTS): a `kind` whose
+        default resolves to "branch" only actually gets "branch" when a real
+        git branch is captured at write time. A non-git workspace or a
+        detached HEAD falls back to "workspace" instead — baking scope=
+        "branch" with an empty branch value would exclude the note from
+        EVERY future branch forever (`fire()` compares stored branch to the
+        branch current at evaluation time; an empty recorded branch never
+        equals a real branch name), a silent, permanent, undiscoverable
+        scope-exclusion. This guard applies only to the OMITTED-scope
+        default-resolution path — an explicitly passed scope="branch" keeps
+        its pre-existing documented behaviour (stores an empty branch value
+        on a non-git workspace; the caller opted into "branch" scope
+        themselves, so the empty-branch outcome is on them, not silent).
         When scope=="branch", the current git branch (`_current_git_branch()`)
         is captured HERE, at write time, and stored on the note — `fire()`
         compares it against the branch current at evaluation time (empty
         string when git is unavailable or `root` isn't a git checkout; such a
         note then never matches, since an empty recorded branch never equals
-        a real current branch name). bm2-design-skeleton.md §1's Default
-        bundles table lists "branch" as `task`'s typical scope; this wave
-        enforces whatever scope a note declares (including "branch") but does
-        NOT auto-assign it from `kind` — see UPG-TRIGGER-SCOPE-KIND-DEFAULTS.
+        a real current branch name).
 
         `anchors`: a list of workspace-relative (or absolute) file paths this
         note is anchored to. Each path's current content hash is computed
@@ -718,7 +740,7 @@ class WorkingContextStore:
                 "unreviewed standing rule is a contradiction in terms; use "
                 "provenance='agent' (or have a human endorse it) instead"
             )
-        if scope not in SCOPE_VALUES:
+        if scope is not None and scope not in SCOPE_VALUES:
             raise ValueError(f"scope must be one of: {', '.join(SCOPE_VALUES)}")
 
         triggers_list = validate_triggers(triggers)
@@ -727,7 +749,34 @@ class WorkingContextStore:
         root = Path(workspace)
         anchor_pairs = [[p, _hash_path_content(root, p)] for p in (anchors or [])]
         anchors_json = json.dumps(anchor_pairs)
-        branch_value = _current_git_branch(root) or "" if scope == "branch" else ""
+
+        # UPG-TRIGGER-SCOPE-KIND-DEFAULTS: an omitted scope (None) resolves to
+        # this kind's default bundle at WRITE TIME (see the docstring above
+        # and KIND_DEFAULT_SCOPES in _types.py); an explicitly passed scope
+        # (including explicit "workspace") is never touched here.
+        branch_for_default: str | None = None
+        if scope is None:
+            scope = KIND_DEFAULT_SCOPES.get(kind, DEFAULT_SCOPE)
+            if scope == "branch":
+                # Silent-death guard: only actually adopt "branch" when a
+                # real branch was captured now — a non-git workspace or a
+                # detached HEAD must never bake scope="branch" with an empty
+                # branch value (see docstring: that would exclude the note
+                # from firing on every future branch, forever, invisibly).
+                branch_for_default = _current_git_branch(root) or ""
+                if not branch_for_default:
+                    scope = DEFAULT_SCOPE
+
+        # branch_value is captured whenever the FINAL resolved scope is
+        # "branch" — reusing branch_for_default (already computed just above)
+        # when the default-resolution path took it, to avoid a second git
+        # subprocess call; falling back to a fresh lookup for an explicitly
+        # passed scope="branch" (pre-existing documented behaviour, empty
+        # string on a non-git workspace, unchanged by this wave).
+        if scope == "branch":
+            branch_value = branch_for_default if branch_for_default is not None else (_current_git_branch(root) or "")
+        else:
+            branch_value = ""
 
         # Derive title fallback from first non-empty content line (80-char cap).
         if not title:

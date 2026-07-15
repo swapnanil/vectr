@@ -356,16 +356,19 @@ _MEMORY_WRITE_TOOLS = [
                 "scope": {
                     "type": "string",
                     "description": (
-                        "Visibility scope, enforced at recall/trigger time (default 'workspace' "
-                        "— visible everywhere in this workspace): 'branch' restricts firing to "
-                        "the git branch this note was written on (useful for kind='task' — open "
-                        "work that only matters on the branch it describes); 'path-subtree' "
-                        "restricts firing to paths under an anchored directory; 'session' "
-                        "restricts it to the writing session only; 'repo' behaves like "
-                        "'workspace' (cross-worktree sharing is not yet a distinct store "
+                        "Visibility scope, enforced at recall/trigger time. Omit this to get "
+                        "the kind's own default: kind='task' defaults to 'branch' (a git branch "
+                        "was actually captured at write time; on a non-git workspace or "
+                        "detached HEAD it falls back to 'workspace' instead of silently never "
+                        "firing again), kind='gotcha' defaults to 'repo', every other kind "
+                        "defaults to 'workspace'. Pass a value explicitly to override the "
+                        "kind default, including passing 'workspace' explicitly: 'branch' "
+                        "restricts firing to the git branch this note was written on; "
+                        "'path-subtree' restricts firing to paths under an anchored directory; "
+                        "'session' restricts it to the writing session only; 'repo' behaves like "
+                        "'workspace' today (cross-worktree sharing is not yet a distinct store "
                         "boundary)."
                     ),
-                    "default": "workspace",
                     "enum": ["workspace", "repo", "path-subtree", "branch", "session"],
                 },
                 "anchors": {

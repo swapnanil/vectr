@@ -556,7 +556,11 @@ def handle_tools_call(
                 "'agent'/'auto'; ask the person to record it themselves, or "
                 "promote it later, if it warrants human endorsement."
             )
-        scope = arguments.get("scope", "workspace") or "workspace"
+        # UPG-TRIGGER-SCOPE-KIND-DEFAULTS: None (omitted, or an empty string)
+        # means "let the store resolve this kind's default scope at write
+        # time"; an explicit non-empty scope (including "workspace") is
+        # passed through verbatim.
+        scope = arguments.get("scope") or None
         anchors = arguments.get("anchors") or None
         supersedes = arguments.get("supersedes")
         if supersedes is not None:

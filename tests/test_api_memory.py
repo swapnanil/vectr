@@ -86,6 +86,38 @@ class TestRememberRoute:
         resp = client.post("/v1/remember", json={"content": "x", "scope": "not-a-real-scope"})
         assert resp.status_code == 422
 
+    # -- UPG-TRIGGER-SCOPE-KIND-DEFAULTS --------------------------------------
+
+    def test_remember_omitted_scope_resolves_to_kind_default_via_rest(self, client_real_memory, tmp_path) -> None:
+        """A `scope`-omitting REST call (the JSON body never includes the
+        key) reaches the store as None, not the string "workspace" — so a
+        kind="gotcha" note's OMITTED scope resolves to "repo" end-to-end
+        through the real route/model/service/store stack, not just
+        unit-level."""
+        import sqlite3
+        resp = client_real_memory.post("/v1/remember", json={
+            "content": "a gotcha about auth.py", "kind": "gotcha",
+        })
+        assert resp.status_code == 200
+        note_id = resp.json()["note_id"]
+        with sqlite3.connect(str(tmp_path / "working_context.sqlite")) as conn:
+            row = conn.execute("SELECT scope FROM notes WHERE note_id = ?", (note_id,)).fetchone()
+        assert row[0] == "repo"
+
+    def test_remember_explicit_workspace_scope_overrides_kind_default_via_rest(self, client_real_memory, tmp_path) -> None:
+        """An explicitly passed scope="workspace" in the REST body always
+        wins verbatim, even for a kind (gotcha) whose omitted default would
+        otherwise be "repo"."""
+        import sqlite3
+        resp = client_real_memory.post("/v1/remember", json={
+            "content": "a gotcha about auth.py", "kind": "gotcha", "scope": "workspace",
+        })
+        assert resp.status_code == 200
+        note_id = resp.json()["note_id"]
+        with sqlite3.connect(str(tmp_path / "working_context.sqlite")) as conn:
+            row = conn.execute("SELECT scope FROM notes WHERE note_id = ?", (note_id,)).fetchone()
+        assert row[0] == "workspace"
+
     def test_remember_malformed_triggers_returns_422(self, client_real_memory) -> None:
         """A malformed trigger reaches the store's ValueError and surfaces as
         a 422 (caller input error), not a 500."""

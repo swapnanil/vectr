@@ -285,7 +285,18 @@ class RememberRequest(BaseModel):
             "settable from this tool — see the separate promote call."
         ),
     )
-    scope: str = Field(default="workspace", description="workspace (default, no filtering) | repo | path-subtree | branch | session")
+    scope: str | None = Field(
+        default=None,
+        description=(
+            "workspace | repo | path-subtree | branch | session. Omit "
+            "(None) to get this note's kind's own default scope, resolved "
+            "at write time (UPG-TRIGGER-SCOPE-KIND-DEFAULTS): kind='task' "
+            "-> 'branch' (falls back to 'workspace' when no git branch was "
+            "actually captured), kind='gotcha' -> 'repo', every other kind "
+            "-> 'workspace'. Pass a value explicitly, including 'workspace', "
+            "to override the kind default."
+        ),
+    )
     anchors: list[str] | None = Field(
         default=None,
         description=(
@@ -332,8 +343,12 @@ class RememberRequest(BaseModel):
 
     @field_validator("scope")
     @classmethod
-    def validate_scope(cls, v: str) -> str:
-        if v not in _SCOPE_VALUES:
+    def validate_scope(cls, v: str | None) -> str | None:
+        # None means "omitted" (UPG-TRIGGER-SCOPE-KIND-DEFAULTS) — passed
+        # straight through so the store resolves this note's kind's default
+        # scope at write time; only a NON-None value is checked against
+        # SCOPE_VALUES here.
+        if v is not None and v not in _SCOPE_VALUES:
             raise ValueError(f"scope must be one of: {', '.join(_SCOPE_VALUES)}")
         return v
 

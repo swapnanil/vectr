@@ -1238,7 +1238,7 @@ class VectrService:
         agent: str = "",
         triggers: list[dict] | None = None,
         provenance: str = "agent",
-        scope: str = "workspace",
+        scope: str | None = None,
         anchors: list[str] | None = None,
         supersedes: int | None = None,
     ) -> int:
@@ -1256,7 +1256,12 @@ class VectrService:
         triggers, an unrecognised provenance/scope, provenance="auto" on
         kind="directive", or a `supersedes` target that does not exist in
         this workspace). This method does no validation of its own so the
-        store stays the single source of truth for these rules."""
+        store stays the single source of truth for these rules.
+
+        `scope`: None (the default) means OMITTED — the store resolves it to
+        this note's kind's default scope at write time
+        (UPG-TRIGGER-SCOPE-KIND-DEFAULTS). An explicitly passed scope,
+        including the literal string "workspace", always wins verbatim."""
         self._require_memory_layer()
         note_id = self._context_store.remember(
             workspace=self._workspace_root,

@@ -1003,9 +1003,12 @@ class TestVectrFetch:
 # Default TRIGGER-ENGINE wave 1 params (bm2-design-skeleton.md §1/§2/§5) that
 # every vectr_remember dispatch appends when the caller omits them — kept as
 # one constant so existing assert_called_once_with() calls below stay
-# readable as the additive surface grows.
+# readable as the additive surface grows. scope=None means "omitted" —
+# UPG-TRIGGER-SCOPE-KIND-DEFAULTS resolves the kind's default scope at write
+# time, downstream of this dispatch layer (see test_working_context_store.py
+# for the write-time resolution itself).
 _DEFAULT_TRIGGER_PARAMS = dict(
-    triggers=None, provenance="agent", scope="workspace", anchors=None, supersedes=None, session_id=None,
+    triggers=None, provenance="agent", scope=None, anchors=None, supersedes=None, session_id=None,
 )
 
 
@@ -1113,7 +1116,7 @@ class TestVectrRemember:
         svc.remember.assert_called_once_with(
             content="corrected finding", tags=None, priority="medium",
             kind="finding", title="", agent="",
-            triggers=None, provenance="agent", scope="workspace", anchors=None, supersedes=7, session_id=None,
+            triggers=None, provenance="agent", scope=None, anchors=None, supersedes=7, session_id=None,
         )
 
     def test_remember_non_integer_supersedes_returns_error(self) -> None:

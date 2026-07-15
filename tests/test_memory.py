@@ -1636,6 +1636,111 @@ class TestRememberTriggerEngineParams:
         assert old.superseded_by_note_id is None  # untouched by the explicit-supersedes path
 
 
+class TestKindDefaultScopes:
+    """UPG-TRIGGER-SCOPE-KIND-DEFAULTS (bm2-design-skeleton.md §1's Default
+    bundles table): an OMITTED scope (the caller never passes scope=) is
+    resolved to the note's kind's default at write time — task -> "branch"
+    (guarded — see below), gotcha -> "repo", every other kind keeps
+    "workspace". An explicitly passed scope, including the literal
+    "workspace", always wins verbatim and never consults the kind default."""
+
+    def test_gotcha_kind_defaults_to_repo_scope_when_omitted(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a gotcha", kind="gotcha")
+        assert store.get_note(ws, note_id).scope == "repo"
+
+    def test_finding_kind_keeps_workspace_default_when_omitted(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a finding", kind="finding")
+        assert store.get_note(ws, note_id).scope == "workspace"
+
+    def test_directive_kind_keeps_workspace_default_when_omitted(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a directive", kind="directive")
+        assert store.get_note(ws, note_id).scope == "workspace"
+
+    def test_reference_kind_keeps_workspace_default_when_omitted(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a reference", kind="reference")
+        assert store.get_note(ws, note_id).scope == "workspace"
+
+    def test_task_kind_defaults_to_branch_scope_when_a_branch_is_captured(self, tmp_path, monkeypatch) -> None:
+        """When a real git branch is captured at write time, an omitted scope
+        on a task note resolves to "branch" — and the captured branch name is
+        stored alongside it, exactly as an explicit scope="branch" write
+        would store it (UPG-TRIGGER-SCOPE-KIND-DEFAULTS)."""
+        import agent.working_context_store._store as store_mod
+        monkeypatch.setattr(store_mod, "_current_git_branch", lambda root: "feature/x")
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a task", kind="task", priority="high")
+        note = store.get_note(ws, note_id)
+        assert note.scope == "branch"
+        assert note.branch == "feature/x"
+
+    def test_task_kind_falls_back_to_workspace_scope_on_non_git_workspace(self, tmp_path) -> None:
+        """CRITICAL silent-death guard: a non-git workspace (tmp_path here is
+        a plain directory, never `git init`-ed) never bakes scope="branch"
+        with an empty branch value on a task note's OMITTED-scope default —
+        that would exclude the note from firing on every future branch,
+        forever, invisibly. The note falls back to scope="workspace" instead,
+        and still fires normally."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a task", kind="task", priority="high",
+                                  triggers=[{"event": "session-start"}])
+        note = store.get_note(ws, note_id)
+        assert note.scope == "workspace"
+        assert note.branch == ""
+        assert len(store.fire(ws, event="session-start")) == 1
+
+    def test_explicit_scope_wins_over_kind_default_task(self, tmp_path) -> None:
+        """An explicitly passed scope always wins verbatim — even for a kind
+        whose default would otherwise be something else."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a task", kind="task", priority="high", scope="workspace")
+        assert store.get_note(ws, note_id).scope == "workspace"
+
+    def test_explicit_scope_wins_over_kind_default_gotcha(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(ws, "a gotcha", kind="gotcha", scope="session", session_id="s1")
+        assert store.get_note(ws, note_id).scope == "session"
+
+    def test_explicit_workspace_scope_is_distinguishable_from_omitted(self, tmp_path, monkeypatch) -> None:
+        """Explicit scope="workspace" on a task note (with a branch
+        available) must NOT be upgraded to "branch" — omitted and explicit
+        "workspace" are both stored as "workspace", but only omitted ever
+        consults the kind-default table."""
+        import agent.working_context_store._store as store_mod
+        monkeypatch.setattr(store_mod, "_current_git_branch", lambda root: "feature/x")
+        store, ws = _store(tmp_path), str(tmp_path)
+        explicit_id = store.remember(ws, "explicit workspace task", kind="task", priority="high", scope="workspace")
+        omitted_id = store.remember(ws, "omitted scope task", kind="task", priority="high")
+        assert store.get_note(ws, explicit_id).scope == "workspace"
+        assert store.get_note(ws, explicit_id).branch == ""  # scope != "branch" -> never captured
+        assert store.get_note(ws, omitted_id).scope == "branch"
+        assert store.get_note(ws, omitted_id).branch == "feature/x"
+
+    def test_pre_existing_row_scope_unaffected_by_this_wave(self, tmp_path) -> None:
+        """A note written (raw SQL, simulating a row from before this wave)
+        with scope="workspace" recalls and fires identically — this wave only
+        changes what a NEW write's OMITTED scope resolves to, never rewrites
+        or reinterprets a stored value."""
+        import sqlite3
+        import time
+        db_path = tmp_path / "working_context.sqlite"
+        store = _store(tmp_path)  # creates the schema
+        ws = str(tmp_path)
+        now = time.time()
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO notes (workspace, content, kind, priority, created_at, last_accessed, scope) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ws, "a pre-existing task note", "task", "high", now, now, "workspace"),
+            )
+        note = store.recall(ws)[0]
+        assert note.scope == "workspace"
+        assert len(store.fire(ws, event="session-start")) == 1
+
+
 class _FakeSymbolResolver:
     """Minimal duck-typed stand-in for SymbolGraph — only the two methods
     attach_symbol_resolver()/remember()/fire() actually call (TRIGGER-ENGINE
