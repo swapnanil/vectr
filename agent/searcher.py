@@ -252,6 +252,16 @@ class SearchResult:
     # blend; never affects pool entry, which ARCH-4's dense_scores merge already
     # handles upstream.
     purpose_sim: float = 0.0
+    # UPG-SCORE-DISPLAY-MIXED-SCALE: which scale `score` was drawn from —
+    # "reranker" (the cross-encoder's calibrated sigmoid, ce_relevance) or
+    # "dense" (the bi-encoder cosine, dense_sim). The two are structurally
+    # different measurements and not comparable side by side, so every result
+    # in one displayed set is guaranteed to share the same value here (see
+    # CodeSearcher.search's post-cut backfill and _apply_quality_and_dedup,
+    # which is where this is first set). Defaults to "dense" — matching
+    # `score`'s own dense_sim fallback — for any SearchResult built outside
+    # search() (e.g. test fixtures).
+    score_source: str = "dense"
 
 
 class SearchResultList(list):
@@ -618,6 +628,39 @@ class CodeSearcher:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         final = SearchResultList(candidates[:n_results])
 
+        # UPG-SCORE-DISPLAY-MIXED-SCALE: guarantee one uniform displayed SCALE
+        # across this result set. `_apply_quality_and_dedup` above already set
+        # each candidate's score/score_source from its own ce_relevance when
+        # THIS candidate was reranked, else dense_sim (UPG-SCORE-DISPLAY-FLAT)
+        # — those are structurally different measurements (a calibrated
+        # cross-encoder sigmoid vs. a raw bi-encoder cosine), not comparable
+        # side by side. Today the reranked pool and the displayed slice are
+        # built from the same candidate list end to end, so every displayed
+        # result already carries ce_relevance whenever reranking ran — but
+        # that invariant depends on no later change ever merging additional,
+        # un-reranked candidates into the pool after the cross-encoder call.
+        # Enforce it defensively here, at the one point after the n_results
+        # cut where the final displayed set is known: if reranking produced a
+        # score for at least one displayed result, batch-score every
+        # displayed result still missing one in a single extra
+        # _Reranker.rerank call — reusing its own sigmoid normalization, so a
+        # backfilled score lands on the identical scale — and never re-sort
+        # by them; the composite already decided ordering.
+        reranked_this_query = any(r.ce_relevance is not None for r in final)
+        if reranked_this_query:
+            stragglers = [r for r in final if r.ce_relevance is None]
+            if stragglers:
+                self._reranker.rerank(query, [(r.content, r) for r in stragglers])
+            for r in final:
+                if r.ce_relevance is not None:
+                    r.score = round(r.ce_relevance, 4)
+                    r.score_source = "reranker"
+                else:
+                    r.score_source = "dense"
+        # else: reranking did not run for this query — every displayed score
+        # is already dense_sim (score_source="dense" for all, set above) —
+        # already uniform, nothing to backfill.
+
         # UPG-SCORE-DISPLAY-FLAT: a second, independent low-confidence signal —
         # the top result's own displayed relevance is below an absolute floor.
         # This is gated on ce_relevance specifically (NOT the dense_sim
@@ -633,6 +676,13 @@ class CodeSearcher:
         # reranker ran (rerank=False, or the model failed to load), this
         # sub-signal is simply absent and low_confidence falls back to the
         # zero-DF vocabulary floor alone (pre-UPG-SCORE-DISPLAY-FLAT behaviour).
+        # UPG-SCORE-DISPLAY-MIXED-SCALE: the backfill above runs first, so
+        # final[0].ce_relevance is now populated whenever reranking ran for
+        # this query, even on the rare candidate that fell outside the
+        # original rerank pool — this signal's gate is unchanged in meaning
+        # (still "no cross-encoder judgment exists for the top result"), it
+        # is simply never starved of a judgment that reranking could in fact
+        # produce.
         top_ce_relevance = final[0].ce_relevance if final else None
         low_top_relevance = (
             top_ce_relevance is not None
@@ -844,5 +894,6 @@ class CodeSearcher:
             # normalization is applied here.
             absolute_relevance = r.ce_relevance if r.ce_relevance is not None else r.dense_sim
             r.score = round(absolute_relevance, 4)
+            r.score_source = "reranker" if r.ce_relevance is not None else "dense"
             out.append(r)
         return out

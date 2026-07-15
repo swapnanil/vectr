@@ -161,6 +161,39 @@ def test_search_happy_path(client) -> None:
     assert "chunks_searched" in data
 
 
+def test_search_result_has_score_source_field(client) -> None:
+    """UPG-SCORE-DISPLAY-MIXED-SCALE: every REST search result must carry an
+    additive `score_source` field ("reranker" | "dense") naming which scale
+    its `score` was drawn from. The default mock's SearchResult never sets
+    score_source explicitly, so it must default to "dense" — matching
+    `score`'s own dense_sim fallback — rather than being omitted."""
+    resp = client.post("/v1/search", json={"query": "JWT token validation"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["results"][0]["score_source"] == "dense"
+
+
+def test_search_result_score_source_reranker_passthrough(client) -> None:
+    """A SearchResult the agent layer stamped score_source="reranker" on must
+    pass that through to the REST response unchanged."""
+    reranked_result = SearchResult(
+        file_path="src/auth/middleware.py",
+        lines="42-67",
+        symbol_name="verify_jwt_token",
+        language="python",
+        score=0.87,
+        content="def verify_jwt_token(token: str) -> dict:\n    ...",
+        ce_relevance=0.87,
+        score_source="reranker",
+    )
+    svc = app.state.service
+    svc.search.return_value = ([reranked_result], 18)
+
+    resp = client.post("/v1/search", json={"query": "JWT token validation"})
+    assert resp.status_code == 200
+    assert resp.json()["results"][0]["score_source"] == "reranker"
+
+
 def test_search_response_has_no_routing_fields(client) -> None:
     """UPG-QUERYTYPE-REROUTE: the deleted regex query-classification layer's
     RoutingDecision (query_type/routing/decision/resolution_strategy) must not

@@ -145,6 +145,7 @@ async def search(body: SearchRequest, request: Request) -> SearchResponse:
                 symbol_start_line=getattr(r, "symbol_start_line", 0),
                 symbol_end_line=getattr(r, "symbol_end_line", 0),
                 id=getattr(r, "chunk_id", ""),
+                score_source=getattr(r, "score_source", "dense"),
             )
             for r in results
         ],

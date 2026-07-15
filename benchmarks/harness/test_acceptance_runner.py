@@ -18,13 +18,20 @@ Same trap: "all" in "recall", "get" in "getter", "run" in "running".
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
+import run_acceptance
 from run_acceptance import (
     _symbol_leaf,
+    main,
+    run_case,
     top_k_absent,
     top_k_contains,
     sorted_by_score,
+    scores_in_unit_interval,
+    uniform_score_source,
     affordance_expand_to_symbol,
 )
 
@@ -158,6 +165,36 @@ class TestTopKAbsent:
         results = [_r("Buffer::readlines", 0.9)]
         assert top_k_absent(results, k=3, symbol="read") is True
 
+    # --- UPG-ACCEPTANCE-HARNESS-F35-CRASH: file-only spec (no 'symbol' key) ---
+
+    def test_file_only_spec_absent_passes(self) -> None:
+        """F35's real recorded shape: {"k": 5, "file": "..."} with no
+        'symbol' key at all. Must not crash and must correctly report the
+        file as absent when no result's file matches."""
+        results = [_r("SomeClass.method", 0.9)]
+        assert top_k_absent(results, k=5, file="django/views/templates/i18n_catalog.js") is True
+
+    def test_file_only_spec_absent_fires(self) -> None:
+        results = [{"symbol": "", "file": "django/views/templates/i18n_catalog.js",
+                    "score": 0.6, "content": "x"}]
+        assert top_k_absent(results, k=5, file="django/views/templates/i18n_catalog.js") is False
+
+    def test_file_only_spec_outside_k_ignored(self) -> None:
+        results = [
+            _r("SomeClass.method", 0.9),
+            {"symbol": "", "file": "django/views/templates/i18n_catalog.js",
+             "score": 0.5, "content": "x"},
+        ]
+        assert top_k_absent(results, k=1, file="django/views/templates/i18n_catalog.js") is True
+
+    def test_neither_symbol_nor_file_is_vacuously_true(self) -> None:
+        """Matches a few pre-existing corpus entries (F19/F50/F52) that pair
+        a real top_k_contains assertion with a no-op top_k_absent(symbol=None)
+        — preserved as an always-True vacuous check, not an error, so those
+        cases keep evaluating exactly as before."""
+        assert top_k_absent([_r("x")], k=3) is True
+        assert top_k_absent([], k=3) is True
+
 
 # ---------------------------------------------------------------------------
 # top_k_contains
@@ -223,6 +260,66 @@ class TestSortedByScore:
 
 
 # ---------------------------------------------------------------------------
+# scores_in_unit_interval / uniform_score_source
+# (UPG-CORPUS-RESTAMP-SCORE-CASES — the current displayed-score contract:
+# bounded [0, 1] and one uniform scale per result set; monotonicity with
+# rank order is explicitly NOT required.)
+# ---------------------------------------------------------------------------
+
+def _rs(symbol: str, score: float, source: str = "dense") -> dict:
+    return {"symbol": symbol, "file": "/p/file.py", "score": score,
+            "score_source": source, "content": "x"}
+
+
+class TestScoresInUnitInterval:
+    def test_all_in_range_passes(self) -> None:
+        results = [_rs("a", 0.0), _rs("b", 0.5), _rs("c", 1.0)]
+        assert scores_in_unit_interval(results) is True
+
+    def test_score_above_one_fails(self) -> None:
+        # the historical F12 defect: base_rank * quality + sym_boost, unbounded
+        results = [_rs("a", 1.2), _rs("b", 0.9)]
+        assert scores_in_unit_interval(results) is False
+
+    def test_negative_score_fails(self) -> None:
+        results = [_rs("a", -0.1)]
+        assert scores_in_unit_interval(results) is False
+
+    def test_non_monotonic_but_bounded_passes(self) -> None:
+        # monotonicity is explicitly not part of this contract
+        results = [_rs("a", 0.6), _rs("b", 0.9), _rs("c", 0.7)]
+        assert scores_in_unit_interval(results) is True
+
+    def test_empty(self) -> None:
+        assert scores_in_unit_interval([]) is True
+
+
+class TestUniformScoreSource:
+    def test_all_reranker_passes(self) -> None:
+        results = [_rs("a", 0.9, "reranker"), _rs("b", 0.8, "reranker")]
+        assert uniform_score_source(results) is True
+
+    def test_all_dense_passes(self) -> None:
+        results = [_rs("a", 0.9, "dense"), _rs("b", 0.8, "dense")]
+        assert uniform_score_source(results) is True
+
+    def test_mixed_sources_fails(self) -> None:
+        results = [_rs("a", 0.9, "reranker"), _rs("b", 0.8, "dense")]
+        assert uniform_score_source(results) is False
+
+    def test_missing_field_defaults_to_dense(self) -> None:
+        results = [{"symbol": "a", "file": "/p/f.py", "score": 0.9, "content": "x"},
+                   _rs("b", 0.8, "dense")]
+        assert uniform_score_source(results) is True
+
+    def test_single_result(self) -> None:
+        assert uniform_score_source([_rs("a", 0.9, "reranker")]) is True
+
+    def test_empty(self) -> None:
+        assert uniform_score_source([]) is True
+
+
+# ---------------------------------------------------------------------------
 # affordance_expand_to_symbol
 # ---------------------------------------------------------------------------
 
@@ -240,3 +337,147 @@ class TestAffordanceExpandToSymbol:
     def test_missing_field_fails(self) -> None:
         results = [{"symbol": "Field", "file": "/p/f.py", "score": 0.9, "content": "x"}]
         assert affordance_expand_to_symbol(results) is False
+
+
+# ---------------------------------------------------------------------------
+# run_case — manual bucket (UPG-ACCEPTANCE-HARNESS-F35-CRASH)
+#
+# A case whose 'expect' dict has no key this harness evaluates (a free-text
+# 'notes'-only entry, or an unimplemented assertion primitive) must be
+# reported as a distinct "manual" result, never silently counted as a pass.
+# ---------------------------------------------------------------------------
+
+class TestRunCaseManualBucket:
+    def test_notes_only_case_is_manual_not_pass(self, monkeypatch) -> None:
+        monkeypatch.setattr(run_acceptance, "_post", lambda base, path, body: {"results": []})
+        case = {"id": "x", "query": "q", "expect": {"notes": "free text only"}}
+        ok, messages = run_case(case, "http://localhost:0")
+        assert ok is None
+        assert any("MANUAL" in m for m in messages)
+
+    def test_unimplemented_primitive_only_is_manual_not_pass(self, monkeypatch) -> None:
+        """e.g. F56's 'top_k_contains_any_of' — a real corpus key this
+        harness does not (yet) implement an evaluator for."""
+        monkeypatch.setattr(run_acceptance, "_post", lambda base, path, body: {"results": []})
+        case = {"id": "x", "query": "q",
+                "expect": {"top_k_contains_any_of": [{"symbol": "a"}, {"symbol": "b"}]}}
+        ok, messages = run_case(case, "http://localhost:0")
+        assert ok is None
+
+    def test_scores_in_unit_interval_and_uniform_score_source_wired(self, monkeypatch) -> None:
+        """The restamped F1c/F12 expect shape end-to-end through run_case."""
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [
+                {"symbol": "Field.deconstruct", "file": "/p/f.py", "score": 0.95,
+                 "score_source": "reranker"},
+                {"symbol": "BloomIndex.deconstruct", "file": "/p/f2.py", "score": 0.80,
+                 "score_source": "reranker"},
+            ]},
+        )
+        case = {"id": "F1c", "query": "q",
+                "expect": {"scores_in_unit_interval": True, "uniform_score_source": True}}
+        ok, messages = run_case(case, "http://localhost:0")
+        assert ok is True
+        assert any("scores_in_unit_interval" in m for m in messages)
+        assert any("uniform_score_source" in m for m in messages)
+
+    def test_scores_in_unit_interval_fires_on_unbounded_score(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [
+                {"symbol": "Field.deconstruct", "file": "/p/f.py", "score": 1.2,
+                 "score_source": "dense"},
+            ]},
+        )
+        case = {"id": "x", "query": "q", "expect": {"scores_in_unit_interval": True}}
+        ok, _ = run_case(case, "http://localhost:0")
+        assert ok is False
+
+    def test_uniform_score_source_fires_on_mixed_set(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [
+                {"symbol": "a", "file": "/p/f.py", "score": 0.9, "score_source": "reranker"},
+                {"symbol": "b", "file": "/p/f.py", "score": 0.5, "score_source": "dense"},
+            ]},
+        )
+        case = {"id": "x", "query": "q", "expect": {"uniform_score_source": True}}
+        ok, _ = run_case(case, "http://localhost:0")
+        assert ok is False
+
+    def test_recognized_assertion_still_returns_bool(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [{"symbol": "Field.deconstruct", "file": "/p/f.py"}]},
+        )
+        case = {"id": "x", "query": "q",
+                "expect": {"top_k_contains": {"k": 3, "symbol": "Field.deconstruct"}}}
+        ok, _ = run_case(case, "http://localhost:0")
+        assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# main() — a malformed corpus entry must never truncate the rest of the run;
+# the summary must count pass/fail/error/manual separately
+# (UPG-ACCEPTANCE-HARNESS-F35-CRASH).
+#
+# HTTP is mocked at the _get/_post module-function level — zero daemon calls.
+# ---------------------------------------------------------------------------
+
+def _fake_get(base: str, path: str) -> dict:
+    assert path == "/v1/status"
+    return {"indexed_files": 1, "total_chunks": 1, "languages": []}
+
+
+def _fake_post(base: str, path: str, body: dict) -> dict:
+    assert path == "/v1/search"
+    return {
+        "results": [
+            {"file": "/p/fields/__init__.py", "symbol": "Field.deconstruct",
+             "score": 1.0, "symbol_start_line": 10, "symbol_end_line": 20},
+        ]
+    }
+
+
+class TestMainErrorHandlingAndBuckets:
+    def test_malformed_case_reported_as_error_and_run_continues(
+        self, tmp_path, monkeypatch, capsys,
+    ) -> None:
+        cases = [
+            {"id": "good-case", "query": "q1",
+             "expect": {"top_k_contains": {"k": 3, "symbol": "Field.deconstruct"}}},
+            # Malformed: top_k_absent with no 'k' key at all -> KeyError deep
+            # inside run_case, which main() must catch rather than crash on.
+            {"id": "malformed-case", "query": "q2",
+             "expect": {"top_k_absent": {"symbol": "read"}}},
+            # F35's real recorded shape (file-only, no 'symbol' key at all) —
+            # must evaluate cleanly, not crash, now that top_k_absent
+            # accepts file= as an independent criterion.
+            {"id": "f35-style-case", "query": "q3",
+             "expect": {"top_k_absent": {"k": 5, "file": "some/other/file.js"}}},
+            # No recognized assertion key -> MANUAL, not silently PASS.
+            {"id": "manual-case", "query": "q4",
+             "expect": {"notes": "free text only, nothing to check"}},
+        ]
+        cases_path = tmp_path / "mini_cases.jsonl"
+        with open(cases_path, "w") as fh:
+            for c in cases:
+                fh.write(json.dumps(c) + "\n")
+
+        monkeypatch.setattr(run_acceptance, "_CASES_PATH", cases_path)
+        monkeypatch.setattr(run_acceptance, "_get", _fake_get)
+        monkeypatch.setattr(run_acceptance, "_post", _fake_post)
+
+        exit_code = main(["--port", "9999"])
+        out = capsys.readouterr().out
+
+        assert "[ERROR] malformed-case" in out
+        assert "KeyError" in out
+        # the run must continue past the malformed case to evaluate the rest...
+        assert "f35-style-case" in out
+        assert "[MANUAL] manual-case" in out
+        assert "good-case" in out
+        assert "Results: 2 pass / 0 fail / 1 error / 1 manual / 0 skip  (4 total)" in out
+        # an error must fail the gate (non-zero exit), not be swallowed
+        assert exit_code == 1
