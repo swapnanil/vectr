@@ -1028,3 +1028,55 @@ class TestDeferSearchInit:
         with patch.object(svc._indexer, "close", wraps=svc._indexer.close) as spy_close:
             svc.shutdown()
         spy_close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# UPG-MAP-VENV-WALK: get_map() must thread the indexer's real file list
+# through to PassportStore.format_for_llm, not just language_stats — the
+# missing link that let the raw-metadata path's import-graph/community
+# detection fall back to an unbounded, unexcluded directory walk (which
+# hangs for minutes on any repo with an in-repo virtualenv).
+# ---------------------------------------------------------------------------
+
+class TestGetMapThreadsIndexedFiles:
+    def test_forwards_indexer_file_list_and_language_stats(self) -> None:
+        """Service-level test with a stub indexer/passport-store (mirrors the
+        `VectrService.__new__` stub pattern in test_fetch_route.py) — asserts
+        get_map() passes both `indexed_files` and `language_stats` through to
+        `PassportStore.format_for_llm`."""
+        from app.service import VectrService
+
+        svc = VectrService.__new__(VectrService)
+        svc._workspace_root = "/ws"
+        svc._indexer = type("_I", (), {})()
+        svc._indexer.indexed_file_paths = ["/ws/a.py", "/ws/b.py"]
+        svc._indexer.indexed_language_stats = lambda: {"python": {"files": 2, "chunks": 4}}
+
+        calls = []
+        svc._passport_store = type("_P", (), {})()
+        svc._passport_store.format_for_llm = (
+            lambda workspace_root, **kw: calls.append((workspace_root, kw)) or "# Passport"
+        )
+
+        result = svc.get_map()
+
+        assert result == "# Passport"
+        workspace_root, kwargs = calls[0]
+        assert workspace_root == "/ws"
+        assert kwargs["indexed_files"] == ["/ws/a.py", "/ws/b.py"]
+        assert kwargs["language_stats"] == {"python": {"files": 2, "chunks": 4}}
+
+    def test_returns_still_initializing_message_when_indexer_none(self) -> None:
+        """Defensive guard for the phase-2 warm-up window: every transport
+        already gates non-memory tools on `fully_ready` before reaching
+        get_map() (routes.py's `_require_fully_ready`, mcp_server/_stdio.py's
+        `MEMORY_READY_TOOLS` gate), so `self._indexer` is never None on a
+        supported transport — this keeps the method itself from crashing
+        with an AttributeError if it's ever reached early."""
+        from app.service import VectrService, _STILL_INITIALIZING_MSG
+
+        svc = VectrService.__new__(VectrService)
+        svc._workspace_root = "/ws"
+        svc._indexer = None
+
+        assert svc.get_map() == _STILL_INITIALIZING_MSG

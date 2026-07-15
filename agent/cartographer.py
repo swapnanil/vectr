@@ -155,9 +155,21 @@ def _build_import_graph(workspace_root: str, indexed_files: list[str] | None = N
         candidate_files = [Path(f) for f in indexed_files
                            if Path(f).suffix.lower() in {".py", ".js", ".ts", ".jsx", ".tsx"}]
     else:
+        # Fallback for a caller with no real indexed-file list yet (e.g. the
+        # very first vectr_map call before background indexing completes).
+        # Must prune the same excluded/hidden directories as the indexer and
+        # `_build_directory_sketch` above (EXCLUDED_DIRS + dot-directories) —
+        # an unpruned walk would descend into an in-repo virtualenv or
+        # node_modules and build a graph over dependency code instead of the
+        # workspace's own source (UPG-MAP-VENV-WALK).
+        from agent.indexer import EXCLUDED_DIRS
+
         candidate_files = []
-        for f in root.rglob("*.py"):
-            candidate_files.append(f)
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS and not d.startswith(".")]
+            for fname in filenames:
+                if fname.endswith(".py"):
+                    candidate_files.append(Path(dirpath) / fname)
 
     # Build a name → path index for quick resolution
     name_index: dict[str, Path] = {}
@@ -392,6 +404,7 @@ class PassportStore:
         self,
         workspace_root: str,
         language_stats: dict[str, dict[str, int]] | None = None,
+        indexed_files: list[str] | None = None,
     ) -> str:
         """
         Return passport for AI consumption.
@@ -401,6 +414,12 @@ class PassportStore:
         `language_stats` (real indexer coverage) is forwarded to
         `collect_raw_metadata` so the raw-metadata path reports the languages
         vectr actually indexed rather than a directory-walk guess (UPG-6.1).
+
+        `indexed_files` (the indexer's real file list) is forwarded the same
+        way so the import-graph/module-community detection inside
+        `collect_raw_metadata` walks only the workspace's actual indexed
+        files rather than falling back to an unbounded directory walk that
+        could descend into an in-repo virtualenv (UPG-MAP-VENV-WALK).
         """
         p = self.load()
         if p and p.get("summary"):
@@ -424,5 +443,7 @@ class PassportStore:
 
         # No passport yet — return raw metadata so the AI can synthesise one
         logger.info("PassportStore: no passport found, returning raw metadata for %s", workspace_root)
-        metadata = collect_raw_metadata(workspace_root, language_stats=language_stats)
+        metadata = collect_raw_metadata(
+            workspace_root, indexed_files=indexed_files, language_stats=language_stats
+        )
         return format_raw_metadata_for_llm(metadata)
