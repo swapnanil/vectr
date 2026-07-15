@@ -674,6 +674,29 @@ behavior:
     - symbol
     - symbol_name
 
+memory_hygiene:
+  # UPG-TASK-SUPERSEDES-HYGIENE: kind="task" notes are current-work
+  # checkpoints, not relevance-ranked learnings, and (per KIND_DEFAULT_SCOPES)
+  # they keep firing at every session-start until explicitly superseded or
+  # forgotten — a task note left un-superseded after the work moves on is
+  # dead weight that never decays (decay/auto-expiry is out of scope by
+  # design; this is a nudge, not a lifecycle change). `vectr_status` surfaces
+  # a one-line warning, driven by these two thresholds, when stale task notes
+  # accumulate — the caller decides whether to supersede or forget.
+
+  # Minimum number of live (non-superseded, non-tombstoned) kind="task" notes
+  # older than stale_task_warn_age_days before the vectr_status warning fires.
+  # 3 was picked as "a small pile, not a single stale note" — one old task
+  # note is normal (the current checkpoint ages before it's replaced); three
+  # or more suggests checkpoints are being left behind instead of superseded.
+  stale_task_warn_count: 3
+
+  # Age (in days) after which a kind="task" note counts toward the stale
+  # count above. 7 days ≈ "outlived a typical work week" — long enough that a
+  # task note genuinely still in progress isn't flagged, short enough that a
+  # note from last month's finished work gets surfaced.
+  stale_task_warn_age_days: 7
+
 symbol_graph:
   # UPG-JSFLOW-SYMBOLS: language keywords that must never be minted as a
   # symbol name or call-edge target. A desynced parse (e.g. Flow syntax

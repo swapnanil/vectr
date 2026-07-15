@@ -1566,6 +1566,46 @@ class WorkingContextStore:
             ).fetchone()
         return row[0] if row else 0
 
+    def stale_task_summary(self, workspace: str, min_age_days: float) -> tuple[int, int | None]:
+        """Count live (non-superseded, non-tombstoned) kind="task" notes older
+        than min_age_days, plus the oldest such note's id.
+
+        Feeds the `vectr_status` memory-hygiene nudge (UPG-TASK-SUPERSEDES-
+        HYGIENE): a task note left un-superseded keeps firing at every
+        session-start forever, so the count/oldest-id pair lets the caller
+        surface a one-line "consider supersedes/forget" warning. State-based
+        only (kind + age + tombstone status) — never inspects note content,
+        never mutates or expires anything itself.
+
+        A note counts as "live" here the same way recall() treats it by
+        default: valid_until IS NULL (an explicit tombstone via supersedes
+        excludes a note from ever firing again, so it must not double-count
+        toward staleness pressure). Oldest is by created_at ASC, note_id ASC
+        tie-break, matching the ordering convention used elsewhere in this
+        store.
+        """
+        cutoff = time.time() - min_age_days * 86400
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*), (
+                    SELECT note_id FROM notes
+                    WHERE workspace = ? AND kind = 'task' AND valid_until IS NULL
+                          AND created_at < ?
+                    ORDER BY created_at ASC, note_id ASC LIMIT 1
+                )
+                FROM notes
+                WHERE workspace = ? AND kind = 'task' AND valid_until IS NULL
+                      AND created_at < ?
+                """,
+                (workspace, cutoff, workspace, cutoff),
+            ).fetchone()
+        if not row:
+            return 0, None
+        count = row[0] or 0
+        oldest_id = row[1] if row[1] is not None else None
+        return count, oldest_id
+
     def forget_all(self, workspace: str) -> int:
         """Clear all notes AND snapshots for a workspace.
 

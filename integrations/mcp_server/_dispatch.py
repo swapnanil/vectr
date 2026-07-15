@@ -4,7 +4,11 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from agent.config import SYMBOL_NAME_PARAM_ALIASES
+from agent.config import (
+    SYMBOL_NAME_PARAM_ALIASES,
+    MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
+    MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
+)
 from integrations.mcp_server._schemas import (
     _EXPLORATION_TOOLS,
     _MEMORY_WRITE_TOOLS,
@@ -328,6 +332,22 @@ def handle_tools_call(
                 f"model {notes_mismatch!r} but {status['embed_model']!r} is "
                 "configured — semantic recall ranking may be degraded until "
                 "migration completes on the next restart"
+            )
+
+        # UPG-TASK-SUPERSEDES-HYGIENE: a nudge, not a lifecycle change — task
+        # notes never decay or auto-expire, so a stale checkpoint left
+        # un-superseded keeps firing at every future session-start forever.
+        # Purely additive/state-based: fires once the live (non-superseded)
+        # count of aged kind="task" notes clears the config threshold.
+        stale_task_count = status.get("stale_task_count", 0)
+        if stale_task_count >= MEMORY_HYGIENE_STALE_TASK_WARN_COUNT:
+            oldest_id = status.get("stale_task_oldest_id")
+            lines.append(
+                f"  WARNING        : {stale_task_count} task note(s) are older than "
+                f"{MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS} days and still active "
+                f"(oldest: #{oldest_id}) — consider vectr_remember(kind=\"task\", "
+                "supersedes=<old id>) if the work moved on, or vectr_forget(note_id=...) "
+                "if it's done"
             )
 
         # Per-language coverage + symbol availability (UPG-3.3). Tells the agent

@@ -291,7 +291,11 @@ _MEMORY_WRITE_TOOLS = [
                         "Memory kind, controlling how the note is injected (default 'finding'): "
                         "'directive' = a must-never-miss rule, injected unconditionally every session; "
                         "'task' = current-work context; 'gotcha' = a file/path-anchored caveat; "
-                        "'finding' = a relevance-ranked learning; 'reference' = a pointer (URL/ticket)."
+                        "'finding' = a relevance-ranked learning; 'reference' = a pointer (URL/ticket). "
+                        "When a new kind='task' note replaces an earlier checkpoint (the work moved on, "
+                        "the old note is no longer the current state), pass supersedes=<old note_id> so "
+                        "the stale checkpoint stops firing at every future session-start instead of "
+                        "piling up alongside the new one."
                     ),
                     "default": "finding",
                     "enum": ["directive", "task", "gotcha", "finding", "reference"],
@@ -386,7 +390,10 @@ _MEMORY_WRITE_TOOLS = [
                         "Optional: the note_id this new note replaces. The old note is retired "
                         "(excluded from recall and from ever firing again) but kept for audit — "
                         "use this instead of vectr_forget when you want the old note's history "
-                        "preserved."
+                        "preserved. Especially important for kind='task' checkpoints: a stale "
+                        "task note keeps firing at every session-start forever until it is "
+                        "explicitly superseded or forgotten, so pass the old note's id here "
+                        "whenever a new task note is really just an update to it."
                     ),
                 },
             },

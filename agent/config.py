@@ -128,6 +128,16 @@ SYMBOL_NAME_PARAM_ALIASES : tuple[str, ...]
     positional trains callers to guess a wrong key; the dispatch layer accepts
     these as drop-in aliases so the call succeeds instead of erroring.
 
+MEMORY_HYGIENE_STALE_TASK_WARN_COUNT : int
+    Minimum number of live kind="task" notes older than
+    MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS before vectr_status appends a
+    stale-task nudge (UPG-TASK-SUPERSEDES-HYGIENE). Additive/state-based only
+    — never mutates or expires notes.
+
+MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS : int
+    Age in days after which a kind="task" note counts toward the stale count
+    above (UPG-TASK-SUPERSEDES-HYGIENE).
+
 LOCATE_LARGE_SPAN_THRESHOLD : int
     Line-span (end_line - start_line) at or above which a located symbol is
     considered "large" — typically a canonical library class or function (UPG-15.10).
@@ -757,3 +767,12 @@ _trig_theta_cfg: dict[str, Any] = _trig_semantic_cfg["theta_by_kind"]
 MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND: dict[str, float] = {
     kind: float(_trig_theta_cfg[kind]) for kind in MEMORY_TRIGGER_KIND_PRIORITY
 }
+
+# ---------------------------------------------------------------------------
+# UPG-TASK-SUPERSEDES-HYGIENE: vectr_status stale-task nudge thresholds.
+# Nudge only — never decay, auto-supersede, or auto-expire a note.
+# ---------------------------------------------------------------------------
+
+_hygiene_cfg: dict[str, Any] = _cfg["memory_hygiene"]
+MEMORY_HYGIENE_STALE_TASK_WARN_COUNT: int = int(_hygiene_cfg["stale_task_warn_count"])
+MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS: int = int(_hygiene_cfg["stale_task_warn_age_days"])

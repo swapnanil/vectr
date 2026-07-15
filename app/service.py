@@ -20,6 +20,7 @@ from agent.config import (
     EVICTION_MAX_TRACKED_SESSIONS,
     HOOKS_LOG_INJECTIONS,
     HOOKS_LOG_CHARS_PER_TOKEN,
+    MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
 )
 from agent.eviction_advisor import EvictionAdvisor
 from agent.trigger_engine import TriggerFireLedger
@@ -1064,6 +1065,10 @@ class VectrService:
         reindex_in_progress = (
             self._index_lock.locked() or watcher_status.get("watcher_batch_running", False)
         )
+        # UPG-TASK-SUPERSEDES-HYGIENE: a stale-task nudge, not a lifecycle
+        # change — surfaced unconditionally so the caller (MCP handler / REST
+        # consumer) decides whether the count clears the warn threshold.
+        stale_task_count, stale_task_oldest_id = self.stale_task_summary()
         return {
             "indexed_files": self._indexer.indexed_file_count if self._indexer else 0,
             "total_chunks": self._indexer.total_chunks if self._indexer else 0,
@@ -1076,6 +1081,13 @@ class VectrService:
             ),
             "languages": self._language_coverage(),
             "notes_count": self.count_notes(),
+            # UPG-TASK-SUPERSEDES-HYGIENE: count of live kind="task" notes
+            # older than MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS, plus the
+            # oldest such note's id (None if there are none). The MCP/REST
+            # surfaces append a one-line nudge once count clears
+            # MEMORY_HYGIENE_STALE_TASK_WARN_COUNT.
+            "stale_task_count": stale_task_count,
+            "stale_task_oldest_id": stale_task_oldest_id,
             "grammars_unavailable": missing,
             "mode": mode,
             "version_stamp": self._version_stamp,
@@ -1743,6 +1755,19 @@ class VectrService:
         if self._context_store is None:
             return 0
         return self._context_store.count_notes(self._workspace_root)
+
+    def stale_task_summary(self) -> tuple[int, int | None]:
+        """Count of live kind="task" notes older than
+        MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS, plus the oldest such note's
+        id (UPG-TASK-SUPERSEDES-HYGIENE). Feeds the `vectr_status`
+        memory-hygiene nudge. Search-only mode has no context store — always
+        (0, None), never an error.
+        """
+        if self._context_store is None:
+            return 0, None
+        return self._context_store.stale_task_summary(
+            self._workspace_root, MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS
+        )
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------

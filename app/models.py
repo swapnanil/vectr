@@ -193,6 +193,12 @@ class StatusResponse(BaseModel):
     # constructed with defer_search_init=True.
     fully_ready: bool = True
     embedder_ready: bool = True
+    # UPG-TASK-SUPERSEDES-HYGIENE: count of live (non-superseded) kind="task"
+    # notes older than MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS, plus the
+    # oldest such note's id (None if there are none or the count is 0). A
+    # nudge only — task notes are never auto-superseded or expired.
+    stale_task_count: int = 0
+    stale_task_oldest_id: int | None = None
 
 
 class HealthResponse(BaseModel):
