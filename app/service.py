@@ -1188,9 +1188,25 @@ class VectrService:
 
         Raw-metadata language detection uses the indexer's real per-language
         coverage (UPG-6.1) rather than a directory-walk extension guess.
+
+        Raw-metadata import-graph/module-community detection is built only
+        over the indexer's real file list (`indexed_file_paths`), forwarded
+        here the same way — never an unbounded directory walk that could
+        descend into an in-repo virtualenv (UPG-MAP-VENV-WALK).
+
+        Guarded for the phase-2 warm-up window: every transport gates
+        non-memory tools on `fully_ready` before reaching this method
+        (routes.py's `_require_fully_ready`, mcp_server/_stdio.py's
+        `MEMORY_READY_TOOLS` gate), so `self._indexer` is never None on a
+        supported transport — this early return is a defensive fallback,
+        not a reachable path.
         """
+        if self._indexer is None:
+            return _STILL_INITIALIZING_MSG
         return self._passport_store.format_for_llm(
-            self._workspace_root, language_stats=self._indexer.indexed_language_stats()
+            self._workspace_root,
+            language_stats=self._indexer.indexed_language_stats(),
+            indexed_files=self._indexer.indexed_file_paths,
         )
 
     # ------------------------------------------------------------------

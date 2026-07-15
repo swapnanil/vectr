@@ -245,6 +245,95 @@ class TestPassportOverwriteGuard:
 
 
 # ---------------------------------------------------------------------------
+# UPG-MAP-VENV-WALK: _build_import_graph's no-indexed-files fallback must
+# never walk into an in-repo virtualenv (or any other excluded/hidden dir)
+# ---------------------------------------------------------------------------
+
+class TestBuildImportGraphFallbackExclusions:
+    def test_fallback_excludes_venv_directory(self, tmp_path) -> None:
+        """Regression test for the venv-walk hang (UPG-MAP-VENV-WALK):
+        with no indexed_files list, the fallback walk must still skip
+        EXCLUDED_DIRS (here `.venv`) — previously a bare `root.rglob('*.py')`
+        walked every file under an in-repo virtualenv's site-packages,
+        producing tens of thousands of spurious graph nodes and a
+        multi-minute community-detection hang on any repo that vendors its
+        own venv (measured 439.8s on the vectr repo itself)."""
+        (tmp_path / "real.py").write_text("import helper\n")
+        (tmp_path / "helper.py").write_text("x = 1\n")
+
+        venv_pkg = tmp_path / ".venv" / "lib" / "python3.11" / "site-packages" / "somepkg"
+        venv_pkg.mkdir(parents=True)
+        (venv_pkg / "__init__.py").write_text("import os\n")
+        (venv_pkg / "mod.py").write_text("x = 2\n")
+
+        from agent.cartographer import _build_import_graph
+        graph = _build_import_graph(str(tmp_path), None)
+
+        assert any(k.endswith("real.py") for k in graph)
+        assert any(k.endswith("helper.py") for k in graph)
+        assert not any(".venv" in k for k in graph)
+
+    def test_fallback_excludes_hidden_directories(self, tmp_path) -> None:
+        """Any dot-directory (not just `.venv`) is pruned — mirrors
+        `_build_directory_sketch`'s hidden-dir exclusion above."""
+        (tmp_path / "app.py").write_text("x = 1\n")
+        hidden = tmp_path / ".cache" / "generated"
+        hidden.mkdir(parents=True)
+        (hidden / "junk.py").write_text("x = 2\n")
+
+        from agent.cartographer import _build_import_graph
+        graph = _build_import_graph(str(tmp_path), None)
+
+        assert any(k.endswith("app.py") for k in graph)
+        assert not any(".cache" in k for k in graph)
+
+    def test_explicit_indexed_files_still_takes_precedence(self, tmp_path) -> None:
+        """The explicit indexed_files list (the path every real caller now
+        uses via UPG-MAP-VENV-WALK) remains authoritative — the directory-walk
+        fallback only runs when it's None/empty."""
+        (tmp_path / "real.py").write_text("x = 1\n")
+        venv_dir = tmp_path / ".venv"
+        venv_dir.mkdir()
+        (venv_dir / "sneaky.py").write_text("x = 2\n")
+
+        from agent.cartographer import _build_import_graph
+        real = str(tmp_path / "real.py")
+        graph = _build_import_graph(str(tmp_path), [real])
+
+        assert list(graph.keys()) == [real]
+
+
+class TestPassportStoreForwardsIndexedFiles:
+    def test_format_for_llm_forwards_indexed_files_to_collect_raw_metadata(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """UPG-MAP-VENV-WALK: format_for_llm previously accepted no
+        indexed_files parameter at all, so collect_raw_metadata() (and, via
+        it, detect_module_communities()/_build_import_graph()) always saw
+        None regardless of what the caller (VectrService.get_map) knew about
+        the real indexed file list. Assert the kwarg is threaded through."""
+        import agent.cartographer as cartographer
+
+        captured: dict = {}
+
+        def _fake_collect_raw_metadata(workspace_root, indexed_files=None, language_stats=None):
+            captured["indexed_files"] = indexed_files
+            return {
+                "workspace_name": "x", "languages": [], "frameworks": [],
+                "structure": {}, "readme_excerpt": "", "module_communities": [],
+                "collected_at": 0.0,
+            }
+
+        monkeypatch.setattr(cartographer, "collect_raw_metadata", _fake_collect_raw_metadata)
+
+        store = cartographer.PassportStore(str(tmp_path))
+        files = [str(tmp_path / "a.py"), str(tmp_path / "b.py")]
+        store.format_for_llm(str(tmp_path), indexed_files=files)
+
+        assert captured["indexed_files"] == files
+
+
+# ---------------------------------------------------------------------------
 # T27: Louvain community detection
 # ---------------------------------------------------------------------------
 
