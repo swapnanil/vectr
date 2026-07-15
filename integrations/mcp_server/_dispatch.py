@@ -412,10 +412,15 @@ def handle_tools_call(
         # inject adaptive instruction style hint at session start
         try:
             style = service.suggest_instruction_style()
+            # UPG-TOOLSTYLE-LABEL-COLLISION: this is a CLAUDE.md authoring-style
+            # label, unrelated to the "Mode" line above (full/memory-only/
+            # search-only, from service.status()) — "memory-first" (not
+            # "memory-only") so the two never render side by side looking
+            # contradictory, e.g. "Mode: full" next to "Tool style: [memory-only]".
             style_hints = {
-                "additive":    "Use vectr tools when they'd be faster than reading files — see CLAUDE.md.",
-                "directed":    "This is a large/unfamiliar codebase. Use vectr_map → vectr_search → vectr_locate before reading files.",
-                "memory-only": "Prior notes exist. Call vectr_recall(query=...) first; use search only to fill gaps.",
+                "additive":     "Use vectr tools when they'd be faster than reading files — see CLAUDE.md.",
+                "directed":     "This is a large/unfamiliar codebase. Use vectr_map → vectr_search → vectr_locate before reading files.",
+                "memory-first": "Prior notes exist. Call vectr_recall(query=...) first; use search only to fill gaps.",
             }
             hint = style_hints.get(style, "")
             if hint:
@@ -604,8 +609,26 @@ def handle_tools_call(
         _reset_calls_since_save(session_id)
         service.note_remembered(session_id=session_id)
         enable_memory_for_session(session_id)
+        # UPG-SCOPE-SURFACE-BACK: an omitted scope is resolved from `kind`'s
+        # default at write time (UPG-TRIGGER-SCOPE-KIND-DEFAULTS), but that
+        # resolution was write-only — the caller had no way to learn where
+        # the note actually landed without a separate vectr_recall(detail=
+        # "full") round trip. One cheap primary-key getter (the same one the
+        # vectr_recall expand path already uses) surfaces it in this same
+        # confirmation instead. Best-effort: a lookup failure just omits the
+        # scope suffix rather than failing the whole write confirmation.
+        scope_suffix = ""
+        try:
+            stored_note = service.get_note(note_id)
+        except Exception:
+            stored_note = None
+        if stored_note is not None:
+            if stored_note.scope == "branch" and stored_note.branch:
+                scope_suffix = f" (scope=branch ({stored_note.branch}))"
+            else:
+                scope_suffix = f" (scope={stored_note.scope})"
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}. Recall with vectr_recall — <50ms, verbatim, any time."}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time."}],
             "isError": False,
         }
 

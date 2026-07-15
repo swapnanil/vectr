@@ -40,6 +40,7 @@ from integrations.mcp_server import (
 
 def _mock_service():
     from agent.searcher import SearchResult
+    from agent.working_context_store import WorkingNote
 
     svc = MagicMock()
     svc.total_chunks = 100
@@ -88,6 +89,14 @@ def _mock_service():
     svc.trace_with_snippets.return_value = {}
     svc.format_trace.return_value = "No trace."
     svc.remember.return_value = 42
+    # UPG-SCOPE-SURFACE-BACK: the MCP remember confirmation looks up the
+    # resolved note via get_note() to surface its scope — a real WorkingNote
+    # (not a bare MagicMock stand-in) so that lookup renders a real scope
+    # value instead of a MagicMock repr in every confirmation text below.
+    svc.get_note.return_value = WorkingNote(
+        note_id=42, workspace="/repo", content="stub", tags=[], priority="medium",
+        created_at=0.0, last_accessed=0.0, kind="finding", scope="workspace",
+    )
     svc.recall.return_value = "# Notes\n[1] [HIGH] some note\n"
     svc.eviction_hint.return_value = ""
     svc.auto_eviction_hint.return_value = ""   # UPG-7.1: gated per-response footer
@@ -705,6 +714,27 @@ class TestVectrStatus:
         assert "vectr_recall" not in text.replace("skip vectr_recall", "").replace("no prior", ""), \
             "when notes_count == 0, must not prompt agent to call recall"
 
+    def test_tool_style_hint_shown_for_memory_first(self) -> None:
+        svc = _mock_service()
+        svc.suggest_instruction_style.return_value = "memory-first"
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "Tool style" in text
+        assert "[memory-first]" in text
+
+    def test_tool_style_label_never_collides_with_mode_label(self) -> None:
+        """UPG-TOOLSTYLE-LABEL-COLLISION: the CLAUDE.md authoring-style hint
+        ("Tool style") and the operating-mode line ("Mode") render in the
+        same vectr_status block — they must never share a literal value, or
+        "Mode: full" next to "Tool style: [memory-only]" reads as a
+        self-contradictory status (search enabled, yet "memory-only")."""
+        svc = _mock_service()
+        svc.status.return_value = {**svc.status.return_value, "mode": "full"}
+        svc.suggest_instruction_style.return_value = "memory-first"
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "Mode           : full" in text
+        assert "[memory-first]" in text
+        assert "memory-only" not in text
+
 
 # ---------------------------------------------------------------------------
 # vectr_map / vectr_map_save
@@ -1027,6 +1057,16 @@ class TestVectrRemember:
         assert result["isError"] is False
         assert "42" in result["content"][0]["text"]
 
+    def test_remember_confirmation_surfaces_resolved_scope(self) -> None:
+        """UPG-SCOPE-SURFACE-BACK: the confirmation names the RESOLVED scope
+        (get_note()'s return, mocked as scope="workspace" — see
+        _mock_service) rather than leaving scope resolution write-only."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_remember", {"content": "Found auth bug"}, svc)
+        assert result["isError"] is False
+        svc.get_note.assert_called_once_with(42)
+        assert "scope=workspace" in result["content"][0]["text"]
+
     def test_remember_with_tags_and_priority(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {
@@ -1197,6 +1237,63 @@ class TestVectrRemember:
         }, svc)
         assert result["isError"] is True
         assert "human" in result["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# UPG-SCOPE-SURFACE-BACK — resolved scope end to end, through a REAL store
+# ---------------------------------------------------------------------------
+
+class TestVectrRememberResolvedScopeEndToEnd:
+    """kind="task" defaults to scope="branch" (UPG-TRIGGER-SCOPE-KIND-DEFAULTS),
+    resolved by the REAL store at write time — a real git branch in a git
+    workspace, falling back to scope="workspace" in a non-git one (the
+    silent-death guard: baking scope="branch" with no branch value would
+    exclude the note from firing on every future branch, forever). Exercises
+    the REAL VectrService + WorkingContextStore (not the MagicMock service
+    used elsewhere in this file) so the scope shown in the MCP confirmation
+    is the store's actual write-time decision, not a stubbed one."""
+
+    def _make_service(self, tmp_path, monkeypatch):
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+        return svc
+
+    def _init_git_repo(self, tmp_path, branch: str = "main") -> None:
+        import subprocess
+        run = lambda *args: subprocess.run(args, cwd=str(tmp_path), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        run("git", "config", "user.email", "test@test.com")
+        run("git", "config", "user.name", "test")
+        run("git", "commit", "--allow-empty", "-q", "-m", "init")
+
+    def test_task_note_shows_resolved_branch_scope_in_git_workspace(self, tmp_path, monkeypatch) -> None:
+        self._init_git_repo(tmp_path, branch="main")
+        svc = self._make_service(tmp_path, monkeypatch)
+        result = handle_tools_call(
+            "vectr_remember", {"content": "current work on segment targeting", "kind": "task"}, svc,
+        )
+        assert result["isError"] is False
+        assert "scope=branch (main)" in result["content"][0]["text"]
+
+    def test_task_note_falls_back_to_workspace_scope_in_non_git_workspace(self, tmp_path, monkeypatch) -> None:
+        # No git init here — a plain directory, no git work tree at all.
+        svc = self._make_service(tmp_path, monkeypatch)
+        result = handle_tools_call(
+            "vectr_remember", {"content": "current work, no git here", "kind": "task"}, svc,
+        )
+        assert result["isError"] is False
+        text = result["content"][0]["text"]
+        assert "scope=workspace" in text
+        assert "scope=branch" not in text
 
 
 # ---------------------------------------------------------------------------

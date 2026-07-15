@@ -409,12 +409,23 @@ class TestSuggestInstructionStyle:
         (override_dir / "style").write_text("directed", encoding="utf-8")
         assert svc.suggest_instruction_style() == "directed"
 
-    def test_style_override_memory_only(self, tmp_path, monkeypatch) -> None:
+    def test_style_override_memory_first(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        override_dir = Path(svc._workspace_root) / ".vectr"
+        override_dir.mkdir(parents=True, exist_ok=True)
+        (override_dir / "style").write_text("memory-first", encoding="utf-8")
+        assert svc.suggest_instruction_style() == "memory-first"
+
+    def test_style_override_accepts_legacy_memory_only_value_on_disk(self, tmp_path, monkeypatch) -> None:
+        """UPG-TOOLSTYLE-LABEL-COLLISION: a .vectr/style file written by a
+        pre-rename `vectr init --style memory-only` run still says
+        "memory-only" on disk — it must keep resolving, normalized to the
+        current "memory-first" label, not fall through as an invalid override."""
         svc = self._make_service(tmp_path, monkeypatch)
         override_dir = Path(svc._workspace_root) / ".vectr"
         override_dir.mkdir(parents=True, exist_ok=True)
         (override_dir / "style").write_text("memory-only", encoding="utf-8")
-        assert svc.suggest_instruction_style() == "memory-only"
+        assert svc.suggest_instruction_style() == "memory-first"
 
     def test_invalid_override_falls_through_to_logic(self, tmp_path, monkeypatch) -> None:
         svc = self._make_service(tmp_path, monkeypatch)
@@ -443,7 +454,7 @@ class TestSuggestInstructionStyle:
             style = svc.suggest_instruction_style()
         assert style == "directed"
 
-    def test_notes_with_known_framework_returns_memory_only(self, tmp_path, monkeypatch) -> None:
+    def test_notes_with_known_framework_returns_memory_first(self, tmp_path, monkeypatch) -> None:
         from agent.strategy_selector import RetrievalStrategy, CodebaseFingerprint
         svc = self._make_service(tmp_path, monkeypatch)
         svc.index(str(tmp_path))
@@ -462,7 +473,7 @@ class TestSuggestInstructionStyle:
                 complexity_class="simple",
             )
             style = svc.suggest_instruction_style()
-        assert style == "memory-only"
+        assert style == "memory-first"
 
     def test_count_notes_returns_integer(self, tmp_path, monkeypatch) -> None:
         svc = self._make_service(tmp_path, monkeypatch)

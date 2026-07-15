@@ -2265,6 +2265,50 @@ class TestFormatNotesForLlmProvenanceFraming:
         assert f"superseded by @note#{new_id}" in output
 
 
+class TestFormatNotesForLlmScopeSurfaced:
+    """UPG-SCOPE-SURFACE-BACK: a note's resolved scope (write-time, per
+    UPG-TRIGGER-SCOPE-KIND-DEFAULTS) was previously visible nowhere after
+    remember() returned the note id. The full-tier render now shows it —
+    and the captured branch too, for scope=="branch" — so a caller can
+    diagnose why a scoped note does or doesn't fire without a second lookup."""
+
+    def test_full_tier_shows_workspace_scope(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a finding", scope="workspace")
+        notes = store.recall(ws)
+        output = store.format_notes_for_llm(notes, detail="full")
+        assert "[scope=workspace]" in output
+
+    def test_full_tier_shows_branch_scope_with_branch_name(self, tmp_path, monkeypatch) -> None:
+        import agent.working_context_store._store as store_mod
+        monkeypatch.setattr(store_mod, "_current_git_branch", lambda root: "feature/x")
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a branch-bound task", kind="task", priority="high")  # omitted -> branch default
+        notes = store.recall(ws)
+        output = store.format_notes_for_llm(notes, detail="full")
+        assert "[scope=branch (feature/x)]" in output
+
+    def test_full_tier_shows_bare_scope_when_branch_fallback_taken(self, tmp_path) -> None:
+        """A non-git workspace falls back to scope="workspace" (the
+        silent-death guard) — the render must show the value actually
+        stored, not "branch" with an empty/missing branch name."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a task note, no git here", kind="task", priority="high")
+        notes = store.recall(ws)
+        output = store.format_notes_for_llm(notes, detail="full")
+        assert "[scope=workspace]" in output
+        assert "[scope=branch" not in output
+
+    def test_index_tier_output_unaffected(self, tmp_path) -> None:
+        """Scope is additive to the full-tier render only — the index-tier
+        one-liner keeps its pre-existing, token-budgeted compact format."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "a finding", scope="repo")
+        notes = store.recall(ws)
+        output = store.format_notes_for_llm(notes, detail="index")
+        assert "scope=" not in output
+
+
 class TestFireEvaluation:
     def test_fire_returns_only_fired_notes(self, tmp_path) -> None:
         store, ws = _store(tmp_path), str(tmp_path)

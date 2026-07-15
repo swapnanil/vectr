@@ -1808,22 +1808,29 @@ class VectrService:
     def suggest_instruction_style(self) -> str:
         """Return the recommended CLAUDE.md instruction variant for this workspace.
 
-        Returns one of: "additive" | "directed" | "memory-only".
+        Returns one of: "additive" | "directed" | "memory-first".
 
         Decision logic (priority order):
         1. File override (.vectr/style) — always wins.
-        2. "memory-only"  — prior notes exist AND codebase is well-known (small
+        2. "memory-first" — prior notes exist AND codebase is well-known (small
                             or familiar framework) → recall-forward session.
         3. "directed"     — large or complex unfamiliar codebase → explicit tool
                             guidance reduces wasted exploration turns.
         4. "additive"     — default; model decides based on when-to-use hints.
 
-        Research basis: additive outperforms forced/memory-only in A/B tests
+        Research basis: additive outperforms forced/memory-first in A/B tests
         (spec §CLAUDE.md framing choices). directed is warranted only when
         codebase is genuinely unfamiliar at implementation depth.
+
+        Note: this is a CLAUDE.md *authoring-style* label, unrelated to
+        `memory_only` (the operating mode that hard-disables search — see
+        `status()`'s "mode" field). UPG-TOOLSTYLE-LABEL-COLLISION renamed
+        this label from the identical-looking "memory-only" string so the
+        two concepts never render side by side looking contradictory (e.g.
+        `vectr_status`'s "Mode: full" next to "Tool style: [memory-only]").
         """
         override = self._read_style_override()
-        if override in ("additive", "directed", "memory-only"):
+        if override in ("additive", "directed", "memory-first"):
             return override
 
         notes_count = self.count_notes()
@@ -1846,7 +1853,7 @@ class VectrService:
         )
 
         if notes_count > 0 and (known_codebase or (fp and fp.size_class == "small")):
-            return "memory-only"
+            return "memory-first"
 
         if fp is not None:
             is_large_unfamiliar = (
@@ -1860,9 +1867,20 @@ class VectrService:
         return "additive"
 
     def _read_style_override(self) -> str:
-        """Read .vectr/style file if present."""
+        """Read .vectr/style file if present.
+
+        UPG-TOOLSTYLE-LABEL-COLLISION renamed the "memory-only" style label
+        to "memory-first". A workspace whose .vectr/style file was written
+        by a pre-rename `vectr init --style memory-only` still has that
+        literal string on disk — accept it transparently on read (the file
+        is never rewritten here; only a fresh `vectr init --style ...` run
+        writes the current label).
+        """
         style_file = Path(self._workspace_root) / ".vectr" / "style"
         try:
-            return style_file.read_text(encoding="utf-8").strip()
+            raw = style_file.read_text(encoding="utf-8").strip()
         except OSError:
             return ""
+        if raw == "memory-only":
+            return "memory-first"
+        return raw
