@@ -1153,6 +1153,24 @@ embedding:
   # default's behavior; raise deliberately, with indexing throughput in mind.
   max_seq_length: 512
 
+  # Hard cap on the number of CPU threads the local (torch-backed) embedding
+  # model may use — applied via torch.set_num_threads/set_num_interop_threads
+  # at LocalEmbedProvider construction, so it also governs the cross-encoder
+  # reranker (same process-wide torch thread pool) (UPG-EMBED-THREAD-CONTENTION).
+  # Without a cap, a debounced watcher batch embed saturates every core and
+  # the HTTP event loop gets no scheduler slice — a live session's first MCP
+  # call (vectr_status/vectr_recall) can time out 30-60s even though no lock
+  # is held. 0 = auto: derive the cap from thread_cap_auto_fraction below
+  # instead of using this fixed value; a positive integer here is used
+  # verbatim as an operator override.
+  thread_cap: 0
+
+  # Fraction of the machine's CPU core count (os.cpu_count()) used to compute
+  # the auto thread cap when thread_cap is 0 above. 0.5 (half the cores,
+  # minimum 1) leaves the other half free for the HTTP event loop, the
+  # watcher's own file-scan work, and any concurrent MCP tool dispatch.
+  thread_cap_auto_fraction: 0.5
+
 fetch:
   # UPG-CTX-EVICT: deterministic re-fetch-by-chunk-id contract. Every chunk
   # already carries a stable id (`file_path:start_line-end_line`, the literal

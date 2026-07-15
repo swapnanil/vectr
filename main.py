@@ -730,7 +730,17 @@ def _resolve_workspace_roots(args: argparse.Namespace) -> list[str]:
     paths = getattr(args, "paths", None) or []
     if paths:
         return [str(Path(p).resolve()) for p in paths]
-    return [str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())]
+    from integrations.workspace_detect import validate_workspace_env, WorkspaceEnvError
+
+    raw = os.getenv("VECTR_WORKSPACE", ".")
+    # UPG-WORKSPACE-ENV-VALIDATE: a typo'd VECTR_WORKSPACE must fail loudly
+    # here rather than silently falling back to cwd detection below.
+    try:
+        validate_workspace_env(raw)
+    except WorkspaceEnvError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    return [str(Path(raw).resolve())]
 
 
 def _code_workspace_file_arg(args: argparse.Namespace) -> str | None:

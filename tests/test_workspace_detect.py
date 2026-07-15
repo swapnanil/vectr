@@ -577,3 +577,61 @@ class TestShouldIndexFileRegex:
         assert should_index_file(
             str(other), [], workspace_root=str(ws), extra_excluded_regexes=regexes
         ) is True
+
+
+# ---------------------------------------------------------------------------
+# validate_workspace_env (UPG-WORKSPACE-ENV-VALIDATE)
+# ---------------------------------------------------------------------------
+
+class TestValidateWorkspaceEnv:
+    """A typo'd VECTR_WORKSPACE must fail loudly instead of silently falling
+    back to cwd-based detection — see api.py's lifespan() and main.py's
+    _resolve_workspace_roots(), the two real call sites."""
+
+    def test_nonexistent_path_raises(self, tmp_path) -> None:
+        from integrations.workspace_detect import validate_workspace_env, WorkspaceEnvError
+
+        bad_path = str(tmp_path / "does-not-exist")
+        with pytest.raises(WorkspaceEnvError) as excinfo:
+            validate_workspace_env(bad_path)
+        assert bad_path in str(excinfo.value)
+
+    def test_path_that_is_a_file_not_a_directory_raises(self, tmp_path) -> None:
+        from integrations.workspace_detect import validate_workspace_env, WorkspaceEnvError
+
+        a_file = tmp_path / "not-a-dir.txt"
+        a_file.write_text("x", encoding="utf-8")
+        with pytest.raises(WorkspaceEnvError):
+            validate_workspace_env(str(a_file))
+
+    def test_valid_directory_does_not_raise(self, tmp_path) -> None:
+        from integrations.workspace_detect import validate_workspace_env
+
+        validate_workspace_env(str(tmp_path))  # must not raise
+
+    def test_empty_raw_path_is_a_no_op(self) -> None:
+        """Callers pass the already-defaulted value (e.g. "." when the env
+        var is unset) — an empty string is never actually produced by
+        os.getenv(..., "."), but validate_workspace_env must not raise on it
+        either, since it signals "nothing to validate"."""
+        from integrations.workspace_detect import validate_workspace_env
+
+        validate_workspace_env("")  # must not raise
+
+    def test_dot_default_never_raises(self, tmp_path, monkeypatch) -> None:
+        """The unset-env default ("." — always the existing cwd) must
+        never be rejected, so `VECTR_WORKSPACE` being unset is unaffected."""
+        from integrations.workspace_detect import validate_workspace_env
+
+        monkeypatch.chdir(tmp_path)
+        validate_workspace_env(".")  # must not raise
+
+    def test_error_message_names_the_bad_path_and_env_var(self, tmp_path) -> None:
+        from integrations.workspace_detect import validate_workspace_env, WorkspaceEnvError
+
+        bad_path = str(tmp_path / "ghost")
+        with pytest.raises(WorkspaceEnvError) as excinfo:
+            validate_workspace_env(bad_path, env_var="VECTR_WORKSPACE")
+        msg = str(excinfo.value)
+        assert "VECTR_WORKSPACE" in msg
+        assert bad_path in msg

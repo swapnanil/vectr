@@ -102,6 +102,31 @@ def client():
 
 
 # ---------------------------------------------------------------------------
+# UPG-WORKSPACE-ENV-VALIDATE: daemon startup fails loudly on a bad
+# VECTR_WORKSPACE rather than silently falling back to cwd detection.
+# ---------------------------------------------------------------------------
+
+class TestLifespanWorkspaceEnvValidation:
+    def test_bad_vectr_workspace_env_fails_startup(self, tmp_path, monkeypatch) -> None:
+        from integrations.workspace_detect import WorkspaceEnvError
+
+        bad_path = str(tmp_path / "does-not-exist")
+        monkeypatch.setenv("VECTR_WORKSPACE", bad_path)
+        with pytest.raises(WorkspaceEnvError) as excinfo:
+            with TestClient(app, raise_server_exceptions=True):
+                pass
+        assert bad_path in str(excinfo.value)
+
+    def test_valid_vectr_workspace_env_starts_normally(self, tmp_path, monkeypatch) -> None:
+        svc = _make_service()
+        monkeypatch.setenv("VECTR_WORKSPACE", str(tmp_path))
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=True) as c:
+                resp = c.get("/v1/health")
+                assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
@@ -339,6 +364,84 @@ def test_index_does_not_block_concurrent_status(client) -> None:
 
     assert status_resp.status_code == 200
     assert elapsed < 1.0, f"/v1/status took {elapsed:.2f}s while /v1/index was running"
+    assert results["resp"].status_code == 200
+
+
+def test_mcp_tools_call_does_not_block_concurrent_status(client) -> None:
+    """UPG-EMBED-THREAD-CONTENTION: POST /mcp's tools/call dispatch runs
+    handle_tools_call() in a threadpool (see app/routes.py), mirroring
+    /v1/index above — an embed-touching tool call (e.g. vectr_search) must
+    never block GET /v1/status from answering promptly on a concurrent
+    request, the same event-loop-starvation class as the index route."""
+    svc = client.app.state.service
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_search(query, n_results=5, language=None):
+        entered.set()
+        assert release.wait(timeout=5), "test never released the slow search call"
+        return ([], 0)
+
+    svc.search.side_effect = slow_search
+
+    results: dict[str, object] = {}
+
+    def do_tool_call() -> None:
+        results["resp"] = client.post("/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "vectr_search", "arguments": {"query": "rate limiter"}},
+        })
+
+    t = threading.Thread(target=do_tool_call)
+    t.start()
+    assert entered.wait(timeout=2), "slow /mcp tools/call handler never started"
+
+    t0 = time.monotonic()
+    status_resp = client.get("/v1/status")
+    elapsed = time.monotonic() - t0
+
+    release.set()
+    t.join(timeout=5)
+
+    assert status_resp.status_code == 200
+    assert elapsed < 1.0, f"/v1/status took {elapsed:.2f}s while /mcp tools/call was running"
+    assert results["resp"].status_code == 200
+    assert results["resp"].json()["result"]["isError"] is False
+
+
+def test_legacy_mcp_tools_call_does_not_block_concurrent_status(client) -> None:
+    """Same guard for the legacy POST /mcp/tools/call route."""
+    svc = client.app.state.service
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_search(query, n_results=5, language=None):
+        entered.set()
+        assert release.wait(timeout=5), "test never released the slow search call"
+        return ([], 0)
+
+    svc.search.side_effect = slow_search
+
+    results: dict[str, object] = {}
+
+    def do_tool_call() -> None:
+        results["resp"] = client.post(
+            "/mcp/tools/call", json={"name": "vectr_search", "arguments": {"query": "rate limiter"}},
+        )
+
+    t = threading.Thread(target=do_tool_call)
+    t.start()
+    assert entered.wait(timeout=2), "slow legacy /mcp/tools/call handler never started"
+
+    t0 = time.monotonic()
+    status_resp = client.get("/v1/status")
+    elapsed = time.monotonic() - t0
+
+    release.set()
+    t.join(timeout=5)
+
+    assert status_resp.status_code == 200
+    assert elapsed < 1.0, f"/v1/status took {elapsed:.2f}s while /mcp/tools/call was running"
     assert results["resp"].status_code == 200
 
 

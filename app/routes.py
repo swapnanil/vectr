@@ -570,9 +570,17 @@ async def mcp_jsonrpc(request: Request, response: Response, body: dict = Body(..
         if still_initialising is not None:
             return _ok(still_initialising)
         client_label = request.headers.get("X-Vectr-Client", "") or ""
-        return _ok(handle_tools_call(
-            tool_name, arguments, svc, session_id=session_id, client_label=client_label,
-        ))
+        # UPG-EMBED-THREAD-CONTENTION: a tool call may embed a query
+        # (search/recall) — CPU-bound work that must not run on the event
+        # loop thread, the same reasoning /v1/index already applies to a
+        # full-workspace index. Off the event loop, a CPU-saturated moment
+        # degrades this call to slow instead of black-holing every other
+        # request the daemon serves concurrently.
+        result = await run_in_threadpool(
+            handle_tools_call, tool_name, arguments, svc,
+            session_id=session_id, client_label=client_label,
+        )
+        return _ok(result)
 
     return _err(-32601, f"Method not found: {method}")
 
@@ -599,6 +607,9 @@ async def mcp_tools_call(request: Request, body: dict = Body(...)) -> dict:
         return still_initialising
     session_id = request.headers.get("X-Session-ID") or None
     client_label = request.headers.get("X-Vectr-Client", "") or ""
-    return handle_tools_call(
-        tool_name, arguments, svc, session_id=session_id, client_label=client_label,
+    # UPG-EMBED-THREAD-CONTENTION: see the /mcp tools/call branch above —
+    # same legacy-route dispatch, same off-event-loop requirement.
+    return await run_in_threadpool(
+        handle_tools_call, tool_name, arguments, svc,
+        session_id=session_id, client_label=client_label,
     )

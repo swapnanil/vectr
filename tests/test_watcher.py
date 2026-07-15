@@ -995,3 +995,56 @@ class TestBurstCoalescing:
         status = watcher.watcher_status()
         assert status["watcher_pending_files"] == 2
         assert status["watcher_burst_mode"] is False
+
+
+class TestBatchDoneSummaryLog:
+    """UPG-EMBED-THREAD-CONTENTION / UPG-WATCH-REVERT-CHURN observability
+    requirement: one INFO line per debounced watcher batch summarizing files
+    ingested, chunks re-embedded, files de-indexed, chunks deleted, and
+    duration — so a large or slow batch (the CPU-contention window a live
+    session's MCP calls can stall inside) is visible in the log instead of a
+    silent multi-minute gap."""
+
+    def test_batch_done_line_reports_ingest_and_delete_counts(self, caplog):
+        indexer = _mock_indexer()
+        indexer.index_file.return_value = 4
+        indexer.delete_file.return_value = 2
+        watcher = CodeWatcher(indexer)
+        watcher._pending_actions = {
+            "/ws/a.py": "modify",
+            "/ws/b.py": "modify",
+            "/ws/c.py": "delete",
+        }
+
+        with caplog.at_level(logging.INFO, logger="agent.watcher"):
+            watcher._submit_batch({"/ws/a.py", "/ws/b.py", "/ws/c.py"})
+            deadline = time.monotonic() + 2
+            while watcher._batch_running and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        summaries = [r for r in caplog.records if "churn batch done" in r.message]
+        assert len(summaries) == 1
+        line = summaries[0].getMessage()
+        # Two files indexed (4 chunks each = 8), one file deleted (2 chunks).
+        assert "2 files ingested (8 chunks re-embedded)" in line
+        assert "1 files de-indexed (2 chunks deleted)" in line
+
+    def test_batch_done_line_fires_even_when_batch_is_empty_of_work(self, caplog):
+        """A batch that reduces to zero real filesystem changes (e.g. every
+        path already handled) still logs its (zero-valued) summary line —
+        the log line's presence, not its counts, is what makes a silently
+        stalled batch visible."""
+        indexer = _mock_indexer()
+        watcher = CodeWatcher(indexer)
+
+        with caplog.at_level(logging.INFO, logger="agent.watcher"):
+            watcher._submit_batch(set())
+            deadline = time.monotonic() + 2
+            while watcher._batch_running and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        summaries = [r for r in caplog.records if "churn batch done" in r.message]
+        assert len(summaries) == 1
+        line = summaries[0].getMessage()
+        assert "0 files ingested (0 chunks re-embedded)" in line
+        assert "0 files de-indexed (0 chunks deleted)" in line

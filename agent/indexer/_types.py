@@ -8,6 +8,7 @@ from typing import Protocol
 from agent.config import (
     EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL,
     EMBEDDING_MAX_SEQ_LENGTH as _EMBEDDING_MAX_SEQ_LENGTH,
+    EMBEDDING_THREAD_CAP as _EMBEDDING_THREAD_CAP,
 )
 
 
@@ -53,6 +54,28 @@ class LocalEmbedProvider:
         suppress_model_load_noise()
         import torch
         from sentence_transformers import SentenceTransformer
+
+        # UPG-EMBED-THREAD-CONTENTION: cap torch's CPU thread pool at
+        # construction time (config.yaml embedding.thread_cap /
+        # thread_cap_auto_fraction). This is a process-wide torch setting —
+        # applying it once here also caps the cross-encoder reranker, which
+        # shares the same pool — so it belongs at the one embed-provider
+        # construction site, not scattered across call sites. Without a cap,
+        # a debounced watcher batch embed saturates every core and the HTTP
+        # event loop gets no scheduler slice, so a live session's first MCP
+        # call (vectr_status/vectr_recall) can time out even though no lock
+        # is held.
+        torch.set_num_threads(_EMBEDDING_THREAD_CAP)
+        try:
+            # Interop-thread count can only be set once per process, before
+            # any parallel torch work has started — a later
+            # LocalEmbedProvider construction in the same process (e.g.
+            # across tests) raises RuntimeError on a second call. Safe to
+            # ignore: the first call already applied the cap process-wide.
+            torch.set_num_interop_threads(_EMBEDDING_THREAD_CAP)
+        except RuntimeError:
+            pass
+
         cache_dir = Path.home() / ".cache" / "vectr" / "models"
         cache_dir.mkdir(parents=True, exist_ok=True)
         # UPG-RERANKER-HF-NETWORK: prefer an offline (local_files_only) load
@@ -117,7 +140,12 @@ class LocalEmbedProvider:
 
 
 class VoyageEmbedProvider:
-    """Uses Voyage AI code embedding model (requires VOYAGE_API_KEY)."""
+    """Uses Voyage AI code embedding model (requires VOYAGE_API_KEY).
+
+    No CPU thread cap (UPG-EMBED-THREAD-CONTENTION) applies here — embedding
+    happens server-side over HTTP; there is no local torch thread pool to
+    contend with the event loop.
+    """
 
     def __init__(self, model_name: str = "voyage-code-2") -> None:
         import voyageai  # type: ignore
@@ -133,7 +161,12 @@ class VoyageEmbedProvider:
 
 
 class OpenAIEmbedProvider:
-    """Uses OpenAI embedding model (requires OPENAI_API_KEY)."""
+    """Uses OpenAI embedding model (requires OPENAI_API_KEY).
+
+    No CPU thread cap (UPG-EMBED-THREAD-CONTENTION) applies here — same
+    reasoning as VoyageEmbedProvider above: embedding is a remote HTTP call,
+    not local CPU-bound torch work.
+    """
 
     def __init__(self, model_name: str = "text-embedding-3-small") -> None:
         from openai import OpenAI

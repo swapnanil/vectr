@@ -325,6 +325,14 @@ EMBEDDING_DEFAULT_MODEL : str
     changing this value forces a full vector index rebuild on next index
     rather than mixing vectors from two models in one collection.
 
+EMBEDDING_THREAD_CAP : int
+    Resolved CPU thread cap applied to the local (torch-backed) embedding
+    model at construction (UPG-EMBED-THREAD-CONTENTION) — `embedding.
+    thread_cap` verbatim if positive, else `embedding.thread_cap_auto_fraction`
+    of `os.cpu_count()` (minimum 1) when that key is 0. Governs the
+    process-wide torch thread pool, so it also caps the cross-encoder
+    reranker.
+
 FETCH_MAX_IDS_PER_CALL : int
     Maximum chunk ids accepted per vectr_fetch / POST /v1/fetch / `vectr
     fetch` call (UPG-CTX-EVICT). Bounds the deterministic re-fetch-by-id
@@ -333,6 +341,7 @@ FETCH_MAX_IDS_PER_CALL : int
 from __future__ import annotations
 
 import importlib.resources as _ilr
+import os as _os
 from typing import Any
 
 import yaml as _yaml
@@ -648,6 +657,22 @@ SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN: int = int(_id_hint_cfg["nearmiss
 
 EMBEDDING_DEFAULT_MODEL: str = str(_cfg["embedding"]["default_model"])
 EMBEDDING_MAX_SEQ_LENGTH: int = int(_cfg["embedding"]["max_seq_length"])
+
+# UPG-EMBED-THREAD-CONTENTION: 0 means "auto" — derive from
+# thread_cap_auto_fraction * os.cpu_count(), minimum 1 thread. A positive
+# configured value is an explicit operator override, used verbatim.
+EMBEDDING_THREAD_CAP_CONFIGURED: int = int(_cfg["embedding"]["thread_cap"])
+EMBEDDING_THREAD_CAP_AUTO_FRACTION: float = float(_cfg["embedding"]["thread_cap_auto_fraction"])
+
+
+def _resolve_embedding_thread_cap() -> int:
+    if EMBEDDING_THREAD_CAP_CONFIGURED > 0:
+        return EMBEDDING_THREAD_CAP_CONFIGURED
+    cores = _os.cpu_count() or 2
+    return max(1, int(cores * EMBEDDING_THREAD_CAP_AUTO_FRACTION))
+
+
+EMBEDDING_THREAD_CAP: int = _resolve_embedding_thread_cap()
 
 # ---------------------------------------------------------------------------
 # Deterministic re-fetch-by-chunk-id contract (UPG-CTX-EVICT)
