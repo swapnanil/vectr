@@ -51,6 +51,13 @@ class CodeChunkResult(BaseModel):
     # POST /v1/fetch to restore this chunk deterministically, no re-search
     # or file re-read needed.
     id: str = ""
+    # UPG-SCORE-DISPLAY-MIXED-SCALE: which scale `score` was drawn from for
+    # THIS chunk — "reranker" (a calibrated cross-encoder judgment) or
+    # "dense" (a raw bi-encoder cosine similarity). The two scales are not
+    # comparable to each other; every result in one response is guaranteed to
+    # share the same value (CodeSearcher.search backfills any straggler so a
+    # response is never a mix of the two once reranking has run for it).
+    score_source: str = "dense"
 
 
 class SearchResponse(BaseModel):

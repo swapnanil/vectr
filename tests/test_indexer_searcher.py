@@ -3814,6 +3814,142 @@ class TestAbsoluteRelevanceScore:
 
 
 # ---------------------------------------------------------------------------
+# CodeSearcher.search — uniform displayed score SCALE across a result set
+# (UPG-SCORE-DISPLAY-MIXED-SCALE)
+#
+# UPG-SCORE-DISPLAY-FLAT lets a chunk's displayed score come from either its
+# cross-encoder relevance (ce_relevance) or its dense cosine similarity
+# (dense_sim) — two structurally different, non-comparable scales. If any
+# candidate that survives into the final displayed slice was never handed to
+# the reranker (a straggler), its score would sit next to reranked scores on
+# a different scale in the same column. search() must batch-score any such
+# straggler after the n_results cut so one result set is never a mix of the
+# two scales.
+# ---------------------------------------------------------------------------
+
+class TestScoreSourceUniformScale:
+    def test_straggler_backfilled_and_ordering_untouched(self, indexer, tmp_path) -> None:
+        """A cross-encoder that (simulating the historical defect shape: a
+        rerank() call handed a smaller pool than the full candidate list)
+        only stamps ce_relevance on a SUBSET of the candidates it is given
+        must not leave the displayed result set on a mixed reranker/dense
+        scale — CodeSearcher.search must batch-score every straggler still
+        missing ce_relevance after the n_results cut, without re-sorting."""
+        from agent.searcher import CodeSearcher
+
+        path = make_py(
+            tmp_path, "metrics.py",
+            "def compute_alpha_metric(data):\n"
+            "    \"\"\"Compute the alpha metric from a list of numbers.\"\"\"\n"
+            "    total = sum(data)\n"
+            "    return total / len(data)\n\n"
+            "def compute_beta_metric(data):\n"
+            "    \"\"\"Compute the beta metric from a list of numbers.\"\"\"\n"
+            "    total = max(data)\n"
+            "    return total - min(data)\n\n"
+            "def compute_gamma_metric(data):\n"
+            "    \"\"\"Compute the gamma metric from a list of numbers.\"\"\"\n"
+            "    return sorted(data)[len(data) // 2]\n\n"
+            "def compute_delta_metric(data):\n"
+            "    \"\"\"Compute the delta metric from a list of numbers.\"\"\"\n"
+            "    return [x * 2 for x in data]\n",
+        )
+        indexer.index_file(path)
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        class _PartialCoverageReranker:
+            """Matches the real _Reranker.rerank contract but (deliberately,
+            to simulate the historical defect shape) only stamps
+            ce_relevance on the first `k` candidates of whichever batch it
+            is handed — leaving the rest at ce_relevance=None, exactly what
+            a rerank() call given a smaller pool than the full candidate
+            list would produce."""
+            def __init__(self, k: int):
+                self._k = k
+
+            def rerank(self, query, candidates):
+                for i, (_, c) in enumerate(candidates):
+                    if i < self._k:
+                        c.ce_relevance = 0.9 - i * 0.1
+                return [c for _, c in candidates]
+
+        query = "compute metric from data"
+
+        s._reranker = _PartialCoverageReranker(k=2)
+        results, _ = s.search(query, n_results=4)
+        assert len(results) >= 2
+        # Every displayed result now carries a cross-encoder score...
+        assert all(r.ce_relevance is not None for r in results), (
+            "a straggler left ce_relevance=None by the main rerank() call "
+            "must be batch-scored before being displayed"
+        )
+        # ...and every displayed result reports the SAME scale.
+        assert {r.score_source for r in results} == {"reranker"}
+
+        # Ordering must be exactly what the composite decided — unaffected by
+        # which candidates the backfill call touched. Compare against a
+        # control run where the stub scores everyone up front (k large
+        # enough to cover the whole pool), so no backfill occurs there.
+        s._reranker = _PartialCoverageReranker(k=1000)
+        control_results, _ = s.search(query, n_results=4)
+        assert [r.file_path for r in results] == [r.file_path for r in control_results]
+        assert [r.lines for r in results] == [r.lines for r in control_results]
+
+    def test_rerank_false_yields_uniform_dense_source(self, indexer, tmp_path) -> None:
+        """When reranking did not run for a query (rerank=False), every
+        displayed result must already be uniform — score_source="dense" for
+        all — with nothing to backfill."""
+        from agent.searcher import CodeSearcher
+
+        path = make_py(
+            tmp_path, "metrics2.py",
+            "def compute_alpha_metric(data):\n"
+            "    \"\"\"Compute the alpha metric from a list of numbers.\"\"\"\n"
+            "    return sum(data) / len(data)\n\n"
+            "def compute_beta_metric(data):\n"
+            "    \"\"\"Compute the beta metric from a list of numbers.\"\"\"\n"
+            "    return max(data) - min(data)\n",
+        )
+        indexer.index_file(path)
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        results, _ = s.search("compute metric from data", n_results=4, rerank=False)
+        assert results
+        assert all(r.ce_relevance is None for r in results)
+        assert {r.score_source for r in results} == {"dense"}
+
+    def test_model_unavailable_yields_uniform_dense_source(self, indexer, tmp_path) -> None:
+        """When the reranker model failed to load, rerank() leaves every
+        candidate's ce_relevance at None (pass-through) — the displayed set
+        must still be uniformly "dense", with no backfill call attempted."""
+        from agent.searcher import CodeSearcher, _Reranker
+
+        path = make_py(
+            tmp_path, "metrics3.py",
+            "def compute_alpha_metric(data):\n"
+            "    \"\"\"Compute the alpha metric from a list of numbers.\"\"\"\n"
+            "    return sum(data) / len(data)\n\n"
+            "def compute_beta_metric(data):\n"
+            "    \"\"\"Compute the beta metric from a list of numbers.\"\"\"\n"
+            "    return max(data) - min(data)\n",
+        )
+        indexer.index_file(path)
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+
+        reranker = _Reranker("fake/model")
+        reranker._failed = True  # _load() becomes a no-op, self._model stays None
+        s._reranker = reranker
+
+        results, _ = s.search("compute metric from data", n_results=4)
+        assert results
+        assert all(r.ce_relevance is None for r in results)
+        assert {r.score_source for r in results} == {"dense"}
+
+
+# ---------------------------------------------------------------------------
 # _Reranker — cross-encoder scoring + ce_relevance stamping (UPG-SCORE-DISPLAY-FLAT)
 #
 # Mocks the CrossEncoder model itself (not the whole _Reranker), so both
