@@ -257,6 +257,50 @@ class TestFingerprint:
         assert fp.has_grpc is True
         assert "grpc" in fp.detected_frameworks
 
+    def test_grpc_detected_from_proto_in_real_source_dir(self, tmp_path) -> None:
+        # Positive control for the ignore-respecting scan below: a .proto in an
+        # ordinary (non-excluded) source subdirectory must still be detected.
+        proto_dir = tmp_path / "proto"
+        proto_dir.mkdir()
+        (proto_dir / "service.proto").write_text('syntax = "proto3";\nservice Greeter {}\n')
+        fp = fingerprint(str(tmp_path), [])
+        assert fp.has_grpc is True
+        assert "grpc" in fp.detected_frameworks
+
+    def test_grpc_not_detected_from_vectrignored_dir(self, tmp_path) -> None:
+        # UPG-FINGERPRINT-RESPECT-IGNORE: a .proto under a .vectrignore'd
+        # directory is invisible to the content indexer, so it must not
+        # produce a phantom gRPC signal that skews the retrieval strategy.
+        (tmp_path / ".vectrignore").write_text("fixtures\n")
+        fixtures_dir = tmp_path / "fixtures"
+        fixtures_dir.mkdir()
+        (fixtures_dir / "service.proto").write_text('syntax = "proto3";\n')
+        fp = fingerprint(str(tmp_path), [])
+        assert fp.has_grpc is False
+        assert "grpc" not in fp.detected_frameworks
+
+    def test_grpc_not_detected_from_excluded_dirs_entry(self, tmp_path) -> None:
+        # A .proto under a directory name in the indexer's own EXCLUDED_DIRS
+        # (e.g. node_modules) must not be visible to the fingerprint scan
+        # either — same exclusion set the content indexer applies.
+        excluded_dir = tmp_path / "node_modules"
+        excluded_dir.mkdir()
+        (excluded_dir / "vendored.proto").write_text('syntax = "proto3";\n')
+        fp = fingerprint(str(tmp_path), [])
+        assert fp.has_grpc is False
+        assert "grpc" not in fp.detected_frameworks
+
+    def test_grpc_not_detected_from_hidden_dir(self, tmp_path) -> None:
+        # A .proto under any hidden directory (name starting with ".") must
+        # not be visible either — the content indexer never descends into
+        # hidden directories.
+        hidden_dir = tmp_path / ".fixtures"
+        hidden_dir.mkdir()
+        (hidden_dir / "service.proto").write_text('syntax = "proto3";\n')
+        fp = fingerprint(str(tmp_path), [])
+        assert fp.has_grpc is False
+        assert "grpc" not in fp.detected_frameworks
+
     def test_doc_coverage_ratio_zero_for_no_docs(self, tmp_path) -> None:
         files = []
         for i in range(3):

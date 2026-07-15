@@ -1,6 +1,8 @@
 """Codebase fingerprinting and adaptive retrieval strategy selection."""
 from __future__ import annotations
 
+import fnmatch
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,11 +82,40 @@ def _detect_monorepo(workspace_root: str) -> bool:
     return sub_pkg_count >= 3
 
 
+def _tree_has_file(workspace_root: str, name_pattern: str) -> bool:
+    """True if any file under workspace_root matches name_pattern, walking only
+    the same tree the content indexer would ever see.
+
+    Fingerprinting must never derive a signal from a subtree vectr doesn't
+    index — a match under an ignored/fixture directory would skew the
+    BM25/semantic strategy blend for a codebase that doesn't actually contain
+    that pattern in any indexed file. Prunes the identical exclusion set
+    `CodeIndexer.index_workspace` applies (see agent/indexer/_core.py and
+    agent/cartographer.py's directory walks): the indexer's own EXCLUDED_DIRS,
+    any hidden directory (name starting with "."), and the workspace's
+    .vectrignore directory entries — reusing get_vectrignore_dirs rather than
+    re-parsing .vectrignore here.
+    """
+    from agent.indexer import EXCLUDED_DIRS
+    from integrations.workspace_detect import get_vectrignore_dirs
+
+    root = Path(workspace_root)
+    all_excluded = EXCLUDED_DIRS | get_vectrignore_dirs(str(root))
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in all_excluded and not d.startswith(".")]
+        if fnmatch.filter(filenames, name_pattern):
+            return True
+    return False
+
+
 def _detect_frameworks(workspace_root: str) -> list[str]:
     root = Path(workspace_root)
     found: list[str] = []
 
-    # Read key dependency files
+    # Read key dependency files. Fixed root-level filenames only — no
+    # directory traversal happens here, so there is no ignored-subtree to
+    # honor (unlike the tree walk below).
     dep_text = ""
     for dep_file in ["requirements.txt", "pyproject.toml", "package.json",
                      "pom.xml", "build.gradle", "Cargo.toml", "go.mod"]:
@@ -95,11 +126,7 @@ def _detect_frameworks(workspace_root: str) -> list[str]:
             except OSError:
                 pass
 
-    _SKIP_DIRS = {".venv", "node_modules", "__pycache__", ".git", "vendor"}
-    has_proto = any(
-        f for f in root.rglob("*.proto")
-        if not any(part in _SKIP_DIRS for part in f.parts)
-    )
+    has_proto = _tree_has_file(workspace_root, "*.proto")
 
     for framework, signals in _FRAMEWORK_SIGNALS.items():
         if framework == "grpc":
