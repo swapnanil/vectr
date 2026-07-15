@@ -30,6 +30,8 @@ from run_acceptance import (
     top_k_absent,
     top_k_contains,
     sorted_by_score,
+    scores_in_unit_interval,
+    uniform_score_source,
     affordance_expand_to_symbol,
 )
 
@@ -258,6 +260,66 @@ class TestSortedByScore:
 
 
 # ---------------------------------------------------------------------------
+# scores_in_unit_interval / uniform_score_source
+# (UPG-CORPUS-RESTAMP-SCORE-CASES — the current displayed-score contract:
+# bounded [0, 1] and one uniform scale per result set; monotonicity with
+# rank order is explicitly NOT required.)
+# ---------------------------------------------------------------------------
+
+def _rs(symbol: str, score: float, source: str = "dense") -> dict:
+    return {"symbol": symbol, "file": "/p/file.py", "score": score,
+            "score_source": source, "content": "x"}
+
+
+class TestScoresInUnitInterval:
+    def test_all_in_range_passes(self) -> None:
+        results = [_rs("a", 0.0), _rs("b", 0.5), _rs("c", 1.0)]
+        assert scores_in_unit_interval(results) is True
+
+    def test_score_above_one_fails(self) -> None:
+        # the historical F12 defect: base_rank * quality + sym_boost, unbounded
+        results = [_rs("a", 1.2), _rs("b", 0.9)]
+        assert scores_in_unit_interval(results) is False
+
+    def test_negative_score_fails(self) -> None:
+        results = [_rs("a", -0.1)]
+        assert scores_in_unit_interval(results) is False
+
+    def test_non_monotonic_but_bounded_passes(self) -> None:
+        # monotonicity is explicitly not part of this contract
+        results = [_rs("a", 0.6), _rs("b", 0.9), _rs("c", 0.7)]
+        assert scores_in_unit_interval(results) is True
+
+    def test_empty(self) -> None:
+        assert scores_in_unit_interval([]) is True
+
+
+class TestUniformScoreSource:
+    def test_all_reranker_passes(self) -> None:
+        results = [_rs("a", 0.9, "reranker"), _rs("b", 0.8, "reranker")]
+        assert uniform_score_source(results) is True
+
+    def test_all_dense_passes(self) -> None:
+        results = [_rs("a", 0.9, "dense"), _rs("b", 0.8, "dense")]
+        assert uniform_score_source(results) is True
+
+    def test_mixed_sources_fails(self) -> None:
+        results = [_rs("a", 0.9, "reranker"), _rs("b", 0.8, "dense")]
+        assert uniform_score_source(results) is False
+
+    def test_missing_field_defaults_to_dense(self) -> None:
+        results = [{"symbol": "a", "file": "/p/f.py", "score": 0.9, "content": "x"},
+                   _rs("b", 0.8, "dense")]
+        assert uniform_score_source(results) is True
+
+    def test_single_result(self) -> None:
+        assert uniform_score_source([_rs("a", 0.9, "reranker")]) is True
+
+    def test_empty(self) -> None:
+        assert uniform_score_source([]) is True
+
+
+# ---------------------------------------------------------------------------
 # affordance_expand_to_symbol
 # ---------------------------------------------------------------------------
 
@@ -301,6 +363,48 @@ class TestRunCaseManualBucket:
                 "expect": {"top_k_contains_any_of": [{"symbol": "a"}, {"symbol": "b"}]}}
         ok, messages = run_case(case, "http://localhost:0")
         assert ok is None
+
+    def test_scores_in_unit_interval_and_uniform_score_source_wired(self, monkeypatch) -> None:
+        """The restamped F1c/F12 expect shape end-to-end through run_case."""
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [
+                {"symbol": "Field.deconstruct", "file": "/p/f.py", "score": 0.95,
+                 "score_source": "reranker"},
+                {"symbol": "BloomIndex.deconstruct", "file": "/p/f2.py", "score": 0.80,
+                 "score_source": "reranker"},
+            ]},
+        )
+        case = {"id": "F1c", "query": "q",
+                "expect": {"scores_in_unit_interval": True, "uniform_score_source": True}}
+        ok, messages = run_case(case, "http://localhost:0")
+        assert ok is True
+        assert any("scores_in_unit_interval" in m for m in messages)
+        assert any("uniform_score_source" in m for m in messages)
+
+    def test_scores_in_unit_interval_fires_on_unbounded_score(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [
+                {"symbol": "Field.deconstruct", "file": "/p/f.py", "score": 1.2,
+                 "score_source": "dense"},
+            ]},
+        )
+        case = {"id": "x", "query": "q", "expect": {"scores_in_unit_interval": True}}
+        ok, _ = run_case(case, "http://localhost:0")
+        assert ok is False
+
+    def test_uniform_score_source_fires_on_mixed_set(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [
+                {"symbol": "a", "file": "/p/f.py", "score": 0.9, "score_source": "reranker"},
+                {"symbol": "b", "file": "/p/f.py", "score": 0.5, "score_source": "dense"},
+            ]},
+        )
+        case = {"id": "x", "query": "q", "expect": {"uniform_score_source": True}}
+        ok, _ = run_case(case, "http://localhost:0")
+        assert ok is False
 
     def test_recognized_assertion_still_returns_bool(self, monkeypatch) -> None:
         monkeypatch.setattr(

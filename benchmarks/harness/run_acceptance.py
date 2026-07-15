@@ -26,6 +26,15 @@ Assertion rules
   substring match caused false positives for this case and any like it
   ("all" ⊂ "recall", etc.).
 - sorted_by_score: returned scores must be non-increasing.
+- scores_in_unit_interval: every returned score is within [0, 1]. This is
+  the current displayed-score contract (UPG-SCORE-DISPLAY-FLAT): score is
+  absolute per-(query,chunk) relevance, not a composite ranking signal, so
+  monotonicity with rank order is explicitly NOT required — only
+  boundedness is.
+- uniform_score_source: every result in the set shares the same
+  score_source ("reranker" or "dense") — the two are structurally
+  different measurements and must never be mixed in one displayed response
+  (UPG-SCORE-DISPLAY-MIXED-SCALE).
 - status_languages_include: /v1/status must list all named languages.
 - affordance_expand_to_symbol: at least one result has symbol_start_line > 0.
 
@@ -156,6 +165,33 @@ def sorted_by_score(results: list[dict]) -> bool:
     return scores == sorted(scores, reverse=True)
 
 
+def scores_in_unit_interval(results: list[dict]) -> bool:
+    """Return True if every displayed score is within [0, 1].
+
+    UPG-SCORE-DISPLAY-FLAT: the displayed score is absolute per-(query,chunk)
+    relevance (the cross-encoder's calibrated sigmoid, or the bi-encoder
+    cosine similarity when reranking didn't run) — not the internal ordering
+    composite. Both underlying scales are naturally bounded to [0, 1], and
+    that boundedness (not monotonicity with rank order, which this contract
+    does not require) is what a caller thresholding on score can rely on.
+    Vacuously True for an empty result list.
+    """
+    return all(0.0 <= r.get("score", 0.0) <= 1.0 for r in results)
+
+
+def uniform_score_source(results: list[dict]) -> bool:
+    """Return True if every result shares the same score_source.
+
+    UPG-SCORE-DISPLAY-MIXED-SCALE: score_source is "reranker" (a calibrated
+    cross-encoder judgment) or "dense" (a raw bi-encoder cosine similarity)
+    — two structurally different measurements that are not comparable side
+    by side. A displayed result set must never mix the two. Vacuously True
+    for an empty result list.
+    """
+    sources = {r.get("score_source", "dense") for r in results}
+    return len(sources) <= 1
+
+
 def affordance_expand_to_symbol(results: list[dict]) -> bool:
     return any(r.get("symbol_start_line", 0) > 0 for r in results)
 
@@ -269,6 +305,24 @@ def run_case(case: dict, base: str) -> tuple[bool | None, list[str]]:
         mark = _PASS if ok else _FAIL
         scores = [round(r.get("score", 0.0), 4) for r in results]
         messages.append(f"  [{mark}] sorted_by_score  scores={scores}")
+        all_pass = all_pass and ok
+
+    # --- scores_in_unit_interval ---
+    if expect.get("scores_in_unit_interval"):
+        ok = scores_in_unit_interval(results)
+        ran_any_assertion = True
+        mark = _PASS if ok else _FAIL
+        scores = [round(r.get("score", 0.0), 4) for r in results]
+        messages.append(f"  [{mark}] scores_in_unit_interval  scores={scores}")
+        all_pass = all_pass and ok
+
+    # --- uniform_score_source ---
+    if expect.get("uniform_score_source"):
+        ok = uniform_score_source(results)
+        ran_any_assertion = True
+        mark = _PASS if ok else _FAIL
+        sources = [r.get("score_source", "dense") for r in results]
+        messages.append(f"  [{mark}] uniform_score_source  sources={sources}")
         all_pass = all_pass and ok
 
     # --- affordance_expand_to_symbol ---
