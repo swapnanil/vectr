@@ -1,0 +1,16 @@
+core/camel-core/src/test/java/org/apache/camel/processor/StreamResequencerReverseGateTest.java: FAILED
+acceptance: PASS
+regression: PASS
+# sha-check FAILED = benign: camel formatter rewrapped javadoc lines 27-28 only (same artifact as all runs);
+# transcript audit: agent made 0 Edit/Write calls on the gate test.
+# canonical wall: duration_ms=1296610 (1296.6s); num_turns=114; total_cost_usd=6.23; subtype=success.
+# model: claude-sonnet-5 (identical to H1c/H2/pilot CS). sleep-check: clean — wall.txt 1300 ≈ duration_ms.
+# V CONTROL INTEGRITY: hooks absent asserted at launch (settings.json.at-launch has no hooks group);
+# daemon audit log shows ZERO trigger evaluations in the V window (111 all-time, all from H runs/probes).
+# V HEADLINE: ZERO vectr MCP calls across 114 turns — despite 4 seeded notes in the store, vectr MCP connected
+# (mcp_posture OK), and CLAUDE.md documenting the tools. Pilot's durable finding REPLICATED with seeds present:
+# knowledge in the store does not change voluntary adoption (V vs pilot B comparison: both ~zero).
+# 1 auto-compaction mid-run; summary-only recovery; run finished green (correctness never depended on memory).
+# H-vs-V (delivery channel, knowledge constant): H1c 95 turns/$5.22/1454s, H2 102/$6.09/1187s,
+# V1 114/$6.23/1297s — injection arms fewer turns + cheaper both times (n small, directional, consistent
+# with pilot CS-vs-A direction).

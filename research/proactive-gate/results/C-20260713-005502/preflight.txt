@@ -1,0 +1,4 @@
+notes at start: 0 (must be 0)
+injection probe context chars: 170
+mcp_posture: OK (vectr connected)
+disk_memory_notes: 0 (dir never created)

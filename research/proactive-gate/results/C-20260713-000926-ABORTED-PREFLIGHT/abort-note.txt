@@ -1,0 +1,24 @@
+ABORTED AT PREFLIGHT (2026-07-13 00:09 IST) — no agent run, no quota spent.
+
+The C-arm injection-probe assert did its job twice over:
+1. Injection path CONFIRMED ALIVE: probe note stored via /v1/remember came
+   back through /v1/proactive channel=proxy as 170 chars of packed context.
+2. Probe cleanup FAILED: `vectr forget --all --port 8766` reported
+   "Deleted 0 working-memory notes across 1 workspace databases" while the
+   probe note remained (daemon notes_count=1) → "ABORT: notes not zero
+   after probe cleanup".
+
+Root cause (product bug, found by this preflight): cmd_forget --all globbed
+only the stale cache layout ~/.cache/vectr/db/<hash>/working_context.sqlite;
+the layout of record is ~/.cache/vectr/<hash>/ (app.service._default_db_dir).
+--all therefore deleted nothing for any current workspace and still printed
+success. Fixed on feature/experimental-godMode with a regression test
+(sweeps both layouts; prints an explicit machine-wide-scope line).
+
+Harness hardening in the same pass: run-arm.sh now uses the daemon-scoped
+clear (`vectr forget --path <workspace> --port 8766` → REST /v1/memory/clear)
+instead of --all at both call sites — the fixed --all would sweep every
+workspace database on the machine, including stores the gate must never
+touch. Verified live: scoped clear deleted the probe note, notes_count=0.
+
+Arm relaunched fresh after the fix; this dir keeps only preflight artifacts.

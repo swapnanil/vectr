@@ -1,0 +1,10 @@
+{"content": "F1: the build-freeze code is QK-4417", "kind": "task", "priority": "high", "tags": ["decay-probe", "ops-facts"]}
+{"content": "F2: the rollback window is 73 minutes", "kind": "task", "priority": "high", "tags": ["decay-probe", "ops-facts"]}
+{"content": "F3: the staging tenant is maroon-otter-19", "kind": "task", "priority": "high", "tags": ["decay-probe", "ops-facts"]}
+{"content": "F4: the payments cutover date is 2027-03-09", "kind": "task", "priority": "high", "tags": ["decay-probe", "ops-facts"]}
+{"content": "F5: the telemetry salt is v9u-KL22-xr", "kind": "task", "priority": "high", "tags": ["decay-probe", "ops-facts"]}
+{"content": "F6: the incident bridge channel is #inc-5561-bridge", "kind": "task", "priority": "high", "tags": ["decay-probe", "ops-facts"]}
+{"content": "F7: the canary abort threshold is 0.83%", "kind": "task", "priority": "high", "tags": ["decay-probe", "ops-facts"]}
+{"content": "F8: the artifact bucket is opal-crate-407", "kind": "task", "priority": "high", "tags": ["decay-probe", "ops-facts"]}
+{"content": "F9: the on-call rotation id is RTX-88-BLUE", "kind": "task", "priority": "high", "tags": ["decay-probe", "ops-facts"]}
+{"content": "F10: the postmortem doc code is PM-7Q-9932", "kind": "task", "priority": "high", "tags": ["decay-probe", "ops-facts"]}

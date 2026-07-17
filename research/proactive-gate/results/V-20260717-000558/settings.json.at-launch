@@ -1,0 +1,9 @@
+{
+  "enableAllProjectMcpServers": true,
+  "mcpServers": {
+    "vectr": {
+      "type": "http",
+      "url": "http://localhost:8766/mcp"
+    }
+  }
+}

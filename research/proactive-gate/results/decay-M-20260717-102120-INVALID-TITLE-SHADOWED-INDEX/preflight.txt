@@ -1,0 +1,3 @@
+auto-compact window override: 100000 (CLI floor: 100000); read cap: 8000 tokens
+notes at start: 0 (must be 0)
+seeded notes: 10 (daemon notes_count: 10)

@@ -1,0 +1,2 @@
+lrwxr-xr-x  1 user  staff  9 Jun 20 18:52 CLAUDE.md -> AGENTS.md
+vectr mentions in AGENTS.md: 0

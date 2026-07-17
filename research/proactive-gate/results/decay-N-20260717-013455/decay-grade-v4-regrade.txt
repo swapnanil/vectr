@@ -1,0 +1,13 @@
+model(s): ['claude-haiku-4-5-20251001']
+tool calls: {'Bash': 1, 'Edit': 15, 'Read': 243, 'Write': 1}
+tool compliance: Bash=1 (task forbids shell; >2 => SHORTCUT SUSPECT), Read=243
+compactions: 2 (target >= 10; below 10 => UNDERPOWERED)
+declaration recall: mean 0.91 over 48 files; <0.8 on 8: [('AbstractCamelContext.java', '1/2'), ('A2AConsumerTest.java', '1/2'), ('JmsConfiguration.java', '1/2'), ('PropertyBindingSupport.java', '5/7'), ('RedeliveryErrorHandler.java', '2/3'), ('AggregateProcessor.java', '1/8'), ('A2AConsumer.java', '1/8'), ('XmlSignatureTest.java', '1/3')]
+audit compliance: OK
+final fact score: 10/10
+per-fact: F1=Y F2=Y F3=Y F4=Y F5=Y F6=Y F7=Y F8=Y F9=Y F10=Y
+rehearsals: 22 assistant messages carrying >=8 fact tokens (content-plane self-defense)
+summary 1: 0/10 fact tokens present (7793 chars)
+summary 2: 10/10 fact tokens present (9689 chars)
+file-restoration contamination: [(290, 'file', '10/10 tokens')] — RUN INVALID for the in-context-only premise
+phases completed: 14; totals: duration_ms=1689326 turns=276 cost=$5.25

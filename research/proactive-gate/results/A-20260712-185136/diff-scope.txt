@@ -1,0 +1,15 @@
+ .../apache/camel/catalog/models/streamConfig.json  |  3 +-
+ .../docs/modules/eips/pages/resequence-eip.adoc    | 52 ++++++++++++++++++++++
+ .../apache/camel/model/config/streamConfig.json    |  3 +-
+ .../apache/camel/model/ResequenceDefinition.java   |  7 +--
+ .../model/config/StreamResequencerConfig.java      | 16 +++++++
+ .../apache/camel/processor/StreamResequencer.java  | 23 +++++++++-
+ .../processor/resequencer/ResequencerEngine.java   | 19 ++++++--
+ .../apache/camel/reifier/ResequenceReifier.java    |  4 +-
+ .../camel/management/mbean/ManagedResequencer.java |  2 +-
+ .../java/org/apache/camel/xml/in/ModelParser.java  |  1 +
+ .../java/org/apache/camel/xml/out/ModelWriter.java |  1 +
+ .../org/apache/camel/yaml/out/YamlModelWriter.java |  1 +
+ .../resources/schema/camelYamlDsl-canonical.json   |  6 +++
+ .../generated/resources/schema/camelYamlDsl.json   |  6 +++
+ 14 files changed, 133 insertions(+), 11 deletions(-)

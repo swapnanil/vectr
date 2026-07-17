@@ -1,0 +1,5 @@
+model(s): ['claude-haiku-4-5-20251001']
+compactions: 0 (target >= 10; below 10 => UNDERPOWERED)
+final fact score: 10/10
+per-fact: F1=Y F2=Y F3=Y F4=Y F5=Y F6=Y F7=Y F8=Y F9=Y F10=Y
+result: {'subtype': 'success', 'duration_ms': 258335, 'num_turns': 23, 'total_cost_usd': 0.5244645999999998}

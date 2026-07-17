@@ -1,0 +1,7 @@
+model(s): ['claude-haiku-4-5-20251001']
+tool calls: {'Edit': 6, 'Read': 35, 'Write': 1}
+tool compliance: Bash=0 (task forbids shell; >2 => SHORTCUT SUSPECT), Read=35
+compactions: 0 (target >= 10; below 10 => UNDERPOWERED)
+final fact score: 10/10
+per-fact: F1=Y F2=Y F3=Y F4=Y F5=Y F6=Y F7=Y F8=Y F9=Y F10=Y
+result: {'subtype': 'success', 'duration_ms': 247382, 'num_turns': 43, 'total_cost_usd': 0.8179778}

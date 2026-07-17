@@ -1,0 +1,14 @@
+ABORTED AT PREFLIGHT (2026-07-13 01:16 IST) — no agent run, no quota spent.
+
+Probe cleanup (`vectr forget --path <camel> --port 8766`) died with a
+client-side httpx.ReadTimeout while daemon 8766 was pegged on post-reset
+reindex churn; the notes!=0 assert then aborted the launch — correctly, since
+the equal-note starting state was unproven. Same churn signature as the
+transient /v1/status timeout hit while grading C1 (retry with -m 30 answered
+in <1s once churn settled).
+
+Harness fix in the same pass: both wipe call sites in run-arm.sh now retry
+the idempotent daemon-scoped clear up to 5x with 20s backoff and -m 30 status
+probes, looping until the daemon confirms zero notes instead of trusting a
+single attempt. Arm relaunched fresh after the fix; this dir keeps only the
+partial preflight artifacts.

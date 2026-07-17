@@ -1,0 +1,29 @@
+WALL-CLOCK CORRECTION (2026-07-12, post-grade — user flagged laptop sleep)
+
+wall.txt records wall_seconds=14023 (elapsed real time bracketing the claude
+invocation). The machine SLEPT during the run:
+
+  pmset -g log:
+    19:45:39 IST  Entering Sleep ('Clamshell Sleep', on battery)
+    ... only 2-second DarkWake maintenance blips every ~15 min ...
+    22:42:57 IST  Wake ('lid', HID Activity)
+  => ~10,638 s asleep inside the run window (run started 18:51 IST).
+
+Reconciliation:
+  transcript event span:            13,993 s
+  minus sleep window:               ~3,355 s
+  transcript result duration_ms:     3,444.6 s  (matches within ~90 s)
+
+Conclusion: the transcript's own duration_ms uses a clock that pauses
+during system sleep and is the honest agent wall-clock for this run:
+
+  CORRECTED wall (arm A take-2): ~3,445 s   (not 14,023 s)
+  vs arm B rerun 938 s  =>  ~3.7x           (not ~15x)
+
+Turns (142), cost ($7.83), and token counts are work-based and unaffected.
+
+METRIC DECISION for all remaining matrix runs: canonical wall metric =
+transcript result duration_ms (sleep-immune; verified equal to wall.txt on
+arm B where no sleep occurred: 935 vs 938 s). wall.txt retained as
+elapsed-real-time only. Harness follow-up queued (not applied mid-run):
+snapshot pmset sleep events into each results dir.

@@ -1,0 +1,18 @@
+ AGENTS.md                                          | 68 ++++++++++++++++++++++
+ .../apache/camel/catalog/models/streamConfig.json  |  3 +-
+ .../apache/camel/catalog/schemas/camel-spring.xsd  |  9 +++
+ .../apache/camel/catalog/schemas/camel-xml-io.xsd  |  9 +++
+ .../docs/modules/eips/pages/resequence-eip.adoc    | 47 +++++++++++++++
+ .../apache/camel/model/config/streamConfig.json    |  3 +-
+ .../apache/camel/model/ResequenceDefinition.java   |  7 ++-
+ .../model/config/StreamResequencerConfig.java      | 15 +++++
+ .../apache/camel/reifier/ResequenceReifier.java    |  4 ++
+ .../apache/camel/java/out/JavaDslModelWriter.java  |  1 +
+ .../java/org/apache/camel/xml/in/ModelParser.java  |  1 +
+ .../java/org/apache/camel/xml/out/ModelWriter.java |  1 +
+ .../org/apache/camel/yaml/out/YamlModelWriter.java |  1 +
+ .../ROOT/pages/camel-4x-upgrade-guide-4_21.adoc    |  6 ++
+ .../dsl/yaml/deserializers/ModelDeserializers.java |  6 ++
+ .../resources/schema/camelYamlDsl-canonical.json   |  6 ++
+ .../generated/resources/schema/camelYamlDsl.json   |  6 ++
+ 17 files changed, 188 insertions(+), 5 deletions(-)

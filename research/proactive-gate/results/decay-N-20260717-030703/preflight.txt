@@ -1,0 +1,8 @@
+auto-compact window override: 100000 (CLI floor: 100000); read cap: 8000 tokens
+N arm: no vectr surface (no .mcp.json, no settings.json, strict-mcp-config, pristine AGENTS.md)
+session id: 7a4d6549-7b8c-42a5-88ad-8932ca0e4d1e
+corpus: 64 files, 16 audit phases, 18 total
+fixture deleted after phase 0 (no re-readable source; defeats post-compaction file restoration)
+phase 6: claude exit 1
+mcp_posture: OK (none)
+disk_memory_notes: 0

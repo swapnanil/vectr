@@ -1,0 +1,17 @@
+core/camel-core/src/test/java/org/apache/camel/processor/StreamResequencerReverseGateTest.java: FAILED
+acceptance: PASS
+regression: PASS
+# sha-check FAILED = benign: camel formatter rewrapped javadoc lines 27-28 only (same artifact as all prior runs);
+# transcript audit: agent made 0 Edit/Write calls on the gate test.
+# canonical wall: duration_ms=1187482 (1187.5s); num_turns=102; total_cost_usd=6.09; subtype=success.
+# model: claude-sonnet-5 (identical to pilot CS and H run 1c).
+# sleep-check: clean — wall.txt 1191 ≈ duration_ms.
+# H mechanism proof (daemon audit log ~/.vectr/logs/28b4cf951971.log, not the transcript):
+#   probe pre-edit fired=1 at 23:42:51; run session-start 23:42:54; run prompt-submit 23:42:55 (index injected);
+#   IN-RUN pre-tool-use gotcha fired=1 at 23:49:34,513 on first touch of ResequenceDefinition.java (~7 min in).
+#   mid-run auto-compaction: session-start + post-compaction events at 23:57:13; run continued to green.
+# adoption ops: 1x vectr_recall (semantic, ~17s into the run — immediate engagement with the injected index;
+# CORRECTED from earlier "post-compaction" misread). 0x vectr_remember. Post-compaction: ZERO vectr ops — the
+# compaction summary alone carried the run to green. Variance vs run 1c
+# (4 recalls + 1 remember): H2 worked from injected content directly without expanding the index by id.
+# false-alarm injections: 0. disk-memory audit: clean (never created).

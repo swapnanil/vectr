@@ -1,0 +1,3 @@
+vanilla arm: no vectr surface (no .mcp.json, no .claude/settings.json, strict-mcp-config, pristine CLAUDE.md/AGENTS.md)
+mcp_posture: OK (none)
+disk_memory_notes: 0 (dir never created)

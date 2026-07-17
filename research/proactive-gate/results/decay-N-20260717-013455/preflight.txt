@@ -1,0 +1,4 @@
+N arm: no vectr surface (no .mcp.json, no settings.json, strict-mcp-config, pristine AGENTS.md)
+session id: 3e2f6e43-a38c-4a12-9ddf-5df781a99393
+mcp_posture: OK (none)
+disk_memory_notes: 0

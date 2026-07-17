@@ -1,0 +1,9 @@
+ AGENTS.md                                          | 68 ++++++++++++++++++++++
+ .../apache/camel/model/config/streamConfig.json    |  3 +-
+ .../apache/camel/model/ResequenceDefinition.java   | 15 ++---
+ .../model/config/StreamResequencerConfig.java      | 16 +++++
+ .../apache/camel/reifier/ResequenceReifier.java    |  6 ++
+ .../java/org/apache/camel/xml/in/ModelParser.java  |  1 +
+ .../java/org/apache/camel/xml/out/ModelWriter.java |  1 +
+ .../org/apache/camel/yaml/out/YamlModelWriter.java |  1 +
+ 8 files changed, 103 insertions(+), 8 deletions(-)

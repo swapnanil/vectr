@@ -1,0 +1,13 @@
+core/camel-core/src/test/java/org/apache/camel/processor/StreamResequencerReverseGateTest.java: FAILED
+acceptance: PASS
+regression: PASS
+# sha-check FAILED = benign: camel formatter rewrapped javadoc lines 27-28 only (same as C-20260713-015112);
+# canonical test restored byte-for-byte before the grading run (Tests run: 2, Failures: 0 — see surefire XML).
+# regression scope: -Dtest='*Resequenc*Test' in core/camel-core → Tests run: 42, Failures: 0, Errors: 0, Skipped: 2 (pre-existing).
+# canonical wall: duration_ms=1629229 (1629.2s); num_turns=106; total_cost_usd=6.57; subtype=success.
+# sleep-check: clean — wall.txt 1632 ≈ duration_ms (all pmset events predate run window 03:59-04:26).
+# CS mechanism proof: proxy injected=5 (262 requests, 0 inject errors, 0 upstream errors); 6 PROACTIVE_INJECT
+# audit events anchor seeded notes 10-13; seeds-at-launch.jsonl snapshot present; preflight seeded=4 verified.
+# voluntary memory use (first across matrix): vectr_status + recall(query) early [both TIMED OUT — starvation
+# data point: settle gate passed just before launch, first MCP calls still starved], recall(note_id=10) OK,
+# forget(10) after implementing (obsolete gotcha cleanup), remember(completion note).

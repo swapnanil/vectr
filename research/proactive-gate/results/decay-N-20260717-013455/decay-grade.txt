@@ -1,0 +1,43 @@
+model(s): ['claude-haiku-4-5-20251001']
+tool calls: {'Bash': 1, 'Edit': 15, 'Read': 243, 'Write': 1}
+tool compliance: Bash=1 (task forbids shell; >2 => SHORTCUT SUSPECT), Read=243
+compactions: 2 (target >= 10; below 10 => UNDERPOWERED)
+declaration recall: mean 0.00 over 48 files; <0.8 on 48: [('Calculator.java', '0/76'), ('JavaDslModelWriter.java', '0/1'), ('AbstractCamelContext.java', '0/2'), ('ProcessorDefinition.java', '0/1'), ('ModelWriter.java', '0/2'), ('YamlModelWriter.java', '0/1'), ('SimpleTest.java', '0/5'), ('HL723ConverterLoader.java', '0/1')]
+audit compliance: SAMPLING/FABRICATION SUSPECT
+final fact score: 10/10
+per-fact: F1=Y F2=Y F3=Y F4=Y F5=Y F6=Y F7=Y F8=Y F9=Y F10=Y
+summary 1: 0/10 fact tokens present (7793 chars)
+summary 2: 10/10 fact tokens present (9689 chars)
+phases completed: 14; totals: duration_ms=1689326 turns=276 cost=$5.25
+
+=== VERDICT (sentinel, 2026-07-17, post-mystery-resolution) ===
+N3 status: tool-COMPLIANT (first compliant fire of the probe; declaration
+recall 0.91/48 files under the fixed parser — the 0.00 in the original grade
+above was a grader artifact, headers '## File N:' vs expected '### N.'), but
+ENDPOINT CONTAMINATED and UNDERPOWERED (k=2 < 10).
+
+The 10/10 final fact score is NOT summary survival. Session file line 290:
+after compaction 1, Claude Code (2.1.211) post-compaction file restoration
+re-attached DECAY-FACTS.md with FULL verbatim content (small files come back
+whole; large files come back as compact_file_reference pointers — audit-
+report.md, Calculator.java, OriginalSimpleTest.java). The agent's next message
+recited all 10 facts and rehearsed them in 22 assistant messages thereafter,
+which is why summary 2 carried 10/10.
+
+What REMAINS valid from this run:
+1. Summary 1 fact drop: 0/10 fact values in the first continuation summary
+   (produced from a context that held them), while the summary asserted
+   "Memorization: Maintained all 10 DECAY-FACTS". k=1 total drop, measured.
+2. `claude -p --resume` preserves compaction state across calls
+   (cumulative_dropped_tokens 384008 = 195039 + 188969; no immediate
+   re-compaction after resume) — the resume-loop design is sound.
+3. Rehearsal tax: 22 fact-recitation messages = content-plane self-defense
+   priced in output tokens.
+4. Harness file restoration EXISTS — deterministic post-compaction
+   restoration is already shipped for FILE state, with no analogous tier for
+   memory. Direct supporting evidence for the memory-mode proposal.
+
+v4 responds: fixture deleted after phase 0 + session-file contamination scan;
+CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=20 for k>=10 at unchanged corpus/cost;
+tolerant report parser; early-fact-write flag; rehearsal metric.
+See decay-grade-v4-regrade.txt for the corrected metrics on this run.

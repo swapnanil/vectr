@@ -1,0 +1,23 @@
+ M AGENTS.md
+ M catalog/camel-catalog/src/generated/resources/org/apache/camel/catalog/models/streamConfig.json
+ M catalog/camel-catalog/src/generated/resources/org/apache/camel/catalog/schemas/camel-spring.xsd
+ M catalog/camel-catalog/src/generated/resources/org/apache/camel/catalog/schemas/camel-xml-io.xsd
+ M core/camel-core-engine/src/main/docs/modules/eips/pages/resequence-eip.adoc
+ M core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/config/streamConfig.json
+ M core/camel-core-model/src/main/java/org/apache/camel/model/ResequenceDefinition.java
+ M core/camel-core-model/src/main/java/org/apache/camel/model/config/StreamResequencerConfig.java
+ M core/camel-core-processor/src/main/java/org/apache/camel/processor/StreamResequencer.java
+ M core/camel-core-reifier/src/main/java/org/apache/camel/reifier/ResequenceReifier.java
+ M core/camel-management/src/main/java/org/apache/camel/management/mbean/ManagedResequencer.java
+ M core/camel-xml-io/src/generated/java/org/apache/camel/xml/in/ModelParser.java
+ M core/camel-xml-io/src/generated/java/org/apache/camel/xml/out/ModelWriter.java
+ M core/camel-yaml-io/src/generated/java/org/apache/camel/yaml/out/YamlModelWriter.java
+ M docs/user-manual/modules/ROOT/pages/camel-4x-upgrade-guide-4_21.adoc
+?? .cursor/
+?? .mcp.json
+?? .vectrignore
+?? core/camel-core-processor/src/main/java/org/apache/camel/processor/resequencer/ReverseExpressionResultComparator.java
+?? core/camel-core/src/test/java/org/apache/camel/processor/StreamResequencerReverseGateTest.java
+ .../org/apache/camel/yaml/out/YamlModelWriter.java |  1 +
+ .../ROOT/pages/camel-4x-upgrade-guide-4_21.adoc    | 10 ++++
+ 15 files changed, 185 insertions(+), 5 deletions(-)

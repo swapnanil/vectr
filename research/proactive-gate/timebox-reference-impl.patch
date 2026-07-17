@@ -1,0 +1,1351 @@
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/a2aSubTask.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/a2aSubTask.json
+index cce5b46d..07438f67 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/a2aSubTask.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/a2aSubTask.json
+@@ -21,6 +21,6 @@
+     "emitAfter": { "index": 5, "kind": "attribute", "displayName": "Emit After", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Simple expression template to emit after the nested steps complete successfully" },
+     "emitOnError": { "index": 6, "kind": "attribute", "displayName": "Emit On Error", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Simple expression template to emit when the nested steps fail" },
+     "failIfNoTaskContext": { "index": 7, "kind": "attribute", "displayName": "Fail If No Task Context", "group": "common", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Whether to fail if the current Exchange does not have an active A2A task context" },
+-    "outputs": { "index": 8, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 8, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/aggregate.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/aggregate.json
+index 36a81804..8c491d05 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/aggregate.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/aggregate.json
+@@ -44,7 +44,7 @@
+     "discardOnAggregationFailure": { "index": 29, "kind": "attribute", "displayName": "Discard On Aggregation Failure", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Discards the aggregated message when aggregation failed (an exception was thrown from AggregationStrategy . This means the partly aggregated message is dropped and not sent out of the aggregator. This option cannot be used together with completionFromBatchConsumer." },
+     "forceCompletionOnStop": { "index": 30, "kind": "attribute", "displayName": "Force Completion On Stop", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Indicates to complete all current aggregated exchanges when the context is stopped" },
+     "completeAllOnStop": { "index": 31, "kind": "attribute", "displayName": "Complete All On Stop", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Indicates to wait to complete all current and partial (pending) aggregated exchanges when the context is stopped. This also means that we will wait for all pending exchanges which are stored in the aggregation repository to complete so the repository is empty before we can stop. You may want to enable this when using the memory based aggregation repository that is memory based only, and do not store data on disk. When this option is enabled, then the aggregator is waiting to complete all those exchanges before its stopped, when stopping CamelContext or the route using it." },
+-    "outputs": { "index": 32, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 32, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelAggregatedSize": { "index": 0, "kind": "exchangeProperty", "displayName": "Aggregated Size", "label": "producer", "required": false, "javaType": "int", "deprecated": false, "autowired": false, "secret": false, "important": true, "description": "Number of exchanges that was grouped together." },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/circuitBreaker.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/circuitBreaker.json
+index 99be6cb1..fee3121e 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/circuitBreaker.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/circuitBreaker.json
+@@ -21,7 +21,7 @@
+     "resilience4jConfiguration": { "index": 6, "kind": "element", "displayName": "Resilience4j Configuration", "group": "common", "required": false, "type": "object", "javaType": "org.apache.camel.model.Resilience4jConfigurationDefinition", "deprecated": false, "autowired": false, "secret": false, "description": "Configures the circuit breaker to use Resilience4j with the given configuration." },
+     "faultToleranceConfiguration": { "index": 7, "kind": "element", "displayName": "Fault Tolerance Configuration", "group": "common", "required": false, "type": "object", "javaType": "org.apache.camel.model.FaultToleranceConfigurationDefinition", "deprecated": false, "autowired": false, "secret": false, "description": "Configures the circuit breaker to use MicroProfile Fault Tolerance with the given configuration." },
+     "onFallback": { "index": 8, "kind": "element", "displayName": "On Fallback", "group": "common", "required": false, "type": "object", "javaType": "org.apache.camel.model.OnFallbackDefinition", "deprecated": false, "autowired": false, "secret": false, "description": "The fallback route path to execute that does not go over the network. This should be a static or cached result that can immediately be returned upon failure. If the fallback requires network connection then use onFallbackViaNetwork() ." },
+-    "outputs": { "index": 9, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 9, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelResponseSuccessfulExecution": { "index": 0, "kind": "exchangeProperty", "displayName": "Response Successful Execution", "label": "producer", "required": false, "javaType": "boolean", "deprecated": false, "autowired": false, "secret": false, "description": "Whether the exchange was processed successfully by the circuit breaker" },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doCatch.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doCatch.json
+index a7f5f256..8341467d 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doCatch.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doCatch.json
+@@ -18,7 +18,7 @@
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+     "exception": { "index": 4, "kind": "element", "displayName": "Exception", "group": "common", "required": false, "type": "array", "javaType": "java.util.List<java.lang.String>", "deprecated": false, "autowired": false, "secret": false, "description": "The exception(s) to catch." },
+     "onWhen": { "index": 5, "kind": "element", "displayName": "On When", "group": "common", "required": false, "type": "object", "javaType": "org.apache.camel.model.OnWhenDefinition", "deprecated": false, "autowired": false, "secret": false, "asPredicate": true, "description": "Used for triggering doCatch in specific situations" },
+-    "outputs": { "index": 6, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 6, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelExceptionCaught": { "index": 0, "kind": "exchangeProperty", "displayName": "Exception Caught", "label": "producer", "required": false, "javaType": "java.lang.Exception", "deprecated": false, "autowired": false, "secret": false, "description": "Stores the caught exception due to a processing error of the current Exchange" },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doFinally.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doFinally.json
+index 49939591..092caa0d 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doFinally.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doFinally.json
+@@ -16,7 +16,7 @@
+     "note": { "index": 1, "kind": "attribute", "displayName": "Note", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the note of this node" },
+     "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+-    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelExceptionCaught": { "index": 0, "kind": "exchangeProperty", "displayName": "Exception Caught", "label": "producer", "required": false, "javaType": "java.lang.Exception", "deprecated": false, "autowired": false, "secret": false, "description": "Stores the caught exception due to a processing error of the current Exchange" },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doTry.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doTry.json
+index f5e4764f..640eeeac 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doTry.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/doTry.json
+@@ -16,7 +16,7 @@
+     "note": { "index": 1, "kind": "attribute", "displayName": "Note", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the note of this node" },
+     "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+-    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false },
++    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false },
+     "doCatch": { "index": 5, "kind": "element", "displayName": "Do Catch", "group": "common", "required": false, "type": "array", "javaType": "java.util.List<org.apache.camel.model.CatchDefinition>", "oneOf": [ "doCatch" ], "deprecated": false, "autowired": false, "secret": false, "description": "Catches exceptions as part of a try, catch, finally block" },
+     "doFinally": { "index": 6, "kind": "element", "displayName": "Do Finally", "group": "common", "required": false, "type": "object", "javaType": "org.apache.camel.model.FinallyDefinition", "deprecated": false, "autowired": false, "secret": false, "description": "Path traversed when a try, catch, finally block exits" }
+   }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/filter.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/filter.json
+index 5b5d4c8a..281f42bc 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/filter.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/filter.json
+@@ -18,6 +18,6 @@
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+     "expression": { "index": 4, "kind": "expression", "displayName": "Expression", "group": "common", "required": true, "type": "object", "javaType": "org.apache.camel.model.language.ExpressionDefinition", "oneOf": [ "constant", "csimple", "datasonnet", "exchangeProperty", "groovy", "header", "hl7terser", "java", "joor", "jq", "js", "jsonpath", "language", "method", "mvel", "ognl", "python", "ref", "simple", "spel", "tokenize", "variable", "wasm", "xpath", "xquery", "xtokenize" ], "deprecated": false, "autowired": false, "secret": false, "asPredicate": true, "description": "Expression to determine if the message should be filtered or not. If the expression returns an empty value or false then the message is filtered (dropped), otherwise the message is continued being routed." },
+     "statusPropertyName": { "index": 5, "kind": "attribute", "displayName": "Status Property Name", "group": "advanced", "label": "advanced", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Name of exchange property to use for storing the status of the filtering. Setting this allows to know if the filter predicate evaluated as true or false." },
+-    "outputs": { "index": 6, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 6, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/idempotentConsumer.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/idempotentConsumer.json
+index 0832e0ea..f65e892b 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/idempotentConsumer.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/idempotentConsumer.json
+@@ -22,7 +22,7 @@
+     "completionEager": { "index": 7, "kind": "attribute", "displayName": "Completion Eager", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Sets whether to complete the idempotent consumer eager or when the exchange is done. If this option is true to complete eager, then the idempotent consumer will trigger its completion when the exchange reached the end of the block of the idempotent consumer pattern. So if the exchange is continued routed after the block ends, then whatever happens there does not affect the state. If this option is false (default) to not complete eager, then the idempotent consumer will complete when the exchange is done being routed. So if the exchange is continued routed after the block ends, then whatever happens there also affect the state. For example if the exchange failed due to an exception, then the state of the idempotent consumer will be a rollback." },
+     "skipDuplicate": { "index": 8, "kind": "attribute", "displayName": "Skip Duplicate", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": true, "description": "Sets whether to skip duplicates or not. The default behavior is to skip duplicates. A duplicate message would have the Exchange property org.apache.camel.Exchange#DUPLICATE_MESSAGE set to a Boolean#TRUE value. A none duplicate message will not have this property set." },
+     "removeOnFailure": { "index": 9, "kind": "attribute", "displayName": "Remove On Failure", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": true, "description": "Sets whether to remove or keep the key on failure. The default behavior is to remove the key on failure." },
+-    "outputs": { "index": 10, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 10, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelDuplicateMessage": { "index": 0, "kind": "exchangeProperty", "displayName": "Duplicate Message", "label": "producer", "required": false, "javaType": "boolean", "deprecated": false, "autowired": false, "secret": false, "description": "Whether this exchange is a duplicate detected by the Idempotent Consumer EIP" }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/intercept.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/intercept.json
+index 3d56e70c..71ecf49b 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/intercept.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/intercept.json
+@@ -17,7 +17,7 @@
+     "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+     "onWhen": { "index": 4, "kind": "element", "displayName": "On When", "group": "common", "required": false, "type": "object", "javaType": "org.apache.camel.model.OnWhenDefinition", "deprecated": false, "autowired": false, "secret": false, "asPredicate": true, "description": "To use an expression to only trigger intercepting in specific situations" },
+-    "outputs": { "index": 5, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 5, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelInterceptedNodeId": { "index": 0, "kind": "exchangeProperty", "displayName": "Intercepted Node Id", "label": "producer", "required": false, "javaType": "String", "deprecated": false, "autowired": false, "secret": false, "description": "The intercepted route's node ID" },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/interceptFrom.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/interceptFrom.json
+index d84d55e7..980f499e 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/interceptFrom.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/interceptFrom.json
+@@ -18,7 +18,7 @@
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+     "uri": { "index": 4, "kind": "attribute", "displayName": "Uri", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Intercept incoming messages from the uri or uri pattern. If this option is not configured, then all incoming messages is intercepted." },
+     "onWhen": { "index": 5, "kind": "element", "displayName": "On When", "group": "common", "required": false, "type": "object", "javaType": "org.apache.camel.model.OnWhenDefinition", "deprecated": false, "autowired": false, "secret": false, "asPredicate": true, "description": "To use an expression to only trigger intercepting in specific situations" },
+-    "outputs": { "index": 6, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 6, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelInterceptedEndpoint": { "index": 0, "kind": "exchangeProperty", "displayName": "Intercepted Endpoint", "label": "producer", "required": false, "javaType": "String", "deprecated": false, "autowired": false, "secret": false, "description": "The endpoint URI that was intercepted" },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/interceptSendToEndpoint.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/interceptSendToEndpoint.json
+index ec306829..d8ddcb90 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/interceptSendToEndpoint.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/interceptSendToEndpoint.json
+@@ -20,7 +20,7 @@
+     "skipSendToOriginalEndpoint": { "index": 5, "kind": "attribute", "displayName": "Skip Send To Original Endpoint", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "If set to true then the message is not sent to the original endpoint. By default (false) the message is both intercepted and then sent to the original endpoint." },
+     "afterUri": { "index": 6, "kind": "attribute", "displayName": "After Uri", "group": "advanced", "label": "advanced", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "After sending to the endpoint then send the message to this uri which allows to process its result." },
+     "onWhen": { "index": 7, "kind": "element", "displayName": "On When", "group": "common", "required": false, "type": "object", "javaType": "org.apache.camel.model.OnWhenDefinition", "deprecated": false, "autowired": false, "secret": false, "asPredicate": true, "description": "To use an expression to only trigger intercepting sending to an endpoint in specific situations" },
+-    "outputs": { "index": 8, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 8, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelInterceptedEndpoint": { "index": 0, "kind": "exchangeProperty", "displayName": "Intercepted Endpoint", "label": "producer", "required": false, "javaType": "String", "deprecated": false, "autowired": false, "secret": false, "description": "The endpoint URI that was intercepted" },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/kamelet.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/kamelet.json
+index 5eaf3b41..a9cf2626 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/kamelet.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/kamelet.json
+@@ -17,6 +17,6 @@
+     "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+     "name": { "index": 4, "kind": "attribute", "displayName": "Name", "group": "common", "required": true, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Name of the Kamelet (templateId\/routeId) to call. Options for the kamelet can be specified using uri syntax, eg mynamecount=4&type=gold." },
+-    "outputs": { "index": 5, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 5, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/loadBalance.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/loadBalance.json
+index 2dd23cd6..e1825877 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/loadBalance.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/loadBalance.json
+@@ -17,6 +17,6 @@
+     "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+     "loadBalancerType": { "index": 4, "kind": "element", "displayName": "Load Balancer Type", "group": "common", "required": true, "type": "object", "javaType": "org.apache.camel.model.LoadBalancerDefinition", "oneOf": [ "customLoadBalancer", "failoverLoadBalancer", "randomLoadBalancer", "roundRobinLoadBalancer", "stickyLoadBalancer", "topicLoadBalancer", "weightedLoadBalancer" ], "deprecated": false, "autowired": false, "secret": false, "description": "The load balancer to be used" },
+-    "outputs": { "index": 5, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 5, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/loop.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/loop.json
+index 98d98462..dd43c623 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/loop.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/loop.json
+@@ -21,7 +21,7 @@
+     "doWhile": { "index": 6, "kind": "attribute", "displayName": "Do While", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Enables the while loop that loops until the predicate evaluates to false or null." },
+     "breakOnShutdown": { "index": 7, "kind": "attribute", "displayName": "Break On Shutdown", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "If the breakOnShutdown attribute is true, then the loop will not iterate until it reaches the end when Camel is shut down." },
+     "onPrepare": { "index": 8, "kind": "attribute", "displayName": "On Prepare", "group": "advanced", "label": "advanced", "required": false, "type": "object", "javaType": "org.apache.camel.Processor", "deprecated": false, "autowired": false, "secret": false, "description": "Uses the Processor when preparing the org.apache.camel.Exchange for each loop iteration. This can be used to deep-clone messages, or any custom logic needed before the looping executes." },
+-    "outputs": { "index": 9, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 9, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelLoopIndex": { "index": 0, "kind": "exchangeProperty", "displayName": "Loop Index", "label": "producer", "required": false, "javaType": "int", "deprecated": false, "autowired": false, "secret": false, "description": "Index of the current iteration (0 based)." },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/multicast.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/multicast.json
+index 91922ee7..5d1447cb 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/multicast.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/multicast.json
+@@ -28,7 +28,7 @@
+     "executorService": { "index": 13, "kind": "attribute", "displayName": "Executor Service", "group": "advanced", "label": "advanced", "required": false, "type": "object", "javaType": "java.util.concurrent.ExecutorService", "deprecated": false, "autowired": false, "secret": false, "description": "Refers to a custom Thread Pool to be used for parallel processing. Notice if you set this option, then parallel processing is automatic implied, and you do not have to enable that option as well." },
+     "onPrepare": { "index": 14, "kind": "attribute", "displayName": "On Prepare", "group": "advanced", "label": "advanced", "required": false, "type": "object", "javaType": "org.apache.camel.Processor", "deprecated": false, "autowired": false, "secret": false, "description": "Uses the Processor when preparing the org.apache.camel.Exchange to be send. This can be used to deep-clone messages that should be send, or any custom logic needed before the exchange is send." },
+     "shareUnitOfWork": { "index": 15, "kind": "attribute", "displayName": "Share Unit Of Work", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Shares the org.apache.camel.spi.UnitOfWork with the parent and each of the sub messages. Multicast will by default not share unit of work between the parent exchange and each multicasted exchange. This means each sub exchange has its own individual unit of work." },
+-    "outputs": { "index": 16, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 16, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelMulticastIndex": { "index": 0, "kind": "exchangeProperty", "displayName": "Multicast Index", "label": "producer", "required": false, "javaType": "int", "deprecated": false, "autowired": false, "secret": false, "description": "An index counter that increases for each Exchange being multicasted. The counter starts from 0." },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onCompletion.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onCompletion.json
+index f3a74e6c..631ab133 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onCompletion.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onCompletion.json
+@@ -23,7 +23,7 @@
+     "executorService": { "index": 8, "kind": "attribute", "displayName": "Executor Service", "group": "advanced", "label": "advanced", "required": false, "type": "object", "javaType": "java.util.concurrent.ExecutorService", "deprecated": false, "autowired": false, "secret": false, "description": "To use a custom Thread Pool to be used for parallel processing. Notice if you set this option, then parallel processing is automatic implied, and you do not have to enable that option as well." },
+     "useOriginalMessage": { "index": 9, "kind": "attribute", "displayName": "Use Original Message", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Will use the original input message body when an org.apache.camel.Exchange for this on completion. The original input message is defensively copied, and the copied message body is converted to org.apache.camel.StreamCache if possible (stream caching is enabled, can be disabled globally or on the original route), to ensure the body can be read when the original message is being used later. If the body is converted to org.apache.camel.StreamCache then the message body on the current org.apache.camel.Exchange is replaced with the org.apache.camel.StreamCache body. If the body is not converted to org.apache.camel.StreamCache then the body will not be able to re-read when accessed later. Important: The original input means the input message that are bounded by the current org.apache.camel.spi.UnitOfWork . An unit of work typically spans one route, or multiple routes if they are connected using internal endpoints such as direct or seda. When messages is passed via external endpoints such as JMS or HTTP then the consumer will create a new unit of work, with the message it received as input as the original input. Also some EIP patterns such as splitter, multicast, will create a new unit of work boundary for the messages in their sub-route (eg the split message); however these EIPs have an option named shareUnitOfWork which allows to combine with the parent unit of work in regard to error handling and therefore use the parent original message. By default this feature is off." },
+     "onWhen": { "index": 10, "kind": "element", "displayName": "On When", "group": "common", "required": false, "type": "object", "javaType": "org.apache.camel.model.OnWhenDefinition", "deprecated": false, "autowired": false, "secret": false, "asPredicate": true, "description": "To use an expression to only trigger routing this completion steps in specific situations" },
+-    "outputs": { "index": 11, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 11, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelOnCompletion": { "index": 0, "kind": "exchangeProperty", "displayName": "On Completion", "label": "producer", "required": false, "javaType": "boolean", "deprecated": false, "autowired": false, "secret": false, "description": "Flag to mark that this exchange is currently being executed as onCompletion" }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onException.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onException.json
+index 78a1558e..0f57dfe7 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onException.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onException.json
+@@ -27,7 +27,7 @@
+     "onExceptionOccurredRef": { "index": 12, "kind": "attribute", "displayName": "On Exception Occurred Ref", "group": "advanced", "label": "advanced", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets a reference to a processor that should be processed just after an exception occurred. Can be used to perform custom logging about the occurred exception at the exact time it happened. Important: Any exception thrown from this processor will be ignored." },
+     "useOriginalMessage": { "index": 13, "kind": "attribute", "displayName": "Use Original Message", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Will use the original input org.apache.camel.Message (original body and headers) when an org.apache.camel.Exchange is moved to the dead letter queue. Notice: this only applies when all redeliveries attempt have failed and the org.apache.camel.Exchange is doomed for failure. Instead of using the current inprogress org.apache.camel.Exchange IN message we use the original IN message instead. This allows you to store the original input in the dead letter queue instead of the inprogress snapshot of the IN message. For instance if you route transform the IN body during routing and then failed. With the original exchange store in the dead letter queue it might be easier to manually re submit the org.apache.camel.Exchange again as the IN message is the same as when Camel received it. So you should be able to send the org.apache.camel.Exchange to the same input. The difference between useOriginalMessage and useOriginalBody is that the former includes both the original body and headers, where as the latter only includes the original body. You can use the latter to enrich the message with custom headers and include the original message body. The former wont let you do this, as its using the original message body and headers as they are. You cannot enable both useOriginalMessage and useOriginalBody. The original input message is defensively copied, and the copied message body is converted to org.apache.camel.StreamCache if possible (stream caching is enabled, can be disabled globally or on the original route), to ensure the body can be read when the original message is being used later. If the body is converted to org.apache.camel.StreamCache then the message body on the current org.apache.camel.Exchange is replaced with the org.apache.camel.StreamCache body. If the body is not converted to org.apache.camel.StreamCache then the body will not be able to re-read when accessed later. Important: The original input means the input message that are bounded by the current org.apache.camel.spi.UnitOfWork . An unit of work typically spans one route, or multiple routes if they are connected using internal endpoints such as direct or seda. When messages is passed via external endpoints such as JMS or HTTP then the consumer will create a new unit of work, with the message it received as input as the original input. Also some EIP patterns such as splitter, multicast, will create a new unit of work boundary for the messages in their sub-route (eg the split message); however these EIPs have an option named shareUnitOfWork which allows to combine with the parent unit of work in regard to error handling and therefore use the parent original message. By default this feature is off." },
+     "useOriginalBody": { "index": 14, "kind": "attribute", "displayName": "Use Original Body", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Will use the original input org.apache.camel.Message body (original body only) when an org.apache.camel.Exchange is moved to the dead letter queue. Notice: this only applies when all redeliveries attempt have failed and the org.apache.camel.Exchange is doomed for failure. Instead of using the current inprogress org.apache.camel.Exchange IN message we use the original IN message instead. This allows you to store the original input in the dead letter queue instead of the inprogress snapshot of the IN message. For instance if you route transform the IN body during routing and then failed. With the original exchange store in the dead letter queue it might be easier to manually re submit the org.apache.camel.Exchange again as the IN message is the same as when Camel received it. So you should be able to send the org.apache.camel.Exchange to the same input. The difference between useOriginalMessage and useOriginalBody is that the former includes both the original body and headers, where as the latter only includes the original body. You can use the latter to enrich the message with custom headers and include the original message body. The former wont let you do this, as its using the original message body and headers as they are. You cannot enable both useOriginalMessage and useOriginalBody. The original input message is defensively copied, and the copied message body is converted to org.apache.camel.StreamCache if possible (stream caching is enabled, can be disabled globally or on the original route), to ensure the body can be read when the original message is being used later. If the body is converted to org.apache.camel.StreamCache then the message body on the current org.apache.camel.Exchange is replaced with the org.apache.camel.StreamCache body. If the body is not converted to org.apache.camel.StreamCache then the body will not be able to re-read when accessed later. Important: The original input means the input message that are bounded by the current org.apache.camel.spi.UnitOfWork . An unit of work typically spans one route, or multiple routes if they are connected using internal endpoints such as direct or seda. When messages is passed via external endpoints such as JMS or HTTP then the consumer will create a new unit of work, with the message it received as input as the original input. Also some EIP patterns such as splitter, multicast, will create a new unit of work boundary for the messages in their sub-route (eg the split message); however these EIPs have an option named shareUnitOfWork which allows to combine with the parent unit of work in regard to error handling and therefore use the parent original message. By default this feature is off." },
+-    "outputs": { "index": 15, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 15, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelExceptionCaught": { "index": 0, "kind": "exchangeProperty", "displayName": "Exception Caught", "label": "producer", "required": false, "javaType": "java.lang.Exception", "deprecated": false, "autowired": false, "secret": false, "description": "Stores the caught exception due to a processing error of the current Exchange" },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onFallback.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onFallback.json
+index a0f6fff7..ef6f3acd 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onFallback.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/onFallback.json
+@@ -16,6 +16,6 @@
+     "note": { "index": 1, "kind": "attribute", "displayName": "Note", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the note of this node" },
+     "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
+     "fallbackViaNetwork": { "index": 3, "kind": "attribute", "displayName": "Fallback Via Network", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Whether the fallback goes over the network. If the fallback will go over the network it is another possible point of failure. It is important to execute the fallback command on a separate thread-pool, otherwise if the main command were to become latent and fill the thread-pool this would prevent the fallback from running if the two commands share the same pool." },
+-    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/otherwise.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/otherwise.json
+index 3f05c68c..f50d3249 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/otherwise.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/otherwise.json
+@@ -16,6 +16,6 @@
+     "note": { "index": 1, "kind": "attribute", "displayName": "Note", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the note of this node" },
+     "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+-    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/pipeline.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/pipeline.json
+index ebd24180..bf8b2d3f 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/pipeline.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/pipeline.json
+@@ -16,6 +16,6 @@
+     "note": { "index": 1, "kind": "attribute", "displayName": "Note", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the note of this node" },
+     "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+-    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/resequence.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/resequence.json
+index 02f57ff2..1808fc60 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/resequence.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/resequence.json
+@@ -18,6 +18,6 @@
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+     "expression": { "index": 4, "kind": "expression", "displayName": "Expression", "group": "common", "required": true, "type": "object", "javaType": "org.apache.camel.model.language.ExpressionDefinition", "oneOf": [ "constant", "csimple", "datasonnet", "exchangeProperty", "groovy", "header", "hl7terser", "java", "joor", "jq", "js", "jsonpath", "language", "method", "mvel", "ognl", "python", "ref", "simple", "spel", "tokenize", "variable", "wasm", "xpath", "xquery", "xtokenize" ], "deprecated": false, "autowired": false, "secret": false, "description": "Expression to use for re-ordering the messages, such as a header with a sequence number" },
+     "resequencerConfig": { "index": 5, "kind": "element", "displayName": "Resequencer Config", "group": "common", "required": true, "type": "object", "javaType": "org.apache.camel.model.config.ResequencerConfig", "oneOf": [ "batchConfig", "streamConfig" ], "deprecated": false, "autowired": false, "secret": false, "description": "To configure the resequencer in using either batch or stream configuration. Will by default use batch configuration." },
+-    "outputs": { "index": 6, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 6, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/route.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/route.json
+index 6ca8b472..cd693d61 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/route.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/route.json
+@@ -34,6 +34,6 @@
+     "inputType": { "index": 19, "kind": "element", "displayName": "Input Type", "group": "advanced", "label": "advanced", "required": false, "type": "object", "javaType": "org.apache.camel.model.InputTypeDefinition", "deprecated": false, "autowired": false, "secret": false, "description": "Declare the expected data type of the input message. If the actual message type is different at runtime, camel look for a required org.apache.camel.spi.Transformer and apply if exists. The type name consists of two parts, 'scheme' and 'name' connected with ':'. For Java type 'name' is a fully qualified class name. For example {code java:java.lang.String} , {code json:ABCOrder} ." },
+     "outputType": { "index": 20, "kind": "element", "displayName": "Output Type", "group": "advanced", "label": "advanced", "required": false, "type": "object", "javaType": "org.apache.camel.model.OutputTypeDefinition", "deprecated": false, "autowired": false, "secret": false, "description": "Declare the expected data type of the output message. If the actual message type is different at runtime, camel look for a required org.apache.camel.spi.Transformer and apply if exists. The type name consists of two parts, 'scheme' and 'name' connected with ':'. For Java type 'name' is a fully qualified class name. For example {code java:java.lang.String} , {code json:ABCOrder} ." },
+     "input": { "index": 21, "kind": "element", "displayName": "Input", "group": "common", "required": true, "type": "object", "javaType": "org.apache.camel.model.FromDefinition", "oneOf": [ "from" ], "deprecated": false, "autowired": false, "secret": false, "description": "Input to the route." },
+-    "outputs": { "index": 22, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<?>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false, "description": "Outputs are processors that determines how messages are processed by this route." }
++    "outputs": { "index": 22, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<?>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false, "description": "Outputs are processors that determines how messages are processed by this route." }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/saga.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/saga.json
+index 6489d7f0..b3981ee5 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/saga.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/saga.json
+@@ -23,6 +23,6 @@
+     "compensation": { "index": 8, "kind": "attribute", "displayName": "Compensation", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "The compensation endpoint URI that must be called to compensate all changes done in the route. The route corresponding to the compensation URI must perform compensation and complete without error. If errors occur during compensation, the saga service may call again the compensation URI to retry." },
+     "completion": { "index": 9, "kind": "attribute", "displayName": "Completion", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "The completion endpoint URI that will be called when the Saga is completed successfully. The route corresponding to the completion URI must perform completion tasks and terminate without error. If errors occur during completion, the saga service may call again the completion URI to retry." },
+     "option": { "index": 10, "kind": "element", "displayName": "Option", "group": "advanced", "label": "advanced", "required": false, "type": "array", "javaType": "java.util.List<org.apache.camel.model.PropertyExpressionDefinition>", "deprecated": false, "autowired": false, "secret": false, "description": "Allows to save properties of the current exchange in order to re-use them in a compensation\/completion callback route. Options are usually helpful e.g. to store and retrieve identifiers of objects that should be deleted in compensating actions. Option values will be transformed into input headers of the compensation\/completion exchange." },
+-    "outputs": { "index": 11, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 11, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/split.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/split.json
+index 4ba89bba..c8bee601 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/split.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/split.json
+@@ -30,7 +30,7 @@
+     "executorService": { "index": 15, "kind": "attribute", "displayName": "Executor Service", "group": "advanced", "label": "advanced", "required": false, "type": "object", "javaType": "java.util.concurrent.ExecutorService", "deprecated": false, "autowired": false, "secret": false, "description": "To use a custom Thread Pool to be used for parallel processing. Notice if you set this option, then parallel processing is automatically implied, and you do not have to enable that option as well." },
+     "onPrepare": { "index": 16, "kind": "attribute", "displayName": "On Prepare", "group": "advanced", "label": "advanced", "required": false, "type": "object", "javaType": "org.apache.camel.Processor", "deprecated": false, "autowired": false, "secret": false, "description": "Uses the Processor when preparing the org.apache.camel.Exchange to be sent. This can be used to deep-clone messages that should be sent, or any custom logic needed before the exchange is sent." },
+     "shareUnitOfWork": { "index": 17, "kind": "attribute", "displayName": "Share Unit Of Work", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Shares the org.apache.camel.spi.UnitOfWork with the parent and each of the sub messages. Splitter will by default not share unit of work between the parent exchange and each split exchange. This means each split exchange has its own individual unit of work." },
+-    "outputs": { "index": 18, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 18, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelSplitIndex": { "index": 0, "kind": "exchangeProperty", "displayName": "Split Index", "label": "producer", "required": false, "javaType": "int", "deprecated": false, "autowired": false, "secret": false, "important": true, "description": "A split counter that increases for each Exchange being split. The counter starts from 0." },
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/step.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/step.json
+index add6adc8..ee8541f4 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/step.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/step.json
+@@ -16,7 +16,7 @@
+     "note": { "index": 1, "kind": "attribute", "displayName": "Note", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the note of this node" },
+     "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+-    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 4, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   },
+   "exchangeProperties": {
+     "CamelStepId": { "index": 0, "kind": "exchangeProperty", "displayName": "Step Id", "label": "producer", "required": false, "javaType": "String", "deprecated": false, "autowired": false, "secret": false, "description": "The id of the Step EIP" }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/timebox.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/timebox.json
+new file mode 100644
+index 00000000..df711a5c
+--- /dev/null
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/timebox.json
+@@ -0,0 +1,22 @@
++{
++  "model": {
++    "kind": "model",
++    "name": "timebox",
++    "title": "Timebox",
++    "description": "Bounds the wall-clock time of a sequence of steps to a fixed budget. If the nested outputs have not completed within the budget, the exchange fails with org.apache.camel.ExchangeTimedOutException .",
++    "deprecated": false,
++    "label": "eip,routing",
++    "javaType": "org.apache.camel.model.TimeboxDefinition",
++    "abstract": false,
++    "input": true,
++    "output": true
++  },
++  "properties": {
++    "id": { "index": 0, "kind": "attribute", "displayName": "Id", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the id of this node" },
++    "note": { "index": 1, "kind": "attribute", "displayName": "Note", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the note of this node" },
++    "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
++    "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
++    "timeoutMillis": { "index": 4, "kind": "attribute", "displayName": "Timeout Millis", "group": "common", "required": true, "type": "integer", "javaType": "java.lang.Long", "deprecated": false, "autowired": false, "secret": false, "description": "The wall-clock budget, in milliseconds, within which the nested outputs must complete. If the budget is exceeded then the exchange fails with org.apache.camel.ExchangeTimedOutException carrying the budget, and any outputs after end() do not run." },
++    "outputs": { "index": 5, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++  }
++}
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/when.json b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/when.json
+index 396ada33..a076b113 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/when.json
++++ b/core/camel-core-model/src/generated/resources/META-INF/org/apache/camel/model/when.json
+@@ -17,6 +17,6 @@
+     "description": { "index": 2, "kind": "attribute", "displayName": "Description", "group": "common", "required": false, "type": "string", "javaType": "java.lang.String", "deprecated": false, "autowired": false, "secret": false, "description": "Sets the description of this node" },
+     "disabled": { "index": 3, "kind": "attribute", "displayName": "Disabled", "group": "advanced", "label": "advanced", "required": false, "type": "boolean", "javaType": "java.lang.Boolean", "deprecated": false, "autowired": false, "secret": false, "defaultValue": false, "description": "Disables this EIP from the route." },
+     "expression": { "index": 4, "kind": "expression", "displayName": "Expression", "group": "common", "required": true, "type": "object", "javaType": "org.apache.camel.model.language.ExpressionDefinition", "oneOf": [ "constant", "csimple", "datasonnet", "exchangeProperty", "groovy", "header", "hl7terser", "java", "joor", "jq", "js", "jsonpath", "language", "method", "mvel", "ognl", "python", "ref", "simple", "spel", "tokenize", "variable", "wasm", "xpath", "xquery", "xtokenize" ], "deprecated": false, "autowired": false, "secret": false, "asPredicate": true, "description": "Expression used as the predicate to evaluate whether this when should trigger and route the message or not." },
+-    "outputs": { "index": 5, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
++    "outputs": { "index": 5, "kind": "element", "displayName": "Outputs", "group": "common", "required": true, "type": "array", "javaType": "java.util.List<org.apache.camel.model.ProcessorDefinition<java.lang.Object>>", "oneOf": [ "a2aSubTask", "aggregate", "bean", "choice", "circuitBreaker", "claimCheck", "convertBodyTo", "convertHeaderTo", "convertVariableTo", "delay", "doCatch", "doFinally", "doTry", "dynamicRouter", "enrich", "filter", "idempotentConsumer", "intercept", "interceptFrom", "interceptSendToEndpoint", "kamelet", "loadBalance", "log", "loop", "marshal", "multicast", "onCompletion", "onException", "pausable", "pipeline", "policy", "poll", "pollEnrich", "process", "recipientList", "removeHeader", "removeHeaders", "removeProperties", "removeProperty", "removeVariable", "resequence", "resumable", "rollback", "routingSlip", "saga", "sample", "script", "setBody", "setExchangePattern", "setHeader", "setHeaders", "setProperty", "setVariable", "setVariables", "sort", "split", "step", "stop", "threads", "throttle", "throwException", "timebox", "to", "toD", "tokenizer", "transacted", "transform", "transformDataType", "unmarshal", "validate", "wireTap" ], "deprecated": false, "autowired": false, "secret": false }
+   }
+ }
+diff --git a/core/camel-core-model/src/generated/resources/META-INF/services/org/apache/camel/model.properties b/core/camel-core-model/src/generated/resources/META-INF/services/org/apache/camel/model.properties
+index c70bc419..cd8feabe 100644
+--- a/core/camel-core-model/src/generated/resources/META-INF/services/org/apache/camel/model.properties
++++ b/core/camel-core-model/src/generated/resources/META-INF/services/org/apache/camel/model.properties
+@@ -205,6 +205,7 @@ threads
+ thrift
+ throttle
+ throwException
++timebox
+ to
+ toD
+ tokenize
+diff --git a/core/camel-core-model/src/generated/resources/org/apache/camel/model/jaxb.index b/core/camel-core-model/src/generated/resources/org/apache/camel/model/jaxb.index
+index 180e2509..b96d1e48 100644
+--- a/core/camel-core-model/src/generated/resources/org/apache/camel/model/jaxb.index
++++ b/core/camel-core-model/src/generated/resources/org/apache/camel/model/jaxb.index
+@@ -104,6 +104,7 @@ ThreadsDefinition
+ ThrottleDefinition
+ ThrottlingMode
+ ThrowExceptionDefinition
++TimeboxDefinition
+ ToDefinition
+ ToDynamicDefinition
+ TokenizerDefinition
+diff --git a/core/camel-core-model/src/main/java/org/apache/camel/model/ProcessorDefinition.java b/core/camel-core-model/src/main/java/org/apache/camel/model/ProcessorDefinition.java
+index 6e9ca335..870baecf 100644
+--- a/core/camel-core-model/src/main/java/org/apache/camel/model/ProcessorDefinition.java
++++ b/core/camel-core-model/src/main/java/org/apache/camel/model/ProcessorDefinition.java
+@@ -1060,6 +1060,20 @@ public abstract class ProcessorDefinition<Type extends ProcessorDefinition<Type>
+         return answer;
+     }
+ 
++    /**
++     * Timebox EIP: Bounds the wall-clock time of the nested outputs to the given budget in milliseconds. If the nested
++     * outputs have not completed within the budget, the exchange fails with
++     * {@link org.apache.camel.ExchangeTimedOutException} and any outputs after {@code end()} do not run.
++     *
++     * @param  timeoutMillis the budget in milliseconds
++     * @return               the builder
++     */
++    public TimeboxDefinition timebox(long timeoutMillis) {
++        TimeboxDefinition answer = new TimeboxDefinition(timeoutMillis);
++        addOutput(answer);
++        return answer;
++    }
++
+     /**
+      * <a href= "https://camel.apache.org/components/latest/eips/pipeline-eip.html">Pipes and Filters EIP:</a> Creates a
+      * {@link org.apache.camel.processor.Pipeline} so that the message will get processed by each endpoint in turn and
+diff --git a/core/camel-core-model/src/main/java/org/apache/camel/model/TimeboxDefinition.java b/core/camel-core-model/src/main/java/org/apache/camel/model/TimeboxDefinition.java
+new file mode 100644
+index 00000000..9b289d16
+--- /dev/null
++++ b/core/camel-core-model/src/main/java/org/apache/camel/model/TimeboxDefinition.java
+@@ -0,0 +1,97 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.camel.model;
++
++import java.util.List;
++
++import jakarta.xml.bind.annotation.XmlAccessType;
++import jakarta.xml.bind.annotation.XmlAccessorType;
++import jakarta.xml.bind.annotation.XmlAttribute;
++import jakarta.xml.bind.annotation.XmlElementRef;
++import jakarta.xml.bind.annotation.XmlRootElement;
++
++import org.apache.camel.spi.Metadata;
++
++/**
++ * Bounds the wall-clock time of a sequence of steps to a fixed budget. If the nested outputs have not completed within
++ * the budget, the exchange fails with {@link org.apache.camel.ExchangeTimedOutException}.
++ */
++@Metadata(label = "eip,routing")
++@XmlRootElement(name = "timebox")
++@XmlAccessorType(XmlAccessType.FIELD)
++public class TimeboxDefinition extends OutputDefinition<TimeboxDefinition> {
++
++    @XmlAttribute(required = true)
++    @Metadata(required = true, javaType = "java.lang.Long")
++    private String timeoutMillis;
++
++    public TimeboxDefinition() {
++    }
++
++    public TimeboxDefinition(TimeboxDefinition source) {
++        super(source);
++        this.timeoutMillis = source.timeoutMillis;
++    }
++
++    public TimeboxDefinition(long timeoutMillis) {
++        this.timeoutMillis = Long.toString(timeoutMillis);
++    }
++
++    @Override
++    public TimeboxDefinition copyDefinition() {
++        return new TimeboxDefinition(this);
++    }
++
++    @Override
++    public List<ProcessorDefinition<?>> getOutputs() {
++        return super.getOutputs();
++    }
++
++    @XmlElementRef
++    @Override
++    public void setOutputs(List<ProcessorDefinition<?>> outputs) {
++        super.setOutputs(outputs);
++    }
++
++    @Override
++    public String toString() {
++        return "Timebox[" + timeoutMillis + " millis, " + getOutputs() + "]";
++    }
++
++    @Override
++    public String getShortName() {
++        return "timebox";
++    }
++
++    @Override
++    public String getLabel() {
++        return "timebox[" + timeoutMillis + "]";
++    }
++
++    public String getTimeoutMillis() {
++        return timeoutMillis;
++    }
++
++    /**
++     * The wall-clock budget, in milliseconds, within which the nested outputs must complete. If the budget is exceeded
++     * then the exchange fails with {@link org.apache.camel.ExchangeTimedOutException} carrying the budget, and any
++     * outputs after {@code end()} do not run.
++     */
++    public void setTimeoutMillis(String timeoutMillis) {
++        this.timeoutMillis = timeoutMillis;
++    }
++}
+diff --git a/core/camel-core-processor/src/main/java/org/apache/camel/processor/TimeboxProcessor.java b/core/camel-core-processor/src/main/java/org/apache/camel/processor/TimeboxProcessor.java
+new file mode 100644
+index 00000000..a4068ebf
+--- /dev/null
++++ b/core/camel-core-processor/src/main/java/org/apache/camel/processor/TimeboxProcessor.java
+@@ -0,0 +1,221 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.camel.processor;
++
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.RejectedExecutionException;
++import java.util.concurrent.ScheduledExecutorService;
++import java.util.concurrent.ScheduledFuture;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++
++import org.apache.camel.AsyncCallback;
++import org.apache.camel.CamelContext;
++import org.apache.camel.Exchange;
++import org.apache.camel.ExchangeTimedOutException;
++import org.apache.camel.Processor;
++import org.apache.camel.Traceable;
++import org.apache.camel.spi.IdAware;
++import org.apache.camel.spi.RouteIdAware;
++import org.apache.camel.support.ExchangeHelper;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/**
++ * The processor which implements the <a href="http://camel.apache.org/timebox.html">Timebox</a> EIP: bounds the
++ * wall-clock time of its nested outputs to a fixed budget, failing the {@link Exchange} with
++ * {@link ExchangeTimedOutException} when the budget is exceeded.
++ * <p/>
++ * <b>Isolation.</b> The nested outputs run against a correlated copy of the exchange (see
++ * {@link ExchangeHelper#createCorrelatedCopy(Exchange, boolean)}), never the original. That way a child which is still
++ * running after the budget has already expired cannot mutate or corrupt the exchange that has, by then, already
++ * continued down the route as timed out.
++ * <p/>
++ * <b>Completion/timeout race.</b> Exactly one of "the nested outputs completed" and "the budget expired" may act on the
++ * original exchange. Both paths attempt a single {@code compareAndSet(false, true)} on a per-invocation
++ * {@link AtomicBoolean}; only the winner is allowed to touch the original exchange and invoke the callback, and only a
++ * within-budget completion copies its results (body, headers, properties, variables and any exception) back onto it.
++ * The loser's outcome is simply dropped. Because the child runs through the normal (possibly asynchronous) processing
++ * chain, this also correctly enforces the budget for asynchronous children (for example an async delayer, or a SEDA
++ * round-trip): whichever thread the child eventually completes on still has to win the same compare-and-set race as the
++ * timer.
++ * <p/>
++ * <b>Executor strategy.</b> Deadlines for all in-flight exchanges passing through one timebox instance are tracked on a
++ * single shared {@link ScheduledExecutorService} (one background timer thread, created in {@link #doStart()}), not a
++ * dedicated thread or busy-wait per exchange. So many concurrent exchanges through the same timebox never create more
++ * than that one extra thread.
++ */
++public class TimeboxProcessor extends BaseDelegateProcessorSupport implements Traceable, IdAware, RouteIdAware {
++
++    private static final Logger LOG = LoggerFactory.getLogger(TimeboxProcessor.class);
++
++    private final CamelContext camelContext;
++    private final long timeoutMillis;
++    private String id;
++    private String routeId;
++    private ScheduledExecutorService executorService;
++    private ExecutorService callbackExecutorService;
++
++    public TimeboxProcessor(CamelContext camelContext, Processor processor, long timeoutMillis) {
++        super(processor);
++        this.camelContext = camelContext;
++        this.timeoutMillis = timeoutMillis;
++    }
++
++    @Override
++    public boolean process(final Exchange exchange, final AsyncCallback callback) {
++        if (timeoutMillis <= 0) {
++            // no budget configured: behave as if the timebox was absent
++            return processor.process(exchange, callback);
++        }
++
++        // isolate: the nested outputs never see the real exchange, only a correlated, independent copy of it.
++        // a late-finishing child can therefore only ever mutate this copy, never the exchange the route
++        // continues with
++        final Exchange copy = ExchangeHelper.createCorrelatedCopy(exchange, false);
++
++        // decides, exactly once, whether the timeout or the completion gets to act on the real exchange
++        final AtomicBoolean done = new AtomicBoolean();
++        final ScheduledFuture<?>[] timeoutFuture = new ScheduledFuture<?>[1];
++
++        Runnable onTimeout = () -> {
++            if (done.compareAndSet(false, true)) {
++                if (LOG.isDebugEnabled()) {
++                    LOG.debug("Timebox of {} millis expired for exchangeId: {}", timeoutMillis, exchange.getExchangeId());
++                }
++                exchange.setException(new ExchangeTimedOutException(exchange, timeoutMillis));
++                // dispatch the callback (and whatever synchronous work it triggers downstream, e.g. a
++                // redelivery that reinvokes this very processor with a slow/blocking child) onto a separate
++                // executor rather than running it inline here. this Runnable itself executes on the single
++                // shared scheduling thread that every in-flight exchange's deadline depends on; if arbitrary
++                // downstream work were allowed to run on that same thread, a single blocking child could
++                // starve every other exchange's timeout -- including a subsequent redelivery attempt of this
++                // very exchange, which would otherwise silently never time out at all
++                callbackExecutorService.execute(() -> callback.done(false));
++            }
++            // else: the nested outputs already completed within budget and won the race; nothing more to do
++        };
++
++        try {
++            timeoutFuture[0] = executorService.schedule(onTimeout, timeoutMillis, TimeUnit.MILLISECONDS);
++        } catch (RejectedExecutionException e) {
++            exchange.setException(e);
++            callback.done(true);
++            return true;
++        }
++
++        // tracks whether the completion callback below both (a) won the race against the timeout and (b) was
++        // invoked synchronously, i.e. before processor.process() below has even returned. only in that exact
++        // case can this method itself honestly report synchronous completion back up the AsyncProcessor chain;
++        // reporting it in any other case would violate the AsyncCallback contract (done(true) must never be
++        // signalled after process() has already returned control to the caller)
++        final boolean[] wonSynchronously = new boolean[1];
++
++        boolean childReportedSync = processor.process(copy, doneSync -> {
++            if (done.compareAndSet(false, true)) {
++                ScheduledFuture<?> future = timeoutFuture[0];
++                if (future != null) {
++                    future.cancel(false);
++                }
++                // completion won within budget: copy body, headers, properties, variables and any exception
++                // from the isolated copy back onto the real exchange, preserving its exchange pattern
++                ExchangeHelper.copyResultsPreservePattern(exchange, copy);
++                if (doneSync) {
++                    // still inside processor.process() below: defer signalling the callback to the return
++                    // value of this method instead of calling callback.done() here
++                    wonSynchronously[0] = true;
++                } else {
++                    callback.done(false);
++                }
++            }
++            // else: the timeout already won and has completed the real exchange; this late completion happened
++            // on the isolated copy only, so it is simply dropped and never touches the real exchange
++        });
++
++        if (childReportedSync && wonSynchronously[0]) {
++            // the child ran and completed entirely within this call, well within budget, and nothing else
++            // (in particular the timer) could have won the race in the meantime: report synchronous completion
++            // honestly, exactly like any other processor would for a fast child
++            callback.done(true);
++            return true;
++        }
++
++        // either the child is still running (asynchronous child, or a slow synchronous one blocking a worker
++        // thread), or the timeout already won the race: which side ultimately wins is only known once one of
++        // the two callbacks above has executed its compare-and-set, and that may happen on the timer thread or
++        // the child's own thread -- so reporting synchronous completion here would be incorrect
++        return false;
++    }
++
++    @Override
++    protected void doStart() throws Exception {
++        super.doStart();
++        if (executorService == null) {
++            executorService = camelContext.getExecutorServiceManager().newSingleThreadScheduledExecutor(this, "Timebox");
++        }
++        if (callbackExecutorService == null) {
++            callbackExecutorService = camelContext.getExecutorServiceManager().newDefaultThreadPool(this, "TimeboxCallback");
++        }
++    }
++
++    @Override
++    protected void doShutdown() throws Exception {
++        if (executorService != null) {
++            camelContext.getExecutorServiceManager().shutdownNow(executorService);
++            executorService = null;
++        }
++        if (callbackExecutorService != null) {
++            camelContext.getExecutorServiceManager().shutdownNow(callbackExecutorService);
++            callbackExecutorService = null;
++        }
++        super.doShutdown();
++    }
++
++    @Override
++    public String getId() {
++        return id;
++    }
++
++    @Override
++    public void setId(String id) {
++        this.id = id;
++    }
++
++    @Override
++    public String getRouteId() {
++        return routeId;
++    }
++
++    @Override
++    public void setRouteId(String routeId) {
++        this.routeId = routeId;
++    }
++
++    @Override
++    public String getTraceLabel() {
++        return "timebox[" + timeoutMillis + "]";
++    }
++
++    public long getTimeoutMillis() {
++        return timeoutMillis;
++    }
++
++    @Override
++    public String toString() {
++        return "Timebox[" + timeoutMillis + " millis]";
++    }
++}
+diff --git a/core/camel-core-reifier/src/main/java/org/apache/camel/reifier/ProcessorReifier.java b/core/camel-core-reifier/src/main/java/org/apache/camel/reifier/ProcessorReifier.java
+index 9326574b..1376b28d 100644
+--- a/core/camel-core-reifier/src/main/java/org/apache/camel/reifier/ProcessorReifier.java
++++ b/core/camel-core-reifier/src/main/java/org/apache/camel/reifier/ProcessorReifier.java
+@@ -103,6 +103,7 @@ import org.apache.camel.model.StopDefinition;
+ import org.apache.camel.model.ThreadsDefinition;
+ import org.apache.camel.model.ThrottleDefinition;
+ import org.apache.camel.model.ThrowExceptionDefinition;
++import org.apache.camel.model.TimeboxDefinition;
+ import org.apache.camel.model.ToDefinition;
+ import org.apache.camel.model.ToDynamicDefinition;
+ import org.apache.camel.model.TokenizerDefinition;
+@@ -323,6 +324,8 @@ public abstract class ProcessorReifier<T extends ProcessorDefinition<?>> extends
+             return new ThrottleReifier(route, definition);
+         } else if (definition instanceof ThrowExceptionDefinition) {
+             return new ThrowExceptionReifier(route, definition);
++        } else if (definition instanceof TimeboxDefinition) {
++            return new TimeboxReifier(route, definition);
+         } else if (definition instanceof ToDefinition) {
+             return new SendReifier(route, definition);
+         } else if (definition instanceof WireTapDefinition) {
+diff --git a/core/camel-core-reifier/src/main/java/org/apache/camel/reifier/TimeboxReifier.java b/core/camel-core-reifier/src/main/java/org/apache/camel/reifier/TimeboxReifier.java
+new file mode 100644
+index 00000000..004f0364
+--- /dev/null
++++ b/core/camel-core-reifier/src/main/java/org/apache/camel/reifier/TimeboxReifier.java
+@@ -0,0 +1,47 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.camel.reifier;
++
++import org.apache.camel.Processor;
++import org.apache.camel.Route;
++import org.apache.camel.model.ProcessorDefinition;
++import org.apache.camel.model.TimeboxDefinition;
++import org.apache.camel.processor.TimeboxProcessor;
++
++public class TimeboxReifier extends ProcessorReifier<TimeboxDefinition> {
++
++    public TimeboxReifier(Route route, ProcessorDefinition<?> definition) {
++        super(route, TimeboxDefinition.class.cast(definition));
++    }
++
++    @Override
++    public Processor createProcessor() throws Exception {
++        long timeoutMillis = parseLong(definition.getTimeoutMillis(), 0);
++        if (timeoutMillis <= 0) {
++            throw new IllegalArgumentException("timeoutMillis must be a positive number on timebox: " + definition);
++        }
++
++        Processor childProcessor = this.createChildProcessor(true);
++
++        TimeboxProcessor answer = new TimeboxProcessor(camelContext, childProcessor, timeoutMillis);
++        answer.setId(getId(definition));
++        answer.setRouteId(route.getRouteId());
++        // TimeboxProcessor is always DisabledAware (via BaseDelegateProcessorSupport), no instanceof needed
++        answer.setDisabled(isDisabled(camelContext, definition));
++        return answer;
++    }
++}
+diff --git a/core/camel-core/src/test/java/org/apache/camel/processor/TimeboxGateTest.java b/core/camel-core/src/test/java/org/apache/camel/processor/TimeboxGateTest.java
+new file mode 100644
+index 00000000..50d61ad2
+--- /dev/null
++++ b/core/camel-core/src/test/java/org/apache/camel/processor/TimeboxGateTest.java
+@@ -0,0 +1,424 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.camel.processor;
++
++import java.io.StringReader;
++import java.io.StringWriter;
++import java.lang.management.ManagementFactory;
++import java.lang.management.ThreadMXBean;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.Callable;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicInteger;
++
++import org.apache.camel.ContextTestSupport;
++import org.apache.camel.Exchange;
++import org.apache.camel.ExchangePattern;
++import org.apache.camel.ExchangeTimedOutException;
++import org.apache.camel.builder.RouteBuilder;
++import org.apache.camel.component.mock.MockEndpoint;
++import org.apache.camel.model.ProcessorDefinition;
++import org.apache.camel.model.RouteDefinition;
++import org.apache.camel.model.RoutesDefinition;
++import org.apache.camel.model.TimeboxDefinition;
++import org.apache.camel.xml.in.ModelParser;
++import org.apache.camel.xml.out.ModelWriter;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertInstanceOf;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++/**
++ * Acceptance test for the timebox EIP. Provided by the harness — implementations must make it pass unmodified.
++ */
++public class TimeboxGateTest extends ContextTestSupport {
++
++    // static so a fresh CamelContext per test method does not reset counts kept purely to observe how many
++    // times a section actually re-ran; each test that uses one resets it to 0 as its first statement
++    private static final AtomicInteger REDELIVERY_COUNTER = new AtomicInteger();
++    private static final AtomicInteger TOTAL_DELIVERIES = new AtomicInteger();
++
++    @Test
++    public void testHappyPathPropagatesBodyHeadersPropertiesAndMep() throws Exception {
++        MockEndpoint result = getMockEndpoint("mock:happyResult");
++        result.expectedBodiesReceived("Hello");
++        result.expectedHeaderReceived("insideHeader", "insideVal");
++
++        Exchange out = template.send("direct:happy", ExchangePattern.InOut, exchange -> {
++            exchange.getIn().setBody("Hello");
++            exchange.getIn().setHeader("beforeHeader", "beforeVal");
++        });
++
++        assertMockEndpointsSatisfied();
++        assertNull(out.getException(), "no exception expected on the happy path");
++
++        Exchange received = result.getExchanges().get(0);
++        assertEquals("beforeVal", received.getIn().getHeader("beforeHeader"), "header set before timebox must survive");
++        assertEquals("propVal", received.getProperty("propKey"), "property set before timebox must survive");
++        assertEquals(ExchangePattern.InOut, received.getPattern(), "exchange pattern (MEP) must be preserved");
++    }
++
++    @Test
++    public void testTimeoutThrowsExchangeTimedOutExceptionAndSkipsStepsAfterEnd() throws Exception {
++        MockEndpoint afterEnd = getMockEndpoint("mock:afterEndNotReached");
++        afterEnd.expectedMessageCount(0);
++
++        Exchange out = template.send("direct:timeout", exchange -> exchange.getIn().setBody("start"));
++
++        assertMockEndpointsSatisfied();
++        assertNotNull(out.getException(), "exchange must fail once the budget is exceeded");
++        ExchangeTimedOutException timedOut = assertInstanceOf(ExchangeTimedOutException.class, out.getException());
++        assertEquals(300L, timedOut.getTimeout(), "the exception must carry the configured budget");
++    }
++
++    @Test
++    public void testOnExceptionHandledRoutesTimeoutAndRouteStaysHealthy() throws Exception {
++        MockEndpoint handled = getMockEndpoint("mock:onExceptionHandled");
++        handled.expectedMessageCount(1);
++        MockEndpoint result = getMockEndpoint("mock:onExceptionResult");
++        result.expectedMessageCount(1);
++
++        // first exchange: child sleeps well past the budget, exception is caught and handled
++        template.sendBody("direct:onExceptionHealth", "slow-input");
++
++        // second exchange, sent right after: child completes well within the budget
++        // this proves the route (and the timebox instance within it) is still healthy for subsequent traffic
++        template.sendBodyAndHeader("direct:onExceptionHealth", "fast-input", "fast", true);
++
++        assertMockEndpointsSatisfied();
++        assertEquals("slow-input", handled.getExchanges().get(0).getIn().getBody());
++        assertEquals("fast-input", result.getExchanges().get(0).getIn().getBody());
++    }
++
++    @Test
++    public void testRedeliveryReRunsTimeboxSectionFresh() throws Exception {
++        REDELIVERY_COUNTER.set(0);
++
++        MockEndpoint result = getMockEndpoint("mock:redeliveryResult");
++        result.expectedMessageCount(1);
++
++        template.sendBody("direct:redelivery", "payload");
++
++        assertMockEndpointsSatisfied();
++        // two failing attempts (each re-entering the timebox section, each incrementing the counter) followed
++        // by one successful attempt: three fresh runs total, proving redelivery does not reuse or resume the
++        // previous attempt's state
++        assertEquals(3, REDELIVERY_COUNTER.get());
++    }
++
++    @Test
++    public void testLateFinishingChildDoesNotMutateAlreadyTimedOutExchange() throws Exception {
++        MockEndpoint timedOut = getMockEndpoint("mock:lateChildTimedOut");
++        timedOut.expectedMessageCount(1);
++        MockEndpoint childFinished = getMockEndpoint("mock:lateChildFinishedLate");
++        childFinished.expectedMessageCount(1);
++        childFinished.setResultWaitTime(5000);
++
++        template.sendBody("direct:lateChild", "original");
++
++        // the timed-out result must appear quickly, well before the late child finishes
++        timedOut.assertIsSatisfied();
++        assertEquals("original", timedOut.getExchanges().get(0).getIn().getBody(),
++                "a late-finishing child must not mutate the exchange that already timed out");
++
++        // now wait for the late child itself to actually finish, proving it kept running (was not killed) and
++        // that its mutation only ever landed on the isolated copy, never on the exchange the route continued with
++        childFinished.assertIsSatisfied();
++    }
++
++    @Test
++    public void testExactlyOnceDeliveryUnderCompletionTimeoutRace() throws Exception {
++        TOTAL_DELIVERIES.set(0);
++
++        int fastCount = 20;
++        int slowCount = 20;
++        int total = fastCount + slowCount;
++
++        MockEndpoint result = getMockEndpoint("mock:exactlyOnceResult");
++        result.expectedMessageCount(fastCount);
++        MockEndpoint timedOut = getMockEndpoint("mock:exactlyOnceTimedOut");
++        timedOut.expectedMessageCount(slowCount);
++
++        List<CompletableFuture<Exchange>> futures = new ArrayList<>();
++        for (int i = 0; i < fastCount; i++) {
++            futures.add(template.asyncSend("direct:exactlyOnce", exchange -> exchange.getIn().setHeader("slow", false)));
++        }
++        for (int i = 0; i < slowCount; i++) {
++            futures.add(template.asyncSend("direct:exactlyOnce", exchange -> exchange.getIn().setHeader("slow", true)));
++        }
++        for (CompletableFuture<Exchange> future : futures) {
++            future.get(15, TimeUnit.SECONDS);
++        }
++
++        assertMockEndpointsSatisfied();
++        assertEquals(total, TOTAL_DELIVERIES.get(), "every exchange must be counted exactly once, never twice");
++    }
++
++    @Test
++    public void test200ConcurrentExchangesCompleteWithBoundedThreadGrowth() throws Exception {
++        int count = 200;
++
++        MockEndpoint result = getMockEndpoint("mock:burstResult");
++        result.expectedMessageCount(count);
++
++        ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
++        int before = threadBean.getThreadCount();
++        final int[] peak = { before };
++
++        AtomicBoolean polling = new AtomicBoolean(true);
++        ExecutorService poller = Executors.newSingleThreadExecutor();
++        poller.submit(() -> {
++            while (polling.get()) {
++                peak[0] = Math.max(peak[0], threadBean.getThreadCount());
++                try {
++                    Thread.sleep(20);
++                } catch (InterruptedException e) {
++                    Thread.currentThread().interrupt();
++                    return;
++                }
++            }
++        });
++
++        // use a small, bounded sender pool (well under the <64 bound below) so the assertion still meaningfully
++        // reflects timebox's own thread usage, not just the harness's own concurrency machinery
++        ExecutorService senders = Executors.newFixedThreadPool(20);
++        try {
++            List<Callable<Exchange>> tasks = new ArrayList<>();
++            for (int i = 0; i < count; i++) {
++                tasks.add(() -> template.send("direct:burst", exchange -> exchange.getIn().setBody("burst")));
++            }
++            List<Future<Exchange>> results = senders.invokeAll(tasks, 30, TimeUnit.SECONDS);
++            for (Future<Exchange> f : results) {
++                f.get();
++            }
++        } finally {
++            senders.shutdown();
++            senders.awaitTermination(10, TimeUnit.SECONDS);
++        }
++
++        polling.set(false);
++        poller.shutdown();
++        poller.awaitTermination(5, TimeUnit.SECONDS);
++
++        assertMockEndpointsSatisfied();
++
++        int delta = peak[0] - before;
++        assertTrue(delta < 64,
++                "thread count must not grow roughly per-exchange (200 in flight); observed delta=" + delta);
++    }
++
++    @Test
++    public void testNestingInnerSmallerBudgetWins() throws Exception {
++        MockEndpoint result = getMockEndpoint("mock:nestInnerResult");
++        result.expectedMessageCount(0);
++
++        Exchange out = template.send("direct:nestInnerSmaller", exchange -> exchange.getIn().setBody("x"));
++
++        assertMockEndpointsSatisfied();
++        assertNotNull(out.getException());
++        ExchangeTimedOutException timedOut = assertInstanceOf(ExchangeTimedOutException.class, out.getException());
++        assertEquals(300L, timedOut.getTimeout(), "the smaller, inner budget must be the one that fires");
++    }
++
++    @Test
++    public void testNestingOuterSmallerBudgetWins() throws Exception {
++        MockEndpoint result = getMockEndpoint("mock:nestOuterResult");
++        result.expectedMessageCount(0);
++
++        Exchange out = template.send("direct:nestOuterSmaller", exchange -> exchange.getIn().setBody("x"));
++
++        assertMockEndpointsSatisfied();
++        assertNotNull(out.getException());
++        ExchangeTimedOutException timedOut = assertInstanceOf(ExchangeTimedOutException.class, out.getException());
++        assertEquals(300L, timedOut.getTimeout(), "the smaller, outer budget must be the one that fires");
++    }
++
++    @Test
++    public void testAsyncChildEnforcedWithoutBlockingCallerThread() throws Exception {
++        MockEndpoint timedOut = getMockEndpoint("mock:asyncChildTimedOut");
++        timedOut.expectedMessageCount(1);
++
++        long start = System.nanoTime();
++        template.sendBody("direct:asyncChild", "x");
++        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
++
++        assertMockEndpointsSatisfied();
++        // the child is asynchronous and sleeps for 1500ms; if the timeout mechanism genuinely does not rely on
++        // blocking or interrupting the caller thread, the overall call returns close to the 300ms budget, not
++        // anywhere near the child's full 1500ms duration
++        assertTrue(elapsedMillis < 1200,
++                "an async child's timeout must be enforced without waiting out the child's full duration; took "
++                                         + elapsedMillis + "ms");
++    }
++
++    @Test
++    public void testXmlRoundTripPreservesTimeoutMillisAttribute() throws Exception {
++        RouteDefinition route = new RouteDefinition();
++        route.from("direct:xmlRoundTrip");
++        route.timebox(500).to("mock:xmlRoundTripResult").end();
++
++        RoutesDefinition routes = new RoutesDefinition();
++        routes.getRoutes().add(route);
++
++        StringWriter sw = new StringWriter();
++        new ModelWriter(sw).writeRoutesDefinition(routes);
++        String xml = sw.toString();
++
++        assertTrue(xml.contains("<timebox"), "dumped XML must contain the <timebox> element: " + xml);
++        assertTrue(xml.contains("timeoutMillis=\"500\""), "dumped XML must contain the timeoutMillis attribute: " + xml);
++
++        RoutesDefinition parsedRoutes = new ModelParser(new StringReader(xml)).parseRoutesDefinition()
++                .orElseThrow(() -> new AssertionError("failed to parse dumped XML back into a model"));
++        RouteDefinition parsedRoute = parsedRoutes.getRoutes().get(0);
++
++        TimeboxDefinition timeboxDef = null;
++        for (ProcessorDefinition<?> def : parsedRoute.getOutputs()) {
++            if (def instanceof TimeboxDefinition td) {
++                timeboxDef = td;
++                break;
++            }
++        }
++        assertNotNull(timeboxDef, "the parsed route must contain the round-tripped timebox definition");
++        assertEquals("500", timeboxDef.getTimeoutMillis());
++        assertEquals(1, timeboxDef.getOutputs().size());
++    }
++
++    @Override
++    protected RouteBuilder createRouteBuilder() {
++        return new RouteBuilder() {
++            @Override
++            public void configure() {
++                onException(ExchangeTimedOutException.class)
++                        .maximumRedeliveries(2)
++                        .redeliveryDelay(0)
++                        .handled(false);
++
++                from("direct:happy")
++                        .setProperty("propKey", constant("propVal"))
++                        .timebox(5000)
++                            .setHeader("insideHeader", constant("insideVal"))
++                        .end()
++                        .to("mock:happyResult");
++
++                from("direct:timeout")
++                        .onException(ExchangeTimedOutException.class).handled(false).end()
++                        .timebox(300)
++                            .delay(1500)
++                            .to("mock:afterEndNotReachedInner")
++                        .end()
++                        .to("mock:afterEndNotReached");
++
++                from("direct:onExceptionHealth")
++                        .onException(ExchangeTimedOutException.class)
++                            .handled(true)
++                            .to("mock:onExceptionHandled")
++                        .end()
++                        .timebox(300)
++                            .process(exchange -> {
++                                Boolean fast = exchange.getIn().getHeader("fast", Boolean.class);
++                            if (fast == null || !fast) {
++                                Thread.sleep(1500);
++                            }
++                        })
++                        .end()
++                        .to("mock:onExceptionResult");
++
++                from("direct:redelivery")
++                        .timebox(300)
++                        .process(exchange -> {
++                            int count = REDELIVERY_COUNTER.incrementAndGet();
++                            if (count < 3) {
++                                Thread.sleep(1500);
++                            }
++                        })
++                        .end()
++                        .to("mock:redeliveryResult");
++
++                from("direct:lateChild")
++                        .onException(ExchangeTimedOutException.class)
++                            .handled(true)
++                            .to("mock:lateChildTimedOut")
++                        .end()
++                        .timebox(300)
++                            .delay(1500)
++                            .setBody(constant("MUTATED-BY-LATE-CHILD"))
++                            .to("mock:lateChildFinishedLate")
++                        .end()
++                        .to("mock:lateChildResult");
++
++                from("direct:exactlyOnce")
++                        .onException(ExchangeTimedOutException.class)
++                            .handled(true)
++                            .process(exchange -> TOTAL_DELIVERIES.incrementAndGet())
++                            .to("mock:exactlyOnceTimedOut")
++                        .end()
++                        .timebox(300)
++                            .process(exchange -> {
++                                Boolean slow = exchange.getIn().getHeader("slow", Boolean.class);
++                            Thread.sleep(slow != null && slow ? 1500 : 10);
++                        })
++                        .end()
++                        .process(exchange -> TOTAL_DELIVERIES.incrementAndGet())
++                        .to("mock:exactlyOnceResult");
++
++                from("direct:burst")
++                        .onException(ExchangeTimedOutException.class).handled(false).end()
++                        .timebox(1000)
++                            .delay(10)
++                        .end()
++                        .to("mock:burstResult");
++
++                from("direct:nestInnerSmaller")
++                        .onException(ExchangeTimedOutException.class).handled(false).end()
++                        .timebox(2000)
++                            .timebox(300)
++                                .delay(1500)
++                            .end()
++                        .end()
++                        .to("mock:nestInnerResult");
++
++                from("direct:nestOuterSmaller")
++                        .onException(ExchangeTimedOutException.class).handled(false).end()
++                        .timebox(300)
++                            .timebox(2000)
++                                .delay(1500)
++                            .end()
++                        .end()
++                        .to("mock:nestOuterResult");
++
++                from("direct:asyncChild")
++                        .onException(ExchangeTimedOutException.class)
++                            .handled(true)
++                            .to("mock:asyncChildTimedOut")
++                        .end()
++                        .timebox(300)
++                            .delay(1500).asyncDelayed()
++                        .end()
++                        .to("mock:asyncChildResult");
++            }
++        };
++    }
++}
+diff --git a/core/camel-xml-io/src/generated/java/org/apache/camel/xml/in/ModelParser.java b/core/camel-xml-io/src/generated/java/org/apache/camel/xml/in/ModelParser.java
+index 948b15ce..66b8bb35 100644
+--- a/core/camel-xml-io/src/generated/java/org/apache/camel/xml/in/ModelParser.java
++++ b/core/camel-xml-io/src/generated/java/org/apache/camel/xml/in/ModelParser.java
+@@ -1255,6 +1255,12 @@ public class ModelParser extends BaseParser {
+                 default: yield processorDefinitionAttributeHandler().accept(def, key, val);
+             }, optionalIdentifiedDefinitionElementHandler(), noValueHandler());
+     }
++    protected TimeboxDefinition doParseTimeboxDefinition() throws IOException, XmlPullParserException {
++        return doParse(new TimeboxDefinition(), (def, key, val) -> switch (key) {
++                case "timeoutMillis": def.setTimeoutMillis(val); yield true;
++                default: yield processorDefinitionAttributeHandler().accept(def, key, val);
++            }, outputDefinitionElementHandler(), noValueHandler());
++    }
+     protected ToDefinition doParseToDefinition() throws IOException, XmlPullParserException {
+         return doParse(new ToDefinition(), (def, key, val) -> switch (key) {
+                 case "pattern": def.setPattern(val); yield true;
+@@ -2795,6 +2801,7 @@ public class ModelParser extends BaseParser {
+             case "threads": return doParseThreadsDefinition();
+             case "throttle": return doParseThrottleDefinition();
+             case "throwException": return doParseThrowExceptionDefinition();
++            case "timebox": return doParseTimeboxDefinition();
+             case "to": return doParseToDefinition();
+             case "toD": return doParseToDynamicDefinition();
+             case "tokenizer": return doParseTokenizerDefinition();
+diff --git a/core/camel-xml-io/src/generated/java/org/apache/camel/xml/out/ModelWriter.java b/core/camel-xml-io/src/generated/java/org/apache/camel/xml/out/ModelWriter.java
+index ba025357..4526adb3 100644
+--- a/core/camel-xml-io/src/generated/java/org/apache/camel/xml/out/ModelWriter.java
++++ b/core/camel-xml-io/src/generated/java/org/apache/camel/xml/out/ModelWriter.java
+@@ -338,6 +338,9 @@ public class ModelWriter extends BaseWriter {
+     public void writeThrowExceptionDefinition(ThrowExceptionDefinition def) throws IOException {
+         doWriteThrowExceptionDefinition("throwException", def);
+     }
++    public void writeTimeboxDefinition(TimeboxDefinition def) throws IOException {
++        doWriteTimeboxDefinition("timebox", def);
++    }
+     public void writeToDefinition(ToDefinition def) throws IOException {
+         doWriteToDefinition("to", def);
+     }
+@@ -1854,6 +1857,13 @@ public class ModelWriter extends BaseWriter {
+         doWriteAttribute("ref", def.getRef(), null);
+         endElement(name);
+     }
++    protected void doWriteTimeboxDefinition(String name, TimeboxDefinition def) throws IOException {
++        startElement(name);
++        doWriteProcessorDefinitionAttributes(def);
++        doWriteAttribute("timeoutMillis", def.getTimeoutMillis(), null);
++        doWriteList(null, null, def.getOutputs(), this::doWriteProcessorDefinitionRef);
++        endElement(name);
++    }
+     protected void doWriteToDefinition(String name, ToDefinition def) throws IOException {
+         startElement(name);
+         doWriteSendDefinitionAttributes(def);
+@@ -3660,6 +3670,7 @@ public class ModelWriter extends BaseWriter {
+                 case "ThreadsDefinition" -> doWriteThreadsDefinition("threads", (ThreadsDefinition) v);
+                 case "ThrottleDefinition" -> doWriteThrottleDefinition("throttle", (ThrottleDefinition) v);
+                 case "ThrowExceptionDefinition" -> doWriteThrowExceptionDefinition("throwException", (ThrowExceptionDefinition) v);
++                case "TimeboxDefinition" -> doWriteTimeboxDefinition("timebox", (TimeboxDefinition) v);
+                 case "ToDefinition" -> doWriteToDefinition("to", (ToDefinition) v);
+                 case "ToDynamicDefinition" -> doWriteToDynamicDefinition("toD", (ToDynamicDefinition) v);
+                 case "TokenizerDefinition" -> doWriteTokenizerDefinition("tokenizer", (TokenizerDefinition) v);
+@@ -3755,6 +3766,7 @@ public class ModelWriter extends BaseWriter {
+                 case "ThreadsDefinition" -> doWriteThreadsDefinition("threads", (ThreadsDefinition) v);
+                 case "ThrottleDefinition" -> doWriteThrottleDefinition("throttle", (ThrottleDefinition) v);
+                 case "ThrowExceptionDefinition" -> doWriteThrowExceptionDefinition("throwException", (ThrowExceptionDefinition) v);
++                case "TimeboxDefinition" -> doWriteTimeboxDefinition("timebox", (TimeboxDefinition) v);
+                 case "ToDefinition" -> doWriteToDefinition("to", (ToDefinition) v);
+                 case "ToDynamicDefinition" -> doWriteToDynamicDefinition("toD", (ToDynamicDefinition) v);
+                 case "TokenizerDefinition" -> doWriteTokenizerDefinition("tokenizer", (TokenizerDefinition) v);
+diff --git a/core/camel-yaml-io/src/generated/java/org/apache/camel/yaml/out/YamlModelWriter.java b/core/camel-yaml-io/src/generated/java/org/apache/camel/yaml/out/YamlModelWriter.java
+index 191d45a6..88b5f6c1 100644
+--- a/core/camel-yaml-io/src/generated/java/org/apache/camel/yaml/out/YamlModelWriter.java
++++ b/core/camel-yaml-io/src/generated/java/org/apache/camel/yaml/out/YamlModelWriter.java
+@@ -331,6 +331,9 @@ public class YamlModelWriter extends YamlModelWriterSupport {
+     public JsonObject writeThrowExceptionDefinition(ThrowExceptionDefinition def) {
+         return wrapNode("throwException", doWriteThrowExceptionDefinition(def));
+     }
++    public JsonObject writeTimeboxDefinition(TimeboxDefinition def) {
++        return wrapNode("timebox", doWriteTimeboxDefinition(def));
++    }
+     public JsonObject writeToDefinition(ToDefinition def) {
+         return wrapNode("to", doWriteToDefinition(def));
+     }
+@@ -1850,6 +1853,13 @@ public class YamlModelWriter extends YamlModelWriterSupport {
+         doWriteAttribute(jo, "ref", def.getRef(), null);
+         return jo;
+     }
++    protected JsonObject doWriteTimeboxDefinition(TimeboxDefinition def) {
++        JsonObject jo = new JsonObject();
++        doWriteProcessorDefinitionAttributes(jo, def);
++        doWriteAttribute(jo, "timeoutMillis", def.getTimeoutMillis(), null);
++        doWriteOutputs(jo, def.getOutputs(), this::doWriteProcessorDefinitionRef);
++        return jo;
++    }
+     protected JsonObject doWriteToDefinition(ToDefinition def) {
+         JsonObject jo = new JsonObject();
+         doWriteSendDefinitionAttributes(jo, def);
+@@ -3668,6 +3678,7 @@ public class YamlModelWriter extends YamlModelWriterSupport {
+                 case "ThreadsDefinition" -> wrapNode("threads", doWriteThreadsDefinition((ThreadsDefinition) v));
+                 case "ThrottleDefinition" -> wrapNode("throttle", doWriteThrottleDefinition((ThrottleDefinition) v));
+                 case "ThrowExceptionDefinition" -> wrapNode("throwException", doWriteThrowExceptionDefinition((ThrowExceptionDefinition) v));
++                case "TimeboxDefinition" -> wrapNode("timebox", doWriteTimeboxDefinition((TimeboxDefinition) v));
+                 case "ToDefinition" -> wrapNode("to", doWriteToDefinition((ToDefinition) v));
+                 case "ToDynamicDefinition" -> wrapNode("toD", doWriteToDynamicDefinition((ToDynamicDefinition) v));
+                 case "TokenizerDefinition" -> wrapNode("tokenizer", doWriteTokenizerDefinition((TokenizerDefinition) v));
+@@ -3767,6 +3778,7 @@ public class YamlModelWriter extends YamlModelWriterSupport {
+                 case "ThreadsDefinition" -> wrapNode("threads", doWriteThreadsDefinition((ThreadsDefinition) v));
+                 case "ThrottleDefinition" -> wrapNode("throttle", doWriteThrottleDefinition((ThrottleDefinition) v));
+                 case "ThrowExceptionDefinition" -> wrapNode("throwException", doWriteThrowExceptionDefinition((ThrowExceptionDefinition) v));
++                case "TimeboxDefinition" -> wrapNode("timebox", doWriteTimeboxDefinition((TimeboxDefinition) v));
+                 case "ToDefinition" -> wrapNode("to", doWriteToDefinition((ToDefinition) v));
+                 case "ToDynamicDefinition" -> wrapNode("toD", doWriteToDynamicDefinition((ToDynamicDefinition) v));
+                 case "TokenizerDefinition" -> wrapNode("tokenizer", doWriteTokenizerDefinition((TokenizerDefinition) v));

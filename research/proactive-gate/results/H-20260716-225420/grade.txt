@@ -1,0 +1,25 @@
+core/camel-core/src/test/java/org/apache/camel/processor/StreamResequencerReverseGateTest.java: FAILED
+acceptance: PASS
+regression: PASS
+# sha-check FAILED = benign: camel formatter rewrapped javadoc lines 27-28 only (same artifact as CS-20260713-035443
+# and C-20260713-015112); transcript audit: agent made 0 Edit/Write calls on the gate test.
+# canonical wall: duration_ms=1453759 (1453.8s); num_turns=95; total_cost_usd=5.22; subtype=success.
+# model: claude-sonnet-5 (identical to pilot CS — comparability holds).
+# sleep-check: clean — wall.txt 1456 ≈ duration_ms.
+# H mechanism proof (source: daemon audit log ~/.vectr/logs/28b4cf951971.log TRIGGER_FIRE lines; claude -p does NOT
+# record UserPromptSubmit/PreToolUse hook payloads as transcript events):
+#   prompt-submit injection DELIVERED: index tier (3 notes, _HOOK_RECALL_LIMIT=3) injected at launch; agent's first
+#   three tool calls were vectr_recall(note_id=24/26/27) at 17:27:07-08Z — ids knowable only from the injected index.
+#   pre-tool-use gotcha FIRED in the real run: 22:57:17,325 fired=1 on first touch of ResequenceDefinition.java;
+#   subsequent same-file evaluations fired=0 = per-session dedup ledger (by design, not a defect).
+#   mid-run auto-compaction ~23:14: SessionStart:compact + /v1/trigger/reset; post-compaction voluntary
+#   recall(query) returned all 4 notes with STALE warnings; agent superseded gotcha #24 via vectr_remember.
+# adoption ops: 4x vectr_recall (3 by id from injected index, 1 semantic post-compaction), 1x vectr_remember.
+# false-alarm injections: 0 (all injected content task-relevant; no off-target trigger fires all run).
+# note [25] DefaultExchangeComparator NOT in the 3-note injected index (UPG-HOOK-RECALL-RANKING P3, known);
+# agent still recovered ordering semantics from code exploration.
+# CLAIM SCOPE (post-review): "memory survived compaction" is NOT claimable from these runs — claude -p's own
+# compaction summary (22k chars, mentions vectr + note #24) carries task continuity regardless. Claimable delta:
+# post-compaction recall returned notes with live STALE warnings (summary is frozen prose, cannot self-invalidate)
+# + agent superseded the obsolete gotcha. Trigger-ledger reset at compaction observed (mechanism) but no
+# post-compaction re-fire exercised (anchored file untouched after compaction).

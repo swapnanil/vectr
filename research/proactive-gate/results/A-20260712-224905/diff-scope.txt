@@ -1,0 +1,9 @@
+ .../docs/modules/eips/pages/resequence-eip.adoc    | 49 ++++++++++++++++++++++
+ .../apache/camel/model/config/streamConfig.json    |  3 +-
+ .../apache/camel/model/ResequenceDefinition.java   | 15 +++----
+ .../model/config/StreamResequencerConfig.java      | 15 +++++++
+ .../apache/camel/reifier/ResequenceReifier.java    | 10 ++++-
+ .../java/org/apache/camel/xml/in/ModelParser.java  |  1 +
+ .../java/org/apache/camel/xml/out/ModelWriter.java |  1 +
+ .../org/apache/camel/yaml/out/YamlModelWriter.java |  1 +
+ 8 files changed, 86 insertions(+), 9 deletions(-)

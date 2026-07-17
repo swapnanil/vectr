@@ -1,0 +1,4 @@
+autocompact pct override: 20
+N arm: no vectr surface (no .mcp.json, no settings.json, strict-mcp-config, pristine AGENTS.md)
+session id: 365f8d9a-0934-4433-adea-5562eaa6f1f6
+fixture deleted after phase 0 (no re-readable source; defeats post-compaction file restoration)

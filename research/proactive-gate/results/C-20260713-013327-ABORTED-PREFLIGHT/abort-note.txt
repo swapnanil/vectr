@@ -1,0 +1,23 @@
+ABORTED AT PREFLIGHT (2026-07-13 01:38 IST) — no agent run, no quota spent.
+
+Second abort at the same assert. This time the wipe retry loop (5x/20s) ran
+its full window and the daemon REST stayed starved throughout. Daemon log
+shows the probe-cleanup clear WAS served (FORGET_ALL deleted=1 at
+01:33:33.132, 200 OK in ms) — the daemon then went dark: zero requests
+served afterward, pegged at ~457% CPU. Thread sample is dominated by
+chromadb_rust_bindings (2324 frames) + libomp + tokenizers, i.e. bulk
+index-layer work, not the memory store.
+
+Same signature preceded the first abort (011040): daemon serves the probe
+sequence in milliseconds, then wedges seconds later. Working theory: the
+01:10 workspace reset (git reset --hard + git clean of run C1's agent edits
+and untracked build artifacts) fed the file watcher a large delete/change
+set; the debounced de-index/re-index job does chroma work expensive enough
+to starve REST for tens of minutes. Two follow-ups logged in tasks.md:
+REST starvation under index churn, and whether gitignored build artifacts
+are being indexed/watched at all.
+
+Harness hardening: run-arm.sh non-vanilla arms now wait out watcher debounce
+after the workspace reset (90s) then require 3 consecutive fast /v1/status
+answers (30-min ceiling) before any preflight REST assert. Relaunch follows
+daemon recovery (poller armed).

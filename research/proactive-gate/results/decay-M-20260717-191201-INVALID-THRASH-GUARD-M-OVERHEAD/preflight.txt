@@ -1,0 +1,8 @@
+auto-compact window override: 100000 (CLI floor: 100000); read cap: 8000 tokens
+notes at start: 0 (must be 0)
+seeded notes: 10 (daemon notes_count: 10)
+hook probe: session-start injected seeded facts (native channel live)
+session id: 1f8eb1a8-bdb1-4aa9-a5ee-23e1116f09b3
+corpus: 64 files, 16 audit phases, 18 total
+fixture deleted after phase 0 (no re-readable source; defeats post-compaction file restoration)
+phase 1: claude exit 1

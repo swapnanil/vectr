@@ -1,0 +1,1 @@
+vanilla arm: no vectr surface (no .mcp.json, pristine CLAUDE.md/AGENTS.md)

@@ -1,0 +1,5 @@
+ .../org/apache/camel/model/config/streamConfig.json     |  3 ++-
+ .../org/apache/camel/model/ResequenceDefinition.java    | 17 +++++++++--------
+ .../camel/model/config/StreamResequencerConfig.java     | 15 +++++++++++++++
+ .../org/apache/camel/reifier/ResequenceReifier.java     |  5 +++++
+ 4 files changed, 31 insertions(+), 9 deletions(-)

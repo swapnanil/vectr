@@ -1,0 +1,40 @@
+2026-07-16 09:39:35 +0530 Sleep               	Entering Sleep state due to 'Sleep Service Back to Sleep':TCPKeepAlive=active Using Batt (Charge:87%) 1001 secs 
+2026-07-16 09:56:16 +0530 DarkWake            	DarkWake from Deep Idle [CDNP] : due to NUB.SPMISw3IRQ nub-spmi0.0x02 rtc/SleepService Using BATT (Charge:87%) 2 secs    
+2026-07-16 09:56:18 +0530 Sleep               	Entering Sleep state due to 'Sleep Service Back to Sleep':TCPKeepAlive=active Using Batt (Charge:87%) 818 secs  
+2026-07-16 10:09:56 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) trackpadkeyboard SMC.OutboxNotEmpty/HID Activity Using BATT (Charge:87%)           
+2026-07-16 12:30:36 +0530 Sleep               	Entering Sleep state due to 'Idle Sleep':TCPKeepAlive=active Using AC (Charge:100%) 141 secs  
+2026-07-16 12:32:57 +0530 DarkWake            	DarkWake from Deep Idle [CDNP] : due to smc.sysState.Wake(0x70070000) USB-C_plug SMC.OutboxNotEmpty/ Using AC (Charge:100%) 35 secs   
+2026-07-16 12:33:32 +0530 Sleep               	Entering Sleep state due to 'Maintenance Sleep':TCPKeepAlive=active Using Batt (Charge:100%) 57 secs   
+2026-07-16 12:34:29 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) pwrbtn SMC.OutboxNotEmpty/UserActivity Assertion Using BATT (Charge:100%)           
+2026-07-16 15:12:12 +0530 Sleep               	Entering Sleep state due to 'Idle Sleep':TCPKeepAlive=active Using Batt (Charge:49%) 203 secs  
+2026-07-16 15:15:35 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) trackpadkeyboard SMC.OutboxNotEmpty nub-spmi0.0x3E/HID Activity Using BATT (Charge:49%)           
+2026-07-16 16:24:50 +0530 Sleep               	Entering Sleep state due to 'Idle Sleep':TCPKeepAlive=active Using AC (Charge:58%) 363 secs  
+2026-07-16 16:30:53 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) trackpadkeyboard SMC.OutboxNotEmpty/HID Activity Using AC (Charge:58%)           
+2026-07-16 18:44:35 +0530 Sleep               	Entering Sleep state due to 'Clamshell Sleep':TCPKeepAlive=active Using Batt (Charge:59%) 905 secs  
+2026-07-16 18:59:40 +0530 DarkWake            	DarkWake from Deep Idle [CDNP] : due to NUB.SPMISw3IRQ nub-spmi0.0x02 rtc/SleepService Using BATT (Charge:59%) 2 secs    
+2026-07-16 18:59:42 +0530 Sleep               	Entering Sleep state due to 'Sleep Service Back to Sleep':TCPKeepAlive=active Using Batt (Charge:59%) 915 secs  
+2026-07-16 19:14:57 +0530 DarkWake            	DarkWake from Deep Idle [CDNP] : due to NUB.SPMISw3IRQ nub-spmi0.0x02 rtc/SleepService Using BATT (Charge:59%) 2 secs    
+2026-07-16 19:14:59 +0530 Sleep               	Entering Sleep state due to 'Sleep Service Back to Sleep':TCPKeepAlive=active Using Batt (Charge:59%) 47 secs   
+2026-07-16 19:15:46 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) lid SMC.OutboxNotEmpty/HID Activity Using BATT (Charge:59%) 988 secs  
+2026-07-16 19:32:14 +0530 Sleep               	Entering Sleep state due to 'Idle Sleep':TCPKeepAlive=active Using Batt (Charge:50%) 218 secs  
+2026-07-16 19:35:52 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) trackpadkeyboard SMC.OutboxNotEmpty nub-spmi0.0x3E/HID Activity Using BATT (Charge:50%) 923 secs  
+2026-07-16 19:51:15 +0530 Sleep               	Entering Sleep state due to 'Idle Sleep':TCPKeepAlive=active Using Batt (Charge:41%) 1020 secs 
+2026-07-16 20:08:15 +0530 DarkWake            	DarkWake from Deep Idle [CDNP] : due to NUB.SPMISw3IRQ nub-spmi0.0x02 rtc/SleepService Using BATT (Charge:41%) 2 secs    
+2026-07-16 20:08:17 +0530 Sleep               	Entering Sleep state due to 'Sleep Service Back to Sleep':TCPKeepAlive=active Using Batt (Charge:41%) 64 secs   
+2026-07-16 20:09:21 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) trackpadkeyboard SMC.OutboxNotEmpty/HID Activity Using BATT (Charge:41%) 76 secs   
+2026-07-16 20:10:37 +0530 Sleep               	Entering Sleep state due to 'Clamshell Sleep':TCPKeepAlive=active Using Batt (Charge:40%) 934 secs  
+2026-07-16 20:26:11 +0530 DarkWake            	DarkWake from Deep Idle [CDNP] : due to NUB.SPMISw3IRQ nub-spmi0.0x02 rtc/SleepService Using BATT (Charge:40%) 2 secs    
+2026-07-16 20:26:13 +0530 Sleep               	Entering Sleep state due to 'Sleep Service Back to Sleep':TCPKeepAlive=active Using Batt (Charge:40%) 1008 secs 
+2026-07-16 20:43:01 +0530 DarkWake            	DarkWake from Deep Idle [CDNP] : due to NUB.SPMISw3IRQ nub-spmi0.0x02 rtc/SleepService Using BATT (Charge:40%) 2 secs    
+2026-07-16 20:43:03 +0530 Sleep               	Entering Sleep state due to 'Sleep Service Back to Sleep':TCPKeepAlive=active Using Batt (Charge:40%) 904 secs  
+2026-07-16 20:58:07 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) lid SMC.OutboxNotEmpty/HID Activity Using BATT (Charge:40%) 1673 secs 
+2026-07-16 21:26:00 +0530 Sleep               	Entering Sleep state due to 'Idle Sleep':TCPKeepAlive=active Using Batt (Charge:25%) 1043 secs 
+2026-07-16 21:43:23 +0530 DarkWake            	DarkWake from Deep Idle [CDNP] : due to NUB.SPMISw3IRQ nub-spmi0.0x02 rtc/SleepService Using BATT (Charge:25%) 6 secs    
+2026-07-16 21:43:29 +0530 Sleep               	Entering Sleep state due to 'Sleep Service Back to Sleep':TCPKeepAlive=active Using Batt (Charge:25%) 1050 secs 
+2026-07-16 22:00:59 +0530 DarkWake            	DarkWake from Deep Idle [CDNP] : due to NUB.SPMISw3IRQ nub-spmi0.0x02 rtc/SleepService Using BATT (Charge:25%) 2 secs    
+2026-07-16 22:01:01 +0530 Sleep               	Entering Sleep state due to 'Sleep Service Back to Sleep':TCPKeepAlive=active Using Batt (Charge:25%) 109 secs  
+2026-07-16 22:02:50 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) trackpadkeyboard SMC.OutboxNotEmpty/HID Activity Using BATT (Charge:25%)           
+2026-07-16 23:27:12 +0530 Sleep               	Entering Sleep state due to 'Idle Sleep':TCPKeepAlive=active Using Batt (Charge:9%) 471 secs  
+2026-07-16 23:35:03 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) trackpadkeyboard SMC.OutboxNotEmpty/HID Activity Using BATT (Charge:9%)           
+2026-07-17 00:44:19 +0530 Sleep               	Entering Sleep state due to 'Idle Sleep':TCPKeepAlive=active Using AC (Charge:97%) 202 secs  
+2026-07-17 00:47:41 +0530 Wake                	Wake from Deep Idle [CDNVA] : due to smc.sysState.Wake(0x70070000) USB-C_plug SMC.OutboxNotEmpty/UserActivity Assertion Using AC (Charge:97%)           

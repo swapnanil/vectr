@@ -1,0 +1,10 @@
+ AGENTS.md                                          | 68 ++++++++++++++++++++++
+ .../docs/modules/eips/pages/resequence-eip.adoc    | 47 +++++++++++++++
+ .../apache/camel/model/config/streamConfig.json    |  3 +-
+ .../apache/camel/model/ResequenceDefinition.java   | 17 +++---
+ .../model/config/StreamResequencerConfig.java      | 15 +++++
+ .../apache/camel/reifier/ResequenceReifier.java    |  5 ++
+ .../java/org/apache/camel/xml/in/ModelParser.java  |  1 +
+ .../java/org/apache/camel/xml/out/ModelWriter.java |  1 +
+ .../org/apache/camel/yaml/out/YamlModelWriter.java |  1 +
+ 9 files changed, 149 insertions(+), 9 deletions(-)

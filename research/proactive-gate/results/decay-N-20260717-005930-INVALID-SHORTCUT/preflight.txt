@@ -1,0 +1,3 @@
+N arm: no vectr surface (no .mcp.json, no settings.json, strict-mcp-config, pristine AGENTS.md)
+mcp_posture: OK (none)
+disk_memory_notes: 0
