@@ -1,0 +1,10 @@
+# Daemon audit-log excerpt for run V-20260717-000558
+# Source: the vectr daemon's per-workspace audit log (workspace hash 28b4cf951971);
+# all lines tagged 'vectr.audit' in the window 2026-07-17 00:04:00 .. 2026-07-17 00:40:00 (daemon-local time).
+# TRIGGER_FIRE: one line per trigger evaluation (fired=0 evaluated-not-fired; on session-start
+# lines, fired=N is the number of notes injected). PROACTIVE_INJECT: one line per proxy-channel injection.
+2026-07-17 00:10:55,109 INFO vectr.audit — FORGET_ALL workspace=/home/user/Documents/fde/vectr/tmp/poc-camel deleted=4
+2026-07-17 00:11:08,614 INFO vectr.audit — REMEMBER workspace=/home/user/Documents/fde/vectr/tmp/poc-camel note_id=33 priority=high kind=gotcha author_id= code_hash= tags=resequencer,reverse,model chars=410 provenance=agent scope=repo
+2026-07-17 00:11:13,826 INFO vectr.audit — REMEMBER workspace=/home/user/Documents/fde/vectr/tmp/poc-camel note_id=34 priority=high kind=finding author_id= code_hash= tags=resequencer,comparator,stream chars=463 provenance=agent scope=workspace
+2026-07-17 00:11:26,039 INFO vectr.audit — REMEMBER workspace=/home/user/Documents/fde/vectr/tmp/poc-camel note_id=35 priority=high kind=finding author_id= code_hash= tags=resequencer,stream,reifier chars=614 provenance=agent scope=workspace
+2026-07-17 00:11:39,040 INFO vectr.audit — REMEMBER workspace=/home/user/Documents/fde/vectr/tmp/poc-camel note_id=36 priority=medium kind=finding author_id= code_hash= tags=resequencer,catalog,schema chars=361 provenance=agent scope=workspace

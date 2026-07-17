@@ -21,9 +21,13 @@ Definitions in `definition.md`; per-run JSON in `v1-results.json`
 Re-exploration is not uniform noise — it concentrates:
 
 - The three heaviest runs (A-20260712-233814, C-20260713-015112,
-  CS-20260713-035443) hold **55 of 61 R1** and **all 24 R2**; each spans
-  at least one compaction (two runs have two).
-- Fresh single-context runs sit at or near zero (four runs with R1=0).
+  CS-20260713-035443) hold **55 of 61 R1** and **21 of 24 R2**; the
+  remaining 3 R2 sit in a fourth compacted run (C-20260712-124925,
+  whose 3 re-reads are all cross-compaction); each of the heavy three
+  spans at least one compaction (two runs have two).
+- Every valid run compacted at least once, yet four finished with
+  R1=0 — the boundary is where waste concentrates when it occurs, not
+  a guarantee that it does.
 - The single worst run wasted ~31.6k result tokens on re-reads — on the
   order of a sixth of a context window spent re-retrieving content the
   session had already paid for.

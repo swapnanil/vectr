@@ -72,6 +72,15 @@ one is explained in the protocol run logs). Inside a run directory:
   continuation summaries).
 - `grade.txt` / `decay-grade.txt` — grader output: scores, survival
   curve, tool compliance, provenance checks.
+- `decay-grade-v4-regrade.txt` (gated decay runs) — the same grader
+  re-run with the format-robust section binding; the paper cites
+  these numbers. The original `decay-grade.txt` is retained
+  unmodified.
+- `daemon-audit-excerpt.log` (H/V/decay-M runs) — sanitized excerpt
+  of the vectr daemon's audit ledger for the run's time window: one
+  line per trigger evaluation/fire and per proactive injection. The
+  evidentiary surface for injection claims the transcript cannot
+  carry.
 - `*.at-launch` (`AGENTS.md`, `mcp.json`, `settings.json`),
   `guidance-state.txt`, `seeds-at-launch.jsonl`, `gate-test.sha256` /
   `decay-facts.sha256`, `daemon-status.json`, `hook-probe-*.json` —

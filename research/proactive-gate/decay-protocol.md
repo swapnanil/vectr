@@ -227,17 +227,22 @@ time.
   and the final summary (#138) carried 0/10 fact tokens — the only
   available source was the session-start memory injection at the final
   resume (last injection pair, 10/10 tokens), transcribed into the
-  report with Edit. ~95 session-start injection pairs carried 10/10
-  fact tokens across the run (plus index-tier prompt-submit fires at
-  3/10 and 1/10). The grader's "RUN INVALID for the in-context-only
+  report with Edit. The daemon audit ledger records 157 session-start
+  deliveries (138 compact-resume + 19 phase launches), each carrying
+  10/10 fact tokens at ~300 tokens per delivery; 139 of them are also
+  recorded in the session file as hook_success/hook_additional_context
+  pairs (launch-time resume payloads are not recorded as session
+  events). Index-tier prompt-submit fires carried 3/10 (9x) and 1/10
+  (6x). The grader's "RUN INVALID for the in-context-only
   premise" line is the N-arm attachment rule misfiring on the
   treatment: every fact-carrying attachment is hook_success /
   hook_additional_context (the memory channel); no file-restoration
-  attachment carried facts. Summary curve is bimodal — long 10/10
-  stretches where the summarizer folded in hook-supplied facts,
-  then #112-138 all 0/10 despite facts present in context every
-  cycle: the summary channel is unreliable independent of fact
-  availability, and the endpoint no longer depends on it.
+  attachment carried facts. Summary curve is bimodal with a regime
+  change — summaries 1-3 0/10, first 10/10 at #4, 53 of summaries
+  4-66 at 10/10, then #67-138 all 0/10 (72 consecutive) despite facts
+  present in context every cycle: the summary channel is unreliable
+  independent of fact availability, and the endpoint no longer
+  depends on it.
   **Workload fidelity is the other half of the story**: declaration
   recall 0.70 vs N6's 0.93 (both re-graded after fixing a grader
   section-binding bug — the original 0.00/SAMPLING-SUSPECT line bound
@@ -258,6 +263,26 @@ time.
   decayed catastrophically; and the guard-forced 6k read cap is an
   M-only operating point that carries an asterisk on the 0.70-vs-0.93
   comparison.
+
+- **Post-review forensics addendum (2026-07-18)**: independent
+  re-verification for the paper corrected two numbers in the entry
+  above (logged 2026-07-17 as "~95 injection pairs" and "#112-138 all
+  0/10"; verified against the daemon ledger and grade curve as
+  157 deliveries / 139 session-recorded pairs, and #67-138 — 72
+  consecutive) and added three findings: (a) of M's 321 Bash tool
+  results exactly one — an orientation grep for phase-10 task state
+  over its own session file, turn 2760 — incidentally echoed fact
+  tokens back into context, 60+ boundaries before the endpoint;
+  (b) the spec-hunt left the corpus: the agent twice Read the memory
+  system's own design doc off the operator's disk (the path first
+  appears in the agent's own thinking with no recorded source; the
+  file carries no fact tokens; both reads are in the audit ledger);
+  (c) the format-robust regrade is now published per-run as
+  `decay-grade-v4-regrade.txt`, and sanitized daemon audit-log
+  excerpts as `daemon-audit-excerpt.log` (H1/H2/V/decay-M; the
+  CS-era daemon log was not retained). H-run trigger evaluations:
+  40 (H1) / 35 (H2) — one in-run gotcha fire each plus the harness's
+  pre-launch probe; zero false alarms.
 
 ## Reading the result
 

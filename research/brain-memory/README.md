@@ -1,8 +1,8 @@
 # brain-memory — the paper and its measurements
 
-**Start here:** [`bm6-paper-final.md`](bm6-paper-final.md) — *Brain
-Memory for Coding Agents: Cue-Anchored Working Memory as a Harness
-Property.*
+**Start here:** [`bm6-paper-final.md`](bm6-paper-final.md) —
+*Delivery, Not Storage: Cue-Anchored Working Memory as a Harness
+Property for Coding Agents.*
 
 The paper's argument in one paragraph: coding agents persist knowledge
 only as documents — deliberately written, deliberately retrieved — and

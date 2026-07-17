@@ -10,9 +10,10 @@ Headline (paper §5.5): **61 intra-session re-reads, of which 24 — 39%
 boundary**; ~78k result tokens re-paid (chars/4 proxy); pooled
 re-exploration share 10.9% of exploration calls (range 0–29.1%); the
 worst single run re-paid ~31.6k tokens. The three heaviest runs hold
-55/61 re-reads and every cross-compaction re-read; fresh
-single-context runs sit at zero — waste concentrates exactly at
-context-loss boundaries.
+55 of 61 re-reads and 21 of 24 cross-compaction re-reads (the
+remaining three sit in a fourth compacted run); every run compacted
+at least once, yet four finished with zero re-reads — waste
+concentrates at context-loss boundaries when it occurs.
 
 ## Files
 
