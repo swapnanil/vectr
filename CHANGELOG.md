@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.3.0 — 2026-07-18
+
+Per-memory trigger engine, stdio MCP transport, instant memory readiness.
+
+### Per-memory trigger engine
+- `vectr_remember` accepts `triggers`: explicit per-note conditions for when
+  a note resurfaces — `path` globs, lifecycle `event`s (session-start,
+  prompt-submit, pre-edit, pre-run, pre-commit, post-compaction), exact
+  `symbol` references resolved against the code symbol graph, `semantic`
+  prompt-similarity with a fixed per-kind threshold, and temporal guards
+  (`not_before`, `expires_visibility`, `cooldown`). Conditions AND within an
+  entry and OR across entries; omitting `triggers` keeps the kind defaults.
+- Trigger evaluation is wired into the live hook pipeline (session-start /
+  prompt-submit / pre-tool-use / pre-compact) with a per-session fire
+  ledger, cumulative injection budgets, scope enforcement, and
+  double-injection prevention against the legacy relevance path.
+- Provenance classes on notes with framing gates: auto-captured content is
+  injected as epistemic memory, never as imperative instruction; forged
+  human-provenance writes are rejected at both MCP and store boundaries.
+- New `vectr_promote` MCP tool (the 15th): raise a reviewed auto-captured
+  note's trust class one step (`auto` → `agent`). Promotion to `human` is
+  reserved for user-side surfaces; the full chain remains available on REST.
+- Kind-default scopes are resolved at write time; path triggers match both
+  absolute and workspace-relative forms.
+
+### Transport and readiness
+- New foreground stdio MCP transport: `vectr mcp-stdio`.
+- Two-phase service init: memory tools are live from process start on every
+  transport, and warm-up notes are vector-backfilled when the embedder
+  attaches — remember/recall no longer wait on model load.
+- `vectr hook <event>` runs a stdlib-only fast path, cutting the per-hook
+  subprocess import tax.
+
+### Availability and correctness
+- Embedding provider's torch thread pool is capped and MCP tool dispatch
+  runs off the event loop; a full-workspace index or embed burst no longer
+  starves concurrent requests.
+- Fixed a shutdown-vs-init race in two-phase startup.
+- `VECTR_WORKSPACE` pointing at a nonexistent path now fails loudly instead
+  of silently indexing nothing.
+- `vectr_map`'s raw-metadata path walks only indexed files (no more venv
+  walks); the workspace fingerprint scan honors indexer exclusions.
+- Injection packing stops at the first eviction and never backfills
+  lower-ranked items; the per-turn recall relevance floor is config-driven
+  (default 0.72).
+
+### Tooling and display
+- One displayed score scale per result set; resolved note scope is surfaced
+  back to the caller; `vectr_status` nudges about stale task notes; the
+  instruction-style label is renamed `memory-first`; a failing acceptance
+  case can no longer crash the harness run.
+
+### Research artifacts
+- New `research/` directory: published evaluation artifacts for the
+  brain-memory work — controlled-matrix and forced-compaction decay-probe
+  protocols, graders, and complete run archives with per-directory READMEs.
+  Not part of the PyPI package.
+
 ## 1.2.0 — 2026-07-13
 
 Proactive context injection and daemon availability under load. All new

@@ -80,8 +80,10 @@ one is explained in the protocol run logs). Inside a run directory:
   `stderr.log` — runner bookkeeping.
 - `audit-report.md` (decay runs) — the artifact the agent produced;
   the final `## Operational Facts` section is the endpoint measurement.
-- `disk-memory-at-end/` (decay-M) — contents of the native memory
-  directory at run end (empty = no disk-memory escape).
+- `disk-memory-at-end/` (decay runs) — contents of the native memory
+  directory at run end. Empty (a lone `.gitkeep`) = no disk-memory
+  escape; this emptiness is itself a provenance claim the graders
+  check.
 
 ## Provenance notes
 

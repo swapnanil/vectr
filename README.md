@@ -199,7 +199,7 @@ No port, no daemon — a single foreground process framed as newline-delimited J
 
 ---
 
-## 14 MCP tools
+## 15 MCP tools
 
 `vectr start` writes a `CLAUDE.md` into your workspace with this table and usage guidance — your AI code editor knows which tool to reach for without being prompted.
 
@@ -226,10 +226,13 @@ No port, no daemon — a single foreground process framed as newline-delimited J
 | End of a long session, want a checkpoint | `vectr_snapshot("label")` |
 | Looking for a prior checkpoint | `vectr_snapshot_list()` |
 | Notes are stale after a large refactor | `vectr_forget(note_id=N)` per note, or `vectr_forget(all=true)` to clear |
+| An auto-captured note has been reviewed and still holds | `vectr_promote(note_id=N)` — raises its trust class one step (`auto` → `agent`); promotion to `human` is reserved for user-side surfaces, never the agent's call |
 
 Workspace-scoped notes double as a shared bus for multi-agent workflows: an orchestrator and its subagents all read and write the same note store, so a subagent can call `vectr_remember(..., agent="coder-2")` with its findings before finishing, and the orchestrator recalls them instead of re-reading the subagent's full transcript. The `agent` param is never inferred — it's explicit attribution, and it shows up as a tag in `vectr_recall` index output.
 
 On editors with session hooks (see the [host-support matrix](#connect-to-your-ai-code-editor) for which ones), recall is injected automatically — directives and high-priority tasks at session start, semantic recall keyed to each prompt, and file-anchored gotchas before a read or edit — with observability via a `Hook injections` line in `vectr status`.
+
+Those are the kind defaults. A note can also carry explicit per-note `triggers` on `vectr_remember`: `path` globs, lifecycle `event`s (session-start, prompt-submit, pre-edit, pre-run, pre-commit, post-compaction), exact `symbol` references resolved against the same symbol graph `vectr_locate` uses, a `semantic` prompt-similarity match with a fixed per-kind threshold, and temporal guards (`not_before`, `expires_visibility`, `cooldown`). Conditions AND within an entry and OR across entries, evaluated deterministically by the daemon with a per-session fire ledger and injection budgets — so a note resurfaces exactly when its condition holds, and never twice in the same window.
 
 ---
 
