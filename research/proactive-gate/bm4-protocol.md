@@ -90,3 +90,14 @@ injected on turns where they were irrelevant) counted by transcript read.
   tool calls / turns / cost; consistency with the pilot's CS-vs-A direction.
 - Any product defect surfaced → UPG item first (bugs are product tasks),
   rerun after fix if the defect invalidated the arm.
+
+## Non-graded launches (run log; entries logged post-hoc from artifacts, 2026-07-18)
+
+- **H-20260716-102250-ABORTED-PREFLIGHT**: aborted at the hook-probe
+  preflight step — `preflight.txt` ends after seeding with no
+  "native channel live" assertion; `hook-probe-prompt.json` retained;
+  no transcript, no agent run, no quota spent.
+- **H-20260716-102744-ABORTED-USERPAUSE**: preflight passed (both hook
+  probes live) and the agent launched; the operator paused the run
+  shortly after launch. Partial transcript retained, never graded; the
+  arm re-ran clean the same day as H-20260716-225420.

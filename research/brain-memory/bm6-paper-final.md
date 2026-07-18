@@ -505,15 +505,18 @@ decisively — a final continuation summary carrying 0/10: had the
 endpoint depended on the summary channel, it would have scored zero.
 The daemon's audit ledger records 157 session-start evaluations, of
 which 139 delivered all ten facts into the run: one at every single
-compact-resume (138/138) plus the first phase launch (which the CLI
-evaluated twice, 1.5 s apart). The 17 remaining mid-session
+compact-resume (138/138) plus the first phase launch. (The ledger's
+one other fact-bearing line, 1.5 s before the launch's, is the
+runner's pre-launch hook probe — payload archived as
+`hook-probe-sessionstart.json` — never part of the session.) The 17
+remaining mid-session
 phase-launch evaluations fired zero notes (16) or one non-seed note
 (1) — the per-session fire ledger of §3 suppressing redundant
 re-injection while the facts were still in-window — and the post-kill
 relaunch logged no evaluation at all. Delivery fired exactly when a
-fresh window needed it and nowhere else. Each delivery ran ~260
-tokens (mean 1.0k chars, chars/4 as in §5.5), ~36k injected tokens
-across the run; all 139 are visible in the session file as
+fresh window needed it and nowhere else. Each delivery ran ~240
+tokens (mean 969 chars of injected text, chars/4 as in §5.5), ~34k
+injected tokens across the run; all 139 are visible in the session file as
 hook-attachment pairs carrying 10/10 fact tokens. The tier's price,
 measured: the delivery overhead, the guard-forced tighter read cap
 (below), and the late-run confabulation spiral put M at +21% turns
@@ -584,12 +587,12 @@ cap). The difference is structural margin. The memory-equipped arm
 carries fixed per-cycle context the naive arm does not — MCP tool
 schemas re-loaded per resumed call, guidance files, per-prompt
 injections — a fixed context overhead the guard reads as refill
-pressure. At the arms' shared 8k cap M could not complete a single
-early phase (its first launch aborted); running at all required
+pressure. At the arms' shared 8k cap the guard killed M's first audit
+phase fourteen turns in and the launch was scrapped; running required
 lowering only M's read cap to 6k tokens, and even at 6k the guard
 killed the final audit phase as the growing report tightened the
-squeeze. One kill for N across eighteen phases at 8k; for M, no
-completed launch at 8k and one kill even at 6k. A harness tuned for
+squeeze. One kill for N across eighteen phases at 8k; for M, a
+scrapped launch at 8k and one kill even at 6k. A harness tuned for
 memoryless operation treats the context profile of a memory-carrying
 configuration as elevated thrashing risk — the operational form of
 this paper's content/control argument, measured.
@@ -656,8 +659,8 @@ vocabulary is exercised unevenly: the graded runs fire path, event,
 and semantic triggers; symbol and temporal triggers are implemented
 but never fired by any graded run, so C2's composition claim rests on
 three of its five elements having measured fires. Capture is the
-unevaluated half (§2's open half): every decay-probe note was seeded
-by the harness, and §5's voluntary-write counts measure initiative,
+unevaluated half (§2's open half): the probe's ten fact notes were
+seeded by the harness, and §5's voluntary-write counts measure initiative,
 not capture quality — capture-side automation is future work.
 
 **Internal.** Arm M ran at a 6k read cap vs N's 8k — forced by the

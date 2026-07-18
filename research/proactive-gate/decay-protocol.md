@@ -234,14 +234,17 @@ time.
   resume (last injection pair, 10/10 tokens), transcribed into the
   report with Edit. The daemon audit ledger records 157 session-start
   evaluations, of which 139 delivered all ten facts: every
-  compact-resume (138/138) plus the first launch (double-evaluated by
-  the CLI, 1.5 s apart); 16 mid-session phase-launch evaluations fired
+  compact-resume (138/138) plus the first launch (the one other
+  fact-bearing line, 1.5 s earlier, is the runner's pre-launch hook
+  probe — payload archived as hook-probe-sessionstart.json, never
+  part of the session); 16 mid-session phase-launch evaluations fired
   0 notes and one fired 1 non-seed note (zero fact tokens) — the
   per-session fire ledger suppressing redundant re-injection with the
   facts still in-window — and the post-kill relaunch logged no
   evaluation [corrected 2026-07-18; originally "157 deliveries, each
-  carrying 10/10" — see the round-2 erratum below]. Payloads: ~260
-  tokens each (mean 1.0k chars, chars/4), ~36k total; all 139 are
+  carrying 10/10" — see the round-2 erratum below]. Payloads: ~240
+  tokens each (mean 969 chars of injected text, chars/4), ~34k total;
+  all 139 are
   recorded in the session file as hook_success/hook_additional_context
   pairs carrying 10/10 tokens. Index-tier prompt-submit fires carried
   3/10 (9x) and 1/10 (6x). The grader's "RUN INVALID for the in-context-only
@@ -301,13 +304,19 @@ time.
   errors, both now fixed in place above with dated markers. (1) The
   "157 deliveries, each carrying 10/10" claim was wrong: the ledger's
   157 session-start evaluations partition as 139 fact-bearing
-  deliveries (138/138 compact-resumes + a double-evaluated first
-  launch) + 16 launch evaluations fired=0 + 1 fired=1 with zero fact
-  tokens (a non-seed note) + no evaluation at the post-kill relaunch —
-  the per-session fire ledger suppressed exactly the redundant
+  deliveries into the run (138/138 compact-resumes + the first
+  launch) + the runner's pre-launch hook probe (fact-bearing, 1.5 s
+  before the launch's line, payload archived as
+  hook-probe-sessionstart.json, never part of the session) + 16
+  launch evaluations fired=0 + 1 fired=1 with zero fact tokens (a
+  non-seed note) + no evaluation at the post-kill relaunch — the
+  per-session fire ledger suppressed exactly the redundant
   launch-time re-injections, and missed none of the compact-resumes.
-  Payloads re-measured at ~260 tokens mean (1.0k chars, chars/4),
-  ~36k total, correcting "~300 tokens / ~47k". (2) N6's "zero thrash
+  (Round-3 correction: this bullet first read the probe's line as a
+  CLI "double evaluation" of the first launch; the archived probe
+  payload refutes that.) Payloads re-measured at ~240 tokens mean
+  (969 chars of injected text, chars/4), ~34k total, correcting
+  "~300 tokens / ~47k". (2) N6's "zero thrash
   aborts" was false: N was guard-killed once at phase 6 (k≈49) and
   relaunched — the guard is not memory-specific; the M-vs-N contrast
   is frequency and severity, not exclusivity. Also corrected: N's

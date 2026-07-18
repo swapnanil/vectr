@@ -170,3 +170,16 @@ A gate pass is necessary but NOT sufficient. In order:
    moves again before the verdict, rebase again and re-run the suite.
 2. Present gate results + rebased-state test results to the user.
 3. Merge ONLY on explicit user approval. No approval, no merge.
+
+## Non-graded launches (run log; entries logged post-hoc from artifacts, 2026-07-18)
+
+- **A-20260712-180615-INVALID-POSTURE**: first A launch, invalidated at
+  the launch-posture gate (suffix assigned at the time). The retained
+  surface is self-contradicting for a vanilla arm — `proxy-status.json`
+  and `daemon-status.json` present alongside the preflight's "no vectr
+  surface" assertion. Superseded the same evening by the clean
+  A-20260712-185136. Excluded from every pooled number in the paper.
+- The three C preflight aborts (C-20260713-000926 store-clear defect;
+  C-20260713-011040 and C-20260713-013327 REST-starvation availability
+  bug) each carry their diagnosis in-directory as `abort-note.txt`;
+  both defects were logged and fixed as product work.
