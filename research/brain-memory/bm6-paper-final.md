@@ -496,7 +496,12 @@ measurement.) The asymmetry the agent exploited is instructive: the
 harness restores *files* after compaction and re-reads root
 instruction files, but restores nothing the conversation knew. Given
 no sanctioned memory tier, the model hand-built an episodic one from
-the harness's disk artifacts.
+the harness's disk artifacts. The endpoint tie with M is an artifact
+of this prompted closing phase — it measures what each arm could
+produce when explicitly asked. The operative quantity for real work is
+mid-run availability, where the arms are not tied: N's post-compaction
+window carried 0/10 fact tokens at 106 of 108 boundaries, while M's
+received all ten by injection at every one of its 138.
 
 **The injected store survives everything (M).** Final score 10/10 with
 clean provenance: zero fact-targeted shell commands, an empty
