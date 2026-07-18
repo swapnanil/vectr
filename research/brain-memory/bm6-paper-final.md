@@ -29,7 +29,7 @@ surveyed academic or shipped system provides. (3) A controlled evaluation
 on a naturalistic coding task showing that voluntary memory use is ~zero
 even when the store is pre-seeded with task-relevant knowledge (0 memory
 operations in 114 turns), that deterministic injection delivered in every
-seeded run (n=3) with zero false-alarm fires across audit-logged trigger
+injection-equipped seeded run (n=3) with zero false-alarm fires across audit-logged trigger
 evaluations, and that 39% of intra-session re-reads re-retrieve content
 the session had already paid for before a compaction boundary. (4) A
 repeated-compaction decay probe: ten facts held only in conversation
@@ -38,7 +38,8 @@ compactions); by the closing phase the deprived agent is grepping the
 harness's own session files off disk to reconstruct them — hand-building,
 against standing instruction, exactly the tier the harness never gave it.
 The same ten facts, injected from a harness-owned store, arrive intact
-through k=138 — 157 deliveries, every one audit-logged — while the final
+through k=138 — 139 audit-logged deliveries: the launch plus every
+single compact-resume (138/138) — while the final
 summary carries zero of them: the agent's memory never depended on what
 the summarizer chose to keep. Delivery, not storage, is the product: the
 reliable memory channel for agents is the one the agent never has to
@@ -280,10 +281,13 @@ first: the per-run `sha-check` line reads FAILED in every run
 directory, because Camel's build formatter re-wrapped two javadoc
 comment lines of the gate test in every run; per-run transcript audits
 confirm zero agent edits to the test, and the canonical test was
-restored byte-for-byte before the grading run (documented in the grade
-files). (Two additional launches aborted at preflight on
-a product availability bug the harness surfaced; logged and fixed as
-product work, abort evidence retained.)
+restored byte-for-byte before the grading run (documented in the
+CS/H/V grade files; the pilot runs are evidenced by per-run diff
+scopes). (Six further matrix launches did not gate, all retained with
+diagnosis: three preflight aborts on two harness-surfaced product bugs
+— one store-clear defect, two on a REST-starvation availability bug —
+one hook-probe preflight abort, one operator pause, and one pilot
+invalidated at the launch-posture assert.)
 
 ### 5.2 Adoption: voluntary memory does not happen
 
@@ -299,7 +303,8 @@ product work, abort evidence retained.)
 - Injection begets engagement: the seeded-proxy run (CS) produced the
   matrix's only memory-hygiene loop — recall by id, *forget* of the
   gotcha its implementation had just obsoleted, *remember* of a
-  completion note. The native runs reproduced the pattern (H1: expansion
+  completion note — after its first two voluntary calls timed out on
+  the availability bug of §5.1. The native runs reproduced the pattern (H1: expansion
   of all three injected index entries by id within seconds of injection,
   later a semantic recall returning staleness-flagged notes, then
   supersession of the obsolete gotcha; H2: one immediate semantic
@@ -310,13 +315,15 @@ product work, abort evidence retained.)
 ### 5.3 Mechanism: deterministic delivery, proven on two channels
 
 **Proxy (CS):** 262 API requests: 241 reached the injection decision —
-5 injected, 236 correctly skipped — and 21 (non-eligible request
-types) did not; zero injection or upstream errors. The proxy's own
-status counters are the published ledger for this channel
-(`proxy-status.json`); the grading-time daemon audit additionally
-recorded six `PROACTIVE_INJECT` events anchoring the seeded notes,
-quoted in the published grade file (that daemon log predates this
-archive's excerpt policy and was not retained).
+5 injected, 236 correctly skipped — and 21 (by subtraction; the
+status file carries no per-type counter) did not; zero injection or
+upstream errors. The proxy's own status counters are the published
+ledger for this channel (`proxy-status.json`); the grading-time
+daemon audit additionally recorded six `PROACTIVE_INJECT` events
+anchoring the seeded notes, quoted in the published grade file — one
+more than the proxy's injected count, plausibly the pre-launch
+injection probe, now unreconcilable because that daemon log predates
+this archive's excerpt policy and was not retained.
 
 **Native hooks (H×2):** the prompt-submit hook injected a three-note
 index at launch in both runs — behaviorally confirmed in H1 by the
@@ -332,8 +339,8 @@ harness's own pre-launch hook probe). One delivery honesty note: the
 injected index carried three of the four seeded notes — the index
 budget dropped one, a known ranking limitation logged as product work;
 the agent recovered that note's content from code exploration.
-Budgeted tiers drop items — a lesson §5.7 re-teaches. A
-methodological note for replication: the agent transcript records
+
+A methodological note for replication: the agent transcript records
 session-start hook payloads but not prompt-submit or pre-tool-use
 payloads — for those, the daemon audit log is the evidentiary surface
 for injection claims (sanitized per-run excerpts are published as
@@ -448,7 +455,7 @@ hooks at every compact-resume.
 | summary 1 (first boundary) | **0/10** | **0/10** |
 | final summary | 0/10 | **0/10** |
 | endpoint (10 facts in report) | 10/10 — **invalid** (transcript archaeology) | 10/10 — **clean** (injection-sourced) |
-| fact-bearing deliveries (daemon audit ledger) | 0 | 157 (all ten facts each) |
+| fact-bearing deliveries (daemon audit ledger) | 0 | 139 (all ten facts each; 157 evaluations logged) |
 
 **Figure 1 — survival regimes.** Every summary is all-or-nothing
 (0/10 or 10/10 fact tokens; no strict subset ever occurred in either
@@ -480,9 +487,9 @@ final score was 10/10 — and provenance forensics invalidate it. In the
 closing phase the agent ran a deliberate archaeology chain over the
 harness's own persistence: grepping its session JSONL and the
 harness's persisted tool-result files for the fact markers, then
-transcribing the hits — 259 shell commands in total (38 fact
-archaeology against the harness's persisted session artifacts, 150
-corpus/orientation, 69 report operations), against a ban restated in
+transcribing the hits — 260 shell commands in total (38 fact
+archaeology against the harness's persisted session artifacts, 152
+corpus/orientation, 70 report operations), against a ban restated in
 every phase prompt. (First shell use appears only after 15
 summaries, so the curve's early region is a clean pure-summary-channel
 measurement.) The asymmetry the agent exploited is instructive: the
@@ -496,14 +503,21 @@ clean provenance: zero fact-targeted shell commands, an empty
 disk-memory directory, no early fact write into the report, and —
 decisively — a final continuation summary carrying 0/10: had the
 endpoint depended on the summary channel, it would have scored zero.
-The daemon's audit ledger records 157 session-start deliveries — one
-per compact-resume (138) plus one per phase launch (19) — each
-carrying all ten facts at ~300 tokens per delivery, ~47k injected
-tokens across the run; 139 of the 157 are also visible in the session
-file as hook-attachment pairs (the CLI records in-session hook
-payloads but not launch-time resume payloads). The tier's price,
-measured: the delivery overhead plus the guard-forced tighter read cap
-(below) put M at +21% turns and +36% cost versus N. One disclosure: of
+The daemon's audit ledger records 157 session-start evaluations, of
+which 139 delivered all ten facts into the run: one at every single
+compact-resume (138/138) plus the first phase launch (which the CLI
+evaluated twice, 1.5 s apart). The 17 remaining mid-session
+phase-launch evaluations fired zero notes (16) or one non-seed note
+(1) — the per-session fire ledger of §3 suppressing redundant
+re-injection while the facts were still in-window — and the post-kill
+relaunch logged no evaluation at all. Delivery fired exactly when a
+fresh window needed it and nowhere else. Each delivery ran ~260
+tokens (mean 1.0k chars, chars/4 as in §5.5), ~36k injected tokens
+across the run; all 139 are visible in the session file as
+hook-attachment pairs carrying 10/10 fact tokens. The tier's price,
+measured: the delivery overhead, the guard-forced tighter read cap
+(below), and the late-run confabulation spiral put M at +21% turns
+and +36% cost versus N. One disclosure: of
 M's 321 shell results, exactly one — an orientation grep over its own
 session file for phase-10 task state — incidentally echoed fact tokens
 back into context; it sits over sixty compaction boundaries before the
@@ -521,9 +535,9 @@ below, changed what the summarizer selected); either reading supports
 the same conclusion: summarizer selection is unreliable *independently
 of fact availability* — and with a memory tier, nothing depends on it.
 The injection-begets-engagement pattern of §5.2 also replicates under
-decay: the M agent voluntarily wrote 11 notes and issued 9 recalls
-mid-run, against zero voluntary operations in the seeded-voluntary
-control. (The prompt-submit index tier separately delivered partial
+decay: the M agent voluntarily issued 11 remember calls (9 landed in
+the audit ledger) and 9 recalls mid-run, against zero voluntary
+operations in the seeded-voluntary control. (The prompt-submit index tier separately delivered partial
 fact coverage — 3/10 tokens early, 1/10 late — the budgeted-index
 lesson of this section's closing note, caught live.)
 
@@ -550,30 +564,35 @@ Audit completeness (declaration recall against a regex ground truth
 over the 64 source files) came out 0.70 for M vs 0.93 for N — with
 the confound that M ran under a tighter read cap, forced on it by the
 harness (next paragraph). Both scores are from the format-robust
-regrade published per-run as `decay-grade-v4-regrade.txt`; the
-original grade files retain three at-a-glance flags a reader will hit
-first, each decoded in the run log: the recall column's 0.00 was a
-section-binding bug in the original grader (fixed; N's score is
-unchanged by the fix), "SAMPLING/FABRICATION SUSPECT" is the
-confabulated-numbering finding itself, and "RUN INVALID for the
-in-context-only premise" is the no-memory-arm contamination rule
-firing — correctly by its own logic — on the memory arm's sanctioned
-injections.
+regrade published per-run as `decay-grade-v4-regrade.txt`.
+
+(Archive note: the original grade files retain three at-a-glance
+flags a reader will hit first, each decoded in the run log — the
+recall column's 0.00 was a section-binding bug in the original grader
+(fixed; N's score is unchanged by the fix), "SAMPLING/FABRICATION
+SUSPECT" is the confabulated-numbering finding itself, and "RUN
+INVALID for the in-context-only premise" is the no-memory-arm
+contamination rule firing — correctly by its own logic — on the
+memory arm's sanctioned injections.)
 
 **The harness fights the memory-carrying configuration.** The agent
 product's autocompact thrash guard aborts a call when context refills
-within three turns of a compact three times consecutively. The
-memory-equipped arm carries fixed per-cycle context the naive arm does
-not — MCP tool schemas re-loaded per resumed call, guidance files,
-per-prompt injections — a fixed context overhead the guard reads as
-refill pressure. At the arms' shared read cap this put every M cycle on the
-guard's edge and aborted the arm's first launch; restoring margin
-required lowering only M's read cap (8k → 6k tokens). Even then the
-guard killed the final audit phase late in the run, as the agent's own
-accumulated memory writes and the growing report tightened the squeeze
-further. A harness tuned for memoryless operation treats the context
-profile of a memory-carrying configuration as a failure mode — the
-operational form of this paper's content/control argument, measured.
+within three turns of a compact three times consecutively. The guard
+is not memory-specific — it also killed arm N once mid-run (phase 6,
+after 49 boundaries; relaunched and completed, still at the 8k read
+cap). The difference is structural margin. The memory-equipped arm
+carries fixed per-cycle context the naive arm does not — MCP tool
+schemas re-loaded per resumed call, guidance files, per-prompt
+injections — a fixed context overhead the guard reads as refill
+pressure. At the arms' shared 8k cap M could not complete a single
+early phase (its first launch aborted); running at all required
+lowering only M's read cap to 6k tokens, and even at 6k the guard
+killed the final audit phase as the growing report tightened the
+squeeze. One kill for N across eighteen phases at 8k; for M, no
+completed launch at 8k and one kill even at 6k. A harness tuned for
+memoryless operation treats the context profile of a memory-carrying
+configuration as elevated thrashing risk — the operational form of
+this paper's content/control argument, measured.
 
 A delivery-design lesson from the probe's preflight: injection
 surfaces that ship an index tier (title line now, expand on demand)
@@ -636,13 +655,17 @@ ground truth, which undercounts prose-only audit content. The trigger
 vocabulary is exercised unevenly: the graded runs fire path, event,
 and semantic triggers; symbol and temporal triggers are implemented
 but never fired by any graded run, so C2's composition claim rests on
-three of its five elements having measured fires.
+three of its five elements having measured fires. Capture is the
+unevaluated half (§2's open half): every decay-probe note was seeded
+by the harness, and §5's voluntary-write counts measure initiative,
+not capture quality — capture-side automation is future work.
 
 **Internal.** Arm M ran at a 6k read cap vs N's 8k — forced by the
 thrash guard, and reported as a finding, but a confound on the
 0.70-vs-0.93 audit-completeness comparison. Tool bans proved
-unenforceable in both decay arms (shell archaeology in N, subagents in
-M); we treat constraint non-compliance under context loss as data, and
+unenforceable in both decay arms (shell archaeology in both; forbidden
+subagents additionally in M); we treat constraint non-compliance under
+context loss as data, and
 gate every endpoint on transcript-level provenance forensics rather
 than on compliance. An 11-minute host hibernation occurred mid-run in
 arm M (processes restored; session continuous; wall-clock excluded

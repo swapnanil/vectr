@@ -151,8 +151,13 @@ time.
 - **decay-N-20260717-030703 (v4.2, N6 — VALID survival curve at k=108;
   endpoint contaminated by session-transcript archaeology)**: full completion
   — 18/18 phases, 64 files, 1235 turns, $21.26, 3.8h wall, **k=108
-  compactions**, zero thrash aborts (the 8k read cap works), declaration
-  recall 0.93 over 64 files, audit compliance OK. **The survival curve is the
+  compactions**, one thrash abort mid-run (phase 6, k≈49 — preflight
+  line "phase 6: claude exit 1", guard message at session line 3205;
+  relaunched and completed at the same 8k cap) [corrected 2026-07-18;
+  originally logged as "zero thrash aborts" — see the round-2 erratum
+  below], declaration recall 0.93 over 64 files, audit compliance OK.
+  The 8k cap restored the margin N5 lacked — one kill across the whole
+  run versus N5's back-to-back phase aborts. **The survival curve is the
   decay measurement: summary 1 carried 0/10 fact tokens — total drop at the
   FIRST compaction, replicating N3 — and 106 of 108 summaries carried 0/10.**
   The only nonzero summaries (30 and 31, both 10/10) directly follow an
@@ -228,12 +233,18 @@ time.
   available source was the session-start memory injection at the final
   resume (last injection pair, 10/10 tokens), transcribed into the
   report with Edit. The daemon audit ledger records 157 session-start
-  deliveries (138 compact-resume + 19 phase launches), each carrying
-  10/10 fact tokens at ~300 tokens per delivery; 139 of them are also
+  evaluations, of which 139 delivered all ten facts: every
+  compact-resume (138/138) plus the first launch (double-evaluated by
+  the CLI, 1.5 s apart); 16 mid-session phase-launch evaluations fired
+  0 notes and one fired 1 non-seed note (zero fact tokens) — the
+  per-session fire ledger suppressing redundant re-injection with the
+  facts still in-window — and the post-kill relaunch logged no
+  evaluation [corrected 2026-07-18; originally "157 deliveries, each
+  carrying 10/10" — see the round-2 erratum below]. Payloads: ~260
+  tokens each (mean 1.0k chars, chars/4), ~36k total; all 139 are
   recorded in the session file as hook_success/hook_additional_context
-  pairs (launch-time resume payloads are not recorded as session
-  events). Index-tier prompt-submit fires carried 3/10 (9x) and 1/10
-  (6x). The grader's "RUN INVALID for the in-context-only
+  pairs carrying 10/10 tokens. Index-tier prompt-submit fires carried
+  3/10 (9x) and 1/10 (6x). The grader's "RUN INVALID for the in-context-only
   premise" line is the N-arm attachment rule misfiring on the
   treatment: every fact-carrying attachment is hook_success /
   hook_additional_context (the memory channel); no file-restoration
@@ -267,8 +278,9 @@ time.
 - **Post-review forensics addendum (2026-07-18)**: independent
   re-verification for the paper corrected two numbers in the entry
   above (logged 2026-07-17 as "~95 injection pairs" and "#112-138 all
-  0/10"; verified against the daemon ledger and grade curve as
-  157 deliveries / 139 session-recorded pairs, and #67-138 — 72
+  0/10"; first corrected to "157 deliveries / 139 session-recorded
+  pairs" — itself amended by the round-2 erratum below to 157
+  evaluations / 139 fact-bearing deliveries — and #67-138 — 72
   consecutive) and added three findings: (a) of M's 321 Bash tool
   results exactly one — an orientation grep for phase-10 task state
   over its own session file, turn 2760 — incidentally echoed fact
@@ -283,6 +295,26 @@ time.
   CS-era daemon log was not retained). H-run trigger evaluations:
   40 (H1) / 35 (H2) — one in-run gotcha fire each plus the harness's
   pre-launch probe; zero false alarms.
+
+- **Round-2 review erratum (2026-07-18)**: hostile re-verification of
+  the corrected entries against the published artifacts found two
+  errors, both now fixed in place above with dated markers. (1) The
+  "157 deliveries, each carrying 10/10" claim was wrong: the ledger's
+  157 session-start evaluations partition as 139 fact-bearing
+  deliveries (138/138 compact-resumes + a double-evaluated first
+  launch) + 16 launch evaluations fired=0 + 1 fired=1 with zero fact
+  tokens (a non-seed note) + no evaluation at the post-kill relaunch —
+  the per-session fire ledger suppressed exactly the redundant
+  launch-time re-injections, and missed none of the compact-resumes.
+  Payloads re-measured at ~260 tokens mean (1.0k chars, chars/4),
+  ~36k total, correcting "~300 tokens / ~47k". (2) N6's "zero thrash
+  aborts" was false: N was guard-killed once at phase 6 (k≈49) and
+  relaunched — the guard is not memory-specific; the M-vs-N contrast
+  is frequency and severity, not exclusivity. Also corrected: N's
+  shell decomposition is 260 commands = 38 archaeology + 152
+  corpus/orientation + 70 report operations (previously "259 =
+  38+150+69", which did not sum); M's "wrote 11 notes" is 11 remember
+  calls of which 9 landed in the audit ledger.
 
 ## Reading the result
 
