@@ -10,10 +10,10 @@ July 18, 2026
 
 Coding agents ship with one kind of memory: documents. Instruction files,
 plan artifacts, and auto-written memory directories are all *deliberately
-authored, deliberately retrieved* — the agent must choose to write them and
+authored, deliberately retrieved*: the agent must choose to write them and
 choose to read them back. Human expertise runs on a second tier that never
-gets written down: situationally-bound operational facts — gotchas,
-locations, "how things are done here" — encoded as a side effect of doing
+gets written down: situationally-bound operational facts (gotchas,
+locations, "how things are done here") encoded as a side effect of doing
 the work and retrieved involuntarily when the situation cues them. We argue
 this second tier is the load-bearing one for long-running agents, and that
 it must be a **harness property, not an agent choice**.
@@ -24,7 +24,7 @@ event-based prospective memory, with each mechanism mapped to an
 architectural requirement. (2) A cue-anchored memory model: memories carry
 first-class trigger conditions over a composable vocabulary {path, symbol,
 semantic, event, temporal}, evaluated deterministically by the harness at
-the moments that structure an agent's epistemic life — a composition no
+the moments that structure an agent's epistemic life, a composition no
 surveyed academic or shipped system provides. (3) A controlled evaluation
 on a naturalistic coding task showing that voluntary memory use is ~zero
 even when the store is pre-seeded with task-relevant knowledge (0 memory
@@ -62,13 +62,13 @@ deliberately written, deliberately retrieved. The second tier does not
 exist. Each session is a competent worker with total amnesia who can read
 the wiki.
 
-The obvious fix — give the agent memory tools — has been tried, and it
+The obvious fix (give the agent memory tools) has been tried, and it
 measurably fails. MEMTRACK [2] finds memory-equipped models "generally
 preferring to repeatedly access information over using the memory
 component." TriggerBench [1] shows the deeper reason: acting on a latent
 standing constraint when its trigger appears (prospective memory) is much
 harder for models than retrieving stated facts (retrospective memory), and
-prospective performance *decays with context length* — precisely the
+prospective performance *decays with context length*, precisely the
 regime long-running agents occupy. Our own controlled runs replicate this
 naturalistically and extend it to the strongest case: an agent whose store
 was **pre-seeded with facts directly relevant to its task**, with
@@ -80,14 +80,14 @@ capture and automatic injection, with no voluntary lookup tool at all.
 
 The distinction that organizes this paper is between memory as **content**
 and memory as **control**. A memory system operating in the *content
-plane* adds material to the context — files, instructions, protocols —
+plane* adds material to the context (files, instructions, protocols)
 and relies on the model's compliance to turn that material into memory. A
 system operating in the *control plane* participates in constructing the
 context itself: it decides, deterministically, what enters the window and
 when. Field data makes the stakes concrete: a heavy user of an agentic
 coding CLI, documenting 59 context compactions over 26 days, built a
-three-tier file vault with standing orders and a compaction watcher [16]
-— an entire memory architecture in the content plane, operable only
+three-tier file vault with standing orders and a compaction watcher [16]:
+an entire memory architecture in the content plane, operable only
 through relentless manual enforcement, because the control plane offered
 nothing. Everything they hand-built traces the shape of a missing harness
 feature.
@@ -135,12 +135,12 @@ mechanism this paper specifies and evaluates for it is cue-anchored
 working memory (§3).
 
 The mapping from cognitive mechanism to design requirement is generative,
-not decorative — each row forced an architectural decision:
+not decorative; each row forced an architectural decision:
 
 - **Encoding is incidental.** In levels-of-processing and
   incidental-learning studies, subjects given no instruction to remember
   recalled as well as deliberate memorizers [17, 18]. (Deliberate
-  generation does aid retention when it happens [29] — the design
+  generation does aid retention when it happens [29]; the design
   premise is only that it cannot be relied on to happen.) Humans don't
   call `remember()`. A design that depends on the model volunteering a
   save fights the grain of the only system known to do memory well. →
@@ -153,11 +153,11 @@ not decorative — each row forced an architectural decision:
   lookup is the fallback, never the load-bearing path.
 - **An external store counts as memory only under the extended-mind
   criteria** [24]: reliably available, near-zero effort, *automatically
-  endorsed*. Clark argued web search fails the endorsement criterion —
+  endorsed*. Clark argued web search fails the endorsement criterion:
   results get evaluated, not trusted. The offloading literature
   measures the other half of the bargain: externalizing reliably frees
-  capacity and reshapes what stays internal — people retain *where*
-  rather than *what* [26, 27], and saving one item measurably improves
+  capacity and reshapes what stays internal (people retain *where*
+  rather than *what* [26, 27]), and saving one item measurably improves
   memory for the next [28]; its group-level analog is transactive
   memory [25]. Injection makes a store function as memory; lookup makes
   it function as a reference document. Same content, different
@@ -172,8 +172,8 @@ not decorative — each row forced an architectural decision:
 
 The content/control distinction of §1 is the systems restatement of the
 endorsement criterion: only control-plane delivery gives a store the
-trust posture and the reliability of memory. Content-plane systems —
-however elaborate — inherit the failure rate of model compliance, which
+trust posture and the reliability of memory. Content-plane systems,
+however elaborate, inherit the failure rate of model compliance, which
 §5 measures.
 
 ## 3 The cue-anchored memory model
@@ -181,13 +181,13 @@ however elaborate — inherit the failure rate of model compliance, which
 A memory is a tuple **(content, kind, triggers, scope, decay)**.
 
 **Kinds** map to the cognitive taxonomy: `directive` (standing
-prospective intention — must never miss), `gotcha` (cue-anchored
+prospective intention that must never miss), `gotcha` (cue-anchored
 caveat), `finding` (semantic fact), `task` (working state), `reference`
 (pointer).
 
 **Triggers** are per-memory standing conditions over a composable
 vocabulary: **path** (glob over touched files), **symbol** (a named code
-entity is referenced — requires a code symbol graph), **semantic**
+entity is referenced; requires a code symbol graph), **semantic**
 (similarity of current activity above a floor), **event** (session
 start, prompt submit, pre-edit, pre-run, pre-compaction,
 post-compaction), **temporal** (not-before, cooldown). Conjunction
@@ -212,7 +212,7 @@ compaction boundaries so anchored facts re-arm in the new window;
 injected content carries provenance framing ("recorded by an AI session,
 not human-endorsed — verify") so memory stays the epistemic surface and
 instructions stay the imperative one; staleness is checked against
-ground truth — if the anchored file changed after the note was written,
+ground truth, so if the anchored file changed after the note was written
 the injection carries an explicit warning. Stale-memory poisoning,
 injection bloat, and false-alarm rate are first-class design constraints
 (the poisoning literature shows cue-anchored firing used adversarially;
@@ -222,8 +222,8 @@ structural defenses beat content inspection [15]).
 
 The model is implemented in Vectr, an open-source local-first
 code-indexing daemon with a working-memory store (see Artifact
-Availability). Delivery integrates with the agent harness — Claude
-Code, an agentic coding CLI — at two alternative points:
+Availability). Delivery integrates with the agent harness (Claude
+Code, an agentic coding CLI) at two alternative points:
 
 1. **Native hooks.** The harness's lifecycle hooks (session start, user
    prompt submit, pre-tool-use, pre-compaction) invoke a hook binary
@@ -243,7 +243,7 @@ architecture, not the implementation.
 
 **Setup.** One naturalistic task on a pinned Apache Camel checkout
 (~169k indexed chunks): implement the `reverse` option for the
-stream-mode Resequencer EIP (Enterprise Integration Pattern) — a real
+stream-mode Resequencer EIP (Enterprise Integration Pattern), a real
 feature requiring cross-module exploration (model layer, processor
 engine, reifier wiring, catalog/schema surfaces), gated by a
 harness-provided acceptance test that must pass unmodified plus the
@@ -253,7 +253,7 @@ Sonnet 5, `claude-sonnet-5`), same prompt, same corpus SHA. Canonical
 wall time is the transcript's `duration_ms` (sleep-immune). Every
 run's MCP (Model Context Protocol) posture, guidance surface, memory
 starting state, and gate-test fingerprint are asserted at launch and
-archived. Seeded arms start from four exploration-grade notes — facts a
+archived. Seeded arms start from four exploration-grade notes: facts a
 prior exploration session would plausibly have stored (locations,
 semantics, the guard site), never solution steps; one note is a gotcha
 anchored to the file containing the guard.
@@ -275,7 +275,7 @@ the same corpus and defines its own arms (N, M) there.
 ### 5.1 Correctness: no harm
 
 12/12 graded runs pass the acceptance test (byte-unmodified,
-fingerprinted) and the regression suite. Injection — proxy or native —
+fingerprinted) and the regression suite. Injection, proxy or native,
 never cost correctness. One archive literalism a reader will hit
 first: the per-run `sha-check` line reads FAILED in every run
 directory, because Camel's build formatter re-wrapped two javadoc
@@ -285,7 +285,7 @@ restored byte-for-byte before the grading run (documented in the
 CS/H/V grade files; the pilot runs are evidenced by per-run diff
 scopes). (Six further matrix launches did not gate, all retained with
 diagnosis: three preflight aborts on two harness-surfaced product bugs
-— one store-clear defect, two on a REST-starvation availability bug —
+(one store-clear defect, two on a REST-starvation availability bug),
 one hook-probe preflight abort, one operator pause, and one pilot
 invalidated at the launch-posture assert.)
 
@@ -301,10 +301,10 @@ invalidated at the launch-posture assert.)
   calls in 114 turns**. Knowledge present in a store contributes nothing
   by itself.
 - Injection begets engagement: the seeded-proxy run (CS) produced the
-  matrix's only memory-hygiene loop — recall by id, *forget* of the
-  gotcha its implementation had just obsoleted, *remember* of a
-  completion note — after its first two voluntary calls timed out on
-  the availability bug of §5.1. The native runs reproduced the pattern (H1: expansion
+  matrix's only memory-hygiene loop (recall by id, *forget* of the
+  gotcha its implementation had just obsoleted, then *remember* of a
+  completion note). The loop came after its first two voluntary calls
+  timed out on the availability bug of §5.1. The native runs reproduced the pattern (H1: expansion
   of all three injected index entries by id within seconds of injection,
   later a semantic recall returning staleness-flagged notes, then
   supersession of the obsolete gotcha; H2: one immediate semantic
@@ -326,7 +326,7 @@ injection probe, now unreconcilable because that daemon log predates
 this archive's excerpt policy and was not retained.
 
 **Native hooks (H×2):** the prompt-submit hook injected a three-note
-index at launch in both runs — behaviorally confirmed in H1 by the
+index at launch in both runs, behaviorally confirmed in H1 by the
 agent's first three tool calls being recalls of exactly the three
 injected note ids (knowable from nowhere else). The cue-anchored gotcha
 **fired inside both runs on the agent's first touch of the anchored
@@ -336,13 +336,13 @@ reset at each compaction boundary, as designed. False-alarm
 injections: zero in both runs, across 40 and 35 audit-logged trigger
 evaluations respectively (the only other fire in each window is the
 harness's own pre-launch hook probe). One delivery honesty note: the
-injected index carried three of the four seeded notes — the index
-budget dropped one, a known ranking limitation logged as product work;
-the agent recovered that note's content from code exploration.
+injected index carried three of the four seeded notes. The index
+budget dropped one (a known ranking limitation logged as product
+work); the agent recovered that note's content from code exploration.
 
 A methodological note for replication: the agent transcript records
 session-start hook payloads but not prompt-submit or pre-tool-use
-payloads — for those, the daemon audit log is the evidentiary surface
+payloads; for those, the daemon audit log is the evidentiary surface
 for injection claims (sanitized per-run excerpts are published as
 `daemon-audit-excerpt.log`).
 
@@ -360,7 +360,7 @@ which carries API-latency and agent-path noise:
 | wall (s) | 2123.6 | 1432.8 | −33% |
 
 Five of the six pooled runs ran with an empty store, so this table
-prices the platform — semantic-search tools plus guidance — not memory
+prices the platform (semantic-search tools plus guidance), not memory
 delivery; it bounds the tool-surface effect and nothing in this paper's
 memory argument rests on it. The memory measurement is the
 knowledge-held-constant comparison (same seeds):
@@ -383,7 +383,7 @@ need ~15–20 runs per arm.
 
 Over the nine pilot transcripts (analyzer and per-run data published;
 cf. [6] on SWE-agent exploration behavior): **61 intra-session
-re-reads**, of which **24 — 39% — re-read content the session had
+re-reads**, of which **24 (39%) re-read content the session had
 already read before a compaction boundary**; ~78k result tokens
 re-paid (chars/4 proxy); pooled re-exploration share 10.9% of
 exploration calls (range 0–29.1%). The distribution is the finding:
@@ -392,7 +392,7 @@ cross-compaction re-reads (the remaining three sit in a fourth
 compacted run); every pilot run compacted at least once, yet four
 finished with zero re-reads — the boundary is where waste concentrates
 when it occurs, not a guarantee that it does. The worst single run re-paid ~31.6k
-tokens — a sixth of a context window — re-retrieving content it had
+tokens (a sixth of a context window) re-retrieving content it had
 already paid for. Waste concentrates exactly at context-loss
 boundaries, which is what deterministic post-compaction re-injection
 targets.
@@ -400,11 +400,11 @@ targets.
 ### 5.6 Compaction, single boundary
 
 All twelve graded runs auto-compacted at least once mid-flight; all
-finished green. A single compaction is near-lossless for task continuity — the
-harness's continuation summary carries it, with or without a memory
+finished green. A single compaction is near-lossless for task continuity:
+the harness's continuation summary carries it, with or without a memory
 tier. What the memory tier measurably added at the boundary:
 post-compaction recall returned the seeded notes with live staleness
-warnings (the agent had since edited the anchored file — a frozen
+warnings (the agent had since edited the anchored file; a frozen
 summary cannot self-invalidate), the agent superseded the obsolete
 note, and the trigger-ledger reset re-armed cue-anchored delivery for
 the new window.
@@ -428,7 +428,7 @@ resumed session with the auto-compaction window pinned at 100k tokens
 **Facts.** Ten synthetic operational facts (a build-freeze code, an
 incident bridge, a rollback deadline, …) are presented exactly once,
 in phase 0, in a fixture file that is **deleted immediately
-afterward** — removing the only re-readable source defeats the
+afterward**: removing the only re-readable source defeats the
 harness's post-compaction file restoration, so any later appearance of
 a fact must have survived in conversation or in a memory tier. Every
 phase prompt restates the tool constraints (file access through the
@@ -478,7 +478,7 @@ agent's own orientation greps accidentally re-surfaced the fact block
 into context; the next two summaries carried 10/10; one
 re-summarization pass later the facts were gone again. A fact
 re-entering context survives approximately one further pass. Selection
-is also all-or-nothing — across both arms, no summary ever carried a
+is also all-or-nothing. Across both arms, no summary ever carried a
 strict subset of the ten facts: the summarizer either folds the block
 in or drops it whole.
 
@@ -487,7 +487,7 @@ final score was 10/10 — and provenance forensics invalidate it. In the
 closing phase the agent ran a deliberate archaeology chain over the
 harness's own persistence: grepping its session JSONL and the
 harness's persisted tool-result files for the fact markers, then
-transcribing the hits — 260 shell commands in total (38 fact
+transcribing the hits: 260 shell commands in total (38 fact
 archaeology against the harness's persisted session artifacts, 152
 corpus/orientation, 70 report operations), against a ban restated in
 every phase prompt. (First shell use appears only after 15
@@ -500,20 +500,19 @@ the harness's disk artifacts.
 
 **The injected store survives everything (M).** Final score 10/10 with
 clean provenance: zero fact-targeted shell commands, an empty
-disk-memory directory, no early fact write into the report, and —
-decisively — a final continuation summary carrying 0/10: had the
+disk-memory directory, no early fact write into the report, and,
+decisively, a final continuation summary carrying 0/10: had the
 endpoint depended on the summary channel, it would have scored zero.
 The daemon's audit ledger records 157 session-start evaluations, of
 which 139 delivered all ten facts into the run: one at every single
 compact-resume (138/138) plus the first phase launch. (The ledger's
 one other fact-bearing line, 1.5 s before the launch's, is the
-runner's pre-launch hook probe — payload archived as
-`hook-probe-sessionstart.json` — never part of the session.) The 17
-remaining mid-session
-phase-launch evaluations fired zero notes (16) or one non-seed note
-(1) — the per-session fire ledger of §3 suppressing redundant
-re-injection while the facts were still in-window — and the post-kill
-relaunch logged no evaluation at all. Delivery fired exactly when a
+runner's pre-launch hook probe, payload archived as
+`hook-probe-sessionstart.json`, never part of the session.) The 17
+remaining mid-session phase-launch evaluations fired zero notes (16)
+or one non-seed note (1), the per-session fire ledger of §3
+suppressing redundant re-injection while the facts were still
+in-window, and the post-kill relaunch logged no evaluation at all. Delivery fired exactly when a
 fresh window needed it and nowhere else. Each delivery ran ~240
 tokens (mean 969 chars of injected text, chars/4 as in §5.5), ~34k
 injected tokens across the run; all 139 are visible in the session file as
@@ -521,8 +520,8 @@ hook-attachment pairs carrying 10/10 fact tokens. The tier's price,
 measured: the delivery overhead, the guard-forced tighter read cap
 (below), and the late-run confabulation spiral put M at +21% turns
 and +36% cost versus N. One disclosure: of
-M's 321 shell results, exactly one — an orientation grep over its own
-session file for phase-10 task state — incidentally echoed fact tokens
+M's 321 shell results, exactly one (an orientation grep over its own
+session file for phase-10 task state) incidentally echoed fact tokens
 back into context; it sits over sixty compaction boundaries before the
 endpoint and cannot reach it. Every fact-bearing carrier in the
 endpoint window is a hook attachment.
@@ -530,8 +529,8 @@ endpoint window is a hook attachment.
 The survival curve is bimodal with a regime change (Figure 1): even
 with the facts injected into the very context being summarized, the
 first three summaries carried none; summaries 4–66 folded them in 53
-times out of 63; then the entire back half of the run — 72 consecutive
-summaries — carried none, while deliveries continued to arrive on
+times out of 63; then the entire back half of the run (72 consecutive
+summaries) carried none, while deliveries continued to arrive on
 schedule. We did not predict the regime change and do not fully
 explain it (plausibly the growing report and the confabulation spiral,
 below, changed what the summarizer selected); either reading supports
@@ -541,12 +540,12 @@ The injection-begets-engagement pattern of §5.2 also replicates under
 decay: the M agent voluntarily issued 11 remember calls (9 landed in
 the audit ledger) and 9 recalls mid-run, against zero voluntary
 operations in the seeded-voluntary control. (The prompt-submit index tier separately delivered partial
-fact coverage — 3/10 tokens early, 1/10 late — the budgeted-index
+fact coverage, 3/10 tokens early and 1/10 late — the budgeted-index
 lesson of this section's closing note, caught live.)
 
 **What nobody seeded still decayed ("Phase 52: Files 203-206").**
-Only the ten facts were seeded. The task state — which files belong to
-which phase — lived in conversation, and under 138 compactions it
+Only the ten facts were seeded. The task state (which files belong to
+which phase) lived in conversation, and under 138 compactions it
 decayed into confabulation: the agent skipped two entire audit phases,
 invented an arithmetically self-consistent phase numbering deep into
 the run ("Phase 52: Files 203-206" — in a sixteen-phase, 64-file
@@ -564,27 +563,27 @@ the same signature at k=2: a first summary asserting "Memorization:
 Maintained all 10 DECAY-FACTS" while carrying zero of them.) Summaries
 consolidate the model's current beliefs; they do not validate them.
 Audit completeness (declaration recall against a regex ground truth
-over the 64 source files) came out 0.70 for M vs 0.93 for N — with
+over the 64 source files) came out 0.70 for M vs 0.93 for N, with
 the confound that M ran under a tighter read cap, forced on it by the
 harness (next paragraph). Both scores are from the format-robust
 regrade published per-run as `decay-grade-v4-regrade.txt`.
 
 (Archive note: the original grade files retain three at-a-glance
-flags a reader will hit first, each decoded in the run log — the
+flags a reader will hit first, each decoded in the run log. The
 recall column's 0.00 was a section-binding bug in the original grader
 (fixed; N's score is unchanged by the fix), "SAMPLING/FABRICATION
 SUSPECT" is the confabulated-numbering finding itself, and "RUN
 INVALID for the in-context-only premise" is the no-memory-arm
-contamination rule firing — correctly by its own logic — on the
+contamination rule firing, correctly by its own logic, on the
 memory arm's sanctioned injections.)
 
 **The harness fights the memory-carrying configuration.** The agent
 product's autocompact thrash guard aborts a call when context refills
 within three turns of a compact three times consecutively. The guard
-is not memory-specific — it also killed arm N once mid-run (phase 6,
+is not memory-specific: it also killed arm N once mid-run (phase 6,
 after 49 boundaries; relaunched and completed, still at the 8k read
 cap). The difference is structural margin. The memory-equipped arm
-carries fixed per-cycle context the naive arm does not — MCP tool
+carries fixed per-cycle context the naive arm does not: MCP tool
 schemas re-loaded per resumed call, guidance files, per-prompt
 injections — a fixed context overhead the guard reads as refill
 pressure. At the arms' shared 8k cap the guard killed M's first audit
@@ -609,7 +608,7 @@ A systematic sweep across four lanes — prospective/trigger-conditioned
 memory, memory-as-governance, agent-memory surveys 2024–2026, and
 shipped product mechanisms — narrows the novelty claim to a specific
 composition. Per-item triggers exist in fragments. Devin's knowledge
-items carry per-item "trigger descriptions" — semantically matched,
+items carry per-item "trigger descriptions", semantically matched
 and fallible by the vendor's own documentation. Pathrule ships
 deterministic hook-time delivery restricted to path globs over
 team-curated knowledge. The rules ecosystem (path-scoped instruction
@@ -618,12 +617,12 @@ industry-standard *for static human-authored configuration*;
 OpenHands' repository microagents extend it to per-item keyword
 triggers evaluated harness-side — still static, human-authored
 knowledge, not agent-written memory. Encoding standing user
-preferences as program state [5] is adjacent in spirit — persistent
-conditioning of behavior — but again human-scoped. PROJECTMEM's
+preferences as program state [5] is adjacent in spirit (persistent
+conditioning of behavior) but again human-scoped. PROJECTMEM's
 pre-action gate [4] is genuine cue-anchored governance,
 hardcoded to two derived warning types and evaluated in a
-single-developer self-study. General memory architectures — MemGPT
-[11], Mem0 [12], Zep [13], A-MEM [14] — offer stores and retrieval
+single-developer self-study. General memory architectures (MemGPT
+[11], Mem0 [12], Zep [13], A-MEM [14]) offer stores and retrieval
 policies, not standing per-item trigger conditions. The systematic
 study of fourteen general memory systems states the other side plainly:
 "No system implements automatic conditional injection based on
@@ -631,12 +630,12 @@ predefined triggers … All retrieval remains either unconditional
 injection or model-mediated selection" [3].
 
 What no surveyed system has, and this design contributes: (1)
-composable multi-vocabulary triggers — {path, symbol, semantic, event,
-temporal} — as per-memory standing conditions (symbol-conditioned
+composable multi-vocabulary triggers, {path, symbol, semantic, event,
+temporal}, as per-memory standing conditions (symbol-conditioned
 memory requires a code symbol graph, which no memory system carries);
 (2) the trigger-carrying item is *agent-written working memory*, not
 static rules or onboarding knowledge; (3) deterministic harness-side
-evaluation with an audit surface; (4) the measurements — TriggerBench
+evaluation with an audit surface; (4) the measurements: TriggerBench
 and MEMTRACK quantify the motivating failure, not a mechanism; no
 shipped or academic system publishes trigger-precision or
 injection-utility numbers, and we know of no prior forced-compaction
@@ -661,10 +660,10 @@ but never fired by any graded run, so C2's composition claim rests on
 three of its five elements having measured fires. Capture is the
 unevaluated half (§2's open half): the probe's ten fact notes were
 seeded by the harness, and §5's voluntary-write counts measure initiative,
-not capture quality — capture-side automation is future work.
+not capture quality; capture-side automation is future work.
 
-**Internal.** Arm M ran at a 6k read cap vs N's 8k — forced by the
-thrash guard, and reported as a finding, but a confound on the
+**Internal.** Arm M ran at a 6k read cap vs N's 8k, forced by the
+thrash guard and reported as a finding, but a confound on the
 0.70-vs-0.93 audit-completeness comparison. Tool bans proved
 unenforceable in both decay arms (shell archaeology in both; forbidden
 subagents additionally in M); we treat constraint non-compliance under
@@ -681,10 +680,10 @@ graders, and analyzers published.
 **External.** One corpus (Apache Camel), one task family per
 experiment, one agent product, one model family; the decay probe uses
 a small fast model (Claude Haiku 4.5), chosen to make k≥100
-compactions affordable — decay behavior of larger summarizers may
+compactions affordable; decay behavior of larger summarizers may
 differ. Camel is public and present in training corpora: if
 equivalent resequencer logic exists anywhere upstream, part of the
-fix may be pretrained knowledge — this affects all arms equally and
+fix may be pretrained knowledge; this affects all arms equally and
 cannot manufacture a between-arm delta, but it shrinks the
 exploration burden the arms differ on. The decay probe's pinned 100k
 window also halves per-boundary content pressure relative to stock
@@ -709,7 +708,7 @@ wiki; giving the harness a cue-anchored tier reproduces the thing
 expertise actually runs on. The evaluation is small but its signature
 is consistent: voluntary memory use rounds to zero even with a seeded
 store; the same store, delivered deterministically at the cued moment
-— through either of two unrelated mechanisms — arrives every time,
+through either of two unrelated mechanisms, arrives every time,
 costs nothing in correctness, and begets the only voluntary memory
 engagement observed anywhere in the corpus. Under repeated compaction
 the case sharpens to a point: the summary channel dropped every
@@ -724,8 +723,8 @@ for agents is not a content problem. It is a control-plane problem.
 
 All run archives, launch-posture assertions, graders, the
 re-exploration analyzer, the decay-probe harness, and per-run
-transcripts are published in the Vectr repository —
-`github.com/swapnanil/vectr` — under `research/proactive-gate/`
+transcripts are published in the Vectr repository
+(`github.com/swapnanil/vectr`) under `research/proactive-gate/`
 (matrix runs, decay results `decay-N-20260717-030703` and
 `decay-M-20260717-192249`, protocols, complete run logs including
 invalidated launches, per-run daemon audit-log excerpts
