@@ -745,8 +745,8 @@ from the same repository.
 
 [1] TriggerBench: Evaluating Prospective Memory in Large Language
 Model Agents. arXiv:2606.23459, 2026.
-[2] MEMTRACK: Evaluating Memory Utilization in Agentic Systems.
-arXiv:2510.01353, 2025.
+[2] MEMTRACK: Evaluating Long-Term Memory and State Tracking in
+Multi-Platform Dynamic Agent Environments. arXiv:2510.01353, 2025.
 [3] A Systematic Study of Fourteen General-Purpose Memory Systems for
 LLM Agents. arXiv:2606.24775, 2026.
 [4] PROJECTMEM: Project-Scoped Memory Gates for Development Agents.
