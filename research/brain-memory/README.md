@@ -1,6 +1,6 @@
 # brain-memory — the paper and its measurements
 
-**Start here:** [`bm6-paper-final.md`](bm6-paper-final.md) —
+**Start here:** [`delivery-not-storage.md`](delivery-not-storage.md) —
 *Delivery, Not Storage: Cue-Anchored Working Memory as a Harness
 Property for Coding Agents.*
 
@@ -23,7 +23,7 @@ intact after 138 compactions.
 
 ## Contents
 
-- [`bm6-paper-final.md`](bm6-paper-final.md) — the paper (abstract,
+- [`delivery-not-storage.md`](delivery-not-storage.md) — the paper (abstract,
   design theory, mechanism, evaluation §5, related work, threats to
   validity, full references).
 - [`bm5/`](bm5/) — the re-exploration-waste measurement: metric

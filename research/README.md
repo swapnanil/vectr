@@ -2,7 +2,7 @@
 
 Run archives and analysis for the cue-anchored working-memory research
 ("Brain Memory for Coding Agents: Cue-Anchored Working Memory as a
-Harness Property" — `brain-memory/bm6-paper-final.md`).
+Harness Property" — `brain-memory/delivery-not-storage.md`).
 
 ## Layout
 

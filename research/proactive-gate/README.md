@@ -7,7 +7,7 @@ diagnosed in the protocol run logs, and mechanism claims are gated on
 daemon audit logs rather than agent transcripts.
 
 Headline results and full analysis:
-[`../brain-memory/bm6-paper-final.md`](../brain-memory/bm6-paper-final.md).
+[`../brain-memory/delivery-not-storage.md`](../brain-memory/delivery-not-storage.md).
 
 ## Experiment 1 — controlled matrix (BM-4)
 
