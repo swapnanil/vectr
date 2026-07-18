@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Vectr — Semantic Code Search + Working Memory for AI Code Editors | llm-tools by Swapnanil Saha</title>
+  <title>Vectr — Semantic Code Search + Working Memory for AI Code Editors | Swapnanil Saha</title>
   <link rel="icon" type="image/svg+xml" href="icon.svg">
-  <meta name="description" content="Semantic codebase search + persistent working memory for AI code editors. AST-aware search, symbol graph, working notes, and context eviction via MCP. Local, zero-config, no API key.">
+  <meta name="description" content="Zero-config semantic code search + working memory for AI code editors. Dual-vector index, symbol graph, per-memory triggers, team-shared memory, opt-in proactive injection — via MCP.">
   <link rel="canonical" href="https://swapnanilsaha.com/tools/vectr/">
-  <meta property="og:title" content="Vectr — Semantic Codebase Indexer">
-  <meta property="og:description" content="Zero-config local indexer that maps your codebase, finds symbols, remembers what your AI assistant learned, and tells it what to forget — automatically, via MCP.">
+  <meta property="og:title" content="Vectr — Semantic Code Search + Working Memory">
+  <meta property="og:description" content="Zero-config semantic code search + working memory for AI code editors. Dual-vector index, symbol graph, per-memory triggers, team-shared memory — via MCP over HTTP or stdio.">
   <meta property="og:url" content="https://swapnanilsaha.com/tools/vectr/">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -93,14 +93,26 @@
     footer { border-top: 1px solid var(--border); padding: 26px 48px; display: flex; justify-content: space-between; align-items: center; }
     .footer-left, .footer-right { font-family: var(--mono); font-size: 10px; color: var(--text-muted); letter-spacing: 1px; }
     .footer-right span { color: var(--gold); }
+    /* Mobile overflow guard: let grid/flex tracks shrink below the min-content
+       width of non-wrapping children (code blocks, tables) so their own
+       overflow-x:auto engages instead of widening the layout viewport.
+       Neutral at desktop widths, where the content already fits. */
+    .container { min-width: 0; }
+    .hero-inner > *, .problem-grid > *, .example-grid > *, .arch-grid > *,
+    .layer-grid > *, .features-grid > *, .suite-grid > * { min-width: 0; }
+    pre { max-width: 100%; }
     @media (max-width: 768px) {
       nav { padding: 16px 24px; } .nav-links { display: none; }
+      .container { padding: 0 24px; }
       .hero-inner, .problem-grid, .example-grid { grid-template-columns: 1fr; }
       .arch-grid { grid-template-columns: 1fr 1fr; }
       .layer-grid, .features-grid { grid-template-columns: 1fr; }
       .suite-grid { grid-template-columns: 1fr 1fr; }
       pre { overflow-x: auto; -webkit-overflow-scrolling: touch; }
       footer { flex-direction: column; gap: 10px; text-align: center; padding: 20px 24px; }
+    }
+    @media (max-width: 480px) {
+      .arch-grid, .suite-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -136,7 +148,8 @@
 <span class="fn">vectr</span> start
 <span class="cmt"># Indexes workspace + builds symbol graph in background.</span>
 <span class="cmt"># Writes MCP config for your AI code editor.</span>
-<span class="cmt"># 14 tools available — no extra steps.</span>
+<span class="cmt"># Memory tools live from the first second — search</span>
+<span class="cmt"># joins as soon as the embedder warms. 15 MCP tools.</span>
 <span class="cmt">✓ Indexed 847 files → 14,523 chunks (9m 12s)</span>
 <span class="cmt">✓ Symbol graph: 6,841 symbols, 22,104 edges</span>
 <span class="cmt">✓ MCP ready at http://localhost:8765/mcp</span>
@@ -194,7 +207,7 @@
       <div class="layer-card">
         <div class="layer-label">Layer 3</div>
         <div class="layer-name">Content Search</div>
-        <div class="layer-desc">AST-aware chunks embedded with ibm-granite/granite-embedding-english-r2 (local, no API key). Adaptive hybrid search: vector + BM25 weights tuned per codebase fingerprint. Returns exact function bodies with file paths and line numbers.</div>
+        <div class="layer-desc">AST-aware chunks embedded with ibm-granite/granite-embedding-english-r2 (local, no API key). Every symbol is indexed twice — a full-body vector plus a body-stripped <em>purpose</em> vector (signature + docstring) — so intent-shaped queries surface the function whose doc answers them. Adaptive hybrid search: vector + BM25 weights tuned per codebase fingerprint.</div>
         <div class="layer-tools">
           <span class="tag tag-cyan">vectr_search</span>
         </div>
@@ -223,7 +236,7 @@
       <div class="arch-step reveal">
         <div class="arch-num">04</div>
         <div class="arch-title">Serve</div>
-        <div class="arch-desc">14 MCP tools at <code style="font-family:var(--mono);font-size:11px">localhost:8765/mcp</code>. Map, locate, search, trace, remember, recall, evict, snapshot, forget. Any MCP-compatible AI code editor connects with two lines of JSON config.</div>
+        <div class="arch-desc">15 MCP tools over HTTP (<code style="font-family:var(--mono);font-size:11px">localhost:8765/mcp</code>) or a foreground stdio transport (<code style="font-family:var(--mono);font-size:11px">vectr mcp-stdio</code>). Map, locate, search, trace, remember, recall, promote, evict, snapshot, forget. Memory tools are live from process start — remember/recall never wait on model load.</div>
       </div>
     </div>
   </div>
@@ -239,7 +252,7 @@
     <div class="features-grid">
       <div class="feature-card reveal">
         <div class="feature-title">Session memory that persists</div>
-        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr_remember</code> saves a working note — key files, edge cases found, what's still missing — to a SQLite store. The note survives <code style="font-family:var(--mono);font-size:12px">/compact</code> and new sessions. <code style="font-family:var(--mono);font-size:12px">vectr_recall</code> retrieves it in &lt;50ms, verbatim, any time. If referenced files changed since the note was written, recall automatically flags them with a <code style="font-family:var(--mono);font-size:12px">[STALE]</code> warning so the AI knows to re-verify before acting.</div>
+        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr_remember</code> saves a working note — key files, edge cases found, what's still missing — to a SQLite store. Five kinds (directive, task, gotcha, finding, reference), each with its own injection semantics: directives fire at every session start, gotchas resurface when their anchored file is touched. Notes survive <code style="font-family:var(--mono);font-size:12px">/compact</code> and new sessions; <code style="font-family:var(--mono);font-size:12px">vectr_recall</code> retrieves them in &lt;50ms, verbatim, with a <code style="font-family:var(--mono);font-size:12px">[STALE]</code> flag if referenced files changed since.</div>
       </div>
       <div class="feature-card reveal">
         <div class="feature-title">Bidirectional recall protocol</div>
@@ -260,6 +273,18 @@
       <div class="feature-card reveal">
         <div class="feature-title">Zero-config, zero cloud</div>
         <div class="feature-desc">Run <code style="font-family:var(--mono);font-size:12px">vectr start</code>. Vectr detects your git root, indexes the workspace, and writes config files for Claude Code, Cursor, and VS Code/Copilot automatically (Windsurf, Cline, and Continue: manual setup documented in the README). The embedding model runs locally — no API key required anywhere. See the <a href="https://github.com/swapnanil/vectr" target="_blank" style="color:var(--cyan);text-decoration:none;">README</a> for the full list.</div>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-title">Per-memory triggers</div>
+        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr_remember</code> accepts explicit <code style="font-family:var(--mono);font-size:12px">triggers</code>: path globs, lifecycle events (session-start, pre-edit, pre-commit, post-compaction), exact symbol references resolved against the code graph, semantic similarity to the current prompt, and temporal guards. Evaluated in the session-hook pipeline with fire ledgers and injection budgets — the right note resurfaces exactly when its condition matches, deterministically.</div>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-title">Team mode — one memory, many agents</div>
+        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr start --host</code> binds a central instance; <code style="font-family:var(--mono);font-size:12px">vectr connect --url</code> points each teammate's — or each agent's — editor at it. Shared index, shared working memory with per-client attribution, constant-time API-key auth, and optional encryption at rest for notes and snapshots. A network-reachable bind refuses to start unauthenticated.</div>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-title">Proactive injection (opt-in)</div>
+        <div class="feature-desc"><code style="font-family:var(--mono);font-size:12px">vectr proxy</code> runs a localhost API-shaped proxy that deterministically injects matched notes into the agent's request context — no reliance on the model choosing to call recall. Consent-gated, budgeted, deduplicated, and fail-open: an injection-path error never blocks the underlying request. Injection counts are fully observable in status.</div>
       </div>
     </div>
   </div>
@@ -298,6 +323,12 @@
 
 <span class="cmt"># Write CLAUDE.md + .mcp.json without starting the server</span>
 <span class="fn">vectr</span> init
+
+<span class="cmt"># Team mode: point your editor at a shared central instance</span>
+<span class="fn">vectr</span> connect --url http://vectr.internal:8765 --api-key=<span class="str">&lt;key&gt;</span>
+
+<span class="cmt"># Foreground stdio MCP transport (no HTTP port)</span>
+<span class="fn">vectr</span> mcp-stdio
 
 <span class="cmt"># Clear working memory after a large refactor</span>
 <span class="fn">vectr</span> forget --path .
@@ -445,6 +476,7 @@
         </tbody>
       </table>
     </div>
+    <p class="reveal" style="font-family:var(--serif);font-size:15px;font-style:italic;color:var(--text-dim);margin-top:28px;max-width:640px;">Beyond the benchmarks: <a href="https://github.com/swapnanil/vectr/blob/main/research/brain-memory/delivery-not-storage.md" target="_blank" style="color:var(--cyan);text-decoration:none;">"Delivery, Not Storage"</a> — a controlled study of agent memory under repeated context compaction, with full run archives published in the repository.</p>
   </div>
 </section>
 
@@ -474,7 +506,6 @@
 
 <footer>
   <div class="footer-left">© 2026 Swapnanil Saha · swapnanilsaha.com</div>
-  <div class="footer-right">Part of the <span>llm-tools</span> suite</div>
 </footer>
 
 <script>
