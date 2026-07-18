@@ -63,9 +63,9 @@ exist. Each session is a competent worker with total amnesia who can read
 the wiki.
 
 The obvious fix (give the agent memory tools) has been tried, and it
-measurably fails. MEMTRACK [2] finds memory-equipped models "generally
-preferring to repeatedly access information over using the memory
-component." TriggerBench [1] shows the deeper reason: acting on a latent
+measurably fails. MEMTRACK [2] benchmarks memory-equipped agents and
+documents systematic failure to utilize memory across long horizons.
+TriggerBench [1] shows the deeper reason: acting on a latent
 standing constraint when its trigger appears (prospective memory) is much
 harder for models than retrieving stated facts (retrospective memory), and
 prospective performance *decays with context length*, precisely the
@@ -215,8 +215,9 @@ instructions stay the imperative one; staleness is checked against
 ground truth, so if the anchored file changed after the note was written
 the injection carries an explicit warning. Stale-memory poisoning,
 injection bloat, and false-alarm rate are first-class design constraints
-(the poisoning literature shows cue-anchored firing used adversarially;
-structural defenses beat content inspection [15]).
+(the poisoning literature demonstrates adversarial cue-anchored
+firing, planted items persisting dormant until a later trigger, and
+finds lightweight rule- and filter-based defenses insufficient [15]).
 
 ## 4 Implementation surface
 
@@ -411,9 +412,9 @@ the new window.
 
 Under *repeated* compaction — the one-conversation-per-project usage
 pattern (field report: 59 compactions in 26 days [16]) — in-context
-facts must survive re-selection at every pass, drift through iterative
-re-paraphrase [7, 8, 9, 10], and compete for a fixed summary budget
-against a growing history. An externalized store is immune by
+facts must survive re-selection at every pass, endure lossy
+extraction [7, 8] and iterative re-encoding drift [9, 10], and compete
+for a fixed summary budget against a growing history. An externalized store is immune by
 construction. §5.7 measures both halves.
 
 ### 5.7 Repeated compaction: the decay probe
@@ -628,11 +629,12 @@ pre-action gate [4] is genuine cue-anchored governance,
 hardcoded to two derived warning types and evaluated in a
 single-developer self-study. General memory architectures (MemGPT
 [11], Mem0 [12], Zep [13], A-MEM [14]) offer stores and retrieval
-policies, not standing per-item trigger conditions. The systematic
-study of fourteen general memory systems states the other side plainly:
-"No system implements automatic conditional injection based on
-predefined triggers … All retrieval remains either unconditional
-injection or model-mediated selection" [3].
+policies, not standing per-item trigger conditions. A recent
+systematic study of general-purpose memory systems [3] maps retrieval
+across its subjects as query-time strategy (attention-based, semantic,
+topological, agentic routing, hybrid); standing per-item trigger
+conditions, evaluated against the agent's ongoing activity, appear
+nowhere in its taxonomy.
 
 What no surveyed system has, and this design contributes: (1)
 composable multi-vocabulary triggers, {path, symbol, semantic, event,
@@ -743,26 +745,27 @@ from the same repository.
 
 ## References
 
-[1] TriggerBench: Evaluating Prospective Memory in Large Language
-Model Agents. arXiv:2606.23459, 2026.
+[1] TriggerBench: Investigating Prospective Memory for Large Language
+Models. arXiv:2606.23459, 2026.
 [2] MEMTRACK: Evaluating Long-Term Memory and State Tracking in
 Multi-Platform Dynamic Agent Environments. arXiv:2510.01353, 2025.
-[3] A Systematic Study of Fourteen General-Purpose Memory Systems for
-LLM Agents. arXiv:2606.24775, 2026.
-[4] PROJECTMEM: Project-Scoped Memory Gates for Development Agents.
-arXiv:2606.12329, 2026.
-[5] User-as-Code: Encoding User Preferences as Standing Program State.
+[3] Are We Ready For An Agent-Native Memory System?
+arXiv:2606.24775, 2026.
+[4] PROJECTMEM: A Local-First, Event-Sourced Memory and Judgment
+Layer for AI Coding Agents. arXiv:2606.12329, 2026.
+[5] User as Code: Executable Memory for Personalized Agents.
 arXiv:2606.16707, 2026.
-[6] SWE-Explore: Exploration Strategies of Software-Engineering
-Agents. arXiv:2606.07297, 2026.
-[7] ProMem: Proactive Memory for Conversational Agents.
-arXiv:2601.04463, 2026.
-[8] RecMem: Reconstructive Memory under Iterative Summarization.
-arXiv:2605.16045, 2026.
-[9] SSGM: Semantic Drift in Summary-Grounded Memory.
+[6] SWE-Explore: Benchmarking How Coding Agents Explore Repositories.
+arXiv:2606.07297, 2026.
+[7] Beyond Static Summarization: Proactive Memory Extraction for LLM
+Agents. arXiv:2601.04463, 2026.
+[8] RecMem: Recurrence-based Memory Consolidation for Efficient and
+Effective Long-Running LLM Agents. arXiv:2605.16045, 2026.
+[9] Governing Evolving Memory in LLM Agents: Risks, Mechanisms, and
+the Stability and Safety Governed Memory (SSGM) Framework.
 arXiv:2603.11768, 2026.
-[10] Recursively Summarizing Enables Long-Term Dialogue Memory.
-arXiv:2308.15022, 2023.
+[10] Recursively Summarizing Enables Long-Term Dialogue Memory in
+Large Language Models. arXiv:2308.15022, 2023.
 [11] MemGPT: Towards LLMs as Operating Systems. arXiv:2310.08560,
 2023.
 [12] Mem0: Building Production-Ready AI Agents with Scalable Long-Term
@@ -770,8 +773,8 @@ Memory. arXiv:2504.19413, 2025.
 [13] Zep: A Temporal Knowledge Graph Architecture for Agent Memory.
 arXiv:2501.13956, 2025.
 [14] A-MEM: Agentic Memory for LLM Agents. arXiv:2502.12110, 2025.
-[15] Memory Poisoning Attacks on Trigger-Conditioned Agent Memory.
-arXiv:2605.28201, 2026.
+[15] Plant, Persist, Trigger: Sleeper Attack on Large Language Model
+Agents. arXiv:2605.28201, 2026.
 [16] anthropics/claude-code issue #34556: "Persistent Memory Across
 Context Compactions (59 compactions, built our own)." Field report,
 2026.
