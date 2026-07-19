@@ -336,3 +336,37 @@ class TestConfigLoaderMemoryTriggerSemanticTheta:
         finally:
             cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND.clear()
             cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND.update(original)
+
+
+class TestConfigLoaderYamlBoolHardening:
+    """UPG-YAML-BOOL: the config loader must not let YAML-1.1 bool literals
+    (on/off/yes/no) corrupt a string-typed list — pyyaml's default resolver
+    parses a bare `on` as True. `_StrictBoolLoader` strips that resolver while
+    keeping true/false as genuine booleans."""
+
+    def test_on_off_yes_no_stay_strings_in_list(self) -> None:
+        import yaml
+        from agent.config import _StrictBoolLoader
+        doc = yaml.load("words: [on, off, yes, no, the]\n", Loader=_StrictBoolLoader)
+        assert doc["words"] == ["on", "off", "yes", "no", "the"]
+        assert all(isinstance(w, str) for w in doc["words"])
+
+    def test_true_false_still_parse_as_bool(self) -> None:
+        import yaml
+        from agent.config import _StrictBoolLoader
+        doc = yaml.load("a: true\nb: false\n", Loader=_StrictBoolLoader)
+        assert doc["a"] is True
+        assert doc["b"] is False
+
+    def test_case_insensitive_on_off_stay_strings(self) -> None:
+        import yaml
+        from agent.config import _StrictBoolLoader
+        doc = yaml.load("words: [On, OFF, Yes, NO]\n", Loader=_StrictBoolLoader)
+        assert doc["words"] == ["On", "OFF", "Yes", "NO"]
+
+    def test_real_stopword_list_contains_bare_on_as_string(self) -> None:
+        # The concrete witness: NOTFOUND_FLOOR_STOPWORDS carries a bare `on`
+        # that must be the string "on", never boolean True.
+        assert "on" in cfg.NOTFOUND_FLOOR_STOPWORDS
+        assert True not in cfg.NOTFOUND_FLOOR_STOPWORDS
+        assert all(isinstance(w, str) for w in cfg.NOTFOUND_FLOOR_STOPWORDS)

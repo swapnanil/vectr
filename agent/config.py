@@ -352,6 +352,7 @@ from __future__ import annotations
 
 import importlib.resources as _ilr
 import os as _os
+import re as _re
 from typing import Any
 
 import yaml as _yaml
@@ -378,10 +379,38 @@ def _read_bundled_text(resource_path: str) -> str:
     return resource.read_text(encoding="utf-8")
 
 
+class _StrictBoolLoader(_yaml.SafeLoader):
+    """SafeLoader that does NOT apply YAML-1.1's implicit bool resolver to the
+    bare tokens ``on/off/yes/no`` (UPG-YAML-BOOL).
+
+    PyYAML's default resolver parses ``on/off/yes/no`` (any case) as booleans,
+    so a string list containing one of them silently gets a ``True``/``False``
+    element instead of the string — a stopword list with a bare ``on`` entry
+    became ``[..., True, ...]`` until quoted. Only ``true``/``false`` remain
+    genuine booleans (the single style config.yaml uses for real bools), so a
+    string-typed list is never corrupted by an unquoted English word.
+    """
+
+
+# Strip the inherited YAML-1.1 bool resolver, then re-register one that matches
+# only true/false. Build fresh per-first-character lists so the parent class's
+# resolver table is untouched.
+_StrictBoolLoader.yaml_implicit_resolvers = {
+    ch: [(tag, regexp) for tag, regexp in resolvers
+         if tag != "tag:yaml.org,2002:bool"]
+    for ch, resolvers in _yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_StrictBoolLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    _re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"),
+)
+
+
 def _load_config() -> dict[str, Any]:
     """Load and return the parsed agent/config.yaml as a dict."""
     raw = _read_bundled_text("config.yaml")
-    return _yaml.safe_load(raw)  # type: ignore[no-any-return]
+    return _yaml.load(raw, Loader=_StrictBoolLoader)  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------
