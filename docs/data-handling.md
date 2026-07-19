@@ -77,3 +77,9 @@ running the daemon. Every key-holder can read the shared workspace's index and
 notes by design; the server operator can read everything. Client labels
 (`--label`) attribute notes and audit lines but are self-declared — they are
 collaboration metadata, not an identity or access-control mechanism.
+
+Note IDs come from a single central sequence assigned in write-arrival order, so
+concurrent clients interleave: a given client's notes are not contiguous, and
+the number of the next note is whoever writes next, not necessarily you. Treat
+the `Stored note #N` value returned by each write as the canonical reference to
+that note — never infer a client's notes from an ID range.

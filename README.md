@@ -361,7 +361,11 @@ non-loopback bind **refuses to start without a key**), then
 `vectr connect --url http://<host>:<port> --api-key <key> --label <you>` on
 each client to point the editor at it. Working memory is shared: a note one
 agent stores, every connected agent can recall; `--label` attributes notes and
-audit lines. Plain limits: one shared key means every holder is an equal,
+audit lines. Note IDs are allocated by the central store in the order writes
+arrive, so with concurrent clients your notes are **not** a contiguous block —
+they interleave with other clients'. The `Stored note #N` line the write returns
+is the canonical reference to that specific note; don't assume the next ID is
+also yours. Plain limits: one shared key means every holder is an equal,
 trusted peer (no roles, no per-user permissions); the server operator can read
 everything; search results reference the **server's** checkout, which may
 differ from your local tree; vectr speaks plain HTTP — put TLS at a reverse
