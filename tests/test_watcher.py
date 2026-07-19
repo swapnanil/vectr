@@ -997,6 +997,30 @@ class TestBurstCoalescing:
         assert status["watcher_burst_mode"] is False
 
 
+def _wait_for_batch_summary(watcher, caplog, timeout: float = 5.0) -> list:
+    """Deterministically wait for the watcher's batch worker to emit its
+    "churn batch done" summary (UPG-WATCHER-BATCHLOG-FLAKY).
+
+    The summary line is logged from the background batch thread AFTER
+    `_batch_running` is cleared (agent/watcher.py: flag reset precedes the
+    `logger.info`), so polling `_batch_running` races the record into caplog
+    and a DIFFERENT test in this class would intermittently see zero summaries.
+    Join the worker thread — the log call completes before `run()` returns — and
+    then poll caplog for the record as a belt-and-suspenders on handler
+    propagation. Never touches product code (the log line itself fires live, per
+    UPG-EMBED-THREAD-CONTENTION's field verification)."""
+    thread = watcher._batch_thread
+    if thread is not None:
+        thread.join(timeout)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        summaries = [r for r in caplog.records if "churn batch done" in r.message]
+        if summaries:
+            return summaries
+        time.sleep(0.01)
+    return [r for r in caplog.records if "churn batch done" in r.message]
+
+
 class TestBatchDoneSummaryLog:
     """UPG-EMBED-THREAD-CONTENTION / UPG-WATCH-REVERT-CHURN observability
     requirement: one INFO line per debounced watcher batch summarizing files
@@ -1018,11 +1042,8 @@ class TestBatchDoneSummaryLog:
 
         with caplog.at_level(logging.INFO, logger="agent.watcher"):
             watcher._submit_batch({"/ws/a.py", "/ws/b.py", "/ws/c.py"})
-            deadline = time.monotonic() + 2
-            while watcher._batch_running and time.monotonic() < deadline:
-                time.sleep(0.01)
+            summaries = _wait_for_batch_summary(watcher, caplog)
 
-        summaries = [r for r in caplog.records if "churn batch done" in r.message]
         assert len(summaries) == 1
         line = summaries[0].getMessage()
         # Two files indexed (4 chunks each = 8), one file deleted (2 chunks).
@@ -1039,11 +1060,8 @@ class TestBatchDoneSummaryLog:
 
         with caplog.at_level(logging.INFO, logger="agent.watcher"):
             watcher._submit_batch(set())
-            deadline = time.monotonic() + 2
-            while watcher._batch_running and time.monotonic() < deadline:
-                time.sleep(0.01)
+            summaries = _wait_for_batch_summary(watcher, caplog)
 
-        summaries = [r for r in caplog.records if "churn batch done" in r.message]
         assert len(summaries) == 1
         line = summaries[0].getMessage()
         assert "0 files ingested (0 chunks re-embedded)" in line
