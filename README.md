@@ -142,7 +142,7 @@ Exposes port 8765. Docker does not auto-write IDE config files — use local ins
 | Windsurf | Manual — see below | Experimental |
 | Cline | Manual — see below | Experimental |
 | Continue | Manual — see below | Experimental |
-| Codex CLI | — | Planned (post-v1) |
+| Codex CLI | Auto — `.codex/config.toml`, `AGENTS.md` guidance, and `.codex/hooks.json` (`vectr init --hooks`) | Experimental |
 
 "Verified" means the full integration (config, guidance, and hooks) has been exercised end to end. "Experimental" means the MCP config is written and works, but the integration hasn't been run through the same verification pass. "Planned" means no support yet.
 
@@ -173,6 +173,13 @@ Exposes port 8765. Docker does not auto-write IDE config files — use local ins
 ```json
 { "mcpServers": [{ "name": "vectr", "transport": { "type": "http", "url": "http://localhost:8765/mcp" } }] }
 ```
+
+**Codex CLI** — project-scoped `.codex/config.toml` (written automatically by `vectr start`):
+```toml
+[mcp_servers.vectr]
+url = "http://localhost:8765/mcp"
+```
+On its first run in the workspace, Codex shows a one-time interactive prompt to trust the project before it loads a project-scoped config; if you also ran `vectr init --hooks`, Codex shows a second one-time prompt to trust the hook commands. Both persist after you accept them once — a config writer cannot clear them for you without weakening your security posture.
 
 </details>
 
