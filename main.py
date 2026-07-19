@@ -185,8 +185,9 @@ _IDE_CONFIG_APPEND_ONLY: tuple[str, ...] = (
 
 def _make_vectr_block(*, hooks_installed: bool = False, search_only: bool = False, tool_loading: bool = False) -> str:
     """`hooks_installed` selects the session-start guidance variant (UPG-11.5) —
-    only meaningful for CLAUDE.md, since Claude Code hooks are the only
-    injection path today; other IDE config files always get the default.
+    meaningful for CLAUDE.md (Claude Code hooks) and AGENTS.md (Codex hooks,
+    UPG-CODEX-PARITY); the other IDE config files have no automatic-injection
+    path and always get the default.
     `search_only` selects the no-working-memory variant (UPG-SEARCH-ONLY-MODE)
     and takes precedence over `hooks_installed`. `tool_loading` splices the
     host-specific deferred-tool loading blockquote — CLAUDE.md only
