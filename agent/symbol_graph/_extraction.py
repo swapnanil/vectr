@@ -125,9 +125,9 @@ def _c_name_node(node):
     field only exists for the specifier/preproc forms; `function_definition`
     and `type_definition` expose it through `declarator`. Returning the
     declarator (rather than None) lets the caller check the NAME's parse
-    integrity in isolation: `typedef struct { PyObject_HEAD ... } PyDictObject;`
-    and a macro-body function like `PyLong_FromLong` both error inside the
-    body/field list while the declarator (`PyDictObject` / `PyLong_FromLong(...)`)
+    integrity in isolation: `typedef struct { SOME_HEADER_MACRO ... } MyStruct;`
+    and a macro-body function like `make_value` both error inside the
+    body/field list while the declarator (`MyStruct` / `make_value(...)`)
     parses cleanly — the symbol must survive.
     """
     if node.type in _C_SPECIFIER_NAME_NODES:

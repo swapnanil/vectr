@@ -260,7 +260,7 @@ def _locate_class_enclosed_batch(rows: list) -> list[bool]:
 # is both wrong and non-deterministic. Order non-test files first (tests/ dirs and
 # test_*.py basenames), then larger line-span first (real defs tend to be large,
 # stubs tiny); _partial_match_key does the precise ranking within the cap.
-# (Witnessed by the django benchmark corpus: the name "Model" has 236 matches,
+# (Witnessed on a large web-framework corpus: the name "Model" has 236 matches,
 # mostly inner test classes, so the library definition fell outside a 200 cap.)
 _CANONICAL_FETCH_ORDER = (
     "ORDER BY (CASE WHEN file_path LIKE '%/tests/%' "
@@ -278,7 +278,7 @@ def _split_class_qualifier(name: str) -> tuple[str, str]:
     wants ordinary suffix-stripping.
 
     Shared by ``locate_l2`` (UPG-11.10-b) and ``trace`` (F33): a vectr_search
-    result displays symbols as ``"QuerySet.delete"`` (Class.method), and an
+    result displays symbols as ``"Repository.delete"`` (Class.method), and an
     LLM naturally copies that qualified name into a follow-up ``locate``/
     ``trace`` call — both call sites need the identical split+match
     convention so a qualified query resolves consistently across both tools.
@@ -1491,8 +1491,8 @@ class SymbolGraph:
         `file_path` — a common leaf name (e.g. `delete`) can have more
         definitions than `limit` across a large codebase, and a bare
         alphabetical-by-path order truncates on file-path spelling alone.
-        `django/db/models/query.py`'s `QuerySet.delete` sorted after
-        `django/db/models/base.py`'s `Model.delete` purely because "q" > "b",
+        one module's `Repository.delete` sorted after another module's
+        `Model.delete` purely because "r" > "m",
         silently dropping it from every trace path that reaches this method —
         not a corpus-specific fix; any workspace with >`limit` definitions of
         one leaf name hits the same alphabetical-accident truncation."""

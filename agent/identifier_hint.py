@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 
 # Combined, single regex — shape detection only, no word/keyword/phrase list:
-#   1. dotted/qualified form   e.g. "QuerySet.delete"
+#   1. dotted/qualified form   e.g. "Repository.delete"
 #   2. CamelCase/PascalCase    e.g. "WorkspaceLock" (leading capital, an
 #                              internal lower-then-upper transition — this
 #                              excludes an ordinary capitalised sentence word

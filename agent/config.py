@@ -647,6 +647,13 @@ _strat_cfg: dict[str, Any] = _cfg["strategy"]
 
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT: float = float(_strat_cfg["default_semantic_weight"])
 STRATEGY_DEFAULT_BM25_WEIGHT: float = float(_strat_cfg["default_bm25_weight"])
+# Frameworks the caller model already knows at implementation depth from
+# training — config-declared so the set is tunable without a code change
+# (UPG-KNOWN-FRAMEWORKS-CONFIG). Matched case-insensitively against
+# fingerprint.detected_frameworks by suggest_instruction_style().
+STRATEGY_KNOWN_FRAMEWORKS: frozenset[str] = frozenset(
+    str(f).lower() for f in _strat_cfg["known_frameworks"]
+)
 # Dual-vector pool entry — purpose (signature+docstring) vector (ARCH-4)
 # ---------------------------------------------------------------------------
 

@@ -475,6 +475,53 @@ class TestSuggestInstructionStyle:
             style = svc.suggest_instruction_style()
         assert style == "memory-first"
 
+    def test_known_framework_match_is_case_insensitive(self, tmp_path, monkeypatch) -> None:
+        # UPG-KNOWN-FRAMEWORKS-CONFIG: the set is config-declared and matched
+        # case-insensitively, so a fingerprint reporting "Django" (or any case)
+        # still resolves to the well-known-framework path.
+        from agent.strategy_selector import RetrievalStrategy, CodebaseFingerprint
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        svc.remember("some note content", tags=["test"])
+
+        svc._strategy = RetrievalStrategy(0.70, 0.30, False, "model", "rationale")
+        with patch("agent.strategy_selector.fingerprint") as mock_fp:
+            mock_fp.return_value = CodebaseFingerprint(
+                total_files=2000,
+                language_dist={"python": 2000},
+                dominant_language="python",
+                is_monorepo=False,
+                size_class="large",
+                detected_frameworks=["Django"],  # mixed case, still a known framework
+                complexity_class="complex",
+            )
+            style = svc.suggest_instruction_style()
+        # Known framework ⇒ not treated as large-unfamiliar ⇒ memory-first (notes exist),
+        # never "directed".
+        assert style == "memory-first"
+
+    def test_unknown_framework_large_codebase_returns_directed(self, tmp_path, monkeypatch) -> None:
+        # A framework absent from the config-declared set is not "well-known":
+        # a large codebase using it is directed, proving the config gate is live.
+        from agent.strategy_selector import RetrievalStrategy, CodebaseFingerprint
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        svc.remember("some note content", tags=["test"])
+
+        svc._strategy = RetrievalStrategy(0.75, 0.25, False, "model", "rationale")
+        with patch("agent.strategy_selector.fingerprint") as mock_fp:
+            mock_fp.return_value = CodebaseFingerprint(
+                total_files=2000,
+                language_dist={"python": 2000},
+                dominant_language="python",
+                is_monorepo=False,
+                size_class="large",
+                detected_frameworks=["obscure-inhouse-framework"],
+                complexity_class="complex",
+            )
+            style = svc.suggest_instruction_style()
+        assert style == "directed"
+
     def test_count_notes_returns_integer(self, tmp_path, monkeypatch) -> None:
         svc = self._make_service(tmp_path, monkeypatch)
         svc.index(str(tmp_path))

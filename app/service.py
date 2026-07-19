@@ -11,6 +11,7 @@ from pathlib import Path
 from agent.config import (
     STRATEGY_DEFAULT_BM25_WEIGHT,
     STRATEGY_DEFAULT_SEMANTIC_WEIGHT,
+    STRATEGY_KNOWN_FRAMEWORKS,
     SEARCH_IDENTIFIER_HINT_ENABLED,
     SEARCH_IDENTIFIER_HINT_MAX_IDENTIFIERS,
     SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS,
@@ -1842,14 +1843,16 @@ class VectrService:
             except Exception:
                 pass
 
-        # Well-known frameworks: model knows these at implementation depth from training
-        _KNOWN_FRAMEWORKS = {
-            "django", "flask", "fastapi", "react", "nextjs", "vue", "angular",
-            "express", "spring-boot", "gin", "echo", "celery",
-        }
+        # Well-known frameworks: model knows these at implementation depth from
+        # training. The set is config-declared (STRATEGY_KNOWN_FRAMEWORKS,
+        # UPG-KNOWN-FRAMEWORKS-CONFIG); match case-insensitively.
         known_codebase = (
             fp is not None
-            and bool(_KNOWN_FRAMEWORKS.intersection(set(fp.detected_frameworks)))
+            and bool(
+                STRATEGY_KNOWN_FRAMEWORKS.intersection(
+                    f.lower() for f in fp.detected_frameworks
+                )
+            )
         )
 
         if notes_count > 0 and (known_codebase or (fp and fp.size_class == "small")):
