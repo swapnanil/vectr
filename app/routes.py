@@ -498,7 +498,9 @@ async def forget(body: ForgetRequest, request: Request) -> dict:
 async def evict_hint(request: Request) -> dict:
     svc = _service(request)
     _require_fully_ready(svc)
-    hint = svc.eviction_hint()
+    # UPG-7.2: an explicit GET is a deliberate ask — on-demand, eviction-focused
+    # framing, distinct from the gated auto-footer's remember alarm.
+    hint = svc.eviction_hint(on_demand=True)
     return {"hint": hint or "No retrieved chunks to evict.", "should_evict": svc.should_evict()}
 
 

@@ -23,6 +23,7 @@ from agent.config import (
     HOOKS_LOG_CHARS_PER_TOKEN,
     HOOKS_MIN_SIMILARITY,
     MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
+    MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
 )
 from agent.eviction_advisor import EvictionAdvisor
 from agent.trigger_engine import TriggerFireLedger
@@ -1438,13 +1439,24 @@ class VectrService:
         # absent that, the implicit event is `["session-start"]`.
         if boot:
             events_to_fire = events if events else ["session-start"]
+            ledger = self._ledger_for(session_id)
             fire_text, _ = self._context_store.fire_and_format(
                 self._workspace_root,
                 events=events_to_fire,
                 session_id=session_id,
-                ledger=self._ledger_for(session_id),
+                ledger=ledger,
                 surface=surface,
             )
+            # UPG-NUDGE-HOOK-PATH-UNREACHABLE (B9): the stale-task hygiene nudge
+            # renders in vectr_status, but the shipped guidance steers agents
+            # away from calling status at session start (notes auto-inject
+            # instead) — so the state-based backstop was unreachable exactly
+            # where the task-note pile-up lives. Surface the same one-line nudge
+            # on the SessionStart injection path agents actually hit, budget-aware
+            # (skipped when the note pack already spent the session's token cap).
+            nudge = self._stale_task_nudge_line()
+            if nudge and (ledger is None or ledger.remaining_budget() > 0):
+                fire_text = f"{fire_text}\n\n{nudge}" if fire_text else nudge
             return fire_text
 
         # Path-anchored mode (UPG-9.6 contract; TRIGGER-ENGINE wave 2a adds
@@ -1765,8 +1777,11 @@ class VectrService:
     # Eviction advisor
     # ------------------------------------------------------------------
 
-    def eviction_hint(self, session_id: str | None = None) -> str:
-        return self._advisor_for(session_id).eviction_hint()
+    def eviction_hint(self, session_id: str | None = None, on_demand: bool = False) -> str:
+        # UPG-7.2: the explicit vectr_evict_hint tool / /v1/evict pass
+        # on_demand=True for an eviction-focused informational framing distinct
+        # from the gated auto-footer's remember alarm.
+        return self._advisor_for(session_id).eviction_hint(on_demand=on_demand)
 
     def auto_eviction_hint(self, session_id: str | None = None) -> str:
         """Gated per-response footer (UPG-7.1) — fires only on fresh context-
@@ -1799,6 +1814,21 @@ class VectrService:
             return 0, None
         return self._context_store.stale_task_summary(
             self._workspace_root, MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS
+        )
+
+    def _stale_task_nudge_line(self) -> str:
+        """One-line stale-task hygiene nudge, or "" when below the warn count
+        (UPG-NUDGE-HOOK-PATH-UNREACHABLE). The same signal vectr_status renders,
+        surfaced on the SessionStart injection path so it reaches agents that
+        never call status."""
+        count, oldest_id = self.stale_task_summary()
+        if count < MEMORY_HYGIENE_STALE_TASK_WARN_COUNT:
+            return ""
+        return (
+            f"Memory hygiene: {count} task note(s) older than "
+            f"{MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS} days are still active "
+            f"(oldest: #{oldest_id}) — vectr_remember(kind=\"task\", supersedes=<old id>) "
+            "if the work moved on, or vectr_forget(note_id=...) if it's done."
         )
 
     # ------------------------------------------------------------------

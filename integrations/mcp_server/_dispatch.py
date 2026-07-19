@@ -637,8 +637,26 @@ def handle_tools_call(
                 scope_suffix = f" (scope=branch ({stored_note.branch}))"
             else:
                 scope_suffix = f" (scope={stored_note.scope})"
+        # UPG-ADOPTION-V2-MINOR (b): echo the stored title + first content line so
+        # the caller can confirm the write landed correctly without a verify
+        # round-trip via vectr_recall. Uses the note already fetched above — no
+        # extra lookup. Bounded so a long note can't bloat the confirmation.
+        echo = ""
+        if stored_note is not None:
+            title = (getattr(stored_note, "title", "") or "").strip()
+            content_lines = (getattr(stored_note, "content", "") or "").strip().splitlines()
+            first_line = content_lines[0].strip() if content_lines else ""
+            if len(first_line) > 120:
+                first_line = first_line[:117] + "..."
+            parts = []
+            if title:
+                parts.append(f"title: {title}")
+            if first_line:
+                parts.append(f"first line: {first_line}")
+            if parts:
+                echo = "\n  Stored — " + " · ".join(parts)
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time."}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}"}],
             "isError": False,
         }
 
@@ -681,7 +699,9 @@ def handle_tools_call(
 
     # ---- vectr_evict_hint ----
     if tool_name == "vectr_evict_hint":
-        hint = service.eviction_hint(session_id=session_id)
+        # UPG-7.2: an explicit ask gets the on-demand, eviction-focused framing —
+        # distinct from the gated auto-footer's "ACTION REQUIRED" remember alarm.
+        hint = service.eviction_hint(session_id=session_id, on_demand=True)
         if not hint:
             hint = "No retrieved chunks to evict. Context window is clean."
         return {"content": [{"type": "text", "text": hint}], "isError": False}

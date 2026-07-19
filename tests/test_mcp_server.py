@@ -129,6 +129,17 @@ class TestToolDescriptions:
         desc = self._desc("vectr_search")
         assert "vectr_locate" in desc, "vectr_search must tell model to use vectr_locate when name is known"
 
+    def test_n_results_description_guides_low_values(self) -> None:
+        # UPG-NRESULTS-GUIDANCE (B5): the n_results param description must steer
+        # the caller to 1-2 for specific lookups (token economy) and widen only
+        # for exploratory queries — description text only, no query-side logic.
+        tool = next(t for t in MCP_TOOLS if t["name"] == "vectr_search")
+        n_desc = tool["inputSchema"]["properties"]["n_results"]["description"].lower()
+        assert "1" in n_desc and "2" in n_desc, "n_results guidance must name the low-value case (1-2)"
+        assert "exploratory" in n_desc or "survey" in n_desc, (
+            "n_results guidance must say when to widen (exploratory/survey queries)"
+        )
+
     def test_search_says_not_when_trace_needed(self) -> None:
         desc = self._desc("vectr_search")
         assert "vectr_trace" in desc, "vectr_search must tell model to use vectr_trace for call relationships"
@@ -1066,6 +1077,35 @@ class TestVectrRemember:
         assert result["isError"] is False
         svc.get_note.assert_called_once_with(42)
         assert "scope=workspace" in result["content"][0]["text"]
+
+    def test_remember_confirmation_echoes_title_and_first_line(self) -> None:
+        """UPG-ADOPTION-V2-MINOR (b): the confirmation echoes the stored title +
+        first content line so the caller can verify the write without a recall
+        round-trip."""
+        from agent.working_context_store import WorkingNote
+        svc = _mock_service()
+        svc.get_note.return_value = WorkingNote(
+            note_id=42, workspace="/repo",
+            content="lock_workspace() at resolver.rs:214 acquires a PID lock\nmore detail",
+            tags=[], priority="medium", created_at=0.0, last_accessed=0.0,
+            kind="finding", scope="workspace", title="workspace lock",
+        )
+        result = handle_tools_call("vectr_remember", {"content": "x"}, svc)
+        text = result["content"][0]["text"]
+        assert "title: workspace lock" in text
+        assert "first line: lock_workspace() at resolver.rs:214 acquires a PID lock" in text
+
+    def test_remember_confirmation_echo_bounds_long_first_line(self) -> None:
+        from agent.working_context_store import WorkingNote
+        svc = _mock_service()
+        svc.get_note.return_value = WorkingNote(
+            note_id=42, workspace="/repo", content="A" * 500, tags=[],
+            priority="medium", created_at=0.0, last_accessed=0.0,
+            kind="finding", scope="workspace", title="",
+        )
+        result = handle_tools_call("vectr_remember", {"content": "x"}, svc)
+        text = result["content"][0]["text"]
+        assert "first line: " + "A" * 117 + "..." in text
 
     def test_remember_with_tags_and_priority(self) -> None:
         svc = _mock_service()

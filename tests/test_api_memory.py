@@ -309,6 +309,17 @@ class TestEvictHintRoute:
         assert isinstance(data["hint"], str)
         assert len(data["hint"]) > 0
 
+    def test_evict_hint_route_passes_on_demand(self, client) -> None:
+        # UPG-7.2 (B13): the explicit GET is a deliberate ask, so the route must
+        # request the on-demand (eviction-focused) framing rather than the
+        # auto-footer's remember alarm. MCP green != REST green (R10): assert the
+        # route threads on_demand=True to the service. (The framing content
+        # itself is unit-tested in TestEvictionHintOnDemandUPG72.)
+        svc = client.app.state.service
+        svc.eviction_hint.reset_mock()
+        client.get("/v1/evict-hint")
+        svc.eviction_hint.assert_called_once_with(on_demand=True)
+
 
 # ---------------------------------------------------------------------------
 # Cross-request persistence — THE key integration tests

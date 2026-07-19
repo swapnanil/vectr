@@ -152,6 +152,34 @@ class TestServiceStaleTaskSummary:
         svc = self._make_service(tmp_path, monkeypatch, search_only=True)
         assert svc.stale_task_summary() == (0, None)
 
+    def test_boot_recall_appends_stale_task_nudge(self, tmp_path, monkeypatch) -> None:
+        # UPG-NUDGE-HOOK-PATH-UNREACHABLE (B9): the SessionStart injection path
+        # (recall boot=True) must carry the stale-task nudge, since the shipped
+        # guidance steers agents away from vectr_status where it otherwise lives.
+        from agent.config import MEMORY_HYGIENE_STALE_TASK_WARN_COUNT
+        svc = self._make_service(tmp_path, monkeypatch)
+        oldest = None
+        for i in range(MEMORY_HYGIENE_STALE_TASK_WARN_COUNT):
+            nid = svc._context_store.remember(
+                svc._workspace_root, f"stale checkpoint {i}", kind="task"
+            )
+            _backdate(svc._context_store, nid, age_days=10)
+            if oldest is None:
+                oldest = nid
+        count, oldest_id = svc.stale_task_summary()
+        assert count >= MEMORY_HYGIENE_STALE_TASK_WARN_COUNT
+        boot_text = svc.recall("", boot=True, session_id="sess-boot")
+        assert "Memory hygiene" in boot_text
+        assert f"#{oldest_id}" in boot_text
+
+    def test_boot_recall_no_nudge_below_threshold(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        nid = svc._context_store.remember(svc._workspace_root, "one stale task", kind="task")
+        _backdate(svc._context_store, nid, age_days=10)
+        # A single stale task is below the warn count → no nudge.
+        boot_text = svc.recall("", boot=True, session_id="sess-boot2")
+        assert "Memory hygiene" not in boot_text
+
 
 # ---------------------------------------------------------------------------
 # MCP-level: vectr_status warning line (mocked svc.status(), UPG-9x pattern)
