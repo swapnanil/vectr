@@ -35,7 +35,14 @@ _EXPLORATION_TOOLS = [
                 },
                 "n_results": {
                     "type": "integer",
-                    "description": "Number of results to return (default: 5, max: 50)",
+                    "description": (
+                        "Number of results to return (default: 5, max: 50). "
+                        "Prefer 1–2 for a specific symbol or single-answer lookup "
+                        "(\"where is X defined\", \"the function that does Y\") — the top "
+                        "hit is usually the answer and fewer results cost far fewer tokens. "
+                        "Widen to 5+ only for exploratory or survey queries where several "
+                        "distinct implementations are genuinely useful."
+                    ),
                     "default": 5,
                 },
                 "language": {

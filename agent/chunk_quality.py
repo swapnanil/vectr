@@ -136,8 +136,8 @@ _DECL_HEADER_RE = re.compile(
 _CLASS_HEADER_RE = re.compile(r"^[\s]*class\s+\w+[^:]*:\s*$")
 
 # _ATTR_ASSIGN_RE: a line is an attribute assignment of the form
-# ``identifier = <value>`` or ``identifier: type = <value>`` (Django/dataclass
-# style).  Matches any assignment; combined with _COMPLEX_RHS_RE to detect
+# ``identifier = <value>`` or ``identifier: type = <value>`` (dataclass /
+# config-class style).  Matches any assignment; combined with _COMPLEX_RHS_RE to detect
 # whether the RHS is a "simple" value (not a function call or dotted access).
 _ATTR_ASSIGN_RE = re.compile(r"^[\s]*\w+\s*(?::[^=]+)?\s*=\s*(.+)$")
 
@@ -224,8 +224,8 @@ def is_trivial_chunk(content: str, language: str = "") -> bool:
     UPG-15.5: HTML/markup and plain-text chunks with ≤ TRIVIAL_DOC_MAX_LINES
     non-blank lines are also trivial.  This catches 1–2-line test-fixture
     templates ("Logged out", "{{ form }}", "<h1>Error</h1>") and egg-info TXT
-    stubs ("django", "from-my-custom-list") that otherwise flood short
-    natural-language queries.  Multi-line .txt/.rst documentation (Django's
+    stubs (a lone package name, "from-my-custom-list") that otherwise flood short
+    natural-language queries.  Multi-line .txt/.rst documentation (a framework's
     docs/howto/*.txt, docs/topics/*.txt) has many more lines and is unaffected.
     """
     raw_nonblank = [l for l in content.splitlines() if l.strip()]
@@ -268,16 +268,16 @@ def is_trivial_chunk(content: str, language: str = "") -> bool:
     # UPG-15.9 / F25: attribute-assignment-only class body with SIMPLE values.
     # A class whose body is ONLY attribute assignments with no method definitions,
     # nested classes, control flow, OR complex RHS (function calls, dotted access)
-    # is a configuration stub (e.g. Django's inner ``class Meta:`` with
-    # ``model=X, fields='__all__'``).  200+ such 3-line chunks exist in Django
-    # test files and flood doc-intent queries with zero educational content.
+    # is a configuration stub (e.g. a web framework's inner ``class Meta:`` with
+    # ``model=X, fields='__all__'``).  200+ such 3-line chunks exist in such a
+    # framework's test files and flood doc-intent queries with zero educational content.
     #
     # Guard conditions (ALL must hold to classify as trivial):
     #   1. First meaningful line is a class declaration header (not a def).
     #   2. The class body has ≤ _TRIVIAL_ATTR_CLASS_MAX_ATTRS meaningful body lines.
     #   3. Every body line is an attribute assignment (matches _ATTR_ASSIGN_RE).
     #   4. NO body line has a complex RHS: no function call ``(`` or dotted ``.``.
-    #      This preserves real Django form/model classes like
+    #      This preserves real form/model classes like
     #      ``username = forms.CharField(...)`` (dotted + parens → complex → kept).
     #   5. NO body line contains a method def, nested class, or control-flow keyword.
     #
@@ -427,8 +427,8 @@ _VECTR_CONFIG_DIRS = {".cursor", ".vscode"}
 
 # Machine-generated / vendored file patterns (not hand-authored code).
 _GENERATED_NAME_RES = [
-    re.compile(r".*_db\.h$"),            # cpython unicodetype_db.h
-    re.compile(r".*_metadata\.h$"),      # cpython pycore_uop_metadata.h
+    re.compile(r".*_db\.h$"),            # generated char-database header, e.g. unicodetype_db.h
+    re.compile(r".*_metadata\.h$"),      # generated opcode-metadata header, e.g. pycore_uop_metadata.h
     re.compile(r".*\.pb\.(go|cc|h|py)$"),  # protobuf
     re.compile(r".*_pb2\.pyi?$"),        # python protobuf
     re.compile(r".*\.min\.(js|css)$"),   # minified
@@ -465,7 +465,7 @@ def is_build_artifact_file(file_path: str) -> bool:
     BM25 on module/command identifiers.
 
     Examples that return True:
-      ``/project/Django.egg-info/SOURCES.txt``
+      ``/project/mypackage.egg-info/SOURCES.txt``
       ``/project/myapp.egg-info/PKG-INFO``
       ``/project/mylib-1.0.dist-info/RECORD``
 
@@ -691,6 +691,57 @@ def quality_score(
     if n_lines <= 2:
         score *= _Q_SHORT_PENALTY
     return score
+
+
+def quality_demotion_reason(
+    content: str,
+    file_path: str = "",
+    language: str = "",
+    node_type: str = "",
+    *,
+    symbol_name: str = "",
+    query_tokens: frozenset[str] = frozenset(),
+    file_fan_in: int = 0,
+) -> str:
+    """Short human label for the dominant quality demotion quality_score applies
+    to this chunk, or "" when the chunk carries no demotion (UPG-SCORE-ORDER-
+    EXPLAIN). Mirrors quality_score's precedence so a render-time explanation of
+    why a higher-relevance chunk ranks below rank 1 names the prior that actually
+    demoted it. Presentational only — never affects ranking.
+
+    Reports the single strongest demotion. The exclusive branches (vectr-config,
+    navigational, trivial, heading-only) short-circuit exactly as in
+    quality_score; the multiplicative demotions (generated/test/doc/private/
+    short) are reported in descending severity so the label names the biggest
+    single contributor."""
+    if file_path and is_vectr_config_file(file_path):
+        return "vectr config file"
+    if node_type == NAVIGATIONAL_NODE_TYPE or is_navigational_chunk(content, language):
+        if query_tokens:
+            for name in navigational_declared_identifiers(content):
+                parts = _identifier_parts(name)
+                if parts and parts <= query_tokens:
+                    return ""  # rescued: not demoted for this query
+        return "navigational chunk"
+    if is_trivial_chunk(content, language) and not is_definition_chunk(symbol_name, node_type):
+        return "trivial stub"
+    if language == "markdown" and is_markdown_heading_only(content):
+        return "heading-only markdown"
+    if file_path and is_generated_file(file_path):
+        return "generated file"
+    is_test_chunk = (
+        (file_path and is_test_file(file_path))
+        or is_content_structural_test_chunk(content, language)
+    )
+    if is_test_chunk and file_fan_in < _TEST_FRAMEWORK_FAN_IN_THRESHOLD:
+        return "test-file demotion"
+    if is_doc_language(language):
+        return "docs/prose"
+    if is_private_symbol_name(symbol_name):
+        return "private helper"
+    if len(_meaningful_lines(content)) <= 2:
+        return "short/thin chunk"
+    return ""
 
 
 # ---------------------------------------------------------------------------

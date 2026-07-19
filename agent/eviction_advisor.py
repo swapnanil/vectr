@@ -303,23 +303,35 @@ class EvictionAdvisor:
                 self._soft_fire_pending = False
         return hint
 
-    def eviction_hint(self, escalated: bool = True) -> str:
+    def eviction_hint(self, escalated: bool = True, on_demand: bool = False) -> str:
         """
         Return a message listing chunks vectr can re-retrieve in <50ms.
         Always safe to call — returns an empty hint if nothing has been retrieved
         and no time-based pressure exists.
 
-        escalated=True (the default, used by the explicit vectr_evict_hint tool
-        and the /v1/evict endpoint — an explicit ask always gets the full
-        directive) renders the imperative "ACTION REQUIRED" wording plus a
-        trailing machine-readable ``needs_remember: true`` line a harness can
-        key off without parsing prose. escalated=False renders the identical
-        factual content (files, token count, re-fetch keys) with softer,
-        non-imperative wording and omits the needs_remember line — used by
-        auto_eviction_hint() for the first eligible re-fire after a
+        escalated=True (the default) renders the imperative "ACTION REQUIRED"
+        wording plus a trailing machine-readable ``needs_remember: true`` line a
+        harness can key off without parsing prose. escalated=False renders the
+        identical factual content (files, token count, re-fetch keys) with
+        softer, non-imperative wording and omits the needs_remember line — used
+        by auto_eviction_hint() for the first eligible re-fire after a
         vectr_remember (UPG-EVICT-ESCALATION-GATE-TOO-LOW).
+
+        on_demand=True (UPG-7.2 — the explicit vectr_evict_hint tool / /v1/evict
+        endpoint): the caller is proactively asking WHAT it can drop, so render
+        an informational, eviction-focused listing distinct from the auto-footer
+        — no imperative remember alarm and no needs_remember line (those belong
+        to the gated auto-footer's escalation, not to a deliberate ask). The
+        factual content (files, tokens, re-fetch keys) is identical. An explicit
+        ask with nothing retrieved is a plain "clean context" answer, never a
+        time-based remember nudge.
         """
         if not self._chunks:
+            if on_demand:
+                # A deliberate ask with nothing retrieved is not a remember
+                # nudge — the caller learns its context is clean (the dispatch
+                # layer renders the "nothing to evict" message on an empty hint).
+                return ""
             # No vectr-tracked chunks, but time pressure still warrants a nudge
             elapsed = time.time() - self._session_started_at
             if elapsed >= self._time_threshold_seconds:
@@ -363,7 +375,19 @@ class EvictionAdvisor:
         shown = file_items[:5]
         overflow = len(file_items) - len(shown)
 
-        if escalated:
+        if on_demand:
+            # UPG-7.2: explicit ask — an eviction-focused, informational framing
+            # that answers "what can I drop?" rather than nudging a remember.
+            lines = [
+                "─── Evictable context (on demand) ───",
+                f"{len(self._chunks)} retrieved chunk(s) (~{total_tokens} tokens) are safely"
+                " droppable from your context — each is re-fetchable verbatim via"
+                " vectr_fetch(ids=[...]) in <50ms, so you can free the space now and"
+                " restore any of it exactly when you need it again.",
+                "",
+                "Files below are listed most recently retrieved first:",
+            ]
+        elif escalated:
             lines = [
                 "─── ACTION REQUIRED ───",
                 "Call vectr_remember(content, tags=[...]) NOW before continuing.",
@@ -371,6 +395,12 @@ class EvictionAdvisor:
                 "Your synthesized understanding does not persist automatically — the output",
                 "file captures findings, not the navigational path to reach them.",
                 "",
+                f"Vectr has {len(self._chunks)} retrieved chunks (~{total_tokens} tokens)"
+                " fully indexed. Drop these chunks from context — each is re-fetchable"
+                " verbatim via vectr_fetch(ids=[...]) in <50ms."
+                " Your synthesized analysis (saved via vectr_remember) is retrievable via vectr_recall.",
+                "",
+                "Files below are listed most recently retrieved first:",
             ]
         else:
             lines = [
@@ -379,15 +409,13 @@ class EvictionAdvisor:
                 "anything worth keeping — key type names, module paths, entry points, non-obvious",
                 "patterns — call vectr_remember(content, tags=[...]) now; otherwise continue.",
                 "",
+                f"Vectr has {len(self._chunks)} retrieved chunks (~{total_tokens} tokens)"
+                " fully indexed. Drop these chunks from context — each is re-fetchable"
+                " verbatim via vectr_fetch(ids=[...]) in <50ms."
+                " Your synthesized analysis (saved via vectr_remember) is retrievable via vectr_recall.",
+                "",
+                "Files below are listed most recently retrieved first:",
             ]
-        lines += [
-            f"Vectr has {len(self._chunks)} retrieved chunks (~{total_tokens} tokens)"
-            " fully indexed. Drop these chunks from context — each is re-fetchable"
-            " verbatim via vectr_fetch(ids=[...]) in <50ms."
-            " Your synthesized analysis (saved via vectr_remember) is retrievable via vectr_recall.",
-            "",
-            "Files below are listed most recently retrieved first:",
-        ]
         for fpath, chunks in shown:
             ranges = ", ".join(
                 f"lines {c.lines}" + (f" ({c.symbol_name})" if c.symbol_name else "")
@@ -414,7 +442,7 @@ class EvictionAdvisor:
                 f"Re-fetch keys: vectr_fetch(ids=[{id_list}]) restores these verbatim.",
             ]
 
-        if escalated:
+        if escalated and not on_demand:
             lines += [
                 "",
                 "Call vectr_remember now, then continue your task.",

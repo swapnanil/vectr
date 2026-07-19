@@ -9,8 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent.config import (
+    DEFAULT_PORT,
     STRATEGY_DEFAULT_BM25_WEIGHT,
     STRATEGY_DEFAULT_SEMANTIC_WEIGHT,
+    STRATEGY_KNOWN_FRAMEWORKS,
     SEARCH_IDENTIFIER_HINT_ENABLED,
     SEARCH_IDENTIFIER_HINT_MAX_IDENTIFIERS,
     SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS,
@@ -22,6 +24,7 @@ from agent.config import (
     HOOKS_LOG_CHARS_PER_TOKEN,
     HOOKS_MIN_SIMILARITY,
     MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
+    MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
 )
 from agent.eviction_advisor import EvictionAdvisor
 from agent.trigger_engine import TriggerFireLedger
@@ -32,19 +35,32 @@ logger = logging.getLogger(__name__)
 _DB_DIR_ENV = "VECTR_DB_DIR"
 
 
+def _cache_dir_slug(workspace_root: str) -> str:
+    """The per-workspace cache-dir name: md5(abs_workspace_path)[:12]."""
+    import hashlib
+    return hashlib.md5(workspace_root.encode()).hexdigest()[:12]
+
+
 def _default_db_dir(workspace_root: str) -> str:
-    """Store DB files in ~/.cache/vectr/<workspace-hash>/, owner-only (0700).
+    """Resolve the DB dir ~/.cache/vectr/<workspace-hash>/ for this workspace.
 
     The cache holds the plaintext code index and (unless encrypted) working-
-    memory notes, so both the shared parent and the per-workspace directory are
-    restricted to the owner on POSIX hosts (see agent/fs_permissions.py)."""
-    import hashlib
+    memory notes, so the shared parent is restricted to the owner on POSIX
+    hosts (see agent/fs_permissions.py); because the parent is owner-only, any
+    child it later gains is unreachable by other users regardless of its own
+    mode.
+
+    UPG-CACHE-LITTER: this resolver only secures the shared parent and returns
+    the path — it does NOT create the per-workspace subdir. Eagerly creating it
+    on every path resolution (service init / status probe, before any indexing
+    or note write) left hundreds of empty <hash>/ dirs under the cache root. The
+    dir is created + secured by the constructing service (VectrService.__init__)
+    only when a real service is built, which then immediately writes its notes
+    DB — so an empty dir never corresponds to a live workspace."""
     from agent.fs_permissions import secure_dir
-    slug = hashlib.md5(workspace_root.encode()).hexdigest()[:12]
     cache_root = Path.home() / ".cache" / "vectr"
     secure_dir(cache_root)
-    db_dir = secure_dir(cache_root / slug)
-    return str(db_dir)
+    return str(cache_root / _cache_dir_slug(workspace_root))
 
 
 _MEMORY_ONLY_MSG = (
@@ -110,7 +126,7 @@ class VectrService:
     def __init__(
         self,
         workspace_root: str,
-        port: int = 8765,
+        port: int = DEFAULT_PORT,
         extra_roots: list[str] | None = None,
         memory_only: bool = False,
         search_only: bool = False,
@@ -169,10 +185,14 @@ class VectrService:
         # UPG-STDIO-MEMORY-READY: the working-memory store (below) is now the
         # FIRST thing constructed against db_dir — previously CodeIndexer ran
         # first and its ChromaDB PersistentClient happened to create the
-        # directory as a side effect. `_default_db_dir` already creates it
-        # via `secure_dir`, but a VECTR_DB_DIR override (e.g. a hosted
-        # deployment's mounted volume) may point at a path that doesn't exist
-        # yet — ensure it explicitly rather than depend on construction order.
+        # directory as a side effect. This is where the per-workspace dir is
+        # created + secured: `_default_db_dir` deliberately no longer does so
+        # (UPG-CACHE-LITTER — a bare path resolution must not litter the cache
+        # root), and a VECTR_DB_DIR override (e.g. a hosted deployment's mounted
+        # volume) may point at a path that doesn't exist yet. Constructing a real
+        # service is exactly the point at which a durable dir is warranted — the
+        # store's _init_db() writes into it immediately below, so it never stays
+        # empty.
         from agent.fs_permissions import secure_dir
         secure_dir(db_dir)
         self._db_dir = db_dir
@@ -295,6 +315,11 @@ class VectrService:
         # not-yet-started phase 2 a no-op and a mid-flight one tear down
         # whatever it just constructed instead of orphaning it.
         self._shutdown_requested = threading.Event()
+        # UPG-STATUS-STALE-GRAPH: set while _build_symbol_graph() is running so
+        # /v1/status can flag that the symbol_count / symbol_graph_complete it is
+        # serving comes from the previous (possibly stale-toolchain) persisted
+        # graph and a rebuild is overwriting it right now.
+        self._symbol_graph_rebuilding = threading.Event()
 
         if not defer_search_init:
             self._init_search_layer()
@@ -542,6 +567,7 @@ class VectrService:
 
     def _build_symbol_graph(self) -> None:
         """Rebuild the symbol graph from the files the indexer already walked."""
+        self._symbol_graph_rebuilding.set()
         try:
             from agent.symbol_graph import SYMBOL_LANGUAGES, available_symbol_languages
             # Warn loudly when a declared grammar is not importable in this
@@ -587,6 +613,8 @@ class VectrService:
             )
         except Exception:
             logger.exception("Symbol graph build failed (non-fatal)")
+        finally:
+            self._symbol_graph_rebuilding.clear()
 
     def save_map(self, summary: str, overwrite: bool = False) -> dict:
         """
@@ -1132,15 +1160,39 @@ class VectrService:
 
         Returns the same "nothing built yet" shape before phase 2 has
         constructed the symbol graph (UPG-STDIO-MEMORY-READY) as it does for
-        a workspace that has never been indexed."""
+        a workspace that has never been indexed.
+
+        UPG-STATUS-STALE-GRAPH: also reports whether the graph being served is
+        stale and whether a rebuild is overwriting it right now, so a caller (or
+        a gate preflight) never mistakes a persisted stale-toolchain graph for
+        current state. `symbol_graph_stale` is true when the persisted graph was
+        built by a different toolchain (vectr/parser/model/schema change) or was
+        left incomplete, or has not been built yet. `symbol_graph_rebuild_in_progress`
+        is true while _build_symbol_graph() is running — during that window the
+        symbol_count / symbol_graph_complete above still reflect the OLD persisted
+        graph until the rebuild's write lands."""
+        rebuilding = self._symbol_graph_rebuilding.is_set()
         if self._symbol_graph is None:
-            return {"symbol_graph_complete": False, "symbol_graph_failed_files": 0}
+            return {
+                "symbol_graph_complete": False,
+                "symbol_graph_failed_files": 0,
+                "symbol_graph_stale": True,
+                "symbol_graph_rebuild_in_progress": rebuilding,
+            }
+        stale = self._symbol_graph.is_stale(self._workspace_root, self._embed_model)
         meta = self._symbol_graph.graph_meta(self._workspace_root)
         if not meta:
-            return {"symbol_graph_complete": False, "symbol_graph_failed_files": 0}
+            return {
+                "symbol_graph_complete": False,
+                "symbol_graph_failed_files": 0,
+                "symbol_graph_stale": stale,
+                "symbol_graph_rebuild_in_progress": rebuilding,
+            }
         return {
             "symbol_graph_complete": meta.get("complete") == "1",
             "symbol_graph_failed_files": int(meta.get("failed", "0") or "0"),
+            "symbol_graph_stale": stale,
+            "symbol_graph_rebuild_in_progress": rebuilding,
         }
 
     def _language_coverage(self) -> list[dict]:
@@ -1437,13 +1489,24 @@ class VectrService:
         # absent that, the implicit event is `["session-start"]`.
         if boot:
             events_to_fire = events if events else ["session-start"]
+            ledger = self._ledger_for(session_id)
             fire_text, _ = self._context_store.fire_and_format(
                 self._workspace_root,
                 events=events_to_fire,
                 session_id=session_id,
-                ledger=self._ledger_for(session_id),
+                ledger=ledger,
                 surface=surface,
             )
+            # UPG-NUDGE-HOOK-PATH-UNREACHABLE (B9): the stale-task hygiene nudge
+            # renders in vectr_status, but the shipped guidance steers agents
+            # away from calling status at session start (notes auto-inject
+            # instead) — so the state-based backstop was unreachable exactly
+            # where the task-note pile-up lives. Surface the same one-line nudge
+            # on the SessionStart injection path agents actually hit, budget-aware
+            # (skipped when the note pack already spent the session's token cap).
+            nudge = self._stale_task_nudge_line()
+            if nudge and (ledger is None or ledger.remaining_budget() > 0):
+                fire_text = f"{fire_text}\n\n{nudge}" if fire_text else nudge
             return fire_text
 
         # Path-anchored mode (UPG-9.6 contract; TRIGGER-ENGINE wave 2a adds
@@ -1764,8 +1827,11 @@ class VectrService:
     # Eviction advisor
     # ------------------------------------------------------------------
 
-    def eviction_hint(self, session_id: str | None = None) -> str:
-        return self._advisor_for(session_id).eviction_hint()
+    def eviction_hint(self, session_id: str | None = None, on_demand: bool = False) -> str:
+        # UPG-7.2: the explicit vectr_evict_hint tool / /v1/evict pass
+        # on_demand=True for an eviction-focused informational framing distinct
+        # from the gated auto-footer's remember alarm.
+        return self._advisor_for(session_id).eviction_hint(on_demand=on_demand)
 
     def auto_eviction_hint(self, session_id: str | None = None) -> str:
         """Gated per-response footer (UPG-7.1) — fires only on fresh context-
@@ -1798,6 +1864,21 @@ class VectrService:
             return 0, None
         return self._context_store.stale_task_summary(
             self._workspace_root, MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS
+        )
+
+    def _stale_task_nudge_line(self) -> str:
+        """One-line stale-task hygiene nudge, or "" when below the warn count
+        (UPG-NUDGE-HOOK-PATH-UNREACHABLE). The same signal vectr_status renders,
+        surfaced on the SessionStart injection path so it reaches agents that
+        never call status."""
+        count, oldest_id = self.stale_task_summary()
+        if count < MEMORY_HYGIENE_STALE_TASK_WARN_COUNT:
+            return ""
+        return (
+            f"Memory hygiene: {count} task note(s) older than "
+            f"{MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS} days are still active "
+            f"(oldest: #{oldest_id}) — vectr_remember(kind=\"task\", supersedes=<old id>) "
+            "if the work moved on, or vectr_forget(note_id=...) if it's done."
         )
 
     # ------------------------------------------------------------------
@@ -1842,14 +1923,16 @@ class VectrService:
             except Exception:
                 pass
 
-        # Well-known frameworks: model knows these at implementation depth from training
-        _KNOWN_FRAMEWORKS = {
-            "django", "flask", "fastapi", "react", "nextjs", "vue", "angular",
-            "express", "spring-boot", "gin", "echo", "celery",
-        }
+        # Well-known frameworks: model knows these at implementation depth from
+        # training. The set is config-declared (STRATEGY_KNOWN_FRAMEWORKS,
+        # UPG-KNOWN-FRAMEWORKS-CONFIG); match case-insensitively.
         known_codebase = (
             fp is not None
-            and bool(_KNOWN_FRAMEWORKS.intersection(set(fp.detected_frameworks)))
+            and bool(
+                STRATEGY_KNOWN_FRAMEWORKS.intersection(
+                    f.lower() for f in fp.detected_frameworks
+                )
+            )
         )
 
         if notes_count > 0 and (known_codebase or (fp and fp.size_class == "small")):

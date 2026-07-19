@@ -260,7 +260,7 @@ def _locate_class_enclosed_batch(rows: list) -> list[bool]:
 # is both wrong and non-deterministic. Order non-test files first (tests/ dirs and
 # test_*.py basenames), then larger line-span first (real defs tend to be large,
 # stubs tiny); _partial_match_key does the precise ranking within the cap.
-# (Witnessed by the django benchmark corpus: the name "Model" has 236 matches,
+# (Witnessed on a large web-framework corpus: the name "Model" has 236 matches,
 # mostly inner test classes, so the library definition fell outside a 200 cap.)
 _CANONICAL_FETCH_ORDER = (
     "ORDER BY (CASE WHEN file_path LIKE '%/tests/%' "
@@ -278,7 +278,7 @@ def _split_class_qualifier(name: str) -> tuple[str, str]:
     wants ordinary suffix-stripping.
 
     Shared by ``locate_l2`` (UPG-11.10-b) and ``trace`` (F33): a vectr_search
-    result displays symbols as ``"QuerySet.delete"`` (Class.method), and an
+    result displays symbols as ``"Repository.delete"`` (Class.method), and an
     LLM naturally copies that qualified name into a follow-up ``locate``/
     ``trace`` call — both call sites need the identical split+match
     convention so a qualified query resolves consistently across both tools.
@@ -532,16 +532,47 @@ class SymbolGraph:
         toolchain fingerprint + completeness are stamped so an upgrade is
         detectable and a partial build is never mistaken for a trustworthy one.
         """
-        total_symbols = 0
         failed: list[str] = []
         for fp in file_paths:
             try:
-                total_symbols += self.index_file(workspace, fp)
+                self.index_file(workspace, fp)
             except Exception:
                 failed.append(fp)
                 logger.warning("Symbol extraction failed for %s — skipped", fp, exc_info=True)
 
+        # UPG-SYMBOLCOUNT-STALE: index_file() only DELETE+INSERTs rows for files
+        # in *this* build's file_paths; rows from files a prior build indexed that
+        # have since dropped out of the workspace (deleted / renamed / newly
+        # excluded) linger in the warm-cache DB. Left in place they leak stale
+        # symbols into locate/trace and inflate the status COUNT(*) above the
+        # build's own symbol count (the observed +210 status-vs-build gap on a
+        # warm-cache restart). Prune them so the persisted graph reflects exactly
+        # the current file set, then derive the reported symbol count from the
+        # SAME COUNT(*) query /v1/status serves — one source of truth, not two.
+        current_files = set(file_paths)
         with self._conn() as conn:
+            persisted_files = [
+                r[0] for r in conn.execute(
+                    "SELECT DISTINCT file_path FROM symbols WHERE workspace = ?", (workspace,)
+                ).fetchall()
+            ]
+            for stale_fp in persisted_files:
+                if stale_fp not in current_files:
+                    conn.execute(
+                        "DELETE FROM symbols WHERE workspace = ? AND file_path = ?",
+                        (workspace, stale_fp),
+                    )
+                    conn.execute(
+                        "DELETE FROM edges WHERE workspace = ? AND from_file = ?",
+                        (workspace, stale_fp),
+                    )
+                    conn.execute(
+                        "DELETE FROM symbol_importance WHERE workspace = ? AND file_path = ?",
+                        (workspace, stale_fp),
+                    )
+            total_symbols = conn.execute(
+                "SELECT COUNT(*) FROM symbols WHERE workspace = ?", (workspace,)
+            ).fetchone()[0]
             edge_count = conn.execute(
                 "SELECT COUNT(*) FROM edges WHERE workspace = ?", (workspace,)
             ).fetchone()[0]
@@ -1491,8 +1522,8 @@ class SymbolGraph:
         `file_path` — a common leaf name (e.g. `delete`) can have more
         definitions than `limit` across a large codebase, and a bare
         alphabetical-by-path order truncates on file-path spelling alone.
-        `django/db/models/query.py`'s `QuerySet.delete` sorted after
-        `django/db/models/base.py`'s `Model.delete` purely because "q" > "b",
+        one module's `Repository.delete` sorted after another module's
+        `Model.delete` purely because "r" > "m",
         silently dropping it from every trace path that reaches this method —
         not a corpus-specific fix; any workspace with >`limit` definitions of
         one leaf name hits the same alphabetical-accident truncation."""
@@ -1711,8 +1742,27 @@ class SymbolGraph:
             "import_chain": "import-chain resolution",
             "fuzzy":        "fuzzy name match (edit-distance)",
         }
-        label = _labels.get(result.resolution_strategy, result.resolution_strategy)
         n = len(result.symbols)
+        # UPG-C-STRUCT-TYPEDEF-LOCATE (fuzzy-fallback honesty, general): an
+        # edit-distance match is a GUESS, not a match — a confident-looking
+        # wrong symbol (`locate("PyDictObject")` → `PyODictObject`) is worse than
+        # not-found because the caller LLM acts on it. Lead with an explicit
+        # no-exact-match caveat so the near-miss is never read as a real hit.
+        if result.resolution_strategy == "fuzzy":
+            names = ", ".join(s.name for s in result.symbols)
+            lines = [
+                f"No exact match for '{result.query}'. "
+                f"Nearest symbol name{'s' if n != 1 else ''} by edit-distance "
+                f"(may be unrelated — verify before use): {names}\n"
+            ]
+            for s in result.symbols:
+                lines.append(f"  [{s.kind}] {s.name}  {s.file_path}:{s.start_line}")
+                if s.snippet:
+                    for ln in s.snippet.splitlines()[:SNIPPET_LINES]:
+                        lines.append(f"    {ln}")
+                    lines.append("")
+            return "\n".join(lines)
+        label = _labels.get(result.resolution_strategy, result.resolution_strategy)
         lines = [
             f"Symbol locations for '{result.query}' "
             f"({n} match{'es' if n != 1 else ''} via {label}):\n"

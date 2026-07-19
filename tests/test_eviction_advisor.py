@@ -234,6 +234,48 @@ class TestEvictionHint:
             "eviction hint must use directive 'ACTION REQUIRED' language to prompt vectr_remember"
         )
 
+
+class TestEvictionHintOnDemandUPG72:
+    """UPG-7.2: the explicit vectr_evict_hint tool passes on_demand=True and must
+    get an eviction-focused informational framing DISTINCT from the gated
+    auto-footer's remember alarm."""
+
+    def _adv_with_chunks(self) -> EvictionAdvisor:
+        adv = EvictionAdvisor()
+        adv.record("auth.py", "1-10", "verify_token", "def verify_token(): ..." * 5)
+        adv.record("models.py", "20-30", "User", "class User: ..." * 5)
+        return adv
+
+    def test_on_demand_omits_action_required_alarm(self) -> None:
+        adv = self._adv_with_chunks()
+        hint = adv.eviction_hint(on_demand=True)
+        assert "ACTION REQUIRED" not in hint
+        assert "needs_remember" not in hint
+
+    def test_on_demand_has_distinct_eviction_header(self) -> None:
+        adv = self._adv_with_chunks()
+        hint = adv.eviction_hint(on_demand=True)
+        assert "Evictable context" in hint
+
+    def test_on_demand_keeps_factual_content(self) -> None:
+        # Same useful facts as the escalated form: files + re-fetch surface.
+        adv = self._adv_with_chunks()
+        hint = adv.eviction_hint(on_demand=True)
+        assert "auth.py" in hint
+        assert "vectr_fetch" in hint
+
+    def test_on_demand_differs_from_escalated_auto_footer(self) -> None:
+        adv = self._adv_with_chunks()
+        assert adv.eviction_hint(on_demand=True) != adv.eviction_hint(escalated=True)
+
+    def test_on_demand_empty_chunks_is_clean_not_remember_nudge(self) -> None:
+        # A deliberate ask with nothing retrieved is not a time-based remember
+        # nudge — it returns "" so the dispatch renders the clean-context reply.
+        adv = EvictionAdvisor(time_threshold_seconds=0)
+        assert adv.eviction_hint(on_demand=True) == ""
+        # ...whereas the auto/explicit-escalated path still nudges on time.
+        assert "ACTION REQUIRED" in adv.eviction_hint()
+
     def test_hint_contains_vectr_remember_call(self) -> None:
         adv = EvictionAdvisor()
         adv.record("f.py", "1-5", "fn", "content" * 10)

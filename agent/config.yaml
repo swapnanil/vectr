@@ -19,7 +19,7 @@ ranking:
     # 1-line and 2-line test-fixture templates ("Logged out", "{{ form }}", top_level.txt)
     # are trivial; any real doc prose chunk has many more lines than this.
     # Must be a small integer (≥1) so that multi-line .txt/.rst documentation
-    # (Django docs/howto/*.txt, docs/topics/*.txt) are NOT classified trivial.
+    # (a framework's docs/howto/*.txt, docs/topics/*.txt) are NOT classified trivial.
     # Conservative default: 2 — catches single-line HTML templates and 1–2-line
     # TXT fixtures without risk of demoting substantive documentation.
     trivial_doc_max_lines: 2
@@ -36,13 +36,13 @@ ranking:
     # declared identifiers directly ("where is request_started signal
     # defined") — a lexical match, gated on the query's own BM25 tokens, not
     # a keyword list — the chunk IS the singular correct answer and the full
-    # navigational demotion buries it (F59: django/core/signals.py absent
-    # from top-25 despite being in the candidate pool). This softened value
+    # navigational demotion buries it (F59: a framework's core signals module
+    # absent from top-25 despite being in the candidate pool). This softened value
     # applies only in that lexically-gated case (chunk_quality.quality_score
     # query_tokens argument); every other query for the same chunk still
     # gets the full `navigational` demotion. Measured against the F59 offline
-    # replay (benchmarks/acceptance/product_cases.jsonl, django corpus,
-    # tmp/vectr-accept-django index): the pool-rank gap needs a value in this
+    # replay (benchmarks/acceptance/product_cases.jsonl over a large web-framework
+    # corpus): the pool-rank gap needs a value in this
     # range to surface the chunk in top-10 without letting the still-nav-
     # shaped chunk outrank undemoted real implementation code (kept < 1.0).
     navigational_declaration_rescue: 0.75
@@ -73,20 +73,21 @@ ranking:
     # UPG-TESTPATH-FRAMEWORK-MISCLASS (F58): is_test_file()'s path-segment
     # heuristic (any "test"/"tests"/... directory component) cannot tell a
     # disposable test module apart from a shipped testing-FRAMEWORK subpackage
-    # that happens to live at a test-named path (e.g. django/test/utils.py —
-    # a stable public API, not a throwaway test). Filtering by "called only
-    # from non-test files" was measured and rejected: a testing framework is,
-    # by definition, called almost exclusively from test code, so that signal
-    # never fires (0/175 measured non-test callers of override_settings on
-    # the django corpus) even though the file plainly IS shipped API surface.
+    # that happens to live at a test-named path (e.g. a web framework's
+    # test/utils.py — a stable public API, not a throwaway test). Filtering by
+    # "called only from non-test files" was measured and rejected: a testing
+    # framework is, by definition, called almost exclusively from test code, so
+    # that signal never fires (0/175 measured non-test callers of a
+    # settings-override decorator on the corpus) even though the file plainly IS
+    # shipped API surface.
     # The signal that DOES discriminate cleanly is corpus-wide unambiguous
     # caller BREADTH: symbol_graph.file_fan_in() counts, per file, the number
     # of DISTINCT calling files across edges whose target symbol name
     # resolves to exactly one defining file corpus-wide (excludes common
     # same-leaf collisions like __init__/setUp that would otherwise dilute
-    # the count with unrelated files). Measured on the django corpus:
-    # django/test/utils.py=285, django/test/testcases.py=518,
-    # django/test/client.py=85, vs. the next-highest genuinely-disposable
+    # the count with unrelated files). Measured on a large web-framework corpus:
+    # test/utils.py=285, test/testcases.py=518,
+    # test/client.py=85, vs. the next-highest genuinely-disposable
     # test file at 42 and a median near 0 — a wide, well-separated gap.
     # A file at or above this threshold is exempted from the
     # test_deprioritised multiplier above regardless of its path.
@@ -108,15 +109,16 @@ ranking:
     # score higher on cross-encoder + BM25 similarity than the public method
     # a natural-language query is actually asking about, because the helper's
     # body happens to restate more of the query's vocabulary literally (e.g.
-    # a queryset-filtering helper's body mentions "queryset"/"filter" several
-    # times while the public method it supports has a terse one-line body).
+    # a data-access filter helper's body mentions the query's collection/filter
+    # vocabulary several times while the public method it supports has a terse
+    # one-line body).
     # The importance/purpose priors (ranking.importance_prior, ranking.
     # purpose_rank) already favor the public symbol's file/class, but a
     # sizeable base-rerank gap from the raw-text-similarity effect above can
     # still outweigh them; this prior corrects the imbalance at its source
-    # (django/db/models/query.py QuerySet.filter vs. the private
-    # _filter_prefetch_queryset helper in fields/related_descriptors.py is
-    # the measured witness case, UPG-16.1/F30). Mild (comparable to
+    # (a public data-access filter method vs. the private prefetch-filter
+    # helper it delegates to is the measured witness case, UPG-16.1/F30).
+    # Mild (comparable to
     # short_penalty) because a private helper is still legitimate,
     # sometimes-wanted code — just usually not the intended answer to a
     # concept-level query naming the public operation.
@@ -126,8 +128,9 @@ ranking:
     # class body to be classified as trivial by is_trivial_chunk() (UPG-15.9 / F25).
     # A ``class Meta:`` inner stub with ≤ this many attribute-assignment body lines
     # and NO method definitions / control flow is trivial — it is a configuration
-    # stub, not a real class definition.  Django test files have 200+ such 3-line
-    # stubs (class Meta: / model = X / fields = '__all__') that flood doc-intent
+    # stub, not a real class definition.  Web-framework test files have 200+ such
+    # 3-line stubs (an inner config class: a model attribute, a fields attribute)
+    # that flood doc-intent
     # queries.  Real small library classes with more attributes or any method body
     # are unaffected.  Conservative default 3: catches the dominant Meta stub
     # pattern without risk of demoting real dataclass-style classes.
@@ -219,9 +222,9 @@ ranking:
     # HIGHER purpose_sim than the canonical production symbol it name-echoes —
     # letting a shallow textual echo outrank the real implementation no matter
     # how large lambda is scaled, since raising lambda amplifies the demoted
-    # chunk's edge by the same factor (a case witnessed on the django corpus:
-    # a test-only helper class's docstring out-scored the production Signal
-    # class's own docstring on raw cosine similarity). Raising this lambda
+    # chunk's edge by the same factor (a case witnessed on a large web-framework
+    # corpus: a test-only helper class's docstring out-scored the production
+    # signal-dispatcher class's own docstring on raw cosine similarity). Raising this lambda
     # alone (against the un-weighted prior) to clear that gap also
     # disproportionately boosts every OTHER demoted-but-purpose-matching chunk
     # against non-symbol content that has no purpose vector at all (prose/doc
@@ -234,8 +237,8 @@ ranking:
     # one, while an undemoted (quality=1.0) candidate keeps the full boost.
     # With that weighting, lambda=0.9 (paired with test_deprioritised=0.46
     # above) is stable across a lambda range of roughly [0.7, 1.1] on the
-    # verified case above — not a knife-edge value — and the full django
-    # offline acceptance replay (benchmarks/acceptance/product_cases.jsonl)
+    # verified case above — not a knife-edge value — and the full offline
+    # acceptance replay (benchmarks/acceptance/product_cases.jsonl)
     # shows zero other case flipped by this change.
     lambda: 0.9
 
@@ -288,7 +291,7 @@ ranking:
     # Line-span threshold (in lines) above which a symbol definition is considered
     # "large" — typically a canonical library class or function.  Symbols with
     # end_line - start_line >= this value get the best span bucket (0).
-    # Django's Model base class has ~1400 lines; real functions are ≥10 lines.
+    # A large web framework's ORM base class has ~1400 lines; real functions are ≥10 lines.
     # Test-inner stubs are typically 2–5 lines.
     large_span_threshold: 50
 
@@ -344,9 +347,9 @@ ranking:
     # than several real on-topic queries) — every sentence embedding this
     # model produces lands close to the corpus centroid regardless of
     # relevance, so no absolute cosine constant can separate the two
-    # classes. (One parenthetical data point from the django benchmark
+    # classes. (One parenthetical data point from a large web-framework
     # corpus: the query "CORS handling implementation" — a protocol
-    # Django's own source never touches — still measured a pool-max cosine
+    # that framework's own source never touches — still measured a pool-max cosine
     # of 0.75, comfortably inside the on-topic band.) The defect was the
     # signal, not the threshold.
     #
@@ -436,6 +439,33 @@ ranking:
     # terminal reader instead of the editor's LLM.
     banner_cli: "No strong match for this query — the results below scored low on absolute relevance and may be unrelated. Try an exact symbol name, rephrase the query, or fall back to grep/reading the file directly."
 
+  score_order_explain:
+    # UPG-SCORE-ORDER-EXPLAIN: displayed absolute relevance may disagree with
+    # display order (the composite quality/importance priors decide order, not
+    # the displayed score — see quality_priors above). When a result below rank 1
+    # shows a MUCH higher relevance than rank 1, annotate WHY it ranks lower from
+    # the prior that demoted it, so the divergence is readable rather than
+    # silently misleading. Additive, deterministic, chunk-property-based — never
+    # reorders anything (no query-side logic).
+    enabled: true
+    # Only annotate a large divergence: a below-rank-1 result whose displayed
+    # relevance is at least this multiple of rank 1's. Mild inversions (a
+    # near-tie) are left unlabeled to avoid noise.
+    margin_ratio: 1.5
+
+  result_floor:
+    # UPG-RESULT-FLOOR: an absent-topic query still draws n_results nearest
+    # neighbours out of the ANN index; after cross-encoder rerank these render at
+    # ~0.000 relevance — real neighbours, but noise the caller pays tokens to
+    # read. Drop results whose absolute cross-encoder relevance is below this
+    # floor rather than returning a full n_results block of them. Gated on
+    # ce_relevance ONLY (never the dense-cosine fallback — a bi-encoder cosine
+    # cannot separate absent-topic from on-topic, UPG-NOTFOUND-FLOOR-2), and the
+    # single strongest result is always kept so the low-confidence banner always
+    # leads a best guess. Deterministic, score-property-based; no query-side logic.
+    enabled: true
+    min_relevance: 0.02
+
 strategy:
   # Fallback hybrid-search weights used before the first index-time codebase
   # fingerprint has run (agent.strategy_selector.select_strategy). Once a
@@ -445,6 +475,26 @@ strategy:
   # first call rather than silently absent (UPG-8.2). Must sum to 1.0.
   default_semantic_weight: 0.70
   default_bm25_weight: 0.30
+  # Widely-adopted frameworks the caller model already knows at implementation
+  # depth from training — when one is detected in the fingerprint and the store
+  # already holds notes, suggest_instruction_style() picks "memory-first"
+  # (the model needs recall, not a guided map). Detection targets, not benchmark
+  # witnesses (UPG-KNOWN-FRAMEWORKS-CONFIG): the list is config-declared so it
+  # can be tuned without a code change, matching the framework-detection pattern
+  # elsewhere. Matched case-insensitively against fingerprint.detected_frameworks.
+  known_frameworks:
+    - django
+    - flask
+    - fastapi
+    - react
+    - nextjs
+    - vue
+    - angular
+    - express
+    - spring-boot
+    - gin
+    - echo
+    - celery
 retrieval:
   dual_vector:
     # ARCH-4: per-symbol dual-vector pool entry. STEP-0 spike proved a mechanical
@@ -548,10 +598,10 @@ indexing:
   # Build-artifact directories excluded from indexing at file-walk time (UPG-15.9).
   # Any path component that ENDS WITH one of these suffixes is treated as a build
   # artifact directory and every file inside it is excluded.  This catches Python
-  # egg-info directories (e.g. Django.egg-info/, mypackage.egg-info/) whose
+  # egg-info directories (e.g. mypackage.egg-info/) whose
   # SOURCES.txt / PKG-INFO / *.txt files are plain file-path listings with no
   # educational content but high BM25 IDF on module/command identifiers.
-  # Rule: suffix match on each path part — "Django.egg-info" ends with ".egg-info".
+  # Rule: suffix match on each path part — "mypackage.egg-info" ends with ".egg-info".
   # Do NOT widen to cover real documentation dirs (docs/, howto/) — only build
   # artifacts whose entire directory is machine-generated have no index value.
   build_artifact_dir_suffixes:

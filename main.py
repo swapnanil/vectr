@@ -33,6 +33,7 @@ import signal
 import subprocess
 import threading
 import time
+import tomllib
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -42,6 +43,7 @@ from agent.config import (
     CLI_START_READY_POLL_TIMEOUT_S,
     CLI_START_READY_PROBE_TIMEOUT_S,
     CLI_VERSION_SKEW_PROBE_TIMEOUT_S,
+    DEFAULT_PORT,
 )
 from agent.instance_registry import (
     InstanceRegistry,
@@ -100,8 +102,8 @@ _SESSION_START_GUIDANCE_HOOKS_AWARE = load_template("session_start_guidance_hook
 # deferred-tool mechanics (ToolSearch, the mcp__vectr__ tool-name prefix) that
 # do not exist in other AI IDEs. It is spliced in only for the CLAUDE.md
 # render; every other IDE config file (AGENTS.md, .cursorrules, GEMINI.md,
-# CODEX.md, copilot-instructions.md, .cursor/rules) gets the shared body with
-# the placeholder removed.
+# copilot-instructions.md, .cursor/rules) gets the shared body with the
+# placeholder removed.
 _TOOL_LOADING_GUIDANCE_CLAUDE = load_template("tool_loading_guidance_claude.txt")
 _TOOL_LOADING_GUIDANCE_CLAUDE_SEARCH_ONLY = load_template("tool_loading_guidance_claude_search_only.txt")
 
@@ -141,6 +143,26 @@ _CURSOR_MCP_JSON = load_template("cursor_mcp.json.template")
 # VSCode 1.99+ / GitHub Copilot Agent Mode uses "servers" (not "mcpServers")
 _VSCODE_MCP_JSON = load_template("vscode_mcp.json.template")
 
+# Codex CLI registers MCP servers in a TOML config (project-scoped
+# `<workspace>/.codex/config.toml`), one `[mcp_servers.<name>]` table per
+# server (UPG-CODEX-PARITY, research/codex-parity-2026-07.md §Q1). vectr is
+# already an HTTP MCP server so it maps directly onto the `url` field with no
+# stdio wrapper. Unlike the JSON MCP configs above (which `_write_or_update`
+# overwrites whole), a user's `.codex/config.toml` is far more likely to hold
+# unrelated content (project trust, model settings, other servers), so the
+# writer edits only vectr's own comment-delimited region and leaves the rest
+# byte-for-byte intact — the same strip-then-append idiom the markdown vectr
+# block uses. `__HEADERS__` is spliced (an `http_headers` inline table for an
+# authenticated daemon, or nothing for the keyless default).
+_CODEX_MCP_TOML = load_template("codex_mcp.toml.template")
+_CODEX_TOML_BLOCK_START = "# vectr-start"
+_CODEX_TOML_BLOCK_END = "# vectr-end"
+# Matches vectr's TOML block plus any blank lines immediately before it.
+_CODEX_TOML_BLOCK_RE = re.compile(
+    r"\n*" + re.escape(_CODEX_TOML_BLOCK_START) + r"\b.*?" + re.escape(_CODEX_TOML_BLOCK_END) + r"\n?",
+    re.DOTALL,
+)
+
 _VECTR_BLOCK_START = "<!-- vectr-start -->"
 _VECTR_BLOCK_END = "<!-- vectr-end -->"
 # Matches the vectr block plus any blank lines immediately before it.
@@ -150,11 +172,14 @@ _VECTR_BLOCK_RE = re.compile(
 )
 
 # IDE config files that get the vectr block appended (not created from scratch).
+# CODEX.md is deliberately absent: Codex CLI reads ONLY AGENTS.md (plus global
+# ~/.codex/AGENTS.md) and has never read a CODEX.md file, so appending a vectr
+# block into a user's pre-existing CODEX.md was dead copy no tool consumes
+# (UPG-CODEX-STALE-AGENTS-FILE). Codex adoption rides the AGENTS.md entry above.
 _IDE_CONFIG_APPEND_ONLY: tuple[str, ...] = (
     "AGENTS.md",
     ".cursorrules",
     "GEMINI.md",
-    "CODEX.md",
 )
 
 
@@ -469,6 +494,56 @@ def _maybe_write_workspace_config(
     _write_workspace_config(workspace, port, search_only=search_only)
 
 
+def _render_codex_mcp_block(port: int, headers: dict[str, str]) -> str:
+    """Render vectr's `[mcp_servers.vectr]` TOML block for Codex CLI, splicing
+    an `http_headers` inline table when the daemon is authenticated (keyless
+    daemons — the default — get the header-free block, byte-identical to the
+    template). Codex's HTTP MCP schema names this field `http_headers`, not the
+    JSON `headers` key the editor MCP configs use (research §Q1)."""
+    hdr = ""
+    if headers:
+        inline = ", ".join(f'"{k}" = "{v}"' for k, v in headers.items())
+        hdr = f"\nhttp_headers = {{ {inline} }}"
+    return _CODEX_MCP_TOML.format(port=port).replace("__HEADERS__", hdr)
+
+
+def _write_codex_mcp_config(path: Path, port: int, headers: dict[str, str]) -> None:
+    """Write/refresh vectr's `[mcp_servers.vectr]` region in `.codex/config.toml`.
+
+    Merge-safe by comment-delimited region (mirrors `_write_ide_config_merge_safe`
+    for markdown): only vectr's own `# vectr-start`…`# vectr-end` block is
+    touched; any other TOML the user has (trust, model, other servers) is
+    preserved verbatim. Idempotent — a port change rewrites the block in place;
+    an unchanged block is a no-op. The merged output is validated as parseable
+    TOML before it is written, so a pre-existing malformed config is left
+    untouched rather than compounded."""
+    block = _render_codex_mcp_block(port, headers)
+    existed = path.exists()
+
+    if not existed:
+        new_content = block
+    else:
+        existing = path.read_text(encoding="utf-8")
+        stripped = _CODEX_TOML_BLOCK_RE.sub("", existing).rstrip()
+        new_content = f"{stripped}\n\n{block}" if stripped else block
+        if new_content == existing:
+            return
+
+    try:
+        tomllib.loads(new_content)
+    except tomllib.TOMLDecodeError:
+        print(
+            f"  Skipped {path}: existing content is not valid TOML — "
+            f'add [mcp_servers.vectr] url = "http://localhost:{port}/mcp" by hand.',
+            file=sys.stderr,
+        )
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_content, encoding="utf-8")
+    print(f"  {'Updated vectr block in' if existed else 'Created'} {path}", file=sys.stderr)
+
+
 def _write_workspace_config(workspace: str, port: int, *, search_only: bool = False) -> None:
     """Write per-IDE MCP config files and IDE guidance into the workspace root.
 
@@ -492,12 +567,20 @@ def _write_workspace_config(workspace: str, port: int, *, search_only: bool = Fa
     if write_default_vectrignore(workspace):
         print(f"  Created {root / '.vectrignore'} (default excludes)", file=sys.stderr)
 
+    # AGENTS.md (Codex CLI) gets the hook-aware guidance variant when Codex
+    # hooks are installed for this workspace (UPG-CODEX-PARITY), mirroring how
+    # CLAUDE.md keys on Claude Code hooks above; the other append-only files
+    # have no automatic-injection path, so they always get the default variant.
+    codex_hooks_installed = _codex_hooks_installed(workspace)
     _write_ide_config_merge_safe(
         root / "CLAUDE.md", create_if_missing=True, hooks_installed=hooks_installed, search_only=search_only,
         tool_loading=True,
     )
     for _rel in _IDE_CONFIG_APPEND_ONLY:
-        _write_ide_config_merge_safe(root / _rel, create_if_missing=False, search_only=search_only)
+        file_hooks = codex_hooks_installed if _rel == "AGENTS.md" else False
+        _write_ide_config_merge_safe(
+            root / _rel, create_if_missing=False, hooks_installed=file_hooks, search_only=search_only,
+        )
     _write_ide_config_merge_safe(
         root / ".github" / "copilot-instructions.md", create_if_missing=False, search_only=search_only,
     )
@@ -511,6 +594,12 @@ def _write_workspace_config(workspace: str, port: int, *, search_only: bool = Fa
     _write_or_update(root / ".mcp.json", _inject_mcp_headers(_MCP_JSON.format(port=port), headers), f"port {port}")
     _write_or_update(root / ".cursor" / "mcp.json", _inject_mcp_headers(_CURSOR_MCP_JSON.format(port=port), headers), f"port {port}")
     _write_or_update(root / ".vscode" / "mcp.json", _inject_mcp_headers(_VSCODE_MCP_JSON.format(port=port), headers), f"port {port}")
+    # Codex CLI (UPG-CODEX-PARITY): project-scoped .codex/config.toml. Written
+    # unconditionally like the other MCP configs; note that Codex only loads a
+    # project-scoped config after the repo is trusted through its one-time
+    # interactive trust prompt (research §Q1) — an expected first-run step, not
+    # something an auto-writer can (or should) clear on the user's behalf.
+    _write_codex_mcp_config(root / ".codex" / "config.toml", port, headers)
 
     # Merge-safe (not create-only): UPG-11.5 reordered `vectr init --hooks` to
     # write hooks before workspace config in the same run, so settings.json can
@@ -577,22 +666,42 @@ def _remote_mcp_configs(url: str, headers: dict[str, str]) -> dict[str, str]:
     }
 
 
-def _write_remote_workspace_config(workspace: str, url: str, headers: dict[str, str]) -> None:
+def _write_remote_workspace_config(workspace: str, url: str, headers: dict[str, str]) -> list[str]:
     """Configure a local editor to use a REMOTE vectr instance (team / central
     mode). Writes the editor guidance blocks and the three MCP configs pointing
     at `url` with the given headers — but spawns no daemon and registers no
-    instance. This is the client half of the client/server split."""
+    instance. This is the client half of the client/server split.
+
+    Returns the workspace-relative paths it manages (created, updated, or an
+    already-present append-only guidance file it merged into), so the caller can
+    print the exact file list for the user (UPG-TEAM-4). Append-only guidance
+    files that do not already exist are never created, so they are excluded."""
     root = Path(workspace)
+    managed: list[str] = []
     # Editor guidance so the MCP client's LLM knows the tools exist.
     _write_ide_config_merge_safe(root / "CLAUDE.md", create_if_missing=True, tool_loading=True)
+    managed.append("CLAUDE.md")
     for _rel in _IDE_CONFIG_APPEND_ONLY:
         _write_ide_config_merge_safe(root / _rel, create_if_missing=False)
-    _write_ide_config_merge_safe(root / ".github" / "copilot-instructions.md", create_if_missing=False)
+        if (root / _rel).exists():
+            managed.append(_rel)
+    copilot = Path(".github") / "copilot-instructions.md"
+    _write_ide_config_merge_safe(root / copilot, create_if_missing=False)
+    if (root / copilot).exists():
+        managed.append(copilot.as_posix())
     _write_cursor_rules(workspace)
+    managed.append(".cursor/rules/vectr.mdc")
 
     for rel, text in _remote_mcp_configs(url, headers).items():
         _write_or_update(root / rel, text, "remote")
+        managed.append(rel)
     _ensure_enable_all_project_mcp_servers(root)
+    managed.append(".claude/settings.json")
+    return managed
+
+
+# The connect-written MCP configs that embed the API key in plaintext (UPG-TEAM-4).
+_REMOTE_KEY_BEARING_FILES = frozenset({".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json"})
 
 
 def _is_vectr_hook_group(group: dict) -> bool:
@@ -603,17 +712,10 @@ def _is_vectr_hook_group(group: dict) -> bool:
     return False
 
 
-def _hooks_installed(workspace: str) -> bool:
-    """True if `<workspace>/.claude/settings.json` already has a vectr-managed
-    hook group (UPG-11.5) — selects CLAUDE.md's hook-aware session-start
-    guidance. Never raises: a missing/malformed settings file just means "no
-    hooks installed yet"."""
-    settings = Path(workspace) / ".claude" / "settings.json"
-    if not settings.exists():
-        return False
-    try:
-        data = json.loads(settings.read_text(encoding="utf-8"))
-    except Exception:
+def _data_has_vectr_hook_group(data: object) -> bool:
+    """True if a parsed hooks-config dict (`.claude/settings.json` or
+    `.codex/hooks.json`) carries a vectr-managed hook group under `hooks`."""
+    if not isinstance(data, dict):
         return False
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
@@ -625,6 +727,35 @@ def _hooks_installed(workspace: str) -> bool:
             if isinstance(group, dict) and _is_vectr_hook_group(group):
                 return True
     return False
+
+
+def _config_has_vectr_hooks(path: Path) -> bool:
+    """True if `path` parses and holds a vectr-managed hook group. Never raises:
+    a missing/malformed file just means "no vectr hooks installed yet"."""
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return _data_has_vectr_hook_group(data)
+
+
+def _hooks_installed(workspace: str) -> bool:
+    """True if `<workspace>/.claude/settings.json` already has a vectr-managed
+    hook group (UPG-11.5) — selects CLAUDE.md's hook-aware session-start
+    guidance."""
+    return _config_has_vectr_hooks(Path(workspace) / ".claude" / "settings.json")
+
+
+def _codex_hooks_installed(workspace: str) -> bool:
+    """True if `<workspace>/.codex/hooks.json` already has a vectr-managed hook
+    group (UPG-CODEX-PARITY) — selects AGENTS.md's hook-aware session-start
+    guidance, mirroring `_hooks_installed` for Claude Code. Codex injects
+    recalled notes automatically once its hooks are installed, so AGENTS.md
+    should stop telling the model to self-call vectr_recall at session start,
+    exactly as CLAUDE.md does for Claude Code hooks."""
+    return _config_has_vectr_hooks(Path(workspace) / ".codex" / "hooks.json")
 
 
 def _install_hook_group(hooks: dict, event: str, *, command: str, matcher: str | None = None) -> None:
@@ -680,6 +811,46 @@ def _write_claude_hooks(workspace: str) -> None:
     print(f"  Wrote vectr hooks to {settings}", file=sys.stderr)
 
 
+def _write_codex_hooks(workspace: str) -> None:
+    """Merge vectr's hook entries into <workspace>/.codex/hooks.json (UPG-CODEX-PARITY).
+
+    Codex CLI's hooks.json schema, event names, matcher vocabulary, and the
+    `hookSpecificOutput.additionalContext` envelope are the same as Claude
+    Code's (research/codex-parity-2026-07.md §Q3), so the same `vectr hook
+    <event>` commands and `_install_hook_group` idempotency apply unchanged —
+    `_emit_hook_context` emits the identical envelope Codex reads. Two
+    differences from `_write_claude_hooks`: the file is `.codex/hooks.json`
+    (whose top level IS the hooks object, not nested under a settings file),
+    and the PreToolUse matcher also covers Codex's native `apply_patch` edit
+    tool. Codex's exact PreToolUse tool name is the one matcher the research
+    could not confirm without a live smoke test; the `Edit|Write|apply_patch`
+    union is harmless either way — an absent tool name simply never fires the
+    hook — so it needs no live verification to ship safely.
+
+    Preserves any existing hooks.json content and any non-vectr hook groups.
+    """
+    hooks_file = Path(workspace) / ".codex" / "hooks.json"
+    hooks_file.parent.mkdir(parents=True, exist_ok=True)
+    data: dict = {}
+    if hooks_file.exists():
+        try:
+            data = json.loads(hooks_file.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}  # malformed — overwrite rather than crash init
+    hooks = data.setdefault("hooks", {})
+
+    _install_hook_group(hooks, "SessionStart", matcher="startup|resume|clear|compact",
+                        command="vectr hook session-start")
+    _install_hook_group(hooks, "UserPromptSubmit", command="vectr hook user-prompt-submit")
+    _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|apply_patch",
+                        command="vectr hook pre-tool-use")
+    _install_hook_group(hooks, "PreCompact", matcher="manual|auto",
+                        command="vectr hook pre-compact")
+
+    hooks_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print(f"  Wrote vectr hooks to {hooks_file}", file=sys.stderr)
+
+
 def _remove_vectr_hooks(workspace: str) -> None:
     """Strip vectr-managed hook groups from .claude/settings.json (for --reset-config).
 
@@ -713,6 +884,66 @@ def _remove_vectr_hooks(workspace: str) -> None:
     if changed:
         settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         print(f"  Removed vectr hooks from {settings}", file=sys.stderr)
+
+
+def _remove_codex_hooks(workspace: str) -> None:
+    """Strip vectr-managed hook groups from .codex/hooks.json (for --reset-config).
+
+    Mirrors `_remove_vectr_hooks`, but `.codex/hooks.json`'s top level IS the
+    hooks object, so once vectr's groups are gone and nothing else remains the
+    file is deleted (it was vectr-only) rather than left as an empty `{}`.
+    Non-vectr hook groups a user added are preserved."""
+    hooks_file = Path(workspace) / ".codex" / "hooks.json"
+    if not hooks_file.exists():
+        return
+    try:
+        data = json.loads(hooks_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    changed = False
+    for event in list(hooks.keys()):
+        groups = hooks[event]
+        if not isinstance(groups, list):
+            continue
+        kept = [g for g in groups if not _is_vectr_hook_group(g)]
+        if len(kept) != len(groups):
+            changed = True
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+    if not hooks:
+        data.pop("hooks", None)
+    if not changed:
+        return
+    if data:
+        hooks_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        print(f"  Removed vectr hooks from {hooks_file}", file=sys.stderr)
+    else:
+        hooks_file.unlink()
+        print(f"  Deleted {hooks_file} (was vectr-only)", file=sys.stderr)
+
+
+def _remove_codex_mcp_config(workspace: str) -> None:
+    """Remove vectr's `[mcp_servers.vectr]` block from .codex/config.toml (for
+    --reset-config). Deletes the file if it becomes empty (was vectr-only);
+    otherwise leaves the user's other TOML intact."""
+    path = Path(workspace) / ".codex" / "config.toml"
+    if not path.exists():
+        return
+    content = path.read_text(encoding="utf-8")
+    if _CODEX_TOML_BLOCK_START not in content:
+        return
+    stripped = _CODEX_TOML_BLOCK_RE.sub("", content).rstrip()
+    if stripped:
+        path.write_text(stripped + "\n", encoding="utf-8")
+        print(f"  Removed vectr block from {path}", file=sys.stderr)
+    else:
+        path.unlink()
+        print(f"  Deleted {path} (was vectr-only)", file=sys.stderr)
 
 
 def _migrate_legacy_files() -> None:
@@ -1170,10 +1401,16 @@ def cmd_connect(args: argparse.Namespace) -> None:
         )
 
     headers = _mcp_auth_headers(api_key=api_key, client_label=label)
-    _write_remote_workspace_config(workspace, url, headers)
+    managed = _write_remote_workspace_config(workspace, url, headers)
 
     print(f"Configured this workspace to use the remote vectr instance at {url}", file=sys.stderr)
     print(f"  Workspace : {workspace}", file=sys.stderr)
+    # UPG-TEAM-4: print the exact list of files connect writes/manages so the
+    # configuration is never a surprise, flagging the ones that embed the key.
+    print("  Files     : written/updated in this workspace —", file=sys.stderr)
+    for rel in managed:
+        marker = "   [holds the API key in plaintext]" if (api_key and rel in _REMOTE_KEY_BEARING_FILES) else ""
+        print(f"                - {rel}{marker}", file=sys.stderr)
     if api_key:
         print("  Auth      : X-Api-Key header written to the editor MCP configs", file=sys.stderr)
         print(
@@ -1281,7 +1518,7 @@ def cmd_proxy(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     workspace = str(Path(getattr(args, "path", ".") or ".").resolve())
-    daemon_port = getattr(args, "daemon_port", None) or _get_port_for_workspace(workspace, 8765)
+    daemon_port = getattr(args, "daemon_port", None) or _get_port_for_workspace(workspace, DEFAULT_PORT)
     api_key = os.getenv("VECTR_API_KEY") or None
 
     provider = None
@@ -2101,6 +2338,35 @@ def cmd_forget(args: argparse.Namespace) -> None:
         _handle_daemon_call_error(exc, port)
 
 
+def cmd_cache(args: argparse.Namespace) -> None:
+    """`vectr cache prune` — remove empty per-workspace cache dirs (UPG-CACHE-LITTER).
+
+    Opt-in cleanup for the hundreds of empty <hash>/ dirs the cache root can
+    accumulate from path resolutions that never wrote anything. Only ever
+    removes EMPTY dirs, skips the reserved db/ and models/ subdirs, and never
+    touches a dir belonging to a live instance (rail R1)."""
+    action = getattr(args, "cache_command", None)
+    if action != "prune":
+        print("usage: vectr cache prune [--dry-run]", file=sys.stderr)
+        return
+    from agent.cache_maintenance import live_instance_slugs, prune_empty_cache_dirs
+
+    cache_root = Path.home() / ".cache" / "vectr"
+    protected = live_instance_slugs()
+    dry_run = getattr(args, "dry_run", False)
+    affected = prune_empty_cache_dirs(cache_root, protected_slugs=protected, dry_run=dry_run)
+    if not affected:
+        print("No empty workspace cache dirs to prune.")
+        return
+    verb = "Would remove" if dry_run else "Removed"
+    print(f"{verb} {len(affected)} empty workspace cache dir(s) under {cache_root}.")
+    if protected:
+        print(f"  ({len(protected)} live-instance dir(s) skipped.)")
+    if dry_run:
+        for d in affected:
+            print(f"  {d.name}")
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     workspace = str(Path(args.path).resolve())
 
@@ -2114,12 +2380,14 @@ def cmd_init(args: argparse.Namespace) -> None:
             cursor_mdc.unlink()
             print(f"  Deleted {cursor_mdc}", file=sys.stderr)
         _remove_vectr_hooks(workspace)
+        _remove_codex_hooks(workspace)
+        _remove_codex_mcp_config(workspace)
         print(f"Vectr config reset for: {workspace}", file=sys.stderr)
         return
 
     entry = InstanceRegistry().get(workspace_hash(workspace))
     port_is_provisional = entry is None
-    port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", "8765"))
+    port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", str(DEFAULT_PORT)))
     if port_is_provisional:
         # UPG-CLI-SMALL-UX: no instance is registered for this workspace yet,
         # so this port is a guess (VECTR_PORT or the 8765 fallback), not a
@@ -2143,10 +2411,11 @@ def cmd_init(args: argparse.Namespace) -> None:
     search_only = _get_daemon_mode(port) == "search-only"
 
     # Hooks are written BEFORE the workspace config (UPG-11.5): CLAUDE.md's
-    # session-start guidance is hook-aware, detected by reading back
-    # .claude/settings.json — so within a single `vectr init --hooks` run,
-    # the hooks must already be on disk when _write_workspace_config runs,
-    # or CLAUDE.md would ship the pre-hooks (double-recall) guidance.
+    # (and AGENTS.md's, UPG-CODEX-PARITY) session-start guidance is hook-aware,
+    # detected by reading back .claude/settings.json / .codex/hooks.json — so
+    # within a single `vectr init --hooks` run, the hooks must already be on
+    # disk when _write_workspace_config runs, or the guidance blocks would ship
+    # the pre-hooks (double-recall) variant.
     if getattr(args, "hooks", False):
         if search_only:
             print(
@@ -2157,6 +2426,7 @@ def cmd_init(args: argparse.Namespace) -> None:
             )
         else:
             _write_claude_hooks(workspace)
+            _write_codex_hooks(workspace)
 
     _maybe_write_workspace_config(workspace, port, args, search_only=search_only)
 
@@ -2362,11 +2632,12 @@ _IDE_CONFIG_WRITES_DISCLOSURE = (
     "On first run for a workspace, vectr writes IDE integration files into "
     "the workspace root so an AI editor can auto-discover the MCP server: "
     "CLAUDE.md, .cursor/rules/vectr.mdc, .mcp.json, .cursor/mcp.json, "
-    ".vscode/mcp.json, .claude/settings.json, and .vectrignore (default "
-    "excludes) — 7 files. Files for other editors/agents (AGENTS.md, "
-    ".cursorrules, GEMINI.md, CODEX.md, .github/copilot-instructions.md) "
+    ".vscode/mcp.json, .codex/config.toml, .claude/settings.json, and "
+    ".vectrignore (default excludes) — 8 files. Files for other editors/agents "
+    "(AGENTS.md, .cursorrules, GEMINI.md, .github/copilot-instructions.md) "
     "only get a vectr guidance block appended if the file already exists — "
-    "they are never created from scratch. Pass --no-ide-config to skip all "
+    "they are never created from scratch (Codex reads AGENTS.md for guidance, "
+    "so no separate CODEX.md is written). Pass --no-ide-config to skip all "
     "of this; the choice persists at .vectr/ide_config for future start/"
     "restart/init calls on this workspace (delete that file to re-enable). "
     "See `vectr init --reset-config` to remove already-written blocks."
@@ -2394,7 +2665,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
 
     _default_path = os.getenv("VECTR_WORKSPACE", ".")
-    _default_port = int(os.getenv("VECTR_PORT", "8765"))
+    _default_port = int(os.getenv("VECTR_PORT", str(DEFAULT_PORT)))
 
     p_start = sub.add_parser(
         "start",
@@ -2668,6 +2939,26 @@ def main() -> None:
         help="Print a fresh high-entropy API key for authenticated / team deployments",
     )
 
+    p_cache = sub.add_parser(
+        "cache",
+        help="Maintain the ~/.cache/vectr cache root",
+        description=(
+            "Cache-root hygiene. `vectr cache prune` removes empty per-workspace "
+            "hash dirs left by path resolutions that never indexed or stored a "
+            "note. Only empty dirs are removed; the model cache (models/), the "
+            "legacy db/ layout's non-empty dirs, and any live instance's dir are "
+            "never touched."
+        ),
+    )
+    cache_sub = p_cache.add_subparsers(dest="cache_command")
+    p_cache_prune = cache_sub.add_parser(
+        "prune", help="Remove empty per-workspace cache dirs (safe; live instances skipped)"
+    )
+    p_cache_prune.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="List the dirs that would be removed without deleting anything",
+    )
+
     p_connect = sub.add_parser(
         "connect",
         help="Configure this workspace's editor to use a REMOTE vectr instance "
@@ -2735,6 +3026,7 @@ def main() -> None:
         "recall":  cmd_recall,
         "hook":    cmd_hook,
         "key":     cmd_key,
+        "cache":   cmd_cache,
         "connect": cmd_connect,
         "proxy":   cmd_proxy,
     }

@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import pytest
 
+from app.service import VectrService
+from tests._seam import assert_seam_call
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/remember
@@ -191,11 +194,13 @@ class TestRecallRoute:
     def test_recall_forwards_hook_event_to_service(self, client) -> None:
         client.post("/v1/recall", json={"boot": True, "hook_event": "SessionStart"})
         from api import app
-        app.state.service.recall.assert_called_with(
-            query=None, tags=None, priority=None, limit=10, kind=None, boot=True,
-            min_similarity=None, file_path=None, max_age_days=None, sort_by="relevance",
-            detail="index", note_id=None, surface="mcp", hook_event="SessionStart",
-            session_id=None, events=None,
+        # UPG-TEST-SIGNATURE-DRIFT: assert only the kwargs this test is about
+        # (hook_event forwarding + boot), validated against the real
+        # VectrService.recall signature — so a new kwarg added to the seam does
+        # not redden this test, but a renamed/removed param is caught precisely.
+        assert_seam_call(
+            app.state.service.recall, VectrService.recall,
+            boot=True, hook_event="SessionStart",
         )
 
     def test_recall_without_hook_event_forwards_none(self, client) -> None:
@@ -308,6 +313,17 @@ class TestEvictHintRoute:
         data = client.get("/v1/evict-hint").json()
         assert isinstance(data["hint"], str)
         assert len(data["hint"]) > 0
+
+    def test_evict_hint_route_passes_on_demand(self, client) -> None:
+        # UPG-7.2 (B13): the explicit GET is a deliberate ask, so the route must
+        # request the on-demand (eviction-focused) framing rather than the
+        # auto-footer's remember alarm. MCP green != REST green (R10): assert the
+        # route threads on_demand=True to the service. (The framing content
+        # itself is unit-tested in TestEvictionHintOnDemandUPG72.)
+        svc = client.app.state.service
+        svc.eviction_hint.reset_mock()
+        client.get("/v1/evict-hint")
+        svc.eviction_hint.assert_called_once_with(on_demand=True)
 
 
 # ---------------------------------------------------------------------------
@@ -644,3 +660,76 @@ class TestPromoteRoute:
         resp = client.post("/v1/promote", json={"note_id": note_id, "to": "human"})
         assert resp.status_code == 200
         assert resp.json()["provenance"] == "human"
+
+
+# ---------------------------------------------------------------------------
+# UPG-SUPERSEDES-GUARD-E2E — a non-human-provenance write may never supersedes-
+# tombstone a human-provenance note, end-to-end through the real REST write
+# surfaces. No write surface mints provenance='human' directly (by design), so
+# the /v1/promote chain (auto -> agent -> human) is the only way to a genuine
+# human note; these tests drive that chain, then attack the resulting note with
+# a non-human `supersedes` write and assert the store guard fires end-to-end.
+# ---------------------------------------------------------------------------
+
+class TestSupersedesHumanProvenanceGuardE2E:
+    def _make_human_note(self, client) -> int:
+        note_id = client.post(
+            "/v1/remember",
+            json={"content": "human-reviewed directive: never disable auth", "provenance": "auto"},
+        ).json()["note_id"]
+        client.post("/v1/promote", json={"note_id": note_id, "to": "agent"})
+        resp = client.post("/v1/promote", json={"note_id": note_id, "to": "human"})
+        assert resp.status_code == 200
+        assert resp.json()["provenance"] == "human"
+        return note_id
+
+    def test_agent_write_cannot_supersede_human_note(self, client_real_memory) -> None:
+        client = client_real_memory
+        human_id = self._make_human_note(client)
+        # Default REST provenance is 'agent' — a non-human write.
+        resp = client.post(
+            "/v1/remember",
+            json={"content": "agent tries to override the directive", "supersedes": human_id},
+        )
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert detail["error"] == "invalid_memory_object"
+        assert "human" in detail["detail"].lower()
+
+    def test_auto_write_cannot_supersede_human_note(self, client_real_memory) -> None:
+        client = client_real_memory
+        human_id = self._make_human_note(client)
+        resp = client.post(
+            "/v1/remember",
+            json={"content": "auto capture", "provenance": "auto", "supersedes": human_id},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["error"] == "invalid_memory_object"
+
+    def test_rejected_supersede_leaves_human_note_live(self, client_real_memory) -> None:
+        """The guard raises before any write, so the human note is not
+        tombstoned — it still recalls after the rejected supersede attempt."""
+        client = client_real_memory
+        human_id = self._make_human_note(client)
+        client.post(
+            "/v1/remember",
+            json={"content": "agent tries to override the directive", "supersedes": human_id},
+        )
+        recalled = client.post(
+            "/v1/recall", json={"query": "human-reviewed directive"}
+        ).json()["notes"]
+        assert "never disable auth" in recalled
+
+    def test_agent_write_may_supersede_non_human_note(self, client_real_memory) -> None:
+        """Control: the guard is specific to HUMAN targets. An agent write may
+        still supersede an agent-provenance note end-to-end (200), proving the
+        rejection above is not a blanket ban on `supersedes`."""
+        client = client_real_memory
+        agent_id = client.post(
+            "/v1/remember", json={"content": "agent note to replace", "provenance": "agent"}
+        ).json()["note_id"]
+        resp = client.post(
+            "/v1/remember",
+            json={"content": "newer agent note", "supersedes": agent_id},
+        )
+        assert resp.status_code == 200

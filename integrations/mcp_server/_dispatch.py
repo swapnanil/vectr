@@ -8,6 +8,8 @@ from agent.config import (
     SYMBOL_NAME_PARAM_ALIASES,
     MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
     MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
+    SCORE_ORDER_EXPLAIN_ENABLED,
+    SCORE_ORDER_EXPLAIN_MARGIN_RATIO,
 )
 from integrations.mcp_server._schemas import (
     _EXPLORATION_TOOLS,
@@ -433,11 +435,21 @@ def handle_tools_call(
 
     # ---- vectr_map ----
     if tool_name == "vectr_map":
+        # Memory-only mode: no code index to map — same guard every sibling
+        # code-index tool carries (UPG-MAP-MEMORY-ONLY-GUARD). Without it a
+        # memory-only daemon returns an empty-ish passport instead of the
+        # mode-contract message search/locate/trace/fetch all give.
+        if getattr(service, "memory_only", False):
+            from app.service import _MEMORY_ONLY_MSG
+            return {"content": [{"type": "text", "text": _MEMORY_ONLY_MSG}], "isError": False}
         text = service.get_map()
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_map_save ----
     if tool_name == "vectr_map_save":
+        if getattr(service, "memory_only", False):
+            from app.service import _MEMORY_ONLY_MSG
+            return {"content": [{"type": "text", "text": _MEMORY_ONLY_MSG}], "isError": False}
         summary = arguments.get("summary", "").strip()
         if not summary:
             return _mcp_error("summary is required")
@@ -627,8 +639,29 @@ def handle_tools_call(
                 scope_suffix = f" (scope=branch ({stored_note.branch}))"
             else:
                 scope_suffix = f" (scope={stored_note.scope})"
+        # UPG-ADOPTION-V2-MINOR (b): echo the stored title + first content line so
+        # the caller can confirm the write landed correctly without a verify
+        # round-trip via vectr_recall. Uses the note already fetched above — no
+        # extra lookup. Bounded so a long note can't bloat the confirmation.
+        echo = ""
+        if stored_note is not None:
+            title = (getattr(stored_note, "title", "") or "").strip()
+            content_lines = (getattr(stored_note, "content", "") or "").strip().splitlines()
+            first_line = content_lines[0].strip() if content_lines else ""
+            if len(first_line) > 120:
+                first_line = first_line[:117] + "..."
+            parts = []
+            if title:
+                parts.append(f"title: {title}")
+            # Only show the first line when it adds information — when no title
+            # was supplied it is derived from the first content line (app/models.py),
+            # so title == first_line and echoing both just prints the same text twice.
+            if first_line and first_line != title:
+                parts.append(f"first line: {first_line}")
+            if parts:
+                echo = "\n  Stored — " + " · ".join(parts)
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time."}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}"}],
             "isError": False,
         }
 
@@ -671,7 +704,9 @@ def handle_tools_call(
 
     # ---- vectr_evict_hint ----
     if tool_name == "vectr_evict_hint":
-        hint = service.eviction_hint(session_id=session_id)
+        # UPG-7.2: an explicit ask gets the on-demand, eviction-focused framing —
+        # distinct from the gated auto-footer's "ACTION REQUIRED" remember alarm.
+        hint = service.eviction_hint(session_id=session_id, on_demand=True)
         if not hint:
             hint = "No retrieved chunks to evict. Context window is clean."
         return {"content": [{"type": "text", "text": hint}], "isError": False}
@@ -865,12 +900,45 @@ def _storage_cap_truncation_warning(
 def _format_search_results(results, query: str, query_ms: int, chunks_searched: int) -> str:
     if not results:
         return f"No results found for: {query}"
-    lines = [f"Found {len(results)} results for '{query}' ({query_ms}ms, {chunks_searched} chunks searched)\n"]
+    # UPG-LOWCONF-OUTPUT-SLIM / UPG-FLOOR-SLIM-PAYLOAD: when the low-confidence
+    # banner fires, the caller is told these results may be unrelated — so ship
+    # pointer-mode entries (file:line + symbol + score, no bodies) instead of
+    # serializing ~2k tokens of chunks the caller was just told not to trust.
+    # The chunk id is shown so a promising pointer can be expanded with
+    # vectr_fetch. Deterministic, response-shaping only.
+    low_conf = getattr(results, "low_confidence", False)
+    # UPG-SCORE-ORDER-EXPLAIN: displayed relevance may disagree with display
+    # order (the composite priors decide order, not the score). When a result
+    # below rank 1 shows a MUCH higher relevance, annotate the demoting prior so
+    # the divergence is readable. Additive; ordering untouched.
+    top_score = results[0].score if results else 0.0
+    header = f"Found {len(results)} results for '{query}' ({query_ms}ms, {chunks_searched} chunks searched)"
+    if low_conf:
+        header += " — low confidence: pointers only (vectr_fetch(ids=[...]) to expand)"
+    lines = [header + "\n"]
     for i, r in enumerate(results, 1):
         lines.append(f"{'─' * 60}")
         dup = f"  (+{r.dup_count} more identical)" if getattr(r, "dup_count", 0) else ""
         chunk_id = getattr(r, "chunk_id", "") or f"{r.file_path}:{r.lines}"
-        lines.append(f"[{i}] {chunk_id}  score {r.score:.3f}{dup}")
+        # UPG-MCP-SCORE-SOURCE-RENDER: surface which scale the displayed score is
+        # on — "reranker" (cross-encoder sigmoid) vs "dense" (bi-encoder cosine).
+        # REST already carries score_source; the caller LLM reads this score to
+        # plan, so the render must say what it means. The mixed-scale fix keeps
+        # score_source uniform within a response.
+        src = getattr(r, "score_source", "") or ""
+        src_label = f" ({src})" if src else ""
+        # UPG-SCORE-ORDER-EXPLAIN: a below-rank-1 result whose relevance clears
+        # the divergence margin gets a one-phrase reason for its lower rank.
+        rank_note = ""
+        if (
+            SCORE_ORDER_EXPLAIN_ENABLED
+            and i > 1
+            and top_score > 0
+            and r.score >= SCORE_ORDER_EXPLAIN_MARGIN_RATIO * top_score
+        ):
+            reason = getattr(r, "quality_reason", "") or "composite ranking prior"
+            rank_note = f"  (ranked lower: {reason})"
+        lines.append(f"[{i}] {chunk_id}  score {r.score:.3f}{src_label}{dup}{rank_note}")
         if r.symbol_name:
             # UPG-11.4: include symbol line-range so the caller knows the full
             # definition's extent even when the displayed content is capped —
@@ -881,6 +949,11 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
             if s_start and s_end:
                 sym_range = f"  [lines {s_start}–{s_end}]"
             lines.append(f"    symbol: {r.symbol_name}{sym_range}  language: {r.language}")
+        if low_conf:
+            # Pointer mode: no body. A caller that finds a promising pointer
+            # expands it deterministically with vectr_fetch.
+            lines.append("")
+            continue
         lines.append("")
         content_lines = r.content.splitlines()
         # UPG-11.4-b: emit an expand hint when the stored content was truncated

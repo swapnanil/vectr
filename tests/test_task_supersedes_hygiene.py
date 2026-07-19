@@ -152,6 +152,34 @@ class TestServiceStaleTaskSummary:
         svc = self._make_service(tmp_path, monkeypatch, search_only=True)
         assert svc.stale_task_summary() == (0, None)
 
+    def test_boot_recall_appends_stale_task_nudge(self, tmp_path, monkeypatch) -> None:
+        # UPG-NUDGE-HOOK-PATH-UNREACHABLE (B9): the SessionStart injection path
+        # (recall boot=True) must carry the stale-task nudge, since the shipped
+        # guidance steers agents away from vectr_status where it otherwise lives.
+        from agent.config import MEMORY_HYGIENE_STALE_TASK_WARN_COUNT
+        svc = self._make_service(tmp_path, monkeypatch)
+        oldest = None
+        for i in range(MEMORY_HYGIENE_STALE_TASK_WARN_COUNT):
+            nid = svc._context_store.remember(
+                svc._workspace_root, f"stale checkpoint {i}", kind="task"
+            )
+            _backdate(svc._context_store, nid, age_days=10)
+            if oldest is None:
+                oldest = nid
+        count, oldest_id = svc.stale_task_summary()
+        assert count >= MEMORY_HYGIENE_STALE_TASK_WARN_COUNT
+        boot_text = svc.recall("", boot=True, session_id="sess-boot")
+        assert "Memory hygiene" in boot_text
+        assert f"#{oldest_id}" in boot_text
+
+    def test_boot_recall_no_nudge_below_threshold(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        nid = svc._context_store.remember(svc._workspace_root, "one stale task", kind="task")
+        _backdate(svc._context_store, nid, age_days=10)
+        # A single stale task is below the warn count → no nudge.
+        boot_text = svc.recall("", boot=True, session_id="sess-boot2")
+        assert "Memory hygiene" not in boot_text
+
 
 # ---------------------------------------------------------------------------
 # MCP-level: vectr_status warning line (mocked svc.status(), UPG-9x pattern)
@@ -276,22 +304,13 @@ class TestConfigDrivenThreshold:
 # ---------------------------------------------------------------------------
 
 class TestRestStatusStaleTask:
-    @staticmethod
-    def _reaffirm_real_service(svc) -> None:
-        """`real_service_client` sets app.state.service = svc only once, the
-        first time the session-scoped fixture is constructed. A LATER test
-        anywhere in the session using the `client`/`client_real_memory` mock
-        fixtures (conftest.py) reassigns the same shared `app.state.service`
-        to its own MagicMock and never restores it — so a REST test relying
-        on `real_service_client` after one of those has run would silently
-        exercise the wrong (mocked) service. Reaffirm the real instance
-        defensively before issuing requests, regardless of test order."""
-        from api import app
-        app.state.service = svc
+    # UPG-CONFTEST-SERVICE-CLOBBER: the `client`/`client_real_memory` fixtures
+    # now save/restore app.state.service in teardown, so the mock no longer
+    # persists into this session-scoped real-service test — the former
+    # `_reaffirm_real_service` defensive reassignment is no longer needed.
 
     def test_status_route_surfaces_stale_task_fields(self, real_service_client) -> None:
         client, svc, ws = real_service_client
-        self._reaffirm_real_service(svc)
         client.post("/v1/memory/clear", json={})
 
         resp = client.get("/v1/status")
@@ -302,7 +321,6 @@ class TestRestStatusStaleTask:
 
     def test_status_route_reflects_backdated_task_note(self, real_service_client) -> None:
         client, svc, ws = real_service_client
-        self._reaffirm_real_service(svc)
         client.post("/v1/memory/clear", json={})
 
         note_id = svc._context_store.remember(ws, "stale checkpoint", kind="task")

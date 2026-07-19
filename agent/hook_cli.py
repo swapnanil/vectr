@@ -11,6 +11,15 @@ CLI module (`main.py`) pulls in `dotenv`, the full `agent.config` surface
 needs), argparse's subcommand tree, and (lazily, per network call) `httpx`
 — together well over the <20ms budget this path is held to.
 
+This <20ms budget is the subprocess's own Python IMPORT cost only (UPG-HOOK-
+SUBPROCESS-IMPORT-TAX cut it from ~118ms to ~10ms; independently re-measured
+~11.7ms). It is NOT the end-to-end hook latency: a warm hook invocation still
+measures ~150–200ms wall clock, dominated by the daemon HTTP round trip and
+the recall work behind it (UPG-HOOK-E2E-LATENCY-DOC, 2026-07-16 optimalness
+review). Trimming this path's import tax removed the fixed per-turn overhead
+the subprocess itself added — it does not, and cannot, make the round trip to
+the daemon sub-20ms.
+
 This module reimplements exactly the 4 hook branches `main.cmd_hook`
 defines — same request shapes, same `hookSpecificOutput` envelope, same
 "never raise" resilience contract — using only the standard library plus

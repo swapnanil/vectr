@@ -87,6 +87,32 @@ def searcher(indexer):
 
 
 # ---------------------------------------------------------------------------
+# UPG-CONFTEST-SERVICE-CLOBBER: universal app.state.service snapshot/restore.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _restore_app_state_service():
+    """Snapshot and restore ``app.state.service`` around every test so no fixture
+    or inline ``TestClient`` block can leave a mock/partial service installed for
+    a later test to exercise vacuously (the "lying mock" class).
+
+    The session-scoped ``real_service_client`` sets ``app.state.service`` once and
+    relies on it persisting; a mock-based test that ran in between used to clobber
+    it and never restore, so a later real-service REST test silently exercised the
+    wrong service. Rolling the value back after every test keeps whatever was
+    installed at each test's start (the real service, once ``real_service_client``
+    is set up) authoritative — which is what makes removing the local
+    ``_reaffirm_real_service`` workaround safe. Higher-scoped fixtures set up
+    before this function-scoped autouse, so the snapshot already reflects them."""
+    from api import app
+    saved = getattr(app.state, "service", None)
+    try:
+        yield
+    finally:
+        app.state.service = saved
+
+
+# ---------------------------------------------------------------------------
 # Real-service fixture — full pipeline with dummy embedder
 # ---------------------------------------------------------------------------
 
@@ -227,10 +253,18 @@ def client():
     """FastAPI TestClient with fully-mocked VectrService. Fast — no model loading."""
     from api import app
     svc = _base_mock_service()
-    with patch("app.service.VectrService", return_value=svc):
-        with TestClient(app, raise_server_exceptions=True) as c:
-            app.state.service = svc
-            yield c
+    # UPG-CONFTEST-SERVICE-CLOBBER: save/restore app.state.service so this mock
+    # never persists past the fixture and clobber a later real-service test that
+    # runs after it (a REST test could otherwise exercise a mock and pass
+    # vacuously depending on execution order).
+    _prior_service = getattr(app.state, "service", None)
+    try:
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=True) as c:
+                app.state.service = svc
+                yield c
+    finally:
+        app.state.service = _prior_service
 
 
 @pytest.fixture
@@ -328,7 +362,14 @@ def client_real_memory(tmp_path):
         real_store.snapshot(ws, label=label)
     svc.list_snapshots.side_effect = lambda: real_store.list_snapshots(ws)
 
-    with patch("app.service.VectrService", return_value=svc):
-        with TestClient(app, raise_server_exceptions=True) as c:
-            app.state.service = svc
-            yield c
+    # UPG-CONFTEST-SERVICE-CLOBBER: save/restore app.state.service (see the
+    # `client` fixture) so this partial-real service does not persist into a
+    # later test that relies on a different app.state.service.
+    _prior_service = getattr(app.state, "service", None)
+    try:
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=True) as c:
+                app.state.service = svc
+                yield c
+    finally:
+        app.state.service = _prior_service

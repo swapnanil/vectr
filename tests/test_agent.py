@@ -374,6 +374,7 @@ class TestMcpServer:
     def test_tools_call_map_save(self) -> None:
         from integrations.mcp_server import handle_tools_call
         mock_svc = MagicMock()
+        mock_svc.memory_only = False  # full mode — map_save must run, not short-circuit
         # UPG-6.2: save_map returns a shaped result; mock the real shape.
         mock_svc.save_map.return_value = {"saved": True, "existing_summary": None}
         result = handle_tools_call("vectr_map_save", {"summary": "Python FastAPI service."}, mock_svc)
@@ -382,7 +383,9 @@ class TestMcpServer:
 
     def test_tools_call_map_save_missing_summary(self) -> None:
         from integrations.mcp_server import handle_tools_call
-        result = handle_tools_call("vectr_map_save", {}, MagicMock())
+        mock_svc = MagicMock()
+        mock_svc.memory_only = False  # full mode — map_save must reach the summary check
+        result = handle_tools_call("vectr_map_save", {}, mock_svc)
         assert result["isError"] is True
 
     def test_tools_call_locate(self) -> None:

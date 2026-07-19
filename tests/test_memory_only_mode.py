@@ -238,6 +238,39 @@ class TestMcpDispatchMemoryOnly:
         assert result["isError"] is False
         assert _MEMORY_ONLY_MSG in result["content"][0]["text"]
 
+    def test_map_returns_memory_only_message(self):
+        # UPG-MAP-MEMORY-ONLY-GUARD: vectr_map is a code-index tool and must
+        # give the mode-contract message, not an empty passport.
+        from integrations.mcp_server import handle_tools_call
+        from app.service import _MEMORY_ONLY_MSG
+        svc = self._make_mock_service(memory_only=True)
+        svc.get_map.return_value = "should not be reached"
+
+        result = handle_tools_call("vectr_map", {}, svc)
+        assert result["isError"] is False
+        assert _MEMORY_ONLY_MSG in result["content"][0]["text"]
+        svc.get_map.assert_not_called()
+
+    def test_map_save_returns_memory_only_message(self):
+        from integrations.mcp_server import handle_tools_call
+        from app.service import _MEMORY_ONLY_MSG
+        svc = self._make_mock_service(memory_only=True)
+
+        result = handle_tools_call("vectr_map_save", {"summary": "a repo summary"}, svc)
+        assert result["isError"] is False
+        assert _MEMORY_ONLY_MSG in result["content"][0]["text"]
+        svc.save_map.assert_not_called()
+
+    def test_map_in_full_mode_not_guarded(self):
+        from integrations.mcp_server import handle_tools_call
+        from app.service import _MEMORY_ONLY_MSG
+        svc = self._make_mock_service(memory_only=False)
+        svc.get_map.return_value = "codebase overview text"
+
+        result = handle_tools_call("vectr_map", {}, svc)
+        assert _MEMORY_ONLY_MSG not in result["content"][0]["text"]
+        assert "codebase overview text" in result["content"][0]["text"]
+
     def test_search_in_full_mode_does_not_return_memory_only_message(self):
         from integrations.mcp_server import handle_tools_call
         from app.service import _MEMORY_ONLY_MSG

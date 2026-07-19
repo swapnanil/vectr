@@ -352,6 +352,7 @@ from __future__ import annotations
 
 import importlib.resources as _ilr
 import os as _os
+import re as _re
 from typing import Any
 
 import yaml as _yaml
@@ -378,10 +379,38 @@ def _read_bundled_text(resource_path: str) -> str:
     return resource.read_text(encoding="utf-8")
 
 
+class _StrictBoolLoader(_yaml.SafeLoader):
+    """SafeLoader that does NOT apply YAML-1.1's implicit bool resolver to the
+    bare tokens ``on/off/yes/no`` (UPG-YAML-BOOL).
+
+    PyYAML's default resolver parses ``on/off/yes/no`` (any case) as booleans,
+    so a string list containing one of them silently gets a ``True``/``False``
+    element instead of the string — a stopword list with a bare ``on`` entry
+    became ``[..., True, ...]`` until quoted. Only ``true``/``false`` remain
+    genuine booleans (the single style config.yaml uses for real bools), so a
+    string-typed list is never corrupted by an unquoted English word.
+    """
+
+
+# Strip the inherited YAML-1.1 bool resolver, then re-register one that matches
+# only true/false. Build fresh per-first-character lists so the parent class's
+# resolver table is untouched.
+_StrictBoolLoader.yaml_implicit_resolvers = {
+    ch: [(tag, regexp) for tag, regexp in resolvers
+         if tag != "tag:yaml.org,2002:bool"]
+    for ch, resolvers in _yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_StrictBoolLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    _re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"),
+)
+
+
 def _load_config() -> dict[str, Any]:
     """Load and return the parsed agent/config.yaml as a dict."""
     raw = _read_bundled_text("config.yaml")
-    return _yaml.safe_load(raw)  # type: ignore[no-any-return]
+    return _yaml.load(raw, Loader=_StrictBoolLoader)  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +647,13 @@ _strat_cfg: dict[str, Any] = _cfg["strategy"]
 
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT: float = float(_strat_cfg["default_semantic_weight"])
 STRATEGY_DEFAULT_BM25_WEIGHT: float = float(_strat_cfg["default_bm25_weight"])
+# Frameworks the caller model already knows at implementation depth from
+# training — config-declared so the set is tunable without a code change
+# (UPG-KNOWN-FRAMEWORKS-CONFIG). Matched case-insensitively against
+# fingerprint.detected_frameworks by suggest_instruction_style().
+STRATEGY_KNOWN_FRAMEWORKS: frozenset[str] = frozenset(
+    str(f).lower() for f in _strat_cfg["known_frameworks"]
+)
 # Dual-vector pool entry — purpose (signature+docstring) vector (ARCH-4)
 # ---------------------------------------------------------------------------
 
@@ -645,6 +681,18 @@ NOTFOUND_FLOOR_MIN_TOP_RELEVANCE: float = float(_nff_cfg["min_top_relevance"])
 NOTFOUND_FLOOR_BANNER: str = str(_nff_cfg["banner"])
 NOTFOUND_FLOOR_BANNER_CLI: str = str(_nff_cfg["banner_cli"])
 
+# UPG-SCORE-ORDER-EXPLAIN: annotate a large displayed-relevance-vs-order
+# divergence with the demoting prior's reason (render-only, additive).
+_soe_cfg: dict[str, Any] = _cfg["ranking"]["score_order_explain"]
+SCORE_ORDER_EXPLAIN_ENABLED: bool = bool(_soe_cfg["enabled"])
+SCORE_ORDER_EXPLAIN_MARGIN_RATIO: float = float(_soe_cfg["margin_ratio"])
+
+# UPG-RESULT-FLOOR: drop sub-floor cross-encoder-relevance results instead of
+# returning a full n_results block of ~0.000 ANN neighbours (keeps >=1).
+_rf_cfg: dict[str, Any] = _cfg["ranking"]["result_floor"]
+RESULT_FLOOR_ENABLED: bool = bool(_rf_cfg["enabled"])
+RESULT_FLOOR_MIN_RELEVANCE: float = float(_rf_cfg["min_relevance"])
+
 # ---------------------------------------------------------------------------
 # Search — additive identifier-shape symbol-graph hint (UPG-QUERYTYPE-REROUTE)
 # ---------------------------------------------------------------------------
@@ -660,6 +708,15 @@ SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS: int = int(_id_hint_cfg["max_locations"])
 SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED: bool = bool(_id_hint_cfg["nearmiss_enabled"])
 SEARCH_IDENTIFIER_HINT_NEARMISS_MAX: int = int(_id_hint_cfg["nearmiss_max"])
 SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN: int = int(_id_hint_cfg["nearmiss_min_prefix_len"])
+
+# ---------------------------------------------------------------------------
+# Server bind defaults (T26): one source of truth for the default port/host,
+# de-hardcoding the 8765 / 127.0.0.1 literals formerly repeated across
+# main.py / app / api / integrations. The VECTR_PORT env var still overrides.
+# ---------------------------------------------------------------------------
+
+DEFAULT_PORT: int = 8765
+DEFAULT_HOST: str = "127.0.0.1"
 
 # ---------------------------------------------------------------------------
 # Embedding — default local model (UPG-EMBEDDER-SWAP-GRANITE)

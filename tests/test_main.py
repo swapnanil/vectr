@@ -992,6 +992,52 @@ class TestVersionSkewWiring:
             m.cmd_forget(args)
         mock_check.assert_called_once_with(8765)
 
+    def test_cmd_cache_prune_removes_empty_dirs(self, tmp_path, monkeypatch, capsys):
+        """UPG-CACHE-LITTER: `vectr cache prune` removes empty per-workspace
+        hash dirs under the cache root, skipping live-instance dirs (R1)."""
+        from pathlib import Path as _P
+        monkeypatch.setattr(_P, "home", lambda: tmp_path)
+        cache_root = tmp_path / ".cache" / "vectr"
+        empty = cache_root / "0041394e972f"
+        empty.mkdir(parents=True)
+        used = cache_root / "00c5ccee8aec"
+        used.mkdir(parents=True)
+        (used / "working_context.sqlite").write_text("x")
+        # No live instances for this test.
+        monkeypatch.setattr("agent.cache_maintenance.live_instance_slugs", lambda: frozenset())
+        args = argparse.Namespace(cache_command="prune", dry_run=False)
+        m.cmd_cache(args)
+        assert not empty.exists()      # empty dir pruned
+        assert used.exists()           # written dir untouched
+        out = capsys.readouterr().out
+        assert "Removed 1" in out
+
+    def test_cmd_cache_prune_dry_run_keeps_dirs(self, tmp_path, monkeypatch, capsys):
+        from pathlib import Path as _P
+        monkeypatch.setattr(_P, "home", lambda: tmp_path)
+        cache_root = tmp_path / ".cache" / "vectr"
+        empty = cache_root / "0041394e972f"
+        empty.mkdir(parents=True)
+        monkeypatch.setattr("agent.cache_maintenance.live_instance_slugs", lambda: frozenset())
+        args = argparse.Namespace(cache_command="prune", dry_run=True)
+        m.cmd_cache(args)
+        assert empty.exists()  # dry run — nothing deleted
+        assert "Would remove 1" in capsys.readouterr().out
+
+    def test_cmd_cache_prune_skips_live_instance_dir(self, tmp_path, monkeypatch, capsys):
+        from pathlib import Path as _P
+        monkeypatch.setattr(_P, "home", lambda: tmp_path)
+        cache_root = tmp_path / ".cache" / "vectr"
+        live_empty = cache_root / "0041394e972f"
+        live_empty.mkdir(parents=True)  # empty but belongs to a live instance
+        monkeypatch.setattr(
+            "agent.cache_maintenance.live_instance_slugs",
+            lambda: frozenset({"0041394e972f"}),
+        )
+        args = argparse.Namespace(cache_command="prune", dry_run=False)
+        m.cmd_cache(args)
+        assert live_empty.exists()  # R1: live-instance dir never removed
+
     def test_cmd_status_reuses_fetched_status_payload_not_a_second_probe(self, tmp_path):
         """cmd_status already fetched /v1/status for its own display — the
         version-skew check must reuse that payload (`daemon_status=`) rather
@@ -2329,14 +2375,16 @@ class TestMergeSafeInit:
         m._write_workspace_config(str(tmp_path), 8765)
         assert not (tmp_path / "GEMINI.md").exists()
 
-    # --- CODEX.md ---
+    # --- CODEX.md (UPG-CODEX-STALE-AGENTS-FILE: Codex reads only AGENTS.md) ---
 
-    def test_codex_md_appended_if_exists(self, tmp_path):
+    def test_codex_md_not_touched_even_if_exists(self, tmp_path):
+        # A pre-existing CODEX.md must NOT get a vectr block — Codex CLI never
+        # reads that file, so the append was dead copy no tool consumes.
         (tmp_path / "CODEX.md").write_text("Codex rules\n")
         m._write_workspace_config(str(tmp_path), 8765)
         content = (tmp_path / "CODEX.md").read_text()
-        assert "Codex rules" in content
-        assert "<!-- vectr-start -->" in content
+        assert content == "Codex rules\n"
+        assert "<!-- vectr-start -->" not in content
 
     def test_codex_md_not_created_if_missing(self, tmp_path):
         m._write_workspace_config(str(tmp_path), 8765)
@@ -3203,6 +3251,29 @@ class TestCmdConnect:
         cursor = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
         assert cursor["mcpServers"]["vectr"]["url"] == "http://central:8765/mcp"
 
+    def test_connect_prints_exact_file_list(self, tmp_path, capsys) -> None:
+        # UPG-TEAM-4: connect prints the exact files it writes, flagging the
+        # three MCP configs that hold the API key in plaintext.
+        args = argparse.Namespace(
+            url="http://central:8765", api_key="team-key", label="", path=str(tmp_path),
+        )
+        m.cmd_connect(args)
+        err = capsys.readouterr().err
+        for rel in (".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json",
+                    ".cursor/rules/vectr.mdc", ".claude/settings.json", "CLAUDE.md"):
+            assert rel in err, f"connect output must list {rel}"
+        # the plaintext-key marker appears for the three MCP configs
+        assert "holds the API key in plaintext" in err
+
+    def test_connect_file_list_omits_key_marker_without_key(self, tmp_path, capsys) -> None:
+        args = argparse.Namespace(
+            url="http://central:8765", api_key="", label="", path=str(tmp_path),
+        )
+        m.cmd_connect(args)
+        err = capsys.readouterr().err
+        assert ".mcp.json" in err
+        assert "holds the API key in plaintext" not in err
+
     def test_connect_api_key_falls_back_to_env(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("VECTR_API_KEY", "env-key")
         args = argparse.Namespace(
@@ -3272,3 +3343,256 @@ class TestCmdKey:
         key = capsys.readouterr().out.strip()
         assert not key.startswith("-")
         assert key == "sAfEkEy0OJdtIPCtvsRBQVfMEHzSY1FJ6uk3Q9y1AbM"
+
+
+# ---------------------------------------------------------------------------
+# Codex CLI first-class support (UPG-CODEX-PARITY)
+# ---------------------------------------------------------------------------
+
+import tomllib
+
+
+class TestCodexMcpConfig:
+    """Part A — vectr registers itself as an MCP server in Codex CLI's
+    project-scoped `.codex/config.toml` via a merge-safe, comment-delimited
+    region (research/codex-parity-2026-07.md §Q1/§2A)."""
+
+    def test_creates_config_with_vectr_server_url(self, tmp_path):
+        cfg = tmp_path / ".codex" / "config.toml"
+        m._write_codex_mcp_config(cfg, 8765, {})
+        parsed = tomllib.loads(cfg.read_text())
+        assert parsed["mcp_servers"]["vectr"]["url"] == "http://localhost:8765/mcp"
+
+    def test_keyless_daemon_has_no_http_headers(self, tmp_path):
+        cfg = tmp_path / ".codex" / "config.toml"
+        m._write_codex_mcp_config(cfg, 8765, {})
+        parsed = tomllib.loads(cfg.read_text())
+        assert "http_headers" not in parsed["mcp_servers"]["vectr"]
+
+    def test_authenticated_daemon_gets_http_headers_table(self, tmp_path):
+        cfg = tmp_path / ".codex" / "config.toml"
+        m._write_codex_mcp_config(cfg, 8765, {"X-Api-Key": "secret123"})
+        parsed = tomllib.loads(cfg.read_text())
+        # Codex names the field http_headers (not the JSON `headers` key).
+        assert parsed["mcp_servers"]["vectr"]["http_headers"]["X-Api-Key"] == "secret123"
+
+    def test_idempotent_single_block(self, tmp_path):
+        cfg = tmp_path / ".codex" / "config.toml"
+        m._write_codex_mcp_config(cfg, 8765, {})
+        m._write_codex_mcp_config(cfg, 8765, {})
+        assert cfg.read_text().count("# vectr-start") == 1
+
+    def test_port_change_rewrites_in_place(self, tmp_path):
+        cfg = tmp_path / ".codex" / "config.toml"
+        m._write_codex_mcp_config(cfg, 8765, {})
+        m._write_codex_mcp_config(cfg, 8999, {})
+        text = cfg.read_text()
+        assert "localhost:8999" in text
+        assert "localhost:8765" not in text
+        assert text.count("# vectr-start") == 1
+
+    def test_merge_safe_preserves_user_toml(self, tmp_path):
+        cfg = tmp_path / ".codex" / "config.toml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text('model = "gpt-5"\n\n[projects."/x"]\ntrust_level = "trusted"\n')
+        m._write_codex_mcp_config(cfg, 8765, {})
+        parsed = tomllib.loads(cfg.read_text())
+        assert parsed["model"] == "gpt-5"
+        assert parsed["projects"]["/x"]["trust_level"] == "trusted"
+        assert parsed["mcp_servers"]["vectr"]["url"] == "http://localhost:8765/mcp"
+
+    def test_replaces_only_vectr_block_on_rerun(self, tmp_path):
+        cfg = tmp_path / ".codex" / "config.toml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text('[mcp_servers.other]\nurl = "http://localhost:1/mcp"\n')
+        m._write_codex_mcp_config(cfg, 8765, {})
+        m._write_codex_mcp_config(cfg, 8766, {})
+        parsed = tomllib.loads(cfg.read_text())
+        # the user's other server survives every re-run untouched
+        assert parsed["mcp_servers"]["other"]["url"] == "http://localhost:1/mcp"
+        assert parsed["mcp_servers"]["vectr"]["url"] == "http://localhost:8766/mcp"
+
+    def test_invalid_existing_toml_is_left_untouched(self, tmp_path, capsys):
+        cfg = tmp_path / ".codex" / "config.toml"
+        cfg.parent.mkdir(parents=True)
+        broken = "this is = = not valid toml ][\n"
+        cfg.write_text(broken)
+        m._write_codex_mcp_config(cfg, 8765, {})
+        # merged output would not parse → skip rather than compound the damage
+        assert cfg.read_text() == broken
+        assert "not valid TOML" in capsys.readouterr().err
+
+    def test_written_by_write_workspace_config(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8765)
+        cfg = tmp_path / ".codex" / "config.toml"
+        assert cfg.exists()
+        parsed = tomllib.loads(cfg.read_text())
+        assert parsed["mcp_servers"]["vectr"]["url"] == "http://localhost:8765/mcp"
+
+
+class TestCodexHooks:
+    """Part C — `.codex/hooks.json` writer reuses the `vectr hook <event>`
+    commands unchanged; Codex's hook schema/events/envelope match Claude
+    Code's (research §Q3)."""
+
+    def test_writes_all_four_events(self, tmp_path):
+        m._write_codex_hooks(str(tmp_path))
+        hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
+        assert set(hooks) == {"SessionStart", "UserPromptSubmit", "PreToolUse", "PreCompact"}
+
+    def test_sessionstart_matcher_and_command(self, tmp_path):
+        m._write_codex_hooks(str(tmp_path))
+        hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
+        g = hooks["SessionStart"][0]
+        assert g["matcher"] == "startup|resume|clear|compact"
+        assert g["hooks"][0]["command"] == "vectr hook session-start"
+
+    def test_userpromptsubmit_has_no_matcher(self, tmp_path):
+        m._write_codex_hooks(str(tmp_path))
+        hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
+        assert "matcher" not in hooks["UserPromptSubmit"][0]
+        assert hooks["UserPromptSubmit"][0]["hooks"][0]["command"] == "vectr hook user-prompt-submit"
+
+    def test_pretooluse_matcher_covers_codex_apply_patch(self, tmp_path):
+        """Codex's native edit tool is apply_patch; the matcher unions it with
+        the Claude-compat Edit|Write names so it fires whichever Codex uses."""
+        m._write_codex_hooks(str(tmp_path))
+        hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
+        assert hooks["PreToolUse"][0]["matcher"] == "Edit|Write|apply_patch"
+        assert hooks["PreToolUse"][0]["hooks"][0]["command"] == "vectr hook pre-tool-use"
+
+    def test_precompact_matcher(self, tmp_path):
+        m._write_codex_hooks(str(tmp_path))
+        hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
+        assert hooks["PreCompact"][0]["matcher"] == "manual|auto"
+        assert hooks["PreCompact"][0]["hooks"][0]["command"] == "vectr hook pre-compact"
+
+    def test_idempotent_no_duplicate_groups(self, tmp_path):
+        m._write_codex_hooks(str(tmp_path))
+        m._write_codex_hooks(str(tmp_path))
+        hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
+        assert len(hooks["SessionStart"]) == 1
+
+    def test_preserves_user_hooks(self, tmp_path):
+        hooks_file = tmp_path / ".codex" / "hooks.json"
+        hooks_file.parent.mkdir(parents=True)
+        hooks_file.write_text(json.dumps({
+            "hooks": {"SessionStart": [
+                {"matcher": "startup", "hooks": [{"type": "command", "command": "my-own-hook"}]}
+            ]}
+        }))
+        m._write_codex_hooks(str(tmp_path))
+        groups = json.loads(hooks_file.read_text())["hooks"]["SessionStart"]
+        cmds = [h["command"] for g in groups for h in g["hooks"]]
+        assert "my-own-hook" in cmds
+        assert "vectr hook session-start" in cmds
+
+    def test_reset_removes_vectr_hooks_only_keeps_user(self, tmp_path):
+        hooks_file = tmp_path / ".codex" / "hooks.json"
+        hooks_file.parent.mkdir(parents=True)
+        hooks_file.write_text(json.dumps({
+            "hooks": {"SessionStart": [
+                {"matcher": "startup", "hooks": [{"type": "command", "command": "my-own-hook"}]}
+            ]}
+        }))
+        m._write_codex_hooks(str(tmp_path))
+        m._remove_codex_hooks(str(tmp_path))
+        cmds = [h["command"] for g in json.loads(hooks_file.read_text())["hooks"]["SessionStart"]
+                for h in g["hooks"]]
+        assert cmds == ["my-own-hook"]
+
+    def test_reset_deletes_vectr_only_hooks_file(self, tmp_path):
+        m._write_codex_hooks(str(tmp_path))
+        m._remove_codex_hooks(str(tmp_path))
+        assert not (tmp_path / ".codex" / "hooks.json").exists()
+
+
+class TestCodexHooksInstalledDetection:
+    def test_false_when_no_file(self, tmp_path):
+        assert m._codex_hooks_installed(str(tmp_path)) is False
+
+    def test_true_after_write(self, tmp_path):
+        m._write_codex_hooks(str(tmp_path))
+        assert m._codex_hooks_installed(str(tmp_path)) is True
+
+    def test_false_for_only_user_hooks(self, tmp_path):
+        hooks_file = tmp_path / ".codex" / "hooks.json"
+        hooks_file.parent.mkdir(parents=True)
+        hooks_file.write_text(json.dumps({
+            "hooks": {"SessionStart": [
+                {"matcher": "startup", "hooks": [{"type": "command", "command": "not-vectr"}]}
+            ]}
+        }))
+        assert m._codex_hooks_installed(str(tmp_path)) is False
+
+    def test_false_on_malformed_file(self, tmp_path):
+        hooks_file = tmp_path / ".codex" / "hooks.json"
+        hooks_file.parent.mkdir(parents=True)
+        hooks_file.write_text("{ not json")
+        assert m._codex_hooks_installed(str(tmp_path)) is False
+
+
+class TestAgentsMdHookAwareParity:
+    """Part B — AGENTS.md (Codex CLI's guidance file) gets the hook-aware
+    session-start variant when Codex hooks are installed, mirroring how
+    CLAUDE.md keys on Claude Code hooks (UPG-CODEX-PARITY §2B)."""
+
+    def test_agents_md_default_guidance_without_codex_hooks(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("# My agents\n")
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert 'call `vectr_recall(query="<your task>")`' in content
+        assert "your working-memory notes are auto-injected automatically" not in content
+
+    def test_agents_md_hook_aware_when_codex_hooks_installed(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("# My agents\n")
+        m._write_codex_hooks(str(tmp_path))          # codex hooks installed first
+        m._write_workspace_config(str(tmp_path), 8765)
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert "your working-memory notes are auto-injected automatically" in content
+        assert 'call `vectr_recall(query="<your task>")`' not in content
+
+    def test_codex_hooks_do_not_flip_claude_md_variant(self, tmp_path):
+        """AGENTS.md keys on Codex hooks; CLAUDE.md keys on Claude hooks. With
+        only Codex hooks installed, CLAUDE.md must stay on the default variant."""
+        m._write_codex_hooks(str(tmp_path))          # only Codex hooks
+        m._write_workspace_config(str(tmp_path), 8765)
+        claude = (tmp_path / "CLAUDE.md").read_text()
+        assert 'call `vectr_recall(query="<your task>")`' in claude
+
+    def test_claude_hooks_do_not_flip_agents_md_variant(self, tmp_path):
+        """Symmetric: only Claude hooks installed → AGENTS.md stays default."""
+        (tmp_path / "AGENTS.md").write_text("# My agents\n")
+        m._write_claude_hooks(str(tmp_path))         # only Claude hooks
+        m._write_workspace_config(str(tmp_path), 8765)
+        agents = (tmp_path / "AGENTS.md").read_text()
+        assert 'call `vectr_recall(query="<your task>")`' in agents
+
+
+class TestCodexInitIntegration:
+    def test_init_hooks_writes_both_hosts_and_hook_aware_agents_md(self, tmp_path):
+        """`vectr init --hooks` writes both .claude and .codex hooks and — in
+        the same run — an AGENTS.md whose guidance is Codex-hook-aware."""
+        (tmp_path / "AGENTS.md").write_text("# My agents\n")
+        with patch("main.InstanceRegistry") as MockReg:
+            MockReg.return_value.get.return_value = None
+            m.cmd_init(_make_args(path=str(tmp_path), hooks=True))
+        assert (tmp_path / ".claude" / "settings.json").exists()
+        assert (tmp_path / ".codex" / "hooks.json").exists()
+        assert m._codex_hooks_installed(str(tmp_path)) is True
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert "your working-memory notes are auto-injected automatically" in content
+
+    def test_reset_config_removes_codex_files(self, tmp_path):
+        with patch("main.InstanceRegistry") as MockReg:
+            MockReg.return_value.get.return_value = None
+            m.cmd_init(_make_args(path=str(tmp_path), hooks=True))
+        assert (tmp_path / ".codex" / "hooks.json").exists()
+        assert (tmp_path / ".codex" / "config.toml").exists()
+        m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
+        assert not (tmp_path / ".codex" / "hooks.json").exists()
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
+    def test_disclosure_lists_codex_config(self):
+        assert ".codex/config.toml" in m._IDE_CONFIG_WRITES_DISCLOSURE
+        assert "8 files" in m._IDE_CONFIG_WRITES_DISCLOSURE

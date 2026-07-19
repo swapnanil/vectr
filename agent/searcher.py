@@ -13,6 +13,7 @@ from rank_bm25 import BM25Plus
 from agent.chunk_quality import (
     normalized_content,
     quality_score,
+    quality_demotion_reason,
     is_trivial_chunk,
     extract_class_from_content,
     is_type_definition_chunk,
@@ -36,6 +37,8 @@ from agent.config import (
     NOTFOUND_FLOOR_STOPWORDS as _NOTFOUND_FLOOR_STOPWORDS,
     NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS as _NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS,
     NOTFOUND_FLOOR_MIN_TOP_RELEVANCE as _NOTFOUND_FLOOR_MIN_TOP_RELEVANCE,
+    RESULT_FLOOR_ENABLED as _RESULT_FLOOR_ENABLED,
+    RESULT_FLOOR_MIN_RELEVANCE as _RESULT_FLOOR_MIN_RELEVANCE,
 )
 from agent.indexer import CodeIndexer
 
@@ -262,6 +265,15 @@ class SearchResult:
     # `score`'s own dense_sim fallback — for any SearchResult built outside
     # search() (e.g. test fixtures).
     score_source: str = "dense"
+    # UPG-SCORE-ORDER-EXPLAIN: a short human label for the dominant quality
+    # demotion applied to this chunk by quality_score (e.g. "navigational chunk",
+    # "test-file demotion"), or "" when the chunk carries no demotion. Set by
+    # _apply_quality_and_dedup where the full classification context (query
+    # tokens, file fan-in) is available. Presentational only — never affects
+    # ordering; the render uses it to explain why a higher-relevance result was
+    # placed below rank 1. Defaults to "" for SearchResults built outside
+    # search() (e.g. test fixtures).
+    quality_reason: str = ""
 
 
 class SearchResultList(list):
@@ -661,6 +673,12 @@ class CodeSearcher:
         # is already dense_sim (score_source="dense" for all, set above) —
         # already uniform, nothing to backfill.
 
+        # UPG-RESULT-FLOOR: drop sub-floor cross-encoder-relevance neighbours the
+        # ANN returned for an absent-topic query instead of shipping a full block
+        # of ~0.000 filler (keeps the composite-top so the banner below leads a
+        # best guess). See _apply_result_floor.
+        final = self._apply_result_floor(final)
+
         # UPG-SCORE-DISPLAY-FLAT: a second, independent low-confidence signal —
         # the top result's own displayed relevance is below an absolute floor.
         # This is gated on ce_relevance specifically (NOT the dense_sim
@@ -700,6 +718,35 @@ class CodeSearcher:
             )
         )
         return final, elapsed_ms
+
+    @staticmethod
+    def _apply_result_floor(final: "SearchResultList") -> "SearchResultList":
+        """UPG-RESULT-FLOOR: an absent-topic query still draws n_results nearest
+        neighbours from the ANN index; after cross-encoder rerank these render at
+        ~0.000 relevance — real neighbours, but noise the caller pays tokens to
+        read. Drop results whose absolute cross-encoder relevance is below the
+        configured floor rather than shipping a full block of them.
+
+        Gated on ce_relevance ONLY (a bi-encoder cosine cannot separate
+        absent-topic from on-topic — UPG-NOTFOUND-FLOOR-2 — so a dense-only
+        result, ce_relevance is None, is never floored). The composite-top result
+        (final[0]) is always kept so the low-confidence banner always leads with a
+        best guess (which UPG-FLOOR-SLIM-PAYLOAD then renders in pointer mode).
+        Ordering is untouched — this only trims."""
+        if not (_RESULT_FLOOR_ENABLED and len(final) > 1):
+            return final
+        top = final[0]
+        kept = [
+            r for r in final
+            if r is top
+            or r.ce_relevance is None
+            or r.ce_relevance >= _RESULT_FLOOR_MIN_RELEVANCE
+        ]
+        if len(kept) == len(final):
+            return final
+        trimmed = SearchResultList(kept)
+        trimmed.low_confidence = final.low_confidence
+        return trimmed
 
     def _apply_quality_and_dedup(
         self,
@@ -767,6 +814,13 @@ class CodeSearcher:
                 r.content, r.file_path, r.language, r.node_type,
                 query_tokens=query_tokens, file_fan_in=fan_in,
                 symbol_name=r.symbol_name,
+            )
+            # UPG-SCORE-ORDER-EXPLAIN: stash the dominant demotion reason (from
+            # the same classification just used for q) so the render can explain
+            # a large displayed-relevance-vs-order divergence. Presentational.
+            r.quality_reason = quality_demotion_reason(
+                r.content, r.file_path, r.language, r.node_type,
+                symbol_name=r.symbol_name, query_tokens=query_tokens, file_fan_in=fan_in,
             )
             # Class context recovered from the indexer-injected "# class: X" prefix
             # in the chunk content (chunk_quality.extract_class_from_content) — the

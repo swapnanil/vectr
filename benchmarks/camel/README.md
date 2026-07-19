@@ -25,7 +25,7 @@ RoutePolicy mechanics. Tasks require reading source to implement correctly.
 Each task runs in two phases in **separate Claude sessions** — simulating the real-world pattern of
 a developer researching a codebase in one session, then implementing in another.
 
-**Phase 1 — Research**: Claude explores the codebase and records findings.
+**Phase 1 — Research**: the agent explores the codebase and records findings.
 - Vanilla: uses Read + Bash freely, writes a prose RESEARCH SUMMARY at the end.
 - Vectr: uses vectr tools (exploration + memory), stores structured notes with `vectr_remember`,
   seals with `vectr_snapshot`.

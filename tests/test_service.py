@@ -341,6 +341,65 @@ class TestStatusDeterminismUPG82:
 
 
 # ---------------------------------------------------------------------------
+# UPG-STATUS-STALE-GRAPH: /v1/status must not let a persisted stale-toolchain
+# graph pass as current, and must flag a rebuild that is overwriting it.
+# ---------------------------------------------------------------------------
+
+class TestStatusStaleGraphUPGSTATUSSTALEGRAPH:
+    def _make_service(self, tmp_path, monkeypatch):
+        from agent import indexer as idx_module
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        make_py(tmp_path, "a.py", "def foo(): pass\n")
+
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            svc = VectrService(workspace_root=str(tmp_path))
+        return svc
+
+    def test_status_carries_stale_signals(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        data = svc.status()
+        assert "symbol_graph_stale" in data
+        assert "symbol_graph_rebuild_in_progress" in data
+
+    def test_clean_build_is_not_stale(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        data = svc.status()
+        assert data["symbol_graph_complete"] is True
+        assert data["symbol_graph_stale"] is False
+        assert data["symbol_graph_rebuild_in_progress"] is False
+
+    def test_toolchain_change_is_flagged_stale(self, tmp_path, monkeypatch) -> None:
+        """A persisted graph built under a different embed model reads as stale —
+        the exact schema-8/arctic-vs-schema-10/granite case in the bug report."""
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        assert svc.status()["symbol_graph_stale"] is False
+        # Simulate a toolchain change: the persisted meta's fingerprint now
+        # mismatches the running toolchain, so the served graph is stale until
+        # the next rebuild overwrites it.
+        svc._embed_model = "some-other-model-v2"
+        assert svc.status()["symbol_graph_stale"] is True
+
+    def test_rebuild_window_is_flagged(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        assert svc.status()["symbol_graph_rebuild_in_progress"] is False
+        # While _build_symbol_graph() runs it holds this event set; status must
+        # tell the caller the count/complete it sees is the OLD graph.
+        svc._symbol_graph_rebuilding.set()
+        try:
+            assert svc.status()["symbol_graph_rebuild_in_progress"] is True
+        finally:
+            svc._symbol_graph_rebuilding.clear()
+
+
+# ---------------------------------------------------------------------------
 # UPG-CLI-DAEMON-VERSION-SKEW: /v1/status carries the daemon's version stamp
 # ---------------------------------------------------------------------------
 
@@ -474,6 +533,53 @@ class TestSuggestInstructionStyle:
             )
             style = svc.suggest_instruction_style()
         assert style == "memory-first"
+
+    def test_known_framework_match_is_case_insensitive(self, tmp_path, monkeypatch) -> None:
+        # UPG-KNOWN-FRAMEWORKS-CONFIG: the set is config-declared and matched
+        # case-insensitively, so a fingerprint reporting "Django" (or any case)
+        # still resolves to the well-known-framework path.
+        from agent.strategy_selector import RetrievalStrategy, CodebaseFingerprint
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        svc.remember("some note content", tags=["test"])
+
+        svc._strategy = RetrievalStrategy(0.70, 0.30, False, "model", "rationale")
+        with patch("agent.strategy_selector.fingerprint") as mock_fp:
+            mock_fp.return_value = CodebaseFingerprint(
+                total_files=2000,
+                language_dist={"python": 2000},
+                dominant_language="python",
+                is_monorepo=False,
+                size_class="large",
+                detected_frameworks=["Django"],  # mixed case, still a known framework
+                complexity_class="complex",
+            )
+            style = svc.suggest_instruction_style()
+        # Known framework ⇒ not treated as large-unfamiliar ⇒ memory-first (notes exist),
+        # never "directed".
+        assert style == "memory-first"
+
+    def test_unknown_framework_large_codebase_returns_directed(self, tmp_path, monkeypatch) -> None:
+        # A framework absent from the config-declared set is not "well-known":
+        # a large codebase using it is directed, proving the config gate is live.
+        from agent.strategy_selector import RetrievalStrategy, CodebaseFingerprint
+        svc = self._make_service(tmp_path, monkeypatch)
+        svc.index(str(tmp_path))
+        svc.remember("some note content", tags=["test"])
+
+        svc._strategy = RetrievalStrategy(0.75, 0.25, False, "model", "rationale")
+        with patch("agent.strategy_selector.fingerprint") as mock_fp:
+            mock_fp.return_value = CodebaseFingerprint(
+                total_files=2000,
+                language_dist={"python": 2000},
+                dominant_language="python",
+                is_monorepo=False,
+                size_class="large",
+                detected_frameworks=["obscure-inhouse-framework"],
+                complexity_class="complex",
+            )
+            style = svc.suggest_instruction_style()
+        assert style == "directed"
 
     def test_count_notes_returns_integer(self, tmp_path, monkeypatch) -> None:
         svc = self._make_service(tmp_path, monkeypatch)

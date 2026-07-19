@@ -1,4 +1,4 @@
-"""FastAPI application entry point. Port: 8765."""
+"""FastAPI application entry point. Default port: agent.config.DEFAULT_PORT."""
 from __future__ import annotations
 
 import hmac
@@ -33,7 +33,8 @@ async def lifespan(application: FastAPI):
     # startup loudly, never silently fall back to cwd-based detection — a bad
     # harness env would otherwise index the wrong tree with no visible error.
     validate_workspace_env(workspace)
-    port = int(os.getenv("VECTR_PORT", "8765"))
+    from agent.config import DEFAULT_PORT
+    port = int(os.getenv("VECTR_PORT", str(DEFAULT_PORT)))
     extra_roots = _json.loads(os.getenv("VECTR_EXTRA_ROOTS", "[]"))
     memory_only = os.getenv("VECTR_MEMORY_ONLY", "") == "1"
     search_only = os.getenv("VECTR_SEARCH_ONLY", "") == "1"

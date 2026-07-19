@@ -284,6 +284,31 @@ def run_case(case: dict, base: str) -> tuple[bool | None, list[str]]:
         )
         all_pass = all_pass and ok
 
+    # --- top_k_contains_any_of ---
+    # UPG-HARNESS-TOPK-ANY-OF-EVALUATOR: an F56-shaped case passes when the top-k
+    # contains AT LEAST ONE of several acceptable answers (a query with more than
+    # one defensible canonical result). Each candidate is a {file?, symbol?} spec
+    # evaluated with the same top_k_contains semantics; the assertion passes if
+    # any candidate is present.
+    if "top_k_contains_any_of" in expect:
+        spec = expect["top_k_contains_any_of"]
+        candidates = spec.get("candidates", [])
+        ok = any(
+            top_k_contains(
+                results, k=spec["k"], file=cand.get("file"), symbol=cand.get("symbol"),
+            )
+            for cand in candidates
+        )
+        ran_any_assertion = True
+        mark = _PASS if ok else _FAIL
+        cand_desc = " | ".join(
+            f"{c.get('file')!r}:{c.get('symbol')!r}" for c in candidates
+        )
+        messages.append(
+            f"  [{mark}] top_k_contains_any_of(k={spec['k']}, candidates=[{cand_desc}])"
+        )
+        all_pass = all_pass and ok
+
     # --- top_k_absent ---
     if "top_k_absent" in expect:
         spec = expect["top_k_absent"]

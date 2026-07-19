@@ -33,6 +33,9 @@ from integrations.mcp_server import (
     _reset_calls_since_save,
 )
 
+from app.service import VectrService
+from tests._seam import assert_seam_call
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -128,6 +131,17 @@ class TestToolDescriptions:
     def test_search_says_not_when_name_known(self) -> None:
         desc = self._desc("vectr_search")
         assert "vectr_locate" in desc, "vectr_search must tell model to use vectr_locate when name is known"
+
+    def test_n_results_description_guides_low_values(self) -> None:
+        # UPG-NRESULTS-GUIDANCE (B5): the n_results param description must steer
+        # the caller to 1-2 for specific lookups (token economy) and widen only
+        # for exploratory queries — description text only, no query-side logic.
+        tool = next(t for t in MCP_TOOLS if t["name"] == "vectr_search")
+        n_desc = tool["inputSchema"]["properties"]["n_results"]["description"].lower()
+        assert "1" in n_desc and "2" in n_desc, "n_results guidance must name the low-value case (1-2)"
+        assert "exploratory" in n_desc or "survey" in n_desc, (
+            "n_results guidance must say when to widen (exploratory/survey queries)"
+        )
 
     def test_search_says_not_when_trace_needed(self) -> None:
         desc = self._desc("vectr_search")
@@ -1067,6 +1081,53 @@ class TestVectrRemember:
         svc.get_note.assert_called_once_with(42)
         assert "scope=workspace" in result["content"][0]["text"]
 
+    def test_remember_confirmation_echoes_title_and_first_line(self) -> None:
+        """UPG-ADOPTION-V2-MINOR (b): the confirmation echoes the stored title +
+        first content line so the caller can verify the write without a recall
+        round-trip."""
+        from agent.working_context_store import WorkingNote
+        svc = _mock_service()
+        svc.get_note.return_value = WorkingNote(
+            note_id=42, workspace="/repo",
+            content="lock_workspace() at resolver.rs:214 acquires a PID lock\nmore detail",
+            tags=[], priority="medium", created_at=0.0, last_accessed=0.0,
+            kind="finding", scope="workspace", title="workspace lock",
+        )
+        result = handle_tools_call("vectr_remember", {"content": "x"}, svc)
+        text = result["content"][0]["text"]
+        assert "title: workspace lock" in text
+        assert "first line: lock_workspace() at resolver.rs:214 acquires a PID lock" in text
+
+    def test_remember_confirmation_echo_bounds_long_first_line(self) -> None:
+        from agent.working_context_store import WorkingNote
+        svc = _mock_service()
+        svc.get_note.return_value = WorkingNote(
+            note_id=42, workspace="/repo", content="A" * 500, tags=[],
+            priority="medium", created_at=0.0, last_accessed=0.0,
+            kind="finding", scope="workspace", title="",
+        )
+        result = handle_tools_call("vectr_remember", {"content": "x"}, svc)
+        text = result["content"][0]["text"]
+        assert "first line: " + "A" * 117 + "..." in text
+
+    def test_remember_confirmation_echo_dedupes_when_title_equals_first_line(self) -> None:
+        """When no explicit title is given, the title is derived from the first
+        content line, so title == first_line; the echo must not print the same
+        text twice as `title: X · first line: X`."""
+        from agent.working_context_store import WorkingNote
+        svc = _mock_service()
+        svc.get_note.return_value = WorkingNote(
+            note_id=42, workspace="/repo",
+            content="Factory.createProducer at Factory.java:2 returns a Producer\nmore",
+            tags=[], priority="medium", created_at=0.0, last_accessed=0.0,
+            kind="finding", scope="workspace",
+            title="Factory.createProducer at Factory.java:2 returns a Producer",
+        )
+        result = handle_tools_call("vectr_remember", {"content": "x"}, svc)
+        text = result["content"][0]["text"]
+        assert "title: Factory.createProducer at Factory.java:2 returns a Producer" in text
+        assert "first line:" not in text
+
     def test_remember_with_tags_and_priority(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {
@@ -1396,57 +1457,52 @@ class TestRememberNudge:
 # ---------------------------------------------------------------------------
 
 class TestVectrRecall:
+    # UPG-TEST-SIGNATURE-DRIFT: these seam assertions name only the kwarg(s) the
+    # test is actually about and validate them against the real
+    # VectrService.recall signature (tests/_seam.assert_seam_call), rather than
+    # re-listing every default kwarg. A new param added to the recall seam no
+    # longer reddens all six at once; a renamed/removed param still fails
+    # precisely, naming the stale key.
     def test_recall_calls_service(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_recall", {}, svc)
-        svc.recall.assert_called_once_with(
-            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
+        assert svc.recall.call_count == 1
+        assert_seam_call(
+            svc.recall, VectrService.recall,
+            query=None, limit=10, boot=False, detail="index", sort_by="relevance", note_id=None,
         )
 
     def test_recall_with_filters(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"query": "auth", "tags": ["wip"], "priority": "high", "limit": 5}, svc)
-        svc.recall.assert_called_once_with(
-            query="auth", tags=["wip"], priority="high", limit=5, kind=None, boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
+        assert_seam_call(
+            svc.recall, VectrService.recall,
+            query="auth", tags=["wip"], priority="high", limit=5,
         )
 
     def test_recall_passes_kind_filter(self) -> None:
         """UPG-9.3: a kind filter reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"kind": "directive"}, svc)
-        svc.recall.assert_called_once_with(
-            query=None, tags=None, priority=None, limit=10, kind="directive", boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
-        )
+        assert_seam_call(svc.recall, VectrService.recall, kind="directive")
 
     def test_recall_passes_detail_full(self) -> None:
         """UPG-RECALL-HIERARCHY: detail='full' reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"detail": "full"}, svc)
-        svc.recall.assert_called_once_with(
-            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="full", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
-        )
+        assert_seam_call(svc.recall, VectrService.recall, detail="full")
 
     def test_recall_passes_note_id(self) -> None:
         """UPG-RECALL-HIERARCHY: note_id expand path reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"note_id": 7}, svc)
-        svc.recall.assert_called_once_with(
-            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=7, session_id=None,
-        )
+        assert_seam_call(svc.recall, VectrService.recall, note_id=7)
 
     def test_recall_passes_sort_by_and_max_age(self) -> None:
         """UPG-RECALL-HIERARCHY: sort_by and max_age_days reach the service."""
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"sort_by": "recency", "max_age_days": 7.0}, svc)
-        svc.recall.assert_called_once_with(
-            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="index", sort_by="recency", max_age_days=7.0, note_id=None, session_id=None,
-        )
+        assert_seam_call(svc.recall, VectrService.recall, sort_by="recency", max_age_days=7.0)
 
     def test_recall_returns_notes_text(self) -> None:
         svc = _mock_service()
@@ -1720,6 +1776,75 @@ class TestFormatSearchResults:
         assert "auth.py" in text
         assert "login" in text
         assert "0.880" in text
+
+    def test_score_source_rendered(self) -> None:
+        # UPG-MCP-SCORE-SOURCE-RENDER: the displayed score's scale (reranker vs
+        # dense) must be visible so the caller can read the number correctly.
+        from agent.searcher import SearchResult
+        rr = SearchResult(
+            file_path="auth.py", lines="10-20", symbol_name="login",
+            language="python", score=0.88, content="def login(): pass",
+            score_source="reranker",
+        )
+        text = _format_search_results([rr], "login", 7, 50)
+        assert "0.880 (reranker)" in text
+
+        dn = SearchResult(
+            file_path="auth.py", lines="10-20", symbol_name="login",
+            language="python", score=0.42, content="def login(): pass",
+            score_source="dense",
+        )
+        text = _format_search_results([dn], "login", 7, 50)
+        assert "0.420 (dense)" in text
+
+    def test_score_order_explain_annotates_large_divergence(self) -> None:
+        # UPG-SCORE-ORDER-EXPLAIN (B6): a below-rank-1 result whose displayed
+        # relevance clears the divergence margin (>=1.5x rank 1) is annotated
+        # with the demoting prior's reason.
+        from agent.searcher import SearchResult, SearchResultList
+        rank1 = SearchResult(file_path="core.py", lines="1-40", symbol_name="select",
+                             language="python", score=0.30, content="def select(): ...",
+                             score_source="reranker")
+        rank2 = SearchResult(file_path="lib.rs", lines="1-10", symbol_name="Layout",
+                             language="rust", score=0.90, content="pub use foo::Bar;",
+                             score_source="reranker", quality_reason="navigational chunk")
+        text = _format_search_results(SearchResultList([rank1, rank2]), "q", 5, 100)
+        assert "(ranked lower: navigational chunk)" in text
+
+    def test_score_order_explain_skips_mild_inversion(self) -> None:
+        from agent.searcher import SearchResult, SearchResultList
+        rank1 = SearchResult(file_path="core.py", lines="1-40", symbol_name="a",
+                             language="python", score=0.80, content="x",
+                             score_source="reranker")
+        rank2 = SearchResult(file_path="b.py", lines="1-10", symbol_name="b",
+                             language="python", score=0.90, content="y",
+                             score_source="reranker", quality_reason="test-file demotion")
+        text = _format_search_results(SearchResultList([rank1, rank2]), "q", 5, 100)
+        assert "ranked lower" not in text  # 0.90 < 1.5*0.80
+
+    def test_low_confidence_renders_pointer_mode(self) -> None:
+        # UPG-LOWCONF-OUTPUT-SLIM / UPG-FLOOR-SLIM-PAYLOAD (B4): the low-confidence
+        # result set ships pointers, not full bodies.
+        from agent.searcher import SearchResult, SearchResultList
+        r = SearchResult(file_path="auth.py", lines="10-20", symbol_name="login",
+                         language="python", score=0.01, content="SECRET_BODY_TOKEN in here",
+                         score_source="reranker")
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        assert "auth.py" in text          # pointer present
+        assert "login" in text
+        assert "SECRET_BODY_TOKEN" not in text   # body omitted
+        assert "pointers only" in text
+
+    def test_full_mode_still_shows_body(self) -> None:
+        from agent.searcher import SearchResult, SearchResultList
+        r = SearchResult(file_path="auth.py", lines="10-20", symbol_name="login",
+                         language="python", score=0.88, content="BODY_TOKEN here",
+                         score_source="reranker")
+        rl = SearchResultList([r])  # low_confidence defaults False
+        text = _format_search_results(rl, "login", 5, 100)
+        assert "BODY_TOKEN" in text
 
     def test_result_count_shown(self) -> None:
         from agent.searcher import SearchResult
