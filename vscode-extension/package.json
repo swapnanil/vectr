@@ -3,19 +3,43 @@
   "displayName": "Vectr — Semantic Code Search + Working Memory",
   "icon": "icon.png",
   "description": "Zero-config local codebase indexer. Auto-starts when you open a workspace and serves semantic code search and persistent working memory to any MCP-compatible AI code editor.",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "publisher": "swapnanilsaha",
   "license": "MIT",
   "homepage": "https://swapnanilsaha.com/tools/vectr",
-  "bugs": { "url": "https://github.com/swapnanil/vectr/issues" },
-  "repository": { "type": "git", "url": "https://github.com/swapnanil/vectr.git" },
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["AI", "Other", "Machine Learning"],
-  "keywords": [
-    "ai", "codebase", "search", "mcp", "rag", "semantic", "embeddings",
-    "claude", "cursor", "copilot", "context", "indexer", "local"
+  "bugs": {
+    "url": "https://github.com/swapnanil/vectr/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/swapnanil/vectr.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Other",
+    "Machine Learning"
   ],
-  "activationEvents": ["onStartupFinished"],
+  "keywords": [
+    "ai",
+    "codebase",
+    "search",
+    "mcp",
+    "rag",
+    "semantic",
+    "embeddings",
+    "claude",
+    "cursor",
+    "copilot",
+    "context",
+    "indexer",
+    "local"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [

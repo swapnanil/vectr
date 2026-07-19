@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.4.0 — 2026-07-20
+
+Search-correctness fixes, leaner MCP responses, and acceptance-corpus hardening.
+
+### Search correctness
+- Zig: struct- and enum-scoped `const`/`var` declarations are now extracted as
+  symbol-graph members (previously silently dropped; function-locals stay
+  excluded). Symbol schema v12.
+- Qualified `Class.method` locate now resolves modifier-prefixed class
+  declarations (`public class`, `export default class`, `export abstract
+  class`, …) across Java/TypeScript/JavaScript.
+- The low-confidence "may be unrelated" banner no longer false-fires on
+  high-confidence paraphrase matches: new config key
+  `ranking.notfound_floor.ce_override_min_relevance` (default 0.70) suppresses
+  the zero-vocabulary trigger when the top result's cross-encoder relevance is
+  confidently high. Genuine misses still banner; set above 1.0 to disable.
+- `class_importance` no longer counts barrel re-export lines (`export { X }
+  from`, `export * from`) as usage, removing a display-order inversion in
+  re-export-heavy JS/TS codebases.
+- `ranking.class_importance.lambda` default raised 0.25 → 0.35 after a
+  full-corpus regression audit (recovers two known ranking regressions with
+  zero regressions elsewhere).
+
+### Leaner MCP responses
+- All MCP text output renders workspace-relative paths, with the absolute
+  root printed once per response header. `vectr_fetch` accepts both relative
+  (new canonical) and absolute (back-compat) chunk ids. The absolute-path
+  prefix previously accounted for ~9% of a default search response, ~26% of
+  pointer mode, and ~42% of `vectr_evict_hint`.
+- `vectr_evict_hint` renders each chunk once, in id-ready form
+  `relpath:start-end  (symbol)`, with a single fetch template — ~70% of the
+  old payload was duplicate serialization.
+- Low-confidence pointer mode is now actually slim: the duplicated
+  symbol-graph section is deduped against the pointer list and the re-fetch
+  footer is dropped.
+- `vectr_remember`'s tool schema trimmed (−317 tokens on tools/list) with no
+  parameter, enum, default, or required-field changes.
+
+### Hygiene
+- Acceptance corpus cases now carry an `embed_model_stamp`; the harness
+  reports stamp/embedder mismatches (informational) so a future embedder swap
+  cannot silently stale-ify verified labels.
+- README version/tool counts refreshed (15 MCP tools); generated-guidance
+  template now lists `vectr_promote` and documents `vectr_remember`'s
+  `triggers` argument.
+- `scripts/release.sh`: one-command tag + push + GitHub release.
+
 ## 1.3.0 — 2026-07-18
 
 Per-memory trigger engine, stdio MCP transport, instant memory readiness.

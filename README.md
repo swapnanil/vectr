@@ -11,10 +11,10 @@
 [![CI](https://github.com/swapnanil/vectr/actions/workflows/ci.yml/badge.svg)](https://github.com/swapnanil/vectr/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version 1.3.0](https://img.shields.io/badge/version-1.3.0-blue.svg)](CHANGELOG.md)
+[![Version 1.4.0](https://img.shields.io/badge/version-1.4.0-blue.svg)](CHANGELOG.md)
 [![MCP: 15 tools](https://img.shields.io/badge/MCP-15%20tools-blue.svg)](#15-mcp-tools)
 
-Version 1.3.0 · Last updated 2026-07-18 · [CHANGELOG](CHANGELOG.md)
+Version 1.4.0 · Last updated 2026-07-20 · [CHANGELOG](CHANGELOG.md)
 
 Vectr gives AI code editors two things they lack: **semantic codebase search** and **persistent working memory** — both served over MCP with zero configuration.
 
