@@ -439,6 +439,33 @@ ranking:
     # terminal reader instead of the editor's LLM.
     banner_cli: "No strong match for this query — the results below scored low on absolute relevance and may be unrelated. Try an exact symbol name, rephrase the query, or fall back to grep/reading the file directly."
 
+  score_order_explain:
+    # UPG-SCORE-ORDER-EXPLAIN: displayed absolute relevance may disagree with
+    # display order (the composite quality/importance priors decide order, not
+    # the displayed score — see quality_priors above). When a result below rank 1
+    # shows a MUCH higher relevance than rank 1, annotate WHY it ranks lower from
+    # the prior that demoted it, so the divergence is readable rather than
+    # silently misleading. Additive, deterministic, chunk-property-based — never
+    # reorders anything (no query-side logic).
+    enabled: true
+    # Only annotate a large divergence: a below-rank-1 result whose displayed
+    # relevance is at least this multiple of rank 1's. Mild inversions (a
+    # near-tie) are left unlabeled to avoid noise.
+    margin_ratio: 1.5
+
+  result_floor:
+    # UPG-RESULT-FLOOR: an absent-topic query still draws n_results nearest
+    # neighbours out of the ANN index; after cross-encoder rerank these render at
+    # ~0.000 relevance — real neighbours, but noise the caller pays tokens to
+    # read. Drop results whose absolute cross-encoder relevance is below this
+    # floor rather than returning a full n_results block of them. Gated on
+    # ce_relevance ONLY (never the dense-cosine fallback — a bi-encoder cosine
+    # cannot separate absent-topic from on-topic, UPG-NOTFOUND-FLOOR-2), and the
+    # single strongest result is always kept so the low-confidence banner always
+    # leads a best guess. Deterministic, score-property-based; no query-side logic.
+    enabled: true
+    min_relevance: 0.02
+
 strategy:
   # Fallback hybrid-search weights used before the first index-time codebase
   # fingerprint has run (agent.strategy_selector.select_strategy). Once a

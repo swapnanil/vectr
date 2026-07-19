@@ -1781,6 +1781,55 @@ class TestFormatSearchResults:
         text = _format_search_results([dn], "login", 7, 50)
         assert "0.420 (dense)" in text
 
+    def test_score_order_explain_annotates_large_divergence(self) -> None:
+        # UPG-SCORE-ORDER-EXPLAIN (B6): a below-rank-1 result whose displayed
+        # relevance clears the divergence margin (>=1.5x rank 1) is annotated
+        # with the demoting prior's reason.
+        from agent.searcher import SearchResult, SearchResultList
+        rank1 = SearchResult(file_path="core.py", lines="1-40", symbol_name="select",
+                             language="python", score=0.30, content="def select(): ...",
+                             score_source="reranker")
+        rank2 = SearchResult(file_path="lib.rs", lines="1-10", symbol_name="Layout",
+                             language="rust", score=0.90, content="pub use foo::Bar;",
+                             score_source="reranker", quality_reason="navigational chunk")
+        text = _format_search_results(SearchResultList([rank1, rank2]), "q", 5, 100)
+        assert "(ranked lower: navigational chunk)" in text
+
+    def test_score_order_explain_skips_mild_inversion(self) -> None:
+        from agent.searcher import SearchResult, SearchResultList
+        rank1 = SearchResult(file_path="core.py", lines="1-40", symbol_name="a",
+                             language="python", score=0.80, content="x",
+                             score_source="reranker")
+        rank2 = SearchResult(file_path="b.py", lines="1-10", symbol_name="b",
+                             language="python", score=0.90, content="y",
+                             score_source="reranker", quality_reason="test-file demotion")
+        text = _format_search_results(SearchResultList([rank1, rank2]), "q", 5, 100)
+        assert "ranked lower" not in text  # 0.90 < 1.5*0.80
+
+    def test_low_confidence_renders_pointer_mode(self) -> None:
+        # UPG-LOWCONF-OUTPUT-SLIM / UPG-FLOOR-SLIM-PAYLOAD (B4): the low-confidence
+        # result set ships pointers, not full bodies.
+        from agent.searcher import SearchResult, SearchResultList
+        r = SearchResult(file_path="auth.py", lines="10-20", symbol_name="login",
+                         language="python", score=0.01, content="SECRET_BODY_TOKEN in here",
+                         score_source="reranker")
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        assert "auth.py" in text          # pointer present
+        assert "login" in text
+        assert "SECRET_BODY_TOKEN" not in text   # body omitted
+        assert "pointers only" in text
+
+    def test_full_mode_still_shows_body(self) -> None:
+        from agent.searcher import SearchResult, SearchResultList
+        r = SearchResult(file_path="auth.py", lines="10-20", symbol_name="login",
+                         language="python", score=0.88, content="BODY_TOKEN here",
+                         score_source="reranker")
+        rl = SearchResultList([r])  # low_confidence defaults False
+        text = _format_search_results(rl, "login", 5, 100)
+        assert "BODY_TOKEN" in text
+
     def test_result_count_shown(self) -> None:
         from agent.searcher import SearchResult
         results = [

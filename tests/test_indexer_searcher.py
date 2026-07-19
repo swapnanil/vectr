@@ -623,6 +623,57 @@ class TestCodeSearcher:
 
 
 # ---------------------------------------------------------------------------
+# UPG-RESULT-FLOOR: sub-floor cross-encoder-relevance results are trimmed
+# ---------------------------------------------------------------------------
+
+class TestResultFloor:
+    def _rl(self, *scores_ce):
+        from agent.searcher import SearchResult, SearchResultList
+        rl = SearchResultList([
+            SearchResult(file_path=f"f{i}.py", lines="1-5", symbol_name=f"s{i}",
+                         language="python", score=(ce if ce is not None else 0.5),
+                         content="x", ce_relevance=ce, score_source="reranker")
+            for i, ce in enumerate(scores_ce)
+        ])
+        return rl
+
+    def test_trims_subfloor_ce_results(self) -> None:
+        from agent.searcher import CodeSearcher
+        rl = self._rl(0.80, 0.001, 0.0005)  # ranks 2-3 are ~0.000 filler
+        out = CodeSearcher._apply_result_floor(rl)
+        assert len(out) == 1
+        assert out[0].symbol_name == "s0"
+
+    def test_always_keeps_composite_top_even_if_subfloor(self) -> None:
+        from agent.searcher import CodeSearcher
+        rl = self._rl(0.001, 0.0005, 0.0)  # every result is filler
+        out = CodeSearcher._apply_result_floor(rl)
+        assert len(out) == 1  # the top is kept as the best guess
+        assert out[0].symbol_name == "s0"
+
+    def test_no_trim_when_all_above_floor(self) -> None:
+        from agent.searcher import CodeSearcher
+        rl = self._rl(0.80, 0.60, 0.40)
+        out = CodeSearcher._apply_result_floor(rl)
+        assert len(out) == 3
+
+    def test_never_trims_dense_only_results(self) -> None:
+        # ce_relevance is None (no reranker ran) → never floored, since a
+        # bi-encoder cosine cannot separate absent-topic from on-topic.
+        from agent.searcher import CodeSearcher
+        rl = self._rl(None, None, None)
+        out = CodeSearcher._apply_result_floor(rl)
+        assert len(out) == 3
+
+    def test_preserves_low_confidence_flag(self) -> None:
+        from agent.searcher import CodeSearcher
+        rl = self._rl(0.80, 0.001)
+        rl.low_confidence = True
+        out = CodeSearcher._apply_result_floor(rl)
+        assert out.low_confidence is True
+
+
+# ---------------------------------------------------------------------------
 # Zig language support
 # ---------------------------------------------------------------------------
 

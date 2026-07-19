@@ -681,6 +681,18 @@ NOTFOUND_FLOOR_MIN_TOP_RELEVANCE: float = float(_nff_cfg["min_top_relevance"])
 NOTFOUND_FLOOR_BANNER: str = str(_nff_cfg["banner"])
 NOTFOUND_FLOOR_BANNER_CLI: str = str(_nff_cfg["banner_cli"])
 
+# UPG-SCORE-ORDER-EXPLAIN: annotate a large displayed-relevance-vs-order
+# divergence with the demoting prior's reason (render-only, additive).
+_soe_cfg: dict[str, Any] = _cfg["ranking"]["score_order_explain"]
+SCORE_ORDER_EXPLAIN_ENABLED: bool = bool(_soe_cfg["enabled"])
+SCORE_ORDER_EXPLAIN_MARGIN_RATIO: float = float(_soe_cfg["margin_ratio"])
+
+# UPG-RESULT-FLOOR: drop sub-floor cross-encoder-relevance results instead of
+# returning a full n_results block of ~0.000 ANN neighbours (keeps >=1).
+_rf_cfg: dict[str, Any] = _cfg["ranking"]["result_floor"]
+RESULT_FLOOR_ENABLED: bool = bool(_rf_cfg["enabled"])
+RESULT_FLOOR_MIN_RELEVANCE: float = float(_rf_cfg["min_relevance"])
+
 # ---------------------------------------------------------------------------
 # Search — additive identifier-shape symbol-graph hint (UPG-QUERYTYPE-REROUTE)
 # ---------------------------------------------------------------------------

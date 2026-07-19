@@ -8,6 +8,8 @@ from agent.config import (
     SYMBOL_NAME_PARAM_ALIASES,
     MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
     MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
+    SCORE_ORDER_EXPLAIN_ENABLED,
+    SCORE_ORDER_EXPLAIN_MARGIN_RATIO,
 )
 from integrations.mcp_server._schemas import (
     _EXPLORATION_TOOLS,
@@ -895,7 +897,22 @@ def _storage_cap_truncation_warning(
 def _format_search_results(results, query: str, query_ms: int, chunks_searched: int) -> str:
     if not results:
         return f"No results found for: {query}"
-    lines = [f"Found {len(results)} results for '{query}' ({query_ms}ms, {chunks_searched} chunks searched)\n"]
+    # UPG-LOWCONF-OUTPUT-SLIM / UPG-FLOOR-SLIM-PAYLOAD: when the low-confidence
+    # banner fires, the caller is told these results may be unrelated — so ship
+    # pointer-mode entries (file:line + symbol + score, no bodies) instead of
+    # serializing ~2k tokens of chunks the caller was just told not to trust.
+    # The chunk id is shown so a promising pointer can be expanded with
+    # vectr_fetch. Deterministic, response-shaping only.
+    low_conf = getattr(results, "low_confidence", False)
+    # UPG-SCORE-ORDER-EXPLAIN: displayed relevance may disagree with display
+    # order (the composite priors decide order, not the score). When a result
+    # below rank 1 shows a MUCH higher relevance, annotate the demoting prior so
+    # the divergence is readable. Additive; ordering untouched.
+    top_score = results[0].score if results else 0.0
+    header = f"Found {len(results)} results for '{query}' ({query_ms}ms, {chunks_searched} chunks searched)"
+    if low_conf:
+        header += " — low confidence: pointers only (vectr_fetch(ids=[...]) to expand)"
+    lines = [header + "\n"]
     for i, r in enumerate(results, 1):
         lines.append(f"{'─' * 60}")
         dup = f"  (+{r.dup_count} more identical)" if getattr(r, "dup_count", 0) else ""
@@ -907,7 +924,18 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         # score_source uniform within a response.
         src = getattr(r, "score_source", "") or ""
         src_label = f" ({src})" if src else ""
-        lines.append(f"[{i}] {chunk_id}  score {r.score:.3f}{src_label}{dup}")
+        # UPG-SCORE-ORDER-EXPLAIN: a below-rank-1 result whose relevance clears
+        # the divergence margin gets a one-phrase reason for its lower rank.
+        rank_note = ""
+        if (
+            SCORE_ORDER_EXPLAIN_ENABLED
+            and i > 1
+            and top_score > 0
+            and r.score >= SCORE_ORDER_EXPLAIN_MARGIN_RATIO * top_score
+        ):
+            reason = getattr(r, "quality_reason", "") or "composite ranking prior"
+            rank_note = f"  (ranked lower: {reason})"
+        lines.append(f"[{i}] {chunk_id}  score {r.score:.3f}{src_label}{dup}{rank_note}")
         if r.symbol_name:
             # UPG-11.4: include symbol line-range so the caller knows the full
             # definition's extent even when the displayed content is capped —
@@ -918,6 +946,11 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
             if s_start and s_end:
                 sym_range = f"  [lines {s_start}–{s_end}]"
             lines.append(f"    symbol: {r.symbol_name}{sym_range}  language: {r.language}")
+        if low_conf:
+            # Pointer mode: no body. A caller that finds a promising pointer
+            # expands it deterministically with vectr_fetch.
+            lines.append("")
+            continue
         lines.append("")
         content_lines = r.content.splitlines()
         # UPG-11.4-b: emit an expand hint when the stored content was truncated

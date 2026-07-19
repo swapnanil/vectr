@@ -693,6 +693,57 @@ def quality_score(
     return score
 
 
+def quality_demotion_reason(
+    content: str,
+    file_path: str = "",
+    language: str = "",
+    node_type: str = "",
+    *,
+    symbol_name: str = "",
+    query_tokens: frozenset[str] = frozenset(),
+    file_fan_in: int = 0,
+) -> str:
+    """Short human label for the dominant quality demotion quality_score applies
+    to this chunk, or "" when the chunk carries no demotion (UPG-SCORE-ORDER-
+    EXPLAIN). Mirrors quality_score's precedence so a render-time explanation of
+    why a higher-relevance chunk ranks below rank 1 names the prior that actually
+    demoted it. Presentational only — never affects ranking.
+
+    Reports the single strongest demotion. The exclusive branches (vectr-config,
+    navigational, trivial, heading-only) short-circuit exactly as in
+    quality_score; the multiplicative demotions (generated/test/doc/private/
+    short) are reported in descending severity so the label names the biggest
+    single contributor."""
+    if file_path and is_vectr_config_file(file_path):
+        return "vectr config file"
+    if node_type == NAVIGATIONAL_NODE_TYPE or is_navigational_chunk(content, language):
+        if query_tokens:
+            for name in navigational_declared_identifiers(content):
+                parts = _identifier_parts(name)
+                if parts and parts <= query_tokens:
+                    return ""  # rescued: not demoted for this query
+        return "navigational chunk"
+    if is_trivial_chunk(content, language) and not is_definition_chunk(symbol_name, node_type):
+        return "trivial stub"
+    if language == "markdown" and is_markdown_heading_only(content):
+        return "heading-only markdown"
+    if file_path and is_generated_file(file_path):
+        return "generated file"
+    is_test_chunk = (
+        (file_path and is_test_file(file_path))
+        or is_content_structural_test_chunk(content, language)
+    )
+    if is_test_chunk and file_fan_in < _TEST_FRAMEWORK_FAN_IN_THRESHOLD:
+        return "test-file demotion"
+    if is_doc_language(language):
+        return "docs/prose"
+    if is_private_symbol_name(symbol_name):
+        return "private helper"
+    if len(_meaningful_lines(content)) <= 2:
+        return "short/thin chunk"
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Class-context extraction (UPG-F4)
 # ---------------------------------------------------------------------------

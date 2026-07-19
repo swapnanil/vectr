@@ -19,6 +19,7 @@ from agent.chunk_quality import (
     is_definition_chunk,
     is_private_symbol_name,
     quality_score,
+    quality_demotion_reason,
     normalized_content,
     leading_docstring_key,
     extract_class_from_content,
@@ -34,6 +35,49 @@ from agent.config import (
     QUALITY_SHORT_PENALTY,
     TEST_FRAMEWORK_FAN_IN_THRESHOLD,
 )
+
+
+class TestQualityDemotionReason:
+    """UPG-SCORE-ORDER-EXPLAIN: quality_demotion_reason names the dominant
+    demotion quality_score applied, or "" when the chunk is undemoted."""
+
+    def test_navigational_reason(self) -> None:
+        content = "from django.dispatch import Signal\n\nrequest_started = Signal()\nrequest_finished = Signal()"
+        assert quality_demotion_reason(content, "signals.py", "python") == "navigational chunk"
+
+    def test_navigational_rescue_is_no_reason(self) -> None:
+        # A manifest whose declared identifier the query names is rescued (not
+        # demoted for that query) → no reason (mirrors quality_score's rescue).
+        content = "from django.dispatch import Signal\n\nrequest_started = Signal()\nrequest_finished = Signal()"
+        assert quality_demotion_reason(
+            content, "signals.py", "python",
+            query_tokens=frozenset({"request", "started"}),
+        ) == ""
+
+    def test_test_file_reason(self) -> None:
+        r = quality_demotion_reason("def test_x():\n    assert foo()\n    assert bar()",
+                                    "tests/test_x.py", "python", symbol_name="test_x", file_fan_in=0)
+        assert r == "test-file demotion"
+
+    def test_test_framework_high_fanin_not_demoted(self) -> None:
+        r = quality_demotion_reason("def override_settings():\n    return X()\n    pass",
+                                    "framework/test/utils.py", "python",
+                                    symbol_name="override_settings", file_fan_in=300)
+        assert r != "test-file demotion"
+
+    def test_generated_reason(self) -> None:
+        assert quality_demotion_reason("x = 1\ny = 2\nz = 3", "schema_pb2.py", "python") == "generated file"
+
+    def test_private_helper_reason(self) -> None:
+        r = quality_demotion_reason("def _helper():\n    do_a()\n    do_b()\n    return q",
+                                    "app.py", "python", symbol_name="_helper")
+        assert r == "private helper"
+
+    def test_undemoted_chunk_has_no_reason(self) -> None:
+        r = quality_demotion_reason(
+            "def public_api():\n    step_one()\n    step_two()\n    return result",
+            "app.py", "python", symbol_name="public_api")
+        assert r == ""
 
 
 class TestIsTrivialChunk:
