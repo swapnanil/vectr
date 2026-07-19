@@ -1841,14 +1841,18 @@ class VectrService:
         # UPG-7.2: the explicit vectr_evict_hint tool / /v1/evict pass
         # on_demand=True for an eviction-focused informational framing distinct
         # from the gated auto-footer's remember alarm.
-        return self._advisor_for(session_id).eviction_hint(on_demand=on_demand)
+        return self._advisor_for(session_id).eviction_hint(
+            on_demand=on_demand, workspace_root=self._workspace_root,
+        )
 
     def auto_eviction_hint(self, session_id: str | None = None) -> str:
         """Gated per-response footer (UPG-7.1) — fires only on fresh context-
         pressure escalation, not every response. Used by the MCP search/locate/
         trace auto-append; the explicit vectr_evict_hint tool uses eviction_hint().
         Reads the calling session's advisor (UPG-EVICT-SESSION-SCOPE)."""
-        return self._advisor_for(session_id).auto_eviction_hint()
+        return self._advisor_for(session_id).auto_eviction_hint(
+            workspace_root=self._workspace_root,
+        )
 
     def should_evict(self, session_id: str | None = None) -> bool:
         return self._advisor_for(session_id).should_evict()

@@ -376,32 +376,52 @@ class TestEvictionHintRecency:
             adv.record(f"{name}.py", "1-10", f"fn_{name}", f"content_{name}" * 5,
                        chunk_id=f"{name}.py:1-10")
 
-    def test_refetch_keys_are_most_recently_retrieved_first(self) -> None:
-        """UPG-EVICT-REFETCH-KEYS-STALE: the Re-fetch keys list must follow the
-        same most-recently-retrieved-first ordering the file list states — the
-        old prefix slice pinned the session's oldest chunk ids there forever,
-        emitting a byte-identical id list in every escalated banner no matter
-        what was retrieved since."""
+    def test_refetch_ids_are_most_recently_retrieved_first(self) -> None:
+        """UPG-EVICT-HINT-SINGLE-SERIALIZE + UPG-EVICT-REFETCH-KEYS-STALE: the
+        id-ready chunk lines (which now double as the re-fetch ids — no separate
+        "Re-fetch keys" block) follow most-recently-retrieved-first order; the
+        oldest two overflow past the cap. The old prefix slice pinned the
+        session's oldest ids forever."""
         adv = EvictionAdvisor()
         self._record_files_with_ids(adv)
         hint = adv.eviction_hint()
-        keys_line = next(l for l in hint.splitlines() if "Re-fetch keys" in l)
-        # Newest five (G..C), newest first; oldest two (A, B) not listed.
-        expected = ['"G.py:1-10"', '"F.py:1-10"', '"E.py:1-10"', '"D.py:1-10"', '"C.py:1-10"']
-        positions = [keys_line.index(k) for k in expected]
-        assert positions == sorted(positions), keys_line
-        assert "A.py:1-10" not in keys_line
-        assert "B.py:1-10" not in keys_line
+        # Newest five (G..C), newest first; oldest two (A, B) overflow.
+        expected = ["G.py:1-10", "F.py:1-10", "E.py:1-10", "D.py:1-10", "C.py:1-10"]
+        positions = [hint.index(k) for k in expected]
+        assert positions == sorted(positions), hint
+        assert "A.py:1-10" not in hint
+        assert "B.py:1-10" not in hint
+        # a single generic fetch template, not a re-listed id block
+        assert "vectr_fetch(ids=[...])" in hint
+        assert "Re-fetch keys:" not in hint
 
-    def test_refetch_keys_refresh_when_an_old_chunk_is_re_retrieved(self) -> None:
-        """A dedup re-touch of the session's oldest chunk must bring its id
-        back into the Re-fetch keys list, at the front."""
+    def test_refetch_ids_refresh_when_an_old_chunk_is_re_retrieved(self) -> None:
+        """A dedup re-touch of the session's oldest chunk must bring its id-ready
+        line back to the front."""
         adv = EvictionAdvisor()
         self._record_files_with_ids(adv)
         adv.record("A.py", "1-10", "fn_A", "content_A" * 5, chunk_id="A.py:1-10")
-        keys_line = next(l for l in adv.eviction_hint().splitlines() if "Re-fetch keys" in l)
-        assert '"A.py:1-10"' in keys_line
-        assert keys_line.index('"A.py:1-10"') < keys_line.index('"G.py:1-10"')
+        hint = adv.eviction_hint()
+        assert "A.py:1-10" in hint
+        assert hint.index("A.py:1-10") < hint.index("G.py:1-10")
+
+    def test_single_serialize_relative_no_double_path(self) -> None:
+        """UPG-EVICT-HINT-SINGLE-SERIALIZE + UPG-RELATIVE-PATH-RENDER: each chunk
+        is serialized exactly ONCE, workspace-relative, with the absolute root
+        printed once in a header — not the old file-list + re-fetch-keys pair
+        that named every path twice with the absolute prefix on both."""
+        adv = EvictionAdvisor()
+        root = "/ws/root"
+        adv.record(f"{root}/pkg/mod.py", "10-20", "do_thing", "body" * 20,
+                   chunk_id=f"{root}/pkg/mod.py:10-20")
+        hint = adv.eviction_hint(workspace_root=root)
+        # absolute root printed once; relative id line present
+        assert f"workspace: {root}" in hint
+        assert "pkg/mod.py:10-20  (do_thing)" in hint
+        # the relative id path appears exactly once (single serialization), and
+        # the absolute prefix never rides the id line
+        assert hint.count("pkg/mod.py:10-20") == 1
+        assert f"{root}/pkg/mod.py:10-20" not in hint
 
 
 # ---------------------------------------------------------------------------

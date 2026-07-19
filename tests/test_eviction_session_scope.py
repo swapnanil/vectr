@@ -215,23 +215,33 @@ class TestDispatchTwoSessionIsolation:
 
 class TestHintListsExactIds:
     def test_hint_lists_the_exact_chunk_id_recorded(self):
+        """UPG-EVICT-HINT-SINGLE-SERIALIZE: the recorded chunk's id-ready line is
+        its exact id `f.py:1-5` (rendered once, doubling as the vectr_fetch id),
+        with a single fetch template — not a separately-serialized quoted-id block."""
         from agent.eviction_advisor import EvictionAdvisor
 
         adv = EvictionAdvisor()
         adv.record("f.py", "1-5", "fn", "x" * 40, chunk_id="f.py:1-5")
         hint = adv.eviction_hint()
         assert "vectr_fetch(ids=" in hint
-        assert '"f.py:1-5"' in hint
+        assert "f.py:1-5" in hint
 
     def test_hint_omits_fetch_line_when_no_chunk_has_an_id(self):
+        """A locate-sourced chunk (no known-good id) still lists its location but
+        the fetch template is suppressed — a symbol range is not a guaranteed
+        chunk boundary, so re-fetch is never advertised for it."""
         from agent.eviction_advisor import EvictionAdvisor
 
         adv = EvictionAdvisor()
         adv.record("f.py", "1-5", "fn", "x" * 40)  # no chunk_id — e.g. locate-sourced
         hint = adv.eviction_hint()
-        assert "Re-fetch keys:" not in hint
+        # the gated fetch template (distinct from the header's generic mention)
+        # is suppressed when nothing has a known-good id
+        assert "Re-fetch any of the ids above" not in hint
 
-    def test_hint_caps_fetch_ids_at_configured_max(self):
+    def test_hint_caps_id_lines_at_configured_max(self):
+        """The id-ready chunk lines are bounded by the configured per-file cap —
+        the oldest overflow past it, so the hint's own token cost stays bounded."""
         from agent.config import EVICTION_HINT_MAX_IDS
         from agent.eviction_advisor import EvictionAdvisor
 
@@ -239,12 +249,10 @@ class TestHintListsExactIds:
         for i in range(EVICTION_HINT_MAX_IDS + 5):
             adv.record(f"f{i}.py", "1-5", "fn", "x" * 40, chunk_id=f"f{i}.py:1-5")
         hint = adv.eviction_hint()
-        assert hint.count(".py:1-5") <= EVICTION_HINT_MAX_IDS + (
-            EVICTION_HINT_MAX_IDS + 5  # the by-file listing above also names each file
-        )
-        # Precisely: the re-fetch key line itself lists at most the configured cap.
-        fetch_line = next(l for l in hint.splitlines() if l.startswith("Re-fetch keys"))
-        assert fetch_line.count('"') // 2 == EVICTION_HINT_MAX_IDS
+        # one id-ready line per shown file, capped at the configured max
+        id_lines = [l for l in hint.splitlines() if l.strip().endswith("(fn)")]
+        assert len(id_lines) == EVICTION_HINT_MAX_IDS
+        assert "and 5 more file(s)" in hint
 
     def test_vectr_search_response_hint_references_a_real_fetch_id(self, tmp_path, monkeypatch):
         from integrations.mcp_server import handle_tools_call
