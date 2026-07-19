@@ -100,8 +100,8 @@ _SESSION_START_GUIDANCE_HOOKS_AWARE = load_template("session_start_guidance_hook
 # deferred-tool mechanics (ToolSearch, the mcp__vectr__ tool-name prefix) that
 # do not exist in other AI IDEs. It is spliced in only for the CLAUDE.md
 # render; every other IDE config file (AGENTS.md, .cursorrules, GEMINI.md,
-# CODEX.md, copilot-instructions.md, .cursor/rules) gets the shared body with
-# the placeholder removed.
+# copilot-instructions.md, .cursor/rules) gets the shared body with the
+# placeholder removed.
 _TOOL_LOADING_GUIDANCE_CLAUDE = load_template("tool_loading_guidance_claude.txt")
 _TOOL_LOADING_GUIDANCE_CLAUDE_SEARCH_ONLY = load_template("tool_loading_guidance_claude_search_only.txt")
 
@@ -150,11 +150,14 @@ _VECTR_BLOCK_RE = re.compile(
 )
 
 # IDE config files that get the vectr block appended (not created from scratch).
+# CODEX.md is deliberately absent: Codex CLI reads ONLY AGENTS.md (plus global
+# ~/.codex/AGENTS.md) and has never read a CODEX.md file, so appending a vectr
+# block into a user's pre-existing CODEX.md was dead copy no tool consumes
+# (UPG-CODEX-STALE-AGENTS-FILE). Codex adoption rides the AGENTS.md entry above.
 _IDE_CONFIG_APPEND_ONLY: tuple[str, ...] = (
     "AGENTS.md",
     ".cursorrules",
     "GEMINI.md",
-    "CODEX.md",
 )
 
 
@@ -2366,7 +2369,8 @@ _IDE_CONFIG_WRITES_DISCLOSURE = (
     "excludes) — 7 files. Files for other editors/agents (AGENTS.md, "
     ".cursorrules, GEMINI.md, CODEX.md, .github/copilot-instructions.md) "
     "only get a vectr guidance block appended if the file already exists — "
-    "they are never created from scratch. Pass --no-ide-config to skip all "
+    "they are never created from scratch (Codex reads AGENTS.md, so no separate "
+    "CODEX.md is written). Pass --no-ide-config to skip all "
     "of this; the choice persists at .vectr/ide_config for future start/"
     "restart/init calls on this workspace (delete that file to re-enable). "
     "See `vectr init --reset-config` to remove already-written blocks."

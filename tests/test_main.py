@@ -2329,14 +2329,16 @@ class TestMergeSafeInit:
         m._write_workspace_config(str(tmp_path), 8765)
         assert not (tmp_path / "GEMINI.md").exists()
 
-    # --- CODEX.md ---
+    # --- CODEX.md (UPG-CODEX-STALE-AGENTS-FILE: Codex reads only AGENTS.md) ---
 
-    def test_codex_md_appended_if_exists(self, tmp_path):
+    def test_codex_md_not_touched_even_if_exists(self, tmp_path):
+        # A pre-existing CODEX.md must NOT get a vectr block — Codex CLI never
+        # reads that file, so the append was dead copy no tool consumes.
         (tmp_path / "CODEX.md").write_text("Codex rules\n")
         m._write_workspace_config(str(tmp_path), 8765)
         content = (tmp_path / "CODEX.md").read_text()
-        assert "Codex rules" in content
-        assert "<!-- vectr-start -->" in content
+        assert content == "Codex rules\n"
+        assert "<!-- vectr-start -->" not in content
 
     def test_codex_md_not_created_if_missing(self, tmp_path):
         m._write_workspace_config(str(tmp_path), 8765)
