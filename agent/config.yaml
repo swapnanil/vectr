@@ -178,14 +178,24 @@ ranking:
     # (is_type_definition_chunk / is_module_level_function_chunk gated
     # lookup).
     #
-    # lambda=0 disables it (behaviour identical to pre-ARCH-2). Conservative
-    # default 0.25, matching ARCH-1b's default: reorders same-leaf look-alikes
-    # toward the canonical symbol without overriding clear relevance — the
+    # lambda=0 disables it (behaviour identical to pre-ARCH-2). The
     # multiplicative gate bounds the factor to [1, 1+lambda] regardless of how
     # skewed the importance map is, so a modest lambda here cannot let even a
     # maximum-importance rival overturn a clear cross-encoder relevance lead.
     # Live F22/F23 tuning is tracked in tasks.md ARCH-2.
-    lambda: 0.25
+    #
+    # UPG-ACCEPT-REGRESSION-RECOVERY (wave2 2026-07-19): raised 0.25 -> 0.35.
+    # The 2026-07-06 granite embedder swap changed dense-pool composition and
+    # regressed six previously-passing acceptance cases; for the two whose
+    # canonical class carries high class_importance but sat just outside the
+    # cut (F14 QuerySet.exclude rank 4->3, F30 QuerySet.filter rank 7->5), the
+    # 0.25 gate was too weak to reorder past low-class-importance look-alikes
+    # (admin FieldListFilter / constraint classes). 0.35 recovers exactly those
+    # two with ZERO regressions across the full 65-case acceptance corpus
+    # (verified 33 pass / 24 fail vs the 31/26 baseline, only F14/F30 flipped).
+    # The remaining four regressions are rerank-position/pool-composition losses
+    # unreachable by class_importance at any lambda (see state/blocked.md).
+    lambda: 0.35
 
   purpose_rank:
     # ARCH-4b: carries the ARCH-4 dual-vector purpose similarity (STEP-0/ARCH-4

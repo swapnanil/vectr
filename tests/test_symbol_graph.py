@@ -3385,10 +3385,13 @@ class TestClassImportanceARCH2:
         assert scores["Widget"] - scores["Gadget"] == pytest.approx(
             expected_log_gap, abs=1e-9,
         )
-        # At the configured class_importance lambda (0.25), this is a >=5%
+        # At the configured class_importance lambda, this is a >=5%
         # multiplicative factor gap between the two candidates — a ranking-
-        # relevant separation, not a near-tie.
-        assert (scores["Widget"] - scores["Gadget"]) * 0.25 > 0.05, (
+        # relevant separation, not a near-tie. Read the configured lambda
+        # rather than a literal so this stays correct across tuning
+        # (UPG-ACCEPT-REGRESSION-RECOVERY raised it 0.25 -> 0.35).
+        from agent.config import CLASS_IMPORTANCE_PRIOR_LAMBDA as _lam_class
+        assert (scores["Widget"] - scores["Gadget"]) * _lam_class > 0.05, (
             f"decisive raw-count gap collapsed to a ranking-irrelevant "
             f"absolute difference after normalization: {scores}"
         )
@@ -3396,7 +3399,7 @@ class TestClassImportanceARCH2:
         # would be over an order of magnitude smaller — the concrete reason
         # log-scale was chosen (arithmetic only; not exercising product code).
         linear_gap = (widget_count / max_count) - (gadget_count / max_count)
-        assert linear_gap * 0.25 < 0.01, (
+        assert linear_gap * _lam_class < 0.01, (
             "expected the linear scale's absolute gap to be ranking-"
             "irrelevant (<1% factor difference) here — if this no longer "
             "holds, revisit the log-scale choice"
