@@ -532,16 +532,47 @@ class SymbolGraph:
         toolchain fingerprint + completeness are stamped so an upgrade is
         detectable and a partial build is never mistaken for a trustworthy one.
         """
-        total_symbols = 0
         failed: list[str] = []
         for fp in file_paths:
             try:
-                total_symbols += self.index_file(workspace, fp)
+                self.index_file(workspace, fp)
             except Exception:
                 failed.append(fp)
                 logger.warning("Symbol extraction failed for %s — skipped", fp, exc_info=True)
 
+        # UPG-SYMBOLCOUNT-STALE: index_file() only DELETE+INSERTs rows for files
+        # in *this* build's file_paths; rows from files a prior build indexed that
+        # have since dropped out of the workspace (deleted / renamed / newly
+        # excluded) linger in the warm-cache DB. Left in place they leak stale
+        # symbols into locate/trace and inflate the status COUNT(*) above the
+        # build's own symbol count (the observed +210 status-vs-build gap on a
+        # warm-cache restart). Prune them so the persisted graph reflects exactly
+        # the current file set, then derive the reported symbol count from the
+        # SAME COUNT(*) query /v1/status serves — one source of truth, not two.
+        current_files = set(file_paths)
         with self._conn() as conn:
+            persisted_files = [
+                r[0] for r in conn.execute(
+                    "SELECT DISTINCT file_path FROM symbols WHERE workspace = ?", (workspace,)
+                ).fetchall()
+            ]
+            for stale_fp in persisted_files:
+                if stale_fp not in current_files:
+                    conn.execute(
+                        "DELETE FROM symbols WHERE workspace = ? AND file_path = ?",
+                        (workspace, stale_fp),
+                    )
+                    conn.execute(
+                        "DELETE FROM edges WHERE workspace = ? AND from_file = ?",
+                        (workspace, stale_fp),
+                    )
+                    conn.execute(
+                        "DELETE FROM symbol_importance WHERE workspace = ? AND file_path = ?",
+                        (workspace, stale_fp),
+                    )
+            total_symbols = conn.execute(
+                "SELECT COUNT(*) FROM symbols WHERE workspace = ?", (workspace,)
+            ).fetchone()[0]
             edge_count = conn.execute(
                 "SELECT COUNT(*) FROM edges WHERE workspace = ?", (workspace,)
             ).fetchone()[0]

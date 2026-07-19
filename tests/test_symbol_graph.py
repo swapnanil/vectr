@@ -2105,6 +2105,46 @@ class TestBuildResilienceUPG87:
         assert meta["failed"] == "1"
 
 
+class TestSymbolCountReconciliationUPGSYMBOLCOUNTSTALE:
+    """UPG-SYMBOLCOUNT-STALE: build_for_workspace's reported symbol count and the
+    status-time symbol_count() query must be the same number. Previously the build
+    reported the sum of freshly-inserted symbols while symbol_count() did a whole-
+    table COUNT(*); rows orphaned by a file that dropped out between builds lingered
+    and pushed status above build (observed +210 on a warm-cache restart)."""
+
+    def test_build_count_matches_symbol_count_query(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        a = make_py(tmp_path, "a.py", "def a_fn():\n    return 1")
+        b = make_py(tmp_path, "b.py", "def b_fn():\n    return 2")
+        g = SymbolGraph(ws)
+        stats = g.build_for_workspace(ws, [a, b])
+        assert stats["symbols"] == g.symbol_count(ws)
+
+    def test_orphaned_rows_pruned_on_rebuild_without_file(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        a = make_py(tmp_path, "a.py", "def a_fn():\n    return 1")
+        b = make_py(tmp_path, "b.py", "def b_fn():\n    return 2")
+        g = SymbolGraph(ws)
+        g.build_for_workspace(ws, [a, b])
+        assert g.locate(ws, "b_fn")
+
+        # b.py drops out of the file set (e.g. deleted / excluded); a rebuild that
+        # no longer lists it must leave no trace of its symbols behind.
+        stats = g.build_for_workspace(ws, [a])
+        assert not g.locate(ws, "b_fn")           # orphan symbol gone
+        assert g.locate(ws, "a_fn")               # surviving file intact
+        assert stats["symbols"] == g.symbol_count(ws)  # build == status, no drift
+
+    def test_meta_symbols_matches_status_query(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        a = make_py(tmp_path, "a.py", "def a_fn():\n    return 1")
+        b = make_py(tmp_path, "b.py", "def b_fn():\n    return 2")
+        g = SymbolGraph(ws)
+        g.build_for_workspace(ws, [a, b])
+        g.build_for_workspace(ws, [a])  # b orphaned then pruned
+        assert int(g.graph_meta(ws)["symbols"]) == g.symbol_count(ws)
+
+
 class TestGraphVersionStampUPG87:
     """A persisted graph records the toolchain that built it so an upgrade
     (new parser / changed schema / different model) is detectable and the graph
