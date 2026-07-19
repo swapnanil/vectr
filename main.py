@@ -42,6 +42,7 @@ from agent.config import (
     CLI_START_READY_POLL_TIMEOUT_S,
     CLI_START_READY_PROBE_TIMEOUT_S,
     CLI_VERSION_SKEW_PROBE_TIMEOUT_S,
+    DEFAULT_PORT,
 )
 from agent.instance_registry import (
     InstanceRegistry,
@@ -1310,7 +1311,7 @@ def cmd_proxy(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     workspace = str(Path(getattr(args, "path", ".") or ".").resolve())
-    daemon_port = getattr(args, "daemon_port", None) or _get_port_for_workspace(workspace, 8765)
+    daemon_port = getattr(args, "daemon_port", None) or _get_port_for_workspace(workspace, DEFAULT_PORT)
     api_key = os.getenv("VECTR_API_KEY") or None
 
     provider = None
@@ -2148,7 +2149,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     entry = InstanceRegistry().get(workspace_hash(workspace))
     port_is_provisional = entry is None
-    port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", "8765"))
+    port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", str(DEFAULT_PORT)))
     if port_is_provisional:
         # UPG-CLI-SMALL-UX: no instance is registered for this workspace yet,
         # so this port is a guess (VECTR_PORT or the 8765 fallback), not a
@@ -2424,7 +2425,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
 
     _default_path = os.getenv("VECTR_WORKSPACE", ".")
-    _default_port = int(os.getenv("VECTR_PORT", "8765"))
+    _default_port = int(os.getenv("VECTR_PORT", str(DEFAULT_PORT)))
 
     p_start = sub.add_parser(
         "start",

@@ -370,3 +370,25 @@ class TestConfigLoaderYamlBoolHardening:
         assert "on" in cfg.NOTFOUND_FLOOR_STOPWORDS
         assert True not in cfg.NOTFOUND_FLOOR_STOPWORDS
         assert all(isinstance(w, str) for w in cfg.NOTFOUND_FLOOR_STOPWORDS)
+
+
+class TestServerDefaultPort:
+    """T26: the default bind port/host have a single source of truth in
+    agent.config, de-hardcoding the sprinkled 8765 literal."""
+
+    def test_default_port_constant_exists(self) -> None:
+        assert cfg.DEFAULT_PORT == 8765
+        assert cfg.DEFAULT_HOST == "127.0.0.1"
+
+    def test_service_default_port_uses_constant(self) -> None:
+        import inspect
+        from app.service import VectrService
+        sig = inspect.signature(VectrService.__init__)
+        assert sig.parameters["port"].default == cfg.DEFAULT_PORT
+
+    def test_vscode_bridge_defaults_use_constant(self) -> None:
+        import inspect
+        from integrations import vscode_bridge
+        for fn in (vscode_bridge.configure_cursor, vscode_bridge.configure_claude_code,
+                   vscode_bridge.configure_all):
+            assert inspect.signature(fn).parameters["port"].default == cfg.DEFAULT_PORT

@@ -710,6 +710,15 @@ SEARCH_IDENTIFIER_HINT_NEARMISS_MAX: int = int(_id_hint_cfg["nearmiss_max"])
 SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN: int = int(_id_hint_cfg["nearmiss_min_prefix_len"])
 
 # ---------------------------------------------------------------------------
+# Server bind defaults (T26): one source of truth for the default port/host,
+# de-hardcoding the 8765 / 127.0.0.1 literals formerly repeated across
+# main.py / app / api / integrations. The VECTR_PORT env var still overrides.
+# ---------------------------------------------------------------------------
+
+DEFAULT_PORT: int = 8765
+DEFAULT_HOST: str = "127.0.0.1"
+
+# ---------------------------------------------------------------------------
 # Embedding — default local model (UPG-EMBEDDER-SWAP-GRANITE)
 # ---------------------------------------------------------------------------
 

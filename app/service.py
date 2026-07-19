@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent.config import (
+    DEFAULT_PORT,
     STRATEGY_DEFAULT_BM25_WEIGHT,
     STRATEGY_DEFAULT_SEMANTIC_WEIGHT,
     STRATEGY_KNOWN_FRAMEWORKS,
@@ -112,7 +113,7 @@ class VectrService:
     def __init__(
         self,
         workspace_root: str,
-        port: int = 8765,
+        port: int = DEFAULT_PORT,
         extra_roots: list[str] | None = None,
         memory_only: bool = False,
         search_only: bool = False,
