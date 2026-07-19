@@ -880,7 +880,14 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         lines.append(f"{'─' * 60}")
         dup = f"  (+{r.dup_count} more identical)" if getattr(r, "dup_count", 0) else ""
         chunk_id = getattr(r, "chunk_id", "") or f"{r.file_path}:{r.lines}"
-        lines.append(f"[{i}] {chunk_id}  score {r.score:.3f}{dup}")
+        # UPG-MCP-SCORE-SOURCE-RENDER: surface which scale the displayed score is
+        # on — "reranker" (cross-encoder sigmoid) vs "dense" (bi-encoder cosine).
+        # REST already carries score_source; the caller LLM reads this score to
+        # plan, so the render must say what it means. The mixed-scale fix keeps
+        # score_source uniform within a response.
+        src = getattr(r, "score_source", "") or ""
+        src_label = f" ({src})" if src else ""
+        lines.append(f"[{i}] {chunk_id}  score {r.score:.3f}{src_label}{dup}")
         if r.symbol_name:
             # UPG-11.4: include symbol line-range so the caller knows the full
             # definition's extent even when the displayed content is capped —

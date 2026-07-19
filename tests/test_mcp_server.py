@@ -1721,6 +1721,26 @@ class TestFormatSearchResults:
         assert "login" in text
         assert "0.880" in text
 
+    def test_score_source_rendered(self) -> None:
+        # UPG-MCP-SCORE-SOURCE-RENDER: the displayed score's scale (reranker vs
+        # dense) must be visible so the caller can read the number correctly.
+        from agent.searcher import SearchResult
+        rr = SearchResult(
+            file_path="auth.py", lines="10-20", symbol_name="login",
+            language="python", score=0.88, content="def login(): pass",
+            score_source="reranker",
+        )
+        text = _format_search_results([rr], "login", 7, 50)
+        assert "0.880 (reranker)" in text
+
+        dn = SearchResult(
+            file_path="auth.py", lines="10-20", symbol_name="login",
+            language="python", score=0.42, content="def login(): pass",
+            score_source="dense",
+        )
+        text = _format_search_results([dn], "login", 7, 50)
+        assert "0.420 (dense)" in text
+
     def test_result_count_shown(self) -> None:
         from agent.searcher import SearchResult
         results = [
