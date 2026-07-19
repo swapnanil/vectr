@@ -5,19 +5,19 @@ Vectr POC — two-phase benchmark: Research → Implementation across separate s
 Architecture:
   Phase 1 (Research) — one shared session covering all tasks:
     Vanilla  → claude -p <combined_research_prompt>
-               Claude explores, writes a prose RESEARCH SUMMARY in the answer
-               Summary is gone when the session ends.
+               The agent explores and returns a prose research summary in its
+               answer; the summary does not persist past the session.
     Vectr    → claude -p <combined_research_prompt + vectr suffix>
-               Claude explores, calls vectr_remember() throughout, ends with
-               vectr_snapshot("research-complete")
+               The agent explores, calls vectr_remember() throughout, and ends
+               with vectr_snapshot("research-complete").
 
   Phase 2 (Implementation, fresh session per task):
-    Vanilla  → claude -p <impl_task> (no prior context; must re-discover)
+    Vanilla  → claude -p <impl_task> (no prior context; rediscovers from scratch)
     Vectr    → claude -p <impl_task prefixed with "call vectr_recall() first">
-               Claude recalls structured notes, jumps straight to implementation
+               The agent recalls structured notes and proceeds to implementation.
 
 The core metric: Phase 2 token cost.
-  Vanilla Phase 2 must re-discover everything → high token cost × 5 tasks.
+  Vanilla Phase 2 rediscovers everything → high token cost × 5 tasks.
   Vectr Phase 2 recalls structured notes in ~200 tokens → low re-discovery cost × 5 tasks.
 
 Usage:
@@ -132,7 +132,7 @@ class PhaseResult:
     tool_call_count: int = 0
     # Raw per-turn token breakdown from claude usage.iterations — one dict per turn.
     # Keys: input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens.
-    # Saved so we can compute avg tokens-per-turn before vs after eviction.
+    # Saved to compute avg tokens-per-turn before vs after eviction.
     token_timeline: list[dict] = field(default_factory=list)
     # Number of Agent tool calls (sub-agents spawned) in the parent session.
     # When > 0: cost_usd includes sub-agent billing; input/output tokens are parent-session only.
@@ -603,7 +603,7 @@ def _run_claude_streaming(
                             full_input=full_input,
                             full_result=full_result,
                         ))
-                        # Real-time log so we can monitor mid-run
+                        # Real-time log for mid-run monitoring
                         short = tool_name.replace("mcp__vectr__", "vectr::")
                         logger.info(
                             "  turn=%d  %-28s  %s  (%.1fs, %d chars)",
