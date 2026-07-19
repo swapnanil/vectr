@@ -4471,6 +4471,77 @@ class TestNotFoundFloorTopRelevance:
 
 
 # ---------------------------------------------------------------------------
+# UPG-NOTFOUND-FLOOR-CE-OVERRIDE — high-confidence override on the zero-DF trigger
+#
+# A zero-document-frequency query token normally flags low_confidence, but an
+# everyday paraphrase of a symbol the corpus DOES contain can lack a corpus
+# vocabulary word while the cross-encoder still judges the top result decisively
+# relevant. When top ce_relevance >= ranking.notfound_floor.ce_override_min_
+# relevance, the zero-DF trigger is suppressed; the low_top_relevance sub-signal
+# is unaffected, so a genuine miss (weak top CE) is never suppressed. Uses the
+# same _StubReranker as TestNotFoundFloorTopRelevance for a deterministic CE.
+# ---------------------------------------------------------------------------
+
+class TestNotFoundFloorCEOverride:
+    def _indexed_searcher(self, indexer, tmp_path, content: str, name="module.py"):
+        path = make_py(tmp_path, name, content)
+        indexer.index_file(path)
+        from agent.searcher import CodeSearcher
+        s = CodeSearcher(indexer)
+        s.refresh_bm25()
+        return s
+
+    # Two chunks so the cross-encoder rerank pool has >1 candidate (rerank is
+    # skipped for a single-chunk pool). "reimburse"/"shopper" appear in neither,
+    # so they are zero-document-frequency content tokens.
+    _CORPUS = (
+        "def charge_card(customer, amount):\n"
+        "    return gateway.charge(customer, amount)\n\n"
+        "def refund_payment(customer, amount):\n"
+        "    return gateway.refund(customer, amount)\n"
+    )
+
+    def test_high_ce_suppresses_zero_df_banner(self, indexer, tmp_path) -> None:
+        """A confident cross-encoder judgment (>= ce_override_min_relevance)
+        suppresses the zero-DF banner — the false-positive the finding hit:
+        'reimburse'/'shopper' never appear in this tiny corpus (zero-DF), yet
+        the top result is decisively relevant, so the caller must NOT be told
+        to fall back to grep."""
+        s = self._indexed_searcher(indexer, tmp_path, self._CORPUS)
+        s._reranker = _StubReranker(0.95)  # confident, >= 0.70 override
+        results, _ = s.search("reimburse the shopper", n_results=5)
+        assert results
+        assert results[0].ce_relevance == pytest.approx(0.95)
+        assert results.low_confidence is False, (
+            "a zero-DF query token must not flag low_confidence when the "
+            "cross-encoder judged the top result >= ce_override_min_relevance"
+        )
+
+    def test_low_ce_still_flags_zero_df_banner(self, indexer, tmp_path) -> None:
+        """The identical zero-DF query with a WEAK top CE (a genuine miss) must
+        still flag low_confidence — proving the suppression is CE-gated, not a
+        blanket disable of the zero-DF check."""
+        s = self._indexed_searcher(indexer, tmp_path, self._CORPUS)
+        s._reranker = _StubReranker(0.20)  # below both override and floor
+        results, _ = s.search("reimburse the shopper", n_results=5)
+        assert results
+        assert results.low_confidence is True
+
+    def test_high_threshold_disables_override_exact_noop(self, indexer, tmp_path, monkeypatch) -> None:
+        """ce_override_min_relevance above 1.0 is an exact no-op: no ce_relevance
+        can meet it, so the zero-DF banner fires again even on a confident CE."""
+        import agent.searcher as searcher_module
+        monkeypatch.setattr(
+            searcher_module, "_NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE", 1.01
+        )
+        s = self._indexed_searcher(indexer, tmp_path, self._CORPUS)
+        s._reranker = _StubReranker(0.99)  # very confident, but override disabled
+        results, _ = s.search("reimburse the shopper", n_results=5)
+        assert results
+        assert results.low_confidence is True
+
+
+# ---------------------------------------------------------------------------
 # UPG-11.4 — Expand-to-symbol affordance (line range on results)
 # ---------------------------------------------------------------------------
 

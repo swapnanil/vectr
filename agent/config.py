@@ -318,6 +318,17 @@ NOTFOUND_FLOOR_MIN_TOP_RELEVANCE : float
     even if the zero-document-frequency check above doesn't trip. Never
     applied to the raw dense-cosine fallback score — see config.yaml for why.
 
+NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE : float
+    UPG-NOTFOUND-FLOOR-CE-OVERRIDE. High-confidence override on the
+    zero-document-frequency trigger: when the top result's cross-encoder
+    relevance (ce_relevance) is >= this value, the zero-DF trigger is
+    suppressed (an everyday paraphrase of a symbol the corpus contains can
+    lack a corpus vocabulary word yet still match decisively — 0.988
+    observed). A threshold comparison on an already-computed calibrated
+    score, never the raw dense-cosine fallback. The low_top_relevance
+    sub-signal is unaffected. Set above 1.0 to disable (no ce_relevance can
+    meet it) — an exact no-op restoring the pre-override OR behaviour.
+
 NOTFOUND_FLOOR_BANNER : str
     Low-confidence banner text prepended to the MCP vectr_search response
     when the floor fires.
@@ -678,6 +689,7 @@ NOTFOUND_FLOOR_MIN_TOKEN_LEN: int = int(_nff_cfg["min_content_token_length"])
 NOTFOUND_FLOOR_STOPWORDS: frozenset[str] = frozenset(_nff_cfg["stopwords"])
 NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS: int = int(_nff_cfg["min_zero_df_tokens"])
 NOTFOUND_FLOOR_MIN_TOP_RELEVANCE: float = float(_nff_cfg["min_top_relevance"])
+NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE: float = float(_nff_cfg["ce_override_min_relevance"])
 NOTFOUND_FLOOR_BANNER: str = str(_nff_cfg["banner"])
 NOTFOUND_FLOOR_BANNER_CLI: str = str(_nff_cfg["banner_cli"])
 

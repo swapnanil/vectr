@@ -427,6 +427,27 @@ ranking:
     # zero-document-frequency check above alone.
     min_top_relevance: 0.30
 
+    # UPG-NOTFOUND-FLOOR-CE-OVERRIDE: high-confidence override on the zero-
+    # document-frequency trigger above. The zero-DF check fires when a query
+    # content word never appears in the corpus's BM25 vocabulary — but an
+    # everyday PARAPHRASE of a symbol the corpus genuinely contains (e.g. "bill
+    # a customer credit card" for PaymentProcessor.charge_card) is built from
+    # common words a small corpus may simply lack, while the cross-encoder
+    # still judges the top result decisively relevant (0.988 observed). Firing
+    # the banner there steers the caller to grep away a correct answer. When
+    # the top result's calibrated cross-encoder relevance (ce_relevance) is
+    # >= this value, the zero-DF trigger is suppressed. This is a threshold
+    # comparison on an already-computed score, NOT query-side classification;
+    # gated on ce_relevance only (never the raw dense-cosine fallback, per the
+    # UPG-NOTFOUND-FLOOR-2 evidence above). The independent low_top_relevance
+    # sub-signal is untouched, and is mutually exclusive with a high CE by
+    # construction, so a genuine miss (top CE well below min_top_relevance) is
+    # never suppressed. Calibrated on the django fixture: genuine misses top
+    # out at ce_relevance ~0.04-0.19, confident matches at ~0.72-0.998, so a
+    # 0.70 threshold cleanly separates the two. Set above 1.0 to disable (no
+    # ce_relevance can ever meet it) — an exact no-op restoring the prior OR.
+    ce_override_min_relevance: 0.70
+
     # Text prepended to the MCP vectr_search response when the floor fires.
     # Results are still shown in full below it — the caller LLM may still
     # salvage a lead; this only adds a signal it currently has no way to see.

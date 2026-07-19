@@ -37,6 +37,7 @@ from agent.config import (
     NOTFOUND_FLOOR_STOPWORDS as _NOTFOUND_FLOOR_STOPWORDS,
     NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS as _NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS,
     NOTFOUND_FLOOR_MIN_TOP_RELEVANCE as _NOTFOUND_FLOOR_MIN_TOP_RELEVANCE,
+    NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE as _NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE,
     RESULT_FLOOR_ENABLED as _RESULT_FLOOR_ENABLED,
     RESULT_FLOOR_MIN_RELEVANCE as _RESULT_FLOOR_MIN_RELEVANCE,
 )
@@ -707,15 +708,37 @@ class CodeSearcher:
             and top_ce_relevance < _NOTFOUND_FLOOR_MIN_TOP_RELEVANCE
         )
 
+        # UPG-NOTFOUND-FLOOR-CE-OVERRIDE: the zero-DF vocabulary trigger fires
+        # when a query content word never appears in the corpus's BM25
+        # vocabulary — but an everyday paraphrase ("bill a customer credit
+        # card") of a symbol the corpus DOES contain ("PaymentProcessor.
+        # charge_card") is built from common words a small corpus may simply
+        # lack, and the cross-encoder can still judge the top result decisively
+        # relevant (0.988 observed). In that case the banner is a false
+        # positive that steers the caller to grep away a correct answer. When
+        # the top result's calibrated cross-encoder relevance meets a
+        # config-declared high-confidence threshold, suppress the zero-DF
+        # trigger — a threshold comparison on an already-computed score, not
+        # query-side classification. The low_top_relevance trigger is untouched
+        # (and mutually exclusive with a high CE by construction, so a genuine
+        # miss — whose top CE sits well below the floor — is never suppressed).
+        # No-op whenever reranking didn't run (top_ce_relevance is None) or the
+        # threshold is set above 1.0 (no ce_relevance can ever meet it).
+        ce_override = (
+            top_ce_relevance is not None
+            and top_ce_relevance >= _NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE
+        )
+        zero_df_trigger = (
+            len(zero_df_tokens) >= _NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS
+            and not ce_override
+        )
+
         # low_confidence: only meaningful when there is something to lead with —
         # an empty result set has its own "no results" message downstream.
         final.low_confidence = (
             _NOTFOUND_FLOOR_ENABLED
             and bool(final)
-            and (
-                len(zero_df_tokens) >= _NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS
-                or low_top_relevance
-            )
+            and (zero_df_trigger or low_top_relevance)
         )
         return final, elapsed_ms
 
