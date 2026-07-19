@@ -526,6 +526,109 @@ class TestVectrSearch:
         assert "Symbol graph (exact matches" not in result["content"][0]["text"]
 
     # -----------------------------------------------------------------
+    # UPG-LOWCONF-SLIM-DEDUPE (B3) — pointer mode drops the symbol-graph
+    # dup and the re-fetchable footer
+    # -----------------------------------------------------------------
+
+    def test_identifier_hint_suppressed_in_pointer_mode_when_fully_duplicate(self) -> None:
+        """A low_confidence response whose only hint symbol is already shown
+        as a pointer-list entry (same file_path + start_line) must not repeat
+        it in a separate symbol-graph section."""
+        from agent.searcher import SearchResult, SearchResultList
+        from agent.symbol_graph import Symbol
+
+        svc = _mock_service()
+        r = SearchResult(
+            file_path="resolver.py", lines="214-240", symbol_name="WorkspaceLock",
+            language="python", score=0.02, content="class WorkspaceLock: ...",
+            symbol_start_line=214, symbol_end_line=240,
+        )
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        svc.search.return_value = (rl, 10)
+        svc.identifier_hint_symbols.return_value = [
+            Symbol(
+                symbol_id=1, workspace="/repo", name="WorkspaceLock", kind="class",
+                file_path="resolver.py", start_line=214, end_line=240,
+            ),
+        ]
+        result = handle_tools_call("vectr_search", {"query": "WorkspaceLock acquisition"}, svc)
+        text = result["content"][0]["text"]
+
+        assert "resolver.py" in text          # still shown once, as a pointer
+        assert "Symbol graph (exact matches" not in text  # no duplicate section
+
+    def test_identifier_hint_partial_dedupe_in_pointer_mode(self) -> None:
+        """When only SOME hint symbols duplicate the pointer list, the
+        duplicate is dropped but a genuinely new symbol still gets its own
+        line — this is a dedupe, not a blanket suppression."""
+        from agent.searcher import SearchResult, SearchResultList
+        from agent.symbol_graph import Symbol
+
+        svc = _mock_service()
+        r = SearchResult(
+            file_path="resolver.py", lines="214-240", symbol_name="WorkspaceLock",
+            language="python", score=0.02, content="class WorkspaceLock: ...",
+            symbol_start_line=214, symbol_end_line=240,
+        )
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        svc.search.return_value = (rl, 10)
+        svc.identifier_hint_symbols.return_value = [
+            Symbol(
+                symbol_id=1, workspace="/repo", name="WorkspaceLock", kind="class",
+                file_path="resolver.py", start_line=214, end_line=240,
+            ),
+            Symbol(
+                symbol_id=2, workspace="/repo", name="OtherLock", kind="class",
+                file_path="other.py", start_line=5, end_line=20,
+            ),
+        ]
+        result = handle_tools_call("vectr_search", {"query": "WorkspaceLock vs OtherLock"}, svc)
+        text = result["content"][0]["text"]
+
+        assert "Symbol graph (exact matches for query identifiers)" in text
+        assert "OtherLock  other.py:5" in text
+        # the duplicate's own hint line (kind-prefixed) must not appear
+        assert "[class] WorkspaceLock  resolver.py:214" not in text
+
+    def test_identifier_hint_not_deduped_outside_pointer_mode(self) -> None:
+        """Full (non-low-confidence) mode is out of scope for B3 — the hint
+        section still appears even when it names the same location as a
+        result, unchanged prior behaviour."""
+        from agent.symbol_graph import Symbol
+
+        svc = _mock_service()  # default search result is NOT low_confidence
+        svc.identifier_hint_symbols.return_value = [
+            Symbol(
+                symbol_id=1, workspace="/repo", name="verify_token", kind="function",
+                file_path="auth.py", start_line=1, end_line=10,
+            ),
+        ]
+        result = handle_tools_call("vectr_search", {"query": "verify_token"}, svc)
+        text = result["content"][0]["text"]
+        assert "Symbol graph (exact matches for query identifiers)" in text
+
+    def test_refetchable_footer_suppressed_in_pointer_mode(self) -> None:
+        from agent.searcher import SearchResult, SearchResultList
+        r = SearchResult(file_path="auth.py", lines="10-20", symbol_name="login",
+                         language="python", score=0.01, content="BODY",
+                         score_source="reranker")
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        assert "re-fetchable anytime" not in text
+
+    def test_refetchable_footer_present_outside_pointer_mode(self) -> None:
+        from agent.searcher import SearchResult, SearchResultList
+        r = SearchResult(file_path="auth.py", lines="10-20", symbol_name="login",
+                         language="python", score=0.9, content="BODY",
+                         score_source="reranker")
+        rl = SearchResultList([r])  # low_confidence defaults False
+        text = _format_search_results(rl, "login", 5, 100)
+        assert "re-fetchable anytime" in text
+
+    # -----------------------------------------------------------------
     # UPG-NEARMISS-SYMBOL-NAMES — additive near-miss symbol-name hint
     # -----------------------------------------------------------------
 

@@ -175,7 +175,8 @@ def handle_tools_call(
         # explicit, hard-to-miss signal that the whole result set may be a
         # weak/unrelated guess. Results are still shown in full below it;
         # nothing is suppressed.
-        if getattr(results, "low_confidence", False):
+        low_conf = getattr(results, "low_confidence", False)
+        if low_conf:
             from agent.config import NOTFOUND_FLOOR_BANNER
             sections.append(f"─── Low confidence ───\n{NOTFOUND_FLOOR_BANNER}")
 
@@ -205,6 +206,15 @@ def handle_tools_call(
         # reordered, or reweighted; empty when no identifier-shaped token in
         # the query resolves exactly.
         hint_symbols = service.identifier_hint_symbols(query)
+        # UPG-LOWCONF-SLIM-DEDUPE: in pointer mode the L3 pointer list already
+        # shows file:line for every result — an exact-match hint for the same
+        # (file_path, start_line) would just repeat it verbatim. Deterministic
+        # set intersection on the already-computed result set, not a
+        # query-content heuristic. A hint symbol not already shown still gets
+        # its own line.
+        if low_conf and hint_symbols:
+            shown = {(r.file_path, r.symbol_start_line) for r in results}
+            hint_symbols = [s for s in hint_symbols if (s.file_path, s.start_line) not in shown]
         if hint_symbols:
             hint_lines = ["─── Symbol graph (exact matches for query identifiers) ───"]
             for s in hint_symbols:
@@ -1011,10 +1021,14 @@ def _format_search_results(
         else:
             lines.append(r.content)
         lines.append("")
-    lines.append(
-        'Results are re-fetchable anytime: vectr_fetch(ids=["<id>"]) restores '
-        "a chunk after it leaves your context."
-    )
+    # UPG-LOWCONF-SLIM-DEDUPE: in pointer mode no body was ever shown, so
+    # nothing "left your context" — the footer would be actively misleading.
+    # The pointers above are already the fetch keys.
+    if not low_conf:
+        lines.append(
+            'Results are re-fetchable anytime: vectr_fetch(ids=["<id>"]) restores '
+            "a chunk after it leaves your context."
+        )
     return "\n".join(lines)
 
 

@@ -332,34 +332,21 @@ _MEMORY_WRITE_TOOLS = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Optional: explicit overrides for WHEN this note should resurface. Each "
-                        "entry may declare 'path' (a glob, e.g. 'src/api/**'), 'event' (one of: "
-                        "session-start, prompt-submit, pre-edit, pre-run, pre-commit, "
-                        "post-compaction), 'symbol' (a code symbol name — matches when the file "
-                        "targeted by the current lifecycle moment defines or references it, "
-                        "resolved exactly against the same symbol graph vectr_locate/vectr_trace "
-                        "use), and/or 'semantic' (true — matches at prompt-submit when the "
-                        "prompt's meaning is close enough to this note's own content, judged by a "
-                        "fixed similarity threshold per kind; no keyword matching involved), plus "
-                        "optional 'not_before' (epoch seconds), 'expires_visibility' (epoch "
-                        "seconds after which the note fades in ranking but still fires), and "
-                        "'cooldown' (seconds between re-fires). Entries within one object are "
-                        "AND'd together (e.g. 'path' + 'symbol' both required); multiple entries "
-                        "in the array are OR'd. Omit this entirely (recommended) and the note's "
-                        "kind gets a sensible default: 'directive' fires at session-start and "
-                        "after context compaction; 'task' fires at session-start; 'gotcha' fires "
-                        "when the anchored file is about to be edited."
+                        "Advanced: explicit overrides for WHEN this note resurfaces (path glob, "
+                        "event, symbol, semantic-similarity, timing/cooldown fields — AND within "
+                        "an entry, OR across entries; see docs for the full field DSL). Omit this "
+                        "entirely (recommended) — each kind already gets a sensible default, e.g. "
+                        "'directive' fires at session-start and after compaction, 'gotcha' fires "
+                        "when its anchored file is about to be edited."
                     ),
                 },
                 "provenance": {
                     "type": "string",
                     "description": (
                         "How much to trust this note when it resurfaces (default 'agent'): "
-                        "'agent' = you recorded this yourself, framed as memory to verify; "
-                        "'auto' = captured with no reviewing judgment at all, weakest framing, "
-                        "and not allowed together with kind='directive'. 'human' is not settable "
-                        "here — a note only becomes 'human'-provenance via an explicit promotion "
-                        "after a person reviews it."
+                        "'agent' = self-recorded, framed as memory to verify; 'auto' = no "
+                        "reviewing judgment, weakest framing, incompatible with kind='directive'. "
+                        "'human' is only reached via explicit promotion, not settable here."
                     ),
                     "default": "agent",
                     "enum": ["agent", "auto"],
@@ -367,18 +354,11 @@ _MEMORY_WRITE_TOOLS = [
                 "scope": {
                     "type": "string",
                     "description": (
-                        "Visibility scope, enforced at recall/trigger time. Omit this to get "
-                        "the kind's own default: kind='task' defaults to 'branch' (a git branch "
-                        "was actually captured at write time; on a non-git workspace or "
-                        "detached HEAD it falls back to 'workspace' instead of silently never "
-                        "firing again), kind='gotcha' defaults to 'repo', every other kind "
-                        "defaults to 'workspace'. Pass a value explicitly to override the "
-                        "kind default, including passing 'workspace' explicitly: 'branch' "
-                        "restricts firing to the git branch this note was written on; "
-                        "'path-subtree' restricts firing to paths under an anchored directory; "
-                        "'session' restricts it to the writing session only; 'repo' behaves like "
-                        "'workspace' today (cross-worktree sharing is not yet a distinct store "
-                        "boundary)."
+                        "Advanced: visibility scope, enforced at recall/trigger time. Omit for "
+                        "the kind's own default ('task'→'branch', 'gotcha'→'repo', else "
+                        "'workspace'); pass explicitly to override — 'branch' (git branch at "
+                        "write time), 'path-subtree' (paths under an anchored dir), 'session' "
+                        "(writing session only), 'repo' (same as 'workspace' today)."
                     ),
                     "enum": ["workspace", "repo", "path-subtree", "branch", "session"],
                 },
@@ -386,21 +366,17 @@ _MEMORY_WRITE_TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Optional: file paths this note is about. Each path's current content is "
-                        "hashed now; if that file changes later, the note still recalls/fires but "
-                        "carries a visible staleness caveat naming the changed path."
+                        "Optional: file paths this note is about, content-hashed at write time so "
+                        "a later change surfaces as a staleness caveat instead of silently going stale."
                     ),
                 },
                 "supersedes": {
                     "type": "integer",
                     "description": (
-                        "Optional: the note_id this new note replaces. The old note is retired "
-                        "(excluded from recall and from ever firing again) but kept for audit — "
-                        "use this instead of vectr_forget when you want the old note's history "
-                        "preserved. Especially important for kind='task' checkpoints: a stale "
-                        "task note keeps firing at every session-start forever until it is "
-                        "explicitly superseded or forgotten, so pass the old note's id here "
-                        "whenever a new task note is really just an update to it."
+                        "Optional: the note_id this new note replaces — the old note is retired "
+                        "(excluded from recall/firing) but kept for audit, unlike vectr_forget. "
+                        "Especially important for kind='task': pass the prior checkpoint's id so "
+                        "it stops firing at every session-start once superseded."
                     ),
                 },
             },
