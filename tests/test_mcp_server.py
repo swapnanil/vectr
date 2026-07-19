@@ -1040,6 +1040,57 @@ class TestVectrFetch:
         assert "Read(" not in text
 
 
+class TestRelativePathRender:
+    """UPG-RELATIVE-PATH-RENDER: MCP text output renders workspace-relative
+    paths and prints the absolute root once per response header, instead of
+    repeating the ~21-token absolute prefix on every result/hint/id line."""
+
+    def _service_with_root(self, root: str):
+        from agent.searcher import SearchResult
+        svc = _mock_service()
+        svc._workspace_root = root
+        result = SearchResult(
+            file_path=f"{root}/pkg/auth.py", lines="1-10", symbol_name="verify_token",
+            language="python", score=0.9, content="def verify_token(): ...",
+        )
+        svc.search.return_value = ([result], 10)
+        return svc
+
+    def test_search_prints_workspace_header_once_and_relative_ids(self) -> None:
+        svc = self._service_with_root("/ws/root")
+        result = handle_tools_call("vectr_search", {"query": "auth"}, svc)
+        text = result["content"][0]["text"]
+        assert "workspace: /ws/root" in text
+        assert "workspace: /ws/root" == [ln for ln in text.splitlines() if ln.startswith("workspace:")][0]
+        # relative chunk id present; the absolute prefix does NOT ride the line
+        assert "pkg/auth.py:1-10" in text
+        assert "/ws/root/pkg/auth.py:1-10" not in text
+
+    def test_search_symbol_graph_hint_renders_relative(self) -> None:
+        from types import SimpleNamespace
+        svc = self._service_with_root("/ws/root")
+        svc.identifier_hint_symbols.return_value = [
+            SimpleNamespace(kind="class", name="Widget", file_path="/ws/root/ui/widget.py", start_line=3),
+        ]
+        result = handle_tools_call("vectr_search", {"query": "Widget"}, svc)
+        text = result["content"][0]["text"]
+        assert "ui/widget.py:3" in text
+        assert "/ws/root/ui/widget.py:3" not in text
+
+    def test_fetch_renders_relative_id_from_absolute_path(self) -> None:
+        svc = self._service_with_root("/ws/root")
+        svc.fetch.return_value = [
+            {"id": "/ws/root/a.py:1-5", "found": True, "file_path": "/ws/root/a.py",
+             "start_line": 1, "end_line": 5, "symbol_name": "foo", "language": "python",
+             "content": "def foo(): pass"},
+        ]
+        result = handle_tools_call("vectr_fetch", {"ids": ["a.py:1-5"]}, svc)
+        text = result["content"][0]["text"]
+        assert "workspace: /ws/root" in text
+        assert "[a.py:1-5]" in text
+        assert "/ws/root/a.py:1-5" not in text
+
+
 # ---------------------------------------------------------------------------
 # vectr_remember
 # ---------------------------------------------------------------------------

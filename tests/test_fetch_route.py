@@ -16,20 +16,40 @@ from tests.conftest import _base_mock_service
 
 
 class TestServiceFetch:
-    def test_delegates_to_indexer_fetch_chunks(self) -> None:
+    @staticmethod
+    def _svc(workspace_root: str = ""):
         from app.service import VectrService
-
         svc = VectrService.__new__(VectrService)
         svc._memory_only = False
+        svc._workspace_root = workspace_root
         svc._indexer = type("_I", (), {})()
         calls = []
         svc._indexer.fetch_chunks = lambda ids: calls.append(ids) or [
             {"id": ids[0], "found": True, "file_path": "a.py", "start_line": 1,
              "end_line": 2, "symbol_name": "", "language": "python", "content": "x"}
         ]
+        return svc, calls
+
+    def test_delegates_to_indexer_fetch_chunks(self) -> None:
+        svc, calls = self._svc()
         result = svc.fetch(["a.py:1-2"])
         assert calls == [["a.py:1-2"]]
         assert result[0]["found"] is True
+
+    def test_resolves_relative_id_to_absolute_before_lookup(self) -> None:
+        """UPG-RELATIVE-PATH-RENDER: search/evict now emit workspace-relative
+        chunk ids, but the index stores absolute ones — a relative id must be
+        joined onto the workspace root before the ChromaDB lookup."""
+        svc, calls = self._svc(workspace_root="/repo")
+        svc.fetch(["django/db/base.py:10-20"])
+        assert calls == [["/repo/django/db/base.py:10-20"]]
+
+    def test_absolute_id_passes_through_unchanged(self) -> None:
+        """Back-compat: an absolute id (what existing sessions hold) is not
+        re-rooted — it fetches exactly as before."""
+        svc, calls = self._svc(workspace_root="/repo")
+        svc.fetch(["/repo/django/db/base.py:10-20"])
+        assert calls == [["/repo/django/db/base.py:10-20"]]
 
     def test_raises_memory_only_message_in_memory_only_mode(self) -> None:
         from app.service import VectrService, _MEMORY_ONLY_MSG

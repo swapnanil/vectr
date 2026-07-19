@@ -942,10 +942,20 @@ class VectrService:
 
         Disabled in memory-only mode — there is no code index to fetch from,
         the same guard as search/locate/trace.
+
+        UPG-RELATIVE-PATH-RENDER: search/evict now render workspace-RELATIVE
+        chunk ids, but the index stores ABSOLUTE ids. Resolve each incoming id
+        against the workspace root before lookup — a relative id is joined onto
+        the root, an already-absolute id passes through unchanged — so both the
+        new relative ids and the absolute ids existing sessions still hold
+        fetch correctly. The returned entry's file_path/lines come from the
+        stored metadata (absolute), which the renderer re-relativizes.
         """
         if self._memory_only:
             raise RuntimeError(_MEMORY_ONLY_MSG)
-        return self._indexer.fetch_chunks(ids)
+        from agent.render_paths import resolve_chunk_id
+        resolved = [resolve_chunk_id(i, self._workspace_root) for i in ids]
+        return self._indexer.fetch_chunks(resolved)
 
     def identifier_hint_symbols(self, query: str) -> list:
         """Additive, high-precision symbol-graph hint (UPG-QUERYTYPE-REROUTE).
