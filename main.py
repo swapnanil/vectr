@@ -580,22 +580,42 @@ def _remote_mcp_configs(url: str, headers: dict[str, str]) -> dict[str, str]:
     }
 
 
-def _write_remote_workspace_config(workspace: str, url: str, headers: dict[str, str]) -> None:
+def _write_remote_workspace_config(workspace: str, url: str, headers: dict[str, str]) -> list[str]:
     """Configure a local editor to use a REMOTE vectr instance (team / central
     mode). Writes the editor guidance blocks and the three MCP configs pointing
     at `url` with the given headers — but spawns no daemon and registers no
-    instance. This is the client half of the client/server split."""
+    instance. This is the client half of the client/server split.
+
+    Returns the workspace-relative paths it manages (created, updated, or an
+    already-present append-only guidance file it merged into), so the caller can
+    print the exact file list for the user (UPG-TEAM-4). Append-only guidance
+    files that do not already exist are never created, so they are excluded."""
     root = Path(workspace)
+    managed: list[str] = []
     # Editor guidance so the MCP client's LLM knows the tools exist.
     _write_ide_config_merge_safe(root / "CLAUDE.md", create_if_missing=True, tool_loading=True)
+    managed.append("CLAUDE.md")
     for _rel in _IDE_CONFIG_APPEND_ONLY:
         _write_ide_config_merge_safe(root / _rel, create_if_missing=False)
-    _write_ide_config_merge_safe(root / ".github" / "copilot-instructions.md", create_if_missing=False)
+        if (root / _rel).exists():
+            managed.append(_rel)
+    copilot = Path(".github") / "copilot-instructions.md"
+    _write_ide_config_merge_safe(root / copilot, create_if_missing=False)
+    if (root / copilot).exists():
+        managed.append(copilot.as_posix())
     _write_cursor_rules(workspace)
+    managed.append(".cursor/rules/vectr.mdc")
 
     for rel, text in _remote_mcp_configs(url, headers).items():
         _write_or_update(root / rel, text, "remote")
+        managed.append(rel)
     _ensure_enable_all_project_mcp_servers(root)
+    managed.append(".claude/settings.json")
+    return managed
+
+
+# The connect-written MCP configs that embed the API key in plaintext (UPG-TEAM-4).
+_REMOTE_KEY_BEARING_FILES = frozenset({".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json"})
 
 
 def _is_vectr_hook_group(group: dict) -> bool:
@@ -1173,10 +1193,16 @@ def cmd_connect(args: argparse.Namespace) -> None:
         )
 
     headers = _mcp_auth_headers(api_key=api_key, client_label=label)
-    _write_remote_workspace_config(workspace, url, headers)
+    managed = _write_remote_workspace_config(workspace, url, headers)
 
     print(f"Configured this workspace to use the remote vectr instance at {url}", file=sys.stderr)
     print(f"  Workspace : {workspace}", file=sys.stderr)
+    # UPG-TEAM-4: print the exact list of files connect writes/manages so the
+    # configuration is never a surprise, flagging the ones that embed the key.
+    print("  Files     : written/updated in this workspace —", file=sys.stderr)
+    for rel in managed:
+        marker = "   [holds the API key in plaintext]" if (api_key and rel in _REMOTE_KEY_BEARING_FILES) else ""
+        print(f"                - {rel}{marker}", file=sys.stderr)
     if api_key:
         print("  Auth      : X-Api-Key header written to the editor MCP configs", file=sys.stderr)
         print(

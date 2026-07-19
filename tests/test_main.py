@@ -3205,6 +3205,29 @@ class TestCmdConnect:
         cursor = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
         assert cursor["mcpServers"]["vectr"]["url"] == "http://central:8765/mcp"
 
+    def test_connect_prints_exact_file_list(self, tmp_path, capsys) -> None:
+        # UPG-TEAM-4: connect prints the exact files it writes, flagging the
+        # three MCP configs that hold the API key in plaintext.
+        args = argparse.Namespace(
+            url="http://central:8765", api_key="team-key", label="", path=str(tmp_path),
+        )
+        m.cmd_connect(args)
+        err = capsys.readouterr().err
+        for rel in (".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json",
+                    ".cursor/rules/vectr.mdc", ".claude/settings.json", "CLAUDE.md"):
+            assert rel in err, f"connect output must list {rel}"
+        # the plaintext-key marker appears for the three MCP configs
+        assert "holds the API key in plaintext" in err
+
+    def test_connect_file_list_omits_key_marker_without_key(self, tmp_path, capsys) -> None:
+        args = argparse.Namespace(
+            url="http://central:8765", api_key="", label="", path=str(tmp_path),
+        )
+        m.cmd_connect(args)
+        err = capsys.readouterr().err
+        assert ".mcp.json" in err
+        assert "holds the API key in plaintext" not in err
+
     def test_connect_api_key_falls_back_to_env(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("VECTR_API_KEY", "env-key")
         args = argparse.Namespace(
