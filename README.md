@@ -11,10 +11,10 @@
 [![CI](https://github.com/swapnanil/vectr/actions/workflows/ci.yml/badge.svg)](https://github.com/swapnanil/vectr/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version 1.2.0](https://img.shields.io/badge/version-1.2.0-blue.svg)](CHANGELOG.md)
-[![MCP: 14 tools](https://img.shields.io/badge/MCP-14%20tools-blue.svg)](#14-mcp-tools)
+[![Version 1.3.0](https://img.shields.io/badge/version-1.3.0-blue.svg)](CHANGELOG.md)
+[![MCP: 15 tools](https://img.shields.io/badge/MCP-15%20tools-blue.svg)](#15-mcp-tools)
 
-Version 1.2.0 · Last updated 2026-07-13 · [CHANGELOG](CHANGELOG.md)
+Version 1.3.0 · Last updated 2026-07-18 · [CHANGELOG](CHANGELOG.md)
 
 Vectr gives AI code editors two things they lack: **semantic codebase search** and **persistent working memory** — both served over MCP with zero configuration.
 
@@ -202,7 +202,7 @@ No port, no daemon — a single foreground process framed as newline-delimited J
 3. **Hybrid search** — vector similarity + BM25 combined, weighted by codebase characteristics (large/unfamiliar → semantic-heavy; small/well-documented → BM25-heavy).
 4. **Symbol graph** — call edges, import chains, and HTTP routes (Flask/FastAPI/Express/Spring) are extracted and stored. `vectr_locate` uses 5 fallback strategies: exact match → suffix → same-module → unique-name → import-chain → fuzzy (edit distance ≤ 2).
 5. **Working memory** — `vectr_remember` stores structured notes to SQLite + ChromaDB. `vectr_recall` does semantic search over notes — not SQL LIKE — so multi-word queries always find relevant context.
-6. **MCP protocol** — 14 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
+6. **MCP protocol** — 15 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
 
 ---
 

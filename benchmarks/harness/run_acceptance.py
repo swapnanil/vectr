@@ -46,6 +46,16 @@ exception (a malformed 'expect' shape this harness doesn't anticipate) is
 reported as ERROR and the run continues with the next case — one bad corpus
 line must never truncate the rest of the suite.
 
+A case may carry an 'embed_model_stamp' field recording the embedding model
+its 'expect' assertions were last verified under. When the running daemon's
+/v1/status reports a different embed_model, the harness PRINTS a stamp
+mismatch notice (UPG-ACCEPT-CORPUS-HYGIENE) — a stale stamp means the label
+needs re-verification, not that the case should be treated as failing. A
+mismatch is never a FAIL and never affects the exit code; it exists so a
+future embedding-model default swap surfaces every case whose "passing"
+label was never re-checked under the new model, instead of trusting it
+indefinitely (see UPG-ACCEPT-REGRESSION-RECOVERY / the wave2 embedder swap).
+
 Exit code: 0 if every evaluated case passes and no case errored, 1 otherwise.
 """
 from __future__ import annotations
@@ -428,17 +438,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No cases found (corpus filter: {args.corpus!r})")
         return 0
 
+    current_embed_model = st.get("embed_model")
+
     total = len(cases)
     n_pass = 0
     n_fail = 0
     n_error = 0
     n_manual = 0
     skipped = 0
+    n_stamp_mismatch = 0
 
     for case in cases:
         cid = case["id"]
         query = case["query"]
         expect = case.get("expect", {})
+
+        # Stamp-vs-current-embedder check (UPG-ACCEPT-CORPUS-HYGIENE): a
+        # print-only signal, never a FAIL — it flags a case whose 'expect'
+        # was last verified under a different embedding model than the one
+        # this daemon is running, so a stale "passing" label can be caught
+        # mechanically instead of trusted indefinitely.
+        stamp = case.get("embed_model_stamp")
+        if stamp and current_embed_model and stamp != current_embed_model:
+            n_stamp_mismatch += 1
+            print(
+                f"\n[STAMP MISMATCH] {cid}: verified under {stamp!r}, "
+                f"daemon is running {current_embed_model!r} — needs re-verification"
+            )
 
         if not expect:
             skipped += 1
@@ -478,6 +504,12 @@ def main(argv: list[str] | None = None) -> int:
         f"Results: {n_pass} pass / {n_fail} fail / {n_error} error / "
         f"{n_manual} manual / {skipped} skip  ({total} total)"
     )
+    if n_stamp_mismatch:
+        print(
+            f"{n_stamp_mismatch} case(s) stamped under a different embed model than "
+            f"the current daemon ({current_embed_model!r}) — see [STAMP MISMATCH] "
+            "lines above. Informational only; does not affect pass/fail or exit code."
+        )
     print("=" * 80)
     return 0 if n_fail == 0 and n_error == 0 else 1
 

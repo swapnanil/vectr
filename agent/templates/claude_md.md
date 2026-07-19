@@ -45,6 +45,9 @@ A note stored with `vectr_remember` is the only finding that survives three thin
 | `vectr_forget(note_id)` | Delete a stale or superseded note by its `[#N]` id; `all=true` clears every note. | `vectr_forget(note_id=12)` |
 | `vectr_snapshot("label")` | Seal current notes as a named checkpoint. | `vectr_snapshot("lock-cycle-mapped")` |
 | `vectr_snapshot_list()` | List saved checkpoints. Use at session start if `vectr_recall` returned nothing useful. | `vectr_snapshot_list()` |
+| `vectr_promote(note_id)` | Raise a reviewed auto-captured note's trust class one step (`auto` → `agent`), so it's treated as agent-verified rather than unreviewed going forward. | `vectr_promote(note_id=12)` |
+
+`vectr_remember` also accepts an optional `triggers` list for conditions beyond the `kind` default: `path` globs, lifecycle `event`s (session-start, prompt-submit, pre-edit, pre-run, pre-commit, post-compaction), exact `symbol` references, a `semantic` prompt-similarity match, and temporal guards (`not_before`, `expires_visibility`, `cooldown`). Conditions AND within one trigger entry and OR across entries. Omit `triggers` to keep the kind default — most notes never need it.
 
 **Multi-agent handoff (orchestrator + subagent workflows):** working memory is a shared bus for the whole workspace, not scoped to one conversation — a note written by a subagent is immediately visible to the orchestrator's recall, and vice versa, through the same daemon. If you are a subagent, call `vectr_remember` with your key findings **before you finish** (pass `agent="your-name"` so the orchestrator can see who found what) instead of relying on the orchestrator to re-read your full transcript. If you are an orchestrator, brief each subagent to do this, and call `vectr_recall` after a subagent completes instead of parsing its raw output — the notes are the durable handoff artifact; the transcript is not.
 
