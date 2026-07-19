@@ -35,19 +35,32 @@ logger = logging.getLogger(__name__)
 _DB_DIR_ENV = "VECTR_DB_DIR"
 
 
+def _cache_dir_slug(workspace_root: str) -> str:
+    """The per-workspace cache-dir name: md5(abs_workspace_path)[:12]."""
+    import hashlib
+    return hashlib.md5(workspace_root.encode()).hexdigest()[:12]
+
+
 def _default_db_dir(workspace_root: str) -> str:
-    """Store DB files in ~/.cache/vectr/<workspace-hash>/, owner-only (0700).
+    """Resolve the DB dir ~/.cache/vectr/<workspace-hash>/ for this workspace.
 
     The cache holds the plaintext code index and (unless encrypted) working-
-    memory notes, so both the shared parent and the per-workspace directory are
-    restricted to the owner on POSIX hosts (see agent/fs_permissions.py)."""
-    import hashlib
+    memory notes, so the shared parent is restricted to the owner on POSIX
+    hosts (see agent/fs_permissions.py); because the parent is owner-only, any
+    child it later gains is unreachable by other users regardless of its own
+    mode.
+
+    UPG-CACHE-LITTER: this resolver only secures the shared parent and returns
+    the path — it does NOT create the per-workspace subdir. Eagerly creating it
+    on every path resolution (service init / status probe, before any indexing
+    or note write) left hundreds of empty <hash>/ dirs under the cache root. The
+    dir is created + secured by the constructing service (VectrService.__init__)
+    only when a real service is built, which then immediately writes its notes
+    DB — so an empty dir never corresponds to a live workspace."""
     from agent.fs_permissions import secure_dir
-    slug = hashlib.md5(workspace_root.encode()).hexdigest()[:12]
     cache_root = Path.home() / ".cache" / "vectr"
     secure_dir(cache_root)
-    db_dir = secure_dir(cache_root / slug)
-    return str(db_dir)
+    return str(cache_root / _cache_dir_slug(workspace_root))
 
 
 _MEMORY_ONLY_MSG = (
@@ -172,10 +185,14 @@ class VectrService:
         # UPG-STDIO-MEMORY-READY: the working-memory store (below) is now the
         # FIRST thing constructed against db_dir — previously CodeIndexer ran
         # first and its ChromaDB PersistentClient happened to create the
-        # directory as a side effect. `_default_db_dir` already creates it
-        # via `secure_dir`, but a VECTR_DB_DIR override (e.g. a hosted
-        # deployment's mounted volume) may point at a path that doesn't exist
-        # yet — ensure it explicitly rather than depend on construction order.
+        # directory as a side effect. This is where the per-workspace dir is
+        # created + secured: `_default_db_dir` deliberately no longer does so
+        # (UPG-CACHE-LITTER — a bare path resolution must not litter the cache
+        # root), and a VECTR_DB_DIR override (e.g. a hosted deployment's mounted
+        # volume) may point at a path that doesn't exist yet. Constructing a real
+        # service is exactly the point at which a durable dir is warranted — the
+        # store's _init_db() writes into it immediately below, so it never stays
+        # empty.
         from agent.fs_permissions import secure_dir
         secure_dir(db_dir)
         self._db_dir = db_dir

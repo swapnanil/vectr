@@ -992,6 +992,52 @@ class TestVersionSkewWiring:
             m.cmd_forget(args)
         mock_check.assert_called_once_with(8765)
 
+    def test_cmd_cache_prune_removes_empty_dirs(self, tmp_path, monkeypatch, capsys):
+        """UPG-CACHE-LITTER: `vectr cache prune` removes empty per-workspace
+        hash dirs under the cache root, skipping live-instance dirs (R1)."""
+        from pathlib import Path as _P
+        monkeypatch.setattr(_P, "home", lambda: tmp_path)
+        cache_root = tmp_path / ".cache" / "vectr"
+        empty = cache_root / "0041394e972f"
+        empty.mkdir(parents=True)
+        used = cache_root / "00c5ccee8aec"
+        used.mkdir(parents=True)
+        (used / "working_context.sqlite").write_text("x")
+        # No live instances for this test.
+        monkeypatch.setattr("agent.cache_maintenance.live_instance_slugs", lambda: frozenset())
+        args = argparse.Namespace(cache_command="prune", dry_run=False)
+        m.cmd_cache(args)
+        assert not empty.exists()      # empty dir pruned
+        assert used.exists()           # written dir untouched
+        out = capsys.readouterr().out
+        assert "Removed 1" in out
+
+    def test_cmd_cache_prune_dry_run_keeps_dirs(self, tmp_path, monkeypatch, capsys):
+        from pathlib import Path as _P
+        monkeypatch.setattr(_P, "home", lambda: tmp_path)
+        cache_root = tmp_path / ".cache" / "vectr"
+        empty = cache_root / "0041394e972f"
+        empty.mkdir(parents=True)
+        monkeypatch.setattr("agent.cache_maintenance.live_instance_slugs", lambda: frozenset())
+        args = argparse.Namespace(cache_command="prune", dry_run=True)
+        m.cmd_cache(args)
+        assert empty.exists()  # dry run — nothing deleted
+        assert "Would remove 1" in capsys.readouterr().out
+
+    def test_cmd_cache_prune_skips_live_instance_dir(self, tmp_path, monkeypatch, capsys):
+        from pathlib import Path as _P
+        monkeypatch.setattr(_P, "home", lambda: tmp_path)
+        cache_root = tmp_path / ".cache" / "vectr"
+        live_empty = cache_root / "0041394e972f"
+        live_empty.mkdir(parents=True)  # empty but belongs to a live instance
+        monkeypatch.setattr(
+            "agent.cache_maintenance.live_instance_slugs",
+            lambda: frozenset({"0041394e972f"}),
+        )
+        args = argparse.Namespace(cache_command="prune", dry_run=False)
+        m.cmd_cache(args)
+        assert live_empty.exists()  # R1: live-instance dir never removed
+
     def test_cmd_status_reuses_fetched_status_payload_not_a_second_probe(self, tmp_path):
         """cmd_status already fetched /v1/status for its own display — the
         version-skew check must reuse that payload (`daemon_status=`) rather

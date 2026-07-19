@@ -99,16 +99,23 @@ class TestCacheDirPermissions:
             secure_dir(target)
             assert (target.stat().st_mode & 0o777) == 0o700
 
-    def test_default_db_dir_is_owner_only(self, tmp_path, monkeypatch) -> None:
+    def test_default_db_dir_secures_parent_without_creating_subdir(self, tmp_path, monkeypatch) -> None:
         # Redirect ~/.cache to a temp home so we never touch the real cache.
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        from agent.fs_permissions import secure_dir
         from app.service import _default_db_dir
         db_dir = Path(_default_db_dir("/some/workspace"))
-        assert db_dir.is_dir()
+        # UPG-CACHE-LITTER: resolving the path must NOT create the per-workspace
+        # subdir (that would litter the cache root on every probe); only the
+        # shared parent is created + tightened.
+        assert not db_dir.exists()
         if sys.platform != "win32":
-            assert (db_dir.stat().st_mode & 0o777) == 0o700
-            # The shared parent is tightened too.
             assert ((tmp_path / ".cache" / "vectr").stat().st_mode & 0o777) == 0o700
+            # When a real service creates it (mirrored here by secure_dir, as
+            # VectrService.__init__ does), it is owner-only — the parent being
+            # 0700 already makes any child unreachable by others regardless.
+            secure_dir(db_dir)
+            assert (db_dir.stat().st_mode & 0o777) == 0o700
 
     def test_secure_dir_never_raises_on_bad_path(self) -> None:
         from agent.fs_permissions import secure_dir

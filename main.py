@@ -2131,6 +2131,35 @@ def cmd_forget(args: argparse.Namespace) -> None:
         _handle_daemon_call_error(exc, port)
 
 
+def cmd_cache(args: argparse.Namespace) -> None:
+    """`vectr cache prune` — remove empty per-workspace cache dirs (UPG-CACHE-LITTER).
+
+    Opt-in cleanup for the hundreds of empty <hash>/ dirs the cache root can
+    accumulate from path resolutions that never wrote anything. Only ever
+    removes EMPTY dirs, skips the reserved db/ and models/ subdirs, and never
+    touches a dir belonging to a live instance (rail R1)."""
+    action = getattr(args, "cache_command", None)
+    if action != "prune":
+        print("usage: vectr cache prune [--dry-run]", file=sys.stderr)
+        return
+    from agent.cache_maintenance import live_instance_slugs, prune_empty_cache_dirs
+
+    cache_root = Path.home() / ".cache" / "vectr"
+    protected = live_instance_slugs()
+    dry_run = getattr(args, "dry_run", False)
+    affected = prune_empty_cache_dirs(cache_root, protected_slugs=protected, dry_run=dry_run)
+    if not affected:
+        print("No empty workspace cache dirs to prune.")
+        return
+    verb = "Would remove" if dry_run else "Removed"
+    print(f"{verb} {len(affected)} empty workspace cache dir(s) under {cache_root}.")
+    if protected:
+        print(f"  ({len(protected)} live-instance dir(s) skipped.)")
+    if dry_run:
+        for d in affected:
+            print(f"  {d.name}")
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     workspace = str(Path(args.path).resolve())
 
@@ -2699,6 +2728,26 @@ def main() -> None:
         help="Print a fresh high-entropy API key for authenticated / team deployments",
     )
 
+    p_cache = sub.add_parser(
+        "cache",
+        help="Maintain the ~/.cache/vectr cache root",
+        description=(
+            "Cache-root hygiene. `vectr cache prune` removes empty per-workspace "
+            "hash dirs left by path resolutions that never indexed or stored a "
+            "note. Only empty dirs are removed; the model cache (models/), the "
+            "legacy db/ layout's non-empty dirs, and any live instance's dir are "
+            "never touched."
+        ),
+    )
+    cache_sub = p_cache.add_subparsers(dest="cache_command")
+    p_cache_prune = cache_sub.add_parser(
+        "prune", help="Remove empty per-workspace cache dirs (safe; live instances skipped)"
+    )
+    p_cache_prune.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="List the dirs that would be removed without deleting anything",
+    )
+
     p_connect = sub.add_parser(
         "connect",
         help="Configure this workspace's editor to use a REMOTE vectr instance "
@@ -2766,6 +2815,7 @@ def main() -> None:
         "recall":  cmd_recall,
         "hook":    cmd_hook,
         "key":     cmd_key,
+        "cache":   cmd_cache,
         "connect": cmd_connect,
         "proxy":   cmd_proxy,
     }

@@ -253,6 +253,8 @@ vectr fetch src/auth.py:10-42         # re-fetch a chunk by exact id, verbatim
 vectr init --path .                   # write CLAUDE.md + MCP config without starting
 vectr init --exclude vendor           # exclude directories from indexing
 vectr forget --path .                 # delete all working-memory notes
+vectr cache prune                     # remove empty per-workspace cache dirs (live instances skipped)
+vectr cache prune --dry-run           # preview what would be removed, delete nothing
 vectr proxy                           # experimental: localhost API proxy (see below)
 vectr mcp-stdio                       # foreground stdio MCP transport, no port/daemon (see above)
 ```
