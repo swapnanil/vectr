@@ -3243,6 +3243,48 @@ class TestClassImportanceARCH2:
             f"Widget must outscore Gadget: {scores}"
         )
 
+    def test_barrel_reexport_mentions_not_counted(self, tmp_path) -> None:
+        """UPG-CLASS-IMPORTANCE-REEXPORT-NOISE: a bare barrel re-export
+        (`export { Foo } from './foo'`) is module plumbing, not a genuine
+        reference — it must not inflate Foo's class_importance above an
+        equally-defined, equally-used sibling (Bar) that just isn't re-exported.
+        Without the fix Foo's count is def+use+re-export (3) vs Bar's def+use (2)
+        → Foo outscores Bar; with the re-export line excluded both count 2."""
+        g = SymbolGraph(str(tmp_path))
+        ws = str(tmp_path)
+        foo = make_py(tmp_path, "foo.ts", "export class Foo {\n  run() {}\n}\n")
+        bar = make_py(tmp_path, "bar.ts", "export class Bar {\n  run() {}\n}\n")
+        # genuine, EQUAL usage of both in a consumer (real reference sites)
+        use = make_py(tmp_path, "use.ts", "const a = new Foo();\nconst b = new Bar();\n")
+        # a barrel that re-exports ONLY Foo — the mention that used to inflate it
+        barrel = make_py(tmp_path, "index.ts", "export { Foo } from './foo';\n")
+        g.build_for_workspace(ws, [foo, bar, use, barrel])
+        scores = g.class_importance(ws)
+        assert scores.get("Foo") == pytest.approx(scores.get("Bar")), (
+            f"the barrel re-export of Foo must not inflate its importance above "
+            f"the equally-defined/used Bar: {scores}"
+        )
+
+    def test_genuine_import_and_definition_still_counted(self, tmp_path) -> None:
+        """The re-export exclusion must be narrow: an `import { X } from` (a real
+        use site) and an `export class X`/`export default X` (a definition/value)
+        keep counting — only bare barrel re-export lines are dropped."""
+        g = SymbolGraph(str(tmp_path))
+        ws = str(tmp_path)
+        widget = make_py(tmp_path, "widget.ts", "export class Widget {\n  run() {}\n}\n")
+        gadget = make_py(tmp_path, "gadget.ts", "export class Gadget {\n  run() {}\n}\n")
+        # Widget is genuinely imported+used more than Gadget → must still win.
+        consumer = make_py(
+            tmp_path, "consumer.ts",
+            "import { Widget } from './widget';\nconst a = new Widget();\nconst b = new Widget();\n",
+        )
+        g.build_for_workspace(ws, [widget, gadget, consumer])
+        scores = g.class_importance(ws)
+        assert scores.get("Widget", 0.0) > scores.get("Gadget", 0.0), (
+            f"a genuinely imported+used class must still outscore an unused one "
+            f"(imports/definitions are not excluded, only barrel re-exports): {scores}"
+        )
+
     def test_persistence_round_trip(self, tmp_path) -> None:
         """build_for_workspace writes class importance; class_importance() returns it."""
         g = SymbolGraph(str(tmp_path))
