@@ -425,6 +425,74 @@ class TestZigSymbolExtractionUPG:
         assert by_name.get("Tree", {}).get("kind") == "variable"
 
 
+class TestZigStructScopedConstUPG:
+    """UPG-ZIG-STRUCT-CONST-LOCATE: a `const`/`var` declared inside a struct/enum
+    body is part of that container's namespace (Zig `Node.default_capacity`) and
+    must be locatable — the old `current_symbol == ""` gate conflated struct
+    scope with function scope and dropped both. Function-locals stay excluded."""
+
+    def test_struct_scoped_pub_const_is_extracted_as_constant(self, tmp_path) -> None:
+        p = tmp_path / "checksum.zig"
+        p.write_text(
+            "pub const Node = struct {\n"
+            "    x: u32,\n"
+            "    pub const default_capacity: u32 = 16;\n"
+            "    pub fn checksum(data: []const u8) u128 {\n"
+            "        var acc: u128 = 0;\n"
+            "        return acc;\n"
+            "    }\n"
+            "};\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        # F64: the struct-scoped `pub const` is a locatable constant
+        assert by_name.get("default_capacity", {}).get("kind") == "constant"
+        assert by_name["default_capacity"]["start_line"] == 3
+        # the struct and its method are still extracted correctly
+        assert by_name["Node"]["kind"] == "struct"
+        assert by_name["checksum"]["kind"] == "function"
+
+    def test_function_local_const_and_var_still_excluded(self, tmp_path) -> None:
+        p = tmp_path / "fn.zig"
+        p.write_text(
+            "pub fn compute() u32 {\n"
+            "    const LOCAL_MAX: u32 = 99;\n"
+            "    var total: u32 = 0;\n"
+            "    return total + LOCAL_MAX;\n"
+            "}\n"
+        )
+        names = {s["name"] for s in extract_symbols_from_file(str(p))[0]}
+        assert "compute" in names
+        # function-locals are disposable, not part of any locatable namespace
+        assert "LOCAL_MAX" not in names
+        assert "total" not in names
+
+    def test_struct_scoped_var_is_extracted_as_variable(self, tmp_path) -> None:
+        p = tmp_path / "counter.zig"
+        p.write_text(
+            "pub const Counter = struct {\n"
+            "    var instances: u32 = 0;\n"
+            "};\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        # a struct-scoped `var` keeps the variable kind (from the `var` keyword,
+        # not the SCREAMING_CASE module-scope heuristic)
+        assert by_name.get("instances", {}).get("kind") == "variable"
+
+    def test_enum_scoped_const_is_extracted(self, tmp_path) -> None:
+        p = tmp_path / "mode.zig"
+        p.write_text(
+            "pub const Mode = enum {\n"
+            "    fast,\n"
+            "    slow,\n"
+            "    pub const default_mode = Mode.fast;\n"
+            "};\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        assert by_name["Mode"]["kind"] == "enum"
+        # a const inside an enum body is part of the enum's namespace
+        assert by_name.get("default_mode", {}).get("kind") == "constant"
+
+
 # ---------------------------------------------------------------------------
 # SymbolGraph — index_file / delete_file / symbol_count
 # ---------------------------------------------------------------------------
@@ -2587,6 +2655,54 @@ class TestLocateRankingClassEnclosedF49:
             f"class (its immediate parent is the function, not TestSuite); got {cls!r}"
         )
 
+    def test_enclosing_class_modifier_prefixed_java(self) -> None:
+        """UPG-CLASS-DEF-RE-MODIFIERS: a `public class` (the standard Java form)
+        must resolve its enclosing class — the bare `^class` regex missed it and
+        misread the declaration line as a scope exit."""
+        lines = [
+            "public class Factory {",
+            "    public Producer createProducer() {",
+            "        return null;",
+            "    }",
+            "}",
+        ]
+        assert _enclosing_class_from_lines(lines, start_line=2) == "Factory"
+
+    def test_enclosing_class_multi_modifier_java(self) -> None:
+        lines = [
+            "public final class Registry {",
+            "    void register() {}",
+            "}",
+        ]
+        assert _enclosing_class_from_lines(lines, start_line=2) == "Registry"
+
+    def test_enclosing_class_export_ts(self) -> None:
+        """UPG-CLASS-DEF-RE-MODIFIERS: `export class` (the standard TS/JS form)."""
+        lines = [
+            "export class Foo {",
+            "    run(): void {}",
+            "}",
+        ]
+        assert _enclosing_class_from_lines(lines, start_line=2) == "Foo"
+
+    def test_enclosing_class_export_default_and_abstract_ts(self) -> None:
+        for header, name in (
+            ("export default class Bar {", "Bar"),
+            ("export abstract class Baz {", "Baz"),
+        ):
+            lines = [header, "    m() {}", "}"]
+            assert _enclosing_class_from_lines(lines, start_line=2) == name
+
+    def test_enclosing_class_modifier_run_without_class_is_not_a_class(self) -> None:
+        """A modifier run NOT followed by `class` (e.g. `public void helper()`)
+        must still be treated as a non-class scope exit, returning ''."""
+        lines = [
+            "public void helper() {",
+            "    int x = 1;",
+            "}",
+        ]
+        assert _enclosing_class_from_lines(lines, start_line=2) == ""
+
     def test_locate_class_enclosed_batch(self, tmp_path) -> None:
         """_locate_class_enclosed_batch reads each file once and reports True only
         for symbols whose immediate enclosing scope is a class."""
@@ -2951,12 +3067,14 @@ class TestFileImportanceARCH1a:
         """SYMBOL_SCHEMA_VERSION is an exact pin, not a floor: every
         extraction-behavior change must bump it (or existing installs never
         rebuild their graph) AND consciously update this pin in the same
-        commit. Currently 11 (Java/C/Zig/TS name-extraction fixes —
+        commit. Currently 12 (Zig struct/enum-scoped const/var extracted as
+        locatable namespace members, function-locals still excluded —
+        UPG-ZIG-STRUCT-CONST-LOCATE — bumped from 11 Java/C/Zig/TS name-extraction fixes —
         UPG-JAVA-METHOD-NAME-EXTRACTION / UPG-C-STRUCT-TYPEDEF-LOCATE /
         UPG-C-MACRO-ADJACENT-DROP / UPG-ZIG-SYMBOL-EXTRACTION /
         UPG-TS-SYMBOLGRAPH-TYPEDEF — bumped from 10/UPG-SIBLING-TYPEDEF-CROWDING)."""
-        assert SYMBOL_SCHEMA_VERSION == 11, (
-            f"Expected SYMBOL_SCHEMA_VERSION=11; got {SYMBOL_SCHEMA_VERSION}. "
+        assert SYMBOL_SCHEMA_VERSION == 12, (
+            f"Expected SYMBOL_SCHEMA_VERSION=12; got {SYMBOL_SCHEMA_VERSION}. "
             "If you changed extraction behavior, bump the version and update this pin."
         )
 

@@ -84,7 +84,21 @@ def _get_imported_files(caller_file: str, workspace: str) -> list[str]:
     return list(dict.fromkeys(imported))  # dedup while preserving order
 
 
-_CLASS_DEF_RE = re.compile(r"^class\s+(\w+)")
+# UPG-CLASS-DEF-RE-MODIFIERS: a class declaration line may carry declaration
+# modifiers before the `class` keyword — Java (`public`/`private`/`protected`/
+# `final`/`abstract`/`static`/`sealed`/`strictfp`) and TS/JS (`export`/`default`/
+# `declare`/`abstract`). The bare `^class` form missed exactly the majority
+# forms (`public class`, `export class`, `export default class`), so the
+# enclosing-class backward scan misread a modifier-prefixed class line as a
+# scope-exit and dropped it — breaking qualified `Class.method` resolution on
+# public/exported API surfaces. The prefix is a FIXED, language-syntax-anchored
+# keyword set (definition-side parsing, not query-side classification); a
+# modifier run that is not followed by `class` still fails to match, preserving
+# the "non-class lesser-indent line exits the scope" semantics.
+_CLASS_DEF_RE = re.compile(
+    r"^(?:(?:export|default|public|private|protected|abstract|final|static|declare|sealed|strictfp)\s+)*"
+    r"class\s+(\w+)"
+)
 
 # ARCH-2: whole-word identifier tokenizer used to count class-name reference
 # frequency across the corpus (locate_scope-independent — a single pass over
