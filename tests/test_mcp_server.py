@@ -1107,6 +1107,24 @@ class TestVectrRemember:
         text = result["content"][0]["text"]
         assert "first line: " + "A" * 117 + "..." in text
 
+    def test_remember_confirmation_echo_dedupes_when_title_equals_first_line(self) -> None:
+        """When no explicit title is given, the title is derived from the first
+        content line, so title == first_line; the echo must not print the same
+        text twice as `title: X · first line: X`."""
+        from agent.working_context_store import WorkingNote
+        svc = _mock_service()
+        svc.get_note.return_value = WorkingNote(
+            note_id=42, workspace="/repo",
+            content="Factory.createProducer at Factory.java:2 returns a Producer\nmore",
+            tags=[], priority="medium", created_at=0.0, last_accessed=0.0,
+            kind="finding", scope="workspace",
+            title="Factory.createProducer at Factory.java:2 returns a Producer",
+        )
+        result = handle_tools_call("vectr_remember", {"content": "x"}, svc)
+        text = result["content"][0]["text"]
+        assert "title: Factory.createProducer at Factory.java:2 returns a Producer" in text
+        assert "first line:" not in text
+
     def test_remember_with_tags_and_priority(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {

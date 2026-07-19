@@ -2394,7 +2394,7 @@ _IDE_CONFIG_WRITES_DISCLOSURE = (
     "CLAUDE.md, .cursor/rules/vectr.mdc, .mcp.json, .cursor/mcp.json, "
     ".vscode/mcp.json, .claude/settings.json, and .vectrignore (default "
     "excludes) — 7 files. Files for other editors/agents (AGENTS.md, "
-    ".cursorrules, GEMINI.md, CODEX.md, .github/copilot-instructions.md) "
+    ".cursorrules, GEMINI.md, .github/copilot-instructions.md) "
     "only get a vectr guidance block appended if the file already exists — "
     "they are never created from scratch (Codex reads AGENTS.md, so no separate "
     "CODEX.md is written). Pass --no-ide-config to skip all "

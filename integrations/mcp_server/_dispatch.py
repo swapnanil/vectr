@@ -653,7 +653,10 @@ def handle_tools_call(
             parts = []
             if title:
                 parts.append(f"title: {title}")
-            if first_line:
+            # Only show the first line when it adds information — when no title
+            # was supplied it is derived from the first content line (app/models.py),
+            # so title == first_line and echoing both just prints the same text twice.
+            if first_line and first_line != title:
                 parts.append(f"first line: {first_line}")
             if parts:
                 echo = "\n  Stored — " + " · ".join(parts)
