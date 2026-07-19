@@ -33,6 +33,9 @@ from integrations.mcp_server import (
     _reset_calls_since_save,
 )
 
+from app.service import VectrService
+from tests._seam import assert_seam_call
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1454,57 +1457,52 @@ class TestRememberNudge:
 # ---------------------------------------------------------------------------
 
 class TestVectrRecall:
+    # UPG-TEST-SIGNATURE-DRIFT: these seam assertions name only the kwarg(s) the
+    # test is actually about and validate them against the real
+    # VectrService.recall signature (tests/_seam.assert_seam_call), rather than
+    # re-listing every default kwarg. A new param added to the recall seam no
+    # longer reddens all six at once; a renamed/removed param still fails
+    # precisely, naming the stale key.
     def test_recall_calls_service(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_recall", {}, svc)
-        svc.recall.assert_called_once_with(
-            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
+        assert svc.recall.call_count == 1
+        assert_seam_call(
+            svc.recall, VectrService.recall,
+            query=None, limit=10, boot=False, detail="index", sort_by="relevance", note_id=None,
         )
 
     def test_recall_with_filters(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"query": "auth", "tags": ["wip"], "priority": "high", "limit": 5}, svc)
-        svc.recall.assert_called_once_with(
-            query="auth", tags=["wip"], priority="high", limit=5, kind=None, boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
+        assert_seam_call(
+            svc.recall, VectrService.recall,
+            query="auth", tags=["wip"], priority="high", limit=5,
         )
 
     def test_recall_passes_kind_filter(self) -> None:
         """UPG-9.3: a kind filter reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"kind": "directive"}, svc)
-        svc.recall.assert_called_once_with(
-            query=None, tags=None, priority=None, limit=10, kind="directive", boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
-        )
+        assert_seam_call(svc.recall, VectrService.recall, kind="directive")
 
     def test_recall_passes_detail_full(self) -> None:
         """UPG-RECALL-HIERARCHY: detail='full' reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"detail": "full"}, svc)
-        svc.recall.assert_called_once_with(
-            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="full", sort_by="relevance", max_age_days=None, note_id=None, session_id=None,
-        )
+        assert_seam_call(svc.recall, VectrService.recall, detail="full")
 
     def test_recall_passes_note_id(self) -> None:
         """UPG-RECALL-HIERARCHY: note_id expand path reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"note_id": 7}, svc)
-        svc.recall.assert_called_once_with(
-            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="index", sort_by="relevance", max_age_days=None, note_id=7, session_id=None,
-        )
+        assert_seam_call(svc.recall, VectrService.recall, note_id=7)
 
     def test_recall_passes_sort_by_and_max_age(self) -> None:
         """UPG-RECALL-HIERARCHY: sort_by and max_age_days reach the service."""
         svc = _mock_service()
         handle_tools_call("vectr_recall", {"sort_by": "recency", "max_age_days": 7.0}, svc)
-        svc.recall.assert_called_once_with(
-            query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-            detail="index", sort_by="recency", max_age_days=7.0, note_id=None, session_id=None,
-        )
+        assert_seam_call(svc.recall, VectrService.recall, sort_by="recency", max_age_days=7.0)
 
     def test_recall_returns_notes_text(self) -> None:
         svc = _mock_service()
