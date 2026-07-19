@@ -355,14 +355,38 @@ class TestRunCaseManualBucket:
         assert ok is None
         assert any("MANUAL" in m for m in messages)
 
-    def test_unimplemented_primitive_only_is_manual_not_pass(self, monkeypatch) -> None:
-        """e.g. F56's 'top_k_contains_any_of' — a real corpus key this
-        harness does not (yet) implement an evaluator for."""
-        monkeypatch.setattr(run_acceptance, "_post", lambda base, path, body: {"results": []})
-        case = {"id": "x", "query": "q",
-                "expect": {"top_k_contains_any_of": [{"symbol": "a"}, {"symbol": "b"}]}}
+    def test_top_k_contains_any_of_passes_when_one_candidate_matches(self, monkeypatch) -> None:
+        """UPG-HARNESS-TOPK-ANY-OF-EVALUATOR: F56's 'top_k_contains_any_of' is now
+        machine-evaluated — passes when the top-k holds AT LEAST ONE candidate."""
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [
+                {"symbol": "check_password", "file": "/p/django/contrib/auth/hashers.py"},
+            ]},
+        )
+        case = {"id": "F56", "query": "q", "expect": {"top_k_contains_any_of": {
+            "k": 5, "candidates": [
+                {"file": "django/contrib/auth/hashers.py", "symbol": "check_password"},
+                {"file": "django/contrib/auth/backends.py", "symbol": "ModelBackend.authenticate"},
+            ]}}}
         ok, messages = run_case(case, "http://localhost:0")
-        assert ok is None
+        assert ok is True
+        assert any("top_k_contains_any_of" in m for m in messages)
+
+    def test_top_k_contains_any_of_fails_when_no_candidate_matches(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [
+                {"symbol": "unrelated", "file": "/p/other.py"},
+            ]},
+        )
+        case = {"id": "F56", "query": "q", "expect": {"top_k_contains_any_of": {
+            "k": 5, "candidates": [
+                {"file": "django/contrib/auth/hashers.py", "symbol": "check_password"},
+                {"file": "django/contrib/auth/backends.py", "symbol": "ModelBackend.authenticate"},
+            ]}}}
+        ok, _ = run_case(case, "http://localhost:0")
+        assert ok is False
 
     def test_scores_in_unit_interval_and_uniform_score_source_wired(self, monkeypatch) -> None:
         """The restamped F1c/F12 expect shape end-to-end through run_case."""
