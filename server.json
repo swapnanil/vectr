@@ -8,13 +8,30 @@
     "source": "github"
   },
   "websiteUrl": "https://swapnanilsaha.com/tools/vectr",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "vectr",
-      "version": "1.3.0",
+      "version": "1.4.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp-stdio",
+          "description": "Serve MCP over stdio for the workspace in the current directory."
+        }
+      ]
+    },
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "vectr",
+      "version": "1.4.0",
       "transport": {
         "type": "streamable-http",
         "url": "http://localhost:{VECTR_PORT}/mcp"
