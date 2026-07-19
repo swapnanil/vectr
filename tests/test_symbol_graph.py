@@ -261,6 +261,170 @@ class TestGoTypeDeclarationNameUPGRustStructChunkMissing:
         assert "" not in {s["name"] for s in symbols}
 
 
+class TestJavaMethodNameExtractionUPG:
+    """UPG-JAVA-METHOD-NAME-EXTRACTION: a Java method with a non-primitive
+    return type emits `type_identifier` (the return type) as a direct child
+    BEFORE the method-name `identifier`, so the positional child-scan indexed
+    the method under its return type's name. `child_by_field_name("name")` is
+    authoritative."""
+
+    def test_method_indexed_under_method_name_not_return_type(self, tmp_path) -> None:
+        p = tmp_path / "Factory.java"
+        p.write_text(
+            "class Factory {\n"
+            "  public Producer createProducer() { return null; }\n"
+            "  private ConnectionPool pool() { return null; }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        by_name = {s["name"]: s for s in symbols}
+        assert "createProducer" in by_name
+        assert by_name["createProducer"]["kind"] == "method"
+        assert "pool" in by_name
+        # the return types must NOT be minted as method symbols
+        assert "Producer" not in by_name
+        assert "ConnectionPool" not in by_name
+
+    def test_primitive_return_type_method_still_resolved(self, tmp_path) -> None:
+        p = tmp_path / "Calc.java"
+        p.write_text("class Calc {\n  int add(int a, int b) { return a + b; }\n}\n")
+        names = {s["name"] for s in extract_symbols_from_file(str(p))[0]}
+        assert "add" in names
+
+
+class TestTSTypedefSymbolGraphUPG:
+    """UPG-TS-SYMBOLGRAPH-TYPEDEF: type_alias_declaration and enum_declaration
+    must resolve as symbols so vectr_locate finds a TS type alias / enum, not
+    just interfaces and classes."""
+
+    def test_type_alias_and_enum_are_symbols(self, tmp_path) -> None:
+        p = tmp_path / "types.ts"
+        p.write_text(
+            "export type UserId = string;\n"
+            "export enum Color { Red, Green, Blue }\n"
+            "export interface Shape { area(): number }\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        assert by_name.get("UserId", {}).get("kind") == "type"
+        assert by_name.get("Color", {}).get("kind") == "enum"
+        assert by_name.get("Shape", {}).get("kind") == "interface"
+
+    def test_ts_typedef_locatable(self, tmp_path) -> None:
+        p = tmp_path / "types.ts"
+        p.write_text("export type UserId = string;\nexport enum Color { Red }\n")
+        g = SymbolGraph(str(tmp_path))
+        g.index_file("ws", str(p))
+        assert g.locate_l2("ws", "UserId").resolution_strategy == "exact"
+        assert g.locate_l2("ws", "Color").resolution_strategy == "exact"
+
+
+class TestCStructTypedefLocateUPG:
+    """UPG-C-STRUCT-TYPEDEF-LOCATE / UPG-C-MACRO-ADJACENT-DROP: the whole-subtree
+    error check dropped C symbols whose NAME/declarator was clean but whose
+    body/field-list contained a macro tree-sitter-c couldn't parse. The check is
+    now declarator-scoped, so both a typedef-struct with a macro field and a
+    function whose body is a type-name-arg macro survive."""
+
+    def test_typedef_struct_with_macro_field_extracted(self, tmp_path) -> None:
+        p = tmp_path / "dictobject.c"
+        p.write_text(
+            "typedef struct {\n"
+            "    PyObject_HEAD\n"
+            "    Py_ssize_t ma_used;\n"
+            "    PyDictKeysObject *ma_keys;\n"
+            "} PyDictObject;\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        assert "PyDictObject" in by_name
+
+    def test_macro_body_function_extracted(self, tmp_path) -> None:
+        p = tmp_path / "longobject.c"
+        p.write_text(
+            "#define PYLONG_FROM_INT(INT_TYPE, ival) do { return; } while (0)\n"
+            "PyObject * PyLong_FromLong(long ival) { PYLONG_FROM_INT(unsigned long, ival); }\n"
+            "PyObject * PyLong_AsLong(PyObject *v) { return v; }\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        assert "PyLong_FromLong" in by_name
+        assert by_name["PyLong_FromLong"]["kind"] == "function"
+        assert "PyLong_AsLong" in by_name  # clean neighbour unaffected
+
+    def test_typedef_struct_locate_exact_not_fuzzy(self, tmp_path) -> None:
+        p = tmp_path / "dictobject.c"
+        p.write_text("typedef struct {\n    PyObject_HEAD\n} PyDictObject;\n")
+        g = SymbolGraph(str(tmp_path))
+        g.index_file("ws", str(p))
+        result = g.locate_l2("ws", "PyDictObject")
+        assert result.resolution_strategy == "exact"
+        assert result.symbols[0].name == "PyDictObject"
+
+    def test_fuzzy_fallback_labeled_as_inexact(self, tmp_path) -> None:
+        # A fuzzy (edit-distance) match must be rendered as an explicit
+        # no-exact-match near-miss, never as a confident hit — the historical
+        # `locate("PyDictObject")` → `PyODictObject` silent-wrong-answer.
+        g = SymbolGraph(str(tmp_path))
+        _seed_symbols(g, "ws", [
+            ("PyODictObject", "type", str(tmp_path / "odictobject.c")),
+        ])
+        result = g.locate_l2("ws", "PyDictObject")
+        assert result.resolution_strategy == "fuzzy"
+        text = g.format_locate_l2_for_llm(result)
+        assert "No exact match for 'PyDictObject'" in text
+        assert "PyODictObject" in text
+        # never render a fuzzy near-miss as a real "match via <strategy>" hit
+        assert "match via" not in text
+        assert "matches via" not in text
+
+
+class TestZigSymbolExtractionUPG:
+    """UPG-ZIG-SYMBOL-EXTRACTION: Zig's overloaded `variable_declaration` node
+    mapped every const/var — including function-local declarations and bare
+    assignments the grammar mis-parses as declarations — to kind "struct". The
+    kind is now resolved from the RHS; locals/mutations/imports are not symbols."""
+
+    def test_local_var_and_mutation_not_indexed_as_struct(self, tmp_path) -> None:
+        p = tmp_path / "checksum.zig"
+        p.write_text(
+            "pub fn checksum(data: []const u8) u128 {\n"
+            "    var checksum: u128 = 0;\n"
+            "    checksum +%= run(data);\n"
+            "    return checksum;\n"
+            "}\n"
+        )
+        symbols = extract_symbols_from_file(str(p))[0]
+        # the only `checksum` symbol is the function definition, not a [struct]
+        checksum_syms = [s for s in symbols if s["name"] == "checksum"]
+        assert len(checksum_syms) == 1
+        assert checksum_syms[0]["kind"] == "function"
+        assert not any(s["kind"] == "struct" for s in symbols)
+
+    def test_container_type_decls_keep_correct_kind(self, tmp_path) -> None:
+        p = tmp_path / "types.zig"
+        p.write_text(
+            "pub const Node = struct { x: u32 };\n"
+            "pub const Color = enum { Red, Green };\n"
+            "pub const Payload = union { a: u8, b: u16 };\n"
+            "pub const Errs = error { NotFound };\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        assert by_name["Node"]["kind"] == "struct"
+        assert by_name["Color"]["kind"] == "enum"
+        assert by_name["Payload"]["kind"] == "struct"
+        assert by_name["Errs"]["kind"] == "enum"
+
+    def test_import_and_factory_bindings_not_struct(self, tmp_path) -> None:
+        p = tmp_path / "mod.zig"
+        p.write_text(
+            'const std = @import("std");\n'
+            "pub const Tree = TreeType(K, V);\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        # @import binding is not a locatable definition
+        assert "std" not in by_name
+        # module-level factory binding is a variable, not a fabricated struct
+        assert by_name.get("Tree", {}).get("kind") == "variable"
+
+
 # ---------------------------------------------------------------------------
 # SymbolGraph — index_file / delete_file / symbol_count
 # ---------------------------------------------------------------------------
@@ -2747,10 +2911,12 @@ class TestFileImportanceARCH1a:
         """SYMBOL_SCHEMA_VERSION is an exact pin, not a floor: every
         extraction-behavior change must bump it (or existing installs never
         rebuild their graph) AND consciously update this pin in the same
-        commit. Currently 10 (UPG-SIBLING-TYPEDEF-CROWDING bumped from 9/
-        UPG-REACT-TSX-FUNCTION-DECL-DROP)."""
-        assert SYMBOL_SCHEMA_VERSION == 10, (
-            f"Expected SYMBOL_SCHEMA_VERSION=10; got {SYMBOL_SCHEMA_VERSION}. "
+        commit. Currently 11 (Java/C/Zig/TS name-extraction fixes —
+        UPG-JAVA-METHOD-NAME-EXTRACTION / UPG-C-STRUCT-TYPEDEF-LOCATE /
+        UPG-C-MACRO-ADJACENT-DROP / UPG-ZIG-SYMBOL-EXTRACTION /
+        UPG-TS-SYMBOLGRAPH-TYPEDEF — bumped from 10/UPG-SIBLING-TYPEDEF-CROWDING)."""
+        assert SYMBOL_SCHEMA_VERSION == 11, (
+            f"Expected SYMBOL_SCHEMA_VERSION=11; got {SYMBOL_SCHEMA_VERSION}. "
             "If you changed extraction behavior, bump the version and update this pin."
         )
 

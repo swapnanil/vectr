@@ -1711,8 +1711,27 @@ class SymbolGraph:
             "import_chain": "import-chain resolution",
             "fuzzy":        "fuzzy name match (edit-distance)",
         }
-        label = _labels.get(result.resolution_strategy, result.resolution_strategy)
         n = len(result.symbols)
+        # UPG-C-STRUCT-TYPEDEF-LOCATE (fuzzy-fallback honesty, general): an
+        # edit-distance match is a GUESS, not a match — a confident-looking
+        # wrong symbol (`locate("PyDictObject")` → `PyODictObject`) is worse than
+        # not-found because the caller LLM acts on it. Lead with an explicit
+        # no-exact-match caveat so the near-miss is never read as a real hit.
+        if result.resolution_strategy == "fuzzy":
+            names = ", ".join(s.name for s in result.symbols)
+            lines = [
+                f"No exact match for '{result.query}'. "
+                f"Nearest symbol name{'s' if n != 1 else ''} by edit-distance "
+                f"(may be unrelated — verify before use): {names}\n"
+            ]
+            for s in result.symbols:
+                lines.append(f"  [{s.kind}] {s.name}  {s.file_path}:{s.start_line}")
+                if s.snippet:
+                    for ln in s.snippet.splitlines()[:SNIPPET_LINES]:
+                        lines.append(f"    {ln}")
+                    lines.append("")
+            return "\n".join(lines)
+        label = _labels.get(result.resolution_strategy, result.resolution_strategy)
         lines = [
             f"Symbol locations for '{result.query}' "
             f"({n} match{'es' if n != 1 else ''} via {label}):\n"

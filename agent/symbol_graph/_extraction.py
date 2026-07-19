@@ -93,27 +93,118 @@ def _get_symbol_name(node, code_bytes: bytes, language: str = "") -> str:
                 if nm is not None:
                     return code_bytes[nm.start_byte:nm.end_byte].decode("utf-8", errors="replace")
         return ""
+    # Prefer tree-sitter's explicit `name` field when the grammar exposes one.
+    # The positional child-scan below returns the FIRST identifier-ish child,
+    # which is the RETURN TYPE — not the method name — for a Java
+    # `method_declaration` with a non-primitive return type (`Producer foo()`
+    # emits `type_identifier` "Producer" before `identifier` "foo"), indexing
+    # the method under its return type's name (UPG-JAVA-METHOD-NAME-EXTRACTION).
+    # The `name` field is authoritative where present; the scan stays the
+    # fallback for node types whose name the grammar doesn't expose that way
+    # (e.g. Python `decorated_definition`, Zig `variable_declaration`).
+    nm = node.child_by_field_name("name")
+    if nm is not None:
+        return code_bytes[nm.start_byte:nm.end_byte].decode("utf-8", errors="replace")
     for child in node.children:
         if child.type in ("identifier", "name", "property_identifier", "type_identifier"):
             return code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
     return ""
 
 
+_C_SPECIFIER_NAME_NODES = frozenset({
+    "struct_specifier", "union_specifier", "enum_specifier", "class_specifier",
+    "namespace_definition", "preproc_def", "preproc_function_def",
+})
+
+
+def _c_name_node(node):
+    """The name-bearing subtree of a C/C++ symbol node, for scoped error checks
+    (UPG-C-STRUCT-TYPEDEF-LOCATE / UPG-C-MACRO-ADJACENT-DROP).
+
+    C nests the identifier under a declarator chain, so the grammar's `name`
+    field only exists for the specifier/preproc forms; `function_definition`
+    and `type_definition` expose it through `declarator`. Returning the
+    declarator (rather than None) lets the caller check the NAME's parse
+    integrity in isolation: `typedef struct { PyObject_HEAD ... } PyDictObject;`
+    and a macro-body function like `PyLong_FromLong` both error inside the
+    body/field list while the declarator (`PyDictObject` / `PyLong_FromLong(...)`)
+    parses cleanly — the symbol must survive.
+    """
+    if node.type in _C_SPECIFIER_NAME_NODES:
+        return node.child_by_field_name("name")
+    return node.child_by_field_name("declarator")
+
+
 def _get_symbol_name_node(node, language: str):
     """The AST node bearing the symbol's own identifier, when the grammar
-    exposes it via tree-sitter's `name` field (UPG-REACT-TSX-FUNCTION-DECL-DROP).
+    exposes it (UPG-REACT-TSX-FUNCTION-DECL-DROP / UPG-C-STRUCT-TYPEDEF-LOCATE).
 
-    Used to check parse-error status on the IDENTIFIER ITSELF rather than the
-    whole definition subtree: a locally-erroring construct elsewhere in a
-    function's signature or body (a Flow-only type the routed grammar can't
-    parse, e.g.) must not erase symbol identity when the name token is clean.
-    Returns None when the field isn't resolvable for this node type — callers
-    then fall back to the broader whole-subtree error check, unchanged from
-    before this fix.
+    Used to check parse-error status on the NAME ITSELF rather than the whole
+    definition subtree: a locally-erroring construct elsewhere in a function's
+    signature or body (a Flow-only type the routed grammar can't parse; a
+    C macro expanding to non-expression tokens inside a body/struct field list)
+    must not erase symbol identity when the name token is clean. For C/C++ the
+    name lives in a declarator chain, resolved by `_c_name_node`. Returns None
+    when the node exposes no name-bearing subtree — callers then fall back to
+    the broader whole-subtree error check.
     """
     if language in ("c", "cpp"):
-        return None  # C/C++ names come from a declarator chain, not this field
+        return _c_name_node(node)
     return node.child_by_field_name("name")
+
+
+# Zig `const X = <container>` RHS node types that make X a genuine type
+# definition, mapped to the symbol kind vocabulary (UPG-ZIG-SYMBOL-EXTRACTION).
+_ZIG_CONTAINER_KIND: dict[str, str] = {
+    "struct_declaration": "struct",
+    "union_declaration": "struct",
+    "opaque_declaration": "struct",
+    "enum_declaration": "enum",
+    "error_set_declaration": "enum",
+}
+
+
+def _zig_var_decl_kind(node, code_bytes: bytes, current_symbol: str, name: str) -> str | None:
+    """Resolve the real symbol kind of a Zig `variable_declaration`, or None to
+    skip it (UPG-ZIG-SYMBOL-EXTRACTION).
+
+    Zig's grammar overloads `variable_declaration` across four shapes that the
+    static `_SYMBOL_TYPES["zig"]` mapping to "struct" all mislabeled:
+      - `const Foo = struct {...}` / `enum {...}` / `union {...}` — a real
+        container-type definition → the matching kind.
+      - `const std = @import("std")` — an import binding, not a definition here.
+      - `const Tree = TreeType(K, V)` / `var checksum: u128 = 0` — a value
+        binding; locatable only at module scope, and as a constant/variable,
+        never a fabricated "struct".
+      - `checksum +%= run();` — a bare assignment the grammar mis-parses as a
+        declaration (no `const`/`var` keyword) → not a symbol at all. This was
+        the witness: a local mutation indexed as `[struct] checksum` that
+        outranked the real `pub fn checksum` definition.
+    """
+    child_types = {c.type for c in node.children}
+    if "const" not in child_types and "var" not in child_types:
+        return None  # bare assignment / mutation, not a declaration
+    value = None
+    after_eq = False
+    for c in node.children:
+        if c.type == "=":
+            after_eq = True
+            continue
+        if after_eq and c.is_named:
+            value = c
+            break
+    if value is not None:
+        container = _ZIG_CONTAINER_KIND.get(value.type)
+        if container is not None:
+            return container
+        # `@import(...)` binds a module, not a locatable definition.
+        if value.type == "builtin_function" and code_bytes[value.start_byte:value.start_byte + 7] == b"@import":
+            return None
+    # A plain value binding is a locatable symbol only at module scope; a
+    # function-local `const`/`var` is not something `locate` looks for.
+    if current_symbol == "":
+        return "constant" if name.lstrip("_").isupper() else "variable"
+    return None
 
 
 def _get_call_name(node, code_bytes: bytes) -> str:
@@ -206,6 +297,11 @@ def _collect_symbols_and_calls(
         kind = symbol_types[node.type]
         start = node.start_point[0] + 1 + line_offset
         end = node.end_point[0] + 1 + line_offset
+        # UPG-ZIG-SYMBOL-EXTRACTION: Zig's `variable_declaration` covers real
+        # container-type defs, value bindings, imports, and mis-parsed
+        # assignments — resolve the true kind (None → not a locatable symbol).
+        if language == "zig" and node.type == "variable_declaration":
+            kind = _zig_var_decl_kind(node, code_bytes, current_symbol, name)
         # UPG-JSFLOW-SYMBOLS / UPG-REACT-TSX-FUNCTION-DECL-DROP: skip anonymous
         # nodes (e.g. C anonymous struct inside a typedef), language keywords
         # misattributed as identifiers, and any node whose own NAME token comes
@@ -218,7 +314,7 @@ def _collect_symbols_and_calls(
         # whole-subtree check remains the fallback where it doesn't.
         name_node = _get_symbol_name_node(node, language)
         name_is_junk = name_node.has_error if name_node is not None else node.has_error
-        if name and not _is_reserved_keyword(name, language) and not name_is_junk:
+        if name and kind is not None and not _is_reserved_keyword(name, language) and not name_is_junk:
             symbols.append({
                 "name": name,
                 "kind": kind,
@@ -226,10 +322,14 @@ def _collect_symbols_and_calls(
                 "start_line": start,
                 "end_line": end,
             })
-        # recurse into body with this symbol as context (use the enclosing symbol
-        # name when this node was anonymous, so nested calls still attribute somewhere)
-        ctx = name or current_symbol
-        ctx_line = start if name else current_line
+        # recurse into body with this symbol as context. Only a symbol we
+        # actually emitted names the context; a skipped Zig local/mutation
+        # (kind None) must not capture the calls in its initializer — those
+        # belong to the enclosing function. For non-Zig nodes kind is never
+        # None, so this is byte-identical to the prior `name or current_symbol`.
+        emitted = bool(name) and kind is not None
+        ctx = name if emitted else current_symbol
+        ctx_line = start if emitted else current_line
         for child in node.children:
             _collect_symbols_and_calls(
                 child, code_bytes, language, file_path,

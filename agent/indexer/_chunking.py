@@ -226,6 +226,16 @@ def _extract_symbol_name(node, language: str, code_bytes: bytes) -> str:
                 if nm is not None:
                     return code_bytes[nm.start_byte:nm.end_byte].decode("utf-8", errors="replace")
         return ""
+    # Prefer tree-sitter's explicit `name` field when the grammar exposes one:
+    # the positional child-scan below returns the FIRST identifier-ish child,
+    # which for a Java `method_declaration` with a non-primitive return type is
+    # the RETURN TYPE (`Producer foo()` → `type_identifier` "Producer" precedes
+    # `identifier` "foo"), naming the chunk after its return type
+    # (UPG-JAVA-METHOD-NAME-EXTRACTION). The scan stays the fallback for node
+    # types the grammar doesn't expose a `name` field for.
+    nm = node.child_by_field_name("name")
+    if nm is not None:
+        return code_bytes[nm.start_byte:nm.end_byte].decode("utf-8", errors="replace")
     for child in node.children:
         # "type_identifier" covers a type definition's own name in grammars
         # that distinguish it from a value identifier — e.g. a TS/Rust
