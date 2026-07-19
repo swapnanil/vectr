@@ -11,6 +11,15 @@ from agent.config import (
     SCORE_ORDER_EXPLAIN_ENABLED,
     SCORE_ORDER_EXPLAIN_MARGIN_RATIO,
 )
+from agent.render_paths import workspace_relpath
+
+
+def _service_ws_root(service) -> str:
+    """The daemon's workspace root as a plain string (UPG-RELATIVE-PATH-RENDER),
+    or "" when unavailable/non-str — so a test MagicMock's auto-attribute never
+    leaks into a rendered path or header."""
+    root = getattr(service, "_workspace_root", "")
+    return root if isinstance(root, str) else ""
 from integrations.mcp_server._schemas import (
     _EXPLORATION_TOOLS,
     _MEMORY_WRITE_TOOLS,
@@ -166,7 +175,8 @@ def handle_tools_call(
         # explicit, hard-to-miss signal that the whole result set may be a
         # weak/unrelated guess. Results are still shown in full below it;
         # nothing is suppressed.
-        if getattr(results, "low_confidence", False):
+        low_conf = getattr(results, "low_confidence", False)
+        if low_conf:
             from agent.config import NOTFOUND_FLOOR_BANNER
             sections.append(f"─── Low confidence ───\n{NOTFOUND_FLOOR_BANNER}")
 
@@ -183,8 +193,12 @@ def handle_tools_call(
                     f"Re-run without the language filter, or use one of the above."
                 )
 
+        # UPG-RELATIVE-PATH-RENDER: the daemon's own workspace root — rendered
+        # once in the search header, then stripped from every path/id below.
+        ws_root = _service_ws_root(service)
+
         # L3 chunks
-        sections.append(_format_search_results(results, query, query_ms, service.total_chunks))
+        sections.append(_format_search_results(results, query, query_ms, service.total_chunks, ws_root))
 
         # UPG-QUERYTYPE-REROUTE: additive, high-precision symbol-graph hint —
         # exact identifier-shaped-token matches only (never a keyword/intent
@@ -192,10 +206,21 @@ def handle_tools_call(
         # reordered, or reweighted; empty when no identifier-shaped token in
         # the query resolves exactly.
         hint_symbols = service.identifier_hint_symbols(query)
+        # UPG-LOWCONF-SLIM-DEDUPE: in pointer mode the L3 pointer list already
+        # shows file:line for every result — an exact-match hint for the same
+        # (file_path, start_line) would just repeat it verbatim. Deterministic
+        # set intersection on the already-computed result set, not a
+        # query-content heuristic. A hint symbol not already shown still gets
+        # its own line.
+        if low_conf and hint_symbols:
+            shown = {(r.file_path, r.symbol_start_line) for r in results}
+            hint_symbols = [s for s in hint_symbols if (s.file_path, s.start_line) not in shown]
         if hint_symbols:
             hint_lines = ["─── Symbol graph (exact matches for query identifiers) ───"]
             for s in hint_symbols:
-                hint_lines.append(f"  [{s.kind}] {s.name}  {s.file_path}:{s.start_line}")
+                hint_lines.append(
+                    f"  [{s.kind}] {s.name}  {workspace_relpath(s.file_path, ws_root)}:{s.start_line}"
+                )
             sections.append("\n".join(hint_lines))
 
         # UPG-NEARMISS-SYMBOL-NAMES: additive, honestly-labeled follow-on —
@@ -208,7 +233,9 @@ def handle_tools_call(
         if nearmiss_pairs:
             nm_lines = []
             for token, syms in nearmiss_pairs:
-                names = ", ".join(f"{s.name} ({s.file_path}:{s.start_line})" for s in syms)
+                names = ", ".join(
+                    f"{s.name} ({workspace_relpath(s.file_path, ws_root)}:{s.start_line})" for s in syms
+                )
                 nm_lines.append(
                     f"─── No exact match for {token!r}; nearest symbol names: {names} ───"
                 )
@@ -264,7 +291,7 @@ def handle_tools_call(
         except Exception:
             pass
 
-        text = _format_fetch_results(entries)
+        text = _format_fetch_results(entries, _service_ws_root(service))
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_status ----
@@ -897,7 +924,9 @@ def _storage_cap_truncation_warning(
     return None
 
 
-def _format_search_results(results, query: str, query_ms: int, chunks_searched: int) -> str:
+def _format_search_results(
+    results, query: str, query_ms: int, chunks_searched: int, workspace_root: str = "",
+) -> str:
     if not results:
         return f"No results found for: {query}"
     # UPG-LOWCONF-OUTPUT-SLIM / UPG-FLOOR-SLIM-PAYLOAD: when the low-confidence
@@ -915,11 +944,17 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
     header = f"Found {len(results)} results for '{query}' ({query_ms}ms, {chunks_searched} chunks searched)"
     if low_conf:
         header += " — low confidence: pointers only (vectr_fetch(ids=[...]) to expand)"
-    lines = [header + "\n"]
+    # UPG-RELATIVE-PATH-RENDER: print the absolute workspace root ONCE here; every
+    # path/chunk-id below is rendered relative to it, so the ~21-token absolute
+    # prefix stops riding every result line. vectr_fetch accepts the relative ids.
+    lines = [header]
+    if workspace_root:
+        lines.append(f"workspace: {workspace_root}")
+    lines.append("")
     for i, r in enumerate(results, 1):
         lines.append(f"{'─' * 60}")
         dup = f"  (+{r.dup_count} more identical)" if getattr(r, "dup_count", 0) else ""
-        chunk_id = getattr(r, "chunk_id", "") or f"{r.file_path}:{r.lines}"
+        chunk_id = f"{workspace_relpath(r.file_path, workspace_root)}:{r.lines}"
         # UPG-MCP-SCORE-SOURCE-RENDER: surface which scale the displayed score is
         # on — "reranker" (cross-encoder sigmoid) vs "dense" (bi-encoder cosine).
         # REST already carries score_source; the caller LLM reads this score to
@@ -968,7 +1003,9 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         # the missing tail.
         s_start = getattr(r, "symbol_start_line", 0)
         s_end = getattr(r, "symbol_end_line", 0)
-        truncation_warning = _storage_cap_truncation_warning(r.content, r.file_path, s_start, s_end)
+        truncation_warning = _storage_cap_truncation_warning(
+            r.content, workspace_relpath(r.file_path, workspace_root), s_start, s_end,
+        )
         if len(content_lines) > 80:
             # Hard cap: the content itself is long but we also cap the display.
             lines.append("\n".join(content_lines[:80]))
@@ -984,14 +1021,18 @@ def _format_search_results(results, query: str, query_ms: int, chunks_searched: 
         else:
             lines.append(r.content)
         lines.append("")
-    lines.append(
-        'Results are re-fetchable anytime: vectr_fetch(ids=["<id>"]) restores '
-        "a chunk after it leaves your context."
-    )
+    # UPG-LOWCONF-SLIM-DEDUPE: in pointer mode no body was ever shown, so
+    # nothing "left your context" — the footer would be actively misleading.
+    # The pointers above are already the fetch keys.
+    if not low_conf:
+        lines.append(
+            'Results are re-fetchable anytime: vectr_fetch(ids=["<id>"]) restores '
+            "a chunk after it leaves your context."
+        )
     return "\n".join(lines)
 
 
-def _format_fetch_results(entries: list[dict]) -> str:
+def _format_fetch_results(entries: list[dict], workspace_root: str = "") -> str:
     """Render vectr_fetch results using the same id + symbol + content
     conventions as _format_search_results (UPG-CTX-EVICT), so a restored
     chunk reads identically to how it first appeared in a search response.
@@ -1002,8 +1043,16 @@ def _format_fetch_results(entries: list[dict]) -> str:
     exact stored bytes, not the original file. Apply the same truncation
     check search already applies so a re-fetch never silently looks complete
     on exactly the large chunks a caller is most tempted to evict.
+
+    UPG-RELATIVE-PATH-RENDER: a found entry's id is re-rendered workspace-
+    relative (from its own file_path, so the display matches search's relative
+    ids regardless of whether the caller fetched by a relative or absolute id);
+    the absolute root is printed once in the header. A not-found entry echoes
+    the exact id the caller passed so a bad id is recognizable.
     """
     lines: list[str] = []
+    if workspace_root:
+        lines.append(f"workspace: {workspace_root}")
     missing = [e["id"] for e in entries if not e["found"]]
     for e in entries:
         lines.append(f"{'─' * 60}")
@@ -1011,14 +1060,16 @@ def _format_fetch_results(entries: list[dict]) -> str:
             lines.append(f"[{e['id']}] not found")
             lines.append("")
             continue
-        lines.append(f"[{e['id']}]")
+        rel_path = workspace_relpath(e.get("file_path", ""), workspace_root)
+        rel_id = f"{rel_path}:{e.get('start_line', 0)}-{e.get('end_line', 0)}"
+        lines.append(f"[{rel_id}]")
         if e.get("symbol_name"):
             lines.append(f"    symbol: {e['symbol_name']}  language: {e.get('language', '')}")
         lines.append("")
         content = e.get("content", "")
         lines.append(content)
         truncation_warning = _storage_cap_truncation_warning(
-            content, e.get("file_path", ""), e.get("start_line", 0), e.get("end_line", 0),
+            content, rel_path, e.get("start_line", 0), e.get("end_line", 0),
         )
         if truncation_warning:
             lines.append(truncation_warning)

@@ -84,12 +84,41 @@ def _get_imported_files(caller_file: str, workspace: str) -> list[str]:
     return list(dict.fromkeys(imported))  # dedup while preserving order
 
 
-_CLASS_DEF_RE = re.compile(r"^class\s+(\w+)")
+# UPG-CLASS-DEF-RE-MODIFIERS: a class declaration line may carry declaration
+# modifiers before the `class` keyword — Java (`public`/`private`/`protected`/
+# `final`/`abstract`/`static`/`sealed`/`strictfp`) and TS/JS (`export`/`default`/
+# `declare`/`abstract`). The bare `^class` form missed exactly the majority
+# forms (`public class`, `export class`, `export default class`), so the
+# enclosing-class backward scan misread a modifier-prefixed class line as a
+# scope-exit and dropped it — breaking qualified `Class.method` resolution on
+# public/exported API surfaces. The prefix is a FIXED, language-syntax-anchored
+# keyword set (definition-side parsing, not query-side classification); a
+# modifier run that is not followed by `class` still fails to match, preserving
+# the "non-class lesser-indent line exits the scope" semantics.
+_CLASS_DEF_RE = re.compile(
+    r"^(?:(?:export|default|public|private|protected|abstract|final|static|declare|sealed|strictfp)\s+)*"
+    r"class\s+(\w+)"
+)
 
 # ARCH-2: whole-word identifier tokenizer used to count class-name reference
 # frequency across the corpus (locate_scope-independent — a single pass over
 # every file's text, not a per-class regex search).
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# UPG-CLASS-IMPORTANCE-REEXPORT-NOISE: a bare barrel / re-export line
+# (`export { X } from '...'`, `export * from '...'`, `export * as NS from '...'`)
+# is module plumbing, not a genuine reference to the named symbol — counting it
+# inflates class_importance identically to a real call-site, enough that a
+# single barrel re-export can double a symbol's reference count and invert
+# display order against a large ce_relevance gap. Occurrences on a line matching
+# this pattern are excluded from the reference-frequency count. A static,
+# corpus-wide, index-time property of the occurrence's LINE (definition-side
+# parsing, not query-side logic). Deliberately does NOT match `export class X`,
+# `export const X`, or `export default X` — genuine definitions/values keep
+# their count; and `import { X } from ...` is left counting (a real use site).
+_REEXPORT_LINE_RE = re.compile(
+    r"^\s*export\s+(?:\{[^}]*\}|\*(?:\s+as\s+\w+)?)\s+from\s+['\"]"
+)
 
 # UPG-15.10: detect enclosing function/method scopes for locate scope-depth ranking.
 # Matches `def ` and `async def ` at the start of a stripped line so indented
@@ -954,10 +983,18 @@ class SymbolGraph:
                 text = Path(fp).read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            for m in _WORD_RE.finditer(text):
-                tok = m.group(0)
-                if tok in counts:
-                    counts[tok] += 1
+            # UPG-CLASS-IMPORTANCE-REEXPORT-NOISE: scan per line so a bare
+            # barrel re-export line's mentions can be excluded — they are
+            # plumbing, not genuine references. Token counting is otherwise
+            # identical to a whole-file _WORD_RE pass (identifiers never span
+            # newlines).
+            for line in text.splitlines():
+                if _REEXPORT_LINE_RE.match(line):
+                    continue
+                for m in _WORD_RE.finditer(line):
+                    tok = m.group(0)
+                    if tok in counts:
+                        counts[tok] += 1
 
         max_count = max(counts.values()) if counts else 0
 

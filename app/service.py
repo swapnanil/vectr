@@ -942,10 +942,20 @@ class VectrService:
 
         Disabled in memory-only mode — there is no code index to fetch from,
         the same guard as search/locate/trace.
+
+        UPG-RELATIVE-PATH-RENDER: search/evict now render workspace-RELATIVE
+        chunk ids, but the index stores ABSOLUTE ids. Resolve each incoming id
+        against the workspace root before lookup — a relative id is joined onto
+        the root, an already-absolute id passes through unchanged — so both the
+        new relative ids and the absolute ids existing sessions still hold
+        fetch correctly. The returned entry's file_path/lines come from the
+        stored metadata (absolute), which the renderer re-relativizes.
         """
         if self._memory_only:
             raise RuntimeError(_MEMORY_ONLY_MSG)
-        return self._indexer.fetch_chunks(ids)
+        from agent.render_paths import resolve_chunk_id
+        resolved = [resolve_chunk_id(i, self._workspace_root) for i in ids]
+        return self._indexer.fetch_chunks(resolved)
 
     def identifier_hint_symbols(self, query: str) -> list:
         """Additive, high-precision symbol-graph hint (UPG-QUERYTYPE-REROUTE).
@@ -1831,14 +1841,18 @@ class VectrService:
         # UPG-7.2: the explicit vectr_evict_hint tool / /v1/evict pass
         # on_demand=True for an eviction-focused informational framing distinct
         # from the gated auto-footer's remember alarm.
-        return self._advisor_for(session_id).eviction_hint(on_demand=on_demand)
+        return self._advisor_for(session_id).eviction_hint(
+            on_demand=on_demand, workspace_root=self._workspace_root,
+        )
 
     def auto_eviction_hint(self, session_id: str | None = None) -> str:
         """Gated per-response footer (UPG-7.1) — fires only on fresh context-
         pressure escalation, not every response. Used by the MCP search/locate/
         trace auto-append; the explicit vectr_evict_hint tool uses eviction_hint().
         Reads the calling session's advisor (UPG-EVICT-SESSION-SCOPE)."""
-        return self._advisor_for(session_id).auto_eviction_hint()
+        return self._advisor_for(session_id).auto_eviction_hint(
+            workspace_root=self._workspace_root,
+        )
 
     def should_evict(self, session_id: str | None = None) -> bool:
         return self._advisor_for(session_id).should_evict()

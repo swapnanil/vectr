@@ -164,7 +164,16 @@ _ZIG_CONTAINER_KIND: dict[str, str] = {
 }
 
 
-def _zig_var_decl_kind(node, code_bytes: bytes, current_symbol: str, name: str) -> str | None:
+# Enclosing-scope kinds whose members belong to a locatable namespace, so a
+# value binding nested inside one is a real, addressable symbol (e.g. Zig
+# `Node.default_capacity`) — unlike a function body, whose `const`/`var` are
+# disposable locals. Mirrors the container kinds `_ZIG_CONTAINER_KIND` emits.
+_ZIG_NAMESPACE_KINDS: frozenset[str] = frozenset({"struct", "enum"})
+
+
+def _zig_var_decl_kind(
+    node, code_bytes: bytes, current_symbol: str, name: str, current_kind: str = "",
+) -> str | None:
     """Resolve the real symbol kind of a Zig `variable_declaration`, or None to
     skip it (UPG-ZIG-SYMBOL-EXTRACTION).
 
@@ -174,15 +183,22 @@ def _zig_var_decl_kind(node, code_bytes: bytes, current_symbol: str, name: str) 
         container-type definition → the matching kind.
       - `const std = @import("std")` — an import binding, not a definition here.
       - `const Tree = TreeType(K, V)` / `var checksum: u128 = 0` — a value
-        binding; locatable only at module scope, and as a constant/variable,
-        never a fabricated "struct".
+        binding; locatable at module scope or as a member of a container
+        (struct/enum) namespace, and as a constant/variable, never a
+        fabricated "struct".
       - `checksum +%= run();` — a bare assignment the grammar mis-parses as a
         declaration (no `const`/`var` keyword) → not a symbol at all. This was
         the witness: a local mutation indexed as `[struct] checksum` that
         outranked the real `pub fn checksum` definition.
+
+    `current_kind` is the KIND of the enclosing symbol (from the walker), which
+    distinguishes a struct/enum namespace member (locatable) from a
+    function-local (not) — the two were previously conflated by the
+    `current_symbol == ""` gate (UPG-ZIG-STRUCT-CONST-LOCATE).
     """
     child_types = {c.type for c in node.children}
-    if "const" not in child_types and "var" not in child_types:
+    is_const = "const" in child_types
+    if not is_const and "var" not in child_types:
         return None  # bare assignment / mutation, not a declaration
     value = None
     after_eq = False
@@ -200,10 +216,14 @@ def _zig_var_decl_kind(node, code_bytes: bytes, current_symbol: str, name: str) 
         # `@import(...)` binds a module, not a locatable definition.
         if value.type == "builtin_function" and code_bytes[value.start_byte:value.start_byte + 7] == b"@import":
             return None
-    # A plain value binding is a locatable symbol only at module scope; a
-    # function-local `const`/`var` is not something `locate` looks for.
+    # A plain value binding is a locatable symbol at module scope (SCREAMING_CASE
+    # heuristic) or as a member of an enclosing container namespace (const vs var
+    # taken from the keyword the declaration actually used); a function-local
+    # `const`/`var` is not something `locate` looks for.
     if current_symbol == "":
         return "constant" if name.lstrip("_").isupper() else "variable"
+    if current_kind in _ZIG_NAMESPACE_KINDS:
+        return "constant" if is_const else "variable"
     return None
 
 
@@ -263,6 +283,7 @@ def _collect_symbols_and_calls(
     edges: list[dict],
     current_symbol: str = "",
     current_line: int = 0,
+    current_kind: str = "",
     depth: int = 0,
     type_usage_nodes: set[str] = frozenset(),
     parser=None,
@@ -301,7 +322,7 @@ def _collect_symbols_and_calls(
         # container-type defs, value bindings, imports, and mis-parsed
         # assignments — resolve the true kind (None → not a locatable symbol).
         if language == "zig" and node.type == "variable_declaration":
-            kind = _zig_var_decl_kind(node, code_bytes, current_symbol, name)
+            kind = _zig_var_decl_kind(node, code_bytes, current_symbol, name, current_kind)
         # UPG-JSFLOW-SYMBOLS / UPG-REACT-TSX-FUNCTION-DECL-DROP: skip anonymous
         # nodes (e.g. C anonymous struct inside a typedef), language keywords
         # misattributed as identifiers, and any node whose own NAME token comes
@@ -330,11 +351,12 @@ def _collect_symbols_and_calls(
         emitted = bool(name) and kind is not None
         ctx = name if emitted else current_symbol
         ctx_line = start if emitted else current_line
+        ctx_kind = kind if emitted else current_kind
         for child in node.children:
             _collect_symbols_and_calls(
                 child, code_bytes, language, file_path,
                 symbol_types, call_types, symbols, edges,
-                current_symbol=ctx, current_line=ctx_line,
+                current_symbol=ctx, current_line=ctx_line, current_kind=ctx_kind,
                 depth=depth + 1, type_usage_nodes=type_usage_nodes,
                 parser=parser, reparse_budget=reparse_budget, line_offset=line_offset,
                 attempted_spans=attempted_spans,
@@ -399,6 +421,7 @@ def _collect_symbols_and_calls(
             sub_tree.root_node, blob, language, file_path,
             symbol_types, call_types, symbols, edges,
             current_symbol=current_symbol, current_line=current_line,
+            current_kind=current_kind,
             depth=depth + 1, type_usage_nodes=type_usage_nodes,
             parser=parser, reparse_budget=reparse_budget,
             line_offset=line_offset + node.start_point[0],
@@ -467,6 +490,7 @@ def _collect_symbols_and_calls(
             child, code_bytes, language, file_path,
             symbol_types, call_types, symbols, edges,
             current_symbol=current_symbol, current_line=current_line,
+            current_kind=current_kind,
             depth=depth + 1,  # MUST increment — generic nodes dominate deep C ASTs;
                               # leaving this at `depth` let the guard never fire → RecursionError
             type_usage_nodes=type_usage_nodes,

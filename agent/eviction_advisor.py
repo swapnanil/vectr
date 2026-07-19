@@ -30,6 +30,7 @@ from agent.config import (
     EVICTION_REMEMBER_ESCALATION_TOKENS,
     EVICTION_RETRIEVED_TOKEN_GATE,
 )
+from agent.render_paths import workspace_relpath
 
 
 @dataclass
@@ -248,7 +249,7 @@ class EvictionAdvisor:
         tokens_at_last = self._last_emit[0] if self._last_emit is not None else 0
         return self.total_tokens_in_session() - tokens_at_last
 
-    def auto_eviction_hint(self) -> str:
+    def auto_eviction_hint(self, workspace_root: str = "") -> str:
         """Gated variant for the per-response footer (UPG-7.1 / UPG-11.15).
 
         Emits the hint only when BOTH conditions hold:
@@ -290,7 +291,7 @@ class EvictionAdvisor:
         ):
             return ""
         escalate = not self._soft_fire_pending
-        hint = self.eviction_hint(escalated=escalate)
+        hint = self.eviction_hint(escalated=escalate, workspace_root=workspace_root)
         if hint:
             self._last_emit = (
                 self.total_tokens_in_session(),
@@ -303,7 +304,9 @@ class EvictionAdvisor:
                 self._soft_fire_pending = False
         return hint
 
-    def eviction_hint(self, escalated: bool = True, on_demand: bool = False) -> str:
+    def eviction_hint(
+        self, escalated: bool = True, on_demand: bool = False, workspace_root: str = "",
+    ) -> str:
         """
         Return a message listing chunks vectr can re-retrieve in <50ms.
         Always safe to call — returns an empty hint if nothing has been retrieved
@@ -372,7 +375,7 @@ class EvictionAdvisor:
         for i, c in enumerate(self._chunks):
             last_seq[c.file_path] = i
         file_items = sorted(by_file.items(), key=lambda kv: last_seq[kv[0]], reverse=True)
-        shown = file_items[:5]
+        shown = file_items[:EVICTION_HINT_MAX_IDS]
         overflow = len(file_items) - len(shown)
 
         if on_demand:
@@ -385,7 +388,7 @@ class EvictionAdvisor:
                 " vectr_fetch(ids=[...]) in <50ms, so you can free the space now and"
                 " restore any of it exactly when you need it again.",
                 "",
-                "Files below are listed most recently retrieved first:",
+                "Chunks below are listed most recently retrieved first — each line is a vectr_fetch id:",
             ]
         elif escalated:
             lines = [
@@ -400,7 +403,7 @@ class EvictionAdvisor:
                 " verbatim via vectr_fetch(ids=[...]) in <50ms."
                 " Your synthesized analysis (saved via vectr_remember) is retrievable via vectr_recall.",
                 "",
-                "Files below are listed most recently retrieved first:",
+                "Chunks below are listed most recently retrieved first — each line is a vectr_fetch id:",
             ]
         else:
             lines = [
@@ -414,32 +417,39 @@ class EvictionAdvisor:
                 " verbatim via vectr_fetch(ids=[...]) in <50ms."
                 " Your synthesized analysis (saved via vectr_remember) is retrievable via vectr_recall.",
                 "",
-                "Files below are listed most recently retrieved first:",
+                "Chunks below are listed most recently retrieved first — each line is a vectr_fetch id:",
             ]
-        for fpath, chunks in shown:
-            ranges = ", ".join(
-                f"lines {c.lines}" + (f" ({c.symbol_name})" if c.symbol_name else "")
-                for c in chunks
-            )
-            lines.append(f"  {fpath}  [{ranges}]")
+        # UPG-RELATIVE-PATH-RENDER: print the absolute workspace root ONCE; every
+        # chunk id below is rendered relative to it.
+        if workspace_root:
+            lines.append(f"workspace: {workspace_root}")
+
+        # UPG-EVICT-HINT-SINGLE-SERIALIZE: render each shown chunk EXACTLY ONCE in
+        # id-ready, workspace-relative form — `relpath:X-Y (symbol)` is
+        # simultaneously the human-readable location AND a copy-pasteable
+        # vectr_fetch id — instead of serializing every path twice (a grouped
+        # file list PLUS a separate "Re-fetch keys" block, ~70% redundant). A
+        # single usage template follows, referencing the ids above rather than
+        # re-listing them.
+        # UPG-EVICT-REFETCH-KEYS-STALE ordering is preserved: `shown` is already
+        # most-recently-retrieved-file first, so the chunk lines inherit it.
+        for _fpath, chunks in shown:
+            for c in chunks:
+                rel_id = f"{workspace_relpath(c.file_path, workspace_root)}:{c.lines}"
+                sym = f"  ({c.symbol_name})" if c.symbol_name else ""
+                lines.append(f"  {rel_id}{sym}")
         if overflow:
             lines.append(f"  ... and {overflow} more file(s). All retrievable via vectr_search('<description>').")
 
-        # UPG-EVICT-SESSION-SCOPE: list the exact re-fetch keys additively —
-        # only for chunks whose id is a known-good vectr_fetch key (never a
-        # guessed one), capped so the hint's own token cost stays bounded.
-        # UPG-EVICT-REFETCH-KEYS-STALE: self._chunks is oldest-first with
-        # re-touched chunks moved to the end, so take the suffix and reverse —
-        # most recently retrieved first, matching the file list's stated
-        # ordering above. The old prefix slice pinned the session's OLDEST
-        # chunks here forever, rendering the identical id list in every
-        # escalated banner regardless of what was retrieved since.
-        fetch_ids = [c.chunk_id for c in self._chunks if c.chunk_id][-EVICTION_HINT_MAX_IDS:][::-1]
-        if fetch_ids:
-            id_list = ", ".join(f'"{i}"' for i in fetch_ids)
+        # UPG-EVICT-SESSION-SCOPE: fetch is advertised only when at least one
+        # recorded chunk carries a real stored id (a locate snippet's symbol
+        # range is not a guaranteed chunk boundary, so its `relpath:X-Y` line is
+        # a location, not a re-fetch key). A single template referencing the ids
+        # above — the ids themselves are not serialized a second time.
+        if any(c.chunk_id for c in self._chunks):
             lines += [
                 "",
-                f"Re-fetch keys: vectr_fetch(ids=[{id_list}]) restores these verbatim.",
+                "Re-fetch any of the ids above verbatim (<50ms): vectr_fetch(ids=[...]).",
             ]
 
         if escalated and not on_demand:

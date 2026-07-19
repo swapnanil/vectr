@@ -425,6 +425,74 @@ class TestZigSymbolExtractionUPG:
         assert by_name.get("Tree", {}).get("kind") == "variable"
 
 
+class TestZigStructScopedConstUPG:
+    """UPG-ZIG-STRUCT-CONST-LOCATE: a `const`/`var` declared inside a struct/enum
+    body is part of that container's namespace (Zig `Node.default_capacity`) and
+    must be locatable — the old `current_symbol == ""` gate conflated struct
+    scope with function scope and dropped both. Function-locals stay excluded."""
+
+    def test_struct_scoped_pub_const_is_extracted_as_constant(self, tmp_path) -> None:
+        p = tmp_path / "checksum.zig"
+        p.write_text(
+            "pub const Node = struct {\n"
+            "    x: u32,\n"
+            "    pub const default_capacity: u32 = 16;\n"
+            "    pub fn checksum(data: []const u8) u128 {\n"
+            "        var acc: u128 = 0;\n"
+            "        return acc;\n"
+            "    }\n"
+            "};\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        # F64: the struct-scoped `pub const` is a locatable constant
+        assert by_name.get("default_capacity", {}).get("kind") == "constant"
+        assert by_name["default_capacity"]["start_line"] == 3
+        # the struct and its method are still extracted correctly
+        assert by_name["Node"]["kind"] == "struct"
+        assert by_name["checksum"]["kind"] == "function"
+
+    def test_function_local_const_and_var_still_excluded(self, tmp_path) -> None:
+        p = tmp_path / "fn.zig"
+        p.write_text(
+            "pub fn compute() u32 {\n"
+            "    const LOCAL_MAX: u32 = 99;\n"
+            "    var total: u32 = 0;\n"
+            "    return total + LOCAL_MAX;\n"
+            "}\n"
+        )
+        names = {s["name"] for s in extract_symbols_from_file(str(p))[0]}
+        assert "compute" in names
+        # function-locals are disposable, not part of any locatable namespace
+        assert "LOCAL_MAX" not in names
+        assert "total" not in names
+
+    def test_struct_scoped_var_is_extracted_as_variable(self, tmp_path) -> None:
+        p = tmp_path / "counter.zig"
+        p.write_text(
+            "pub const Counter = struct {\n"
+            "    var instances: u32 = 0;\n"
+            "};\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        # a struct-scoped `var` keeps the variable kind (from the `var` keyword,
+        # not the SCREAMING_CASE module-scope heuristic)
+        assert by_name.get("instances", {}).get("kind") == "variable"
+
+    def test_enum_scoped_const_is_extracted(self, tmp_path) -> None:
+        p = tmp_path / "mode.zig"
+        p.write_text(
+            "pub const Mode = enum {\n"
+            "    fast,\n"
+            "    slow,\n"
+            "    pub const default_mode = Mode.fast;\n"
+            "};\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        assert by_name["Mode"]["kind"] == "enum"
+        # a const inside an enum body is part of the enum's namespace
+        assert by_name.get("default_mode", {}).get("kind") == "constant"
+
+
 # ---------------------------------------------------------------------------
 # SymbolGraph — index_file / delete_file / symbol_count
 # ---------------------------------------------------------------------------
@@ -2587,6 +2655,54 @@ class TestLocateRankingClassEnclosedF49:
             f"class (its immediate parent is the function, not TestSuite); got {cls!r}"
         )
 
+    def test_enclosing_class_modifier_prefixed_java(self) -> None:
+        """UPG-CLASS-DEF-RE-MODIFIERS: a `public class` (the standard Java form)
+        must resolve its enclosing class — the bare `^class` regex missed it and
+        misread the declaration line as a scope exit."""
+        lines = [
+            "public class Factory {",
+            "    public Producer createProducer() {",
+            "        return null;",
+            "    }",
+            "}",
+        ]
+        assert _enclosing_class_from_lines(lines, start_line=2) == "Factory"
+
+    def test_enclosing_class_multi_modifier_java(self) -> None:
+        lines = [
+            "public final class Registry {",
+            "    void register() {}",
+            "}",
+        ]
+        assert _enclosing_class_from_lines(lines, start_line=2) == "Registry"
+
+    def test_enclosing_class_export_ts(self) -> None:
+        """UPG-CLASS-DEF-RE-MODIFIERS: `export class` (the standard TS/JS form)."""
+        lines = [
+            "export class Foo {",
+            "    run(): void {}",
+            "}",
+        ]
+        assert _enclosing_class_from_lines(lines, start_line=2) == "Foo"
+
+    def test_enclosing_class_export_default_and_abstract_ts(self) -> None:
+        for header, name in (
+            ("export default class Bar {", "Bar"),
+            ("export abstract class Baz {", "Baz"),
+        ):
+            lines = [header, "    m() {}", "}"]
+            assert _enclosing_class_from_lines(lines, start_line=2) == name
+
+    def test_enclosing_class_modifier_run_without_class_is_not_a_class(self) -> None:
+        """A modifier run NOT followed by `class` (e.g. `public void helper()`)
+        must still be treated as a non-class scope exit, returning ''."""
+        lines = [
+            "public void helper() {",
+            "    int x = 1;",
+            "}",
+        ]
+        assert _enclosing_class_from_lines(lines, start_line=2) == ""
+
     def test_locate_class_enclosed_batch(self, tmp_path) -> None:
         """_locate_class_enclosed_batch reads each file once and reports True only
         for symbols whose immediate enclosing scope is a class."""
@@ -2951,12 +3067,14 @@ class TestFileImportanceARCH1a:
         """SYMBOL_SCHEMA_VERSION is an exact pin, not a floor: every
         extraction-behavior change must bump it (or existing installs never
         rebuild their graph) AND consciously update this pin in the same
-        commit. Currently 11 (Java/C/Zig/TS name-extraction fixes —
+        commit. Currently 12 (Zig struct/enum-scoped const/var extracted as
+        locatable namespace members, function-locals still excluded —
+        UPG-ZIG-STRUCT-CONST-LOCATE — bumped from 11 Java/C/Zig/TS name-extraction fixes —
         UPG-JAVA-METHOD-NAME-EXTRACTION / UPG-C-STRUCT-TYPEDEF-LOCATE /
         UPG-C-MACRO-ADJACENT-DROP / UPG-ZIG-SYMBOL-EXTRACTION /
         UPG-TS-SYMBOLGRAPH-TYPEDEF — bumped from 10/UPG-SIBLING-TYPEDEF-CROWDING)."""
-        assert SYMBOL_SCHEMA_VERSION == 11, (
-            f"Expected SYMBOL_SCHEMA_VERSION=11; got {SYMBOL_SCHEMA_VERSION}. "
+        assert SYMBOL_SCHEMA_VERSION == 12, (
+            f"Expected SYMBOL_SCHEMA_VERSION=12; got {SYMBOL_SCHEMA_VERSION}. "
             "If you changed extraction behavior, bump the version and update this pin."
         )
 
@@ -3125,6 +3243,48 @@ class TestClassImportanceARCH2:
             f"Widget must outscore Gadget: {scores}"
         )
 
+    def test_barrel_reexport_mentions_not_counted(self, tmp_path) -> None:
+        """UPG-CLASS-IMPORTANCE-REEXPORT-NOISE: a bare barrel re-export
+        (`export { Foo } from './foo'`) is module plumbing, not a genuine
+        reference — it must not inflate Foo's class_importance above an
+        equally-defined, equally-used sibling (Bar) that just isn't re-exported.
+        Without the fix Foo's count is def+use+re-export (3) vs Bar's def+use (2)
+        → Foo outscores Bar; with the re-export line excluded both count 2."""
+        g = SymbolGraph(str(tmp_path))
+        ws = str(tmp_path)
+        foo = make_py(tmp_path, "foo.ts", "export class Foo {\n  run() {}\n}\n")
+        bar = make_py(tmp_path, "bar.ts", "export class Bar {\n  run() {}\n}\n")
+        # genuine, EQUAL usage of both in a consumer (real reference sites)
+        use = make_py(tmp_path, "use.ts", "const a = new Foo();\nconst b = new Bar();\n")
+        # a barrel that re-exports ONLY Foo — the mention that used to inflate it
+        barrel = make_py(tmp_path, "index.ts", "export { Foo } from './foo';\n")
+        g.build_for_workspace(ws, [foo, bar, use, barrel])
+        scores = g.class_importance(ws)
+        assert scores.get("Foo") == pytest.approx(scores.get("Bar")), (
+            f"the barrel re-export of Foo must not inflate its importance above "
+            f"the equally-defined/used Bar: {scores}"
+        )
+
+    def test_genuine_import_and_definition_still_counted(self, tmp_path) -> None:
+        """The re-export exclusion must be narrow: an `import { X } from` (a real
+        use site) and an `export class X`/`export default X` (a definition/value)
+        keep counting — only bare barrel re-export lines are dropped."""
+        g = SymbolGraph(str(tmp_path))
+        ws = str(tmp_path)
+        widget = make_py(tmp_path, "widget.ts", "export class Widget {\n  run() {}\n}\n")
+        gadget = make_py(tmp_path, "gadget.ts", "export class Gadget {\n  run() {}\n}\n")
+        # Widget is genuinely imported+used more than Gadget → must still win.
+        consumer = make_py(
+            tmp_path, "consumer.ts",
+            "import { Widget } from './widget';\nconst a = new Widget();\nconst b = new Widget();\n",
+        )
+        g.build_for_workspace(ws, [widget, gadget, consumer])
+        scores = g.class_importance(ws)
+        assert scores.get("Widget", 0.0) > scores.get("Gadget", 0.0), (
+            f"a genuinely imported+used class must still outscore an unused one "
+            f"(imports/definitions are not excluded, only barrel re-exports): {scores}"
+        )
+
     def test_persistence_round_trip(self, tmp_path) -> None:
         """build_for_workspace writes class importance; class_importance() returns it."""
         g = SymbolGraph(str(tmp_path))
@@ -3267,10 +3427,13 @@ class TestClassImportanceARCH2:
         assert scores["Widget"] - scores["Gadget"] == pytest.approx(
             expected_log_gap, abs=1e-9,
         )
-        # At the configured class_importance lambda (0.25), this is a >=5%
+        # At the configured class_importance lambda, this is a >=5%
         # multiplicative factor gap between the two candidates — a ranking-
-        # relevant separation, not a near-tie.
-        assert (scores["Widget"] - scores["Gadget"]) * 0.25 > 0.05, (
+        # relevant separation, not a near-tie. Read the configured lambda
+        # rather than a literal so this stays correct across tuning
+        # (UPG-ACCEPT-REGRESSION-RECOVERY raised it 0.25 -> 0.35).
+        from agent.config import CLASS_IMPORTANCE_PRIOR_LAMBDA as _lam_class
+        assert (scores["Widget"] - scores["Gadget"]) * _lam_class > 0.05, (
             f"decisive raw-count gap collapsed to a ranking-irrelevant "
             f"absolute difference after normalization: {scores}"
         )
@@ -3278,7 +3441,7 @@ class TestClassImportanceARCH2:
         # would be over an order of magnitude smaller — the concrete reason
         # log-scale was chosen (arithmetic only; not exercising product code).
         linear_gap = (widget_count / max_count) - (gadget_count / max_count)
-        assert linear_gap * 0.25 < 0.01, (
+        assert linear_gap * _lam_class < 0.01, (
             "expected the linear scale's absolute gap to be ranking-"
             "irrelevant (<1% factor difference) here — if this no longer "
             "holds, revisit the log-scale choice"
