@@ -304,22 +304,13 @@ class TestConfigDrivenThreshold:
 # ---------------------------------------------------------------------------
 
 class TestRestStatusStaleTask:
-    @staticmethod
-    def _reaffirm_real_service(svc) -> None:
-        """`real_service_client` sets app.state.service = svc only once, the
-        first time the session-scoped fixture is constructed. A LATER test
-        anywhere in the session using the `client`/`client_real_memory` mock
-        fixtures (conftest.py) reassigns the same shared `app.state.service`
-        to its own MagicMock and never restores it — so a REST test relying
-        on `real_service_client` after one of those has run would silently
-        exercise the wrong (mocked) service. Reaffirm the real instance
-        defensively before issuing requests, regardless of test order."""
-        from api import app
-        app.state.service = svc
+    # UPG-CONFTEST-SERVICE-CLOBBER: the `client`/`client_real_memory` fixtures
+    # now save/restore app.state.service in teardown, so the mock no longer
+    # persists into this session-scoped real-service test — the former
+    # `_reaffirm_real_service` defensive reassignment is no longer needed.
 
     def test_status_route_surfaces_stale_task_fields(self, real_service_client) -> None:
         client, svc, ws = real_service_client
-        self._reaffirm_real_service(svc)
         client.post("/v1/memory/clear", json={})
 
         resp = client.get("/v1/status")
@@ -330,7 +321,6 @@ class TestRestStatusStaleTask:
 
     def test_status_route_reflects_backdated_task_note(self, real_service_client) -> None:
         client, svc, ws = real_service_client
-        self._reaffirm_real_service(svc)
         client.post("/v1/memory/clear", json={})
 
         note_id = svc._context_store.remember(ws, "stale checkpoint", kind="task")
