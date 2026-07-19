@@ -298,6 +298,11 @@ class VectrService:
         # not-yet-started phase 2 a no-op and a mid-flight one tear down
         # whatever it just constructed instead of orphaning it.
         self._shutdown_requested = threading.Event()
+        # UPG-STATUS-STALE-GRAPH: set while _build_symbol_graph() is running so
+        # /v1/status can flag that the symbol_count / symbol_graph_complete it is
+        # serving comes from the previous (possibly stale-toolchain) persisted
+        # graph and a rebuild is overwriting it right now.
+        self._symbol_graph_rebuilding = threading.Event()
 
         if not defer_search_init:
             self._init_search_layer()
@@ -545,6 +550,7 @@ class VectrService:
 
     def _build_symbol_graph(self) -> None:
         """Rebuild the symbol graph from the files the indexer already walked."""
+        self._symbol_graph_rebuilding.set()
         try:
             from agent.symbol_graph import SYMBOL_LANGUAGES, available_symbol_languages
             # Warn loudly when a declared grammar is not importable in this
@@ -590,6 +596,8 @@ class VectrService:
             )
         except Exception:
             logger.exception("Symbol graph build failed (non-fatal)")
+        finally:
+            self._symbol_graph_rebuilding.clear()
 
     def save_map(self, summary: str, overwrite: bool = False) -> dict:
         """
@@ -1135,15 +1143,39 @@ class VectrService:
 
         Returns the same "nothing built yet" shape before phase 2 has
         constructed the symbol graph (UPG-STDIO-MEMORY-READY) as it does for
-        a workspace that has never been indexed."""
+        a workspace that has never been indexed.
+
+        UPG-STATUS-STALE-GRAPH: also reports whether the graph being served is
+        stale and whether a rebuild is overwriting it right now, so a caller (or
+        a gate preflight) never mistakes a persisted stale-toolchain graph for
+        current state. `symbol_graph_stale` is true when the persisted graph was
+        built by a different toolchain (vectr/parser/model/schema change) or was
+        left incomplete, or has not been built yet. `symbol_graph_rebuild_in_progress`
+        is true while _build_symbol_graph() is running — during that window the
+        symbol_count / symbol_graph_complete above still reflect the OLD persisted
+        graph until the rebuild's write lands."""
+        rebuilding = self._symbol_graph_rebuilding.is_set()
         if self._symbol_graph is None:
-            return {"symbol_graph_complete": False, "symbol_graph_failed_files": 0}
+            return {
+                "symbol_graph_complete": False,
+                "symbol_graph_failed_files": 0,
+                "symbol_graph_stale": True,
+                "symbol_graph_rebuild_in_progress": rebuilding,
+            }
+        stale = self._symbol_graph.is_stale(self._workspace_root, self._embed_model)
         meta = self._symbol_graph.graph_meta(self._workspace_root)
         if not meta:
-            return {"symbol_graph_complete": False, "symbol_graph_failed_files": 0}
+            return {
+                "symbol_graph_complete": False,
+                "symbol_graph_failed_files": 0,
+                "symbol_graph_stale": stale,
+                "symbol_graph_rebuild_in_progress": rebuilding,
+            }
         return {
             "symbol_graph_complete": meta.get("complete") == "1",
             "symbol_graph_failed_files": int(meta.get("failed", "0") or "0"),
+            "symbol_graph_stale": stale,
+            "symbol_graph_rebuild_in_progress": rebuilding,
         }
 
     def _language_coverage(self) -> list[dict]:

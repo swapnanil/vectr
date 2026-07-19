@@ -135,6 +135,14 @@ class StatusResponse(BaseModel):
     # extraction; failed_files counts those skipped, so a partial graph is visible.
     symbol_graph_complete: bool = False
     symbol_graph_failed_files: int = 0
+    # UPG-STATUS-STALE-GRAPH: staleness signals for the symbol-graph fields above.
+    # `stale` = the persisted graph was built by a different toolchain (vectr/
+    # parser/model/schema change), left incomplete, or never built — so the
+    # symbol_count / symbol_graph_complete served may not reflect current state.
+    # `rebuild_in_progress` = a full rebuild is overwriting the graph right now,
+    # so those fields still reflect the OLD graph until it lands.
+    symbol_graph_stale: bool = True
+    symbol_graph_rebuild_in_progress: bool = False
     processing_ms: int
     # Adaptive retrieval strategy. Always populated by VectrService.status()
     # (UPG-8.2): the config-declared defaults before the first index-time

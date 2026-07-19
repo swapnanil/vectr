@@ -51,6 +51,9 @@ def _make_service():
         # UPG-8.7: symbol-graph build trust signals (real shape)
         "symbol_graph_complete": True,
         "symbol_graph_failed_files": 0,
+        # UPG-STATUS-STALE-GRAPH: staleness signals (real shape)
+        "symbol_graph_stale": False,
+        "symbol_graph_rebuild_in_progress": False,
         # UPG-HOOK-INJECT-OBSERVABILITY: hook injection counters are always
         # present in the real service.status() output — mock the real shape.
         "hook_injection_counts": {"SessionStart": 3, "PreToolUse": 2},
@@ -508,6 +511,9 @@ def test_status(client) -> None:
     # UPG-8.7: symbol-graph build trust signals surface in /v1/status
     assert data["symbol_graph_complete"] is True
     assert data["symbol_graph_failed_files"] == 0
+    # UPG-STATUS-STALE-GRAPH: staleness signals surface in /v1/status
+    assert data["symbol_graph_stale"] is False
+    assert data["symbol_graph_rebuild_in_progress"] is False
     # UPG-3.3: per-language coverage with symbol availability
     langs = {l["language"]: l for l in data["languages"]}
     assert langs["python"]["symbols"] is True
