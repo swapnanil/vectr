@@ -433,11 +433,21 @@ def handle_tools_call(
 
     # ---- vectr_map ----
     if tool_name == "vectr_map":
+        # Memory-only mode: no code index to map — same guard every sibling
+        # code-index tool carries (UPG-MAP-MEMORY-ONLY-GUARD). Without it a
+        # memory-only daemon returns an empty-ish passport instead of the
+        # mode-contract message search/locate/trace/fetch all give.
+        if getattr(service, "memory_only", False):
+            from app.service import _MEMORY_ONLY_MSG
+            return {"content": [{"type": "text", "text": _MEMORY_ONLY_MSG}], "isError": False}
         text = service.get_map()
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     # ---- vectr_map_save ----
     if tool_name == "vectr_map_save":
+        if getattr(service, "memory_only", False):
+            from app.service import _MEMORY_ONLY_MSG
+            return {"content": [{"type": "text", "text": _MEMORY_ONLY_MSG}], "isError": False}
         summary = arguments.get("summary", "").strip()
         if not summary:
             return _mcp_error("summary is required")
