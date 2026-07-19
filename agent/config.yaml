@@ -452,7 +452,7 @@ ranking:
     # UPG-NOTFOUND-FLOOR-2 evidence above). The independent low_top_relevance
     # sub-signal is untouched, and is mutually exclusive with a high CE by
     # construction, so a genuine miss (top CE well below min_top_relevance) is
-    # never suppressed. Calibrated on the django fixture: genuine misses top
+    # never suppressed. Calibrated on the acceptance fixture: genuine misses top
     # out at ce_relevance ~0.04-0.19, confident matches at ~0.72-0.998, so a
     # 0.70 threshold cleanly separates the two. Set above 1.0 to disable (no
     # ce_relevance can ever meet it) — an exact no-op restoring the prior OR.
