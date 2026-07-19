@@ -238,8 +238,9 @@ class TestFormatDetailTiers:
         store.remember("/ws", "fresh note")
         notes = store.recall("/ws")
         text = store.format_notes_for_llm(notes, detail="index")
-        # Age should be "0h" for a brand-new note
-        assert "0h" in text
+        # Age should be "0s" for a brand-new note (UPG-RECALL-AGE-GRANULARITY)
+        assert "0s" in text
+        assert "0h" not in text
 
     def test_index_tier_has_no_body_content(self, tmp_path) -> None:
         store = _store(tmp_path)
@@ -529,3 +530,33 @@ class TestRESTHierarchy:
         message = resp.json()["message"]
         assert "vectr_recall" not in message
         assert "vectr recall" in message
+
+
+# ---------------------------------------------------------------------------
+# Age string granularity (UPG-RECALL-AGE-GRANULARITY)
+# ---------------------------------------------------------------------------
+
+class TestAgeString:
+    """Sub-hour ages must render as seconds or minutes — a note stored
+    moments ago must never read as the misleading "0h"."""
+
+    def test_under_a_minute_renders_seconds(self) -> None:
+        from agent.working_context_store._store import _age_str
+        assert _age_str(time.time() - 5) == "5s"
+
+    def test_under_an_hour_renders_minutes(self) -> None:
+        from agent.working_context_store._store import _age_str
+        assert _age_str(time.time() - 25 * 60) == "25m"
+
+    def test_hours_and_days_tiers_unchanged(self) -> None:
+        from agent.working_context_store._store import _age_str
+        assert _age_str(time.time() - 3 * 3600) == "3h"
+        assert _age_str(time.time() - 3 * 86400) == "3d"
+
+    def test_fresh_note_is_zero_seconds_not_zero_hours(self) -> None:
+        from agent.working_context_store._store import _age_str
+        assert _age_str(time.time()) == "0s"
+
+    def test_future_timestamp_clamps_to_zero(self) -> None:
+        from agent.working_context_store._store import _age_str
+        assert _age_str(time.time() + 300) == "0s"

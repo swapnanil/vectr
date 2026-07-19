@@ -184,11 +184,16 @@ def _scope_filter(
 
 
 def _age_str(created_at: float) -> str:
-    """`created_at`'s age as a compact human string ("3h", "2d") — hoisted to
-    module level (was a closure inside `format_notes_for_llm`) so
-    `_format_index_line`/`_format_full_block` (and `fire_and_format()`,
-    TRIGGER-ENGINE wave 2a) can share it."""
-    age_h = (time.time() - created_at) / 3600
+    """`created_at`'s age as a compact human string ("45s", "12m", "3h",
+    "2d") — hoisted to module level (was a closure inside
+    `format_notes_for_llm`) so `_format_index_line`/`_format_full_block`
+    (and `fire_and_format()`, TRIGGER-ENGINE wave 2a) can share it."""
+    age_s = max(time.time() - created_at, 0.0)
+    if age_s < 60:
+        return f"{age_s:.0f}s"
+    if age_s < 3600:
+        return f"{age_s / 60:.0f}m"
+    age_h = age_s / 3600
     return f"{age_h:.0f}h" if age_h < 48 else f"{age_h / 24:.0f}d"
 
 
