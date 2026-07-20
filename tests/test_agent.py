@@ -84,6 +84,102 @@ class TestChunkFile:
 
 
 # ---------------------------------------------------------------------------
+# UPG-IMPL-BLOCK-CHUNK-TRUNCATION: any container-shaped node — not just a
+# class — must recurse into its members instead of taking one capped chunk.
+# Synthetic fixtures only (no benchmark-corpus source).
+# ---------------------------------------------------------------------------
+
+class TestChunkFileContainerRecursion:
+    def _rust_impl_block_source(self, n_padding_methods: int) -> str:
+        lines = ["struct Widget { value: i32 }", "", "impl Widget {"]
+        lines.append("    fn early_method(&self) -> i32 {")
+        lines.append("        self.value")
+        lines.append("    }")
+        lines.append("")
+        for i in range(n_padding_methods):
+            lines.append(f"    fn padding_method_{i}(&self) -> i32 {{")
+            lines.append(f"        self.value + {i}")
+            lines.append("    }")
+            lines.append("")
+        lines.append("    fn late_method(&self) -> i32 {")
+        lines.append("        self.value * 2")
+        lines.append("    }")
+        lines.append("}")
+        return "\n".join(lines) + "\n"
+
+    def test_rust_impl_block_method_past_150_lines_is_its_own_chunk(self, tmp_path) -> None:
+        # 40 padding methods (4 lines each) push the impl block well past the
+        # 150-line max_chunk_lines cap before late_method is even reached —
+        # before the fix, impl_item never recursed (not in _CLASS_NODE_TYPES),
+        # so the whole block became one chunk capped at 150 lines and
+        # late_method's text was silently dropped, never embedded or indexed.
+        p = tmp_path / "widget.rs"
+        p.write_text(self._rust_impl_block_source(n_padding_methods=40))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(p))
+
+        late = [c for c in chunks if c.symbol_name == "late_method"]
+        assert late, "late_method (past line 150 of the impl block) got no chunk of its own"
+        assert "self.value * 2" in late[0].content
+        assert late[0].node_type == "function_item"
+
+    def test_rust_impl_block_method_before_150_lines_still_chunks(self, tmp_path) -> None:
+        p = tmp_path / "widget.rs"
+        p.write_text(self._rust_impl_block_source(n_padding_methods=40))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(p))
+
+        early = [c for c in chunks if c.symbol_name == "early_method"]
+        assert early
+        assert "self.value" in early[0].content
+        assert early[0].node_type == "function_item"
+
+    def test_rust_impl_item_chunk_itself_is_header_capped_not_full_body(self, tmp_path) -> None:
+        # The impl_item's own chunk becomes a header (capped at class_header_lines)
+        # now that it recurses — mirrors what class_definition already did.
+        p = tmp_path / "widget.rs"
+        p.write_text(self._rust_impl_block_source(n_padding_methods=40))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(p))
+
+        impl_chunks = [c for c in chunks if c.node_type == "impl_item"]
+        assert len(impl_chunks) == 1
+        from agent.config import INDEXING_CLASS_HEADER_LINES
+        assert len(impl_chunks[0].content.splitlines()) <= INDEXING_CLASS_HEADER_LINES
+
+    def test_small_rust_impl_block_unaffected(self, tmp_path) -> None:
+        # A short impl block (well under any cap) — every method still chunks
+        # individually, same as before the fix.
+        p = tmp_path / "widget.rs"
+        p.write_text(self._rust_impl_block_source(n_padding_methods=0))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(p))
+        names = {c.symbol_name for c in chunks}
+        assert {"early_method", "late_method"} <= names
+
+    def test_python_class_chunking_is_unchanged(self) -> None:
+        # Regression guard: class_definition was already in the container
+        # fast-path (_CLASS_NODE_TYPES) before this fix — behavior for an
+        # ordinary class with several methods must stay identical.
+        path = make_temp_py("""
+            class Greeter:
+                def greet(self) -> str:
+                    return "hello"
+
+                def farewell(self) -> str:
+                    return "bye"
+        """)
+        from agent.indexer import chunk_file
+        chunks = chunk_file(path)
+        node_types = {c.node_type for c in chunks}
+        names = {c.symbol_name for c in chunks}
+        assert "class_definition" in node_types
+        assert {"Greeter", "greet", "farewell"} <= names
+        greet_chunk = next(c for c in chunks if c.symbol_name == "greet")
+        assert "# class: Greeter" in greet_chunk.content
+
+
+# ---------------------------------------------------------------------------
 # Chunking fallback edge cases — mixed-language, window math
 # ---------------------------------------------------------------------------
 

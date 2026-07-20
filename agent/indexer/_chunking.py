@@ -111,7 +111,13 @@ def _parser_language_for(language: str, code: str) -> str:
 # _MAX_CHUNK_LINES / _CLASS_HEADER_LINES.  The alias names are kept so all
 # existing call sites work without change.
 
-# Node types that represent class declarations (handled specially — emit header + recurse)
+# Node types that represent class declarations (handled specially — emit header + recurse).
+# This is a fast-path/safety net: every one of these already recurses correctly
+# today, and is kept as an explicit set so that guarantee never depends on the
+# structural check below. Any OTHER container-shaped node type (an impl/extension
+# block, a namespace, an interface/trait with default methods, …) is detected
+# structurally by `_is_member_container` instead of being enumerated here —
+# see UPG-IMPL-BLOCK-CHUNK-TRUNCATION.
 _CLASS_NODE_TYPES = {"class_definition", "class_declaration"}
 
 # Node types that represent top-level code units worth indexing per language
@@ -265,6 +271,35 @@ def _get_leading_comments(lines: list[str], start_line: int) -> str:
     return "\n".join(collected)
 
 
+def _is_member_container(node, target_types: set[str]) -> bool:
+    """True when `node` is a CONTAINER — its own body directly lists at least
+    one further chunk-worthy member — rather than a leaf definition.
+
+    UPG-IMPL-BLOCK-CHUNK-TRUNCATION: `_CLASS_NODE_TYPES` alone under-recognizes
+    containers — a Rust `impl_item`, a C++ `namespace_definition`/`class_specifier`,
+    a Java `interface_declaration` with default methods, a Swift-style
+    `extension_declaration` are all containers too, and enumerating every such
+    node type per language is exactly the kind of special-casing that doesn't
+    generalize (and was already caught missing `impl_item`, `class_specifier`,
+    and `namespace_definition` — none of which are Rust-specific). Detected
+    structurally instead: does this node's tree-sitter `body` field directly
+    list (one hop down) another node whose type is itself in `target_types`?
+
+    Deliberately checks only DIRECT children of the body field, not the whole
+    subtree — a member declaration is always a direct child of its container's
+    body list in every grammar checked (tree-sitter python/rust/java/cpp), while
+    a chunk-worthy node reachable only several hops deeper — a JS callback
+    passed as a call argument, an anonymous inner class built inside a method
+    body — is always wrapped in at least one intervening statement/expression
+    node first. The one-hop rule is what tells a real member apart from an
+    incidental nested occurrence, without naming any language's node types.
+    """
+    body = node.child_by_field_name("body")
+    if body is None:
+        return False
+    return any(child.type in target_types for child in body.children)
+
+
 def _collect_chunks_ast(
     node,
     code_bytes: bytes,
@@ -290,9 +325,14 @@ def _collect_chunks_ast(
         parts = [p for p in [leading, context_prefix + raw] if p]
         content = "\n".join(parts)
 
-        # Cap very long chunks — class bodies can be thousands of lines
-        is_class = node.type in _CLASS_NODE_TYPES
-        cap = _CLASS_HEADER_LINES if is_class else _MAX_CHUNK_LINES
+        # Cap very long chunks — container bodies (classes, impl/extension blocks,
+        # namespaces, …) can be thousands of lines. A CONTAINER only keeps its
+        # header here; its members are emitted as their own chunks below, so
+        # nothing past the cap is lost. A leaf definition (a plain function, a
+        # struct with no nested members) keeps the full budget instead, since
+        # nothing else will carry the rest of its content.
+        is_container = node.type in _CLASS_NODE_TYPES or _is_member_container(node, target_types)
+        cap = _CLASS_HEADER_LINES if is_container else _MAX_CHUNK_LINES
         content_lines = content.splitlines()
         if len(content_lines) > cap:
             content = "\n".join(content_lines[:cap])
@@ -309,12 +349,12 @@ def _collect_chunks_ast(
             symbol_name=symbol,
         ))
 
-        if is_class:
-            # Also recurse into the class body so methods get their own chunks with context
+        if is_container:
+            # Also recurse into the body so members get their own chunks with context
             for child in node.children:
                 _collect_chunks_ast(child, code_bytes, lines, language, file_path,
                                     target_types, results, class_context=symbol)
-        return  # don't recurse further for non-class nodes (avoids duplicate nested defs)
+        return  # don't recurse further for non-container nodes (avoids duplicate nested defs)
 
     for child in node.children:
         _collect_chunks_ast(child, code_bytes, lines, language, file_path,
