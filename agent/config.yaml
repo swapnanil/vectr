@@ -497,6 +497,40 @@ ranking:
     enabled: true
     min_relevance: 0.02
 
+  pointer_mode_retain:
+    # UPG-POINTER-MODE-UNIFORM-STRIP: when low_confidence fires, pointer mode
+    # (UPG-LOWCONF-OUTPUT-SLIM / UPG-FLOOR-SLIM-PAYLOAD) strips the body from
+    # EVERY result in the set uniformly — including one whose own score
+    # independently clears a confidence floor (observed: the correct chunk
+    # sat in the pool at the set's highest absolute relevance yet still
+    # rendered as a bare pointer, because the flag is set-wide, not
+    # per-result). This is a per-result override: a result whose own
+    # ce_relevance meets this floor keeps a bounded excerpt of its body
+    # (never the full body — see excerpt_lines) and is labeled as
+    # individually strong, even while the surrounding set is still flagged
+    # low confidence overall. Gated on ce_relevance ONLY, never the raw
+    # dense-cosine fallback — a bi-encoder cosine cannot separate
+    # absent-topic from on-topic queries (UPG-NOTFOUND-FLOOR-2), so it
+    # cannot anchor a per-result floor either; when reranking did not run,
+    # every result's ce_relevance is None and every result still renders as
+    # a plain pointer, identical to pre-fix behaviour. Deterministic,
+    # score-property-based; no query-content logic.
+    enabled: true
+    # Reuses the same absolute bar the SET-LEVEL low-confidence gate itself
+    # uses (ranking.notfound_floor.min_top_relevance) — "individually strong"
+    # means clearing the identical floor a set-leading result would need to
+    # avoid the low-confidence flag in the first place. Independently
+    # tunable from that key.
+    min_relevance: 0.30
+    # Bounded excerpt length (lines) for a retained result — deliberately
+    # smaller than the normal 80-line display cap (UPG-11.4-b) so a
+    # low-confidence set with several individually-strong results still
+    # stays token-bounded; vectr_fetch(ids=[...]) restores the rest.
+    excerpt_lines: 20
+    # Phrase attached to a retained result's pointer line, so the caller LLM
+    # knows why this one entry differs from its low-confidence neighbours.
+    label: "individually strong — clears the confidence floor despite the low-confidence set"
+
 strategy:
   # Fallback hybrid-search weights used before the first index-time codebase
   # fingerprint has run (agent.strategy_selector.select_strategy). Once a

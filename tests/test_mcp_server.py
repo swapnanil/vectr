@@ -2000,6 +2000,108 @@ class TestFormatSearchResults:
         text = _format_search_results(rl, "login", 5, 100)
         assert "BODY_TOKEN" in text
 
+    # UPG-POINTER-MODE-UNIFORM-STRIP: a result whose own ce_relevance clears
+    # the retention floor keeps a body/excerpt even when the SET is flagged
+    # low confidence.
+    def test_individually_strong_result_keeps_excerpt_in_low_confidence_set(self) -> None:
+        from agent.searcher import SearchResult, SearchResultList
+        strong = SearchResult(
+            file_path="payments.py", lines="10-20", symbol_name="charge_card",
+            language="python", score=0.531, content="STRONG_BODY_TOKEN here",
+            score_source="reranker", ce_relevance=0.531,
+        )
+        weak = SearchResult(
+            file_path="auth.py", lines="30-40", symbol_name="login",
+            language="python", score=0.05, content="WEAK_BODY_TOKEN here",
+            score_source="reranker", ce_relevance=0.05,
+        )
+        rl = SearchResultList([weak, strong])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        assert "STRONG_BODY_TOKEN" in text, "an individually-strong result must keep its body"
+        assert "WEAK_BODY_TOKEN" not in text, "a genuinely weak result stays pointer-only"
+        assert "individually strong" in text, "the retained result must be labeled"
+        assert "0.531" in text
+
+    def test_all_weak_low_confidence_set_still_pointer_only(self) -> None:
+        """No result clears the retention floor — every result stays a bare
+        pointer, identical to pre-fix behaviour."""
+        from agent.searcher import SearchResult, SearchResultList
+        r = SearchResult(
+            file_path="auth.py", lines="10-20", symbol_name="login",
+            language="python", score=0.05, content="SECRET_BODY_TOKEN in here",
+            score_source="reranker", ce_relevance=0.05,
+        )
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        assert "SECRET_BODY_TOKEN" not in text
+        assert "individually strong" not in text
+
+    def test_no_reranker_low_confidence_set_still_pointer_only(self) -> None:
+        """Zero-DF-triggered low_confidence with no reranker run (ce_relevance
+        None on every result) must not retain any body — there is no
+        calibrated score to clear the floor with."""
+        from agent.searcher import SearchResult, SearchResultList
+        r = SearchResult(
+            file_path="auth.py", lines="10-20", symbol_name="login",
+            language="python", score=0.9, content="DENSE_ONLY_BODY_TOKEN",
+        )  # ce_relevance defaults to None (no reranker)
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        assert "DENSE_ONLY_BODY_TOKEN" not in text
+
+    def test_retention_floor_boundary(self) -> None:
+        """ce_relevance exactly at the configured floor retains; just below
+        does not (matches ranking.pointer_mode_retain.min_relevance = 0.30)."""
+        from agent.config import POINTER_MODE_RETAIN_MIN_RELEVANCE
+        from agent.searcher import SearchResult, SearchResultList
+
+        at_floor = SearchResult(
+            file_path="a.py", lines="1-5", symbol_name="a",
+            language="python", score=POINTER_MODE_RETAIN_MIN_RELEVANCE,
+            content="AT_FLOOR_BODY", score_source="reranker",
+            ce_relevance=POINTER_MODE_RETAIN_MIN_RELEVANCE,
+        )
+        rl = SearchResultList([at_floor])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        assert "AT_FLOOR_BODY" in text, "a result exactly at the floor must retain its body"
+
+        below_floor = SearchResult(
+            file_path="b.py", lines="1-5", symbol_name="b",
+            language="python", score=POINTER_MODE_RETAIN_MIN_RELEVANCE - 0.01,
+            content="BELOW_FLOOR_BODY", score_source="reranker",
+            ce_relevance=POINTER_MODE_RETAIN_MIN_RELEVANCE - 0.01,
+        )
+        rl2 = SearchResultList([below_floor])
+        rl2.low_confidence = True
+        text2 = _format_search_results(rl2, "unrelated", 5, 100)
+        assert "BELOW_FLOOR_BODY" not in text2, "a result just below the floor must stay pointer-only"
+
+    def test_retained_excerpt_bounded_and_refetchable(self) -> None:
+        """A retained excerpt is bounded (not the full body verbatim beyond
+        the configured excerpt length) and the vectr_fetch footer reappears
+        because real content was shown."""
+        from agent.config import POINTER_MODE_RETAIN_EXCERPT_LINES
+        from agent.searcher import SearchResult, SearchResultList
+        long_content = "\n".join(f"line {i}" for i in range(POINTER_MODE_RETAIN_EXCERPT_LINES + 40))
+        r = SearchResult(
+            file_path="big.py", lines="1-999", symbol_name="big_fn",
+            language="python", score=0.9, content=long_content,
+            score_source="reranker", ce_relevance=0.9,
+        )
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        shown_lines = [l for l in text.splitlines() if l.startswith("line ")]
+        assert len(shown_lines) == POINTER_MODE_RETAIN_EXCERPT_LINES, (
+            f"excerpt must be bounded to {POINTER_MODE_RETAIN_EXCERPT_LINES} lines, got {len(shown_lines)}"
+        )
+        assert "more lines" in text
+        assert "vectr_fetch(ids=" in text, "footer must reappear once a body/excerpt was actually shown"
+
     def test_result_count_shown(self) -> None:
         from agent.searcher import SearchResult
         results = [

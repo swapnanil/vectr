@@ -715,6 +715,16 @@ _rf_cfg: dict[str, Any] = _cfg["ranking"]["result_floor"]
 RESULT_FLOOR_ENABLED: bool = bool(_rf_cfg["enabled"])
 RESULT_FLOOR_MIN_RELEVANCE: float = float(_rf_cfg["min_relevance"])
 
+# UPG-POINTER-MODE-UNIFORM-STRIP: per-result override on low-confidence
+# pointer mode — a result whose own ce_relevance clears this floor keeps a
+# bounded excerpt of its body instead of a bare pointer, even while the
+# surrounding result set is still flagged low confidence.
+_pmr_cfg: dict[str, Any] = _cfg["ranking"]["pointer_mode_retain"]
+POINTER_MODE_RETAIN_ENABLED: bool = bool(_pmr_cfg["enabled"])
+POINTER_MODE_RETAIN_MIN_RELEVANCE: float = float(_pmr_cfg["min_relevance"])
+POINTER_MODE_RETAIN_EXCERPT_LINES: int = int(_pmr_cfg["excerpt_lines"])
+POINTER_MODE_RETAIN_LABEL: str = str(_pmr_cfg["label"])
+
 # ---------------------------------------------------------------------------
 # Search — additive identifier-shape symbol-graph hint (UPG-QUERYTYPE-REROUTE)
 # ---------------------------------------------------------------------------

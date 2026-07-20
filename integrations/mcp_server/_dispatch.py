@@ -10,6 +10,10 @@ from agent.config import (
     MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
     SCORE_ORDER_EXPLAIN_ENABLED,
     SCORE_ORDER_EXPLAIN_MARGIN_RATIO,
+    POINTER_MODE_RETAIN_ENABLED,
+    POINTER_MODE_RETAIN_MIN_RELEVANCE,
+    POINTER_MODE_RETAIN_EXCERPT_LINES,
+    POINTER_MODE_RETAIN_LABEL,
 )
 from agent.render_paths import workspace_relpath
 
@@ -941,9 +945,26 @@ def _format_search_results(
     # below rank 1 shows a MUCH higher relevance, annotate the demoting prior so
     # the divergence is readable. Additive; ordering untouched.
     top_score = results[0].score if results else 0.0
+    # UPG-POINTER-MODE-UNIFORM-STRIP: pointer mode strips bodies uniformly per
+    # SET, but a result whose own ce_relevance independently clears the
+    # retention floor keeps a bounded excerpt instead — computed once here
+    # (per result) so both the header wording and the per-result render below
+    # agree on which results are retained. See agent/config.py
+    # POINTER_MODE_RETAIN_* / config.yaml ranking.pointer_mode_retain.
+    retain_body = [
+        bool(
+            low_conf
+            and POINTER_MODE_RETAIN_ENABLED
+            and r.ce_relevance is not None
+            and r.ce_relevance >= POINTER_MODE_RETAIN_MIN_RELEVANCE
+        )
+        for r in results
+    ]
     header = f"Found {len(results)} results for '{query}' ({query_ms}ms, {chunks_searched} chunks searched)"
     if low_conf:
         header += " — low confidence: pointers only (vectr_fetch(ids=[...]) to expand)"
+        if any(retain_body):
+            header += f"; {sum(retain_body)} result(s) individually clear the confidence floor and keep an excerpt below"
     # UPG-RELATIVE-PATH-RENDER: print the absolute workspace root ONCE here; every
     # path/chunk-id below is rendered relative to it, so the ~21-token absolute
     # prefix stops riding every result line. vectr_fetch accepts the relative ids.
@@ -984,9 +1005,28 @@ def _format_search_results(
             if s_start and s_end:
                 sym_range = f"  [lines {s_start}–{s_end}]"
             lines.append(f"    symbol: {r.symbol_name}{sym_range}  language: {r.language}")
-        if low_conf:
+        if low_conf and not retain_body[i - 1]:
             # Pointer mode: no body. A caller that finds a promising pointer
             # expands it deterministically with vectr_fetch.
+            lines.append("")
+            continue
+        if low_conf:
+            # UPG-POINTER-MODE-UNIFORM-STRIP: this result's own ce_relevance
+            # clears the retention floor even though the SET is flagged low
+            # confidence — keep a bounded excerpt (never the full body) and
+            # say why, so the caller can trust this one entry without a
+            # vectr_fetch round trip first.
+            lines.append(f"    ({POINTER_MODE_RETAIN_LABEL}: ce_relevance {r.ce_relevance:.3f})")
+            lines.append("")
+            content_lines = r.content.splitlines()
+            if len(content_lines) > POINTER_MODE_RETAIN_EXCERPT_LINES:
+                lines.append("\n".join(content_lines[:POINTER_MODE_RETAIN_EXCERPT_LINES]))
+                lines.append(
+                    f"... {len(content_lines) - POINTER_MODE_RETAIN_EXCERPT_LINES} more lines — "
+                    f"vectr_fetch(ids=[{chunk_id!r}]) restores the full chunk"
+                )
+            else:
+                lines.append(r.content)
             lines.append("")
             continue
         lines.append("")
@@ -1023,8 +1063,10 @@ def _format_search_results(
         lines.append("")
     # UPG-LOWCONF-SLIM-DEDUPE: in pointer mode no body was ever shown, so
     # nothing "left your context" — the footer would be actively misleading.
-    # The pointers above are already the fetch keys.
-    if not low_conf:
+    # The pointers above are already the fetch keys. UPG-POINTER-MODE-
+    # UNIFORM-STRIP: a retained excerpt IS shown content, so the footer
+    # applies again whenever at least one result kept a body.
+    if not low_conf or any(retain_body):
         lines.append(
             'Results are re-fetchable anytime: vectr_fetch(ids=["<id>"]) restores '
             "a chunk after it leaves your context."
