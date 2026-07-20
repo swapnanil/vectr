@@ -27,6 +27,7 @@ from agent.config import (
     LOCATE_SMALL_SPAN_THRESHOLD,
     INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES,
     SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN,
+    SYMBOL_GRAPH_TRACE_QUALIFIER_NEARMISS_MAX,
 )
 
 logger = logging.getLogger(__name__)
@@ -1613,6 +1614,18 @@ class SymbolGraph:
         those sites (the same per-definition attribution UPG-4.1 already does
         for an unqualified ambiguous name), so a qualified query gets a
         precise answer instead of the leaf's merged-across-classes one.
+
+        UPG-TRACE-CALLERS-QUALIFIER-VALIDATION: a qualifier that names no real
+        class enclosing the leaf (a fabricated or misremembered "Class.method")
+        must not be silently answered with the bare leaf's flat callers/callees
+        as though they belonged to that class — a caller LLM has no way to
+        tell a validated answer from an unvalidated leaf fallback otherwise.
+        `resolved_qualifier` below is the SAME enclosing-class check already
+        used to scope `definitions`/`by_definition`; when it fails, that
+        failure is recorded (`qualifier_unresolved`) and near-miss qualified
+        names are looked up (reusing `nearest_symbol_names`, the same
+        machinery `locate` already uses) so the formatter can lead with an
+        honest miss instead of a confident-looking wrong answer.
         """
         class_qualifier, leaf = _split_class_qualifier(symbol_name)
         lookup_name = leaf if class_qualifier else symbol_name
@@ -1620,9 +1633,12 @@ class SymbolGraph:
         result: dict = {}
         if direction in ("callers", "both"):
             # Callers can't be attributed to one class-qualified definition —
-            # a call site never records the receiver's type — so a qualified
-            # query still returns the leaf's full (ambiguous) caller list
-            # rather than a silent empty result.
+            # a call site never records the receiver's type — so a resolved
+            # qualified query still returns the leaf's full (ambiguous) caller
+            # list rather than a silent empty result. When the qualifier does
+            # NOT resolve at all (below), the formatter is told so it can
+            # label this same list honestly instead of presenting it as the
+            # named class's callers.
             result["callers"] = self.callers(workspace, lookup_name, limit)
         if direction in ("callees", "both"):
             callees, hidden = self._edges(
@@ -1648,6 +1664,15 @@ class SymbolGraph:
         result["definitions"] = defs
         if resolved_qualifier:
             result["qualified_class"] = class_qualifier
+        elif class_qualifier:
+            # The qualifier was given but matched no real definition's
+            # enclosing class — every leaf-scoped answer below (callers, and
+            # callees/definitions when the by-definition breakdown does not
+            # itself fire) is unvalidated against it.
+            result["qualifier_unresolved"] = True
+            result["qualifier_near_miss"] = self.nearest_symbol_names(
+                workspace, symbol_name, limit=SYMBOL_GRAPH_TRACE_QUALIFIER_NEARMISS_MAX
+            )
 
         if direction in ("callees", "both") and (len(defs) > 1 or resolved_qualifier):
             by_def = []
@@ -1880,13 +1905,50 @@ class SymbolGraph:
             "(e.g. vectr_trace(name=\"MethodName\")) to see its call details."
         )
 
+    @staticmethod
+    def _qualifier_unresolved_banner(
+        symbol_name: str, class_qualifier: str, leaf_name: str, near_miss: list,
+    ) -> str:
+        """Leading honesty banner for UPG-TRACE-CALLERS-QUALIFIER-VALIDATION: a
+        `Class.method` qualifier that matched no real definition must say so
+        BEFORE any leaf-scoped fallback data, not after — otherwise a caller
+        LLM reading top-to-bottom sees a confident-looking answer before it
+        would ever reach a caveat trailing it. `near_miss` is additive and
+        deterministic (`SymbolGraph.nearest_symbol_names`, the same machinery
+        `locate` already uses for a near-miss) — never a semantic guess, and
+        empty when no near-miss candidate exists."""
+        lines = [
+            f"⚠ '{symbol_name}' does not resolve — no definition of "
+            f"'{leaf_name}' found inside a class named '{class_qualifier}'."
+        ]
+        if near_miss:
+            names = ", ".join(s.name for s in near_miss)
+            lines.append(
+                f"  Nearest real symbol name(s) by name resolution "
+                f"(inexact — verify before use): {names}"
+            )
+        lines.append("")
+        return "\n".join(lines)
+
     def format_trace_for_llm(self, trace_result: dict, symbol_name: str) -> str:
         lines = [f"Call graph trace for '{symbol_name}':\n"]
 
         # F33 (UPG-17.1): the leaf name actually matched against the edge/symbol
         # tables — used only for the "any '<leaf>'" caller wording below so it
         # doesn't overstate what was matched when `symbol_name` was qualified.
-        _, leaf_name = _split_class_qualifier(symbol_name)
+        class_qualifier, leaf_name = _split_class_qualifier(symbol_name)
+
+        # UPG-TRACE-CALLERS-QUALIFIER-VALIDATION: the qualifier was given but
+        # did not resolve to a real definition — lead with the honest miss
+        # (and any near-miss suggestion) before any leaf-scoped fallback data
+        # below, so the caller LLM never mistakes an unvalidated fallback for
+        # a validated answer.
+        qualifier_unresolved = bool(trace_result.get("qualifier_unresolved"))
+        if qualifier_unresolved:
+            lines.append(self._qualifier_unresolved_banner(
+                symbol_name, class_qualifier, leaf_name,
+                trace_result.get("qualifier_near_miss") or [],
+            ))
 
         # UPG-4.1 / F33: ambiguous symbol OR a resolved "Class.method" query —
         # show callees separated per definition so the LLM sees e.g. resolver
@@ -1903,6 +1965,13 @@ class SymbolGraph:
                     f"calls are shown per definition. (Callers below match the leaf name "
                     f"'{leaf_name}' only and can't be attributed to one class by static "
                     f"analysis.)\n"
+                )
+            elif qualifier_unresolved:
+                lines.append(
+                    f"Falling back to every definition of the unscoped leaf name "
+                    f"'{leaf_name}' below ({len(by_def)}) — none confirmed to belong "
+                    f"to '{class_qualifier}'; calls are shown per definition. "
+                    f"(Callers further below match the leaf name only.)\n"
                 )
             else:
                 lines.append(
@@ -1948,12 +2017,24 @@ class SymbolGraph:
         callers_empty = callers is not None and not callers
         if callers is not None:
             if callers:
-                lines.append(f"{self._caller_verb(callers)} ({len(callers)}):")
+                # UPG-TRACE-CALLERS-QUALIFIER-VALIDATION: this is the ONE flat
+                # list, always looked up by bare leaf regardless of qualifier
+                # (see `trace()`). When the qualifier failed to resolve, label
+                # it "any '<leaf>'" — matching the wording the by-definition
+                # branch above already uses for the same "can't attribute to
+                # one definition" situation — instead of presenting it as the
+                # named class's callers.
+                if qualifier_unresolved:
+                    lines.append(f"{self._caller_verb(callers)} — any '{leaf_name}' ({len(callers)}):")
+                else:
+                    lines.append(f"{self._caller_verb(callers)} ({len(callers)}):")
                 for e in callers:
                     lines.append(
                         f"  {e.from_symbol}  in {e.from_file}:{e.from_line}"
                         f"{self._count_suffix(e)}{self._dynamic_marker(e)}"
                     )
+            elif qualifier_unresolved:
+                lines.append(f"Called by — any '{leaf_name}': (none found in index)")
             else:
                 lines.append("Called by: (none found in index)")
 
@@ -1961,11 +2042,20 @@ class SymbolGraph:
         callees_empty = callees is not None and not callees
         if callees is not None:
             if callees:
-                lines.append(f"\nCalls ({len(callees)}):")
+                # Same flat, bare-leaf lookup and same honesty labeling as
+                # callers above — the by-definition breakdown is the only
+                # exactly-attributed callees answer; this flat one is not.
+                if qualifier_unresolved:
+                    lines.append(f"\nCalls — any '{leaf_name}' ({len(callees)}):")
+                else:
+                    lines.append(f"\nCalls ({len(callees)}):")
                 for e in callees:
                     lines.append(f"  {e.to_symbol}{self._count_suffix(e)}{self._dynamic_marker(e)}")
             else:
-                lines.append("\nCalls: (none found in index)")
+                if qualifier_unresolved:
+                    lines.append(f"\nCalls — any '{leaf_name}': (none found in index)")
+                else:
+                    lines.append("\nCalls: (none found in index)")
                 definitions = trace_result.get("definitions") or []
                 if any(d.kind == "class" for d in definitions):
                     lines.append(self._class_trace_note())

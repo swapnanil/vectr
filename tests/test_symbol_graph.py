@@ -1698,6 +1698,142 @@ class TestTraceQualifiedNameF33:
 
 
 # ---------------------------------------------------------------------------
+# UPG-TRACE-CALLERS-QUALIFIER-VALIDATION — a `vectr_trace("Class.method")`
+# whose class qualifier matches no real definition must not silently answer
+# with the bare leaf's callers/callees as though they belonged to that class.
+# `definitions`/`by_definition` already validate the qualifier (F33 above);
+# this closes the gap for `callers` (and the flat, non-by-definition
+# `callees` answer), which previously skipped validation entirely.
+# ---------------------------------------------------------------------------
+
+class TestTraceCallersQualifierValidationUPG:
+    def _fixture(self, tmp_path) -> tuple:
+        core = tmp_path / "core"
+        legacy = tmp_path / "legacy"
+        core.mkdir()
+        legacy.mkdir()
+        # RegistryClient has `simple_detail`, never a bare `simple` method.
+        (core / "registry.py").write_text(textwrap.dedent("""\
+            class RegistryClient:
+                def simple_detail(self):
+                    pass
+
+                def other_method(self):
+                    pass
+
+            def use_registry():
+                RegistryClient().simple_detail()
+        """))
+        # A same-leaf-adjacent, wholly unrelated `simple()` elsewhere — its
+        # caller must never be presented as RegistryClient's.
+        (legacy / "misc.py").write_text(textwrap.dedent("""\
+            def simple():
+                pass
+
+            def unrelated_caller():
+                simple()
+        """))
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g.index_file(ws, str(core / "registry.py"))
+        g.index_file(ws, str(legacy / "misc.py"))
+        return g, ws
+
+    def test_fabricated_qualifier_flags_unresolved_with_near_miss(self, tmp_path) -> None:
+        g, ws = self._fixture(tmp_path)
+        result = g.trace(ws, "RegistryClient.simple", direction="callers")
+        assert result.get("qualifier_unresolved") is True
+        near_miss_names = {s.name for s in result.get("qualifier_near_miss", [])}
+        assert "RegistryClient.simple_detail" in near_miss_names
+
+    def test_fabricated_qualifier_callers_not_presented_as_class_callers(self, tmp_path) -> None:
+        g, ws = self._fixture(tmp_path)
+        result = g.trace(ws, "RegistryClient.simple", direction="callers")
+        text = g.format_trace_for_llm(result, "RegistryClient.simple")
+
+        assert "does not resolve" in text
+        assert "RegistryClient.simple_detail" in text  # near-miss surfaced
+
+        # The miss banner must LEAD — appear before any fallback caller data.
+        banner_idx = text.find("does not resolve")
+        caller_idx = text.find("unrelated_caller")
+        assert banner_idx != -1
+        if caller_idx != -1:
+            assert banner_idx < caller_idx
+
+        # Never the unlabeled, confident-looking heading a real single-symbol
+        # trace would use.
+        assert "Called by (1):" not in text
+        # If the bare-leaf caller is still shown as a fallback, it must be
+        # unambiguously labeled as the leaf's, not the (fabricated) class's.
+        if "unrelated_caller" in text:
+            assert "any 'simple'" in text
+
+    def test_valid_qualifier_trace_unchanged(self, tmp_path) -> None:
+        g, ws = self._fixture(tmp_path)
+        result = g.trace(ws, "RegistryClient.simple_detail", direction="callers")
+        assert "qualifier_unresolved" not in result
+        assert result["callers"], "valid qualified trace must return real callers"
+        callers = {e.from_symbol for e in result["callers"]}
+        assert "use_registry" in callers
+        assert "unrelated_caller" not in callers  # misc.py's `simple` caller must not leak in
+
+        text = g.format_trace_for_llm(result, "RegistryClient.simple_detail")
+        assert "does not resolve" not in text
+        assert "Called by (1):" in text
+        assert "use_registry" in text
+
+    def test_bare_leaf_trace_unaffected(self, tmp_path) -> None:
+        g, ws = self._fixture(tmp_path)
+        result = g.trace(ws, "simple_detail", direction="callers")
+        assert "qualifier_unresolved" not in result
+        text = g.format_trace_for_llm(result, "simple_detail")
+        assert "does not resolve" not in text
+        assert "Called by (1):" in text
+
+    def test_unknown_qualifier_ambiguous_defs_banner_leads(self, tmp_path) -> None:
+        """Same validation gap, but with >1 same-leaf definitions across
+        classes (the `by_definition` branch fires) — the banner must still
+        lead, and the pre-existing ambiguous-defs wording must not claim the
+        fabricated qualified name itself "has definitions"."""
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        (a / "models.py").write_text(textwrap.dedent("""\
+            class Widget:
+                def render(self):
+                    pass
+
+            def use_widget_a():
+                Widget().render()
+        """))
+        (b / "models.py").write_text(textwrap.dedent("""\
+            class Gadget:
+                def render(self):
+                    pass
+
+            def use_widget_b():
+                Gadget().render()
+        """))
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g.index_file(ws, str(a / "models.py"))
+        g.index_file(ws, str(b / "models.py"))
+
+        result = g.trace(ws, "Ghost.render", direction="both")
+        assert result.get("qualifier_unresolved") is True
+        assert "qualified_class" not in result
+
+        text = g.format_trace_for_llm(result, "Ghost.render")
+        banner_idx = text.find("does not resolve")
+        assert banner_idx != -1
+        by_def_idx = text.find("Falling back")
+        assert by_def_idx == -1 or banner_idx < by_def_idx
+        assert "'Ghost.render' has" not in text  # no longer claims the fake name "has" definitions
+
+
+# ---------------------------------------------------------------------------
 # UPG-4.2 — dedup edges; rank callees/callers by relevance, not alphabetically
 # ---------------------------------------------------------------------------
 

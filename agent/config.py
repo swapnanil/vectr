@@ -220,6 +220,11 @@ SYMBOL_GRAPH_ERROR_RECOVERY_MAX_EXTEND_STEPS_PER_ATTEMPT : int
     a mid-declaration cut, so one badly-cut region can't burn the whole
     per-file reparse budget (UPG-REACT-TSX-FUNCTION-DECL-DROP).
 
+SYMBOL_GRAPH_TRACE_QUALIFIER_NEARMISS_MAX : int
+    Maximum nearest-real-qualified-name suggestions surfaced by `trace()` when
+    a "Class.method" qualifier fails to resolve to a real definition
+    (UPG-TRACE-CALLERS-QUALIFIER-VALIDATION).
+
 WORKSPACE_DEFAULT_VECTRIGNORE_DIRS : tuple[str, ...]
     Directory names seeded into a fresh .vectrignore on first `vectr start`/`vectr
     init` when the workspace has none yet (UPG-13.2). Never overwrites an existing
@@ -593,6 +598,11 @@ SYMBOL_GRAPH_ERROR_RECOVERY_MAX_REPARSE_ATTEMPTS: int = int(
 SYMBOL_GRAPH_ERROR_RECOVERY_MAX_EXTEND_STEPS_PER_ATTEMPT: int = int(
     _sg_error_recovery_cfg["max_extend_steps_per_attempt"]
 )
+
+# UPG-TRACE-CALLERS-QUALIFIER-VALIDATION: near-miss suggestion cap when a
+# trace() "Class.method" qualifier fails to resolve to a real definition.
+_sg_trace_qualifier_cfg: dict[str, Any] = _sg_cfg["trace_qualifier"]
+SYMBOL_GRAPH_TRACE_QUALIFIER_NEARMISS_MAX: int = int(_sg_trace_qualifier_cfg["nearmiss_max"])
 
 # ---------------------------------------------------------------------------
 # CLI daemon-readiness poll (UPG-CLI-START-READY-RACE)

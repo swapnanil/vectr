@@ -1112,6 +1112,19 @@ symbol_graph:
     # every other desynced region in the same file.
     max_extend_steps_per_attempt: 20
 
+  # UPG-TRACE-CALLERS-QUALIFIER-VALIDATION: `vectr_trace(name="Class.method")`
+  # applies the same enclosing-class validation to callers that definitions/
+  # callees already apply. When the "Class" qualifier does not match any real
+  # definition's enclosing class (a fabricated or misremembered qualifier),
+  # the answer must not silently fall back to the bare leaf's callers/callees
+  # presented as if they belonged to the named class — see SymbolGraph.trace.
+  trace_qualifier:
+    # Maximum nearest-real-qualified-name suggestions surfaced when a
+    # "Class.method" qualifier fails to resolve. Reuses the same deterministic
+    # near-miss machinery `locate` already uses (SymbolGraph.nearest_symbol_names)
+    # — never a semantic guess, always labeled inexact.
+    nearmiss_max: 3
+
 cli:
   # UPG-CLI-START-READY-RACE: `vectr start`/`restart` spawn the daemon as a
   # detached background process and used to print a success block
