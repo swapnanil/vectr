@@ -178,6 +178,132 @@ class TestChunkFileContainerRecursion:
         greet_chunk = next(c for c in chunks if c.symbol_name == "greet")
         assert "# class: Greeter" in greet_chunk.content
 
+    # -----------------------------------------------------------------------
+    # UPG-JAVA-ENUM-METHOD-CHUNK-DEPTH: tree-sitter-java nests an enum's own
+    # methods two hops below `enum_body` (enum_body -> enum_body_declarations
+    # -> method_declaration) instead of one (a class's methods sit directly
+    # under class_body), so the one-hop container check alone always missed
+    # them — `_MEMBER_WRAPPER_NODE_TYPES` allows exactly one scoped extra hop
+    # through the known `enum_body_declarations` grammar wrapper.
+    # -----------------------------------------------------------------------
+
+    def _java_enum_source(self, n_padding_methods: int) -> str:
+        lines = ["public enum Planet {", "    MERCURY, VENUS;", ""]
+        lines.append("    public double earlyMethod() {")
+        lines.append("        return 1.0;")
+        lines.append("    }")
+        lines.append("")
+        for i in range(n_padding_methods):
+            lines.append(f"    public double paddingMethod{i}() {{")
+            lines.append(f"        return {i}.0;")
+            lines.append("    }")
+            lines.append("")
+        lines.append("    public double lateMethod() {")
+        lines.append("        return 99.0;")
+        lines.append("    }")
+        lines.append("}")
+        return "\n".join(lines) + "\n"
+
+    def test_java_enum_method_past_150_lines_is_its_own_chunk(self, tmp_path) -> None:
+        # 40 padding methods push the enum body well past the 150-line
+        # max_chunk_lines cap before lateMethod is even reached — before the
+        # fix, enum_declaration never recursed at all (its one-hop container
+        # check always failed), so the whole enum became one chunk capped at
+        # 150 lines and lateMethod's text was silently dropped.
+        p = tmp_path / "Planet.java"
+        p.write_text(self._java_enum_source(n_padding_methods=40))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(p))
+
+        late = [c for c in chunks if c.symbol_name == "lateMethod"]
+        assert late, "lateMethod (past line 150 of the enum body) got no chunk of its own"
+        assert "return 99.0" in late[0].content
+        assert late[0].node_type == "method_declaration"
+
+    def test_java_enum_method_before_150_lines_still_chunks(self, tmp_path) -> None:
+        p = tmp_path / "Planet.java"
+        p.write_text(self._java_enum_source(n_padding_methods=40))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(p))
+
+        early = [c for c in chunks if c.symbol_name == "earlyMethod"]
+        assert early
+        assert "return 1.0" in early[0].content
+        assert early[0].node_type == "method_declaration"
+
+    def test_java_enum_chunk_itself_is_header_capped_not_full_body(self, tmp_path) -> None:
+        # The enum_declaration's own chunk becomes a header (capped at
+        # class_header_lines) now that it recurses — mirrors what
+        # class_declaration and impl_item already do.
+        p = tmp_path / "Planet.java"
+        p.write_text(self._java_enum_source(n_padding_methods=40))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(p))
+
+        enum_chunks = [c for c in chunks if c.node_type == "enum_declaration"]
+        assert len(enum_chunks) == 1
+        from agent.config import INDEXING_CLASS_HEADER_LINES
+        assert len(enum_chunks[0].content.splitlines()) <= INDEXING_CLASS_HEADER_LINES
+
+    def test_small_java_enum_unaffected(self, tmp_path) -> None:
+        # A short enum (well under any cap) — every method still chunks
+        # individually, same as before the fix.
+        p = tmp_path / "Planet.java"
+        p.write_text(self._java_enum_source(n_padding_methods=0))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(p))
+        names = {c.symbol_name for c in chunks}
+        assert {"earlyMethod", "lateMethod"} <= names
+
+    def test_java_plain_class_chunking_is_unchanged(self, tmp_path) -> None:
+        # Regression guard: a Java class (not enum) with several methods must
+        # keep exactly the same one-hop container behavior — this fix only
+        # widens what counts as a container for the enum's own body shape.
+        p = tmp_path / "Calculator.java"
+        p.write_text(textwrap.dedent("""\
+            public class Calculator {
+                public int add(int a, int b) {
+                    return a + b;
+                }
+
+                public int subtract(int a, int b) {
+                    return a - b;
+                }
+            }
+        """))
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(p))
+        node_types = {c.node_type for c in chunks}
+        names = {c.symbol_name for c in chunks}
+        assert "class_declaration" in node_types
+        assert {"add", "subtract"} <= names
+
+    def test_js_closure_callback_still_does_not_trigger_container_recursion(self, tmp_path) -> None:
+        # Guards the exact false-positive class this fix must not reintroduce:
+        # an anonymous function passed as a call argument sits several hops
+        # below the enclosing function's body (wrapped in an expression
+        # statement / call arguments), never as a direct body-field child —
+        # unlike enum_body_declarations, "wrapped in a call argument" is not a
+        # closed, verified grammar wrapper, so it stays outside
+        # `_MEMBER_WRAPPER_NODE_TYPES` and must never get its own chunk, no
+        # matter how long the enclosing function is.
+        lines = ["function processItems(items) {"]
+        for i in range(40):
+            lines.append(f"  const padding{i} = {i};")
+        lines.append("  items.forEach(function(item) {")
+        lines.append("    console.log(item);")
+        lines.append("  });")
+        lines.append("}")
+        js_file = tmp_path / "process.js"
+        js_file.write_text("\n".join(lines) + "\n")
+
+        from agent.indexer import chunk_file
+        chunks = chunk_file(str(js_file))
+        node_types = {c.node_type for c in chunks}
+        assert "function_expression" not in node_types
+        assert len(chunks) == 1
+        assert chunks[0].symbol_name == "processItems"
+
 
 # ---------------------------------------------------------------------------
 # Chunking fallback edge cases — mixed-language, window math

@@ -271,9 +271,33 @@ def _get_leading_comments(lines: list[str], start_line: int) -> str:
     return "\n".join(collected)
 
 
+# Node types that exist PURELY as a member-group wrapper directly inside a
+# container's `body` field — never a chunk-worthy node in their own right, and
+# never a general statement/expression wrapper, only a grammar artifact that
+# groups a fixed run of members together as one intermediate node. A wrapper
+# type belongs here only when it is verified (via a live tree-sitter parse) to
+# be nested exactly one level between `body` and the real member declarations,
+# with nothing else ever occurring at that position.
+#
+# UPG-JAVA-ENUM-METHOD-CHUNK-DEPTH: tree-sitter-java nests an enum's methods as
+# enum_declaration -> [body] enum_body -> enum_body_declarations ->
+# method_declaration — one hop deeper than a class's methods (class_declaration
+# -> [body] class_body -> method_declaration directly), because the grammar
+# groups the `;` separator and every member after it under one node. This is
+# NOT the same shape as a JS closure/anonymous-class false positive: those are
+# reachable only through an intervening statement/expression node (a distinct,
+# open-ended node family with no fixed member list), which is why a general
+# depth increase would reintroduce that class of bug — this allowlist instead
+# names the exact, closed set of grammar wrapper node types verified to hold
+# nothing but members, and `_is_member_container` may descend through one of
+# them exactly one extra hop, never further.
+_MEMBER_WRAPPER_NODE_TYPES = frozenset({"enum_body_declarations"})
+
+
 def _is_member_container(node, target_types: set[str]) -> bool:
-    """True when `node` is a CONTAINER — its own body directly lists at least
-    one further chunk-worthy member — rather than a leaf definition.
+    """True when `node` is a CONTAINER — its own body directly lists (or lists
+    via exactly one `_MEMBER_WRAPPER_NODE_TYPES` hop) at least one further
+    chunk-worthy member — rather than a leaf definition.
 
     UPG-IMPL-BLOCK-CHUNK-TRUNCATION: `_CLASS_NODE_TYPES` alone under-recognizes
     containers — a Rust `impl_item`, a C++ `namespace_definition`/`class_specifier`,
@@ -293,11 +317,24 @@ def _is_member_container(node, target_types: set[str]) -> bool:
     body — is always wrapped in at least one intervening statement/expression
     node first. The one-hop rule is what tells a real member apart from an
     incidental nested occurrence, without naming any language's node types.
+
+    UPG-JAVA-ENUM-METHOD-CHUNK-DEPTH: a body-field child that is itself a known
+    member-group WRAPPER (`_MEMBER_WRAPPER_NODE_TYPES`) is allowed exactly one
+    further hop — its own children are checked the same way direct body
+    children are. This does not touch the JS-closure protection above: the
+    wrapper allowlist is a closed, verified set of grammar node types, never
+    the open-ended statement/expression families a closure is wrapped in.
     """
     body = node.child_by_field_name("body")
     if body is None:
         return False
-    return any(child.type in target_types for child in body.children)
+    for child in body.children:
+        if child.type in target_types:
+            return True
+        if child.type in _MEMBER_WRAPPER_NODE_TYPES:
+            if any(grandchild.type in target_types for grandchild in child.children):
+                return True
+    return False
 
 
 def _collect_chunks_ast(
@@ -350,7 +387,13 @@ def _collect_chunks_ast(
         ))
 
         if is_container:
-            # Also recurse into the body so members get their own chunks with context
+            # Also recurse into the body so members get their own chunks with context.
+            # This walks every child unconditionally (via the plain fallback loop
+            # below, for any non-target-type node) all the way down to the real
+            # members, so a member-group WRAPPER between `body` and its members
+            # (UPG-JAVA-ENUM-METHOD-CHUNK-DEPTH — e.g. Java's enum_body_declarations)
+            # is traversed through automatically once `is_container` is True for
+            # the enclosing node; no separate wrapper-aware traversal is needed here.
             for child in node.children:
                 _collect_chunks_ast(child, code_bytes, lines, language, file_path,
                                     target_types, results, class_context=symbol)
