@@ -64,10 +64,36 @@ sys.path.insert(0, str(_VS_BASH_DIR))
 from run_tier0 import count_tokens  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# claude CLI resolution -- PATH only, never a hardcoded per-user install path
-# (no absolute home-directory paths in committed files).
+# claude CLI resolution -- env override, then PATH, then the desktop-app-
+# managed install (the same location benchmarks/harness/run_multi_repo.py
+# resolves), newest version first. Derived from the home dir at run time --
+# no hardcoded absolute home-directory paths in committed files.
 # ---------------------------------------------------------------------------
-CLAUDE_BIN = shutil.which("claude") or "claude"
+
+def _resolve_claude_bin() -> str:
+    env = os.environ.get("CLAUDE_BIN")
+    if env:
+        return env
+    on_path = shutil.which("claude")
+    if on_path:
+        return on_path
+    import glob
+    import re as _re
+    pattern = os.path.expanduser(
+        "~/Library/Application Support/Claude/claude-code/*/claude.app/Contents/MacOS/claude"
+    )
+
+    def _version_key(p: str) -> list[int]:
+        m = _re.search(r"/claude-code/([0-9.]+)/", p)
+        return [int(x) for x in m.group(1).split(".")] if m else [0]
+
+    candidates = sorted(glob.glob(pattern), key=_version_key)
+    if candidates:
+        return candidates[-1]
+    return "claude"
+
+
+CLAUDE_BIN = _resolve_claude_bin()
 
 # MCP server name registered in the generated --mcp-config file; tool names
 # the CLI reports are "mcp__<this>__<tool>", e.g. "mcp__vectr__vectr_locate".
@@ -411,6 +437,9 @@ def main(argv: list[str] | None = None) -> int:
         if session["returncode"] not in (0, None):
             print(f"  [WARN] claude exited {session['returncode']}: "
                   f"{session['stderr_tail'][-300:]}")
+        if not session["events"]:
+            print(f"  [WARN] session produced ZERO events -- spawn or auth failure, "
+                  f"not agent behavior. stderr: {session['stderr_tail'][-300:]!r}")
 
         stamp = time.strftime("%Y%m%dT%H%M%S")
         transcript_path = out_dir / f"{tid}_{stamp}.jsonl"
