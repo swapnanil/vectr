@@ -314,6 +314,52 @@ class TestCmdHookPostCommitBranch:
         assert branch == "feature-x"
         assert files == ["a.py"]
 
+    def test_root_commit_reports_full_file_list(self, tmp_path, monkeypatch):
+        """A parentless initial commit must list its files — plain
+        `git diff-tree HEAD` prints nothing without --root (M1 review nit)."""
+        _run_git(tmp_path, "init", "-q")
+        _run_git(tmp_path, "config", "user.email", "test@test.com")
+        _run_git(tmp_path, "config", "user.name", "test")
+        (tmp_path / "a.py").write_text("x = 1\n")
+        (tmp_path / "b.py").write_text("y = 2\n")
+        _run_git(tmp_path, "add", ".")
+        _run_git(tmp_path, "commit", "-q", "-m", "initial commit")
+        monkeypatch.chdir(tmp_path)
+
+        with patch("main._resolve_hook_instance", return_value={"port": 8765}), \
+             patch("main._post_commit_note") as mock_post:
+            m.cmd_hook(argparse.Namespace(hook_event="post-commit"))
+
+        _, _, _, _, files = mock_post.call_args.args
+        assert sorted(files) == ["a.py", "b.py"]
+
+    def test_merge_commit_reports_first_parent_diff(self, tmp_path, monkeypatch):
+        """post-commit fires on merges too; the file list must be the diff vs
+        the FIRST parent (what the merge landed on this branch), not empty and
+        not both parents' diffs concatenated (M1 review nit)."""
+        _init_git_repo(tmp_path)
+        (tmp_path / "base.py").write_text("b = 0\n")
+        _run_git(tmp_path, "add", ".")
+        _run_git(tmp_path, "commit", "-q", "-m", "base")
+        _run_git(tmp_path, "checkout", "-qb", "side")
+        (tmp_path / "side.py").write_text("s = 1\n")
+        _run_git(tmp_path, "add", ".")
+        _run_git(tmp_path, "commit", "-q", "-m", "side work")
+        _run_git(tmp_path, "checkout", "-q", "main")
+        (tmp_path / "mainline.py").write_text("m = 1\n")
+        _run_git(tmp_path, "add", ".")
+        _run_git(tmp_path, "commit", "-q", "-m", "mainline work")
+        _run_git(tmp_path, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        monkeypatch.chdir(tmp_path)
+
+        with patch("main._resolve_hook_instance", return_value={"port": 8765}), \
+             patch("main._post_commit_note") as mock_post:
+            m.cmd_hook(argparse.Namespace(hook_event="post-commit"))
+
+        _, _, subject, _, files = mock_post.call_args.args
+        assert subject == "merge side"
+        assert files == ["side.py"]  # first-parent diff only
+
     def test_detached_head_reports_empty_branch(self, tmp_path, monkeypatch):
         _init_git_repo(tmp_path)
         sha_full = _run_git(tmp_path, "rev-parse", "HEAD").stdout.strip()

@@ -2264,7 +2264,17 @@ def cmd_hook(args: argparse.Namespace) -> None:
             branch = _git_fact(cwd, "rev-parse", "--abbrev-ref", "HEAD")
             if branch == "HEAD":
                 branch = ""  # detached HEAD — git's own sentinel, not a real branch name
-            files_raw = _git_fact(cwd, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+            # `log -m --first-parent --root` instead of `diff-tree -r HEAD`:
+            # diff-tree prints NOTHING for a parentless initial commit (no
+            # --root) and for merge commits (its --first-parent does not
+            # constrain -m, so adding both concatenates every parent's diff).
+            # This form yields the initial commit's full file list and a
+            # merge's diff vs first parent — the "what landed on this
+            # branch" reading — while normal commits are unchanged.
+            files_raw = _git_fact(
+                cwd, "log", "-1", "--format=", "--name-only", "-m",
+                "--first-parent", "--root", "HEAD",
+            )
             files = [f for f in files_raw.splitlines() if f]
             _post_commit_note(port, sha, subject, branch, files)
     except Exception:
