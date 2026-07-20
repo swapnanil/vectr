@@ -1583,6 +1583,9 @@ class WorkingContextStore:
                                                  # note_count is None when the
                                                  # payload could not be read
                                                  # (see restore_snapshot()).
+            "gotchas_truncated": bool,          # True when more open gotchas
+                                                 # exist beyond the cap — the
+                                                 # render must disclose it.
           }
 
         Not semantic, not gated on notes_count — this is deterministic state
@@ -1596,11 +1599,15 @@ class WorkingContextStore:
 
         # kind='gotcha' newest-first, reusing the same recall() every other
         # kind-filtered query goes through (sort_by='recency' is a plain SQL
-        # ORDER BY — no new ranking invented for this surface).
+        # ORDER BY — no new ranking invented for this surface). Over-fetch by
+        # one so the render can disclose truncation instead of silently
+        # capping — a reader must be able to tell "5 gotchas" from "5 of 9".
         gotchas = self.recall(
-            workspace, kind="gotcha", limit=RESUME_MAX_GOTCHAS, sort_by="recency",
+            workspace, kind="gotcha", limit=RESUME_MAX_GOTCHAS + 1, sort_by="recency",
             session_id=session_id,
         )
+        gotchas_truncated = len(gotchas) > RESUME_MAX_GOTCHAS
+        gotchas = gotchas[:RESUME_MAX_GOTCHAS]
 
         snapshot: dict | None = None
         snaps = self.list_snapshots(workspace)
@@ -1610,7 +1617,12 @@ class WorkingContextStore:
             note_count = len(payload["notes"]) if payload else None
             snapshot = {**latest, "note_count": note_count}
 
-        return {"last_task": last_task, "gotchas": gotchas, "snapshot": snapshot}
+        return {
+            "last_task": last_task,
+            "gotchas": gotchas,
+            "snapshot": snapshot,
+            "gotchas_truncated": gotchas_truncated,
+        }
 
     def format_resume(
         self,
@@ -1663,6 +1675,12 @@ class WorkingContextStore:
                 if paths:
                     anchor_str = "  [" + ", ".join(paths) + "]"
                 lines.append("  " + _format_index_line(g, stale_warnings, surface=surface) + anchor_str)
+            if state.get("gotchas_truncated"):
+                gotcha_hint = (
+                    'vectr_recall(kind="gotcha")' if surface == "mcp"
+                    else "vectr recall --kind gotcha"
+                )
+                lines.append(f"  …more open gotchas exist — {gotcha_hint} lists all")
             sections.append("\n".join(lines))
 
         if not sections:

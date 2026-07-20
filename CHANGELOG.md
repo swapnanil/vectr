@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Working memory
+- New `vectr_resume` MCP tool (16th) + `vectr resume` CLI + `GET /v1/resume`:
+  the most recent task note, the latest snapshot, and open gotchas with file
+  anchors in one deterministic call, selected by the same shared helper
+  session-start injection uses. Config: `behavior.resume.max_gotchas`
+  (default 5).
+- New note kind `decision` and recall sort `chronological` (oldest-first,
+  dated index lines): architectural decisions accrue as notes and recall as
+  an ADR-style timeline. Decisions are not auto-injected at session start.
+
+### Hygiene
+- Two staleness tests pinned file mtimes explicitly, fixing a CI-only
+  coarse-clock flake.
+
 ## 1.4.0 — 2026-07-20
 
 Search-correctness fixes, leaner MCP responses, and acceptance-corpus hardening.

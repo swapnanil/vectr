@@ -573,6 +573,9 @@ class ResumeResponse(BaseModel):
     last_task: ResumeNoteSummary | None = None
     snapshot: ResumeSnapshotSummary | None = None
     gotchas: list[ResumeNoteSummary] = []
+    # True when more open gotchas exist beyond the configured cap
+    # (behavior.resume.max_gotchas) — the formatted text discloses this too.
+    gotchas_truncated: bool = False
     # Human/LLM-readable sectioned rendering of the fields above — the same
     # text the CLI prints and the MCP tool returns.
     formatted: str

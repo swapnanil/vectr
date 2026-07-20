@@ -1890,6 +1890,7 @@ class VectrService:
             "last_task": _summary(last_task) if last_task else None,
             "gotchas": [_summary(g) for g in gotchas],
             "snapshot": snapshot,
+            "gotchas_truncated": state["gotchas_truncated"],
             "formatted": formatted,
         }
 

@@ -729,7 +729,10 @@ class TestResumeState:
     def test_empty_workspace_returns_all_empty(self, tmp_path) -> None:
         store = _store(tmp_path)
         state = store.resume_state("/repo")
-        assert state == {"last_task": None, "gotchas": [], "snapshot": None}
+        assert state == {
+            "last_task": None, "gotchas": [], "snapshot": None,
+            "gotchas_truncated": False,
+        }
 
     def test_last_task_matches_boot_recall_selection(self, tmp_path) -> None:
         """The task note resume_state() surfaces must be EXACTLY the one
@@ -760,6 +763,17 @@ class TestResumeState:
         state = store.resume_state("/repo")
         assert len(state["gotchas"]) == RESUME_MAX_GOTCHAS
         assert state["gotchas"][0].content == f"gotcha {RESUME_MAX_GOTCHAS + 2}"  # newest first
+        assert state["gotchas_truncated"] is True
+
+    def test_gotchas_at_or_under_cap_not_truncated(self, tmp_path) -> None:
+        from agent.config import RESUME_MAX_GOTCHAS
+
+        store = _store(tmp_path)
+        for i in range(RESUME_MAX_GOTCHAS):
+            store.remember("/repo", f"gotcha {i}", kind="gotcha")
+        state = store.resume_state("/repo")
+        assert len(state["gotchas"]) == RESUME_MAX_GOTCHAS
+        assert state["gotchas_truncated"] is False
 
     def test_findings_and_directives_excluded_from_gotchas(self, tmp_path) -> None:
         store = _store(tmp_path)
@@ -806,7 +820,10 @@ class TestResumeState:
         store.remember("/ws-a", "gotcha a", kind="gotcha")
         store.snapshot("/ws-a", label="snap-a")
         state_b = store.resume_state("/ws-b")
-        assert state_b == {"last_task": None, "gotchas": [], "snapshot": None}
+        assert state_b == {
+            "last_task": None, "gotchas": [], "snapshot": None,
+            "gotchas_truncated": False,
+        }
 
     def test_session_scoped_gotcha_excluded_from_other_session(self, tmp_path) -> None:
         store = _store(tmp_path)
@@ -838,9 +855,26 @@ class TestFormatResume:
         assert "ship the resume feature" in text
         assert "Open gotchas (1):" in text
         assert "watch out for the flaky test" in text
+        assert "more open gotchas exist" not in text  # under cap: no truncation line
         assert "tests/test_flaky.py" in text
         assert "Latest snapshot:" in text
         assert "checkpoint-1" in text
+
+    def test_gotcha_truncation_disclosed(self, tmp_path) -> None:
+        """With more open gotchas than the cap, the render must say so and
+        point at the full listing — a reader must be able to tell "5 gotchas"
+        from "5 of 9" (M2 review nit: silent cap)."""
+        from agent.config import RESUME_MAX_GOTCHAS
+
+        store = _store(tmp_path)
+        for i in range(RESUME_MAX_GOTCHAS + 2):
+            store.remember("/repo", f"gotcha {i}", kind="gotcha")
+        state = store.resume_state("/repo")
+        mcp_text = store.format_resume(state, "/repo", surface="mcp")
+        assert "more open gotchas exist" in mcp_text
+        assert 'vectr_recall(kind="gotcha")' in mcp_text
+        cli_text = store.format_resume(state, "/repo", surface="cli")
+        assert "vectr recall --kind gotcha" in cli_text
 
     def test_omits_sections_with_nothing_to_show(self, tmp_path) -> None:
         """Only a task note exists — no gotcha/snapshot sections must appear."""

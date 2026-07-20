@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
 [![Version 1.4.0](https://img.shields.io/badge/version-1.4.0-blue.svg)](CHANGELOG.md)
-[![MCP: 15 tools](https://img.shields.io/badge/MCP-15%20tools-blue.svg)](#15-mcp-tools)
+[![MCP: 16 tools](https://img.shields.io/badge/MCP-16%20tools-blue.svg)](#16-mcp-tools)
 
 Version 1.4.0 · Last updated 2026-07-20 · [CHANGELOG](CHANGELOG.md)
 
@@ -202,11 +202,11 @@ No port, no daemon — a single foreground process framed as newline-delimited J
 3. **Hybrid search** — vector similarity + BM25 combined, weighted by codebase characteristics (large/unfamiliar → semantic-heavy; small/well-documented → BM25-heavy).
 4. **Symbol graph** — call edges, import chains, and HTTP routes (Flask/FastAPI/Express/Spring) are extracted and stored. `vectr_locate` uses 5 fallback strategies: exact match → suffix → same-module → unique-name → import-chain → fuzzy (edit distance ≤ 2).
 5. **Working memory** — `vectr_remember` stores structured notes to SQLite + ChromaDB. `vectr_recall` does semantic search over notes — not SQL LIKE — so multi-word queries always find relevant context.
-6. **MCP protocol** — 15 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
+6. **MCP protocol** — 16 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
 
 ---
 
-## 15 MCP tools
+## 16 MCP tools
 
 `vectr start` writes a `CLAUDE.md` into your workspace with this table and usage guidance — your AI code editor knows which tool to reach for without being prompted.
 
@@ -227,7 +227,8 @@ No port, no daemon — a single foreground process framed as newline-delimited J
 | Situation | Tool |
 |---|---|
 | Notes exist from a prior session | `vectr_recall(query)` — semantic vector search, not substring match; two-tier (crisp index by default, expand one note with `note_id=N` or all bodies with `detail='full'`) |
-| You found something worth preserving | `vectr_remember(content, tags, priority, kind, title, agent)` — `kind` controls injection: `directive` fires unconditionally every session, `task` carries current-work state, `gotcha` resurfaces when its file is touched, `finding` (default) is relevance-ranked, `reference` is a pointer; `title` labels the note in index output; `agent` attributes it to a subagent/orchestrator |
+| You found something worth preserving | `vectr_remember(content, tags, priority, kind, title, agent)` — `kind` controls injection: `directive` fires unconditionally every session, `task` carries current-work state, `gotcha` resurfaces when its file is touched, `finding` (default) is relevance-ranked, `reference` is a pointer, `decision` is an architectural decision recallable as a chronological ADR-style timeline (`vectr_recall(kind="decision", sort_by="chronological")`); `title` labels the note in index output; `agent` attributes it to a subagent/orchestrator |
+| Starting a session, want to pick up where you left off | `vectr_resume()` — the most recent task note, the latest snapshot, and open gotchas with their file anchors, in one call (also `vectr resume` on the CLI) |
 | Context is filling up | `vectr_evict_hint()` — identifies chunks vectr can re-retrieve, with the exact re-fetch ids |
 | A chunk shown earlier has left your context | `vectr_fetch(ids=[...])` — deterministic, byte-verbatim re-fetch by id; no re-search, no file re-read; flags a truncation warning if the index itself stored a capped chunk |
 | End of a long session, want a checkpoint | `vectr_snapshot("label")` |
