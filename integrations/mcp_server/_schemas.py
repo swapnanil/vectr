@@ -1,9 +1,19 @@
 """MCP tool schema definitions — exploration, memory write, memory read, utility."""
 from __future__ import annotations
 
+from importlib import metadata as _importlib_metadata
+
+
+def _package_version() -> str:
+    try:
+        return _importlib_metadata.version("vectr")
+    except _importlib_metadata.PackageNotFoundError:
+        return "0.0.0"
+
+
 MCP_SERVER_INFO = {
     "name": "vectr",
-    "version": "1.2.0",
+    "version": _package_version(),
     "description": "Zero-config semantic code search + persistent working memory for AI agents",
     "capabilities": {"tools": {}},
 }
