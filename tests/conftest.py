@@ -350,7 +350,7 @@ def client_real_memory(tmp_path):
                                   max_age_days=max_age_days, sort_by=sort_by, session_id=session_id)
         if fired_ids:
             notes = [n for n in notes if n.note_id not in fired_ids]
-        formatted = real_store.format_notes_for_llm(notes, detail=detail, surface=surface)
+        formatted = real_store.format_notes_for_llm(notes, detail=detail, surface=surface, sort_by=sort_by)
         if fire_text and formatted:
             return fire_text + "\n\n" + formatted
         return fire_text or formatted

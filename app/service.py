@@ -1590,7 +1590,7 @@ class VectrService:
             notes = [n for n in notes if n.note_id not in fired_ids]
         stale = self._context_store.check_staleness(notes, self._workspace_root)
         formatted = self._context_store.format_notes_for_llm(
-            notes, stale_warnings=stale, detail=detail, surface=surface
+            notes, stale_warnings=stale, detail=detail, surface=surface, sort_by=sort_by
         )
         # UPG-STDIO-MEMORY-READY: a query-bearing recall that lands before the
         # embedder has attached used the lexical SQL LIKE fallback — tell the

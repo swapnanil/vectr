@@ -13,7 +13,14 @@ from dataclasses import dataclass
 #   gotcha    — file/path-anchored caveats; injected at PreToolUse + semantic recall.
 #   finding   — relevance-ranked learnings; injected per-prompt at UserPromptSubmit.
 #   reference — pointers (URLs/tickets); surfaced on demand only.
-VALID_KINDS: tuple[str, ...] = ("directive", "task", "gotcha", "finding", "reference")
+#   decision  — an architectural/design decision plus its why (UPG-DECISION-
+#               TIMELINE). NOT boot-privileged (no default trigger bundle, see
+#               default_bundle_for_kind() in trigger_engine.py — same
+#               evaluation-time bucket as finding/reference); accrues over a
+#               project's life and is meant to be recalled as a group with
+#               `vectr_recall(kind="decision", sort_by="chronological")`,
+#               yielding an ADR-like decision timeline for free.
+VALID_KINDS: tuple[str, ...] = ("directive", "task", "gotcha", "finding", "reference", "decision")
 DEFAULT_KIND = "finding"
 
 # Trigger engine wave 1 (TRIGGER-ENGINE, bm2-design-skeleton.md §2/§5) — closed
@@ -100,7 +107,7 @@ class WorkingNote:
     last_accessed: float
     session_id: str | None = None
     decay_score: float = 1.0
-    kind: str = DEFAULT_KIND  # directive | task | gotcha | finding | reference (UPG-9.3)
+    kind: str = DEFAULT_KIND  # directive | task | gotcha | finding | reference | decision (UPG-9.3, UPG-DECISION-TIMELINE)
     # team/shared notes tri-key model
     author_id: str = ""              # developer/agent identifier
     author_trust_score: float = 1.0  # Bayesian weight per contributor (0.0–1.0)

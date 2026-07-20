@@ -2901,7 +2901,7 @@ def main() -> None:
     p_remember.add_argument("content", help="The note content to store")
     p_remember.add_argument("--tags", action="append", metavar="TAG", help="Topic tag (repeatable)")
     p_remember.add_argument("--priority", choices=["high", "medium", "low"], default="medium")
-    p_remember.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference"],
+    p_remember.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference", "decision"],
                             default="finding", help="Memory kind (controls injection policy)")
     p_remember.add_argument("--title", default="", help="Short label for index-tier display (optional; derived from first content line if empty)")
     p_remember.add_argument("--agent", default="", help="Optional agent/subagent identifier for multi-agent shared-memory attribution (e.g. 'coder-2'); never inferred")
@@ -2912,7 +2912,7 @@ def main() -> None:
     p_recall.add_argument("query", nargs="?", default=None, help="Semantic recall query (optional)")
     p_recall.add_argument("--tags", action="append", metavar="TAG", help="Filter by tag (repeatable)")
     p_recall.add_argument("--priority", choices=["high", "medium", "low"], default=None)
-    p_recall.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference"],
+    p_recall.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference", "decision"],
                           default=None, help="Filter to one memory kind")
     p_recall.add_argument("--boot", action="store_true",
                           help="Boot mode: unconditional directives + high-priority tasks (for SessionStart hooks)")
@@ -2920,8 +2920,8 @@ def main() -> None:
                           help="Relevance cutoff [0..1]: drop semantic matches below this cosine similarity")
     p_recall.add_argument("--max-age-days", type=float, default=None, dest="max_age_days",
                           help="Time filter: only return notes created within this many days")
-    p_recall.add_argument("--sort-by", choices=["relevance", "recency", "priority"], default="relevance",
-                          dest="sort_by", help="Sort order: relevance | recency | priority")
+    p_recall.add_argument("--sort-by", choices=["relevance", "recency", "priority", "chronological"], default="relevance",
+                          dest="sort_by", help="Sort order: relevance | recency | priority | chronological (oldest-first; index lines show the creation date)")
     p_recall.add_argument("--detail", choices=["index", "full"], default="index",
                           help="Detail level: 'index' = one-line summaries (default); 'full' = bodies")
     p_recall.add_argument("--id", type=int, default=None, dest="note_id",

@@ -162,9 +162,14 @@ def default_bundle_for_kind(
                  (empty list) — it continues to be served exactly as today by
                  WorkingContextStore.recall_for_path()'s unrelated content-
                  substring match, left untouched by this engine.
-    - finding/reference: wave-2 M-territory (θ-gated semantic trigger) — no
-                 wave-1 default bundle. Their current relevance-rank recall()
-                 injection is unchanged and unaffected by this engine.
+    - finding/reference/decision: wave-2 M-territory (θ-gated semantic
+                 trigger) — no wave-1 default bundle. Their current
+                 relevance-rank recall() injection is unchanged and
+                 unaffected by this engine. `decision` (UPG-DECISION-
+                 TIMELINE) is deliberately NOT boot-privileged — an
+                 architectural decision is meant to be pulled on demand as a
+                 group (vectr_recall(kind="decision",
+                 sort_by="chronological")), not pushed into every session.
     """
     if kind == "directive":
         return [{"event": "session-start"}, {"event": "post-compaction"}]

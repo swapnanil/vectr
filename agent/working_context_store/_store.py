@@ -197,17 +197,37 @@ def _age_str(created_at: float) -> str:
     return f"{age_h:.0f}h" if age_h < 48 else f"{age_h / 24:.0f}d"
 
 
+def _date_str(created_at: float) -> str:
+    """`created_at`'s calendar date as `YYYY-MM-DD` (UPG-DECISION-TIMELINE) —
+    used by `_format_index_line` in place of `_age_str`'s relative age when
+    `sort_by='chronological'`, so a time-ordered listing reads as a dated
+    timeline rather than a set of ages that all drift as the caller keeps
+    reading. Deterministic, calendar-only (no time-of-day) so two notes
+    written the same day render identically regardless of when the caller
+    happens to recall them."""
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(created_at).strftime("%Y-%m-%d")
+
+
 def _format_index_line(
     note: WorkingNote,
     stale_warnings: dict[int, list[str]],
     *,
     surface: str = "mcp",
+    sort_by: str = "relevance",
 ) -> str:
     """One note's single index-tier line — hoisted from
     `format_notes_for_llm()`'s detail='index' loop body (unchanged rendering)
     so `fire_and_format()` (TRIGGER-ENGINE wave 2a) can render the same
     index-tier line for a trigger-fired note without duplicating the
-    format."""
+    format.
+
+    `sort_by='chronological'` (UPG-DECISION-TIMELINE) swaps the trailing
+    relative age for the note's creation date, so a chronological listing —
+    typically `vectr_recall(kind="decision", sort_by="chronological")`, an
+    ADR-style decision timeline — reads as a dated sequence instead of a set
+    of ages. Every other `sort_by` value renders exactly as before this
+    branch existed."""
     n = note
     kind_label = n.kind if n.kind else DEFAULT_KIND
     title = n.title or (n.content.strip().splitlines()[0][:80] if n.content.strip() else "(no title)")
@@ -216,6 +236,11 @@ def _format_index_line(
     # UPG-SUBAGENT-MEMORY: caller-declared agent/subagent attribution
     # (author_id) — never inferred. Absent renders exactly as before.
     agent_marker = f" ({n.author_id})" if n.author_id else ""
+    if sort_by == "chronological":
+        return (
+            f"[{id_str}] {_date_str(n.created_at)} {kind_label}/{n.priority}{agent_marker}"
+            f" · {title}{stale_marker}"
+        )
     return (
         f"[{id_str}] {kind_label}/{n.priority}{agent_marker} · {title}"
         f"  ({_age_str(n.created_at)}){stale_marker}"
@@ -671,8 +696,8 @@ class WorkingContextStore:
         same workspace + code_hash (same code anchor), the older note is marked
         superseded before the new note is inserted.
 
-        `kind` is one of VALID_KINDS (directive|task|gotcha|finding|reference);
-        an unrecognised value falls back to DEFAULT_KIND.
+        `kind` is one of VALID_KINDS (directive|task|gotcha|finding|reference|
+        decision); an unrecognised value falls back to DEFAULT_KIND.
 
         `title` is a short label for index-tier display (UPG-RECALL-HIERARCHY).
         When empty, a fallback is derived from the first non-empty line of content,
@@ -1015,9 +1040,15 @@ class WorkingContextStore:
         are returned (UPG-RECALL-HIERARCHY time filter).
 
         sort_by: one of 'relevance' (semantic/default SQL order), 'recency'
-        (created_at DESC), or 'priority' (high>medium>low, then created_at DESC).
-        In the semantic path, recency/priority are applied as a re-sort after
-        candidate fetch (relevance = semantic order is unchanged).
+        (created_at DESC), 'priority' (high>medium>low, then created_at DESC),
+        or 'chronological' (created_at ASC — oldest first; UPG-DECISION-
+        TIMELINE). 'chronological' composes with any `kind`/`tags`/`priority`
+        filter the same way 'recency'/'priority' already do — it is not
+        specific to kind='decision', just the lever that turns a filtered
+        recall into a time-ordered listing (e.g. an ADR-style decision
+        timeline via kind='decision'). In the semantic path, recency/
+        priority/chronological are applied as a re-sort after candidate fetch
+        (relevance = semantic order is unchanged).
 
         session_id: enforces scope="session" notes (TRIGGER-ENGINE wave 2a,
         §1) — a note scoped to a different session (or to none, when
@@ -1075,6 +1106,13 @@ class WorkingContextStore:
                 " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,"
                 " created_at DESC LIMIT ?"
             )
+        elif sort_by == "chronological":
+            # Oldest-first (UPG-DECISION-TIMELINE) — the inverse of 'recency',
+            # so a filtered recall (e.g. kind='decision') reads as a timeline
+            # rather than a most-recent-first feed. note_id ASC breaks a
+            # created_at tie deterministically (two notes written in the same
+            # wall-clock second still get a stable relative order).
+            sql += " ORDER BY created_at ASC, note_id ASC LIMIT ?"
         else:
             # relevance (default): trust/decay ordering, then a deterministic
             # tie-break (UPG-RECALL-ORDER-CHURN — last_accessed excluded, see
@@ -1169,8 +1207,9 @@ class WorkingContextStore:
         `1 - cosine_similarity`, so similarity = `1 - distance`.
 
         max_age_days: applied as a SQL filter after candidate fetch (UPG-RECALL-HIERARCHY).
-        sort_by: 'relevance' preserves semantic order; 'recency'/'priority' re-sorts
-        the candidate set after fetch (UPG-RECALL-HIERARCHY).
+        sort_by: 'relevance' preserves semantic order; 'recency'/'priority'/
+        'chronological' each re-sort the candidate set after fetch
+        (UPG-RECALL-HIERARCHY, UPG-DECISION-TIMELINE).
         session_id: scope="session" enforcement (TRIGGER-ENGINE wave 2a) —
         see recall()'s docstring; the same post-LIMIT trade-off applies.
         """
@@ -1249,6 +1288,10 @@ class WorkingContextStore:
             elif sort_by == "priority":
                 _prio_rank = {"high": 0, "medium": 1, "low": 2}
                 all_notes.sort(key=lambda n: (_prio_rank.get(n.priority, 1), -n.created_at))
+            elif sort_by == "chronological":
+                # Oldest-first (UPG-DECISION-TIMELINE) — mirrors the SQL
+                # path's ORDER BY created_at ASC, note_id ASC.
+                all_notes.sort(key=lambda n: (n.created_at, n.note_id))
             notes = all_notes[:limit]
 
         notes = _scope_filter(notes, session_id=session_id)
@@ -2276,6 +2319,7 @@ class WorkingContextStore:
         stale_warnings: dict[int, list[str]] | None = None,
         detail: str = "index",
         surface: str = "mcp",
+        sort_by: str = "relevance",
     ) -> str:
         """Format recalled notes into a clean LLM-readable string.
 
@@ -2287,6 +2331,19 @@ class WorkingContextStore:
           UPG-SUBAGENT-MEMORY), it renders as an attribution tag right after
           priority: `[#12] task/high (coder-2) · title  (2h)`. Never inferred;
           a note with no `agent` renders exactly as before this feature shipped.
+
+          sort_by='chronological' (UPG-DECISION-TIMELINE) — passed through
+          unchanged from the same-named `recall()` argument that produced
+          `notes` — replaces the trailing relative age with the note's
+          creation date:
+            [#<note_id>] <YYYY-MM-DD> <kind>/<priority> · <title>
+          so the index reads as a dated timeline (e.g.
+          `vectr_recall(kind="decision", sort_by="chronological")` for an
+          ADR-style decision history). Every other `sort_by` value (the
+          default 'relevance', plus 'recency'/'priority') renders exactly as
+          before this parameter existed — this only changes the rendering,
+          the caller is still responsible for having asked `recall()` to
+          actually sort chronologically.
 
         detail='full': renders the full body format (pre-existing behaviour).
           Use for explicit vectr_recall(detail='full') or single-note expand (note_id path).
@@ -2325,7 +2382,7 @@ class WorkingContextStore:
             header = f"# Working Notes — index ({len(notes)} entries; {expand_hint})\n"
             lines = [header]
             for n in notes:
-                lines.append(_format_index_line(n, stale_warnings, surface=surface))
+                lines.append(_format_index_line(n, stale_warnings, surface=surface, sort_by=sort_by))
             return "\n".join(lines)
 
         # detail == "full" (original behaviour, with stale warnings)

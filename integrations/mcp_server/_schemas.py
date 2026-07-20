@@ -308,14 +308,17 @@ _MEMORY_WRITE_TOOLS = [
                         "Memory kind, controlling how the note is injected (default 'finding'): "
                         "'directive' = a must-never-miss rule, injected unconditionally every session; "
                         "'task' = current-work context; 'gotcha' = a file/path-anchored caveat; "
-                        "'finding' = a relevance-ranked learning; 'reference' = a pointer (URL/ticket). "
+                        "'finding' = a relevance-ranked learning; 'reference' = a pointer (URL/ticket); "
+                        "'decision' = an architectural/design decision plus its why — not auto-injected, "
+                        "recall the group chronologically with vectr_recall(kind=\"decision\", "
+                        "sort_by=\"chronological\") for an ADR-style decision history. "
                         "When a new kind='task' note replaces an earlier checkpoint (the work moved on, "
                         "the old note is no longer the current state), pass supersedes=<old note_id> so "
                         "the stale checkpoint stops firing at every future session-start instead of "
                         "piling up alongside the new one."
                     ),
                     "default": "finding",
-                    "enum": ["directive", "task", "gotcha", "finding", "reference"],
+                    "enum": ["directive", "task", "gotcha", "finding", "reference", "decision"],
                 },
                 "title": {
                     "type": "string",
@@ -480,18 +483,21 @@ _MEMORY_TOOLS = [
                 },
                 "kind": {
                     "type": "string",
-                    "description": "Filter to one memory kind: 'directive' | 'task' | 'gotcha' | 'finding' | 'reference'",
+                    "description": "Filter to one memory kind: 'directive' | 'task' | 'gotcha' | 'finding' | 'reference' | 'decision'",
                     "nullable": True,
-                    "enum": ["directive", "task", "gotcha", "finding", "reference"],
+                    "enum": ["directive", "task", "gotcha", "finding", "reference", "decision"],
                 },
                 "sort_by": {
                     "type": "string",
                     "description": (
                         "Sort order: 'relevance' (semantic/trust order, default), "
-                        "'recency' (newest first), 'priority' (high→medium→low then newest)."
+                        "'recency' (newest first), 'priority' (high→medium→low then newest), "
+                        "'chronological' (oldest first — index lines show the creation date instead "
+                        "of a relative age; combine with kind=\"decision\" for an ADR-style decision "
+                        "timeline, or with any other kind/tag filter for the same time-ordered view)."
                     ),
                     "default": "relevance",
-                    "enum": ["relevance", "recency", "priority"],
+                    "enum": ["relevance", "recency", "priority", "chronological"],
                 },
                 "max_age_days": {
                     "type": "number",
