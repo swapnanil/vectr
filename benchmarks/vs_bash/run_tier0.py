@@ -91,7 +91,9 @@ ARCHETYPE_PLAN: dict[int, list[tuple[str, str]]] = {
     # who-calls-X: trace, then locate each caller name the trace itself
     # rendered (trace output today carries no fetch-chainable ids, so
     # locate-by-name is the only in-band way to read a caller's definition).
-    6: [("trace", "primary"), ("locate", "followup_trace_callers")],
+    # If the trace itself dead-ends (mis-named symbol), fall back to search --
+    # the same recovery the product's own trace-empty hint instructs.
+    6: [("trace", "primary"), ("locate", "followup_trace_callers"), ("search", "fallback")],
     7: [("search", "primary")],                            # stack-trace literal
     8: [("search", "primary")],                            # doc/howto
     9: [("search", "primary"), ("search", "hop2")],        # cross-file flow
@@ -237,14 +239,20 @@ def run_vectr_arm(task: dict, base: str) -> dict:
             if len(names) > _TRACE_FOLLOWUP_CAP:
                 print(f"  [note] {task['id']}: locating first {_TRACE_FOLLOWUP_CAP} of "
                       f"{len(names)} traced callers (uniform archetype cap)")
+            any_located = False
             for name in names[:_TRACE_FOLLOWUP_CAP]:
                 text, wall_ms = mcp_tools_call_text(base, "vectr_locate", {"name": name})
-                prev_empty = _looks_empty(text)
+                empty = _looks_empty(text)
+                any_located = any_located or not empty
                 calls.append({
                     "tool": "vectr_locate", "args": {"name": name}, "kind": kind,
                     "wall_ms": round(wall_ms, 2), "tokens": count_tokens(text),
-                    "empty": prev_empty, "_text": text,
+                    "empty": empty, "_text": text,
                 })
+            # A later fallback step fires only when this whole stage missed:
+            # every followup locate empty (or none issued from a parsed name).
+            if names:
+                prev_empty = not any_located
             continue
         text, wall_ms = mcp_tools_call_text(base, f"vectr_{tool}", call_args)
         prev_empty = _looks_empty(text)
