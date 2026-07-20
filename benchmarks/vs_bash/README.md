@@ -87,6 +87,31 @@ run time — see `.claude/HEURISTIC-DIRECTIVE.md` R5.
 ./.venv/bin/python benchmarks/vs_bash/run_tier0.py --port 8798 --corpus django
 ```
 
+### uv corpus
+
+`tasks_uv.jsonl` / `gold_uv.jsonl` mirror the django set's schema and archetype
+distribution against uv (Astral's Rust package/project manager) — a second-language
+witness (Rust vs Python) for the same 10 archetypes. Curated against the fixture
+checkout at `tmp/poc-uv-vanilla`, not the default `tmp/vectr-accept-<corpus>` path used
+above, so pass `--fixture-root` explicitly:
+
+```
+# Daemon: port 8799 only, indexed from tmp/poc-uv-vanilla.
+/opt/homebrew/bin/vectr start tmp/poc-uv-vanilla --port 8799
+
+# Smoke test a few tasks:
+./.venv/bin/python benchmarks/vs_bash/run_tier0.py --port 8799 --corpus uv --fixture-root tmp/poc-uv-vanilla --tasks T01,T08,T11 --smoke
+
+# Full scoring run (all tasks) -- gated on sentinel review of the gold set first:
+./.venv/bin/python benchmarks/vs_bash/run_tier0.py --port 8799 --corpus uv --fixture-root tmp/poc-uv-vanilla
+```
+
+Gold curation notes flag two tasks (T04, T09) where a blind symbol-name guess did not
+match the real fixture, and two (T05, T13) with a genuine Rust-specific structural
+bash-recipe gap (rustfmt wraps multi-parameter signatures across lines, so
+context-free grep can only ever capture the signature-opening line) — see
+`gold_uv.jsonl`'s per-task `notes` for details before scoring.
+
 Results land in `results/vectr-vs-bash/<corpus>/<vectr-sha>/tier0_<smoke|run>_<timestamp>.json`
 (gitignored — regenerable run output, not source, same convention as
 `benchmarks/harness/results/`).
