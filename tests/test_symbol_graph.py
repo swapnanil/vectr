@@ -2554,6 +2554,237 @@ class TestQualifiedLocateUPG1110b:
 
 
 # ---------------------------------------------------------------------------
+# UPG-RUST-IMPL-QUALIFIED-LOCATE — qualified `Type.method` locate/trace must
+# resolve a method declared inside a Rust `impl Type { }` block exactly as it
+# already resolves a Python/Java `class` member. Rust has no `class` keyword,
+# so the pre-existing enclosing-owner lookup (a text scan for a `class NAME`
+# line) never matches an impl block; the owning type must instead come from
+# tree-sitter's own `type` field on the `impl_item` node.
+# ---------------------------------------------------------------------------
+
+class TestRustImplQualifiedLocateUPG:
+    def _fixture(self, tmp_path) -> tuple:
+        """Two structs each with an `impl` block that defines a method of the
+        SAME leaf name (`add_item`), plus a trait impl, so a qualifier is
+        required to disambiguate — mirrors the Class.method fixtures already
+        used for Python/Java elsewhere in this file."""
+        src = textwrap.dedent("""\
+            struct Basket {
+                count: u32,
+            }
+
+            impl Basket {
+                pub fn add_item(&mut self, n: u32) {
+                    self.count += n;
+                }
+
+                pub fn total(&self) -> u32 {
+                    self.count
+                }
+            }
+
+            trait Weighable {
+                fn weigh(&self) -> u32;
+            }
+
+            impl Weighable for Basket {
+                fn weigh(&self) -> u32 {
+                    self.count * 2
+                }
+            }
+
+            struct Crate {
+                count: u32,
+            }
+
+            impl Crate {
+                pub fn add_item(&mut self, n: u32) {
+                    self.count += n * 10;
+                }
+            }
+
+            fn use_basket() {
+                let mut b = Basket { count: 0 };
+                b.add_item(3);
+            }
+        """)
+        fp = tmp_path / "basket.rs"
+        fp.write_text(src)
+        g = SymbolGraph(str(tmp_path))
+        g.index_file(str(tmp_path), str(fp))
+        return g, str(tmp_path), str(fp)
+
+    # --- (a) qualified locate resolves to the method's own file:line ---
+
+    def test_qualified_locate_resolves_impl_method_file_line(self, tmp_path) -> None:
+        g, ws, fp = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "Basket.add_item")
+        names = [s.name for s in result.symbols]
+        assert "Basket.add_item" in names, f"expected Basket.add_item, got {names}"
+        sym = next(s for s in result.symbols if s.name == "Basket.add_item")
+        assert sym.file_path == fp
+        lines = Path(fp).read_text().splitlines()
+        assert "add_item" in lines[sym.start_line - 1], (
+            f"start_line {sym.start_line} does not point at the method: "
+            f"{lines[sym.start_line - 1]!r}"
+        )
+        assert "10" not in (sym.snippet or ""), (
+            "resolved to Crate.add_item's body, not Basket's"
+        )
+
+    def test_qualified_locate_excludes_other_impl_same_leaf(self, tmp_path) -> None:
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "Basket.add_item")
+        names = [s.name for s in result.symbols]
+        assert "Crate.add_item" not in names, f"Crate.add_item leaked in: {names}"
+
+    def test_qualified_locate_other_impl_by_its_own_qualifier(self, tmp_path) -> None:
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "Crate.add_item")
+        names = [s.name for s in result.symbols]
+        assert "Crate.add_item" in names
+        assert "Basket.add_item" not in names
+
+    # --- trait impl: the owner is the implemented TYPE, never the TRAIT ---
+
+    def test_trait_impl_owner_is_type_not_trait(self, tmp_path) -> None:
+        """`impl Weighable for Basket` — the owner is Basket, never Weighable."""
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "Basket.weigh")
+        names = [s.name for s in result.symbols]
+        assert "Basket.weigh" in names, f"expected Basket.weigh, got {names}"
+
+    def test_trait_impl_wrong_qualifier_not_accepted(self, tmp_path) -> None:
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "Weighable.weigh")
+        names = [s.name for s in result.symbols]
+        assert "Basket.weigh" not in names, (
+            f"the trait name must never be accepted as the owning qualifier: {names}"
+        )
+
+    # --- (b) bare-name locate is unaffected by the fix ---
+
+    def test_bare_name_locate_returns_all_impls(self, tmp_path) -> None:
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.locate_l2(ws, "add_item")
+        names = [s.name for s in result.symbols]
+        owners = {n.split(".")[0] for n in names if "." in n}
+        assert "Basket" in owners and "Crate" in owners, f"got {names}"
+
+    # --- (c) regression: Java class-qualified locate unaffected ---
+    # (Python coverage already lives in TestQualifiedLocateUPG1110b above —
+    # this fixture is Rust's fallback partner: the AST-based impl lookup is a
+    # fallback that only runs when the fast `class NAME` text scan finds
+    # nothing, so it must never change Java's already-working path.)
+
+    def test_java_class_qualified_locate_unaffected(self, tmp_path) -> None:
+        src = textwrap.dedent("""\
+            public class Basket {
+                public int addItem(int n) {
+                    return n;
+                }
+            }
+        """)
+        fp = tmp_path / "Basket.java"
+        fp.write_text(src)
+        g = SymbolGraph(str(tmp_path))
+        g.index_file(str(tmp_path), str(fp))
+        result = g.locate_l2(str(tmp_path), "Basket.addItem")
+        names = [s.name for s in result.symbols]
+        assert "Basket.addItem" in names, f"Java qualified locate regressed: {names}"
+
+    # --- (d) trace synergy with UPG-TRACE-CALLERS-QUALIFIER-VALIDATION ---
+
+    def test_trace_valid_impl_qualifier_resolves_without_banner(self, tmp_path) -> None:
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.trace(ws, "Basket.add_item", direction="callers")
+        assert result.get("qualified_class") == "Basket"
+        assert "qualifier_unresolved" not in result
+        text = g.format_trace_for_llm(result, "Basket.add_item")
+        assert "does not resolve" not in text
+
+    def test_trace_valid_trait_impl_qualifier_resolves(self, tmp_path) -> None:
+        """A method inside `impl Trait for Type` resolves its qualifier to
+        the TYPE, matching locate's trait-vs-type distinction."""
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.trace(ws, "Basket.weigh", direction="callees")
+        assert result.get("qualified_class") == "Basket"
+        assert "qualifier_unresolved" not in result
+
+    def test_trace_fabricated_impl_qualifier_still_banners(self, tmp_path) -> None:
+        g, ws, _ = self._fixture(tmp_path)
+        result = g.trace(ws, "Basket.does_not_exist", direction="callers")
+        assert result.get("qualifier_unresolved") is True
+        text = g.format_trace_for_llm(result, "Basket.does_not_exist")
+        assert "does not resolve" in text
+
+    # --- direct unit tests on the new AST-fallback helper ---
+
+    def test_enclosing_container_from_file_impl_method(self, tmp_path) -> None:
+        from agent.symbol_graph._graph import _enclosing_container_from_file
+        src = textwrap.dedent("""\
+            struct Widget {
+                n: u32,
+            }
+
+            impl Widget {
+                fn spin(&self) -> u32 {
+                    self.n
+                }
+            }
+        """)
+        fp = tmp_path / "w.rs"
+        fp.write_text(src)
+        owner = _enclosing_container_from_file(str(fp), 6)
+        assert owner == "Widget", f"expected 'Widget', got {owner!r}"
+
+    def test_enclosing_container_from_file_generic_multiline_impl(self, tmp_path) -> None:
+        """A generic impl header spanning multiple lines has no single
+        `class`-style keyword line a regex could match — the AST-based
+        fallback (tree-sitter's own `type` field) resolves the owner
+        regardless of how the header is laid out."""
+        from agent.symbol_graph._graph import _enclosing_container_from_file
+        src = textwrap.dedent("""\
+            struct Wrapper<T> {
+                inner: T,
+            }
+
+            impl<T: Clone>
+                Wrapper<T>
+            {
+                fn get(&self) -> T {
+                    self.inner.clone()
+                }
+            }
+        """)
+        fp = tmp_path / "wrap.rs"
+        fp.write_text(src)
+        owner = _enclosing_container_from_file(str(fp), 8)
+        assert owner == "Wrapper", f"expected 'Wrapper', got {owner!r}"
+
+    def test_enclosing_container_from_file_no_impl_block(self, tmp_path) -> None:
+        from agent.symbol_graph._graph import _enclosing_container_from_file
+        fp = tmp_path / "s.rs"
+        fp.write_text("fn standalone() {}\n")
+        assert _enclosing_container_from_file(str(fp), 1) == ""
+
+    def test_enclosing_container_from_file_falls_back_only_when_needed(
+        self, tmp_path
+    ) -> None:
+        """A Python file with a real `class` line is answered by the fast
+        text scan; the AST fallback never even considers it."""
+        from agent.symbol_graph._graph import _enclosing_container_from_file
+        src = textwrap.dedent("""\
+            class Basket:
+                def add_item(self, n):
+                    return n
+        """)
+        fp = tmp_path / "basket.py"
+        fp.write_text(src)
+        assert _enclosing_container_from_file(str(fp), 2) == "Basket"
+
+
+# ---------------------------------------------------------------------------
 # UPG-15.10 — locate: canonical library defs rank before inner test-scope stubs
 #
 # Acceptance case (F29): vectr_locate('Model') must return the canonical

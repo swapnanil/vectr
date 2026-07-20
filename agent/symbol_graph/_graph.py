@@ -20,6 +20,7 @@ from agent.symbol_graph._constants import (
     _KIND_RANK_DEFAULT,
     _BUILTINS,
     _IMPORTANCE_SYMBOL_KINDS,
+    _IMPL_CONTAINER_NODE_TYPES,
     graph_toolchain_fingerprint,
 )
 from agent.config import (
@@ -248,12 +249,119 @@ def _enclosing_class_from_file(file_path: str, start_line: int) -> str:
     return _enclosing_class_from_lines(lines, start_line)
 
 
+def _impl_owner_type_name(node, language: str, code_bytes: bytes) -> str:
+    """Owning type name of an impl-style container node (kind "impl" in
+    `_SYMBOL_TYPES`), read from the grammar's own field rather than a
+    positional child-scan.
+
+    tree-sitter-rust exposes the implemented type as a `type` field on
+    `impl_item` for BOTH `impl Type { }` and `impl Trait for Type { }` — the
+    field always names the type after `for`, never the trait (`trait` is a
+    separate, optional field present only on the second form), so this never
+    misreads a trait name as the owner. A generic impl (`impl<T: Bound>
+    Foo<T> { }`) exposes `type` as a `generic_type` node whose OWN `type`
+    field is the bare `type_identifier` — unwrapped here down to the leaf.
+    """
+    if language != "rust":
+        return ""
+    cur = node.child_by_field_name("type")
+    for _ in range(6):  # bounded — generic/reference nesting is shallow
+        if cur is None:
+            return ""
+        if cur.type == "type_identifier":
+            return code_bytes[cur.start_byte:cur.end_byte].decode("utf-8", errors="replace")
+        cur = cur.child_by_field_name("type")
+    return ""
+
+
+def _impl_container_spans(file_path: str, language: str) -> list[tuple[int, int, str]]:
+    """[(start_line, end_line, owner_type_name), ...] — 1-indexed inclusive —
+    for every impl-style container block in *file_path* (UPG-RUST-IMPL-
+    QUALIFIED-LOCATE). Computed once per file so a batch caller (below, and
+    `_enclosing_container_from_file`) never re-parses the same file per row.
+
+    This is the AST-based counterpart to the text/regex `class NAME` scan
+    (`_enclosing_class_from_lines`) — needed because an impl-style container's
+    header carries no single fixed keyword line to match: a Rust impl block's
+    header can span multiple lines with generics (``impl<T: Clone>\n
+    Foo<T>\n{``), and a trait impl names TWO types on one line
+    (``impl Trait for Type {``) where only the second is the owner. Reading
+    tree-sitter's own `type` field sidesteps both problems; a regex could only
+    approximate the single-line, non-generic case.
+
+    Returns [] when *language* has no impl-kind container (i.e. every
+    language except Rust today — see `_IMPL_CONTAINER_NODE_TYPES`), its
+    grammar isn't installed, or the file can't be read.
+    """
+    container_types = _IMPL_CONTAINER_NODE_TYPES.get(language, frozenset())
+    if not container_types:
+        return []
+    from agent.indexer import _get_parser
+    parser = _get_parser(language)
+    if parser is None:
+        return []
+    try:
+        code = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    code_bytes = code.encode("utf-8")
+    tree = parser.parse(code_bytes)
+    spans: list[tuple[int, int, str]] = []
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type in container_types:
+            owner = _impl_owner_type_name(node, language, code_bytes)
+            if owner:
+                spans.append((node.start_point[0] + 1, node.end_point[0] + 1, owner))
+        stack.extend(node.children)
+    return spans
+
+
+def _owner_from_spans(spans: list[tuple[int, int, str]], start_line: int) -> str:
+    """Innermost (smallest-span) container from `_impl_container_spans` whose
+    range contains *start_line* (1-indexed), or "" when none does."""
+    best, best_size = "", None
+    for s, e, owner in spans:
+        if s <= start_line <= e and (best_size is None or (e - s) < best_size):
+            best, best_size = owner, e - s
+    return best
+
+
+def _enclosing_container_from_file(file_path: str, start_line: int) -> str:
+    """Enclosing definitional container (class OR impl-style block) for the
+    symbol at *start_line* in *file_path* — the single "what type owns this
+    member" lookup shared by qualified `Type.method` resolution in both
+    `locate_l2` and `trace` (UPG-RUST-IMPL-QUALIFIED-LOCATE).
+
+    Tries the fast text-based `class NAME` scan first (`_enclosing_class_from_file`
+    — unchanged behaviour for every class-keyword language: Python, Java,
+    JS/TS, C++). Falls back to the AST-based impl-container lookup only when
+    that finds nothing — i.e. only for a language whose owning-container
+    syntax isn't a `class`-keyword line at all. A Rust method's owner is
+    declared by its enclosing `impl Type { }` block, never a `class` line, so
+    the text scan structurally can never find it there; the fallback reads
+    the owner directly off tree-sitter's grammar field instead of extending
+    the regex with another keyword (a generic/multi-line impl header has no
+    single line a keyword regex could match).
+    """
+    cls = _enclosing_class_from_file(file_path, start_line)
+    if cls:
+        return cls
+    from agent.indexer import LANG_BY_EXT
+    language = LANG_BY_EXT.get(Path(file_path).suffix.lower(), "")
+    return _owner_from_spans(_impl_container_spans(file_path, language), start_line)
+
+
 def _locate_class_enclosed_batch(rows: list) -> list[bool]:
     """Pre-compute, for each row, whether the symbol's IMMEDIATE enclosing scope
-    is a class body (used by the F49 locate ranking signal below). Each source
-    file is read at most once — mirrors ``_locate_scope_depth_batch``'s caching.
+    is a class body OR an impl-style container (used by the F49 locate ranking
+    signal below). Each source file is read at most once — mirrors
+    ``_locate_scope_depth_batch``'s caching; the impl-container AST scan
+    (UPG-RUST-IMPL-QUALIFIED-LOCATE) is likewise computed at most once per file.
 
     A method directly inside a class (e.g. ``class ForNode: def render(self):``)
+    or inside an impl block (e.g. Rust ``impl Basket { fn total(&self) {} }``)
     returns True; a module-level function (e.g. ``def render(request, ...):``)
     returns False. A symbol whose immediate enclosing scope is a function body
     (e.g. a class defined inside a test method, per UPG-15.10/F29) also returns
@@ -265,7 +373,9 @@ def _locate_class_enclosed_batch(rows: list) -> list[bool]:
     equal to `function` in `_KIND_RANK` (a method is a legitimate top-level
     result, e.g. `locate('save')` on a single canonical model).
     """
+    from agent.indexer import LANG_BY_EXT
     file_lines: dict[str, list[str]] = {}
+    impl_spans: dict[str, list[tuple[int, int, str]]] = {}
     result: list[bool] = []
     for r in rows:
         fp = r["file_path"]
@@ -276,7 +386,13 @@ def _locate_class_enclosed_batch(rows: list) -> list[bool]:
                 ).splitlines()
             except OSError:
                 file_lines[fp] = []
-        result.append(bool(_enclosing_class_from_lines(file_lines[fp], r["start_line"])))
+        enclosed = bool(_enclosing_class_from_lines(file_lines[fp], r["start_line"]))
+        if not enclosed:
+            if fp not in impl_spans:
+                language = LANG_BY_EXT.get(Path(fp).suffix.lower(), "")
+                impl_spans[fp] = _impl_container_spans(fp, language)
+            enclosed = bool(_owner_from_spans(impl_spans[fp], r["start_line"]))
+        result.append(enclosed)
     return result
 
 
@@ -1200,8 +1316,11 @@ class SymbolGraph:
                 # UPG-11.10-b: populate qualified name on the symbol so callers
                 # see "Class.method" rather than bare "method" — parity with
                 # the searcher's qualified display via extract_class_from_content.
+                # UPG-RUST-IMPL-QUALIFIED-LOCATE: the owning container may be a
+                # class OR an impl-style block (Rust) — `_enclosing_container_from_file`
+                # covers both.
                 if "." not in s.name and "::" not in s.name:
-                    cls = _enclosing_class_from_file(s.file_path, s.start_line)
+                    cls = _enclosing_container_from_file(s.file_path, s.start_line)
                     if cls:
                         s.name = f"{cls}.{s.name}"
             return syms
@@ -1652,9 +1771,12 @@ class SymbolGraph:
         defs = self._exact_definitions(workspace, lookup_name, limit=limit)
         resolved_qualifier = False
         if class_qualifier:
+            # UPG-RUST-IMPL-QUALIFIED-LOCATE: owner may be a class OR an
+            # impl-style block (Rust) — `_enclosing_container_from_file`
+            # covers both, unlike the class-keyword-only text scan.
             filtered = [
                 d for d in defs
-                if _enclosing_class_from_file(d.file_path, d.start_line) == class_qualifier
+                if _enclosing_container_from_file(d.file_path, d.start_line) == class_qualifier
             ]
             if filtered:
                 defs = filtered

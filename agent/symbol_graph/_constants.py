@@ -98,6 +98,19 @@ _IMPORTANCE_SYMBOL_KINDS: frozenset[str] = frozenset({
     "class", "struct", "enum", "interface", "type", "function",
 })
 
+# Node types per language whose `_SYMBOL_TYPES` kind is "impl" — a container
+# that IMPLEMENTS a type (Rust's `impl_item`) rather than defining one, so a
+# member declared inside it is owned by the implemented type, not by the
+# container node's own identity. Derived directly from `_SYMBOL_TYPES` (not a
+# separate hardcoded per-language check) so any future "impl"-kind language is
+# picked up automatically by the enclosing-owner lookup in
+# `agent/symbol_graph/_graph.py` (UPG-RUST-IMPL-QUALIFIED-LOCATE) without
+# touching that lookup's own code.
+_IMPL_CONTAINER_NODE_TYPES: dict[str, frozenset[str]] = {
+    lang: frozenset(nt for nt, kind in mapping.items() if kind == "impl")
+    for lang, mapping in _SYMBOL_TYPES.items()
+}
+
 # UPG-10.3: node types that bind a MODULE-LEVEL name (a constant/config/binding
 # that isn't a function or class but IS something callers `locate` — e.g. Python
 # `_CLAUDE_MD = """..."""`). Indexed only at module scope (see the scope guard in
