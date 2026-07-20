@@ -45,6 +45,7 @@ A note stored with `vectr_remember` is the only finding that survives three thin
 | `vectr_forget(note_id)` | Delete a stale or superseded note by its `[#N]` id; `all=true` clears every note. | `vectr_forget(note_id=12)` |
 | `vectr_snapshot("label")` | Seal current notes as a named checkpoint. | `vectr_snapshot("lock-cycle-mapped")` |
 | `vectr_snapshot_list()` | List saved checkpoints. Use at session start if `vectr_recall` returned nothing useful. | `vectr_snapshot_list()` |
+| `vectr_resume()` | "Pick up where you left off" in one call — the most recent task note, the latest snapshot, and open gotchas with their file anchors. | `vectr_resume()` |
 | `vectr_promote(note_id)` | Raise a reviewed auto-captured note's trust class one step (`auto` → `agent`), so it's treated as agent-verified rather than unreviewed going forward. | `vectr_promote(note_id=12)` |
 
 `vectr_remember` also accepts an optional `triggers` list for conditions beyond the `kind` default: `path` globs, lifecycle `event`s (session-start, prompt-submit, pre-edit, pre-run, pre-commit, post-compaction), exact `symbol` references, a `semantic` prompt-similarity match, and temporal guards (`not_before`, `expires_visibility`, `cooldown`). Conditions AND within one trigger entry and OR across entries. Omit `triggers` to keep the kind default — most notes never need it.

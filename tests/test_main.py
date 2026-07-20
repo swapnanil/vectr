@@ -1679,6 +1679,105 @@ class TestCmdRecall:
 
 
 # ---------------------------------------------------------------------------
+# cmd_resume (UPG-RESUME-SURFACE)
+# ---------------------------------------------------------------------------
+
+class TestCmdResume:
+    def test_prints_formatted_to_stdout(self, tmp_path, capsys):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "last_task": None, "gotchas": [], "snapshot": None,
+            "formatted": "Last task:\n  [1] task/high · ship the resume feature  (2m)",
+            "processing_ms": 3,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.get", return_value=mock_resp) as mock_get, \
+             patch("main._check_version_skew"):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(path=str(tmp_path), port=8765)
+            m.cmd_resume(args)
+
+        call_url = mock_get.call_args[0][0]
+        assert "/v1/resume" in call_url
+        assert "ship the resume feature" in capsys.readouterr().out
+
+    def test_empty_formatted_prints_nothing(self, tmp_path, capsys):
+        import argparse
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "last_task": None, "gotchas": [], "snapshot": None, "formatted": "", "processing_ms": 1,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.get", return_value=mock_resp), \
+             patch("main._check_version_skew"):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(path=str(tmp_path), port=8765)
+            m.cmd_resume(args)
+
+        assert capsys.readouterr().out == ""
+
+    def test_daemon_down_follows_standard_error_contract(self, tmp_path, capsys):
+        import argparse
+        import httpx
+        from unittest.mock import patch
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.get", side_effect=httpx.ConnectError("down")), \
+             patch("main._check_version_skew"):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(path=str(tmp_path), port=8765)
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_resume(args)
+
+        assert exc_info.value.code == 1
+        assert "not running" in capsys.readouterr().err.lower()
+
+    def test_search_only_gate_error_still_prints_detail(self, tmp_path, capsys):
+        import argparse
+        import httpx
+        from unittest.mock import patch, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "detail": {"error": "search_only_mode", "detail": "vectr is in search-only mode..."},
+        }
+        mock_resp.status_code = 503
+        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "503", request=MagicMock(), response=mock_resp,
+        )
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.get", return_value=mock_resp), \
+             patch("main._check_version_skew"):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(path=str(tmp_path), port=8765)
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_resume(args)
+
+        assert exc_info.value.code == 1
+        assert "search-only mode" in capsys.readouterr().err
+
+    def test_resume_registered_in_dispatch(self, tmp_path):
+        """`vectr resume` reaches cmd_resume via the CLI's real argparse +
+        dispatch table, not just a standalone function nobody wires up."""
+        from unittest.mock import patch
+
+        with patch("sys.argv", ["vectr", "resume", "--path", str(tmp_path), "--port", "8765"]), \
+             patch("main.cmd_resume") as mock_cmd:
+            m.main()
+        mock_cmd.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # SessionStart hook + vectr init --hooks (UPG-9.4)
 # ---------------------------------------------------------------------------
 
@@ -2458,10 +2557,10 @@ class TestClaudeMdFraming:
                      "vectr_fetch"):
             assert tool in block, f"{tool} must appear in the search section"
 
-    def test_memory_section_lists_all_seven_tools(self, tmp_path):
+    def test_memory_section_lists_all_eight_tools(self, tmp_path):
         block = self._vectr_block(tmp_path)
         for tool in ("vectr_status", "vectr_recall", "vectr_remember", "vectr_forget",
-                     "vectr_evict_hint", "vectr_snapshot", "vectr_snapshot_list"):
+                     "vectr_evict_hint", "vectr_snapshot", "vectr_snapshot_list", "vectr_resume"):
             assert tool in block, f"{tool} must appear in the memory section"
 
     def test_vectr_forget_present(self, tmp_path):

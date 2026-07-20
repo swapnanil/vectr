@@ -722,6 +722,154 @@ class TestSnapshots:
 
 
 # ---------------------------------------------------------------------------
+# Resume surface (UPG-RESUME-SURFACE)
+# ---------------------------------------------------------------------------
+
+class TestResumeState:
+    def test_empty_workspace_returns_all_empty(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        state = store.resume_state("/repo")
+        assert state == {"last_task": None, "gotchas": [], "snapshot": None}
+
+    def test_last_task_matches_boot_recall_selection(self, tmp_path) -> None:
+        """The task note resume_state() surfaces must be EXACTLY the one
+        boot_recall() would inject — both derive from the same
+        _boot_task_notes() query (UPG-RESUME-SURFACE's core requirement:
+        the two surfaces can never disagree on 'current task')."""
+        store = _store(tmp_path)
+        store.remember("/repo", "old task", kind="task", priority="high")
+        time.sleep(0.01)
+        store.remember("/repo", "newest task", kind="task", priority="high")
+        store.remember("/repo", "low-priority task", kind="task", priority="low")
+
+        boot = store.boot_recall("/repo")
+        boot_task_notes = [n for n in boot if n.kind == "task"]
+        state = store.resume_state("/repo")
+
+        assert state["last_task"] is not None
+        assert state["last_task"].note_id == boot_task_notes[0].note_id
+        assert state["last_task"].content == "newest task"
+
+    def test_gotchas_newest_first_and_capped(self, tmp_path) -> None:
+        from agent.config import RESUME_MAX_GOTCHAS
+
+        store = _store(tmp_path)
+        for i in range(RESUME_MAX_GOTCHAS + 3):
+            store.remember("/repo", f"gotcha {i}", kind="gotcha")
+            time.sleep(0.005)
+        state = store.resume_state("/repo")
+        assert len(state["gotchas"]) == RESUME_MAX_GOTCHAS
+        assert state["gotchas"][0].content == f"gotcha {RESUME_MAX_GOTCHAS + 2}"  # newest first
+
+    def test_findings_and_directives_excluded_from_gotchas(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "a finding", kind="finding")
+        store.remember("/repo", "a directive", kind="directive")
+        store.remember("/repo", "a real gotcha", kind="gotcha")
+        state = store.resume_state("/repo")
+        assert len(state["gotchas"]) == 1
+        assert state["gotchas"][0].content == "a real gotcha"
+
+    def test_snapshot_is_latest_with_note_count(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "note 1")
+        store.remember("/repo", "note 2")
+        store.snapshot("/repo", label="first")
+        time.sleep(0.01)
+        store.remember("/repo", "note 3")
+        sid2 = store.snapshot("/repo", label="second")
+
+        state = store.resume_state("/repo")
+        assert state["snapshot"]["snapshot_id"] == sid2
+        assert state["snapshot"]["label"] == "second"
+        assert state["snapshot"]["note_count"] == 3
+
+    def test_snapshot_none_when_unread_payload(self, tmp_path) -> None:
+        """restore_snapshot() returning None (undecryptable payload) must
+        surface as note_count=None, not crash resume_state()."""
+        store = _store(tmp_path)
+        store.remember("/repo", "note")
+        sid = store.snapshot("/repo", label="only")
+
+        # Simulate an unreadable payload the same way restore_snapshot() would
+        # treat it — corrupt the stored JSON so json.loads fails.
+        import sqlite3
+        with sqlite3.connect(str(tmp_path / "working_context.sqlite")) as conn:
+            conn.execute("UPDATE snapshots SET payload = ? WHERE snapshot_id = ?", ("not json", sid))
+
+        state = store.resume_state("/repo")
+        assert state["snapshot"]["note_count"] is None
+
+    def test_workspace_isolation(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/ws-a", "task a", kind="task", priority="high")
+        store.remember("/ws-a", "gotcha a", kind="gotcha")
+        store.snapshot("/ws-a", label="snap-a")
+        state_b = store.resume_state("/ws-b")
+        assert state_b == {"last_task": None, "gotchas": [], "snapshot": None}
+
+    def test_session_scoped_gotcha_excluded_from_other_session(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "session-only gotcha", kind="gotcha", session_id="sess-1", scope="session")
+        state = store.resume_state("/repo", session_id="sess-2")
+        assert state["gotchas"] == []
+        state_same = store.resume_state("/repo", session_id="sess-1")
+        assert len(state_same["gotchas"]) == 1
+
+
+class TestFormatResume:
+    def test_empty_state_returns_guidance(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        state = store.resume_state("/repo")
+        text = store.format_resume(state, "/repo")
+        assert "vectr_remember" in text
+        assert "Last task" not in text
+        assert "Open gotchas" not in text
+        assert "Latest snapshot" not in text
+
+    def test_sections_present_when_populated(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "ship the resume feature", kind="task", priority="high")
+        store.remember("/repo", "watch out for the flaky test", kind="gotcha", anchors=["tests/test_flaky.py"])
+        store.snapshot("/repo", label="checkpoint-1")
+        state = store.resume_state("/repo")
+        text = store.format_resume(state, "/repo")
+        assert "Last task:" in text
+        assert "ship the resume feature" in text
+        assert "Open gotchas (1):" in text
+        assert "watch out for the flaky test" in text
+        assert "tests/test_flaky.py" in text
+        assert "Latest snapshot:" in text
+        assert "checkpoint-1" in text
+
+    def test_omits_sections_with_nothing_to_show(self, tmp_path) -> None:
+        """Only a task note exists — no gotcha/snapshot sections must appear."""
+        store = _store(tmp_path)
+        store.remember("/repo", "only a task", kind="task", priority="high")
+        state = store.resume_state("/repo")
+        text = store.format_resume(state, "/repo")
+        assert "Last task:" in text
+        assert "Open gotchas" not in text
+        assert "Latest snapshot" not in text
+
+    def test_surface_cli_uses_shell_expand_hint(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.remember("/repo", "a task", kind="task", priority="high")
+        state = store.resume_state("/repo")
+        text_cli = store.format_resume(state, "/repo", surface="cli")
+        text_mcp = store.format_resume(state, "/repo", surface="mcp")
+        assert "vectr recall --id" in text_cli
+        assert "vectr_recall(note_id=" in text_mcp
+
+    def test_stale_marker_propagates(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        nid = store.remember("/repo", "gotcha about a file", kind="gotcha")
+        state = store.resume_state("/repo")
+        text = store.format_resume(state, "/repo", stale_warnings={nid: ["file changed"]})
+        assert "[STALE]" in text
+
+
+# ---------------------------------------------------------------------------
 # Staleness — _extract_file_paths and check_staleness
 # ---------------------------------------------------------------------------
 

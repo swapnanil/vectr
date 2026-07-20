@@ -1,6 +1,6 @@
 """
 Tests for REST API memory routes: POST /v1/remember, POST /v1/recall,
-POST /v1/snapshot, GET /v1/evict-hint, GET /v1/snapshot/list.
+POST /v1/snapshot, GET /v1/evict-hint, GET /v1/snapshot/list, GET /v1/resume.
 
 Two fixture layers:
   client              — mocked VectrService, tests HTTP shape/status codes
@@ -256,6 +256,76 @@ class TestSnapshotRoute:
     def test_snapshot_processing_ms_present(self, client) -> None:
         resp = client.post("/v1/snapshot", json={"label": "test"})
         assert "processing_ms" in resp.json()
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/resume (UPG-RESUME-SURFACE)
+# ---------------------------------------------------------------------------
+
+class TestResumeRoute:
+    def test_resume_returns_200_with_formatted_field(self, client) -> None:
+        resp = client.get("/v1/resume")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "formatted" in data
+        assert "last_task" in data
+        assert "gotchas" in data
+        assert "snapshot" in data
+        assert "processing_ms" in data
+
+    def test_resume_empty_workspace_fields_are_empty(self, client) -> None:
+        data = client.get("/v1/resume").json()
+        assert data["last_task"] is None
+        assert data["gotchas"] == []
+        assert data["snapshot"] is None
+
+    def test_resume_end_to_end_with_real_store(self, client_real_memory) -> None:
+        client = client_real_memory
+        client.post("/v1/remember", json={
+            "content": "finish the resume surface", "kind": "task", "priority": "high",
+        })
+        client.post("/v1/remember", json={
+            "content": "watch for the flaky snapshot test", "kind": "gotcha",
+            "anchors": ["tests/test_flaky.py"],
+        })
+        client.post("/v1/snapshot", json={"label": "checkpoint-1"})
+
+        resp = client.get("/v1/resume")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["last_task"] is not None
+        assert data["last_task"]["title"] == "finish the resume surface"
+        assert data["last_task"]["kind"] == "task"
+
+        assert len(data["gotchas"]) == 1
+        assert data["gotchas"][0]["anchors"] == ["tests/test_flaky.py"]
+
+        assert data["snapshot"]["label"] == "checkpoint-1"
+        assert data["snapshot"]["note_count"] == 2
+
+        assert "finish the resume surface" in data["formatted"]
+        assert "checkpoint-1" in data["formatted"]
+        assert "tests/test_flaky.py" in data["formatted"]
+
+    def test_resume_uses_cli_expand_hint(self, client_real_memory) -> None:
+        """The REST route renders with surface='cli' (`vectr recall --id N`)
+        — REST is the human/script terminal surface, mirroring how
+        POST /v1/recall's CLI caller sets surface='cli' itself (here the
+        REST route fixes it, since GET /v1/resume takes no body)."""
+        client = client_real_memory
+        client.post("/v1/remember", json={"content": "a task", "kind": "task", "priority": "high"})
+        formatted = client.get("/v1/resume").json()["formatted"]
+        assert "vectr recall --id" in formatted
+        assert "vectr_recall(note_id=" not in formatted
+
+    def test_resume_only_gotchas_omits_other_sections(self, client_real_memory) -> None:
+        client = client_real_memory
+        client.post("/v1/remember", json={"content": "just a gotcha", "kind": "gotcha"})
+        data = client.get("/v1/resume").json()
+        assert data["last_task"] is None
+        assert data["snapshot"] is None
+        assert len(data["gotchas"]) == 1
 
 
 # ---------------------------------------------------------------------------

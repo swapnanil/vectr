@@ -220,6 +220,26 @@ class TestConfigLoaderBehavior:
         assert _REMEMBER_NUDGE_COOLDOWN is cfg.BEHAVIOR_REMEMBER_NUDGE_COOLDOWN
 
 
+class TestConfigLoaderResume:
+    """behavior.resume.* values must load correctly from config.yaml (UPG-RESUME-SURFACE)."""
+
+    def test_max_gotchas_default(self) -> None:
+        assert cfg.RESUME_MAX_GOTCHAS == 5, (
+            f"RESUME_MAX_GOTCHAS should be 5, got {cfg.RESUME_MAX_GOTCHAS}"
+        )
+
+    def test_max_gotchas_is_int(self) -> None:
+        assert isinstance(cfg.RESUME_MAX_GOTCHAS, int)
+
+    def test_missing_key_raises_keyerror(self) -> None:
+        """No .get()-with-default fallback anywhere in this wiring — a config
+        missing behavior.resume.max_gotchas must fail loudly at import, not
+        silently default."""
+        stripped = {k: v for k, v in cfg._cfg["behavior"].items() if k != "resume"}
+        with pytest.raises(KeyError):
+            _ = stripped["resume"]["max_gotchas"]
+
+
 class TestConfigLoaderWorkspaceAndWatcher:
     """workspace.* / watcher.* values must load correctly from config.yaml (UPG-13.1/13.2)."""
 

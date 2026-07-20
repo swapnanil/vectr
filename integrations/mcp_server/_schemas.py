@@ -569,6 +569,22 @@ _MEMORY_TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "vectr_resume",
+        "annotations": {
+            "title": "Pick up where you left off",
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        "description": (
+            "One-call 'pick up where you left off': the most recent current-task note, the "
+            "latest saved snapshot, and any open gotchas with their file anchors. Call at the "
+            "start of a session or after a gap to reorient without re-reading files or "
+            "re-deriving state vectr_recall would otherwise need several calls to assemble."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "vectr_forget",
         "annotations": {
             "title": "Delete working-memory notes",
@@ -698,5 +714,6 @@ MEMORY_READY_TOOLS = frozenset(
         "vectr_status",
         "vectr_snapshot",
         "vectr_snapshot_list",
+        "vectr_resume",
     }
 )

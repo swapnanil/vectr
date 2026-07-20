@@ -206,6 +206,11 @@ class TestMemoryLayerGuardedInSearchOnlyMode:
         with pytest.raises(RuntimeError):
             svc.list_snapshots()
 
+    def test_resume_raises(self, tmp_path, monkeypatch):
+        svc = _make_service(tmp_path, monkeypatch, search_only=True)
+        with pytest.raises(RuntimeError):
+            svc.resume()
+
     def test_search_still_works(self, tmp_path, monkeypatch):
         svc = _make_service(tmp_path, monkeypatch, search_only=True)
         svc.index(str(tmp_path))
@@ -282,6 +287,16 @@ class TestMcpDispatchSearchOnly:
         assert result["isError"] is False
         assert _SEARCH_ONLY_MSG in result["content"][0]["text"]
         svc.forget_note.assert_not_called()
+
+    def test_resume_returns_search_only_message(self):
+        from integrations.mcp_server import handle_tools_call
+        from app.service import _SEARCH_ONLY_MSG
+        svc = self._make_mock_service(search_only=True)
+
+        result = handle_tools_call("vectr_resume", {}, svc)
+        assert result["isError"] is False
+        assert _SEARCH_ONLY_MSG in result["content"][0]["text"]
+        svc.resume.assert_not_called()
 
     def test_evict_hint_stays_active_in_search_only_mode(self):
         """vectr_evict_hint advises on re-retrievable SEARCH chunks, not notes
@@ -439,6 +454,22 @@ class TestRestRoutesSearchOnly:
             with TestClient(app, raise_server_exceptions=False) as c:
                 app.state.service = svc
                 resp = c.post("/v1/forget", json={"all": True})
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["detail"]["error"] == "search_only_mode"
+
+    def test_resume_returns_503_in_search_only_mode(self):
+        from fastapi.testclient import TestClient
+        from api import app
+        from tests.conftest import _base_mock_service
+
+        svc = _base_mock_service()
+        svc.search_only = True
+
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                app.state.service = svc
+                resp = c.get("/v1/resume")
         assert resp.status_code == 503
         body = resp.json()
         assert body["detail"]["error"] == "search_only_mode"

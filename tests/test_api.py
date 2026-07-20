@@ -833,6 +833,7 @@ class TestMemoryRoutesServeWhileNotFullyReady:
         ("post", "/v1/snapshot", {"label": "warm-up-checkpoint"}),
         ("post", "/v1/forget", {"all": True}),
         ("get", "/v1/status", None),
+        ("get", "/v1/resume", None),
         ("post", "/v1/memory/clear", {}),
     ])
     def test_returns_200_not_gated(self, method, path, json_body) -> None:

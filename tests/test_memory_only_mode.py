@@ -185,6 +185,18 @@ class TestMemoryToolsWorkInMemoryOnlyMode:
         svc.remember("a memory-only note")
         assert svc.count_notes() == before + 1
 
+    def test_resume_works_in_memory_only_mode(self, tmp_path, monkeypatch):
+        """UPG-RESUME-SURFACE: the working-memory layer is fully active in
+        memory-only mode (unlike search-only), so resume() needs no special
+        casing there — it just works."""
+        svc = _make_service(tmp_path, monkeypatch, memory_only=True)
+        svc.remember("ship the resume feature", kind="task", priority="high")
+
+        result = svc.resume()
+        assert result["last_task"] is not None
+        assert result["last_task"]["title"] == "ship the resume feature"
+        assert "ship the resume feature" in result["formatted"]
+
 
 # ---------------------------------------------------------------------------
 # MCP dispatch: search/locate/trace return the memory-only message

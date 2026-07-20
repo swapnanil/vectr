@@ -117,6 +117,13 @@ BOOT_MAX_TASK_NOTES : int
     current-work state, so the boot set surfaces only the freshest
     checkpoints rather than the full task history.
 
+RESUME_MAX_GOTCHAS : int
+    Maximum open (non-superseded) kind="gotcha" notes returned by
+    resume_state() (UPG-RESUME-SURFACE), newest first. The task-note and
+    snapshot sections of `resume` reuse BOOT_MAX_TASK_NOTES and the
+    snapshots table's own "latest" selection respectively — this is the one
+    new bound resume introduces.
+
 INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES : int
     Maximum unresolved caller/callee example strings surfaced in the
     vectr_ingest_traces response (UPG-7.3). Edges are ingested regardless;
@@ -583,6 +590,14 @@ _boot_cfg: dict[str, Any] = _cfg["behavior"]["boot"]
 
 BOOT_MAX_DIRECTIVE_NOTES: int = int(_boot_cfg["max_directive_notes"])
 BOOT_MAX_TASK_NOTES: int = int(_boot_cfg["max_task_notes"])
+
+# ---------------------------------------------------------------------------
+# Resume surface (UPG-RESUME-SURFACE)
+# ---------------------------------------------------------------------------
+
+_resume_cfg: dict[str, Any] = _cfg["behavior"]["resume"]
+
+RESUME_MAX_GOTCHAS: int = int(_resume_cfg["max_gotchas"])
 
 # ---------------------------------------------------------------------------
 # Symbol graph — reserved keywords (UPG-JSFLOW-SYMBOLS)

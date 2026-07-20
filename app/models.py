@@ -541,6 +541,44 @@ class SnapshotResponse(BaseModel):
     processing_ms: int
 
 
+class ResumeNoteSummary(BaseModel):
+    """One resume-surface note, index-tier only (UPG-RESUME-SURFACE) — same
+    bounded fields (id, kind/priority, title, age, staleness) the CLI/MCP
+    text render shows; expand the full body with
+    vectr_recall(note_id=...)/`vectr recall --id <note_id>`."""
+    note_id: int
+    kind: str
+    priority: str
+    title: str
+    created_at: float
+    anchors: list[str] = []
+    stale: bool = False
+
+
+class ResumeSnapshotSummary(BaseModel):
+    snapshot_id: str
+    label: str
+    created_at: float
+    # None when the snapshot payload could not be decrypted/read (see
+    # WorkingContextStore.restore_snapshot) — distinct from an empty snapshot.
+    note_count: int | None = None
+
+
+class ResumeResponse(BaseModel):
+    """GET /v1/resume (UPG-RESUME-SURFACE): deterministic 'pick up where you
+    left off' — the most recent high-priority task note (the SAME selection
+    SessionStart boot injection uses), the latest saved snapshot, and open
+    gotchas. Any of the three is None/empty when there is nothing to show —
+    never an error."""
+    last_task: ResumeNoteSummary | None = None
+    snapshot: ResumeSnapshotSummary | None = None
+    gotchas: list[ResumeNoteSummary] = []
+    # Human/LLM-readable sectioned rendering of the fields above — the same
+    # text the CLI prints and the MCP tool returns.
+    formatted: str
+    processing_ms: int
+
+
 class TriggerResetRequest(BaseModel):
     """Reset one session's trigger-engine state (TRIGGER-ENGINE wave 2a,
     bm2-design-skeleton.md §3: "cleared on compaction"): the per-session fire

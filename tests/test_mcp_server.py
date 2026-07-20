@@ -106,6 +106,19 @@ def _mock_service():
     svc.should_evict.return_value = False
     svc.snapshot_session.return_value = "snap_xyz"
     svc.list_snapshots.return_value = []
+    # UPG-RESUME-SURFACE: real VectrService.resume() shape — a bare MagicMock
+    # is not subscriptable, so the vectr_resume dispatch branch's
+    # result["formatted"] needs a REAL dict here, not a stand-in.
+    svc.resume.return_value = {
+        "last_task": None,
+        "gotchas": [],
+        "snapshot": None,
+        "formatted": (
+            "Nothing to resume yet — no task notes, snapshots, or gotchas "
+            "recorded for this workspace. Use vectr_remember(kind='task', ...) "
+            "to start one."
+        ),
+    }
     svc.memory_only = False
     svc.search_only = False
     return svc
@@ -1742,6 +1755,42 @@ class TestVectrSnapshot:
 
 
 # ---------------------------------------------------------------------------
+# vectr_resume (UPG-RESUME-SURFACE)
+# ---------------------------------------------------------------------------
+
+class TestVectrResume:
+    def test_resume_returns_formatted_text(self) -> None:
+        svc = _mock_service()
+        svc.resume.return_value = {
+            "last_task": None, "gotchas": [], "snapshot": None,
+            "formatted": "Last task:\n  [#7] task/high · ship the resume feature  (2m)",
+        }
+        result = handle_tools_call("vectr_resume", {}, svc)
+        assert result["isError"] is False
+        assert "ship the resume feature" in result["content"][0]["text"]
+
+    def test_resume_empty_workspace_returns_guidance(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_resume", {}, svc)
+        assert result["isError"] is False
+        assert "vectr_remember" in result["content"][0]["text"]
+
+    def test_resume_calls_service_with_mcp_surface(self) -> None:
+        svc = _mock_service()
+        handle_tools_call("vectr_resume", {}, svc, session_id="sess-9")
+        svc.resume.assert_called_once_with(session_id="sess-9", surface="mcp")
+
+    def test_resume_is_in_memory_ready_tools(self) -> None:
+        from integrations.mcp_server._schemas import MEMORY_READY_TOOLS
+        assert "vectr_resume" in MEMORY_READY_TOOLS
+
+    def test_resume_listed_in_tools(self) -> None:
+        result = handle_tools_list()
+        names = {t["name"] for t in result["tools"]}
+        assert "vectr_resume" in names
+
+
+# ---------------------------------------------------------------------------
 # vectr_forget
 # ---------------------------------------------------------------------------
 
@@ -1804,8 +1853,8 @@ class TestVectrForget:
         monkeypatch.setenv("VECTR_MCP_ALL_TOOLS", "1")
         tools = handle_tools_list(session_id="fresh-session-no-notes")["tools"]
         names = {t["name"] for t in tools}
-        assert len(tools) == 15
-        assert {"vectr_recall", "vectr_forget", "vectr_promote", "vectr_snapshot", "vectr_snapshot_list"} <= names
+        assert len(tools) == 16
+        assert {"vectr_recall", "vectr_forget", "vectr_promote", "vectr_snapshot", "vectr_snapshot_list", "vectr_resume"} <= names
 
     def test_all_tools_env_flag_off_keeps_gating(self, monkeypatch) -> None:
         monkeypatch.delenv("VECTR_MCP_ALL_TOOLS", raising=False)

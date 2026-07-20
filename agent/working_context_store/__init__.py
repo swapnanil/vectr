@@ -29,6 +29,7 @@ re-exported here so every existing import site keeps working unchanged:
   from agent.working_context_store import _build_encryptor
   from agent.working_context_store import _extract_file_paths
   from agent.working_context_store import _FILE_PATH_RE
+  from agent.working_context_store import _note_title
 """
 from __future__ import annotations
 
@@ -62,7 +63,7 @@ from agent.working_context_store._encryption import (
 )
 
 # Store class
-from agent.working_context_store._store import WorkingContextStore
+from agent.working_context_store._store import WorkingContextStore, _note_title
 
 __all__ = [
     # Audit
@@ -88,4 +89,5 @@ __all__ = [
     "_extract_file_paths",
     # Store
     "WorkingContextStore",
+    "_note_title",
 ]

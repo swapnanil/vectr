@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from fastapi import APIRouter, Body, HTTPException, Request, Response
+from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from app.models import (
@@ -27,6 +27,7 @@ from app.models import (
     RecallResponse,
     RememberRequest,
     RememberResponse,
+    ResumeResponse,
     SearchRequest,
     SearchResponse,
     SnapshotRequest,
@@ -365,6 +366,27 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
     )
     return RecallResponse(
         notes=notes_text,
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.get("/v1/resume", response_model=ResumeResponse)
+async def resume(
+    request: Request,
+    session_id: str | None = Query(default=None),
+) -> ResumeResponse:
+    """UPG-RESUME-SURFACE: deterministic 'pick up where you left off' — the
+    CLI/MCP-equivalent view of the same selection SessionStart boot injection
+    already replays (see VectrService.resume / WorkingContextStore.resume_state).
+    GET, no body: this reads existing state, it stores nothing."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    data = svc.resume(session_id=session_id, surface="cli")
+    return ResumeResponse(
+        **data,
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

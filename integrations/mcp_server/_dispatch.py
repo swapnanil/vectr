@@ -785,6 +785,16 @@ def handle_tools_call(
             text = "\n".join(lines)
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
+    # ---- vectr_resume ----
+    if tool_name == "vectr_resume":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
+        result = service.resume(session_id=session_id, surface="mcp")
+        return {"content": [{"type": "text", "text": result["formatted"]}], "isError": False}
+
     # ---- vectr_forget ----
     if tool_name == "vectr_forget":
         # Search-only mode: the working-memory layer is disabled for this workspace

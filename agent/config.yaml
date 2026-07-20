@@ -770,6 +770,20 @@ behavior:
     # the full task history.
     max_task_notes: 5
 
+  resume:
+    # UPG-RESUME-SURFACE: 'vectr resume' / GET /v1/resume / vectr_resume package
+    # the SAME task-note selection boot.max_task_notes already bounds (see
+    # WorkingContextStore._boot_task_notes) plus open gotchas into one named
+    # "pick up where you left off" surface. Only the gotcha section needs its
+    # own cap here — the task-note and snapshot sections reuse boot's/
+    # snapshot's own selection, nothing new to bound there.
+
+    # Maximum open (non-superseded) kind="gotcha" notes shown, newest first.
+    # Same order of magnitude as boot.max_task_notes (5) — a handful of live
+    # caveats is useful "where was I" context; the full gotcha history stays
+    # reachable via vectr_recall(kind="gotcha").
+    max_gotchas: 5
+
   ingest_traces:
     # Maximum number of "caller/callee not found in the indexed symbol graph"
     # example strings surfaced in the vectr_ingest_traces response text (UPG-7.3).

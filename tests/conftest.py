@@ -241,6 +241,19 @@ def _base_mock_service():
     svc.recall.return_value = "# Working Notes (1 entries)\n\n[1] [HIGH] test content\n"
     svc.snapshot_session.return_value = "snap_abc123"
     svc.list_snapshots.return_value = [{"snapshot_id": "snap_abc123", "label": "test", "created_at": 0.0}]
+    # UPG-RESUME-SURFACE: real VectrService.resume() shape (last_task/gotchas/
+    # snapshot/formatted) — a bare MagicMock would fail `ResumeResponse(**data)`
+    # at the route (mocks must return the REAL type, not a stand-in).
+    svc.resume.return_value = {
+        "last_task": None,
+        "gotchas": [],
+        "snapshot": None,
+        "formatted": (
+            "Nothing to resume yet — no task notes, snapshots, or gotchas "
+            "recorded for this workspace. Use vectr_remember(kind='task', ...) "
+            "to start one."
+        ),
+    }
     # Default mode is full (not memory-only / not search-only); must be an
     # explicit bool, not a MagicMock (bare MagicMock attrs are truthy by default).
     svc.memory_only = False
@@ -361,6 +374,37 @@ def client_real_memory(tmp_path):
     svc.snapshot_session.side_effect = lambda label, session_id=None: \
         real_store.snapshot(ws, label=label)
     svc.list_snapshots.side_effect = lambda: real_store.list_snapshots(ws)
+
+    def _resume(session_id=None, surface="mcp"):
+        # Mirrors VectrService.resume() exactly (see app/service.py) against
+        # the REAL store, the same way `_recall`/`_remember` above do for
+        # their routes — a REST test exercising this fixture goes through
+        # the real selection/rendering, not a hollow mock return.
+        from agent.working_context_store import _note_title
+        state = real_store.resume_state(ws, session_id=session_id)
+        last_task = state["last_task"]
+        gotchas = state["gotchas"]
+        snapshot = state["snapshot"]
+        notes_for_staleness = ([last_task] if last_task else []) + gotchas
+        stale = real_store.check_staleness(notes_for_staleness, ws) if notes_for_staleness else {}
+
+        def _summary(note):
+            return {
+                "note_id": note.note_id, "kind": note.kind, "priority": note.priority,
+                "title": _note_title(note), "created_at": note.created_at,
+                "anchors": [a[0] for a in (note.anchors or []) if a],
+                "stale": note.note_id in stale,
+            }
+
+        formatted = real_store.format_resume(state, ws, stale_warnings=stale, surface=surface)
+        return {
+            "last_task": _summary(last_task) if last_task else None,
+            "gotchas": [_summary(g) for g in gotchas],
+            "snapshot": snapshot,
+            "formatted": formatted,
+        }
+
+    svc.resume.side_effect = _resume
 
     # UPG-CONFTEST-SERVICE-CLOBBER: save/restore app.state.service (see the
     # `client` fixture) so this partial-real service does not persist into a

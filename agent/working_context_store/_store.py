@@ -209,6 +209,17 @@ def _date_str(created_at: float) -> str:
     return _dt.datetime.fromtimestamp(created_at).strftime("%Y-%m-%d")
 
 
+def _note_title(note: WorkingNote) -> str:
+    """The display title for one note: the caller-declared `title`, or the
+    first content line (truncated) when none was given. Hoisted out of
+    `_format_index_line` so `resume_state()`'s JSON note summaries (UPG-
+    RESUME-SURFACE) derive a title the identical way the index-tier render
+    does, rather than re-deriving the same fallback separately."""
+    return note.title or (
+        note.content.strip().splitlines()[0][:80] if note.content.strip() else "(no title)"
+    )
+
+
 def _format_index_line(
     note: WorkingNote,
     stale_warnings: dict[int, list[str]],
@@ -230,7 +241,7 @@ def _format_index_line(
     branch existed."""
     n = note
     kind_label = n.kind if n.kind else DEFAULT_KIND
-    title = n.title or (n.content.strip().splitlines()[0][:80] if n.content.strip() else "(no title)")
+    title = _note_title(n)
     stale_marker = " [STALE]" if n.note_id in stale_warnings else ""
     id_str = f"#{n.note_id}" if surface == "mcp" else f"{n.note_id}"
     # UPG-SUBAGENT-MEMORY: caller-declared agent/subagent attribution
@@ -1488,6 +1499,29 @@ class WorkingContextStore:
             return stamped or "unknown (unstamped)"
         return None
 
+    def _boot_task_notes(self, workspace: str) -> list[WorkingNote]:
+        """The 'current task' selection SessionStart boot injection uses
+        (UPG-9.2 / UPG-TASK-NOTE-INJECTION-RECENCY): kind='task', priority=
+        'high' only, newest-first (created_at DESC, note_id DESC tie-break),
+        capped at config.BOOT_MAX_TASK_NOTES.
+
+        Extracted out of `boot_recall()` so `resume_state()` (UPG-RESUME-
+        SURFACE) reuses this EXACT query for its own 'last task note' rather
+        than re-deriving a possibly different notion of "current task" — the
+        SessionStart injection and the `vectr resume` surface can never
+        disagree on which task note is current, by construction.
+        """
+        from agent.config import BOOT_MAX_TASK_NOTES
+
+        with self._conn() as conn:
+            task_rows = conn.execute(
+                "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
+                "AND kind = 'task' AND priority = 'high' "
+                "ORDER BY created_at DESC, note_id DESC LIMIT ?",
+                (workspace, BOOT_MAX_TASK_NOTES),
+            ).fetchall()
+        return [self._row_to_note(r) for r in task_rows]
+
     def boot_recall(self, workspace: str) -> list[WorkingNote]:
         """Unconditional 'boot set' for harness-injected recall (UPG-9.2).
 
@@ -1500,17 +1534,15 @@ class WorkingContextStore:
 
         Directives are returned first (they are imperatives), oldest-first so
         standing rules stay in a stable order, capped at
-        config.BOOT_MAX_DIRECTIVE_NOTES. High-priority task notes follow,
-        ordered newest-first — created_at DESC, note_id DESC tie-break — and
-        capped at config.BOOT_MAX_TASK_NOTES (UPG-TASK-NOTE-INJECTION-RECENCY):
-        a task note is current-work state, so the boot set must surface the
-        latest checkpoint first rather than whichever task note happens to be
-        oldest, and must not grow unbounded as task notes accumulate over a
-        long-running workspace. Does NOT bump last_accessed — boot injection
-        is automatic, not an agency-driven access, so it must not interfere
-        with decay.
+        config.BOOT_MAX_DIRECTIVE_NOTES. High-priority task notes follow, via
+        `_boot_task_notes()` (UPG-TASK-NOTE-INJECTION-RECENCY): a task note is
+        current-work state, so the boot set must surface the latest checkpoint
+        first rather than whichever task note happens to be oldest, and must
+        not grow unbounded as task notes accumulate over a long-running
+        workspace. Does NOT bump last_accessed — boot injection is automatic,
+        not an agency-driven access, so it must not interfere with decay.
         """
-        from agent.config import BOOT_MAX_DIRECTIVE_NOTES, BOOT_MAX_TASK_NOTES
+        from agent.config import BOOT_MAX_DIRECTIVE_NOTES
 
         with self._conn() as conn:
             directive_rows = conn.execute(
@@ -1518,16 +1550,131 @@ class WorkingContextStore:
                 "AND kind = 'directive' ORDER BY created_at ASC LIMIT ?",
                 (workspace, BOOT_MAX_DIRECTIVE_NOTES),
             ).fetchall()
-            task_rows = conn.execute(
-                "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
-                "AND kind = 'task' AND priority = 'high' "
-                "ORDER BY created_at DESC, note_id DESC LIMIT ?",
-                (workspace, BOOT_MAX_TASK_NOTES),
-            ).fetchall()
-        notes = [self._row_to_note(r) for r in directive_rows] + \
-                [self._row_to_note(r) for r in task_rows]
+        notes = [self._row_to_note(r) for r in directive_rows] + self._boot_task_notes(workspace)
         audit("RECALL", workspace=workspace, query="", notes_returned=len(notes), method="boot")
         return notes
+
+    def resume_state(self, workspace: str, session_id: str | None = None) -> dict:
+        """Deterministic 'pick up where you left off' selection (UPG-RESUME-
+        SURFACE) — the shared internals behind `vectr resume` / GET /v1/resume
+        / `vectr_resume`, and the ONLY place this selection is computed.
+
+        `session_id`, when given, enforces scope="session" notes the same way
+        a direct `recall()` call would (a gotcha explicitly scoped to a
+        different/no session is excluded) — the task-note query
+        (`_boot_task_notes()`) is never scope-filtered, matching
+        `boot_recall()`'s own unfiltered behaviour exactly.
+
+        Returns:
+          {
+            "last_task": WorkingNote | None,   # most recent high-priority task
+                                                # note, via `_boot_task_notes()`
+                                                # — the SAME query SessionStart
+                                                # boot injection uses, so this
+                                                # can never show a different
+                                                # 'current task' than what was
+                                                # already injected.
+            "gotchas": list[WorkingNote],       # open (non-superseded) kind=
+                                                 # 'gotcha' notes, newest first,
+                                                 # capped at config.RESUME_MAX_GOTCHAS.
+            "snapshot": dict | None,            # latest saved snapshot —
+                                                 # {'snapshot_id', 'label',
+                                                 # 'created_at', 'note_count'};
+                                                 # note_count is None when the
+                                                 # payload could not be read
+                                                 # (see restore_snapshot()).
+          }
+
+        Not semantic, not gated on notes_count — this is deterministic state
+        (existing notes/snapshots), not a search; a fresh, empty workspace
+        returns every field empty rather than erroring.
+        """
+        from agent.config import RESUME_MAX_GOTCHAS
+
+        task_notes = self._boot_task_notes(workspace)
+        last_task = task_notes[0] if task_notes else None
+
+        # kind='gotcha' newest-first, reusing the same recall() every other
+        # kind-filtered query goes through (sort_by='recency' is a plain SQL
+        # ORDER BY — no new ranking invented for this surface).
+        gotchas = self.recall(
+            workspace, kind="gotcha", limit=RESUME_MAX_GOTCHAS, sort_by="recency",
+            session_id=session_id,
+        )
+
+        snapshot: dict | None = None
+        snaps = self.list_snapshots(workspace)
+        if snaps:
+            latest = snaps[0]
+            payload = self.restore_snapshot(latest["snapshot_id"])
+            note_count = len(payload["notes"]) if payload else None
+            snapshot = {**latest, "note_count": note_count}
+
+        return {"last_task": last_task, "gotchas": gotchas, "snapshot": snapshot}
+
+    def format_resume(
+        self,
+        state: dict,
+        workspace: str,
+        *,
+        stale_warnings: dict[int, list[str]] | None = None,
+        surface: str = "mcp",
+    ) -> str:
+        """Render a `resume_state()` result as one sectioned, token-bounded
+        block (UPG-RESUME-SURFACE) — shared by the CLI/REST/MCP `resume`
+        surfaces so none of them re-derive their own rendering.
+
+        Sections that have nothing to show are OMITTED entirely (no snapshot
+        -> no snapshot section; no gotchas -> no gotchas section), per the
+        same "never inject noise" convention `boot_recall()`/
+        `format_notes_for_llm()` already follow. An entirely empty state
+        returns friendly guidance naming `vectr_remember` rather than an
+        error or a bare "nothing found".
+
+        `surface` controls the note-id form and expand hint exactly as
+        `format_notes_for_llm()` does — 'mcp' -> `vectr_recall(note_id=N)`,
+        'cli' -> `vectr recall --id N`.
+        """
+        stale_warnings = stale_warnings or {}
+        last_task = state["last_task"]
+        gotchas = state["gotchas"]
+        snapshot = state["snapshot"]
+
+        sections: list[str] = []
+
+        if last_task is not None:
+            sections.append("Last task:\n  " + _format_index_line(last_task, stale_warnings, surface=surface))
+
+        if snapshot is not None:
+            import datetime
+            ts = datetime.datetime.fromtimestamp(snapshot["created_at"]).strftime("%Y-%m-%d %H:%M")
+            count = snapshot["note_count"]
+            count_str = f"{count} notes" if count is not None else "note count unavailable"
+            sections.append(
+                f"Latest snapshot: {snapshot['snapshot_id']}  [{ts}]  "
+                f"{snapshot['label']}  ({count_str})"
+            )
+
+        if gotchas:
+            lines = [f"Open gotchas ({len(gotchas)}):"]
+            for g in gotchas:
+                anchor_str = ""
+                paths = [a[0] for a in (g.anchors or []) if a]
+                if paths:
+                    anchor_str = "  [" + ", ".join(paths) + "]"
+                lines.append("  " + _format_index_line(g, stale_warnings, surface=surface) + anchor_str)
+            sections.append("\n".join(lines))
+
+        if not sections:
+            return (
+                "Nothing to resume yet — no task notes, snapshots, or gotchas "
+                "recorded for this workspace. Use vectr_remember(kind='task', ...) "
+                "to start one."
+            )
+
+        expand_hint = "vectr_recall(note_id=N)" if surface == "mcp" else "vectr recall --id N"
+        header = f"# Resume — pick up where you left off (use {expand_hint} to expand a note)\n"
+        return header + "\n\n".join(sections)
 
     def get_note(self, workspace: str, note_id: int) -> "WorkingNote | None":
         """Fetch a single note by ID for the expand path (UPG-RECALL-HIERARCHY).

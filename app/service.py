@@ -1833,6 +1833,66 @@ class VectrService:
         self._require_memory_layer()
         return self._context_store.restore_snapshot(snapshot_id)
 
+    def resume(self, session_id: str | None = None, surface: str = "mcp") -> dict:
+        """UPG-RESUME-SURFACE: 'pick up where you left off' as one named,
+        discoverable surface (CLI `vectr resume` / REST GET /v1/resume / MCP
+        `vectr_resume`) over internals SessionStart boot injection already
+        uses.
+
+        Selection is computed exactly once, entirely in
+        `WorkingContextStore.resume_state()` — shared verbatim with
+        `boot_recall()`'s own task-note query (`_boot_task_notes()`), so this
+        surface and SessionStart injection can never disagree on which task
+        note is "current". This method only adds staleness flags and two
+        renderings on top of that one selection: a structured, JSON-safe
+        summary per note (for REST/programmatic callers) and one formatted
+        text block (for CLI/MCP, via `format_resume()`).
+
+        Works identically in memory-only mode (the memory layer is fully
+        active there); raises in search-only mode via `_require_memory_layer`
+        — callers (REST/MCP) intercept that earlier with the shared
+        `_SEARCH_ONLY_MSG`, same as every other memory method.
+        """
+        from agent.working_context_store import _note_title
+
+        self._require_memory_layer()
+        state = self._context_store.resume_state(self._workspace_root, session_id=session_id)
+        last_task = state["last_task"]
+        gotchas = state["gotchas"]
+        snapshot = state["snapshot"]
+
+        notes_for_staleness = ([last_task] if last_task else []) + gotchas
+        stale = (
+            self._context_store.check_staleness(notes_for_staleness, self._workspace_root)
+            if notes_for_staleness else {}
+        )
+
+        def _summary(note) -> dict:
+            # Index-tier only (no body) — matches vectr_recall's own
+            # index-tier contract, so a JSON/REST consumer gets the same
+            # bounded fields the CLI/MCP text render shows, and expands via
+            # note_id (vectr_recall(note_id=N) / vectr recall --id N).
+            return {
+                "note_id": note.note_id,
+                "kind": note.kind,
+                "priority": note.priority,
+                "title": _note_title(note),
+                "created_at": note.created_at,
+                "anchors": [a[0] for a in (note.anchors or []) if a],
+                "stale": note.note_id in stale,
+            }
+
+        formatted = self._context_store.format_resume(
+            state, self._workspace_root, stale_warnings=stale, surface=surface,
+        )
+
+        return {
+            "last_task": _summary(last_task) if last_task else None,
+            "gotchas": [_summary(g) for g in gotchas],
+            "snapshot": snapshot,
+            "formatted": formatted,
+        }
+
     # ------------------------------------------------------------------
     # Eviction advisor
     # ------------------------------------------------------------------

@@ -1769,6 +1769,28 @@ def cmd_recall(args: argparse.Namespace) -> None:
         _handle_daemon_call_error(exc, port)
 
 
+def cmd_resume(args: argparse.Namespace) -> None:
+    """Print 'pick up where you left off' to stdout (UPG-RESUME-SURFACE).
+
+    One named subcommand over the same selection SessionStart boot injection
+    and `vectr_resume` use — the most recent current-task note, the latest
+    saved snapshot, and open gotchas. GET, no body: reads existing state only.
+    """
+    import httpx
+
+    workspace = str(Path(args.path).resolve())
+    port = _get_port_for_workspace(workspace, args.port)
+    _check_version_skew(port)
+    try:
+        resp = httpx.get(f"{_api_base(port)}/v1/resume", timeout=30)
+        resp.raise_for_status()
+        formatted = resp.json().get("formatted", "")
+        if formatted:
+            print(formatted)
+    except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
+        _handle_daemon_call_error(exc, port)
+
+
 def _fetch_recall(port: int, payload: dict) -> str:
     """POST /v1/recall and return the notes text, or '' on ANY failure.
 
@@ -2930,6 +2952,20 @@ def main() -> None:
     p_recall.add_argument("--path", default=_default_path)
     p_recall.add_argument("--port", type=int, default=_default_port)
 
+    p_resume = sub.add_parser(
+        "resume",
+        help="Print 'pick up where you left off' to stdout",
+        description=(
+            "Deterministic 'pick up where you left off': the most recent "
+            "current-task note (the same selection SessionStart boot "
+            "injection uses), the latest saved snapshot, and open gotchas "
+            "with their file anchors. Not a search — reads existing state "
+            "only, one call instead of several vectr recall calls."
+        ),
+    )
+    p_resume.add_argument("--path", default=_default_path)
+    p_resume.add_argument("--port", type=int, default=_default_port)
+
     p_status = sub.add_parser("status", help="Show status for a workspace")
     p_status.add_argument("--path", default=_default_path)
     p_status.add_argument("--port", type=int, default=_default_port)
@@ -3025,6 +3061,7 @@ def main() -> None:
         "forget":  cmd_forget,
         "remember": cmd_remember,
         "recall":  cmd_recall,
+        "resume":  cmd_resume,
         "hook":    cmd_hook,
         "key":     cmd_key,
         "cache":   cmd_cache,
