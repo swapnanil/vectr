@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -71,21 +72,54 @@ def _trace_args(task: dict) -> dict:
     return {"name": task["symbol"], "direction": "callers"}
 
 
+def _lastsegment_args(task: dict) -> dict:
+    return {"name": task["symbol"].rsplit(".", 1)[-1]}
+
+
 ARCHETYPE_PLAN: dict[int, list[tuple[str, str]]] = {
     # archetype -> list of (tool, step_kind). step_kind selects an
     # arg-builder + a "run only if the previous step's output looks empty"
     # rule, both applied uniformly per archetype -- never per task.
     1: [("locate", "primary"), ("search", "fallback")],   # known-symbol lookup
     2: [("locate", "primary"), ("search", "fallback")],   # qualified name
-    3: [("locate", "primary"), ("search", "fallback")],   # misremembered/typo
+    # misremembered/typo: on a qualified-name miss, retry locate with the
+    # last dot-segment (what an instructed agent does when the class half of
+    # a guess is the shaky part), then semantic search as final fallback.
+    3: [("locate", "primary"), ("locate", "followup_lastsegment"), ("search", "fallback")],
     4: [("search", "primary")],                            # NL concept
     5: [("search", "primary")],                            # absent topic
-    6: [("trace", "primary")],                              # who-calls-X
+    # who-calls-X: trace, then locate each caller name the trace itself
+    # rendered (trace output today carries no fetch-chainable ids, so
+    # locate-by-name is the only in-band way to read a caller's definition).
+    6: [("trace", "primary"), ("locate", "followup_trace_callers")],
     7: [("search", "primary")],                            # stack-trace literal
     8: [("search", "primary")],                            # doc/howto
     9: [("search", "primary"), ("search", "hop2")],        # cross-file flow
     10: [("locate", "primary"), ("search", "fallback_n8")], # structural
 }
+
+# Uniform cap on how many traced callers the archetype-6 followup locates,
+# applied in listed order -- truncation is always printed, never silent.
+_TRACE_FOLLOWUP_CAP = 5
+
+_TRACE_CALLER_LINE = re.compile(r"^\s+(\S+)\s+in\s+\S+:\d+", re.MULTILINE)
+
+
+def _parse_trace_caller_names(trace_text: str) -> list[str]:
+    """Caller names as rendered by vectr_trace's own 'Name  in path:line'
+    lines, restricted to the 'Called by' section of the output. This parses
+    the TOOL's response text (the same convention _looks_empty uses), never
+    the task's query text.
+    """
+    section = trace_text.split("\nCalls:", 1)[0]
+    seen: set[str] = set()
+    names: list[str] = []
+    for m in _TRACE_CALLER_LINE.finditer(section):
+        name = m.group(1)
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
 
 _NOT_FOUND_MARKERS = ("no symbol", "no results", "not found")
 
@@ -112,7 +146,14 @@ def build_vectr_steps(task: dict) -> list[tuple[str, dict]]:
     plan = ARCHETYPE_PLAN[task["archetype"]]
     steps = []
     for tool, kind in plan:
-        if tool == "locate":
+        if tool == "locate" and kind == "followup_lastsegment":
+            seg = _lastsegment_args(task)
+            if seg["name"] != task["symbol"]:  # undotted symbol: retry would be identical
+                steps.append(("locate", seg, kind))
+        elif tool == "locate" and kind == "followup_trace_callers":
+            # args are resolved at run time from the trace step's own output
+            steps.append(("locate", {}, kind))
+        elif tool == "locate":
             steps.append(("locate", _locate_args(task), kind))
         elif tool == "trace":
             steps.append(("trace", _trace_args(task), kind))
@@ -187,8 +228,24 @@ def run_vectr_arm(task: dict, base: str) -> dict:
     calls = []
     prev_empty = False
     for tool, call_args, kind in steps:
-        if kind in ("fallback", "fallback_n8") and not prev_empty:
+        if kind in ("fallback", "fallback_n8", "followup_lastsegment") and not prev_empty:
             continue  # pre-registered fallback only fires on a genuine miss
+        if kind == "followup_trace_callers":
+            if prev_empty or not calls:
+                continue  # the trace itself missed -- nothing to locate
+            names = _parse_trace_caller_names(calls[-1]["_text"])
+            if len(names) > _TRACE_FOLLOWUP_CAP:
+                print(f"  [note] {task['id']}: locating first {_TRACE_FOLLOWUP_CAP} of "
+                      f"{len(names)} traced callers (uniform archetype cap)")
+            for name in names[:_TRACE_FOLLOWUP_CAP]:
+                text, wall_ms = mcp_tools_call_text(base, "vectr_locate", {"name": name})
+                prev_empty = _looks_empty(text)
+                calls.append({
+                    "tool": "vectr_locate", "args": {"name": name}, "kind": kind,
+                    "wall_ms": round(wall_ms, 2), "tokens": count_tokens(text),
+                    "empty": prev_empty, "_text": text,
+                })
+            continue
         text, wall_ms = mcp_tools_call_text(base, f"vectr_{tool}", call_args)
         prev_empty = _looks_empty(text)
         calls.append({
@@ -323,6 +380,22 @@ def main(argv: list[str] | None = None) -> int:
 
     task_ids = [t.strip() for t in args.tasks.split(",")] if args.tasks else sorted(tasks.keys())
 
+    # Preflight: refuse to score against a daemon whose index has not
+    # attached yet. vectr serves HTTP before the warm index loads, so a
+    # too-early run would replay every task against an empty index and
+    # score a silent 0 (this exact failure produced one deleted run).
+    try:
+        with urllib.request.urlopen(f"{base}/v1/status", timeout=10) as r:
+            daemon_status = json.load(r)
+    except (urllib.error.URLError, ConnectionError) as exc:
+        print(f"ERROR: cannot read {base}/v1/status: {exc}", file=sys.stderr)
+        return 1
+    indexed_files = int(daemon_status.get("indexed_files") or 0)
+    if indexed_files == 0:
+        print(f"ERROR: daemon at {base} reports indexed_files=0 -- index not attached "
+              f"yet; refusing to score. Wait for indexing to finish and retry.", file=sys.stderr)
+        return 1
+
     # Verify daemon reachable + measure one-time tools/list overhead.
     try:
         overhead = measure_tools_list_overhead(base)
@@ -332,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("=" * 88)
     print(f"Tier-0 replay -- corpus={args.corpus}  daemon={base}  fixture={fixture_root}")
+    print(f"index: {indexed_files} files / {daemon_status.get('total_chunks')} chunks")
     print(f"tools/list overhead (one-time, amortized, NOT charged per task): "
           f"{overhead['tokens']} tokens, {overhead['wall_ms']}ms")
     print(f"Running {len(task_ids)} task(s): {task_ids}")
