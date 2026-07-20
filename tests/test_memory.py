@@ -10,6 +10,7 @@ Critical coverage:
 """
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -791,6 +792,10 @@ class TestCheckStaleness:
         f = tmp_path / "src" / "auth.py"
         f.parent.mkdir(exist_ok=True)
         f.write_text("changed code")
+        # pin mtime past note.created_at — the kernel's coarse file-timestamp
+        # clock can lag time.time() by a tick, making a fresh write ambiguous
+        future = time.time() + 10
+        os.utime(f, (future, future))
         notes = store.recall(str(tmp_path))
         stale = store.check_staleness(notes, str(tmp_path))
         assert note_id in stale
@@ -819,6 +824,9 @@ class TestCheckStaleness:
         f = tmp_path / "src" / "core.py"
         f.parent.mkdir(exist_ok=True)
         f.write_text("modified")
+        # pin mtime past note.created_at (same coarse-clock race as above)
+        future = time.time() + 10
+        os.utime(f, (future, future))
         notes = store.recall(str(tmp_path))
         stale = store.check_staleness(notes, str(tmp_path))
         assert len(stale) == 1
