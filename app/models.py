@@ -530,6 +530,33 @@ class PromoteResponse(BaseModel):
     processing_ms: int
 
 
+class CommitNoteRequest(BaseModel):
+    """UPG-COMMIT-MEMORY-HOOK: the git post-commit hook's own write path —
+    called only by `vectr hook post-commit` (main.cmd_hook), never by the
+    editor's LLM. Every field is a raw git fact gathered client-side by that
+    hook's own `git` subprocess calls; all interpretation (file-list
+    capping, active-task lookup, note content/kind/provenance) happens
+    server-side in `VectrService.record_commit_note`, the single source of
+    truth for the resulting note's shape."""
+
+    sha: str = Field(..., min_length=1, description="Short commit sha (git rev-parse --short HEAD)")
+    subject: str = Field(default="", description="Commit subject line (git log -1 --format=%s)")
+    branch: str = Field(default="", description="Current branch name (git rev-parse --abbrev-ref HEAD); empty on a detached HEAD")
+    files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Files touched by this commit (git diff-tree --no-commit-id "
+            "--name-only -r <sha>), sent uncapped — the server applies the "
+            "display cap (agent/config.yaml hooks.commit_note_max_files)."
+        ),
+    )
+
+
+class CommitNoteResponse(BaseModel):
+    note_id: int
+    processing_ms: int
+
+
 class SnapshotRequest(BaseModel):
     label: str = Field(..., min_length=1)
     session_id: str | None = Field(default=None)

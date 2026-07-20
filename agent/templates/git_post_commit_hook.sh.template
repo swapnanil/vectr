@@ -1,0 +1,14 @@
+# vectr-start
+# vectr-managed: capture this commit's provenance (sha, subject, branch,
+# touched files, active task) as a working-memory note — recall-on-demand,
+# never injected automatically. Re-run `vectr init --hooks` to refresh this
+# block; hand edits here are overwritten on the next re-init.
+#
+# Fully detached so this hook adds no latency to `git commit`: the redirects
+# close stdin/stdout/stderr before backgrounding, and `command -v` makes the
+# whole block a silent no-op if `vectr` is not on PATH (e.g. a GUI git client
+# with a reduced PATH) or no vectr instance serves this workspace.
+if command -v vectr >/dev/null 2>&1; then
+    vectr hook post-commit </dev/null >/dev/null 2>&1 &
+fi
+# vectr-end

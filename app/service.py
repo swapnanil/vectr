@@ -20,6 +20,8 @@ from agent.config import (
     SEARCH_IDENTIFIER_HINT_NEARMISS_MAX,
     EMBEDDING_DEFAULT_MODEL,
     EVICTION_MAX_TRACKED_SESSIONS,
+    HOOKS_COMMIT_NOTE_MAX_FILES,
+    HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS,
     HOOKS_LOG_INJECTIONS,
     HOOKS_LOG_CHARS_PER_TOKEN,
     HOOKS_MIN_SIMILARITY,
@@ -118,6 +120,43 @@ _FETCH_NOT_FOUND_NOTE = (
     "since indexing (edited, moved, or deleted), which shifts or removes "
     "chunk ids. Re-run vectr_search to get current ids."
 )
+
+# UPG-COMMIT-MEMORY-HOOK: markers on every note `record_commit_note` writes.
+# `_COMMIT_NOTE_TAG` makes auto-provenance notes filterable/identifiable via
+# the existing tags mechanism (no schema change); `_COMMIT_NOTE_AGENT_ID` is
+# a complementary attribution marker on the note's existing `author_id`
+# column (renders as "@git-post-commit-hook" in recall index lines,
+# mirroring how vectr_remember(agent=...) already attributes multi-agent
+# notes). Boot-injection exclusion itself does not depend on either of
+# these — it falls structurally out of kind="finding" (see
+# `record_commit_note`'s docstring).
+_COMMIT_NOTE_TAG = "auto-provenance"
+_COMMIT_NOTE_AGENT_ID = "git-post-commit-hook"
+
+
+def _format_commit_note_content(
+    sha: str, subject: str, branch: str, files: list[str], task_note,
+) -> str:
+    """Deterministic, zero-inference content for a commit-provenance note
+    (UPG-COMMIT-MEMORY-HOOK) — every line is either a raw git fact or an
+    existing note's own id/title, never an inference. `files` beyond
+    HOOKS_COMMIT_NOTE_MAX_FILES collapse into "+N more" rather than growing
+    the note unbounded on a large mechanical commit."""
+    subject = subject[:HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS]
+    lines = [f"Commit {sha} on {branch or '(detached HEAD)'}: {subject}"]
+    if files:
+        shown = files[:HOOKS_COMMIT_NOTE_MAX_FILES]
+        remainder = len(files) - len(shown)
+        file_list = ", ".join(shown)
+        if remainder > 0:
+            file_list = f"{file_list}, +{remainder} more"
+        lines.append(f"Files ({len(files)}): {file_list}")
+    if task_note is not None:
+        task_title = task_note.title or (
+            task_note.content.strip().splitlines()[0][:80] if task_note.content.strip() else ""
+        )
+        lines.append(f"Active task: [#{task_note.note_id}] {task_title}")
+    return "\n".join(lines)
 
 
 class VectrService:
@@ -1371,6 +1410,72 @@ class VectrService:
         )
         self._bump_notes_epoch()
         return note_id
+
+    def _current_task_note(self):
+        """The most recent kind='task' note, if any — SAME selection boot
+        injection uses (`WorkingContextStore.boot_recall`'s task-row query:
+        priority='high', newest-first), reused rather than duplicated. Uses
+        `boot_recall` (not `fire()`/`fire_and_format()`) deliberately: it is
+        legacy-but-correct and side-effect-free (does not bump
+        `last_accessed`/`last_fired`), matching this passive "peek at
+        current task" lookup rather than a genuine SessionStart firing
+        event. Returns None in search-only mode or when there is no such
+        note."""
+        if self._context_store is None:
+            return None
+        for note in self._context_store.boot_recall(self._workspace_root):
+            if note.kind == "task":
+                return note
+        return None
+
+    def record_commit_note(
+        self, sha: str, subject: str, branch: str, files: list[str],
+    ) -> int:
+        """Write ONE deterministic, zero-inference working-memory note per
+        git commit (UPG-COMMIT-MEMORY-HOOK) — git already records WHAT
+        changed; this records the commit's identity, its touched files, and
+        the current task context, so a future session (or this one, past
+        /compact) can recall WHY a change happened without re-deriving it
+        from `git log`/`git show`.
+
+        Called only by the git post-commit hook `vectr init --hooks`
+        installs (see main.cmd_hook's "post-commit" branch /
+        `_write_git_post_commit_hook`) — never by the editor's LLM.
+        `sha`/`subject`/`branch`/`files` are raw git facts gathered
+        client-side by that hook's own `git` subprocess calls; ALL
+        interpretation (file-list capping, active-task lookup, content
+        formatting) happens HERE, once, server-side — the single source of
+        truth, same rationale as `recall()`'s own HOOKS_MIN_SIMILARITY
+        default.
+
+        kind="finding" (never "task" or "directive"): `default_bundle_for_
+        kind` (agent/trigger_engine.py) gives finding/reference an EMPTY
+        SessionStart trigger bundle at every priority, so this note can
+        never boot-inject or crowd the directive/task notes a human or an
+        agent wrote deliberately — structurally, not by an extra filter —
+        it is recall-on-demand only (semantic recall can still find it).
+        provenance="auto": captured by a mechanism with no reviewing
+        judgment (a git hook, not an agent's own assessment) — the existing
+        PROVENANCE_VALUES framing built for exactly this case, and rejected
+        outright by the store for kind="directive" (moot here, since this
+        method always writes kind="finding"). tags=[_COMMIT_NOTE_TAG] and
+        agent=_COMMIT_NOTE_AGENT_ID are two complementary, pre-existing
+        markers (no schema change) that make these notes filterable/
+        attributable without affecting boot-injection eligibility, which
+        kind alone already settles.
+        """
+        self._require_memory_layer()
+        task_note = self._current_task_note()
+        content = _format_commit_note_content(sha, subject, branch, files, task_note)
+        return self.remember(
+            content=content,
+            tags=[_COMMIT_NOTE_TAG],
+            priority="low",
+            kind="finding",
+            title=f"Commit {sha}: {subject[:HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS]}",
+            agent=_COMMIT_NOTE_AGENT_ID,
+            provenance="auto",
+        )
 
     def promote_note(self, note_id: int, to: str) -> bool:
         """Explicit provenance promotion (TRIGGER-ENGINE wave 1,

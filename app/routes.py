@@ -8,6 +8,8 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from app.models import (
+    CommitNoteRequest,
+    CommitNoteResponse,
     FetchEntry,
     FetchRequest,
     FetchResponse,
@@ -419,6 +421,27 @@ async def promote(body: PromoteRequest, request: Request) -> PromoteResponse:
     return PromoteResponse(
         note_id=body.note_id,
         provenance=body.to,
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/commit-note", response_model=CommitNoteResponse)
+async def commit_note(body: CommitNoteRequest, request: Request) -> CommitNoteResponse:
+    """Git post-commit hook write path (UPG-COMMIT-MEMORY-HOOK): one
+    deterministic, zero-inference working-memory note per commit, capturing
+    the commit's identity, touched files, and active task context — git
+    records WHAT changed, this records the context for WHY. Called only by
+    `vectr hook post-commit` (main.cmd_hook), never by the editor's LLM."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    note_id = svc.record_commit_note(
+        sha=body.sha, subject=body.subject, branch=body.branch, files=body.files,
+    )
+    return CommitNoteResponse(
+        note_id=note_id,
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

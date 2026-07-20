@@ -407,6 +407,28 @@ def client_real_memory(tmp_path):
 
     svc.resume.side_effect = _resume
 
+    # UPG-COMMIT-MEMORY-HOOK: mirrors VectrService.record_commit_note's own
+    # logic against the REAL store (same active-task lookup via boot_recall,
+    # same content formatting) so /v1/commit-note REST tests exercise the
+    # real remember() write path, not a stub that always returns a bare int.
+    def _record_commit_note(sha, subject, branch, files):
+        from agent.config import HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS
+        from app.service import _format_commit_note_content, _COMMIT_NOTE_TAG, _COMMIT_NOTE_AGENT_ID
+
+        task_note = None
+        for note in real_store.boot_recall(ws):
+            if note.kind == "task":
+                task_note = note
+                break
+        content = _format_commit_note_content(sha, subject, branch, files, task_note)
+        return real_store.remember(
+            ws, content, [_COMMIT_NOTE_TAG], "low", None, kind="finding",
+            title=f"Commit {sha}: {subject[:HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS]}",
+            author_id=_COMMIT_NOTE_AGENT_ID, provenance="auto",
+        )
+
+    svc.record_commit_note.side_effect = _record_commit_note
+
     # UPG-CONFTEST-SERVICE-CLOBBER: save/restore app.state.service (see the
     # `client` fixture) so this partial-real service does not persist into a
     # later test that relies on a different app.state.service.

@@ -280,6 +280,21 @@ HOOKS_MIN_SIMILARITY : float
     the M trigger primitive's own per-kind thetas (0.72-0.80) had 0/8 false
     fires on the identical prompts.
 
+HOOKS_COMMIT_NOTE_MAX_FILES : int
+    Display cap on the file list a commit-provenance note shows verbatim
+    (UPG-COMMIT-MEMORY-HOOK) — files beyond this count collapse into "+N
+    more".
+
+HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS : int
+    Hard cap on a commit-provenance note's subject-line length
+    (UPG-COMMIT-MEMORY-HOOK).
+
+HOOKS_POST_COMMIT_TIMEOUT_S : float
+    Hard timeout (seconds) the post-commit git hook's own daemon HTTP call
+    (POST /v1/commit-note) is held to (UPG-COMMIT-MEMORY-HOOK) — defense in
+    depth behind the hook's own shell-level backgrounding, which is what
+    actually keeps `git commit` from ever waiting on it.
+
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT : float
 STRATEGY_DEFAULT_BM25_WEIGHT : float
     Fallback hybrid-search weights used before the first index-time codebase
@@ -671,6 +686,9 @@ _hooks_cfg: dict[str, Any] = _cfg["hooks"]
 HOOKS_LOG_INJECTIONS: bool = bool(_hooks_cfg["log_injections"])
 HOOKS_LOG_CHARS_PER_TOKEN: int = int(_hooks_cfg["log_chars_per_token"])
 HOOKS_MIN_SIMILARITY: float = float(_hooks_cfg["min_similarity"])
+HOOKS_COMMIT_NOTE_MAX_FILES: int = int(_hooks_cfg["commit_note_max_files"])
+HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS: int = int(_hooks_cfg["commit_note_max_subject_chars"])
+HOOKS_POST_COMMIT_TIMEOUT_S: float = float(_hooks_cfg["post_commit_timeout_s"])
 
 # ---------------------------------------------------------------------------
 # ingest_traces unresolved-caller/callee warning cap (UPG-7.3)

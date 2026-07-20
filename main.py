@@ -19,6 +19,14 @@ import sys
 # reimplements the same 4 branches (see its module docstring for why this is
 # a second implementation, parity-tested against this file's `cmd_hook`,
 # rather than a shared import).
+#
+# `post-commit` (UPG-COMMIT-MEMORY-HOOK) is deliberately NOT in this tuple —
+# it is fired by `git`, not the editor harness's synchronous turn loop, and
+# its own shell hook wrapper backgrounds the whole `vectr hook post-commit`
+# invocation (see agent/templates/git_post_commit_hook.sh.template), so
+# `git commit` returns before this module's import cost is even paid. The
+# fast path exists to shave per-turn latency off events that block the
+# harness; a backgrounded, once-per-commit event has nothing to shave.
 _HOOK_EVENTS = ("session-start", "user-prompt-submit", "pre-tool-use", "pre-compact")
 if len(sys.argv) == 3 and sys.argv[1] == "hook" and sys.argv[2] in _HOOK_EVENTS:
     from agent.hook_cli import run_hook
@@ -44,6 +52,7 @@ from agent.config import (
     CLI_START_READY_PROBE_TIMEOUT_S,
     CLI_VERSION_SKEW_PROBE_TIMEOUT_S,
     DEFAULT_PORT,
+    HOOKS_POST_COMMIT_TIMEOUT_S,
 )
 from agent.instance_registry import (
     InstanceRegistry,
@@ -170,6 +179,33 @@ _VECTR_BLOCK_RE = re.compile(
     r"\n*<!-- vectr-start -->.*?<!-- vectr-end -->\n?",
     re.DOTALL,
 )
+
+# UPG-COMMIT-MEMORY-HOOK: the git post-commit hook's own comment-delimited
+# region (a shell script, so `#`-style markers — same literal text as the
+# Codex TOML markers above by coincidence of both being comment syntax, but
+# declared as its own constants/regex rather than shared, matching this
+# module's existing per-artifact-type convention (markdown vs. TOML each get
+# their own trio above)).
+_GIT_HOOK_BLOCK_START = "# vectr-start"
+_GIT_HOOK_BLOCK_END = "# vectr-end"
+_GIT_HOOK_BLOCK_RE = re.compile(
+    r"\n*" + re.escape(_GIT_HOOK_BLOCK_START) + r"\b.*?" + re.escape(_GIT_HOOK_BLOCK_END) + r"\n?",
+    re.DOTALL,
+)
+# Interpreters vectr's `if command -v ...; then ... fi` POSIX-shell block may
+# be safely appended under — matched against the shebang's own basename
+# (handling both `#!/bin/sh` and `#!/usr/bin/env bash` forms), never a
+# substring, so e.g. `#!/usr/bin/env pwsh` (PowerShell) is correctly treated
+# as incompatible rather than false-positiving on a stray "sh"-like name.
+_POSIX_SHELL_NAMES: tuple[str, ...] = ("sh", "bash", "dash", "zsh", "ksh")
+_GIT_POST_COMMIT_BLOCK = load_template("git_post_commit_hook.sh.template")
+
+# Local `git` subprocess safety timeout — a hang guard against a stuck git
+# process, mirroring `_current_git_branch`'s own literal (agent/
+# working_context_store/_store.py). Not an operator-tunable value (unlike
+# agent/config.yaml's hooks.post_commit_timeout_s, which governs the actual
+# tunable this data feeds: the daemon HTTP call in _post_commit_note below).
+_GIT_SUBPROCESS_TIMEOUT_S = 2
 
 # IDE config files that get the vectr block appended (not created from scratch).
 # CODEX.md is deliberately absent: Codex CLI reads ONLY AGENTS.md (plus global
@@ -945,6 +981,142 @@ def _remove_codex_mcp_config(workspace: str) -> None:
     else:
         path.unlink()
         print(f"  Deleted {path} (was vectr-only)", file=sys.stderr)
+
+
+def _git_hooks_dir(workspace: str) -> Path | None:
+    """Resolve the git hooks directory for `workspace` via `git rev-parse
+    --git-path hooks` (UPG-COMMIT-MEMORY-HOOK) — correct for both a plain
+    repo (`.git/hooks`) and a linked worktree, where `.git` is a FILE
+    pointing at a shared common git dir whose hooks/ subdirectory every
+    worktree of that repo shares (a hardcoded `.git/hooks` join is wrong
+    there). Returns None when `workspace` is not inside a git working tree,
+    or `git` itself is unavailable — callers treat that as "skip silently,
+    with a disclosed message," never an error."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-path", "hooks"],
+            cwd=workspace, capture_output=True, text=True, timeout=_GIT_SUBPROCESS_TIMEOUT_S,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path(workspace) / path
+    return path.resolve()
+
+
+def _shell_shebang_compatible(first_line: str) -> bool:
+    """True if `first_line` (a hook file's own first line) is a shebang for
+    one of `_POSIX_SHELL_NAMES` — handles both a direct (`#!/bin/sh`) and an
+    `env`-wrapped (`#!/usr/bin/env bash`) shebang form, matched against the
+    interpreter path's own basename (never a substring, so `#!/usr/bin/env
+    pwsh` is correctly rejected rather than false-positiving on a stray
+    "sh"-like name). A missing/absent shebang is treated the same as an
+    incompatible one — a hook file with no `#!` line isn't reliably
+    executable as a shell script in the first place, so vectr's POSIX-shell
+    block must not be appended under it either."""
+    first_line = first_line.strip()
+    if not first_line.startswith("#!"):
+        return False
+    parts = first_line[2:].strip().split()
+    if not parts:
+        return False
+    interpreter = parts[0]
+    if Path(interpreter).name == "env" and len(parts) > 1:
+        interpreter = parts[1]
+    return Path(interpreter).name in _POSIX_SHELL_NAMES
+
+
+def _write_git_post_commit_hook(workspace: str) -> None:
+    """Install the git post-commit hook that records one deterministic
+    working-memory note per commit (UPG-COMMIT-MEMORY-HOOK): git already
+    records WHAT changed; this captures the commit's identity, touched
+    files, and active task context so a future session (or this one, past
+    /compact) can recall WHY without re-deriving it from `git log`/`git
+    show`. The hook itself only invokes `vectr hook post-commit`
+    (backgrounded — see the template); all interpretation happens in
+    `cmd_hook`'s post-commit branch.
+
+    Merge-safe like `_write_ide_config_merge_safe`/`_write_codex_mcp_config`:
+    only vectr's own comment-delimited region is touched; a pre-existing
+    user hook's other content is preserved verbatim, and re-running this
+    (idempotent re-init) replaces the vectr block in place rather than
+    duplicating it.
+
+    Skips silently, with a disclosed stderr message (never an error), when
+    `workspace` is not a git working tree, or when a pre-existing foreign
+    `post-commit` hook's interpreter is not POSIX-shell-compatible
+    (`_shell_shebang_compatible`) — vectr's block would not run correctly
+    appended under e.g. a Python or PowerShell hook.
+    """
+    hooks_dir = _git_hooks_dir(workspace)
+    if hooks_dir is None:
+        print(
+            f"  Skipped git post-commit hook: {workspace} is not a git working tree.",
+            file=sys.stderr,
+        )
+        return
+
+    hook_path = hooks_dir / "post-commit"
+    if not hook_path.exists():
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        hook_path.write_text(f"#!/bin/sh\n{_GIT_POST_COMMIT_BLOCK}", encoding="utf-8")
+        hook_path.chmod(hook_path.stat().st_mode | 0o111)
+        print(f"  Created {hook_path}", file=sys.stderr)
+        return
+
+    existing = hook_path.read_text(encoding="utf-8")
+    if _GIT_HOOK_BLOCK_START not in existing:
+        first_line = existing.splitlines()[0] if existing.splitlines() else ""
+        if not _shell_shebang_compatible(first_line):
+            print(
+                f"  Skipped {hook_path}: existing hook's interpreter is not a "
+                "POSIX shell vectr's post-commit block can run under. Add "
+                "`vectr hook post-commit </dev/null >/dev/null 2>&1 &` to it "
+                "by hand if you want commit provenance capture.",
+                file=sys.stderr,
+            )
+            return
+        new_content = f"{existing.rstrip()}\n\n{_GIT_POST_COMMIT_BLOCK}"
+    else:
+        stripped = _GIT_HOOK_BLOCK_RE.sub("", existing).rstrip()
+        new_content = f"{stripped}\n\n{_GIT_POST_COMMIT_BLOCK}" if stripped else f"#!/bin/sh\n{_GIT_POST_COMMIT_BLOCK}"
+        if new_content == existing:
+            return
+
+    hook_path.write_text(new_content, encoding="utf-8")
+    hook_path.chmod(hook_path.stat().st_mode | 0o111)
+    print(f"  Updated vectr block in {hook_path}", file=sys.stderr)
+
+
+def _remove_git_post_commit_hook(workspace: str) -> None:
+    """Strip vectr's block from the git post-commit hook (for
+    --reset-config). Deletes the file if it becomes vectr-only-and-empty
+    (mirrors `_remove_vectr_block`/`_remove_codex_mcp_config`); leaves a
+    user's own pre-existing hook content untouched otherwise."""
+    hooks_dir = _git_hooks_dir(workspace)
+    if hooks_dir is None:
+        return
+    hook_path = hooks_dir / "post-commit"
+    if not hook_path.exists():
+        return
+    content = hook_path.read_text(encoding="utf-8")
+    if _GIT_HOOK_BLOCK_START not in content:
+        return
+    stripped = _GIT_HOOK_BLOCK_RE.sub("", content).rstrip()
+    # A vectr-only file's only remaining content after stripping is its own
+    # shebang line — nothing left worth keeping as an executable hook.
+    if stripped and stripped.strip() != "#!/bin/sh":
+        hook_path.write_text(stripped + "\n", encoding="utf-8")
+        print(f"  Removed vectr block from {hook_path}", file=sys.stderr)
+    else:
+        hook_path.unlink()
+        print(f"  Deleted {hook_path} (was vectr-only)", file=sys.stderr)
 
 
 def _migrate_legacy_files() -> None:
@@ -1842,6 +2014,43 @@ def _post_trigger_reset(port: int, session_id: str) -> bool:
         return False
 
 
+def _git_fact(cwd: str, *args: str) -> str:
+    """Run one read-only `git` subprocess call from `cwd` and return its
+    trimmed stdout, or "" on ANY failure (missing git, not a repo, non-zero
+    exit, timeout) — never raises (UPG-COMMIT-MEMORY-HOOK). Used by the
+    post-commit hook branch to gather the sha/subject/branch/files facts a
+    commit-provenance note is built from — all interpretation of these raw
+    facts happens server-side (`VectrService.record_commit_note`), this only
+    gathers them."""
+    try:
+        result = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=_GIT_SUBPROCESS_TIMEOUT_S,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _post_commit_note(port: int, sha: str, subject: str, branch: str, files: list[str]) -> bool:
+    """POST /v1/commit-note; True on success, False on any failure (never
+    raises) — mirrors `_post_snapshot`/`_post_trigger_reset` immediately
+    above. A down, slow, or erroring daemon must never surface as a git hook
+    failure (UPG-COMMIT-MEMORY-HOOK fail-safe contract)."""
+    import httpx
+    try:
+        resp = httpx.post(
+            f"{_api_base(port)}/v1/commit-note",
+            json={"sha": sha, "subject": subject, "branch": branch, "files": files},
+            timeout=HOOKS_POST_COMMIT_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
 def _read_hook_stdin() -> dict:
     """Read the Claude Code hook event JSON from stdin; {} if absent/invalid."""
     try:
@@ -1913,6 +2122,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
     | pre-tool-use      | file-bearing tool (Edit/Write/Read) | pre-edit + that file's path   | POST /v1/recall {file_path, kind: gotcha, session_id, hook_event} |
     | pre-tool-use      | command-running tool           | pre-run                             | no live caller this wave — PreToolUse's matcher (`_write_claude_hooks`) only reaches Edit/Write/Read, so a command-running tool call never reaches this hook yet |
     | pre-compact       | any `trigger`                  | ledger reset (§3)                   | POST /v1/snapshot (unchanged) + POST /v1/trigger/reset {session_id} |
+    | post-commit       | n/a (fired by `git`, not the editor harness) | n/a — a WRITE path, not a recall/trigger event | POST /v1/commit-note {sha, subject, branch, files} |
 
     `session-start` with `source == "compact"` is the deterministic first
     delivery point after PreCompact's reset: it is the SAME lifecycle moment
@@ -1922,6 +2132,21 @@ def cmd_hook(args: argparse.Namespace) -> None:
     folded into that one call rather than inventing a new delivery point.
     `pre-run`/`pre-commit` remain declared-but-inert this wave (no lifecycle
     moment maps to them — never an error, bm2-design-skeleton.md §2).
+
+    `post-commit` (UPG-COMMIT-MEMORY-HOOK) is fundamentally different from
+    the four events above: it is invoked directly by `git` (installed by
+    `_write_git_post_commit_hook`, not `_write_claude_hooks`/
+    `_write_codex_hooks`), carries no editor-harness JSON on stdin (`event`
+    degrades to `{}`, so `cwd` falls through to `os.getcwd()` — correct,
+    since git runs hooks from the working-tree root), and never calls
+    `_emit_hook_context` — nothing reads this process's stdout as a
+    `hookSpecificOutput` envelope. It is also deliberately NOT part of the
+    stdlib-only fast path (`agent/hook_cli.py`, see `main.py`'s own
+    `_HOOK_EVENTS` comment): the shell wrapper backgrounds this whole
+    invocation (`vectr hook post-commit </dev/null >/dev/null 2>&1 &`), so
+    `git commit` returns before this process's imports even begin — the
+    fast path's ~100ms import-cost saving exists for the four hooks above,
+    which block the editor's turn loop synchronously; it buys nothing here.
     """
     try:
         event = _read_hook_stdin()
@@ -2020,6 +2245,28 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # tracked ledger (or no session_id at all) is a no-op.
             if session_id:
                 _post_trigger_reset(port, session_id)
+
+        elif args.hook_event == "post-commit":
+            # UPG-COMMIT-MEMORY-HOOK: fired by git itself, post-commit — no
+            # editor-harness JSON, so `event` is `{}` and `cwd` above already
+            # resolved to os.getcwd() (git runs hooks from the working-tree
+            # root). All git facts are gathered HERE via read-only `git`
+            # subprocess calls rather than in the shell wrapper, so there is
+            # no shell string-escaping to get right for an arbitrary commit
+            # subject/branch/file name. All interpretation (file-list
+            # capping, active-task lookup, content formatting) happens
+            # server-side in VectrService.record_commit_note — this branch
+            # only gathers and forwards raw facts.
+            sha = _git_fact(cwd, "rev-parse", "--short", "HEAD")
+            if not sha:
+                return  # not a git repo, or git unavailable -> nothing to record
+            subject = _git_fact(cwd, "log", "-1", "--format=%s", "HEAD")
+            branch = _git_fact(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+            if branch == "HEAD":
+                branch = ""  # detached HEAD — git's own sentinel, not a real branch name
+            files_raw = _git_fact(cwd, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+            files = [f for f in files_raw.splitlines() if f]
+            _post_commit_note(port, sha, subject, branch, files)
     except Exception:
         pass  # hook safety: never propagate
 
@@ -2405,6 +2652,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         _remove_vectr_hooks(workspace)
         _remove_codex_hooks(workspace)
         _remove_codex_mcp_config(workspace)
+        _remove_git_post_commit_hook(workspace)
         print(f"Vectr config reset for: {workspace}", file=sys.stderr)
         return
 
@@ -2450,6 +2698,11 @@ def cmd_init(args: argparse.Namespace) -> None:
         else:
             _write_claude_hooks(workspace)
             _write_codex_hooks(workspace)
+            # UPG-COMMIT-MEMORY-HOOK: a git-level hook, not an editor-harness
+            # one — installed under the same --hooks flag and the same
+            # search-only gate (it writes a note, so it needs the same
+            # working-memory layer the two hooks above inject from).
+            _write_git_post_commit_hook(workspace)
 
     _maybe_write_workspace_config(workspace, port, args, search_only=search_only)
 
@@ -2875,10 +3128,11 @@ def main() -> None:
 
     p_hook = sub.add_parser(
         "hook",
-        help="Emit Claude Code hook output (invoked by `vectr init --hooks` entries; not called directly)",
+        help="Emit Claude Code hook output, or record commit provenance (invoked by "
+             "`vectr init --hooks` entries; not called directly)",
     )
     p_hook.add_argument("hook_event",
-                        choices=["session-start", "user-prompt-submit", "pre-tool-use", "pre-compact"],
+                        choices=["session-start", "user-prompt-submit", "pre-tool-use", "pre-compact", "post-commit"],
                         help="Which hook event to emit output for")
 
     p_index = sub.add_parser("index", help="(Re)index a directory or file")

@@ -1308,6 +1308,27 @@ hooks:
   # fires on the identical prompts. 0.72 matches the lowest of those thetas.
   min_similarity: 0.72
 
+  # UPG-COMMIT-MEMORY-HOOK: display cap on the file list a commit-provenance
+  # note (the git post-commit hook's own write path, POST /v1/commit-note)
+  # shows verbatim — files beyond this count collapse into "+N more" rather
+  # than growing the note unbounded on a large mechanical commit (e.g. a
+  # lockfile regen touching hundreds of files).
+  commit_note_max_files: 10
+
+  # UPG-COMMIT-MEMORY-HOOK: hard cap on a commit-provenance note's subject-
+  # line length — a defensive bound against a pathological single-line
+  # commit message (no body, so the whole message IS "the subject"),
+  # independent of git's own subject-line conventions.
+  commit_note_max_subject_chars: 200
+
+  # UPG-COMMIT-MEMORY-HOOK: hard timeout (seconds) the post-commit git
+  # hook's own HTTP call to the daemon (POST /v1/commit-note) is held to,
+  # client-side. The hook backgrounds itself from its shell wrapper so
+  # `git commit` never waits on this call either way, but a runaway
+  # background process must still bound itself rather than hold a socket
+  # open indefinitely.
+  post_commit_timeout_s: 2.0
+
 embedding:
   # Default local (sentence-transformers) embedding model for the L3 content
   # index (UPG-EMBEDDER-SWAP-GRANITE). Dimension-compatible drop-in for the
