@@ -225,6 +225,12 @@ SYMBOL_GRAPH_TRACE_QUALIFIER_NEARMISS_MAX : int
     a "Class.method" qualifier fails to resolve to a real definition
     (UPG-TRACE-CALLERS-QUALIFIER-VALIDATION).
 
+SYMBOL_GRAPH_QUALIFIED_NEARMISS_CANDIDATE_CAP : int
+    Cap on exact-leaf-name candidates pulled before `nearest_symbol_names`
+    ranks them by qualifier/enclosing-type similarity, when a "Class.method"
+    qualifier fails to resolve under every `locate_l2` strategy
+    (UPG-LOCATE-FALLBACK-NO-SIMILARITY).
+
 WORKSPACE_DEFAULT_VECTRIGNORE_DIRS : tuple[str, ...]
     Directory names seeded into a fresh .vectrignore on first `vectr start`/`vectr
     init` when the workspace has none yet (UPG-13.2). Never overwrites an existing
@@ -603,6 +609,13 @@ SYMBOL_GRAPH_ERROR_RECOVERY_MAX_EXTEND_STEPS_PER_ATTEMPT: int = int(
 # trace() "Class.method" qualifier fails to resolve to a real definition.
 _sg_trace_qualifier_cfg: dict[str, Any] = _sg_cfg["trace_qualifier"]
 SYMBOL_GRAPH_TRACE_QUALIFIER_NEARMISS_MAX: int = int(_sg_trace_qualifier_cfg["nearmiss_max"])
+
+# UPG-LOCATE-FALLBACK-NO-SIMILARITY: candidate pool cap for the qualifier-
+# similarity near-miss widening in SymbolGraph.nearest_symbol_names.
+_sg_qualified_nearmiss_cfg: dict[str, Any] = _sg_cfg["qualified_nearmiss"]
+SYMBOL_GRAPH_QUALIFIED_NEARMISS_CANDIDATE_CAP: int = int(
+    _sg_qualified_nearmiss_cfg["candidate_pool_cap"]
+)
 
 # ---------------------------------------------------------------------------
 # CLI daemon-readiness poll (UPG-CLI-START-READY-RACE)

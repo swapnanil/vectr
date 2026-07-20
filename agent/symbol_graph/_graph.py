@@ -9,6 +9,7 @@ import math
 import re
 import sqlite3
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Literal
 
@@ -29,6 +30,7 @@ from agent.config import (
     INGEST_TRACES_MAX_UNRESOLVED_EXAMPLES,
     SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN,
     SYMBOL_GRAPH_TRACE_QUALIFIER_NEARMISS_MAX,
+    SYMBOL_GRAPH_QUALIFIED_NEARMISS_CANDIDATE_CAP,
 )
 
 logger = logging.getLogger(__name__)
@@ -1500,12 +1502,44 @@ class SymbolGraph:
         `search.identifier_hint.nearmiss_min_prefix_len` characters long
         (excludes short, generic names from matching as a "prefix" of
         unrelated tokens).
+
+        UPG-LOCATE-FALLBACK-NO-SIMILARITY: when `token` carries a
+        "Class.method" qualifier, EVERY one of `locate_l2`'s strategies
+        filters candidates down to definitions actually enclosed by that
+        class (`_filter_by_class`) — so a class that matches nothing in the
+        workspace always ends in "none", regardless of how many OTHER
+        classes define the same leaf method. This near-miss lookup is
+        explicitly inexact by construction, so it is the sanctioned place to
+        widen out to the leaf's real definitions across every OTHER class
+        and rank them by how closely each candidate's own enclosing
+        type/path resembles the qualifier that failed to resolve — a
+        fabricated or misremembered class name is usually a near-miss of a
+        real one. Ranking against `class_qualifier` (the explicit argument
+        the caller passed) is a result-side signal, not query-content
+        gating.
         """
         if limit <= 0:
             return []
         result = self.locate_l2(workspace, token, limit=limit)
         if result.resolution_strategy not in ("exact", "none"):
             return result.symbols[:limit]
+
+        class_qualifier, leaf = _split_class_qualifier(token)
+        if class_qualifier:
+            pool = self._exact_definitions(
+                workspace, leaf, limit=SYMBOL_GRAPH_QUALIFIED_NEARMISS_CANDIDATE_CAP,
+            )
+            if pool:
+                ranked = sorted(
+                    pool, key=lambda c: self._qualifier_similarity_key(class_qualifier, c),
+                )
+                top = ranked[:limit]
+                for s in top:
+                    s.snippet = self.get_snippet(s.file_path, s.start_line, s.end_line)
+                    enclosing = _enclosing_container_from_file(s.file_path, s.start_line)
+                    if enclosing:
+                        s.name = f"{enclosing}.{s.name}"
+                return top
 
         min_len = SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN
         if len(token) < min_len:
@@ -1605,7 +1639,22 @@ class SymbolGraph:
         When `not include_builtins` (callee path only), language-builtin/stdlib
         callees are dropped *before* truncation so they can't push repo-internal
         calls out of the window; returns the count hidden (UPG-4.3). Callers are
-        never filtered — a caller is by definition a repo-defined function."""
+        never filtered — a caller is by definition a repo-defined function.
+
+        UPG-CALLER-TIEBREAK-ALPHA: on the callers path (`rank_repo_defined=
+        False`) call frequency was the only relevance signal above — a tied
+        call_count fell all the way through to plain alphabetical name order
+        (the `repo = set(groups)` line below is a harmless no-op for that
+        path; it only exists so callees' unrelated primary key can be
+        computed the same way). Ties are now broken by the caller's own
+        repo-defined ancestry (repo-defined before external/unresolved —
+        `ingest_trace_data` documents that a caller name need not resolve to
+        a known symbol), then by in-degree — how many distinct places
+        elsewhere in the graph call that candidate — as a bounded,
+        query-time stand-in for centrality; no new stored/precomputed
+        centrality pipeline. Both lookups are scoped to only the names that
+        actually collide on call_count, so the common untied case pays no
+        extra query cost."""
         groups: dict[str, dict] = {}
         for e in edges:
             k = e.from_symbol if group == "from_symbol" else e.to_symbol
@@ -1620,6 +1669,15 @@ class SymbolGraph:
         # for callers also avoids a needless symbols-table scan.
         repo = self._known_symbol_names(workspace, list(groups)) if rank_repo_defined else set(groups)
         suppress = rank_repo_defined and not include_builtins
+
+        tie_repo: set[str] = set()
+        tie_in_degree: dict[str, int] = {}
+        if not rank_repo_defined:
+            tied = self._tied_call_count_names(groups)
+            if tied:
+                tie_repo = self._known_symbol_names(workspace, list(tied))
+                tie_in_degree = self._caller_in_degree(workspace, list(tied))
+
         ranked: list[tuple] = []
         hidden = 0
         for k, g in groups.items():
@@ -1628,9 +1686,54 @@ class SymbolGraph:
                 hidden += 1
                 continue
             e.call_count = len(g["sites"])
-            ranked.append((0 if k in repo else 1, -e.call_count, k, e))
-        ranked.sort(key=lambda t: (t[0], t[1], t[2]))
-        return [t[3] for t in ranked[:limit]], hidden
+            if rank_repo_defined:
+                ranked.append((0 if k in repo else 1, -e.call_count, k, e))
+            else:
+                ranked.append((
+                    -e.call_count,
+                    0 if k in tie_repo else 1,
+                    -tie_in_degree.get(k, 0),
+                    k,
+                    e,
+                ))
+        ranked.sort(key=lambda t: t[:-1])
+        return [t[-1] for t in ranked[:limit]], hidden
+
+    @staticmethod
+    def _tied_call_count_names(groups: dict[str, dict]) -> set[str]:
+        """Names in *groups* whose call_count collides with at least one
+        other name's — the only candidates a tie-break signal can actually
+        change the order of (UPG-CALLER-TIEBREAK-ALPHA); an untied name is
+        already fully decided by call_count and never consults these maps."""
+        by_count: dict[int, list[str]] = {}
+        for k, g in groups.items():
+            by_count.setdefault(len(g["sites"]), []).append(k)
+        return {k for names in by_count.values() if len(names) > 1 for k in names}
+
+    def _caller_in_degree(self, workspace: str, names: list[str]) -> dict[str, int]:
+        """How many distinct calling functions target each of *names*
+        elsewhere in the graph — a bounded, query-time proxy for a
+        candidate caller's own importance/centrality (UPG-CALLER-TIEBREAK-
+        ALPHA). Deliberately not a new stored centrality pipeline: one
+        grouped COUNT over the same `edges` table `_known_symbol_names`
+        already queries (using the same `idx_edge_to` index), scoped to the
+        (typically small) set of names actually tied on call_count."""
+        if not names:
+            return {}
+        counts: dict[str, int] = {}
+        with self._conn() as conn:
+            for i in range(0, len(names), 500):  # stay under SQLite's bound-var limit
+                chunk = names[i:i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT to_symbol, COUNT(DISTINCT from_symbol) AS c FROM edges "
+                    f"WHERE workspace = ? AND to_symbol IN ({placeholders}) "
+                    f"GROUP BY to_symbol",
+                    (workspace, *chunk),
+                ).fetchall()
+                for r in rows:
+                    counts[r["to_symbol"]] = r["c"]
+        return counts
 
     def _known_symbol_names(self, workspace: str, names: list[str]) -> set[str]:
         """Subset of `names` that are defined as symbols in this workspace —
@@ -1691,6 +1794,33 @@ class SymbolGraph:
                 (workspace, name, limit),
             ).fetchall()
         return [self._row_to_symbol(r) for r in rows]
+
+    @staticmethod
+    def _qualifier_similarity_key(class_qualifier: str, candidate: Symbol) -> tuple[float, float]:
+        """Sort key for UPG-LOCATE-FALLBACK-NO-SIMILARITY (ascending order =
+        best match first — negate the ratios so `sorted()` puts the closest
+        candidate first). Ranks a same-leaf definition candidate by how
+        closely its OWN enclosing type resembles the class qualifier that
+        failed to resolve — a fabricated or misremembered qualifier is
+        usually a near-miss of a real class/module name elsewhere, not
+        random. `difflib.SequenceMatcher` is deterministic stdlib string
+        similarity, never a semantic guess.
+
+        Enclosing-type similarity is primary; file-path similarity is a
+        secondary signal only consulted on a tie (e.g. a candidate with no
+        enclosing type at all — a module-level definition — falls back to
+        comparing the qualifier against its path). The caller's `sorted()`
+        is stable, so a full tie on both ratios preserves the candidates'
+        original (canonical-fetch-order) relative order."""
+        enclosing = _enclosing_container_from_file(candidate.file_path, candidate.start_line)
+        type_ratio = (
+            SequenceMatcher(None, class_qualifier.lower(), enclosing.lower()).ratio()
+            if enclosing else 0.0
+        )
+        path_ratio = SequenceMatcher(
+            None, class_qualifier.lower(), candidate.file_path.lower()
+        ).ratio()
+        return (-type_ratio, -path_ratio)
 
     @staticmethod
     def _module_label(file_path: str, workspace: str) -> str:

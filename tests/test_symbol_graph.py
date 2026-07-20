@@ -776,6 +776,80 @@ class TestNearestSymbolNames:
         assert len(near) <= 2
 
 
+# ---------------------------------------------------------------------------
+# UPG-LOCATE-FALLBACK-NO-SIMILARITY: after a qualified miss (Class.method
+# where the qualifier resolves to no real enclosing type anywhere in the
+# workspace), nearest_symbol_names widens to every exact-leaf-name
+# definition and ranks them by string similarity between the FAILED
+# qualifier and each candidate's enclosing type (secondarily its file
+# path) — ranking result-side data against the caller's own explicit
+# argument, not query-content gating.
+# ---------------------------------------------------------------------------
+
+class TestNearestSymbolNamesQualifierSimilarityUPG:
+    def test_fabricated_qualifier_falls_back_to_similarity_ranked_leaf_candidates(
+        self, tmp_path,
+    ) -> None:
+        """A dotted "Class.method" token whose class matches no enclosing
+        type anywhere is invisible to locate_l2 (every strategy's class
+        filter empties out) and to the existing prefix-containment fallback
+        (it only compares bare names, never a dotted qualifier). The new
+        fallback widens to every "process" definition and ranks the
+        candidate whose enclosing class is the closest string match to the
+        failed qualifier first."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(
+            tmp_path, "widgets.py",
+            "class WidgetRegistry:\n    def process(self):\n        pass\n"
+            "class SprocketFactory:\n    def process(self):\n        pass\n"
+            "class GadgetHelper:\n    def process(self):\n        pass\n",
+        )
+        g.index_file("ws", str(tmp_path / "widgets.py"))
+
+        # Confirm locate_l2 truly has nothing for the fabricated class (pins
+        # the gap this fallback fills; regression guard if locate_l2 ever
+        # widens its own class filter).
+        assert g.locate_l2("ws", "WidgetRegistery.process").resolution_strategy == "none"
+
+        near = g.nearest_symbol_names("ws", "WidgetRegistery.process", limit=10)
+        assert [s.name for s in near] == [
+            "WidgetRegistry.process",
+            "GadgetHelper.process",
+            "SprocketFactory.process",
+        ]
+
+    def test_similarity_ties_keep_canonical_fetch_order(self, tmp_path) -> None:
+        """Two candidates that tie exactly on both the enclosing-type and
+        file-path similarity ratios (same file, disjoint-character class
+        names against a disjoint-character fabricated qualifier) keep the
+        order _exact_definitions already produced — stable sort, no
+        incidental reordering on a real tie."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(
+            tmp_path, "mod.py",
+            "class Xxxxxx:\n    def process(self):\n"
+            + "".join(f"        v{i} = {i}\n" for i in range(20))
+            + "class Yyyyyy:\n    def process(self):\n        pass\n",
+        )
+        g.index_file("ws", str(tmp_path / "mod.py"))
+
+        near = g.nearest_symbol_names("ws", "Wwwwww.process", limit=10)
+        assert [s.name for s in near] == ["Xxxxxx.process", "Yyyyyy.process"]
+
+    def test_candidate_pool_still_capped_and_limit_respected(self, tmp_path) -> None:
+        """The widened fallback is bounded by the configured candidate pool
+        cap upstream and by the caller's requested limit downstream."""
+        classes = "".join(
+            f"class C{i}:\n    def process(self):\n        pass\n" for i in range(5)
+        )
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "many.py", classes)
+        g.index_file("ws", str(tmp_path / "many.py"))
+
+        near = g.nearest_symbol_names("ws", "Bogus.process", limit=2)
+        assert len(near) == 2
+
+
 class TestLevenshtein:
     def test_identical_strings(self) -> None:
         assert _levenshtein("abc", "abc") == 0
@@ -1934,6 +2008,109 @@ class TestEdgeAggregationUPG42:
         text = g.format_trace_for_llm(result, "caller")
         assert "target" in text
         assert "×" not in text
+
+
+# ---------------------------------------------------------------------------
+# UPG-CALLER-TIEBREAK-ALPHA: on tied call_count, caller aggregation
+# (rank_repo_defined=False) no longer degrades straight to name order.
+# Secondary keys: repo-defined callers before external/unresolved ones,
+# then higher in-degree (callers of the caller, from the already-loaded
+# edge table) before lower, with name as the final stable tiebreak.
+# ---------------------------------------------------------------------------
+
+class TestCallerTiebreakAlphaUPG:
+    def test_repo_defined_caller_ranks_before_external_on_tied_count(self, tmp_path) -> None:
+        # `alpha_caller` is unresolved/external (no symbol row); `beta_caller`
+        # is repo-defined. Both call `target` exactly once — tied call_count.
+        # Alphabetically "alpha_caller" < "beta_caller", so a pure name-order
+        # fallback would (wrongly) rank the external one first.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("beta_caller", "function", f"{ws}/b.py")])
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "alpha_caller", 1, "target"),
+            (f"{ws}/a.py", "beta_caller", 2, "target"),
+        ])
+        names = [e.from_symbol for e in g.callers(ws, "target")]
+        assert names == ["beta_caller", "alpha_caller"]
+
+    def test_higher_in_degree_breaks_tie_between_two_repo_defined_callers(
+        self, tmp_path,
+    ) -> None:
+        # `beta_caller` and `zeta_caller` are both repo-defined and both call
+        # `target` once — tied on call_count and on repo-defined. `zeta_caller`
+        # itself has 3 distinct callers elsewhere in the graph (higher
+        # in-degree/centrality proxy); `beta_caller` has none.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [
+            ("beta_caller", "function", f"{ws}/b.py"),
+            ("zeta_caller", "function", f"{ws}/z.py"),
+        ])
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "beta_caller", 1, "target"),
+            (f"{ws}/a.py", "zeta_caller", 2, "target"),
+            (f"{ws}/x.py", "caller_x1", 10, "zeta_caller"),
+            (f"{ws}/x.py", "caller_x2", 11, "zeta_caller"),
+            (f"{ws}/x.py", "caller_x3", 12, "zeta_caller"),
+        ])
+        names = [e.from_symbol for e in g.callers(ws, "target")]
+        assert names == ["zeta_caller", "beta_caller"]
+
+    def test_full_tie_falls_back_to_name_as_stable_final_key(self, tmp_path) -> None:
+        # Both callers repo-defined, both zero in-degree, both call `target`
+        # once — every secondary signal ties, so the final deterministic key
+        # is the name itself.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [
+            ("alpha_caller", "function", f"{ws}/a.py"),
+            ("beta_caller", "function", f"{ws}/b.py"),
+        ])
+        _seed_edges(g, ws, [
+            (f"{ws}/c.py", "alpha_caller", 1, "target"),
+            (f"{ws}/c.py", "beta_caller", 2, "target"),
+        ])
+        names = [e.from_symbol for e in g.callers(ws, "target")]
+        assert names == ["alpha_caller", "beta_caller"]
+
+    def test_three_way_tie_combines_repo_defined_and_in_degree(self, tmp_path) -> None:
+        # alpha_caller: external/unresolved. beta_caller: repo-defined,
+        # in-degree 0. zeta_caller: repo-defined, in-degree 3. All three tie
+        # on call_count (1 each) — full expected ranking exercises both
+        # secondary keys together, not just pairwise.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [
+            ("beta_caller", "function", f"{ws}/b.py"),
+            ("zeta_caller", "function", f"{ws}/z.py"),
+        ])
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "alpha_caller", 1, "target"),
+            (f"{ws}/a.py", "beta_caller", 2, "target"),
+            (f"{ws}/a.py", "zeta_caller", 3, "target"),
+            (f"{ws}/x.py", "caller_x1", 10, "zeta_caller"),
+            (f"{ws}/x.py", "caller_x2", 11, "zeta_caller"),
+            (f"{ws}/x.py", "caller_x3", 12, "zeta_caller"),
+        ])
+        names = [e.from_symbol for e in g.callers(ws, "target")]
+        assert names == ["zeta_caller", "beta_caller", "alpha_caller"]
+
+    def test_untied_call_count_still_dominates_over_secondary_keys(self, tmp_path) -> None:
+        # `alpha_caller` is external but calls `target` 3 times; `beta_caller`
+        # is repo-defined but calls it only once. Primary key (call_count)
+        # must still win over the repo-defined/in-degree secondary keys.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("beta_caller", "function", f"{ws}/b.py")])
+        _seed_edges(g, ws, [
+            (f"{ws}/a.py", "alpha_caller", 1, "target"),
+            (f"{ws}/a.py", "alpha_caller", 2, "target"),
+            (f"{ws}/a.py", "alpha_caller", 3, "target"),
+            (f"{ws}/a.py", "beta_caller", 4, "target"),
+        ])
+        names = [e.from_symbol for e in g.callers(ws, "target")]
+        assert names == ["alpha_caller", "beta_caller"]
 
 
 # ---------------------------------------------------------------------------

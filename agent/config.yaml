@@ -1159,6 +1159,19 @@ symbol_graph:
     # — never a semantic guess, always labeled inexact.
     nearmiss_max: 3
 
+  # UPG-LOCATE-FALLBACK-NO-SIMILARITY: when a "Class.method" qualifier fails
+  # to resolve under every locate_l2 strategy (the class matches no real
+  # enclosing type anywhere in the workspace), nearest_symbol_names widens the
+  # search to the leaf's exact-name definitions across every OTHER class and
+  # ranks them by string similarity between the failed qualifier and each
+  # candidate's own enclosing type/path.
+  qualified_nearmiss:
+    # Cap on how many exact-leaf-name candidates are pulled before the
+    # similarity ranking runs. A common leaf name (e.g. "get") can collide
+    # across many classes; bounding the pool keeps the difflib comparison
+    # cheap and the ranking deterministic.
+    candidate_pool_cap: 50
+
 cli:
   # UPG-CLI-START-READY-RACE: `vectr start`/`restart` spawn the daemon as a
   # detached background process and used to print a success block
