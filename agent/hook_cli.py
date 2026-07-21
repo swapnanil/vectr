@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -77,6 +78,12 @@ from agent.prompt_templates import load_template
 _HOOK_RECALL_LIMIT = 3
 _HOOK_NO_DOUBLE_RECALL_LINE = load_template("hook_no_double_recall.txt")
 _HOOK_EVENTS_ANNOUNCE_INJECTION = ("SessionStart", "UserPromptSubmit")
+
+# Mirrors main.py's `_EPISODE_FOREGROUND_TRUNCATE_CHARS` exactly (adversarial-
+# review fix B1) — see that constant's docstring for the measured foreground-
+# latency rationale and why this is a hardcoded constant, not a
+# agent/config.yaml entry, on this stdlib-only fast path.
+_EPISODE_FOREGROUND_TRUNCATE_CHARS = 65536
 
 
 def _recv_full_response(sock: socket.socket) -> bytes:
@@ -213,24 +220,44 @@ def _post_trigger_reset(port: int, session_id: str) -> bool:
     return _post_json(port, "/v1/trigger/reset", {"session_id": session_id}) is not None
 
 
+_FAILURE_EXIT_CODE_LINE_RE = re.compile(r"^Exit code (-?\d+)\n?")
+
+
+def _parse_failure_error(error: str) -> tuple[int | None, str]:
+    """Mirrors `main._parse_failure_error` exactly — see its docstring for
+    the G0-verified PostToolUseFailure error-string shape."""
+    m = _FAILURE_EXIT_CODE_LINE_RE.match(error)
+    if m is None:
+        return None, error
+    try:
+        rc = int(m.group(1))
+    except ValueError:
+        return None, error
+    return rc, error[m.end():]
+
+
+def _tail_truncate(text: str, cap: int) -> str:
+    """Mirrors `main._tail_truncate` exactly — keeps the last `cap` chars."""
+    return text[-cap:] if len(text) > cap else text
+
+
 def _build_episode_payload(event: dict) -> dict | None:
     """Mirrors `main._build_episode_payload` exactly — see its docstring for
-    the full field-by-field rationale (G0 defensive shape, path-only for
-    Edit/Write/MultiEdit, raw un-truncated stdout/stderr)."""
+    the full field-by-field rationale (G0 live-verified success/failure
+    shapes, path-only for Edit/Write/MultiEdit/apply_patch, foreground
+    tail-truncation)."""
     tool_name = (event.get("tool_name") or "").strip()
+    hook_event_name = (event.get("hook_event_name") or "").strip()
     tool_input = event.get("tool_input") or {}
-    tool_response = event.get("tool_response") or {}
     if not isinstance(tool_input, dict):
         tool_input = {}
-    if not isinstance(tool_response, dict):
-        tool_response = {}
 
     if tool_name == "Bash":
         tool = "bash"
         command = tool_input.get("command")
         description = tool_input.get("description")
         file_path = None
-    elif tool_name in ("Edit", "Write", "MultiEdit"):
+    elif tool_name in ("Edit", "Write", "MultiEdit", "apply_patch"):
         tool = "edit"
         command = None
         description = None
@@ -243,7 +270,23 @@ def _build_episode_payload(event: dict) -> dict | None:
             return value
         return "" if value is None else str(value)
 
-    rc = tool_response.get("exit_code", tool_response.get("returncode"))
+    if hook_event_name == "PostToolUseFailure":
+        rc, remainder = _parse_failure_error(_text(event.get("error")))
+        is_error = True
+        interrupted = bool(event.get("is_interrupt", False))
+        stdout_tail = remainder
+        stderr_tail = ""
+    else:
+        tool_response = event.get("tool_response") or {}
+        if not isinstance(tool_response, dict):
+            tool_response = {}
+        rc_raw = tool_response.get("exit_code", tool_response.get("returncode"))
+        rc = rc_raw if isinstance(rc_raw, int) else None
+        is_error = bool(tool_response.get("is_error", False))
+        interrupted = bool(tool_response.get("interrupted", False))
+        stdout_tail = _text(tool_response.get("stdout"))
+        stderr_tail = _text(tool_response.get("stderr"))
+
     return {
         "session_id": (event.get("session_id") or None),
         "cwd": event.get("cwd") or "",
@@ -251,11 +294,11 @@ def _build_episode_payload(event: dict) -> dict | None:
         "command": command,
         "description": description,
         "file_path": file_path,
-        "rc": rc if isinstance(rc, int) else None,
-        "is_error": bool(tool_response.get("is_error", False)),
-        "interrupted": bool(tool_response.get("interrupted", False)),
-        "stdout_tail": _text(tool_response.get("stdout")),
-        "stderr_tail": _text(tool_response.get("stderr")),
+        "rc": rc,
+        "is_error": is_error,
+        "interrupted": interrupted,
+        "stdout_tail": _tail_truncate(stdout_tail, _EPISODE_FOREGROUND_TRUNCATE_CHARS),
+        "stderr_tail": _tail_truncate(stderr_tail, _EPISODE_FOREGROUND_TRUNCATE_CHARS),
     }
 
 

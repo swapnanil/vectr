@@ -114,6 +114,18 @@ POST_TOOL_USE_FIXTURES = [
     '"tool_response": {}}',
     '{"cwd": "/p", "tool_name": "Read", "tool_input": {"file_path": "/p/agent/symbol_graph.py"}}',
     '{"cwd": "/nowhere", "tool_name": "Bash", "tool_input": {"command": "echo hi"}}',
+    # apply_patch (adversarial-review fix B4) — Codex's edit tool, captured
+    # identically to Edit/Write/MultiEdit.
+    '{"cwd": "/p", "tool_name": "apply_patch", "tool_input": {"file_path": "/p/agent/symbol_graph.py"}, '
+    '"tool_response": {}}',
+    # PostToolUseFailure (adversarial-review fix B5, G0-verified shape) — no
+    # tool_response; a top-level "error" string and "is_interrupt" instead.
+    '{"cwd": "/p", "session_id": "abc-123", "tool_name": "Bash", '
+    '"hook_event_name": "PostToolUseFailure", "tool_input": {"command": "false"}, '
+    '"error": "Exit code 7\\nfailing-probe"}',
+    '{"cwd": "/p", "tool_name": "Bash", "hook_event_name": "PostToolUseFailure", '
+    '"tool_input": {"command": "sleep 100"}, "error": "Exit code -1\\ninterrupted", '
+    '"is_interrupt": true}',
 ]
 
 

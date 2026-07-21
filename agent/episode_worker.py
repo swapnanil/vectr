@@ -15,7 +15,9 @@ via `tempfile.mkstemp`) containing one JSON object
 `{"port": int, "payload": {...}}`; this process reads it, deletes it, caps
 `payload["stdout_tail"]`/`payload["stderr_tail"]` to the config-declared
 `EPISODES_CLIENT_TRUNCATE_CHARS` (the single source of truth for that cap —
-see agent/config.yaml's `episodes.client_truncate_chars`), POSTs the result
+see agent/config.yaml's `episodes.client_truncate_chars`), KEEPING THE TAIL
+(not the head — a failure marker near the end of a long output must survive
+this cap), POSTs the result
 to `http://localhost:<port>/v1/episode`, and exits 0 regardless of outcome.
 Never writes to stdout/stderr — nothing reads this process's output. Any
 failure (missing/malformed file, daemon down, timeout, non-2xx response)
@@ -56,7 +58,14 @@ def main() -> None:
     for field in ("stdout_tail", "stderr_tail"):
         value = payload.get(field)
         if isinstance(value, str) and len(value) > EPISODES_CLIENT_TRUNCATE_CHARS:
-            payload[field] = value[:EPISODES_CLIENT_TRUNCATE_CHARS]
+            # Keep the TAIL, not the head (adversarial-review B1 follow-on
+            # fix): failure markers characteristically appear near the end
+            # of long output (agent/outcome.py), and agent/episode_canon.py's
+            # own digest step is head+tail-preserving on the assumption that
+            # truncation upstream hasn't already discarded the tail. Slicing
+            # the head here would silently drop exactly the signal that
+            # determines outcome for any output longer than the cap.
+            payload[field] = value[-EPISODES_CLIENT_TRUNCATE_CHARS:]
 
     try:
         import httpx

@@ -26,6 +26,31 @@ def _registry_stub(monkeypatch, entry: dict | None):
     monkeypatch.setattr(m, "InstanceRegistry", lambda *a, **k: _FakeRegistry())
 
 
+class TestParseFailureError:
+    """G0-verified PostToolUseFailure error-string shape (adversarial-review
+    fix B5): "Exit code N\\n<merged stdout+stderr>"."""
+
+    def test_extracts_rc_and_remainder(self):
+        rc, remainder = m._parse_failure_error("Exit code 7\nfailing-probe")
+        assert rc == 7
+        assert remainder == "failing-probe"
+
+    def test_negative_exit_code(self):
+        rc, remainder = m._parse_failure_error("Exit code -1\ninterrupted")
+        assert rc == -1
+        assert remainder == "interrupted"
+
+    def test_no_leading_exit_code_line_returns_none_and_full_text(self):
+        rc, remainder = m._parse_failure_error("no exit code here at all")
+        assert rc is None
+        assert remainder == "no exit code here at all"
+
+    def test_empty_string_never_raises(self):
+        rc, remainder = m._parse_failure_error("")
+        assert rc is None
+        assert remainder == ""
+
+
 class TestBuildEpisodePayload:
     def test_bash_tool_captures_command_description_and_output(self):
         event = {
@@ -115,6 +140,96 @@ class TestBuildEpisodePayload:
         event = {"cwd": "/repo", "tool_name": "Bash", "tool_input": {"command": "ls"}}
         payload = m._build_episode_payload(event)
         assert payload["session_id"] is None
+
+    def test_apply_patch_captured_as_edit_tool(self):
+        """Adversarial-review fix B4: Codex's native edit tool must produce
+        an edit episode exactly like Edit/Write/MultiEdit, or the
+        edit-mediated arc (design doc §3.4) never forms under Codex."""
+        event = {"cwd": "/repo", "tool_name": "apply_patch", "tool_input": {"file_path": "/repo/c.py"}}
+        payload = m._build_episode_payload(event)
+        assert payload["tool"] == "edit"
+        assert payload["file_path"] == "/repo/c.py"
+
+    def test_foreground_truncation_keeps_the_tail_of_stdout_and_stderr(self):
+        """Adversarial-review fix B1: truncation must happen here, in the
+        foreground function, BEFORE the temp-file handoff — not only later
+        in the detached worker — and must keep the tail (failure markers
+        appear near the end), not the head."""
+        long_out = ("HEAD" * 100) + ("y" * (m._EPISODE_FOREGROUND_TRUNCATE_CHARS + 1000)) + "TAIL-MARKER"
+        event = {
+            "cwd": "/repo", "tool_name": "Bash", "tool_input": {"command": "cat big.log"},
+            "tool_response": {"stdout": long_out, "stderr": long_out, "exit_code": 0},
+        }
+        payload = m._build_episode_payload(event)
+        assert len(payload["stdout_tail"]) == m._EPISODE_FOREGROUND_TRUNCATE_CHARS
+        assert len(payload["stderr_tail"]) == m._EPISODE_FOREGROUND_TRUNCATE_CHARS
+        assert payload["stdout_tail"].endswith("TAIL-MARKER")
+        assert "HEAD" not in payload["stdout_tail"]
+
+    def test_under_cap_output_is_untouched_by_foreground_truncation(self):
+        event = {
+            "cwd": "/repo", "tool_name": "Bash", "tool_input": {"command": "echo hi"},
+            "tool_response": {"stdout": "hi\n", "stderr": "", "exit_code": 0},
+        }
+        payload = m._build_episode_payload(event)
+        assert payload["stdout_tail"] == "hi\n"
+
+
+class TestBuildEpisodePayloadPostToolUseFailure:
+    """G0 live capture (2026-07-22, real `claude -p` session): a failed Bash
+    call fires PostToolUseFailure instead of PostToolUse — `tool_response`
+    is absent; a top-level `error` string ("Exit code N\\n<merged output>")
+    and `is_interrupt` replace it (adversarial-review fix B5)."""
+
+    def test_failure_event_extracts_rc_and_feeds_remainder_to_stdout_tail(self):
+        event = {
+            "cwd": "/repo", "tool_name": "Bash", "hook_event_name": "PostToolUseFailure",
+            "tool_input": {"command": "false"},
+            "error": "Exit code 7\nfailing-probe",
+        }
+        payload = m._build_episode_payload(event)
+        assert payload["rc"] == 7
+        assert payload["is_error"] is True
+        assert payload["stdout_tail"] == "failing-probe"
+        assert payload["stderr_tail"] == ""
+
+    def test_multiline_error_body_preserved_after_exit_code_line(self):
+        event = {
+            "cwd": "/repo", "tool_name": "Bash", "hook_event_name": "PostToolUseFailure",
+            "tool_input": {"command": "ls /nonexistent-dir"},
+            "error": "Exit code 1\nls: /nonexistent-dir: No such file or directory",
+        }
+        payload = m._build_episode_payload(event)
+        assert payload["rc"] == 1
+        assert payload["stdout_tail"] == "ls: /nonexistent-dir: No such file or directory"
+
+    def test_is_interrupt_maps_to_interrupted_field(self):
+        event = {
+            "cwd": "/repo", "tool_name": "Bash", "hook_event_name": "PostToolUseFailure",
+            "tool_input": {"command": "sleep 100"},
+            "error": "Exit code -1\ninterrupted", "is_interrupt": True,
+        }
+        payload = m._build_episode_payload(event)
+        assert payload["interrupted"] is True
+
+    def test_malformed_error_string_never_raises_rc_none(self):
+        event = {
+            "cwd": "/repo", "tool_name": "Bash", "hook_event_name": "PostToolUseFailure",
+            "tool_input": {"command": "false"}, "error": "something unexpected",
+        }
+        payload = m._build_episode_payload(event)
+        assert payload["rc"] is None
+        assert payload["stdout_tail"] == "something unexpected"
+
+    def test_failure_error_is_also_foreground_truncated(self):
+        long_error = "Exit code 1\n" + ("z" * (m._EPISODE_FOREGROUND_TRUNCATE_CHARS + 1000)) + "TAIL-MARKER"
+        event = {
+            "cwd": "/repo", "tool_name": "Bash", "hook_event_name": "PostToolUseFailure",
+            "tool_input": {"command": "false"}, "error": long_error,
+        }
+        payload = m._build_episode_payload(event)
+        assert len(payload["stdout_tail"]) == m._EPISODE_FOREGROUND_TRUNCATE_CHARS
+        assert payload["stdout_tail"].endswith("TAIL-MARKER")
 
 
 class TestSpawnEpisodeWorker:

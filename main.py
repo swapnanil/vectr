@@ -90,6 +90,28 @@ _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 # agent.config just to send that one float on its hottest path.
 _HOOK_RECALL_LIMIT = 3
 
+# L1 episode capture (memoization-l1-capture-design §2, adversarial-review
+# fix B1) — hard cap on how much of a Bash/Edit tool's raw stdout/stderr this
+# FOREGROUND process (the one the editor harness is synchronously waiting
+# on, budget ≤50ms p95 per spec §7 gate G2) will ever json.dump into the
+# handoff temp file. Measured before this cap existed: a 1MB tool output
+# cost ~30ms p50/205ms p95 to serialize foreground, a 10MB one ~66/230ms —
+# well over budget, and the size is attacker/tool-controlled (a verbose test
+# run, a huge `cat`), not bounded by anything upstream. Kept as a raw
+# hardcoded constant rather than an agent/config.yaml entry for the same
+# reason as `_HOOK_RECALL_LIMIT` immediately below: this is the stdlib-only
+# fast path (agent/hook_cli.py mirrors it) that exists specifically to avoid
+# paying agent.config's import cost, so a config-sourced value here would
+# defeat its own purpose. Set well above the worker's own
+# EPISODES_CLIENT_TRUNCATE_CHARS default (8000) so nothing the daemon-side
+# digest step would have kept is lost here first — this is a coarse
+# foreground safety cap, not the real truncation (that stays config-driven,
+# server/worker-side). Tail-kept (last N chars, not first): failure markers
+# characteristically appear near the end of long output (see
+# agent/outcome.py), so truncating the head and keeping the tail preserves
+# the signal that actually determines outcome.
+_EPISODE_FOREGROUND_TRUNCATE_CHARS = 65536
+
 # UPG-11.5 — hook-injected notes announce themselves so the model doesn't also
 # self-call vectr_recall for the same purpose. Without this, SessionStart/
 # UserPromptSubmit injection and the model's own recall both fire and pay for
@@ -858,6 +880,17 @@ def _write_claude_hooks(workspace: str) -> None:
     # loop on the actual HTTP write.
     _install_hook_group(hooks, "PostToolUse", matcher="Bash|Edit|Write|MultiEdit",
                         command="vectr hook post-tool-use")
+    # G0 live capture (2026-07-22, adversarial-review fix B5): PostToolUse
+    # fires ONLY on tool SUCCESS — a failed Bash call (non-zero exit) fires
+    # PostToolUseFailure instead, and PostToolUse never fires for it at all.
+    # Without this second group, every RED run (the failure half of every
+    # failure->fix->success arc, arguably the most valuable episode class)
+    # is silently never captured. Same matcher and same `vectr hook
+    # post-tool-use` command — the two events share one CLI invocation;
+    # `_build_episode_payload` tells them apart via the JSON's own
+    # `hook_event_name` field, not a separate subcommand.
+    _install_hook_group(hooks, "PostToolUseFailure", matcher="Bash|Edit|Write|MultiEdit",
+                        command="vectr hook post-tool-use")
     # UPG-9.7 — PreCompact (manual|auto): snapshot working memory before /compact replaces context.
     _install_hook_group(hooks, "PreCompact", matcher="manual|auto",
                         command="vectr hook pre-compact")
@@ -880,7 +913,17 @@ def _write_codex_hooks(workspace: str) -> None:
     tool. Codex's exact PreToolUse tool name is the one matcher the research
     could not confirm without a live smoke test; the `Edit|Write|apply_patch`
     union is harmless either way — an absent tool name simply never fires the
-    hook — so it needs no live verification to ship safely.
+    hook — so it needs no live verification to ship safely. The PostToolUse
+    matcher includes `apply_patch` too (adversarial-review fix B4): without
+    it, no edit episode is ever captured under Codex, and the edit-mediated
+    arc (design doc §3.4 — the dominant real fix loop) can never form there.
+
+    Codex's hook surface documents no distinct failure-path event
+    (research/codex-parity-2026-07.md lists only "PostToolUse" among its
+    event names) — this writer deliberately does NOT install a
+    PostToolUseFailure group the way `_write_claude_hooks` does; inventing
+    an event name Codex doesn't fire would just be a silent no-op, and a
+    real one should be added here once confirmed, not guessed.
 
     Preserves any existing hooks.json content and any non-vectr hook groups.
     """
@@ -900,9 +943,11 @@ def _write_codex_hooks(workspace: str) -> None:
     _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|apply_patch",
                         command="vectr hook pre-tool-use")
     # L1 episode capture (memoization-l1-capture-design §2) — see
-    # _write_claude_hooks's PostToolUse group for the rationale; same event,
-    # matcher, and command apply unchanged under Codex's identical schema.
-    _install_hook_group(hooks, "PostToolUse", matcher="Bash|Edit|Write|MultiEdit",
+    # _write_claude_hooks's PostToolUse group for the rationale; same event
+    # and command apply unchanged under Codex's identical schema. The
+    # matcher adds `apply_patch` (fix B4, see module docstring) alongside
+    # the Claude-compat tool names, mirroring the PreToolUse matcher above.
+    _install_hook_group(hooks, "PostToolUse", matcher="Bash|Edit|Write|MultiEdit|apply_patch",
                         command="vectr hook post-tool-use")
     _install_hook_group(hooks, "PreCompact", matcher="manual|auto",
                         command="vectr hook pre-compact")
@@ -2083,43 +2128,84 @@ def _read_hook_stdin() -> dict:
         return {}
 
 
-def _build_episode_payload(event: dict) -> dict | None:
-    """Build the `POST /v1/episode` payload from a raw PostToolUse hook JSON
-    event (memoization-l1-capture-design §2), or None when `tool_name` isn't
-    one this lane captures.
+_FAILURE_EXIT_CODE_LINE_RE = re.compile(r"^Exit code (-?\d+)\n?")
 
-    Every field is read defensively via `.get()` with no assumed shape: the
-    real PostToolUse payload could not be live-captured in this environment
-    (spec §7 gate G0 — no editor CLI binary was reachable to run one), so
-    every field is optional and an absent/differently-shaped field silently
-    yields None/"" rather than raising. Only `tool_input.command` +
-    `tool_input.description` (Bash) or `tool_input.file_path` (Edit/Write/
-    MultiEdit — the path only, never file content) are forwarded from
-    tool_input; only stdout/stderr text, `is_error`, `interrupted`, and an
-    exit code (whichever key the editor happens to use) are forwarded from
-    tool_response. stdout/stderr are forwarded RAW here — the client-side
-    truncation to a config cap happens in `agent/episode_worker.py`
-    immediately before it POSTs (see `_spawn_episode_worker`'s docstring for
-    why truncation lives there, not in this foreground function). All
-    further interpretation (argv normalization, outcome derivation, digest
-    canonicalization) happens server-side in `VectrService.record_episode` —
-    this only gathers raw facts, mirroring `_git_fact`'s own division of
-    labor for the post-commit hook.
+
+def _parse_failure_error(error: str) -> tuple[int | None, str]:
+    """Structurally parse the editor harness's PostToolUseFailure error
+    string (G0 live capture, 2026-07-22, real `claude -p` session): a fixed
+    `"Exit code N\\n<merged stdout+stderr>"` shape, e.g. `"Exit code 7\\n
+    failing-probe"` or `"Exit code 1\\nls: /x: No such file or directory"`.
+
+    Returns `(rc, remainder)` — `rc` is None (never guessed) when the
+    leading line doesn't match this exact shape; `remainder` is the merged
+    output digest to run marker matching over either way. This reads the
+    harness's own fixed error-message structure, not task-prompt content or
+    a query — R5-sanctioned (tool output/argv only)."""
+    m = _FAILURE_EXIT_CODE_LINE_RE.match(error)
+    if m is None:
+        return None, error
+    try:
+        rc = int(m.group(1))
+    except ValueError:
+        return None, error
+    return rc, error[m.end():]
+
+
+def _tail_truncate(text: str, cap: int) -> str:
+    """Keep the LAST `cap` characters of `text` (never the first) — see
+    `_EPISODE_FOREGROUND_TRUNCATE_CHARS`'s docstring for why tail, not head."""
+    return text[-cap:] if len(text) > cap else text
+
+
+def _build_episode_payload(event: dict) -> dict | None:
+    """Build the `POST /v1/episode` payload from a raw PostToolUse (or
+    PostToolUseFailure) hook JSON event (memoization-l1-capture-design §2),
+    or None when `tool_name` isn't one this lane captures.
+
+    Shapes below are G0 live-verified (2026-07-22, real `claude -p` session,
+    claude-code 2.1.181) — no longer defensive guesses:
+
+    - PostToolUse fires ONLY on tool success. Bash's `tool_response` is
+      `{stdout, stderr, interrupted, isImage, noOutputExpected}` — there is
+      NO exit-code field on this path, ever (rc is structurally absent, not
+      merely omitted). Edit/Write/MultiEdit/apply_patch's `tool_response`
+      carries `filePath`/`structuredPatch`/etc.; only `tool_input.file_path`
+      is read from any of them (the path only, never file content).
+    - A FAILED Bash call (non-zero exit) fires PostToolUseFailure instead —
+      PostToolUse never fires for it. `tool_response` is absent; instead a
+      top-level `error` string (`"Exit code N\\n<merged output>"`, see
+      `_parse_failure_error`) and `is_interrupt` (note the different key
+      name vs. `interrupted` on the success path — normalized to the same
+      `interrupted` episode field here).
+
+    Every field is still read defensively (`.get()`, isinstance checks) in
+    case a future harness version or Codex's own payload drifts from this
+    shape — absent/malformed fields silently yield None/"" rather than
+    raising. All further interpretation (argv normalization, outcome
+    derivation, digest canonicalization) happens server-side in
+    `VectrService.record_episode` — this only gathers raw facts, mirroring
+    `_git_fact`'s own division of labor for the post-commit hook.
+
+    stdout/stderr (or the failure-path error remainder) are tail-truncated
+    to `_EPISODE_FOREGROUND_TRUNCATE_CHARS` HERE, before the temp-file
+    handoff (adversarial-review fix B1) — `agent/episode_worker.py` applies
+    its own, smaller, config-driven cap afterward as the real truncation;
+    this is only a coarse foreground safety cap bounding this synchronous
+    process's own json.dump cost against an arbitrarily large tool output.
     """
     tool_name = (event.get("tool_name") or "").strip()
+    hook_event_name = (event.get("hook_event_name") or "").strip()
     tool_input = event.get("tool_input") or {}
-    tool_response = event.get("tool_response") or {}
     if not isinstance(tool_input, dict):
         tool_input = {}
-    if not isinstance(tool_response, dict):
-        tool_response = {}
 
     if tool_name == "Bash":
         tool = "bash"
         command = tool_input.get("command")
         description = tool_input.get("description")
         file_path = None
-    elif tool_name in ("Edit", "Write", "MultiEdit"):
+    elif tool_name in ("Edit", "Write", "MultiEdit", "apply_patch"):
         tool = "edit"
         command = None
         description = None
@@ -2132,7 +2218,23 @@ def _build_episode_payload(event: dict) -> dict | None:
             return value
         return "" if value is None else str(value)
 
-    rc = tool_response.get("exit_code", tool_response.get("returncode"))
+    if hook_event_name == "PostToolUseFailure":
+        rc, remainder = _parse_failure_error(_text(event.get("error")))
+        is_error = True
+        interrupted = bool(event.get("is_interrupt", False))
+        stdout_tail = remainder
+        stderr_tail = ""
+    else:
+        tool_response = event.get("tool_response") or {}
+        if not isinstance(tool_response, dict):
+            tool_response = {}
+        rc_raw = tool_response.get("exit_code", tool_response.get("returncode"))
+        rc = rc_raw if isinstance(rc_raw, int) else None
+        is_error = bool(tool_response.get("is_error", False))
+        interrupted = bool(tool_response.get("interrupted", False))
+        stdout_tail = _text(tool_response.get("stdout"))
+        stderr_tail = _text(tool_response.get("stderr"))
+
     return {
         "session_id": (event.get("session_id") or None),
         "cwd": event.get("cwd") or "",
@@ -2140,11 +2242,11 @@ def _build_episode_payload(event: dict) -> dict | None:
         "command": command,
         "description": description,
         "file_path": file_path,
-        "rc": rc if isinstance(rc, int) else None,
-        "is_error": bool(tool_response.get("is_error", False)),
-        "interrupted": bool(tool_response.get("interrupted", False)),
-        "stdout_tail": _text(tool_response.get("stdout")),
-        "stderr_tail": _text(tool_response.get("stderr")),
+        "rc": rc,
+        "is_error": is_error,
+        "interrupted": interrupted,
+        "stdout_tail": _tail_truncate(stdout_tail, _EPISODE_FOREGROUND_TRUNCATE_CHARS),
+        "stderr_tail": _tail_truncate(stderr_tail, _EPISODE_FOREGROUND_TRUNCATE_CHARS),
     }
 
 

@@ -99,6 +99,20 @@ class TestTruncation:
         posted = mock_post.call_args.kwargs["json"]
         assert posted["stdout_tail"] == "short"
 
+    def test_truncation_keeps_the_tail_not_the_head(self, tmp_path):
+        """Adversarial-review B1 follow-on fix: a failure marker near the
+        end of a long output must survive truncation. `value[:CAP]` (head)
+        would keep HEAD-MARKER and drop TAIL-MARKER; the correct
+        `value[-CAP:]` (tail) does the opposite."""
+        long_text = "HEAD-MARKER" + ("x" * (EPISODES_CLIENT_TRUNCATE_CHARS + 500)) + "TAIL-MARKER"
+        path = _write_envelope(tmp_path, 8765, {"tool": "bash", "stdout_tail": long_text, "stderr_tail": ""})
+        with patch("sys.argv", ["episode_worker.py", path]):
+            with patch("httpx.post") as mock_post:
+                episode_worker.main()
+        posted = mock_post.call_args.kwargs["json"]
+        assert posted["stdout_tail"].endswith("TAIL-MARKER")
+        assert "HEAD-MARKER" not in posted["stdout_tail"]
+
 
 class TestPostFailureNeverRaises:
     def test_connection_error_is_swallowed(self, tmp_path):

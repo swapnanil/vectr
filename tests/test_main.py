@@ -2211,6 +2211,25 @@ class TestInitHooks:
         data = json.loads(settings.read_text())
         assert "PostToolUse" not in data.get("hooks", {})
 
+    def test_writes_posttoolusefailure_hook_with_same_matcher_and_command(self, tmp_path):
+        """Adversarial-review fix B5 (G0 live capture, 2026-07-22): a failed
+        Bash call fires PostToolUseFailure instead of PostToolUse, so a
+        second group with the same matcher/command is required or every RED
+        run is silently never captured."""
+        m._write_claude_hooks(str(tmp_path))
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        groups = data["hooks"]["PostToolUseFailure"]
+        assert len(groups) == 1
+        assert groups[0]["matcher"] == "Bash|Edit|Write|MultiEdit"
+        assert groups[0]["hooks"][0]["command"] == "vectr hook post-tool-use"
+
+    def test_reset_removes_posttoolusefailure_hook_too(self, tmp_path):
+        settings = tmp_path / ".claude" / "settings.json"
+        m._write_claude_hooks(str(tmp_path))
+        m._remove_vectr_hooks(str(tmp_path))
+        data = json.loads(settings.read_text())
+        assert "PostToolUseFailure" not in data.get("hooks", {})
+
     def test_sessionstart_compact_matcher_enables_post_compact_reinject(self, tmp_path):
         """UPG-9.7's re-inject path = the SessionStart `compact` matcher (UPG-9.4)."""
         m._write_claude_hooks(str(tmp_path))
@@ -3588,12 +3607,23 @@ class TestCodexHooks:
 
     def test_posttooluse_matcher_and_command(self, tmp_path):
         """L1 episode capture (memoization-l1-capture-design §2): same event
-        name/matcher/command as the Claude Code writer — Codex's hook schema
-        matches Claude Code's (research §Q3)."""
+        name/command as the Claude Code writer — Codex's hook schema matches
+        Claude Code's (research §Q3). Matcher additionally unions
+        `apply_patch` (adversarial-review fix B4): without it, Codex's own
+        edit tool never produces an edit episode."""
         m._write_codex_hooks(str(tmp_path))
         hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
-        assert hooks["PostToolUse"][0]["matcher"] == "Bash|Edit|Write|MultiEdit"
+        assert hooks["PostToolUse"][0]["matcher"] == "Bash|Edit|Write|MultiEdit|apply_patch"
         assert hooks["PostToolUse"][0]["hooks"][0]["command"] == "vectr hook post-tool-use"
+
+    def test_no_posttooluseFailure_group_installed_for_codex(self, tmp_path):
+        """Codex's hook surface documents no distinct failure-path event
+        (research/codex-parity-2026-07.md lists only "PostToolUse") — unlike
+        the Claude Code writer, this one must NOT invent a PostToolUseFailure
+        group for an event Codex doesn't fire."""
+        m._write_codex_hooks(str(tmp_path))
+        hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
+        assert "PostToolUseFailure" not in hooks
 
     def test_idempotent_no_duplicate_groups(self, tmp_path):
         m._write_codex_hooks(str(tmp_path))
