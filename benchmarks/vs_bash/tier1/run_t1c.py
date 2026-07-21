@@ -17,6 +17,14 @@ DIRECTIVE.md` R5 there is no query-content branching anywhere in this
 driver: no arm gets a different preamble, flag set, or parsing path based on
 what a task's prompt says.
 
+"Which tools exist" is enforced on disk, not assumed: both arms' fixture
+checkouts must pass a guidance-purity preflight (see check_guidance_purity)
+proving no vectr-owned config files, no vectr-appended blocks in agent-
+instruction files the corpus may ship its own copy of, no vectr hooks in
+project `.claude/settings.json` (--strict-mcp-config does NOT disable
+hooks), and no vectr git hooks. The vectr arm receives vectr exclusively
+through the --mcp-config flag this driver composes.
+
 THIS SCRIPT NEVER SPAWNS `claude -p` UNLESS EXPLICITLY RUN WITHOUT --dry-run.
 Automation (subagents, CI, hooks) must only ever call this with --dry-run;
 live sessions burn the user's Claude Code quota and are sentinel's call to
@@ -114,15 +122,38 @@ _PREAMBLE = (
 # wrong/under-indexed daemon before spending quota against it.
 _EXPECTED_MIN_CHUNKS = 100_000
 
-# Root-level filenames/dirs `vectr init`/`vectr start` write into a fixture
-# it has touched (an IDE MCP config, generated agent-instruction files, and
-# per-editor rule directories). The bash arm's fixture must carry NONE of
-# these at its root, or the "no MCP tools available" comparison is not
-# actually clean -- an agent could still find vectr-authored guidance in a
-# CLAUDE.md/AGENTS.md file even without the MCP server itself.
-_VECTR_GENERATED_ROOT_NAMES = (
-    ".mcp.json", "CLAUDE.md", "AGENTS.md", ".cursor", ".codex", "GEMINI.md",
+# Fixture guidance-purity model. A session picks up vectr three ways beyond
+# the --mcp-config flag this driver controls: (1) files vectr itself CREATES
+# in a workspace it has touched, (2) a fenced block vectr APPENDS to agent-
+# instruction files the corpus may legitimately ship its own copy of, and
+# (3) project `.claude/settings.json` hooks -- `--strict-mcp-config`
+# neutralizes a project's MCP *servers* but does NOT disable its *hooks*, so
+# a fixture whose settings run `vectr hook ...` injects vectr into a session
+# regardless of MCP config. Both arms' fixtures must be clean on all three:
+# the bash arm so "no vectr" is true, the vectr arm so the only vectr
+# guidance it gets is the MCP toolset itself (arms differ ONLY in available
+# tools + cwd -- pre-registered design).
+
+# (1) Files only vectr writes; upstream corpora never ship these, so bare
+# presence is a purity failure. Bare `.cursor`/`.vscode`/`.codex` DIRS are
+# deliberately NOT checked -- upstream corpora may ship them (camel ships
+# `.vscode/`); only the vectr-owned files inside them are checked.
+_VECTR_OWNED_PATHS = (
+    ".mcp.json",
+    ".vectrignore",
+    ".cursor/mcp.json",
+    ".vscode/mcp.json",
+    ".cursor/rules/vectr.mdc",
+    ".codex/config.toml",
 )
+
+# (2) Files vectr appends a fenced block to. Presence alone proves nothing
+# (camel ships its own AGENTS.md plus a CLAUDE.md symlink to it); only
+# vectr's literal block marker does. Marker strings match vectr's own
+# append-block constants in main.py.
+_VECTR_APPENDED_NAMES = ("CLAUDE.md", "AGENTS.md", "GEMINI.md", ".cursorrules")
+_VECTR_MD_MARKER = "<!-- vectr-start -->"
+_VECTR_COMMENT_MARKER = "# vectr-start"
 
 
 def _path_present(p: Path) -> bool:
@@ -130,6 +161,67 @@ def _path_present(p: Path) -> bool:
     symlink -- Path.exists() alone follows symlinks and misses a dangling
     one, which would otherwise hide a purity violation."""
     return p.exists() or p.is_symlink()
+
+
+def _read_if_present(p: Path) -> str | None:
+    """Text of `p` (symlinks followed), None if nothing exists there, "" if
+    present but unreadable (e.g. a dangling symlink -- which cannot steer an
+    agent, so unreadable == no guidance)."""
+    if not _path_present(p):
+        return None
+    try:
+        return p.resolve().read_text(errors="ignore")
+    except OSError:
+        return ""
+
+
+def _settings_mentions_vectr(text: str) -> str | None:
+    """Violation description if a .claude settings JSON wires vectr in via
+    hooks or a project MCP server entry, else None. Falls back to a raw
+    substring scan when the JSON does not parse -- an unparseable settings
+    file that mentions vectr cannot be proven clean."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return "unparseable JSON mentioning vectr" if "vectr" in text else None
+    for event, entries in (data.get("hooks") or {}).items():
+        for entry in entries or []:
+            for hook in entry.get("hooks") or []:
+                if "vectr" in str(hook.get("command", "")):
+                    return f"hook command references vectr ({event})"
+    if "vectr" in (data.get("mcpServers") or {}):
+        return "mcpServers contains a vectr entry"
+    return None
+
+
+def check_guidance_purity(fixture_root: Path, allow: frozenset[str] = frozenset()) -> tuple[bool, str]:
+    """All three purity axes above, for either arm's fixture. `allow` names
+    _VECTR_OWNED_PATHS entries exempted for a specific arm (the vectr arm
+    keeps its `.vectrignore`: gitignore-style indexing patterns the live
+    daemon's view of the workspace depends on -- infrastructure with no
+    agent-facing guidance, and removing it could churn the built index)."""
+    violations = []
+    for rel in _VECTR_OWNED_PATHS:
+        if rel in allow:
+            continue
+        if _path_present(fixture_root / rel):
+            violations.append(f"vectr-owned file present: {rel}")
+    for name in _VECTR_APPENDED_NAMES:
+        text = _read_if_present(fixture_root / name)
+        if text and _VECTR_MD_MARKER in text:
+            violations.append(f"vectr block marker in {name}")
+    for rel in (".claude/settings.json", ".claude/settings.local.json"):
+        text = _read_if_present(fixture_root / rel)
+        if text:
+            bad = _settings_mentions_vectr(text)
+            if bad:
+                violations.append(f"{rel}: {bad}")
+    hook_text = _read_if_present(fixture_root / ".git" / "hooks" / "post-commit")
+    if hook_text and _VECTR_COMMENT_MARKER in hook_text:
+        violations.append("vectr block marker in .git/hooks/post-commit")
+    if violations:
+        return False, f"purity failure -- {'; '.join(violations)} ({fixture_root})"
+    return True, "no vectr-owned files, appended blocks, settings hooks, or git hooks"
 
 
 # ---------------------------------------------------------------------------
@@ -168,20 +260,39 @@ def build_mcp_config_bash() -> dict:
 # invocation has not itself been live-verified against a live CLI.
 # ---------------------------------------------------------------------------
 
+_USAGE_KEYS = (
+    "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+    "output_tokens",
+)
+
+
 def usage_from_events(events: list[dict]) -> dict:
+    """Terminal result event's token usage, reported in three input tiers
+    (base / cache-creation / cache-read) plus their total. The tiers stay
+    separate in the record because the two arms cache differently (the vectr
+    arm's MCP tool schemas are cache-heavy) -- a single lumped number would
+    distort the arm comparison. When no result event exists, or one exists
+    but its usage dict is empty/reshaped, every value is None and
+    `usage_unparsed` is True -- zeros are never reported as if measured."""
     result = None
     for ev in events:
         if ev.get("type") == "result":
             result = ev
+    unparsed = {k: None for k in _USAGE_KEYS}
+    unparsed.update({"total_input_tokens": None, "usage_unparsed": True})
     if result is None:
-        return {"input_tokens": None, "output_tokens": None}
+        return unparsed
     usage = result.get("usage") or {}
     iters = usage.get("iterations", [usage])
-    base = sum(it.get("input_tokens", 0) for it in iters)
-    cc = sum(it.get("cache_creation_input_tokens", 0) for it in iters)
-    cr = sum(it.get("cache_read_input_tokens", 0) for it in iters)
-    out = sum(it.get("output_tokens", 0) for it in iters)
-    return {"input_tokens": base + cc + cr, "output_tokens": out}
+    if not any(k in it for it in iters for k in _USAGE_KEYS):
+        return unparsed
+    vals = {k: sum(it.get(k, 0) for it in iters) for k in _USAGE_KEYS}
+    vals["total_input_tokens"] = (
+        vals["input_tokens"] + vals["cache_creation_input_tokens"]
+        + vals["cache_read_input_tokens"]
+    )
+    vals["usage_unparsed"] = False
+    return vals
 
 
 # ---------------------------------------------------------------------------
@@ -233,8 +344,12 @@ def summarize_task_result(task: dict, arm: str, events: list[dict], wall_s: floa
         "tool_call_counts": dict(counts),
         "bash_native_counts": bash_native_counts,
         "search_calls": search_calls,
-        "usage_input_tokens": usage["input_tokens"],
+        "usage_input_tokens": usage["total_input_tokens"],
+        "usage_input_base_tokens": usage["input_tokens"],
+        "usage_cache_creation_tokens": usage["cache_creation_input_tokens"],
+        "usage_cache_read_tokens": usage["cache_read_input_tokens"],
         "usage_output_tokens": usage["output_tokens"],
+        "usage_unparsed": usage["usage_unparsed"],
         "used_vectr": used_vectr,
         "used_bash_native": used_bash_native,
         "final_answer": parsed["final"]["answer"],
@@ -303,9 +418,10 @@ def preflight_vectr(base: str) -> tuple[bool, str]:
 
 
 def preflight_bash(fixture_root: Path) -> tuple[bool, str]:
-    """Fixture root exists, is a git repo, and carries none of the
-    vectr-generated root files/dirs. Read-only -- filesystem stat + a
-    read-only git rev-parse, nothing that mutates the fixture."""
+    """Fixture root exists, is a git repo, and passes all guidance-purity
+    axes (vectr-owned files, appended block markers, settings hooks, git
+    hooks). Read-only -- filesystem stat/reads + a read-only git rev-parse,
+    nothing that mutates the fixture."""
     if not _path_present(fixture_root):
         return False, f"fixture root does not exist: {fixture_root}"
     try:
@@ -315,11 +431,23 @@ def preflight_bash(fixture_root: Path) -> tuple[bool, str]:
         )
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return False, f"fixture root is not a git repo: {fixture_root} ({exc})"
-    present = [n for n in _VECTR_GENERATED_ROOT_NAMES if _path_present(fixture_root / n)]
-    if present:
-        return False, (f"purity failure -- vectr-generated file(s)/dir(s) present at fixture "
-                        f"root: {present} ({fixture_root})")
-    return True, f"{fixture_root} OK -- git repo, no vectr-generated files at root"
+    ok, msg = check_guidance_purity(fixture_root)
+    if not ok:
+        return False, msg
+    return True, f"{fixture_root} OK -- git repo, {msg}"
+
+
+def corpus_sha(fixture_root: Path) -> str | None:
+    """The fixture checkout's HEAD sha (read-only), None if unresolvable.
+    Recorded per arm and asserted equal across arms -- two fixtures at
+    different corpus commits would silently compare different code."""
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(fixture_root), "rev-parse", "HEAD"],
+            text=True, timeout=10, stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +496,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: no task file: {tasks_path}", file=sys.stderr)
         return 1
     tasks = load_jsonl(tasks_path)
-    task_ids = [t.strip() for t in args.tasks.split(",")] if args.tasks else sorted(tasks.keys())
+    task_ids = [t.strip() for t in args.tasks.split(",") if t.strip()] if args.tasks else sorted(tasks.keys())
+    unknown = [t for t in task_ids if t not in tasks]
+    if unknown or not task_ids:
+        print(f"ERROR: unknown/empty task id(s) {unknown or args.tasks!r} -- "
+              f"valid ids in {tasks_path.name}: {sorted(tasks.keys())}", file=sys.stderr)
+        return 2
 
     print("=" * 88)
     print(f"Tier-1c two-arm exploration -- corpus={_CORPUS}  arms={requested_arms}")
@@ -382,14 +515,17 @@ def main(argv: list[str] | None = None) -> int:
     # Preflights -- one or more checks per requested arm. A failure is a
     # loudly-printed, non-fatal warning in --dry-run (dry-run's job is to
     # compose + print every invocation regardless); it is fatal in live
-    # mode. vectr arm gets two checks (fixture exists as a session cwd,
-    # daemon healthy); bash arm gets one combined check (fixture exists, is
-    # a git repo, carries no vectr-generated root files -- preflight_bash).
+    # mode. vectr arm gets three checks (fixture exists as a session cwd,
+    # daemon healthy, guidance purity -- its `.vectrignore` exempted as
+    # daemon indexing infrastructure); bash arm gets one combined check
+    # (fixture exists, is a git repo, full guidance purity -- preflight_bash).
     # ------------------------------------------------------------------
     checks_by_arm: dict[str, list[tuple[str, bool, str]]] = {a: [] for a in requested_arms}
     if "vectr" in requested_arms:
         checks_by_arm["vectr"].append(("vectr-fixture", *check_fixture_root_exists(vectr_fixture_root)))
         checks_by_arm["vectr"].append(("vectr-daemon", *preflight_vectr(base)))
+        checks_by_arm["vectr"].append(
+            ("vectr-purity", *check_guidance_purity(vectr_fixture_root, allow=frozenset({".vectrignore"}))))
     if "bash" in requested_arms:
         checks_by_arm["bash"].append(("bash-fixture", *preflight_bash(bash_fixture_root)))
 
@@ -404,6 +540,20 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print(f"ERROR: {label} check failed: {msg}", file=sys.stderr)
                     return 1
+
+    # Corpus commit per arm: recorded in the aggregate and asserted equal
+    # across arms -- fixtures at different corpus commits would silently
+    # compare different code. Fatal in live mode, warning in --dry-run.
+    corpus_sha_by_arm = {a: corpus_sha(fixture_root_by_arm[a]) for a in requested_arms}
+    print(f"corpus sha by arm: {corpus_sha_by_arm}")
+    resolved_shas = {s for s in corpus_sha_by_arm.values() if s}
+    if len(resolved_shas) > 1:
+        msg = f"corpus sha mismatch across arms: {corpus_sha_by_arm}"
+        if args.dry_run:
+            print(f"  [dry-run] WARNING: {msg}")
+        else:
+            print(f"ERROR: {msg}", file=sys.stderr)
+            return 1
 
     sha = subprocess.check_output(
         ["git", "rev-parse", "--short", "HEAD"], cwd=_REPO_ROOT, text=True,
@@ -429,9 +579,6 @@ def main(argv: list[str] | None = None) -> int:
         fixture_root = fixture_root_by_arm[arm]
         mcp_config_path = mcp_config_path_by_arm[arm]
         for tid in task_ids:
-            if tid not in tasks:
-                print(f"[SKIP] {tid}: not in {tasks_path.name}")
-                continue
             task = tasks[tid]
             cmd = compose_command(task, mcp_config_path, args.model, args.max_turns)
             n_composed += 1
@@ -498,6 +645,7 @@ def main(argv: list[str] | None = None) -> int:
 
     aggregate = {
         "corpus": _CORPUS,
+        "corpus_sha_by_arm": corpus_sha_by_arm,
         "vectr_sha": sha,
         "smoke_test": bool(args.smoke),
         "port": args.port,
