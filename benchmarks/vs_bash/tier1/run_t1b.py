@@ -45,8 +45,10 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -142,32 +144,65 @@ def _spawn_env() -> dict:
             if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))}
 
 
+def _hard_kill(proc: subprocess.Popen) -> None:
+    """Kill `proc` AND its whole process group, not just the direct child --
+    `claude` (or a tool it invokes) can leave descendants behind that a plain
+    `proc.kill()` never reaches, which would keep proc.stdout's write end
+    open and the reader loop below blocked forever even after the top-level
+    process is gone. Falls back to a plain `proc.kill()` if the process has
+    no group of its own (e.g. it already exited) or the group kill is
+    refused for any other reason."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def run_claude_session(cmd: list[str], cwd: str, timeout_s: int) -> dict:
     """Spawn one `claude -p ... --output-format stream-json` session and
     collect its event stream, each event stamped with a wall-clock arrival
     time (`_t`) so per-tool-call durations are recoverable without needing a
     multi-message stdin protocol (this driver issues one prompt per session,
     unlike eval_v2.py's persistent multi-turn sessions).
+
+    Hard-timeout via a watchdog thread (UPG-T1-DRIVER-TIMEOUT-STALL): the
+    read loop below (`for raw in proc.stdout`) blocks on the next line and
+    only ever gets a chance to check the clock BETWEEN lines -- if the child
+    goes silent (produces no more stdout at all, e.g. stuck after a
+    rate_limit_event with no further output) that in-loop check never runs
+    again and the loop hangs past `timeout_s` indefinitely (observed live: a
+    T1c session sat 1274s against a 600s timeout). A background thread that
+    is woken early on normal completion, or fires the hard-kill itself once
+    `timeout_s` elapses, catches a silent child the same way it catches a
+    slow-but-still-talking one -- the pipe closes on kill either way, so the
+    blocking read always unblocks.
     """
     events: list[dict] = []
     start = time.time()
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env=_spawn_env(),
+            text=True, env=_spawn_env(), start_new_session=True,
         )
     except FileNotFoundError:
         return {"events": [], "wall_s": 0.0, "returncode": None,
-                "stderr_tail": "claude CLI not found on PATH"}
+                "stderr_tail": "claude CLI not found on PATH", "timed_out": False}
 
-    deadline = start + timeout_s
-    timed_out = False
+    finished = threading.Event()
+    timed_out_flag = {"value": False}
+
+    def _watchdog() -> None:
+        if not finished.wait(timeout_s):
+            timed_out_flag["value"] = True
+            _hard_kill(proc)
+
+    watchdog = threading.Thread(target=_watchdog, daemon=True)
+    watchdog.start()
     try:
         for raw in proc.stdout:
-            if time.time() > deadline:
-                proc.kill()
-                timed_out = True
-                break
             raw = raw.strip()
             if not raw:
                 continue
@@ -178,10 +213,16 @@ def run_claude_session(cmd: list[str], cwd: str, timeout_s: int) -> dict:
             ev["_t"] = time.time()
             events.append(ev)
     finally:
+        finished.set()
+        watchdog.join(timeout=5)
         try:
             proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            _hard_kill(proc)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
 
     wall_s = time.time() - start
     stderr_tail = ""
@@ -191,7 +232,7 @@ def run_claude_session(cmd: list[str], cwd: str, timeout_s: int) -> dict:
         pass
     return {
         "events": events, "wall_s": wall_s, "returncode": proc.returncode,
-        "stderr_tail": stderr_tail, "timed_out": timed_out,
+        "stderr_tail": stderr_tail, "timed_out": timed_out_flag["value"],
     }
 
 
