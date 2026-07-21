@@ -193,3 +193,20 @@ bash side while C02 vectr got it right. All 8 `vectr_search` calls set `n_result
 (3-8, median 5) -- the T1a default-n question is resolved. Conclusion carried into Tier 2:
 adoption configuration (bare MCP vs agent-instruction coaching vs hook injection) is the
 first-class variable; bare MCP alone does not produce usage.
+
+### T2 results (2026-07-22, sentinel-scored, full readout in the results dir)
+
+8 sessions ran (4 pre-registered seeded-bugfix tasks x 2 arms, sonnet, `--max-turns 40`,
+vectr-as-shipped arm = on-disk init artifacts + hooks + `.mcp.json`). Gate = the upstream fix's
+own test, reactor-paired, driver-side. **Bash arm won 4/4 gates vs vectr's 3/4**: the vectr arm's
+one loss (T2-01) was max-turns exhaustion with *no fix written* (41 turns of exploration), while
+bash passed the same task at exactly the 40-turn ceiling; both arms found the correct file on every
+task, zero test-file edits, and one bash session recreated the upstream fix byte-for-byte (T2-02,
+0-byte delta). Adoption with shipped artifacts: vectr invoked in 3/4 sessions (vs 2/6 in T1c with
+coaching stripped) but shallowly -- status + 1-6 searches, zero locate/trace/remember. The run's
+biggest finding is environmental: across all 8 sessions, 25 maven invocations produced **zero
+observed BUILD FAILUREs** -- every invocation was single-module (false-passing against installed
+`~/.m2` artifacts on cross-module tasks) and piped/quieted (masking exit codes), so no agent ever
+had a reliable red/green loop; the reactor-paired driver gate was the only honest referee.
+Conclusion: adoption depth plus missing operational feedback-loop knowledge is the binding
+constraint, not retrieval quality -- direct evidence for hook-injected operational memoization.
