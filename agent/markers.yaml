@@ -1,0 +1,81 @@
+# Versioned, protocol-level outcome-content marker table
+# (memoization-l1-capture-design §2.4). Every entry here is a regex over
+# TOOL OUTPUT (stdout/stderr digests) — R5-sanctioned, the same category as
+# classifying an exit code. This table must stay protocol-level: build
+# tools, test runners, and generic shell errors any codebase might invoke —
+# NEVER a project-specific or corpus-specific pattern. Additions go through
+# review (see agent/outcome.py, which loads and applies this table).
+version: 1
+markers:
+  # --- Maven ---
+  - id: maven.build_failure
+    pattern: "BUILD FAILURE"
+    kind: failure
+  - id: maven.build_success
+    pattern: "BUILD SUCCESS"
+    kind: success
+  - id: maven.tests_failed
+    pattern: "Tests run:.*Failures: [1-9]"
+    kind: failure
+
+  # --- Gradle ---
+  - id: gradle.build_failed
+    pattern: "BUILD FAILED"
+    kind: failure
+  - id: gradle.build_successful
+    pattern: "BUILD SUCCESSFUL"
+    kind: success
+
+  # --- pytest ---
+  - id: pytest.failed
+    pattern: "\\d+ failed"
+    kind: failure
+  - id: pytest.errors
+    pattern: "^ERRORS?$"
+    kind: failure
+  - id: pytest.passed
+    pattern: "\\d+ passed"
+    kind: success
+
+  # --- cargo ---
+  - id: cargo.error
+    pattern: "^error(\\[E\\d+\\])?:"
+    kind: failure
+  - id: cargo.finished
+    pattern: "Finished .* profile"
+    kind: success
+
+  # --- go test ---
+  - id: go_test.fail
+    pattern: "^FAIL"
+    kind: failure
+  - id: go_test.ok
+    pattern: "^ok\\s"
+    kind: success
+
+  # --- jest ---
+  - id: jest.failed
+    pattern: "Tests:.*\\d+ failed"
+    kind: failure
+  - id: jest.passed
+    pattern: "Tests:.*\\d+ passed"
+    kind: success
+
+  # --- make ---
+  - id: make.error
+    pattern: "\\*\\*\\* \\["
+    kind: failure
+
+  # --- generic shell ---
+  - id: shell.command_not_found
+    pattern: "command not found"
+    kind: failure
+  - id: shell.no_such_file
+    pattern: "No such file or directory"
+    kind: failure
+  - id: shell.permission_denied
+    pattern: "Permission denied"
+    kind: failure
+  - id: shell.traceback
+    pattern: "Traceback \\(most recent call last\\)"
+    kind: failure

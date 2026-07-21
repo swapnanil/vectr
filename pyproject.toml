@@ -11,7 +11,7 @@ where = ["."]
 include = ["agent*", "app*", "integrations*"]
 
 [tool.setuptools.package-data]
-agent = ["config.yaml", "data/*.txt", "templates/*"]
+agent = ["config.yaml", "markers.yaml", "data/*.txt", "templates/*"]
 
 [project]
 name = "vectr"

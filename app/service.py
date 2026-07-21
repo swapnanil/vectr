@@ -19,6 +19,11 @@ from agent.config import (
     SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED,
     SEARCH_IDENTIFIER_HINT_NEARMISS_MAX,
     EMBEDDING_DEFAULT_MODEL,
+    EPISODES_DIGEST_HEAD_LINES,
+    EPISODES_DIGEST_MAX_CHARS,
+    EPISODES_DIGEST_TAIL_LINES,
+    EPISODES_MAX_ROWS,
+    EPISODES_TTL_DAYS,
     EVICTION_MAX_TRACKED_SESSIONS,
     HOOKS_COMMIT_NOTE_MAX_FILES,
     HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS,
@@ -271,6 +276,17 @@ class VectrService:
         self._context_store: WorkingContextStore | None = None
         if not self._search_only:
             self._context_store = WorkingContextStore(db_dir)
+
+        # L1 episode capture (memoization-l1-capture-design §2): its own
+        # store/connection to the SAME db file, deliberately never imported
+        # by `agent/searcher.py` or `agent/working_context_store` — episode
+        # rows cannot reach a vectr_search/vectr_recall result by
+        # construction. Same search-only gating as the context store above:
+        # no episodes table writer exists for a workspace that never records one.
+        from agent.episode_store import EpisodeStore
+        self._episode_store: EpisodeStore | None = None
+        if not self._search_only:
+            self._episode_store = EpisodeStore(db_dir)
 
         # Eviction advisor (UPG-EVICT-SESSION-SCOPE): one advisor per calling
         # MCP session, so one session never sees chunks retrieved by another.
@@ -1194,6 +1210,13 @@ class VectrService:
             # background-construction window.
             "fully_ready": self.fully_ready,
             "embedder_ready": self.embedder_ready,
+            # L1 episode capture (memoization-l1-capture-design §2, §7 gate
+            # G2): a plain count, never the rows themselves — status is not a
+            # reader of episode content, only GET /v1/episodes is.
+            "episodes_count": self.count_episodes(),
+            # Best-effort: 0 until the arc detector's own table exists (see
+            # `EpisodeStore.count_arcs_pending_distill`).
+            "arcs_pending_distill": self.count_arcs_pending_distill(),
         }
 
     @staticmethod
@@ -1476,6 +1499,132 @@ class VectrService:
             agent=_COMMIT_NOTE_AGENT_ID,
             provenance="auto",
         )
+
+    # ------------------------------------------------------------------
+    # L1 episode capture (memoization-l1-capture-design §2)
+    # ------------------------------------------------------------------
+
+    def record_episode(
+        self,
+        *,
+        session_id: str | None,
+        ts: float | None,
+        cwd: str,
+        tool: str,
+        command: str | None,
+        description: str | None,
+        file_path: str | None,
+        rc: int | None,
+        is_error: bool,
+        interrupted: bool,
+        stdout_tail: str,
+        stderr_tail: str,
+    ) -> int:
+        """Write ONE deterministic, zero-inference episode row per
+        Bash/Edit/Write/MultiEdit tool call (called only by `POST /v1/episode`,
+        which is called only by `vectr hook post-tool-use`'s detached
+        worker). ALL interpretation — argv normalization, digest
+        canonicalization, outcome derivation — happens HERE, once,
+        server-side, mirroring `record_commit_note`'s own "raw facts
+        client-side, interpretation server-side" split; no embedding ever
+        happens on this path (memoization-l1-capture-design §2.2).
+
+        `description` (Bash tool_input.description, an LLM-authored one-line
+        summary) is accepted for forward compatibility but not persisted —
+        the episode row schema (memoization-l1-capture-design §2 point 5)
+        has no column for it, and no logic here ever branches on its
+        content (R5: no query/prompt-content classification)."""
+        self._require_memory_layer()
+        from agent.episode_canon import canonicalize_digest
+        from agent.episode_normalize import normalize_command
+        from agent.outcome import derive_outcome
+
+        cmd_raw = command or ""
+        if tool == "bash" and cmd_raw:
+            parsed = normalize_command(cmd_raw)
+            verb = parsed["verb"]
+            flags = parsed["flags"]
+            args = parsed["args"]
+            env_delta_names = parsed["env_delta_names"]
+        else:
+            verb, flags, args, env_delta_names = "", [], [], []
+
+        stdout_digest = canonicalize_digest(
+            stdout_tail or "",
+            EPISODES_DIGEST_MAX_CHARS,
+            EPISODES_DIGEST_HEAD_LINES,
+            EPISODES_DIGEST_TAIL_LINES,
+        )
+        stderr_digest = canonicalize_digest(
+            stderr_tail or "",
+            EPISODES_DIGEST_MAX_CHARS,
+            EPISODES_DIGEST_HEAD_LINES,
+            EPISODES_DIGEST_TAIL_LINES,
+        )
+        derived = derive_outcome(
+            rc=rc,
+            is_error=is_error,
+            interrupted=interrupted,
+            stdout_digest=stdout_digest,
+            stderr_digest=stderr_digest,
+        )
+        return self._episode_store.insert(
+            self._workspace_root,
+            session_id=session_id,
+            ts=ts if ts is not None else time.time(),
+            cwd=cwd or "",
+            tool=tool,
+            cmd_raw=cmd_raw,
+            verb=verb,
+            flags=flags,
+            args=args,
+            rc=rc,
+            termination=derived["termination"],
+            outcome=derived["outcome"],
+            stdout_digest=stdout_digest,
+            stderr_digest=stderr_digest,
+            markers_matched=derived["markers_matched"],
+            env_delta_names=env_delta_names,
+            file_path=file_path,
+            max_rows=EPISODES_MAX_ROWS,
+            ttl_days=EPISODES_TTL_DAYS,
+        )
+
+    def list_episodes(
+        self,
+        *,
+        session_id: str | None = None,
+        arc_id: int | None = None,
+        since_ts: float | None = None,
+        until_ts: float | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """The only bulk reader of the `episodes` table besides the
+        aggregate counts in `status()` — deliberately absent from
+        `agent/searcher.py` and `agent/working_context_store`, so nothing on
+        the search/recall path can ever import it."""
+        self._require_memory_layer()
+        return self._episode_store.list_episodes(
+            self._workspace_root,
+            session_id=session_id,
+            arc_id=arc_id,
+            since_ts=since_ts,
+            until_ts=until_ts,
+            limit=limit,
+        )
+
+    def count_episodes(self) -> int:
+        """Search-only mode (or no episode store yet): always 0, never an
+        error — mirrors `count_notes()`'s own contract."""
+        if self._episode_store is None:
+            return 0
+        return self._episode_store.count_episodes(self._workspace_root)
+
+    def count_arcs_pending_distill(self) -> int:
+        """Best-effort — see `EpisodeStore.count_arcs_pending_distill`."""
+        if self._episode_store is None:
+            return 0
+        return self._episode_store.count_arcs_pending_distill(self._workspace_root)
 
     def promote_note(self, note_id: int, to: str) -> bool:
         """Explicit provenance promotion (TRIGGER-ENGINE wave 1,

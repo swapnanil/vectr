@@ -10,6 +10,10 @@ from starlette.concurrency import run_in_threadpool
 from app.models import (
     CommitNoteRequest,
     CommitNoteResponse,
+    EpisodeRecord,
+    EpisodeRequest,
+    EpisodeResponse,
+    EpisodesResponse,
     FetchEntry,
     FetchRequest,
     FetchResponse,
@@ -536,6 +540,69 @@ async def forget(body: ForgetRequest, request: Request) -> dict:
     raise HTTPException(
         status_code=422,
         detail="Pass note_id to delete one note, or all=true to clear every note.",
+    )
+
+
+@router.post("/v1/episode", response_model=EpisodeResponse)
+async def episode(body: EpisodeRequest, request: Request) -> EpisodeResponse:
+    """PostToolUse hook write path (L1 episode capture,
+    memoization-l1-capture-design §2): one deterministic, zero-inference row
+    per Bash/Edit/Write/MultiEdit tool call. Called only by `vectr hook
+    post-tool-use`'s detached worker, never by the editor's LLM directly.
+
+    Quarantined by construction: this route is the ONLY write path into the
+    `episodes` table (via `EpisodeStore`, a module neither `agent/searcher.py`
+    nor `agent/working_context_store` ever imports) — episode rows can never
+    surface in `vectr_search`/`vectr_recall` results or any hook-injected
+    context. No embedding happens here or anywhere on this path."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    episode_id = svc.record_episode(
+        session_id=body.session_id,
+        ts=body.ts,
+        cwd=body.cwd,
+        tool=body.tool,
+        command=body.command,
+        description=body.description,
+        file_path=body.file_path,
+        rc=body.rc,
+        is_error=body.is_error,
+        interrupted=body.interrupted,
+        stdout_tail=body.stdout_tail,
+        stderr_tail=body.stderr_tail,
+    )
+    return EpisodeResponse(
+        episode_id=episode_id,
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.get("/v1/episodes", response_model=EpisodesResponse)
+async def episodes(
+    request: Request,
+    session_id: str | None = Query(default=None),
+    arc_id: int | None = Query(default=None),
+    since_ts: float | None = Query(default=None),
+    until_ts: float | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> EpisodesResponse:
+    """The only bulk reader of the `episodes` table besides the aggregate
+    counts folded into `vectr_status` — deliberately not part of the
+    vectr_search/vectr_recall surface (memoization-l1-capture-design §2.5)."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    rows = svc.list_episodes(
+        session_id=session_id, arc_id=arc_id, since_ts=since_ts, until_ts=until_ts, limit=limit,
+    )
+    return EpisodesResponse(
+        episodes=[EpisodeRecord(**row) for row in rows],
+        processing_ms=int((time.monotonic() - t0) * 1000),
     )
 
 

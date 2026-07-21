@@ -2193,6 +2193,24 @@ class TestInitHooks:
         assert groups[0]["matcher"] == "manual|auto"
         assert groups[0]["hooks"][0]["command"] == "vectr hook pre-compact"
 
+    def test_writes_posttooluse_hook_with_bash_edit_write_multiedit_matcher(self, tmp_path):
+        """L1 episode capture (memoization-l1-capture-design §2): a new
+        PostToolUse group alongside the existing four, matching every tool
+        this lane can turn into an episode row."""
+        m._write_claude_hooks(str(tmp_path))
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        groups = data["hooks"]["PostToolUse"]
+        assert len(groups) == 1
+        assert groups[0]["matcher"] == "Bash|Edit|Write|MultiEdit"
+        assert groups[0]["hooks"][0]["command"] == "vectr hook post-tool-use"
+
+    def test_reset_removes_posttooluse_hook_too(self, tmp_path):
+        settings = tmp_path / ".claude" / "settings.json"
+        m._write_claude_hooks(str(tmp_path))
+        m._remove_vectr_hooks(str(tmp_path))
+        data = json.loads(settings.read_text())
+        assert "PostToolUse" not in data.get("hooks", {})
+
     def test_sessionstart_compact_matcher_enables_post_compact_reinject(self, tmp_path):
         """UPG-9.7's re-inject path = the SessionStart `compact` matcher (UPG-9.4)."""
         m._write_claude_hooks(str(tmp_path))
@@ -3534,10 +3552,12 @@ class TestCodexHooks:
     commands unchanged; Codex's hook schema/events/envelope match Claude
     Code's (research §Q3)."""
 
-    def test_writes_all_four_events(self, tmp_path):
+    def test_writes_all_five_events(self, tmp_path):
         m._write_codex_hooks(str(tmp_path))
         hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
-        assert set(hooks) == {"SessionStart", "UserPromptSubmit", "PreToolUse", "PreCompact"}
+        assert set(hooks) == {
+            "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PreCompact",
+        }
 
     def test_sessionstart_matcher_and_command(self, tmp_path):
         m._write_codex_hooks(str(tmp_path))
@@ -3565,6 +3585,15 @@ class TestCodexHooks:
         hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
         assert hooks["PreCompact"][0]["matcher"] == "manual|auto"
         assert hooks["PreCompact"][0]["hooks"][0]["command"] == "vectr hook pre-compact"
+
+    def test_posttooluse_matcher_and_command(self, tmp_path):
+        """L1 episode capture (memoization-l1-capture-design §2): same event
+        name/matcher/command as the Claude Code writer — Codex's hook schema
+        matches Claude Code's (research §Q3)."""
+        m._write_codex_hooks(str(tmp_path))
+        hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
+        assert hooks["PostToolUse"][0]["matcher"] == "Bash|Edit|Write|MultiEdit"
+        assert hooks["PostToolUse"][0]["hooks"][0]["command"] == "vectr hook post-tool-use"
 
     def test_idempotent_no_duplicate_groups(self, tmp_path):
         m._write_codex_hooks(str(tmp_path))

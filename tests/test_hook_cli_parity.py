@@ -101,6 +101,21 @@ FIXTURES = [
     ("session-start", '{"cwd": "/nowhere"}'),  # no daemon registered
 ]
 
+# Separate fixture list for post-tool-use (memoization-l1-capture-design §2):
+# this branch never calls `_fetch_recall`/`_emit_hook_context` at all — its
+# stdout is unconditionally empty in both implementations — so parity here
+# means "spawns a detached worker with an equivalent payload", not "prints
+# the same recall text". See TestPostToolUseParity below.
+POST_TOOL_USE_FIXTURES = [
+    '{"cwd": "/p", "session_id": "abc-123", "tool_name": "Bash", '
+    '"tool_input": {"command": "git commit -m \\"fix\\"", "description": "commit"}, '
+    '"tool_response": {"stdout": "ok\\n", "stderr": "", "is_error": false, "exit_code": 0}}',
+    '{"cwd": "/p", "tool_name": "Edit", "tool_input": {"file_path": "/p/agent/symbol_graph.py"}, '
+    '"tool_response": {}}',
+    '{"cwd": "/p", "tool_name": "Read", "tool_input": {"file_path": "/p/agent/symbol_graph.py"}}',
+    '{"cwd": "/nowhere", "tool_name": "Bash", "tool_input": {"command": "echo hi"}}',
+]
+
 
 class TestHookCliParity:
     @pytest.mark.parametrize("hook_event,stdin_json", FIXTURES)
@@ -120,3 +135,43 @@ class TestHookCliParity:
         slim_out = capsys.readouterr().out
 
         assert slim_out == canonical_out
+
+
+class TestPostToolUseParity:
+    """post-tool-use (memoization-l1-capture-design §2) never prints
+    anything and never awaits the daemon write — parity here is: (1) both
+    implementations produce empty stdout, always; (2) both spawn a detached
+    worker with the SAME episode payload for the same input, or spawn
+    nothing at all for the same inputs (no daemon / uncaptured tool_name)."""
+
+    @pytest.mark.parametrize("stdin_json", POST_TOOL_USE_FIXTURES)
+    def test_both_implementations_spawn_the_same_payload(
+        self, stdin_json, tmp_path, stub_daemon, monkeypatch, capsys,
+    ):
+        reg = _registry_pointing_at(tmp_path, stub_daemon)
+        monkeypatch.setattr(m, "InstanceRegistry", lambda *a, **k: reg)
+        monkeypatch.setattr(hook_cli, "InstanceRegistry", lambda *a, **k: reg)
+
+        canonical_calls: list[dict] = []
+        slim_calls: list[dict] = []
+
+        def _fake_spawn_canonical(port, payload):
+            canonical_calls.append({"port": port, "payload": payload})
+
+        def _fake_spawn_slim(port, payload):
+            slim_calls.append({"port": port, "payload": payload})
+
+        monkeypatch.setattr(m, "_spawn_episode_worker", _fake_spawn_canonical)
+        monkeypatch.setattr(hook_cli, "_spawn_episode_worker", _fake_spawn_slim)
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_json))
+        m.cmd_hook(argparse.Namespace(hook_event="post-tool-use"))
+        canonical_out = capsys.readouterr().out
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_json))
+        hook_cli.run_hook("post-tool-use")
+        slim_out = capsys.readouterr().out
+
+        assert canonical_out == ""
+        assert slim_out == ""
+        assert canonical_calls == slim_calls

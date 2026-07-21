@@ -295,6 +295,34 @@ HOOKS_POST_COMMIT_TIMEOUT_S : float
     depth behind the hook's own shell-level backgrounding, which is what
     actually keeps `git commit` from ever waiting on it.
 
+EPISODES_MAX_ROWS : int
+    Per-workspace ring-buffer size for the `episodes` table (L1 capture,
+    memoization-l1-capture-design §2) — rows beyond this count (newest kept)
+    are pruned on every write.
+
+EPISODES_TTL_DAYS : float
+    TTL (days) beyond which an episode row is pruned on the next write,
+    independent of the ring buffer above.
+
+EPISODES_CLIENT_TRUNCATE_CHARS : int
+    Hard cap (characters) on the raw stdout/stderr text the PostToolUse
+    hook's detached worker forwards to the daemon, applied client-side
+    before the HTTP POST.
+
+EPISODES_DIGEST_MAX_CHARS : int
+    Server-side digest cap (characters) for stdout_digest/stderr_digest,
+    applied at insert time (agent/episode_canon.py) after the client-side
+    truncation above.
+
+EPISODES_DIGEST_HEAD_LINES : int
+EPISODES_DIGEST_TAIL_LINES : int
+    Lines kept from the start/end of a digest once it must be elided
+    (agent/episode_canon.py).
+
+EPISODES_POST_TIMEOUT_S : float
+    Hard timeout (seconds) the PostToolUse hook's detached worker holds its
+    own POST /v1/episode call to, client-side.
+
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT : float
 STRATEGY_DEFAULT_BM25_WEIGHT : float
     Fallback hybrid-search weights used before the first index-time codebase
@@ -787,6 +815,20 @@ HOOKS_MIN_SIMILARITY: float = float(_hooks_cfg["min_similarity"])
 HOOKS_COMMIT_NOTE_MAX_FILES: int = int(_hooks_cfg["commit_note_max_files"])
 HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS: int = int(_hooks_cfg["commit_note_max_subject_chars"])
 HOOKS_POST_COMMIT_TIMEOUT_S: float = float(_hooks_cfg["post_commit_timeout_s"])
+
+# ---------------------------------------------------------------------------
+# L1 episode capture (memoization-l1-capture-design §2)
+# ---------------------------------------------------------------------------
+
+_episodes_cfg: dict[str, Any] = _cfg["episodes"]
+
+EPISODES_MAX_ROWS: int = int(_episodes_cfg["max_rows"])
+EPISODES_TTL_DAYS: float = float(_episodes_cfg["ttl_days"])
+EPISODES_CLIENT_TRUNCATE_CHARS: int = int(_episodes_cfg["client_truncate_chars"])
+EPISODES_DIGEST_MAX_CHARS: int = int(_episodes_cfg["digest_max_chars"])
+EPISODES_DIGEST_HEAD_LINES: int = int(_episodes_cfg["digest_head_lines"])
+EPISODES_DIGEST_TAIL_LINES: int = int(_episodes_cfg["digest_tail_lines"])
+EPISODES_POST_TIMEOUT_S: float = float(_episodes_cfg["post_timeout_s"])
 
 # ---------------------------------------------------------------------------
 # ingest_traces unresolved-caller/callee warning cap (UPG-7.3)

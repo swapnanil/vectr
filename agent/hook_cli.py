@@ -2,14 +2,15 @@
 IMPORT-TAX).
 
 A hook fires on every SessionStart / UserPromptSubmit / PreToolUse /
-PreCompact event in an editor session — of every vectr entry point, this is
-the one invoked most often per turn, and it runs as a fresh subprocess each
-time. Its own import cost is pure per-event latency the harness (and the
-person waiting on it) pays before the hook can even read stdin. The main
-CLI module (`main.py`) pulls in `dotenv`, the full `agent.config` surface
-(every tunable across the whole product, not just the one float a hook
-needs), argparse's subcommand tree, and (lazily, per network call) `httpx`
-— together well over the <20ms budget this path is held to.
+PostToolUse / PreCompact event in an editor session — of every vectr entry
+point, this is the one invoked most often per turn, and it runs as a fresh
+subprocess each time. Its own import cost is pure per-event latency the
+harness (and the person waiting on it) pays before the hook can even read
+stdin. The main CLI module (`main.py`) pulls in `dotenv`, the full
+`agent.config` surface (every tunable across the whole product, not just the
+one float a hook needs), argparse's subcommand tree, and (lazily, per
+network call) `httpx` — together well over the <20ms budget this path is
+held to.
 
 This <20ms budget is the subprocess's own Python IMPORT cost only (UPG-HOOK-
 SUBPROCESS-IMPORT-TAX cut it from ~118ms to ~10ms; independently re-measured
@@ -20,7 +21,7 @@ review). Trimming this path's import tax removed the fixed per-turn overhead
 the subprocess itself added — it does not, and cannot, make the round trip to
 the daemon sub-20ms.
 
-This module reimplements exactly the 4 hook branches `main.cmd_hook`
+This module reimplements exactly the 5 hook branches `main.cmd_hook`
 defines — same request shapes, same `hookSpecificOutput` envelope, same
 "never raise" resilience contract — using only the standard library plus
 `agent.instance_registry` (itself stdlib-only) to resolve which daemon
@@ -31,6 +32,13 @@ input and diffs their captured stdout/stderr/exit-code byte-for-byte,
 rather than by sharing one module-level implementation — sharing a single
 implementation across both the always-imported `main.py` and this
 stdlib-only path would re-import everything this module exists to avoid.
+
+The `post-tool-use` branch (memoization-l1-capture-design §2) never touches
+`agent.config` or `httpx` in THIS process at all — it writes the raw episode
+facts to a private temp file and hands it to a detached
+`agent/episode_worker.py` child, which pays the `agent.config` import cost
+(and does the actual HTTP POST) entirely on its own time, decoupled from
+this subprocess's budget.
 
 The one tunable the slower path used to read from agent/config.yaml
 (`hooks.min_similarity`, the per-turn recall relevance floor) is not read
@@ -55,7 +63,9 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -203,12 +213,80 @@ def _post_trigger_reset(port: int, session_id: str) -> bool:
     return _post_json(port, "/v1/trigger/reset", {"session_id": session_id}) is not None
 
 
+def _build_episode_payload(event: dict) -> dict | None:
+    """Mirrors `main._build_episode_payload` exactly — see its docstring for
+    the full field-by-field rationale (G0 defensive shape, path-only for
+    Edit/Write/MultiEdit, raw un-truncated stdout/stderr)."""
+    tool_name = (event.get("tool_name") or "").strip()
+    tool_input = event.get("tool_input") or {}
+    tool_response = event.get("tool_response") or {}
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    if not isinstance(tool_response, dict):
+        tool_response = {}
+
+    if tool_name == "Bash":
+        tool = "bash"
+        command = tool_input.get("command")
+        description = tool_input.get("description")
+        file_path = None
+    elif tool_name in ("Edit", "Write", "MultiEdit"):
+        tool = "edit"
+        command = None
+        description = None
+        file_path = tool_input.get("file_path")
+    else:
+        return None
+
+    def _text(value: object) -> str:
+        if isinstance(value, str):
+            return value
+        return "" if value is None else str(value)
+
+    rc = tool_response.get("exit_code", tool_response.get("returncode"))
+    return {
+        "session_id": (event.get("session_id") or None),
+        "cwd": event.get("cwd") or "",
+        "tool": tool,
+        "command": command,
+        "description": description,
+        "file_path": file_path,
+        "rc": rc if isinstance(rc, int) else None,
+        "is_error": bool(tool_response.get("is_error", False)),
+        "interrupted": bool(tool_response.get("interrupted", False)),
+        "stdout_tail": _text(tool_response.get("stdout")),
+        "stderr_tail": _text(tool_response.get("stderr")),
+    }
+
+
+def _spawn_episode_worker(port: int, payload: dict) -> None:
+    """Mirrors `main._spawn_episode_worker` exactly — see its docstring for
+    why the payload goes through a temp file (never a blocking pipe write)
+    and why truncation/POSTing happens entirely in the detached
+    `agent/episode_worker.py` child, never in this process."""
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix="vectr-episode-", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"port": port, "payload": payload}, f)
+        subprocess.Popen(
+            [sys.executable, "-m", "agent.episode_worker", tmp_path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
 def run_hook(hook_event: str) -> None:
     """Same behavior as `main.cmd_hook(argparse.Namespace(hook_event=...))`
-    for the 4 declared hook events (session-start / user-prompt-submit /
-    pre-tool-use / pre-compact) — never raises, always "exits" (returns)
-    cleanly regardless of daemon state. See `main.cmd_hook`'s docstring for
-    the full event → engine-event → REST-call mapping this reimplements."""
+    for the 5 declared hook events (session-start / user-prompt-submit /
+    pre-tool-use / post-tool-use / pre-compact) — never raises, always
+    "exits" (returns) cleanly regardless of daemon state. See
+    `main.cmd_hook`'s docstring for the full event → engine-event →
+    REST-call mapping this reimplements."""
     try:
         event = _read_hook_stdin()
         cwd = event.get("cwd") or os.getcwd()
@@ -259,6 +337,13 @@ def run_hook(hook_event: str) -> None:
                 payload["session_id"] = session_id
             notes = _fetch_recall(port, payload)
             _emit_hook_context("PreToolUse", notes)
+
+        elif hook_event == "post-tool-use":
+            # L1 episode capture (memoization-l1-capture-design §2): never
+            # emits a hookSpecificOutput envelope, never awaits the write.
+            payload = _build_episode_payload(event)
+            if payload is not None:
+                _spawn_episode_worker(port, payload)
 
         elif hook_event == "pre-compact":
             trigger = (event.get("trigger") or "manual").strip() or "manual"

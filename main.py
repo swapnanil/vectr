@@ -6,7 +6,7 @@ import sys
 # UPG-HOOK-SUBPROCESS-IMPORT-TAX — `vectr hook <event>` is the highest-
 # frequency invocation of this CLI: the editor harness spawns a fresh
 # subprocess for it on every SessionStart/UserPromptSubmit/PreToolUse/
-# PreCompact, so this module's own import cost (dotenv, the full
+# PostToolUse/PreCompact, so this module's own import cost (dotenv, the full
 # agent.config surface, argparse's subcommand tree) is pure per-turn latency
 # paid before a single byte of stdin is even read. Short-circuit to the
 # stdlib-only implementation in agent/hook_cli.py BEFORE any of those heavy
@@ -16,9 +16,18 @@ import sys
 # unrecognized event) falls through unchanged to the normal argparse-driven
 # path below, which already handles it — this is a fast path alongside the
 # existing one, not a replacement for its validation. `agent.hook_cli`
-# reimplements the same 4 branches (see its module docstring for why this is
+# reimplements the same branches (see its module docstring for why this is
 # a second implementation, parity-tested against this file's `cmd_hook`,
 # rather than a shared import).
+#
+# `post-tool-use` (memoization-l1-capture-design §2) belongs in this tuple
+# for the same reason as the other four: it fires on the harness's
+# synchronous turn loop (one PostToolUse per Bash/Edit/Write/MultiEdit call —
+# the highest-frequency event of all), and its own foreground budget (≤50ms
+# p95, spec §7 gate G2) cannot be met while paying this module's argparse
+# import cost. Unlike those four, its own handler does no HTTP I/O inline —
+# it only spawns a detached worker — but the import tax alone already
+# dominates the budget, so the fast path still matters here.
 #
 # `post-commit` (UPG-COMMIT-MEMORY-HOOK) is deliberately NOT in this tuple —
 # it is fired by `git`, not the editor harness's synchronous turn loop, and
@@ -27,7 +36,9 @@ import sys
 # `git commit` returns before this module's import cost is even paid. The
 # fast path exists to shave per-turn latency off events that block the
 # harness; a backgrounded, once-per-commit event has nothing to shave.
-_HOOK_EVENTS = ("session-start", "user-prompt-submit", "pre-tool-use", "pre-compact")
+_HOOK_EVENTS = (
+    "session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "pre-compact",
+)
 if len(sys.argv) == 3 and sys.argv[1] == "hook" and sys.argv[2] in _HOOK_EVENTS:
     from agent.hook_cli import run_hook
     run_hook(sys.argv[2])
@@ -840,6 +851,13 @@ def _write_claude_hooks(workspace: str) -> None:
     # it's about to change it.
     _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|Read",
                         command="vectr hook pre-tool-use")
+    # L1 episode capture (memoization-l1-capture-design §2) — PostToolUse
+    # (Bash|Edit|Write|MultiEdit): record one deterministic episode row per
+    # tool call. Foreground work is a stdin read + a detached-worker spawn
+    # only (see cmd_hook's "post-tool-use" branch) — never blocks the turn
+    # loop on the actual HTTP write.
+    _install_hook_group(hooks, "PostToolUse", matcher="Bash|Edit|Write|MultiEdit",
+                        command="vectr hook post-tool-use")
     # UPG-9.7 — PreCompact (manual|auto): snapshot working memory before /compact replaces context.
     _install_hook_group(hooks, "PreCompact", matcher="manual|auto",
                         command="vectr hook pre-compact")
@@ -881,6 +899,11 @@ def _write_codex_hooks(workspace: str) -> None:
     _install_hook_group(hooks, "UserPromptSubmit", command="vectr hook user-prompt-submit")
     _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|apply_patch",
                         command="vectr hook pre-tool-use")
+    # L1 episode capture (memoization-l1-capture-design §2) — see
+    # _write_claude_hooks's PostToolUse group for the rationale; same event,
+    # matcher, and command apply unchanged under Codex's identical schema.
+    _install_hook_group(hooks, "PostToolUse", matcher="Bash|Edit|Write|MultiEdit",
+                        command="vectr hook post-tool-use")
     _install_hook_group(hooks, "PreCompact", matcher="manual|auto",
                         command="vectr hook pre-compact")
 
@@ -2060,6 +2083,113 @@ def _read_hook_stdin() -> dict:
         return {}
 
 
+def _build_episode_payload(event: dict) -> dict | None:
+    """Build the `POST /v1/episode` payload from a raw PostToolUse hook JSON
+    event (memoization-l1-capture-design §2), or None when `tool_name` isn't
+    one this lane captures.
+
+    Every field is read defensively via `.get()` with no assumed shape: the
+    real PostToolUse payload could not be live-captured in this environment
+    (spec §7 gate G0 — no editor CLI binary was reachable to run one), so
+    every field is optional and an absent/differently-shaped field silently
+    yields None/"" rather than raising. Only `tool_input.command` +
+    `tool_input.description` (Bash) or `tool_input.file_path` (Edit/Write/
+    MultiEdit — the path only, never file content) are forwarded from
+    tool_input; only stdout/stderr text, `is_error`, `interrupted`, and an
+    exit code (whichever key the editor happens to use) are forwarded from
+    tool_response. stdout/stderr are forwarded RAW here — the client-side
+    truncation to a config cap happens in `agent/episode_worker.py`
+    immediately before it POSTs (see `_spawn_episode_worker`'s docstring for
+    why truncation lives there, not in this foreground function). All
+    further interpretation (argv normalization, outcome derivation, digest
+    canonicalization) happens server-side in `VectrService.record_episode` —
+    this only gathers raw facts, mirroring `_git_fact`'s own division of
+    labor for the post-commit hook.
+    """
+    tool_name = (event.get("tool_name") or "").strip()
+    tool_input = event.get("tool_input") or {}
+    tool_response = event.get("tool_response") or {}
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    if not isinstance(tool_response, dict):
+        tool_response = {}
+
+    if tool_name == "Bash":
+        tool = "bash"
+        command = tool_input.get("command")
+        description = tool_input.get("description")
+        file_path = None
+    elif tool_name in ("Edit", "Write", "MultiEdit"):
+        tool = "edit"
+        command = None
+        description = None
+        file_path = tool_input.get("file_path")
+    else:
+        return None  # a tool_name this lane does not capture episodes for
+
+    def _text(value: object) -> str:
+        if isinstance(value, str):
+            return value
+        return "" if value is None else str(value)
+
+    rc = tool_response.get("exit_code", tool_response.get("returncode"))
+    return {
+        "session_id": (event.get("session_id") or None),
+        "cwd": event.get("cwd") or "",
+        "tool": tool,
+        "command": command,
+        "description": description,
+        "file_path": file_path,
+        "rc": rc if isinstance(rc, int) else None,
+        "is_error": bool(tool_response.get("is_error", False)),
+        "interrupted": bool(tool_response.get("interrupted", False)),
+        "stdout_tail": _text(tool_response.get("stdout")),
+        "stderr_tail": _text(tool_response.get("stderr")),
+    }
+
+
+def _spawn_episode_worker(port: int, payload: dict) -> None:
+    """Hand `payload` to a fully detached child process
+    (`agent/episode_worker.py`) that truncates the stdout/stderr text to the
+    config cap and performs the `POST /v1/episode` HTTP call — the
+    PostToolUse hook's own foreground budget is ≤50ms p95 (spec §7 gate G2),
+    which neither an HTTP round-trip nor importing the full `agent.config`
+    surface (measured ~50–90ms alone, see agent/hook_cli.py's own module
+    docstring) can reliably meet.
+
+    The payload is written to a private temp file rather than piped to the
+    child's stdin: a raw tool-output capture can be large (e.g. a verbose
+    test-suite log), and a pipe write from this process would BLOCK once the
+    OS pipe buffer fills if the child hasn't started reading yet — which it
+    can't, until its own `agent.config` import finishes. A local temp-file
+    write is a fast, non-blocking disk write regardless of payload size, so
+    this process can hand off and return immediately. The child deletes the
+    file after reading it.
+
+    Mirrors `_do_start`'s Popen-detached idiom: unlike the git post-commit
+    hook (which backgrounds itself at the shell level via its own generated
+    wrapper script), PostToolUse's `command` field is invoked directly by the
+    editor harness with no custom shell available, so detachment happens
+    entirely inside this process via `start_new_session=True` — the child
+    outlives this one's exit. Never raises: a spawn failure silently drops
+    this one episode rather than breaking the tool call it's reporting on."""
+    try:
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(prefix="vectr-episode-", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"port": port, "payload": payload}, f)
+        subprocess.Popen(
+            [sys.executable, "-m", "agent.episode_worker", tmp_path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(Path(__file__).resolve().parent),
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
 def _emit_hook_context(event_name: str, text: str) -> None:
     """Print the Claude Code additionalContext envelope — only when there's text.
 
@@ -2121,6 +2251,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
     | user-prompt-submit| —                              | prompt-submit                       | POST /v1/recall {query, ..., events: [prompt-submit], session_id, hook_event} |
     | pre-tool-use      | file-bearing tool (Edit/Write/Read) | pre-edit + that file's path   | POST /v1/recall {file_path, kind: gotcha, session_id, hook_event} |
     | pre-tool-use      | command-running tool           | pre-run                             | no live caller this wave — PreToolUse's matcher (`_write_claude_hooks`) only reaches Edit/Write/Read, so a command-running tool call never reaches this hook yet |
+    | post-tool-use     | Bash/Edit/Write/MultiEdit      | n/a — a WRITE path (L1 episode capture, §2), not a recall/trigger event | POST /v1/episode {session_id, cwd, tool, command/file_path, ...}, via a DETACHED worker (never awaited here) |
     | pre-compact       | any `trigger`                  | ledger reset (§3)                   | POST /v1/snapshot (unchanged) + POST /v1/trigger/reset {session_id} |
     | post-commit       | n/a (fired by `git`, not the editor harness) | n/a — a WRITE path, not a recall/trigger event | POST /v1/commit-note {sha, subject, branch, files} |
 
@@ -2134,7 +2265,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
     moment maps to them — never an error, bm2-design-skeleton.md §2).
 
     `post-commit` (UPG-COMMIT-MEMORY-HOOK) is fundamentally different from
-    the four events above: it is invoked directly by `git` (installed by
+    the five events above: it is invoked directly by `git` (installed by
     `_write_git_post_commit_hook`, not `_write_claude_hooks`/
     `_write_codex_hooks`), carries no editor-harness JSON on stdin (`event`
     degrades to `{}`, so `cwd` falls through to `os.getcwd()` — correct,
@@ -2145,7 +2276,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
     `_HOOK_EVENTS` comment): the shell wrapper backgrounds this whole
     invocation (`vectr hook post-commit </dev/null >/dev/null 2>&1 &`), so
     `git commit` returns before this process's imports even begin — the
-    fast path's ~100ms import-cost saving exists for the four hooks above,
+    fast path's ~100ms import-cost saving exists for the five hooks above,
     which block the editor's turn loop synchronously; it buys nothing here.
     """
     try:
@@ -2230,6 +2361,17 @@ def cmd_hook(args: argparse.Namespace) -> None:
                 payload["session_id"] = session_id
             notes = _fetch_recall(port, payload)
             _emit_hook_context("PreToolUse", notes)
+
+        elif args.hook_event == "post-tool-use":
+            # L1 episode capture (memoization-l1-capture-design §2): never
+            # emits a hookSpecificOutput envelope (nothing to inject) and
+            # never awaits the actual write — build the payload, hand it to
+            # a detached worker, return. A tool_name this lane doesn't
+            # capture (anything but Bash/Edit/Write/MultiEdit) yields None
+            # and is a silent no-op.
+            payload = _build_episode_payload(event)
+            if payload is not None:
+                _spawn_episode_worker(port, payload)
 
         elif args.hook_event == "pre-compact":
             # Seal working memory before /compact replaces the conversation (UPG-9.7).

@@ -1329,6 +1329,45 @@ hooks:
   # open indefinitely.
   post_commit_timeout_s: 2.0
 
+episodes:
+  # L1 episode capture (memoization-l1-capture-design §2): PostToolUse hook
+  # -> POST /v1/episode -> the `episodes` table, quarantined from search and
+  # working-memory recall. Per-workspace ring buffer: rows beyond this count
+  # (newest kept) are pruned on every write, bounding table size regardless
+  # of session length.
+  max_rows: 5000
+
+  # TTL (days) beyond which an episode row is pruned on the next write,
+  # independent of the ring buffer above — bounds how long a quiet
+  # workspace's old episodes linger.
+  ttl_days: 30
+
+  # Hard cap (characters) on the RAW stdout/stderr text the PostToolUse
+  # hook's detached worker forwards to the daemon, applied client-side
+  # before the HTTP POST — bounds the payload handed to the detached child
+  # process regardless of how much a tool call printed.
+  client_truncate_chars: 8000
+
+  # Server-side digest cap (characters) for stdout_digest/stderr_digest —
+  # applied AFTER the client-side truncation above, at insert time
+  # (agent/episode_canon.py). Smaller than client_truncate_chars: the
+  # digest is what a human/L3 distiller actually reads back via
+  # GET /v1/episodes, not a full-fidelity log.
+  digest_max_chars: 2000
+
+  # Lines kept from the start/end of a digest once it must be elided
+  # (agent/episode_canon.py) — the dropped middle is replaced by a
+  # hash-tagged marker rather than silently disappearing.
+  digest_head_lines: 20
+  digest_tail_lines: 20
+
+  # Hard timeout (seconds) the PostToolUse hook's detached worker holds its
+  # own POST /v1/episode call to, client-side — mirrors
+  # hooks.post_commit_timeout_s's rationale: the worker is already detached
+  # from the editor's turn loop (so a slow daemon never blocks the agent),
+  # but a runaway background process must still bound itself.
+  post_timeout_s: 2.0
+
 embedding:
   # Default local (sentence-transformers) embedding model for the L3 content
   # index (UPG-EMBEDDER-SWAP-GRANITE). Dimension-compatible drop-in for the

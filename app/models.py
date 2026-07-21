@@ -628,6 +628,71 @@ class TriggerResetResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# L1 episode capture (memoization-l1-capture-design §2)
+# ---------------------------------------------------------------------------
+
+class EpisodeRequest(BaseModel):
+    """PostToolUse hook's own write path — called only by `vectr hook
+    post-tool-use` (main.cmd_hook / agent.hook_cli.run_hook)'s detached
+    worker, never by the editor's LLM directly. Every field optional except
+    `tool`: the hook forwards whatever the editor's PostToolUse payload
+    actually contains, defensively (payload shape across editor versions is
+    not fully known — see the L1 capture design spec's G0 gate). ALL
+    interpretation (normalization, outcome derivation, digest
+    canonicalization) happens server-side in `VectrService.record_episode`,
+    the single source of truth for the resulting row's shape — mirroring
+    `CommitNoteRequest`'s "gather raw facts client-side, interpret
+    server-side" split."""
+
+    session_id: str | None = Field(default=None)
+    ts: float | None = Field(default=None, description="Client-observed event time; server stamps its own if omitted")
+    cwd: str = Field(default="")
+    tool: str = Field(..., min_length=1, description="'bash' or 'edit'")
+    command: str | None = Field(default=None, description="tool_input.command (Bash only)")
+    description: str | None = Field(default=None, description="tool_input.description (Bash only)")
+    file_path: str | None = Field(default=None, description="tool_input.file_path (Edit/Write/MultiEdit only) — path only, never content")
+    rc: int | None = Field(default=None, description="Exit code, if the editor's tool_response ever includes one")
+    is_error: bool = Field(default=False)
+    interrupted: bool = Field(default=False)
+    stdout_tail: str = Field(default="", description="Client-truncated stdout text")
+    stderr_tail: str = Field(default="", description="Client-truncated stderr text")
+
+
+class EpisodeResponse(BaseModel):
+    episode_id: int
+    processing_ms: int
+
+
+class EpisodeRecord(BaseModel):
+    """One row as returned by GET /v1/episodes — the only bulk reader of the
+    `episodes` table besides the aggregate counts in `vectr_status`."""
+
+    id: int
+    session_id: str | None = None
+    ts: float
+    cwd: str
+    tool: str
+    cmd_raw: str
+    verb: str
+    flags: list[str]
+    args: list[dict]
+    rc: int | None = None
+    termination: str
+    outcome: str
+    stdout_digest: str
+    stderr_digest: str
+    markers_matched: list[str]
+    env_delta_names: list[str]
+    file_path: str | None = None
+    arc_id: int | None = None
+
+
+class EpisodesResponse(BaseModel):
+    episodes: list[EpisodeRecord]
+    processing_ms: int
+
+
+# ---------------------------------------------------------------------------
 # Symbol graph
 # ---------------------------------------------------------------------------
 
