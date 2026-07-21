@@ -140,3 +140,60 @@ behavior (see `tests/test_cmdnorm.py::TestClassifyArg`,
 through_pending_failures`,
 `test_tie_break_prefers_most_recent_equally_similar_failure`, and
 `TestSimilarity::test_different_arity_args_falls_back_to_class_jaccard`).
+
+## Adversarial review 2026-07-22 (bcbcb50) — five further fixes, re-run confirms 0 arcs unchanged
+
+An Opus review of the initial landing found five additional defects, all
+in constructed corner cases the two corpora above never happen to exercise
+(neither corpus has multi-stage pipelines, wrapper-prefixed commands,
+cross-cwd retries, empty-verb episodes, or missing timestamps). The design
+spec (`memoization-l1-capture-design.md`) was amended (`e736c24`) to
+resolve the two genuine spec ambiguities (cwd's role, pipeline collapse)
+before these were coded:
+
+1. **`app/arcs.py` pending-bucket key** — was verb-family alone; a failure
+   in one cwd and an identical/similar-scoring success in a *different*
+   cwd could falsely bind into an arc (unrelated repos' builds). Spec
+   ruling: cwd is a bucket key, not a mutation axis (it cannot differ
+   within a bucket by construction) — `mutation_diff`'s `cwd` axis is
+   removed accordingly. Bucket key is now `(verb-family, cwd)`.
+2. **`app/cmdnorm.py` pipeline-stage collapse** — collapsed unconditionally
+   to pipeline stage 0, so `cat data.csv | python train.py` and `cat
+   data.csv | python eval.py` normalized identically. Fixed: only a
+   *trailing* run of display-only stages (`cat`/`tail`/`head`) is dropped;
+   any remaining non-trailing stage's tokens stay in the comparison set.
+3. **`app/cmdnorm.py` wrapper-prefix stripping** — `timeout N`, `env
+   VAR=...`, `nice [-n N]`, `nohup`, `stdbuf -xX` were left as part of the
+   verb, so `timeout 60 curl X` and `timeout 90 curl X` scored as a
+   distinct mutation instead of an identical retry. Fixed: these five
+   wrapper prefixes are stripped iteratively before verb extraction (config
+   keys `arc_detection.normalization.wrapper_prefixes` / `nice_niceness_
+   flag`); `xargs` is deliberately never stripped (its argument is a
+   command template, not the command that ran).
+4. **`app/arcs.py` empty-verb handling** — an episode normalizing to an
+   empty verb (`2>&1` alone, an env-assignment-only command) carries no
+   comparable structure but was still reaching the pending/match logic.
+   Fixed: treated like outcome `unknown` in `ArcDetector.observe` — never
+   enters pending, never resolves one.
+5. **`app/arcs.py` `observe()` timestamp robustness** — `_parse_ts(episode
+   ["ts"])` raised on a missing key or an explicit `None` value. Fixed:
+   `_resolve_ts` falls back to a small monotonic step past the session's
+   own last-seen ts (config key `arc_detection.window.
+   ts_monotonic_fallback_seconds`) instead of raising.
+
+All five are config/logic fixes only — no numeric default from §3.2
+(mutation band, similarity weights, soft-match ratio) changed. 19 new
+unit tests were added across `tests/test_cmdnorm.py` (pipeline collapse,
+wrapper prefixes, empty verb) and `tests/test_arcs.py` (cross-cwd
+isolation for both the identical-command and mutation-band paths,
+multi-stage-pipeline edit-mediation, wrapper-prefix flaky suppression,
+empty-verb plumbing, missing/`None` `ts`).
+
+**Re-ran `benchmarks/arc_replay.py` over the identical two corpora after
+all five fixes: result unchanged — `TOTAL arcs across 20 sessions: 0`,
+identical per-session bash/edit/failure counts to the table above.** None
+of the five findings are exercised by this corpus (confirmed above: no
+pipelines, no wrapper prefixes, single cwd throughout, no empty-verb
+episodes, real timestamps on every episode) — regression coverage for all
+five lives in the unit suite, per the same evidence-gate reasoning as the
+original three fixes.

@@ -132,6 +132,94 @@ class TestNormalizeCommandDecoration:
         assert n.verb == "make build"
 
 
+class TestNormalizeCommandPipelineCollapse:
+    """Reviewer finding F2 (2026-07-22): only a TRAILING run of
+    display-only stages (cat/tail/head) may be dropped from a pipeline; a
+    genuine multi-stage pipeline must keep every non-trailing stage's
+    tokens in the comparison set."""
+
+    def test_multistage_pipeline_downstream_tokens_kept_and_differentiate(self) -> None:
+        a = normalize_command("cat data.csv | python train.py")
+        b = normalize_command("cat data.csv | python eval.py")
+        assert a != b
+        assert a.args != b.args
+        assert "train.py" in a.args
+        assert "eval.py" in b.args
+
+    def test_multistage_pipeline_matching_downstream_stage_is_identical(self) -> None:
+        a = normalize_command("cat data.csv | python train.py")
+        b = normalize_command("cat data.csv | python train.py")
+        assert a == b
+
+    def test_trailing_display_only_chain_all_dropped(self) -> None:
+        a = normalize_command("mvn test | tail -5 | cat")
+        b = normalize_command("mvn test")
+        assert a.verb == b.verb
+        assert a.args == b.args
+
+    def test_non_trailing_display_verb_not_dropped(self) -> None:
+        # `cat` is only display-only when it is the LAST stage; as the
+        # first (primary) stage of a real pipeline it is the actual verb.
+        n = normalize_command("cat data.csv | python train.py")
+        assert n.verb == "cat"
+
+
+class TestNormalizeCommandWrapperPrefixes:
+    """Reviewer finding F3 (2026-07-22): transparent wrapper prefixes are
+    stripped iteratively before verb extraction so the wrapped command,
+    not the wrapper, is normalized."""
+
+    def test_timeout_duration_value_stripped_before_verb(self) -> None:
+        a = normalize_command("timeout 60 curl https://api.example.com/x")
+        b = normalize_command("timeout 90 curl https://api.example.com/x")
+        assert (a.verb, a.flags, a.args) == (b.verb, b.flags, b.args)
+        assert a.verb == "curl"
+        assert a.args == ("https://api.example.com/x",)
+
+    def test_env_wrapper_and_bare_assignment_both_captured(self) -> None:
+        n = normalize_command("env FOO=bar npm test")
+        assert n.verb == "npm test"
+        assert n.env_prefix_names == ("FOO",)
+
+    def test_nice_with_niceness_flag_stripped(self) -> None:
+        n = normalize_command("nice -n 10 make build")
+        assert n.verb == "make build"
+
+    def test_bare_nice_stripped(self) -> None:
+        n = normalize_command("nice make build")
+        assert n.verb == "make build"
+
+    def test_nohup_stripped(self) -> None:
+        n = normalize_command("nohup python script.py")
+        assert n.verb == "python"
+        assert n.args == ("script.py",)
+
+    def test_stdbuf_dash_flags_stripped(self) -> None:
+        n = normalize_command("stdbuf -oL python script.py")
+        assert n.verb == "python"
+        assert n.args == ("script.py",)
+
+    def test_xargs_is_never_stripped(self) -> None:
+        # xargs's argument is a command TEMPLATE, not the command that
+        # actually ran — stripping it would misattribute the invocation.
+        n = normalize_command("xargs -I{} rm {}")
+        assert n.verb == "xargs"
+
+
+class TestNormalizeCommandEmptyVerb:
+    """Reviewer finding F4 (2026-07-22): a command that normalizes to an
+    empty verb carries no comparable structure."""
+
+    def test_bare_stderr_merge_token_is_empty_verb(self) -> None:
+        n = normalize_command("2>&1")
+        assert n.verb == ""
+
+    def test_env_assignment_only_is_empty_verb(self) -> None:
+        n = normalize_command("FOO=bar")
+        assert n.verb == ""
+        assert n.env_prefix_names == ("FOO",)
+
+
 class TestNormalizeCommandArgs:
     def test_path_arg_classified(self) -> None:
         n = normalize_command("ls -la /tmp")

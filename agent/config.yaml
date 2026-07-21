@@ -1563,6 +1563,43 @@ arc_detection:
     # from runaway-absorbing their arguments into the verb. Tune only
     # against the G1 replay corpus (benchmarks/arc_replay.py).
     max_verb_tokens: 3
+    # Transparent wrapper prefixes (review 2026-07-22, §3.1) stripped
+    # iteratively from the front of the primary pipeline stage BEFORE verb
+    # extraction, so the WRAPPED command — not the wrapper — is normalized
+    # as the verb (`timeout 60 curl X` and `timeout 90 curl X` must
+    # normalize identically so flaky suppression can compare them). Value
+    # names how many/which of the wrapper's OWN following tokens it
+    # consumes: `bare` (the wrapper name only, e.g. `nohup`), `fixed_arg`
+    # (name + exactly one following token, e.g. `timeout N`),
+    # `nice_niceness` (name + an optional `-n N`), `dash_flags` (name + any
+    # immediately-following dash-prefixed flags, e.g. `stdbuf -oL -eL`),
+    # `env_assignments` (name only — the `VAR=value` tokens that follow it
+    # are already consumed by the bare env-assignment-prefix handling).
+    # `xargs` is deliberately absent: its argument is a command TEMPLATE,
+    # not the command that actually ran, so stripping it would misattribute
+    # the real invocation.
+    wrapper_prefixes:
+      timeout: fixed_arg
+      env: env_assignments
+      nice: nice_niceness
+      nohup: bare
+      stdbuf: dash_flags
+    # The niceness-value flag recognized by the `nice_niceness` wrapper rule
+    # above.
+    nice_niceness_flag: '-n'
+    # Pipeline stages whose ONLY effect is reshaping output for a human to
+    # read (never changing what actually ran) — a TRAILING run of these
+    # stages is dropped (`... | tail -30`, `... | cat`). Checked against the
+    # stage's own first token only; a stage is never dropped if it isn't
+    # the last remaining one, so a genuine multi-stage pipeline
+    # (`cat data.csv | python train.py`) always keeps every non-trailing
+    # stage's tokens in the comparison set (review 2026-07-22: collapsing
+    # unconditionally to stage 0 made distinct pipelines normalize
+    # identical).
+    pipeline_display_only_verbs:
+      - cat
+      - tail
+      - head
 
   similarity:
     # Composite score = verb_weight*verb + flag_weight*jaccard(flags) +
@@ -1586,11 +1623,18 @@ arc_detection:
     max_commands: 20
     ttl_seconds: 600
     max_pending_per_verb_family: 5
+    # Fallback step (seconds) used to synthesize a strictly-increasing `ts`
+    # when an episode's own `ts` is missing/None/unparseable (§2.1
+    # drift-tolerant payloads; review 2026-07-22: observe() must never
+    # raise on this). Deterministic given a fixed replay sequence — never
+    # wall-clock-derived.
+    ts_monotonic_fallback_seconds: 0.001
 
   flake:
     # §3.4 Travis-CI base-rate defense: once an identical command has
-    # flipped outcome (flaky retry — no intervening edit and no env/cwd
-    # delta) this many times in a session, near-threshold mutation-band
+    # flipped outcome (flaky retry — no intervening edit and no env delta;
+    # cwd is a pending-bucket key so it cannot differ within a match — see
+    # §3.3) this many times in a session, near-threshold mutation-band
     # matches for that same normalized command are suppressed too, instead
     # of emitted as arcs.
     suppress_min_count: 2

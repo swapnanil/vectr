@@ -42,6 +42,7 @@ from agent.config import (
     ARC_SIMILARITY_VERB_SOFT_MATCH_SCORE,
     ARC_SIMILARITY_VERB_WEIGHT,
     ARC_TRANSIENT_MARKER_IDS,
+    ARC_TS_MONOTONIC_FALLBACK_SECONDS,
     ARC_WINDOW_MAX_COMMANDS,
     ARC_WINDOW_MAX_PENDING_PER_VERB_FAMILY,
     ARC_WINDOW_TTL_SECONDS,
@@ -50,7 +51,7 @@ from app.cmdnorm import NormalizedCommand, classify_arg, normalize_command
 
 _PENDING_OUTCOMES = frozenset({"failure", "soft_failure"})
 _IGNORED_OUTCOMES = frozenset({"interrupted", "unknown", None})
-_MUTATION_DIFF_AXES = ("verb", "flag", "arg", "cwd", "env", "files")
+_MUTATION_DIFF_AXES = ("verb", "flag", "arg", "env", "files")
 
 
 # ---------------------------------------------------------------------------
@@ -63,9 +64,12 @@ class Arc:
     """One emitted failure(s)->success discovery moment.
 
     `failures_chain` is oldest-first; `mutation_diff` maps a subset of
-    {verb, flag, arg, cwd, env, files} to an (old, new) pair — only the axes
-    that actually changed are present. `confidence` is "normal" or "low"
-    (§3.5(b): a chained failure's stderr matched a transient-error marker).
+    {verb, flag, arg, env, files} to an (old, new) pair — only the axes
+    that actually changed are present. `cwd` is never a mutation_diff axis:
+    it is a pending-bucket key (§3.3, review 2026-07-22), so it cannot
+    differ between a chain's failures and its resolving success by
+    construction. `confidence` is "normal" or "low" (§3.5(b): a chained
+    failure's stderr matched a transient-error marker).
     """
 
     session_id: str
@@ -175,6 +179,19 @@ def _verb_family(n: NormalizedCommand) -> str:
     return n.verb.split(" ", 1)[0] if n.verb else ""
 
 
+def _bucket_key(n: NormalizedCommand, episode: dict[str, Any]) -> tuple[str, Any]:
+    """Pending-failure bucket key (§3.3, review 2026-07-22): `(verb-family,
+    cwd)`. cwd is a BUCKET KEY, not a mutation axis — the original draft
+    listed cwd on both sides, which is contradictory: cwd-as-mutation-axis
+    binds unrelated repos' builds into false arcs (the same command failing
+    in `/work/serviceA` and succeeding in `/work/serviceB` must never
+    match), while the genuine "cd to the right dir fixed it" case normally
+    has the `cd` inside the same invocation, where normalization already
+    strips it (`app.cmdnorm._strip_leading_cd`) — so cross-cwd matching is
+    nearly all downside."""
+    return (_verb_family(n), episode.get("cwd"))
+
+
 # ---------------------------------------------------------------------------
 # Timestamp parsing — always derived from episode data, never wall clock, so
 # the detector is exactly reproducible against a historical transcript.
@@ -200,8 +217,8 @@ def _parse_ts(ts: Any) -> float:
 
 
 # ---------------------------------------------------------------------------
-# mutation_diff (§3.3: "which of {verb, flag, arg, cwd, env, files}
-# changed, old->new")
+# mutation_diff (§3.3: "which of {verb, flag, arg, env, files} changed,
+# old->new" — cwd is the bucket key, never a diff axis; review 2026-07-22)
 # ---------------------------------------------------------------------------
 
 
@@ -211,6 +228,11 @@ def diff_episodes(
     new_norm: NormalizedCommand,
     new_episode: dict[str, Any],
 ) -> dict[str, tuple[Any, Any]]:
+    """Structural diff over {verb, flag, arg, env} (§3.3) — only the axes
+    that actually changed are present. `cwd` is deliberately never
+    computed here: it is the pending-bucket key (§3.3, review 2026-07-22),
+    so `old_episode`/`new_episode` always share the same cwd by
+    construction whenever this is called."""
     d: dict[str, tuple[Any, Any]] = {}
     if old_norm.verb != new_norm.verb:
         d["verb"] = (old_norm.verb, new_norm.verb)
@@ -219,9 +241,6 @@ def diff_episodes(
         d["flag"] = (tuple(sorted(old_flags)), tuple(sorted(new_flags)))
     if old_norm.args != new_norm.args:
         d["arg"] = (old_norm.args, new_norm.args)
-    old_cwd, new_cwd = old_episode.get("cwd"), new_episode.get("cwd")
-    if old_cwd != new_cwd:
-        d["cwd"] = (old_cwd, new_cwd)
     old_env = frozenset(old_episode.get("env_delta_names") or ())
     new_env = frozenset(new_episode.get("env_delta_names") or ())
     if old_env != new_env:
@@ -272,10 +291,12 @@ class _EditRecord:
 class _SessionState:
     command_count: int = 0
     last_ts: float = 0.0
-    pending: dict[str, list[_PendingFailure]] = field(default_factory=dict)
+    # Keyed by (verb-family, cwd) — §3.3, review 2026-07-22.
+    pending: dict[tuple[str, Any], list[_PendingFailure]] = field(default_factory=dict)
     edits: list[_EditRecord] = field(default_factory=list)
     # Keyed by the identical-command signature that has proven flaky
-    # (flipped outcome with no intervening edit/env/cwd delta) — §3.4.
+    # (flipped outcome with no intervening edit/env delta — cwd cannot
+    # differ within a bucket) — §3.4.
     flake_counts: dict[tuple[Any, ...], int] = field(default_factory=dict)
 
 
@@ -301,7 +322,7 @@ class ArcDetector:
             return []
 
         state = self._sessions.setdefault(session_id, _SessionState())
-        ts = _parse_ts(episode["ts"])
+        ts = self._resolve_ts(state, episode.get("ts"))
         state.command_count += 1
         state.last_ts = ts
         self._age_out(state)
@@ -326,6 +347,12 @@ class ArcDetector:
             return []
 
         normalized = _normalize_episode(episode)
+        if not normalized.verb:
+            # An episode that normalizes to an empty verb (`2>&1` alone, an
+            # env-assignment-only command) carries no comparable command
+            # structure — treated like outcome `unknown` (§3.1, review
+            # 2026-07-22): never enters pending, never resolves one.
+            return []
 
         if outcome in _PENDING_OUTCOMES:
             self._add_pending(state, episode, normalized, ts)
@@ -336,6 +363,20 @@ class ArcDetector:
 
         return []
 
+    def _resolve_ts(self, state: _SessionState, ts_raw: Any) -> float:
+        """Episode timestamps are drift-tolerant (§2.1) — a missing/None/
+        unparseable `ts` must never raise (review 2026-07-22: the wiring
+        lane may not always supply one). Falls back to a small monotonic
+        step past the session's own last-seen ts so window/TTL math stays
+        well-defined and strictly ordered; deterministic for a fixed replay
+        sequence, never wall-clock-derived."""
+        if ts_raw is None:
+            return state.last_ts + ARC_TS_MONOTONIC_FALLBACK_SECONDS
+        try:
+            return _parse_ts(ts_raw)
+        except ValueError:
+            return state.last_ts + ARC_TS_MONOTONIC_FALLBACK_SECONDS
+
     # -- window maintenance ---------------------------------------------
 
     def _in_window(self, state: _SessionState, ts: float, command_index: int) -> bool:
@@ -345,12 +386,12 @@ class ArcDetector:
         )
 
     def _age_out(self, state: _SessionState) -> None:
-        for family in list(state.pending.keys()):
-            kept = [p for p in state.pending[family] if self._in_window(state, p.ts, p.command_index)]
+        for bucket_key in list(state.pending.keys()):
+            kept = [p for p in state.pending[bucket_key] if self._in_window(state, p.ts, p.command_index)]
             if kept:
-                state.pending[family] = kept
+                state.pending[bucket_key] = kept
             else:
-                del state.pending[family]
+                del state.pending[bucket_key]
         state.edits = [e for e in state.edits if self._in_window(state, e.ts, e.command_index)]
 
     def _add_pending(
@@ -360,7 +401,7 @@ class ArcDetector:
         normalized: NormalizedCommand,
         ts: float,
     ) -> None:
-        bucket = state.pending.setdefault(_verb_family(normalized), [])
+        bucket = state.pending.setdefault(_bucket_key(normalized, episode), [])
         bucket.append(
             _PendingFailure(episode=episode, normalized=normalized, ts=ts, command_index=state.command_count)
         )
@@ -405,13 +446,13 @@ class ArcDetector:
                 frontier_index = p.command_index
         return chain, used
 
-    def _remove_indices(self, state: _SessionState, family: str, indices: set[int]) -> None:
-        bucket = state.pending.get(family, [])
+    def _remove_indices(self, state: _SessionState, bucket_key: tuple[str, Any], indices: set[int]) -> None:
+        bucket = state.pending.get(bucket_key, [])
         remaining = [p for i, p in enumerate(bucket) if i not in indices]
         if remaining:
-            state.pending[family] = remaining
+            state.pending[bucket_key] = remaining
         else:
-            state.pending.pop(family, None)
+            state.pending.pop(bucket_key, None)
 
     def _match_success(
         self,
@@ -420,8 +461,8 @@ class ArcDetector:
         success_episode: dict[str, Any],
         success_norm: NormalizedCommand,
     ) -> list[Arc]:
-        family = _verb_family(success_norm)
-        bucket = state.pending.get(family)
+        bucket_key = _bucket_key(success_norm, success_episode)
+        bucket = state.pending.get(bucket_key)
         if not bucket:
             return []
 
@@ -430,12 +471,14 @@ class ArcDetector:
             anchor_idx = identical_idxs[-1]
             anchor = bucket[anchor_idx]
             edited = self._intervening_edits(state, anchor.command_index, state.command_count)
-            cwd_delta = anchor.episode.get("cwd") != success_episode.get("cwd")
+            # cwd is never checked here: it is the bucket key above, so
+            # `anchor` and `success_episode` share it by construction
+            # (§3.3, review 2026-07-22).
             env_delta = frozenset(anchor.episode.get("env_delta_names") or ()) != frozenset(
                 success_episode.get("env_delta_names") or ()
             )
 
-            if edited or cwd_delta or env_delta:
+            if edited or env_delta:
                 chain, used = self._build_chain(bucket, anchor_idx)
                 diff = diff_episodes(chain[0].normalized, chain[0].episode, success_norm, success_episode)
                 if edited:
@@ -448,14 +491,14 @@ class ArcDetector:
                     mutation_diff=diff,
                     confidence=self._confidence_for(chain),
                 )
-                self._remove_indices(state, family, used)
+                self._remove_indices(state, bucket_key, used)
                 return [arc]
 
-            # True flaky retry (§3.4): identical command, no edit, no
-            # env/cwd delta — suppressed, never emitted as an arc.
+            # True flaky retry (§3.4): identical command, no edit, no env
+            # delta — suppressed, never emitted as an arc.
             signature = _command_signature(success_norm)
             state.flake_counts[signature] = state.flake_counts.get(signature, 0) + 1
-            self._remove_indices(state, family, {anchor_idx})
+            self._remove_indices(state, bucket_key, {anchor_idx})
             return []
 
         candidates: list[tuple[int, _PendingFailure, float]] = []
@@ -478,7 +521,7 @@ class ArcDetector:
         if not filtered:
             # Every mutation-band candidate was near-threshold flaky noise —
             # resolve them out of pending without emitting an arc.
-            self._remove_indices(state, family, near_threshold_suppressed)
+            self._remove_indices(state, bucket_key, near_threshold_suppressed)
             return []
 
         # Highest score wins; ties broken by recency (the most recent
@@ -498,5 +541,5 @@ class ArcDetector:
             confidence=self._confidence_for(chain),
         )
         used |= near_threshold_suppressed
-        self._remove_indices(state, family, used)
+        self._remove_indices(state, bucket_key, used)
         return [arc]

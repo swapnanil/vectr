@@ -142,7 +142,7 @@ class TestBasicMutationArc:
         arcs = d.observe(make_episode(ts=1, cmd_raw="pip install django", outcome="success"))
         assert arcs == []
         state = d._sessions["s1"]
-        assert len(state.pending["pip"]) == 1
+        assert len(state.pending[("pip", "/repo")]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +194,7 @@ class TestChainsAndInterleaving:
         d.observe(make_episode(ts=2, cmd_raw="pip install requests==2.28.0", outcome="failure"))
         d.observe(make_episode(ts=3, cmd_raw="pip install requests==2.28.1", outcome="success"))
         state = d._sessions["s1"]
-        remaining = [p.episode["cmd_raw"] for p in state.pending.get("pip", [])]
+        remaining = [p.episode["cmd_raw"] for p in state.pending.get(("pip", "/repo"), [])]
         assert remaining == ["pip install completely-different-package-xyz-not-related-at-all"]
 
     def test_interleaved_different_family_success_is_ignored(self) -> None:
@@ -288,12 +288,32 @@ class TestEditMediatedVsFlaky:
         assert state.flake_counts[sig] == 1
         assert state.pending == {}
 
-    def test_identical_retry_with_cwd_delta_is_not_flaky(self) -> None:
+    def test_cross_cwd_identical_command_never_matches(self) -> None:
+        """§3.3 (review 2026-07-22, reviewer finding F1/G1): cwd is a
+        pending-bucket key, NOT a mutation axis — a failure in one cwd and
+        an identical-command success in a DIFFERENT cwd must never be
+        bound together (they land in different buckets entirely), or
+        unrelated repos' builds would falsely bind into an arc."""
         d = ArcDetector()
-        d.observe(make_episode(ts=0, cwd="/repo/a", cmd_raw="make build", outcome="failure"))
-        arcs = d.observe(make_episode(ts=1, cwd="/repo/b", cmd_raw="make build", outcome="success"))
-        assert len(arcs) == 1
-        assert arcs[0].mutation_diff == {"cwd": ("/repo/a", "/repo/b")}
+        d.observe(make_episode(ts=0, cwd="/work/serviceA", cmd_raw="make build", outcome="failure"))
+        arcs = d.observe(make_episode(ts=1, cwd="/work/serviceB", cmd_raw="make build", outcome="success"))
+        assert arcs == []
+        # The serviceA failure is untouched, sitting in its own bucket.
+        state = d._sessions["s1"]
+        assert len(state.pending[("make", "/work/serviceA")]) == 1
+
+    def test_cross_cwd_mutation_candidate_never_matches(self) -> None:
+        """§3.3 (review 2026-07-22, reviewer finding F1/G2): the same
+        cross-cwd isolation applies to the mutation-band (non-identical)
+        path, not just the identical-command path."""
+        d = ArcDetector()
+        d.observe(
+            make_episode(ts=0, cwd="/work/serviceA", cmd_raw="mvn test -Dtest=Foo", outcome="failure")
+        )
+        arcs = d.observe(
+            make_episode(ts=1, cwd="/work/serviceB", cmd_raw="mvn test -Dtest=Bar", outcome="success")
+        )
+        assert arcs == []
 
     def test_identical_retry_with_env_delta_is_not_flaky(self) -> None:
         d = ArcDetector()
@@ -422,3 +442,83 @@ class TestEpisodePlumbing:
         d = ArcDetector()
         arcs = d.observe(make_episode(ts=0, tool="edit", file_path="app/foo.py"))
         assert arcs == []
+
+
+# ---------------------------------------------------------------------------
+# Reviewer findings F2-F5 (2026-07-22 adversarial review of bcbcb50):
+# pipeline collapse, wrapper transparency, empty-verb handling, ts
+# robustness. F1 (cwd bucket key) is covered above in
+# TestEditMediatedVsFlaky.test_cross_cwd_identical_command_never_matches /
+# test_cross_cwd_mutation_candidate_never_matches.
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineWrapperEmptyVerbAndTsRobustness:
+    def test_multistage_pipeline_edit_then_different_downstream_stage_is_not_edit_mediated(
+        self,
+    ) -> None:
+        """F2: `cmdnorm` must keep a non-trailing downstream pipeline
+        stage's tokens in the comparison set, so two genuinely different
+        pipelines are never treated as the identical command an
+        intervening edit could "resolve"."""
+        d = ArcDetector()
+        assert not is_identical_command(
+            nc("cat data.csv | python train.py"), nc("cat data.csv | python eval.py")
+        )
+        d.observe(make_episode(ts=0, cmd_raw="cat data.csv | python train.py", outcome="failure"))
+        d.observe(make_episode(ts=1, tool="edit", file_path="unrelated.txt"))
+        arcs = d.observe(make_episode(ts=2, cmd_raw="cat data.csv | python eval.py", outcome="success"))
+        for arc in arcs:
+            assert "files" not in arc.mutation_diff, (
+                "a genuinely different downstream pipeline stage must never be classified "
+                "edit-mediated (that branch is reserved for an IDENTICAL command)"
+            )
+
+    def test_wrapper_prefix_timeout_value_change_does_not_dodge_flaky_suppression(self) -> None:
+        """F3: `timeout N` is a transparent wrapper — the wrapped command
+        is the verb, so two retries differing only in the timeout value
+        must normalize IDENTICALLY and go through the flaky-retry path,
+        not be scored as a distinct mutation."""
+        assert is_identical_command(
+            nc("timeout 60 curl https://api.example.com/x"),
+            nc("timeout 90 curl https://api.example.com/x"),
+        )
+        d = ArcDetector()
+        d.observe(make_episode(ts=0, cmd_raw="timeout 60 curl https://api.example.com/x", outcome="failure"))
+        arcs = d.observe(
+            make_episode(ts=1, cmd_raw="timeout 90 curl https://api.example.com/x", outcome="success")
+        )
+        assert arcs == [], "no intervening edit, no env delta -> flaky retry, suppressed"
+        state = d._sessions["s1"]
+        assert state.flake_counts
+
+    def test_empty_verb_episode_never_enters_or_resolves_pending(self) -> None:
+        """F4: an episode that normalizes to an empty verb (`2>&1` alone,
+        an env-assignment-only command) is treated like outcome `unknown`
+        — never enters pending, never resolves a pending failure."""
+        d = ArcDetector()
+        d.observe(make_episode(ts=0, cmd_raw="2>&1", outcome="failure"))
+        d.observe(make_episode(ts=1, tool="edit", file_path="app/foo.py"))
+        arcs = d.observe(make_episode(ts=2, cmd_raw="FOO=bar", outcome="success"))
+        assert arcs == []
+        state = d._sessions["s1"]
+        assert state.pending == {}
+
+    def test_observe_tolerates_missing_ts_key(self) -> None:
+        """F5: observe() must never raise on a missing `ts` field — the
+        wiring lane may not always wrap every call."""
+        d = ArcDetector()
+        episode = make_episode(ts=0, cmd_raw="git status", outcome="failure")
+        del episode["ts"]
+        arcs = d.observe(episode)
+        assert arcs == []
+
+    def test_observe_tolerates_none_ts_value(self) -> None:
+        """F5: same tolerance for an explicit `ts=None` (a drift-tolerant
+        payload that supplied the key but not a value) — the monotonic
+        fallback must still let a genuine mutation match resolve to an
+        arc rather than raising or silently losing the pending failure."""
+        d = ArcDetector()
+        d.observe(make_episode(ts=None, cmd_raw="mvn test -Dtest=Foo", outcome="failure"))
+        arcs = d.observe(make_episode(ts=None, cmd_raw="mvn test -Dtest=Bar", outcome="success"))
+        assert len(arcs) == 1

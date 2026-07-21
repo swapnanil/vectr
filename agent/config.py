@@ -412,6 +412,25 @@ ARC_NORM_MAX_VERB_TOKENS : int
     runaway absorption of positional arguments into the verb for commands
     with no flags (e.g. `cp src dest`).
 
+ARC_NORM_WRAPPER_PREFIXES : dict[str, str]
+    Transparent wrapper-prefix tokens (`timeout`, `env`, `nice`, `nohup`,
+    `stdbuf`) stripped iteratively before verb extraction (§3.1, review
+    2026-07-22) so the wrapped command — not the wrapper — becomes the
+    verb. Value names the wrapper's own token-consumption shape (`bare`,
+    `fixed_arg`, `nice_niceness`, `dash_flags`, `env_assignments`); see
+    app/cmdnorm.py. `xargs` is deliberately never in this map — its
+    argument is a command template, not the command that ran.
+
+ARC_NORM_NICE_NICENESS_FLAG : str
+    The niceness-value flag (`-n`) recognized by the `nice_niceness`
+    wrapper-consumption rule above.
+
+ARC_NORM_PIPELINE_DISPLAY_ONLY_VERBS : frozenset[str]
+    Verbs (`cat`, `tail`, `head`) whose pipeline stage is dropped only when
+    it is part of a TRAILING run of such stages (§3.1, review 2026-07-22) —
+    a non-trailing multi-stage pipeline always keeps every stage's tokens
+    in the comparison set.
+
 ARC_SIMILARITY_VERB_WEIGHT, ARC_SIMILARITY_FLAG_WEIGHT,
 ARC_SIMILARITY_ARG_WEIGHT : float
     Composite mutation-similarity weights (L1 capture design doc §3.2,
@@ -443,14 +462,22 @@ ARC_WINDOW_TTL_SECONDS : float
     clock) since it was observed.
 
 ARC_WINDOW_MAX_PENDING_PER_VERB_FAMILY : int
-    Cap on concurrently pending failures tracked per (session, verb-family)
-    bucket (§3.3) — the oldest is evicted once a new failure exceeds it.
+    Cap on concurrently pending failures tracked per (session, verb-family,
+    cwd) bucket (§3.3) — the oldest is evicted once a new failure exceeds
+    it.
+
+ARC_TS_MONOTONIC_FALLBACK_SECONDS : float
+    Step added to a session's last-seen `ts` to synthesize a
+    strictly-increasing timestamp when an episode's own `ts` is
+    missing/None/unparseable (§2.1; review 2026-07-22: `observe()` must
+    never raise on this).
 
 ARC_FLAKE_SUPPRESS_MIN_COUNT : int
     Number of proven flaky-retry flips (identical command, no intervening
-    edit, no env/cwd delta) for the same normalized command within a
-    session before near-threshold mutation-band matches for that command
-    are suppressed too (§3.4, Travis-CI base-rate defense).
+    edit, no env delta — cwd is a bucket key, see §3.3) for the same
+    normalized command within a session before near-threshold
+    mutation-band matches for that command are suppressed too (§3.4,
+    Travis-CI base-rate defense).
 
 ARC_FLAKE_NEAR_THRESHOLD_MIN : float
     Lower bound of the "near-identical" similarity sub-band subject to the
@@ -911,6 +938,13 @@ ARC_NORM_PATH_EXTENSION_REGEX: str = str(_arc_norm_cfg["path_extension_regex"])
 ARC_NORM_ENV_ASSIGNMENT_REGEX: str = str(_arc_norm_cfg["env_assignment_regex"])
 ARC_NORM_STDERR_MERGE_TOKEN: str = str(_arc_norm_cfg["stderr_merge_token"])
 ARC_NORM_MAX_VERB_TOKENS: int = int(_arc_norm_cfg["max_verb_tokens"])
+ARC_NORM_WRAPPER_PREFIXES: dict[str, str] = {
+    str(k): str(v) for k, v in _arc_norm_cfg["wrapper_prefixes"].items()
+}
+ARC_NORM_NICE_NICENESS_FLAG: str = str(_arc_norm_cfg["nice_niceness_flag"])
+ARC_NORM_PIPELINE_DISPLAY_ONLY_VERBS: frozenset[str] = frozenset(
+    str(v) for v in _arc_norm_cfg["pipeline_display_only_verbs"]
+)
 
 _arc_sim_cfg: dict[str, Any] = _arc_cfg["similarity"]
 
@@ -927,6 +961,7 @@ _arc_window_cfg: dict[str, Any] = _arc_cfg["window"]
 ARC_WINDOW_MAX_COMMANDS: int = int(_arc_window_cfg["max_commands"])
 ARC_WINDOW_TTL_SECONDS: float = float(_arc_window_cfg["ttl_seconds"])
 ARC_WINDOW_MAX_PENDING_PER_VERB_FAMILY: int = int(_arc_window_cfg["max_pending_per_verb_family"])
+ARC_TS_MONOTONIC_FALLBACK_SECONDS: float = float(_arc_window_cfg["ts_monotonic_fallback_seconds"])
 
 _arc_flake_cfg: dict[str, Any] = _arc_cfg["flake"]
 

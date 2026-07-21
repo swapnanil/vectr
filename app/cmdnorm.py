@@ -22,11 +22,14 @@ from dataclasses import dataclass, field
 from agent.config import (
     ARC_NORM_ENV_ASSIGNMENT_REGEX,
     ARC_NORM_MAX_VERB_TOKENS,
+    ARC_NORM_NICE_NICENESS_FLAG,
     ARC_NORM_NUM_REGEX,
     ARC_NORM_PATH_EXTENSION_REGEX,
+    ARC_NORM_PIPELINE_DISPLAY_ONLY_VERBS,
     ARC_NORM_STDERR_MERGE_TOKEN,
     ARC_NORM_UUID_REGEX,
     ARC_NORM_VERSION_REGEX,
+    ARC_NORM_WRAPPER_PREFIXES,
 )
 
 _UUID_RE = re.compile(ARC_NORM_UUID_REGEX)
@@ -118,6 +121,57 @@ def _strip_leading_cd(segments: list[list[str]]) -> list[list[str]]:
     return segments
 
 
+def _is_display_only_stage(stage: list[str]) -> bool:
+    return bool(stage) and stage[0] in ARC_NORM_PIPELINE_DISPLAY_ONLY_VERBS
+
+
+def _strip_trailing_display_stages(pipeline_stages: list[list[str]]) -> list[list[str]]:
+    """Drop a TRAILING run of display-only stages (`| tail -30`, `| cat`) —
+    §3.1: these only reshape output for a human, never change what
+    actually ran. A stage is only ever eligible while it is the last
+    remaining one, so a genuine multi-stage pipeline (`cat data.csv |
+    python train.py`) keeps every non-trailing stage's tokens (review
+    2026-07-22: unconditionally collapsing to stage 0 made distinct
+    pipelines normalize identical)."""
+    while len(pipeline_stages) > 1 and _is_display_only_stage(pipeline_stages[-1]):
+        pipeline_stages = pipeline_stages[:-1]
+    return pipeline_stages
+
+
+def _strip_env_and_wrapper_prefixes(stage: list[str]) -> tuple[list[str], list[str]]:
+    """Strip, iteratively and in any interleaving, leading bare env-var
+    assignments (`FOO=bar cmd`) and transparent wrapper-prefix tokens
+    (`timeout N`, `env VAR=...`, `nice [-n N]`, `nohup`, `stdbuf -xX`) from
+    the front of a pipeline stage — §3.1 (review 2026-07-22) — so the
+    WRAPPED command, not the wrapper, is what verb extraction sees.
+    Returns (remaining_tokens, env_assignment_names)."""
+    tokens = list(stage)
+    env_names: list[str] = []
+    while tokens:
+        head = tokens[0]
+        if _ENV_ASSIGNMENT_RE.match(head):
+            env_names.append(head.split("=", 1)[0])
+            tokens = tokens[1:]
+            continue
+        kind = ARC_NORM_WRAPPER_PREFIXES.get(head)
+        if kind is None:
+            break
+        tokens = tokens[1:]
+        if kind == "fixed_arg":
+            tokens = tokens[1:]
+        elif kind == "nice_niceness":
+            if tokens and tokens[0] == ARC_NORM_NICE_NICENESS_FLAG:
+                tokens = tokens[1:]
+                if tokens:
+                    tokens = tokens[1:]
+        elif kind == "dash_flags":
+            while tokens and tokens[0].startswith("-"):
+                tokens = tokens[1:]
+        # "bare" and "env_assignments" wrappers consume only their own
+        # name token — nothing further to drop here.
+    return tokens, env_names
+
+
 def normalize_command(cmd_raw: str) -> NormalizedCommand:
     """Normalize one raw Bash command string into (verb, flags, args)."""
     tokens = tokenize(cmd_raw or "")
@@ -127,22 +181,17 @@ def normalize_command(cmd_raw: str) -> NormalizedCommand:
     # own rc/outcome actually reflects, so it defines the normalized command.
     primary_segment = segments[-1] if segments else []
 
-    pipeline_stages = _split_on_any(primary_segment, frozenset({"|"}))
-    # `2>&1 | cat` / `| tail -N` / `| head -N` (§3.1): the first pipeline
-    # stage always defines the invocation regardless of what output-shaping
-    # stages follow it.
+    pipeline_stages = _strip_trailing_display_stages(
+        _split_on_any(primary_segment, frozenset({"|"}))
+    )
     primary_stage = pipeline_stages[0] if pipeline_stages else []
+    downstream_stages = pipeline_stages[1:]
     if primary_stage and primary_stage[-1] == ARC_NORM_STDERR_MERGE_TOKEN:
         primary_stage = primary_stage[:-1]
 
-    env_names: list[str] = []
-    i = 0
-    while i < len(primary_stage) and _ENV_ASSIGNMENT_RE.match(primary_stage[i]):
-        env_names.append(primary_stage[i].split("=", 1)[0])
-        i += 1
-    primary_stage = primary_stage[i:]
+    primary_stage, env_names = _strip_env_and_wrapper_prefixes(primary_stage)
 
-    if not primary_stage:
+    if not primary_stage and not downstream_stages:
         return NormalizedCommand(
             verb="",
             flags=(),
@@ -152,20 +201,23 @@ def normalize_command(cmd_raw: str) -> NormalizedCommand:
             cmd_raw=cmd_raw or "",
         )
 
-    # verb = binary + immediate subcommand chain (`git commit`, `./mvnw
-    # test`, `npm run build`): keep absorbing leading bareword tokens (not
-    # flag-shaped, not arg-classified) up to the configured cap, which
-    # bounds runaway absorption of positional arguments (e.g. `cp src
-    # dest`) into the verb.
-    verb_tokens = [primary_stage[0]]
-    j = 1
-    while j < len(primary_stage) and len(verb_tokens) < ARC_NORM_MAX_VERB_TOKENS:
-        tok = primary_stage[j]
-        if tok.startswith("-") or classify_arg(tok) != tok:
-            break
-        verb_tokens.append(tok)
-        j += 1
-    verb = " ".join(verb_tokens)
+    verb = ""
+    j = 0
+    if primary_stage:
+        # verb = binary + immediate subcommand chain (`git commit`, `./mvnw
+        # test`, `npm run build`): keep absorbing leading bareword tokens
+        # (not flag-shaped, not arg-classified) up to the configured cap,
+        # which bounds runaway absorption of positional arguments (e.g.
+        # `cp src dest`) into the verb.
+        verb_tokens = [primary_stage[0]]
+        j = 1
+        while j < len(primary_stage) and len(verb_tokens) < ARC_NORM_MAX_VERB_TOKENS:
+            tok = primary_stage[j]
+            if tok.startswith("-") or classify_arg(tok) != tok:
+                break
+            verb_tokens.append(tok)
+            j += 1
+        verb = " ".join(verb_tokens)
 
     flags: list[str] = []
     args: list[str] = []
@@ -176,6 +228,19 @@ def normalize_command(cmd_raw: str) -> NormalizedCommand:
         else:
             args.append(tok)
             arg_classes.append(classify_arg(tok))
+
+    # Non-trailing downstream pipeline stages (`| python train.py` in `cat
+    # data.csv | python train.py`) must stay in the comparison set so
+    # distinct pipelines never normalize identical (§3.1, review
+    # 2026-07-22) — every one of their tokens is folded into flags/args
+    # exactly like the primary stage's own remainder, preserving order.
+    for stage in downstream_stages:
+        for tok in stage:
+            if tok.startswith("-"):
+                flags.append(tok)
+            else:
+                args.append(tok)
+                arg_classes.append(classify_arg(tok))
 
     return NormalizedCommand(
         verb=verb,
