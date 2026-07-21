@@ -18,6 +18,7 @@ from agent.config import (
     SEARCH_IDENTIFIER_HINT_MAX_LOCATIONS,
     SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED,
     SEARCH_IDENTIFIER_HINT_NEARMISS_MAX,
+    ARC_DETECTION_ENABLED,
     EMBEDDING_DEFAULT_MODEL,
     EPISODES_DIGEST_HEAD_LINES,
     EPISODES_DIGEST_MAX_CHARS,
@@ -287,6 +288,20 @@ class VectrService:
         self._episode_store: EpisodeStore | None = None
         if not self._search_only:
             self._episode_store = EpisodeStore(db_dir)
+
+        # Arc detector (adversarial-review fix B2b, design doc §3): one
+        # instance for this VectrService's lifetime, mirroring the episode
+        # store's own search-only gating immediately above — a workspace
+        # that never records an episode never needs a detector either. Its
+        # internal per-session state (app/arcs.py's `_SessionState`) is
+        # in-memory only and reset on daemon restart; that is acceptable
+        # because the design's pending-failure window is itself bounded
+        # (ARC_WINDOW_TTL_SECONDS / ARC_WINDOW_MAX_COMMANDS), not meant to
+        # survive process restarts.
+        from app.arcs import ArcDetector
+        self._arc_detector: ArcDetector | None = None
+        if not self._search_only:
+            self._arc_detector = ArcDetector()
 
         # Eviction advisor (UPG-EVICT-SESSION-SCOPE): one advisor per calling
         # MCP session, so one session never sees chunks retrieved by another.
@@ -1536,16 +1551,21 @@ class VectrService:
         content (R5: no query/prompt-content classification)."""
         self._require_memory_layer()
         from agent.episode_canon import canonicalize_digest
-        from agent.episode_normalize import normalize_command
         from agent.outcome import derive_outcome
+        from app.cmdnorm import normalize_command
 
         cmd_raw = command or ""
         if tool == "bash" and cmd_raw:
+            # Single canonical normalizer (adversarial-review fix B2): the
+            # duplicate `agent/episode_normalize.py` diverged from this one
+            # and is now deleted. `app/arcs.py`'s ArcDetector consumes the
+            # exact same `NormalizedCommand` shape, so a persisted episode's
+            # (verb, flags, args) always matches what the detector sees.
             parsed = normalize_command(cmd_raw)
-            verb = parsed["verb"]
-            flags = parsed["flags"]
-            args = parsed["args"]
-            env_delta_names = parsed["env_delta_names"]
+            verb = parsed.verb
+            flags = list(parsed.flags)
+            args = list(parsed.args)
+            env_delta_names = list(parsed.env_prefix_names)
         else:
             verb, flags, args, env_delta_names = "", [], [], []
 
@@ -1568,10 +1588,11 @@ class VectrService:
             stdout_digest=stdout_digest,
             stderr_digest=stderr_digest,
         )
-        return self._episode_store.insert(
+        episode_ts = ts if ts is not None else time.time()
+        episode_id = self._episode_store.insert(
             self._workspace_root,
             session_id=session_id,
-            ts=ts if ts is not None else time.time(),
+            ts=episode_ts,
             cwd=cwd or "",
             tool=tool,
             cmd_raw=cmd_raw,
@@ -1589,6 +1610,64 @@ class VectrService:
             max_rows=EPISODES_MAX_ROWS,
             ttl_days=EPISODES_TTL_DAYS,
         )
+
+        # Feed the arc detector (adversarial-review fix B2b, design doc
+        # §3/§3.5): config-gated so the write path can be disabled without
+        # touching the detector's own always-loaded config. The dict shape
+        # matches app/arcs.py's documented `episode` contract exactly
+        # (`markers`, not `markers_matched` — a deliberate naming
+        # difference between the DB column and the detector's in-memory
+        # field); `episode_id` is an extra key the detector never reads but
+        # carries through by reference into any `Arc` it emits, letting
+        # `_persist_arc` correlate an arc back to the episode rows it
+        # resolved.
+        if ARC_DETECTION_ENABLED and self._arc_detector is not None:
+            detector_episode = {
+                "episode_id": episode_id,
+                "session_id": session_id,
+                "ts": episode_ts,
+                "cwd": cwd or "",
+                "tool": tool,
+                "cmd_raw": cmd_raw,
+                "outcome": derived["outcome"],
+                "termination": derived["termination"],
+                "markers": derived["markers_matched"],
+                "env_delta_names": env_delta_names,
+                "file_path": file_path,
+            }
+            for arc in self._arc_detector.observe(detector_episode):
+                self._persist_arc(arc)
+
+        return episode_id
+
+    def _persist_arc(self, arc) -> None:
+        """Persist one `ArcDetector`-emitted arc (adversarial-review fix
+        B2b, design doc §3.5: "Emitted arcs live in ... an `arcs` table
+        ... L1 never writes notes") into the quarantined `arcs` table, and
+        stamp `arc_id` back onto every episode row the arc resolved. The
+        `episode_id` key read here was injected into each detector-episode
+        dict in `record_episode`, above — `arc.failures_chain`/`arc.success`
+        are those SAME dicts by reference (app/arcs.py stores episodes by
+        reference, never copies), so it survives unchanged."""
+        failure_ids = [
+            e["episode_id"] for e in arc.failures_chain if e.get("episode_id") is not None
+        ]
+        success_id = arc.success.get("episode_id")
+        arc_row_id = self._episode_store.insert_arc(
+            self._workspace_root,
+            session_id=arc.session_id,
+            cwd=arc.success.get("cwd") or "",
+            ts=arc.success.get("ts") or time.time(),
+            confidence=arc.confidence,
+            mutation_diff=arc.mutation_diff,
+            failure_episode_ids=failure_ids,
+            success_episode_id=success_id,
+        )
+        resolved_ids = list(failure_ids)
+        if success_id is not None:
+            resolved_ids.append(success_id)
+        for episode_id in resolved_ids:
+            self._episode_store.mark_episode_arc(episode_id, arc_row_id)
 
     def list_episodes(
         self,

@@ -145,24 +145,72 @@ class TestRetention:
         assert store.count_episodes("ws2") == 1
 
 
-class TestArcsPendingDistillGracefulDegradation:
-    """Best-effort: 0 (never an error) until the arc detector's own `arcs`
-    table exists — see EpisodeStore.count_arcs_pending_distill docstring for
-    why this lane does not create or own that table."""
+def _insert_arc(store: EpisodeStore, workspace: str, *, session_id: str = "s1",
+                 failure_episode_ids: list[int] | None = None,
+                 success_episode_id: int | None = None) -> int:
+    return store.insert_arc(
+        workspace,
+        session_id=session_id,
+        cwd="/repo",
+        ts=time.time(),
+        confidence="normal",
+        mutation_diff={"arg": (("old",), ("new",))},
+        failure_episode_ids=failure_episode_ids or [1],
+        success_episode_id=success_episode_id if success_episode_id is not None else 2,
+    )
 
-    def test_no_arcs_table_returns_zero(self, tmp_path):
+
+class TestArcsTable:
+    """The `arcs` table is created by this lane (adversarial-review fix
+    B2b, design doc §3.5: "wiring is a <=10-line change by whichever lane
+    lands second" — that lane is this one)."""
+
+    def test_insert_arc_then_count_pending_distill(self, tmp_path):
+        store = EpisodeStore(str(tmp_path))
+        _insert_arc(store, "ws1")
+        assert store.count_arcs_pending_distill("ws1") == 1
+
+    def test_distilled_arc_is_not_counted_as_pending(self, tmp_path):
+        store = EpisodeStore(str(tmp_path))
+        _insert_arc(store, "ws1")
+        with store._conn() as conn:
+            conn.execute(
+                "UPDATE arcs SET distilled_at = ? WHERE workspace = 'ws1'",
+                (time.time(),),
+            )
+        assert store.count_arcs_pending_distill("ws1") == 0
+
+    def test_mark_episode_arc_stamps_arc_id(self, tmp_path):
+        store = EpisodeStore(str(tmp_path))
+        eid = _insert(store, "ws1", ts=time.time())
+        arc_id = _insert_arc(store, "ws1", success_episode_id=eid)
+        store.mark_episode_arc(eid, arc_id)
+        row = store.list_episodes("ws1")[0]
+        assert row["arc_id"] == arc_id
+
+
+class TestArcsPendingDistillGracefulDegradation:
+    """Best-effort: 0, never an error — this lane always creates the `arcs`
+    table (TestArcsTable above), so the try/except in
+    count_arcs_pending_distill is a defensive-only guard against a
+    pre-existing db file from before this lane owned the table, not a
+    normal-path outcome."""
+
+    def test_no_arcs_recorded_returns_zero(self, tmp_path):
         store = EpisodeStore(str(tmp_path))
         assert store.count_arcs_pending_distill("ws1") == 0
 
-    def test_arcs_table_present_with_workspace_column_is_counted(self, tmp_path):
+    def test_counting_is_scoped_per_workspace(self, tmp_path):
         store = EpisodeStore(str(tmp_path))
-        with store._conn() as conn:
-            conn.execute(
-                "CREATE TABLE arcs (id INTEGER PRIMARY KEY, workspace TEXT)"
-            )
-            conn.execute("INSERT INTO arcs (workspace) VALUES ('ws1')")
+        _insert_arc(store, "ws1")
         assert store.count_arcs_pending_distill("ws1") == 1
         assert store.count_arcs_pending_distill("ws2") == 0
+
+    def test_missing_arcs_table_is_tolerated(self, tmp_path):
+        store = EpisodeStore(str(tmp_path))
+        with store._conn() as conn:
+            conn.execute("DROP TABLE arcs")
+        assert store.count_arcs_pending_distill("ws1") == 0
 
 
 class TestNeverImportedBySearchOrRecallCode:

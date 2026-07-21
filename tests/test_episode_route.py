@@ -50,7 +50,11 @@ class TestRecordEpisodeIntegration:
         row = rows[0]
         assert row["id"] == episode_id
         assert row["verb"] == "git commit"
-        assert row["flags"] == ["-m=fix bug"]
+        # app.cmdnorm.normalize_command (single normalizer, adversarial-
+        # review fix B2) never merges a flag with its following token — "-m"
+        # is a simple flag append, and "fix bug" is a separate positional arg.
+        assert row["flags"] == ["-m"]
+        assert row["args"] == ["fix bug"]
         assert row["outcome"] == "success"
         assert row["tool"] == "bash"
 
@@ -143,10 +147,11 @@ class TestStatusEpisodeCounts:
         )
         assert svc.status()["episodes_count"] == 1
 
-    def test_arcs_pending_distill_defaults_to_zero_when_no_arcs_table(self, tmp_path, monkeypatch):
-        """LANE-ARC (§3) owns creating/populating the `arcs` table — this
-        lane only reads a best-effort count that must never error before
-        that table exists."""
+    def test_arcs_pending_distill_defaults_to_zero_when_no_arcs_recorded(self, tmp_path, monkeypatch):
+        """The `arcs` table (owned by this lane, adversarial-review fix
+        B2b) always exists once the store initializes, but the count must
+        still read 0 until an arc is actually emitted — never an error
+        either way, matching `count_episodes()`'s own zero-safe contract."""
         svc = _make_real_service(tmp_path, monkeypatch)
         assert svc.status()["arcs_pending_distill"] == 0
 
@@ -242,6 +247,89 @@ class TestEpisodeRoute:
             assert resp.json()["detail"]["error"] == "search_only_mode"
         finally:
             svc._search_only = False
+
+
+class TestArcDetectionWiring:
+    """End-to-end (adversarial-review fix B2b): persisted bash/edit
+    episodes actually reach `ArcDetector.observe()` and an emitted arc is
+    quarantined into the `arcs` table (never notes), with `arc_id` stamped
+    back onto every episode row it resolved — through the REAL `POST
+    /v1/episode` route, not a direct `svc.record_episode()` call, so the
+    request/response schema changes (B2's args-shape fix) are covered too.
+    """
+
+    def test_edit_mediated_arc_recorded_via_real_route(self, real_episode_client):
+        client, svc = real_episode_client
+        import time as time_module
+        # Must be close to "now" — EpisodeStore._enforce_retention() prunes
+        # anything older than EPISODES_TTL_DAYS immediately after insert, so
+        # a fixed/arbitrary-past epoch here would have every row deleted
+        # out from under this test before it could assert on them.
+        base_ts = time_module.time()
+
+        # Two failing, mutation-band-similar bash episodes (same verb/
+        # flags, one differing positional arg) forming the pending chain.
+        client.post("/v1/episode", json={
+            "session_id": "s1", "cwd": "/repo", "tool": "bash",
+            "command": "pytest tests/test_foo.py -k test_a", "rc": 1,
+            "ts": base_ts,
+        })
+        client.post("/v1/episode", json={
+            "session_id": "s1", "cwd": "/repo", "tool": "bash",
+            "command": "pytest tests/test_foo.py -k test_b", "rc": 1,
+            "ts": base_ts + 1,
+        })
+        # Intervening edit to the file under test — the signal that turns
+        # a mere identical-retry into a genuine "this fixed it" arc.
+        client.post("/v1/episode", json={
+            "session_id": "s1", "cwd": "/repo", "tool": "edit",
+            "file_path": "/repo/tests/test_foo.py", "ts": base_ts + 2,
+        })
+        # Rerunning the SAME command as the second failure now succeeds.
+        resp = client.post("/v1/episode", json={
+            "session_id": "s1", "cwd": "/repo", "tool": "bash",
+            "command": "pytest tests/test_foo.py -k test_b", "rc": 0,
+            "ts": base_ts + 3,
+        })
+        assert resp.status_code == 200
+
+        assert svc.status()["arcs_pending_distill"] == 1
+
+        rows = svc.list_episodes(session_id="s1")
+        arced = [r for r in rows if r["arc_id"] is not None]
+        # Both failures and the resolving success are bound to the arc; the
+        # edit episode itself never is (arcs only bind bash episodes).
+        assert len(arced) == 3
+        assert len({r["arc_id"] for r in arced}) == 1
+        assert {r["cmd_raw"] for r in arced} == {
+            "pytest tests/test_foo.py -k test_a",
+            "pytest tests/test_foo.py -k test_b",
+        }
+        edit_rows = [r for r in rows if r["tool"] == "edit"]
+        assert len(edit_rows) == 1
+        assert edit_rows[0]["arc_id"] is None
+
+    def test_disabled_via_config_flag_records_episodes_without_ever_calling_detector(
+        self, real_episode_client, monkeypatch,
+    ):
+        """Master switch (B2b): flipping `ARC_DETECTION_ENABLED` off must
+        still record every episode row — only the detector call is
+        skipped."""
+        client, svc = real_episode_client
+        monkeypatch.setattr("app.service.ARC_DETECTION_ENABLED", False)
+
+        def _boom(_episode):
+            raise AssertionError("ArcDetector.observe must not be called when disabled")
+
+        monkeypatch.setattr(svc._arc_detector, "observe", _boom)
+
+        for i in range(2):
+            resp = client.post("/v1/episode", json={
+                "session_id": "s1", "cwd": "/repo", "tool": "bash",
+                "command": f"echo {i}", "rc": 0,
+            })
+            assert resp.status_code == 200
+        assert svc.count_episodes() == 2
 
 
 class TestEpisodesRoute:

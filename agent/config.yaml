@@ -1580,6 +1580,13 @@ arc_detection:
   # streaming failure->success arc detector over TOOL-CALL episodes (argv
   # structure of already-issued Bash/Edit/Write calls; R5-clean — never
   # prompt content). See app/cmdnorm.py + app/arcs.py.
+
+  # Master switch (adversarial-review fix B2b): whether `record_episode`
+  # feeds persisted bash/edit episodes into `ArcDetector.observe()` at all.
+  # The detector and its similarity/window machinery below stay loaded and
+  # configured either way — this only gates whether the write path calls it.
+  enabled: true
+
   normalization:
     # Regex classes for positional-argument ABSTRACTION (comparison only —
     # concrete values are always preserved alongside in the row). Order:

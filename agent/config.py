@@ -420,6 +420,12 @@ FETCH_MAX_IDS_PER_CALL : int
     fetch` call (UPG-CTX-EVICT). Bounds the deterministic re-fetch-by-id
     surface so it can't be used as an unbounded bulk export of the index.
 
+ARC_DETECTION_ENABLED : bool
+    Master switch for arc detection (L1 capture design doc §3, LANE-ARC):
+    whether `VectrService.record_episode` feeds persisted bash/edit episodes
+    into `ArcDetector.observe()` at all. False disables the write-path call
+    only — the detector's own config below stays loaded either way.
+
 ARC_NORM_UUID_REGEX, ARC_NORM_VERSION_REGEX, ARC_NORM_NUM_REGEX,
 ARC_NORM_PATH_EXTENSION_REGEX : str
     Positional-argument abstraction-class regexes used by app/cmdnorm.py
@@ -971,6 +977,11 @@ FETCH_MAX_IDS_PER_CALL: int = int(_cfg["fetch"]["max_ids_per_call"])
 # ---------------------------------------------------------------------------
 
 _arc_cfg: dict[str, Any] = _cfg["arc_detection"]
+
+# Master switch (adversarial-review fix B2b) — whether the episode write
+# path feeds bash/edit episodes into ArcDetector.observe() at all.
+ARC_DETECTION_ENABLED: bool = bool(_arc_cfg["enabled"])
+
 _arc_norm_cfg: dict[str, Any] = _arc_cfg["normalization"]
 
 ARC_NORM_UUID_REGEX: str = str(_arc_norm_cfg["uuid_regex"])

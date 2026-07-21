@@ -13,6 +13,12 @@ folded into `vectr_status` (`app/service.py`).
 
 No embedding, ever — episodes are keyed/temporal rows, not a semantic-search
 corpus (memoization-l1-capture-design §2.2).
+
+This module also owns the `arcs` table (adversarial-review fix B2b, design
+doc §3.5: "an `arcs` table with the chain, diff, confidence, cwd ... L1
+never writes notes") — one row per `app.arcs.ArcDetector`-emitted discovery
+moment (`app/service.py`'s `record_episode`/`_persist_arc`), quarantined
+exactly like `episodes`: still never a semantic-search or note-store input.
 """
 from __future__ import annotations
 
@@ -68,6 +74,22 @@ class EpisodeStore:
                     ON episodes(workspace, session_id);
                 CREATE INDEX IF NOT EXISTS idx_episodes_arc
                     ON episodes(workspace, arc_id);
+
+                CREATE TABLE IF NOT EXISTS arcs (
+                    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace                TEXT NOT NULL,
+                    session_id               TEXT NOT NULL,
+                    cwd                      TEXT NOT NULL DEFAULT '',
+                    ts                       REAL NOT NULL,
+                    confidence               TEXT NOT NULL DEFAULT 'normal',
+                    mutation_diff_json       TEXT NOT NULL DEFAULT '{}',
+                    failure_episode_ids_json TEXT NOT NULL DEFAULT '[]',
+                    success_episode_id       INTEGER,
+                    distilled_at             REAL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_arcs_workspace_ts
+                    ON arcs(workspace, ts);
                 """
             )
 
@@ -82,7 +104,7 @@ class EpisodeStore:
         cmd_raw: str,
         verb: str,
         flags: list[str],
-        args: list[dict],
+        args: list[str],
         rc: int | None,
         termination: str,
         outcome: str,
@@ -181,22 +203,67 @@ class EpisodeStore:
             ).fetchone()
         return int(row["n"]) if row else 0
 
+    def insert_arc(
+        self,
+        workspace: str,
+        *,
+        session_id: str,
+        cwd: str,
+        ts: float,
+        confidence: str,
+        mutation_diff: dict,
+        failure_episode_ids: list[int],
+        success_episode_id: int | None,
+    ) -> int:
+        """Insert one `app.arcs.ArcDetector`-emitted arc (adversarial-review
+        fix B2b, design doc §3.5) — a discovery moment (one or more failed
+        attempts resolved by a success), quarantined in its own `arcs`
+        table exactly like `episodes` (never notes, never embedded).
+        Returns the new row's id."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO arcs (
+                    workspace, session_id, cwd, ts, confidence,
+                    mutation_diff_json, failure_episode_ids_json,
+                    success_episode_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace, session_id, cwd, ts, confidence,
+                    json.dumps(mutation_diff), json.dumps(failure_episode_ids),
+                    success_episode_id,
+                ),
+            )
+            return cur.lastrowid
+
+    def mark_episode_arc(self, episode_id: int, arc_id: int) -> None:
+        """Stamp `arc_id` onto one episode row (called once per episode
+        that participated in a just-emitted arc) so `list_episodes(arc_id=
+        ...)` and the `episodes` table's own `idx_episodes_arc` index can
+        find every episode belonging to a discovered discovery moment."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE episodes SET arc_id = ? WHERE id = ?", (arc_id, episode_id)
+            )
+
     def count_arcs_pending_distill(self, workspace: str) -> int:
-        """Best-effort count of arcs awaiting L3 distillation, from the
-        `arcs` table a separate lane (arc detection, §3) owns. This lane
-        does not create that table or define what "pending" means for it —
-        structurally absent (0, never an error) until it exists, matching
-        the spec's "reads an arcs table count if present, else 0"
-        instruction. Reconcile the exact WHERE clause with the arc
-        detector's real schema once both land."""
+        """Count of `workspace`'s arcs not yet L3-distilled (`distilled_at
+        IS NULL`) — folded into `vectr_status`'s `arcs_pending_distill`
+        field. The `arcs` table is always created by `_init_db` (this lane
+        owns it, B2b); the try/except remains only as a defensive guard
+        against a pre-existing db file from before this lane owned the
+        table, never a normal-path outcome."""
         try:
             with self._conn() as conn:
                 row = conn.execute(
-                    "SELECT COUNT(*) AS n FROM arcs WHERE workspace = ?", (workspace,)
+                    "SELECT COUNT(*) AS n FROM arcs "
+                    "WHERE workspace = ? AND distilled_at IS NULL",
+                    (workspace,),
                 ).fetchone()
             return int(row["n"]) if row else 0
         except sqlite3.OperationalError:
-            return 0  # no `arcs` table (or schema mismatch) yet
+            return 0  # no `arcs` table (or schema mismatch) — defensive only
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:

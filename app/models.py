@@ -675,7 +675,7 @@ class EpisodeRecord(BaseModel):
     cmd_raw: str
     verb: str
     flags: list[str]
-    args: list[dict]
+    args: list[str]
     rc: int | None = None
     termination: str
     outcome: str
