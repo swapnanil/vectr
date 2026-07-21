@@ -179,3 +179,17 @@ Transcripts and the aggregate JSON land in `results/vectr-vs-bash/camel/<vectr-s
   (task, arm) session.
 - `t1c_<smoke|run>_<timestamp>.json` -- the aggregate: per-(task, arm) rows (tool sequence, tool
   counts, `n_results` values, usage tokens, wall time, final answer text) plus per-arm totals.
+
+### T1c results (2026-07-21, sentinel-scored, full readout in the results dir)
+
+12 sessions ran (6 tasks x 2 arms, sonnet, `--max-turns 30`). **Bash arm won 29/30 vs 20/30**:
+the vectr arm lost C01 to max-turns exhaustion (no answer) and C03 to an API rate-limit stall
+(external), and -- the headline -- **chose to call vectr tools in only 2 of 6 sessions** despite
+having them available. With all on-disk coaching stripped for arm purity, three of the four
+vectr-arm answers were produced with zero vectr calls. The one fully vectr-driven session (C04)
+matched the bash arm's answer quality with ~40% fewer tool calls at equal wall time, and the one
+scoring error found anywhere (C02 bash: type-converter fallback ladder ordered wrong) was on the
+bash side while C02 vectr got it right. All 8 `vectr_search` calls set `n_results` explicitly
+(3-8, median 5) -- the T1a default-n question is resolved. Conclusion carried into Tier 2:
+adoption configuration (bare MCP vs agent-instruction coaching vs hook injection) is the
+first-class variable; bare MCP alone does not produce usage.
