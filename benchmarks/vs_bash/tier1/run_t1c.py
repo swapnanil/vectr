@@ -467,7 +467,10 @@ def main(argv: list[str] | None = None) -> int:
                          help="Override the bash-arm corpus checkout root "
                               "(default ~/.cache/vectr/bench/poc-camel-bash)")
     parser.add_argument("--model", default="sonnet", help="Model alias/id passed to --model (cheaper-models rule: sonnet by default)")
-    parser.add_argument("--max-turns", type=int, default=12, help="Exploration tasks are multi-step")
+    parser.add_argument("--max-turns", type=int, default=30,
+                         help="Exploration tasks are multi-step. 12 proved insufficient in the "
+                              "C01 smoke: both arms hit the ceiling mid-exploration and produced "
+                              "empty final answers (is_error=True, ~200 output tokens).")
     parser.add_argument("--timeout", type=int, default=600, help="Per-session wall-clock timeout, seconds")
     parser.add_argument("--smoke", action="store_true", help="Tag the results file as a smoke test")
     parser.add_argument("--dry-run", action="store_true",
