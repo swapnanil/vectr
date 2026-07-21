@@ -89,3 +89,4 @@ benchmarks/harness/results/
 
 # Local vectr daemon workspace data (created when a vectr instance indexes this repo)
 .vectr/
+.worktrees/
