@@ -27,8 +27,13 @@ markers:
     kind: success
 
   # --- pytest ---
+  # [1-9]\d* (never \d+): "0 failed" appears verbatim in a fully GREEN run's
+  # own summary line and, since match_markers() scans the combined digest
+  # regardless of which tool actually ran, in other tools' green summaries
+  # too (e.g. cargo's "5 passed; 0 failed; ..."). maven.tests_failed above
+  # already uses this [1-9] convention.
   - id: pytest.failed
-    pattern: "\\d+ failed"
+    pattern: "[1-9]\\d* failed"
     kind: failure
   - id: pytest.errors
     pattern: "^ERRORS?$"
@@ -55,7 +60,7 @@ markers:
 
   # --- jest ---
   - id: jest.failed
-    pattern: "Tests:.*\\d+ failed"
+    pattern: "Tests:.*[1-9]\\d* failed"
     kind: failure
   - id: jest.passed
     pattern: "Tests:.*\\d+ passed"

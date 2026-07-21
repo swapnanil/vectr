@@ -113,3 +113,65 @@ class TestMarkerMatchingOverTextOnly:
 
     def test_no_match_returns_empty(self):
         assert match_markers("nothing interesting here", "") == []
+
+
+class TestZeroCountNeverFalsePositivesAsFailure:
+    """Adversarial-review fix B3: `\\d+ failed`-style patterns match a fully
+    GREEN run's own "0 failed" summary line. `match_markers` scans the
+    combined stdout+stderr digest with no per-tool scoping (agent/outcome.py
+    docstring), so this is also a cross-tool risk — a green cargo test
+    summary containing "0 failed" must never trip the pytest/jest markers.
+    `maven.tests_failed` already used the `[1-9]` convention this table now
+    matches everywhere a "N failed"-shaped marker exists."""
+
+    def test_pytest_zero_failed_summary_is_success(self):
+        result = derive_outcome(
+            rc=0, is_error=False, interrupted=False,
+            stdout_digest="5 passed, 0 failed in 1.2s", stderr_digest="",
+        )
+        assert result["outcome"] == "success"
+        assert "pytest.failed" not in result["markers_matched"]
+
+    def test_jest_zero_failed_summary_is_success(self):
+        result = derive_outcome(
+            rc=0, is_error=False, interrupted=False,
+            stdout_digest="Tests:       0 failed, 5 passed, 5 total", stderr_digest="",
+        )
+        assert result["outcome"] == "success"
+        assert "jest.failed" not in result["markers_matched"]
+
+    def test_green_cargo_summary_with_zero_failed_is_success_not_soft_failure(self):
+        """The reviewer's specific witness case: cargo's own summary line
+        contains the substring "0 failed", and prior to this fix the
+        generic (non-cargo-scoped) `pytest.failed` pattern matched it
+        anywhere in the digest, downgrading a green run (rc=0) to
+        soft_failure."""
+        result = derive_outcome(
+            rc=0, is_error=False, interrupted=False,
+            stdout_digest=(
+                "running 5 tests\n"
+                "test result: ok. 5 passed; 0 failed; 0 ignored; "
+                "0 measured; 0 filtered out"
+            ),
+            stderr_digest="",
+        )
+        assert result["outcome"] == "success"
+        assert "pytest.failed" not in result["markers_matched"]
+
+    def test_nonzero_failed_count_still_matches(self):
+        """The fix narrows the pattern to [1-9]\\d* — a genuine failure
+        count must still be detected."""
+        result = derive_outcome(
+            rc=1, is_error=False, interrupted=False,
+            stdout_digest="4 passed, 2 failed in 1.2s", stderr_digest="",
+        )
+        assert result["outcome"] == "failure"
+        assert "pytest.failed" in result["markers_matched"]
+
+    def test_jest_nonzero_failed_count_still_matches(self):
+        result = derive_outcome(
+            rc=1, is_error=False, interrupted=False,
+            stdout_digest="Tests:       2 failed, 3 passed, 5 total", stderr_digest="",
+        )
+        assert result["outcome"] == "failure"
+        assert "jest.failed" in result["markers_matched"]
