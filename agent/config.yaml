@@ -1535,3 +1535,75 @@ proactive:
       enabled: false
       ttl_seconds: 60
       max_entries: 256
+
+arc_detection:
+  # §3 of memoization-l1-capture-design.md (LANE-ARC) — deterministic
+  # streaming failure->success arc detector over TOOL-CALL episodes (argv
+  # structure of already-issued Bash/Edit/Write calls; R5-clean — never
+  # prompt content). See app/cmdnorm.py + app/arcs.py.
+  normalization:
+    # Regex classes for positional-argument ABSTRACTION (comparison only —
+    # concrete values are always preserved alongside in the row). Order:
+    # uuid > version > path > num > literal (first match wins).
+    uuid_regex: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    version_regex: '^([vV]\d+(\.\d+)*|\d+(\.\d+){2,}([-+][0-9A-Za-z.]+)?)$'
+    num_regex: '^-?\d+(\.\d+)?$'
+    # Glob wildcards (`*`, `?`) are allowed in the filename-stem portion so
+    # that shell-glob path arguments (`find . -name "*.java"`) classify as
+    # <PATH> like any other extensioned filename, rather than staying an
+    # unclassified literal purely because of the wildcard character.
+    path_extension_regex: '^[\w.\-*?]+\.\w{1,5}$'
+    env_assignment_regex: '^[A-Za-z_][A-Za-z0-9_]*=.*$'
+    # Trailing redirect token stripped when it is the LAST token of the
+    # first pipeline stage (`mvn test 2>&1 | tail -30` -> `mvn test`).
+    stderr_merge_token: '2>&1'
+    # Maximum leading tokens folded into `verb` (binary + immediate
+    # subcommand chain). 3 covers the longest spec example (`npm run
+    # build`) and bounds pure positional-arg commands (e.g. `cp src dest`)
+    # from runaway-absorbing their arguments into the verb. Tune only
+    # against the G1 replay corpus (benchmarks/arc_replay.py).
+    max_verb_tokens: 3
+
+  similarity:
+    # Composite score = verb_weight*verb + flag_weight*jaccard(flags) +
+    # arg_weight*jaccard(args) (§3.2). Must sum to 1.0.
+    verb_weight: 0.5
+    flag_weight: 0.3
+    arg_weight: 0.2
+    # verb exact match = 1.0; Levenshtein ratio above this = soft match at
+    # verb_soft_match_score (typo-fix verbs); below = 0 (unrelated).
+    verb_soft_match_min_ratio: 0.8
+    verb_soft_match_score: 0.7
+    # Mutation band: mutation_band_min <= score < mutation_band_max. A
+    # score of 1.0 (identical normalized command) is never a mutation — it
+    # routes to the edit-mediated/flaky check (§3.4) instead.
+    mutation_band_min: 0.55
+    mutation_band_max: 0.999
+
+  window:
+    # Sliding per-session state (§3.3): a pending failure or edit record
+    # ages out of consideration once EITHER bound is exceeded.
+    max_commands: 20
+    ttl_seconds: 600
+    max_pending_per_verb_family: 5
+
+  flake:
+    # §3.4 Travis-CI base-rate defense: once an identical command has
+    # flipped outcome (flaky retry — no intervening edit and no env/cwd
+    # delta) this many times in a session, near-threshold mutation-band
+    # matches for that same normalized command are suppressed too, instead
+    # of emitted as arcs.
+    suppress_min_count: 2
+    near_threshold_min: 0.95
+
+  # §3.5(b): marker ids (tool-output classification, sanctioned — see
+  # agent/markers.yaml, owned by LANE-EPISODE) that mark a captured arc
+  # low_confidence: the failure's stderr matched a transient-error
+  # signature, so the "fix" may just be an environment retry rather than a
+  # real one. LANE-ARC does not own the marker table; these names are
+  # reconciled against whichever ids agent/markers.yaml actually ships at
+  # LANE-EPISODE integration.
+  transient_marker_ids:
+    - generic.timeout
+    - generic.connection_reset
+    - generic.rate_limit

@@ -391,6 +391,77 @@ FETCH_MAX_IDS_PER_CALL : int
     Maximum chunk ids accepted per vectr_fetch / POST /v1/fetch / `vectr
     fetch` call (UPG-CTX-EVICT). Bounds the deterministic re-fetch-by-id
     surface so it can't be used as an unbounded bulk export of the index.
+
+ARC_NORM_UUID_REGEX, ARC_NORM_VERSION_REGEX, ARC_NORM_NUM_REGEX,
+ARC_NORM_PATH_EXTENSION_REGEX : str
+    Positional-argument abstraction-class regexes used by app/cmdnorm.py
+    (L1 capture design doc §3.1, LANE-ARC). Comparison-only classification
+    of argv structure — concrete values are always preserved alongside.
+
+ARC_NORM_ENV_ASSIGNMENT_REGEX : str
+    Matches a leading `NAME=value` env-var-assignment prefix token on a
+    Bash command (§3.1) — its name is captured, the token is stripped.
+
+ARC_NORM_STDERR_MERGE_TOKEN : str
+    Trailing redirect token stripped from the first pipeline stage
+    (`cmd 2>&1 | tail -30` -> `cmd`) — §3.1 semantics-neutral decoration.
+
+ARC_NORM_MAX_VERB_TOKENS : int
+    Maximum leading tokens folded into a normalized command's `verb`
+    (binary + immediate subcommand chain, e.g. `npm run build`) — bounds
+    runaway absorption of positional arguments into the verb for commands
+    with no flags (e.g. `cp src dest`).
+
+ARC_SIMILARITY_VERB_WEIGHT, ARC_SIMILARITY_FLAG_WEIGHT,
+ARC_SIMILARITY_ARG_WEIGHT : float
+    Composite mutation-similarity weights (L1 capture design doc §3.2,
+    LANE-ARC): score = verb_weight*verb + flag_weight*jaccard(flags) +
+    arg_weight*jaccard(args). Sum to 1.0.
+
+ARC_SIMILARITY_VERB_SOFT_MATCH_MIN_RATIO : float
+    Levenshtein ratio above which two non-identical verbs count as a soft
+    match (typo-fix verbs) rather than unrelated (§3.2).
+
+ARC_SIMILARITY_VERB_SOFT_MATCH_SCORE : float
+    Fixed verb-component score assigned to a soft verb match (§3.2) —
+    not the raw Levenshtein ratio.
+
+ARC_MUTATION_BAND_MIN, ARC_MUTATION_BAND_MAX : float
+    Composite-similarity band a candidate failure->success pair must fall
+    in to count as a mutation arc (§3.2). A score of 1.0 (identical
+    normalized command) is never a mutation — it routes to the
+    edit-mediated/flaky check (§3.4) instead.
+
+ARC_WINDOW_MAX_COMMANDS : int
+    Sliding-window bound (§3.3): a pending failure or edit record ages out
+    once more than this many Bash/Edit episodes have since been observed
+    in the session.
+
+ARC_WINDOW_TTL_SECONDS : float
+    Sliding-window bound (§3.3): a pending failure or edit record ages out
+    once this many seconds have elapsed (by episode timestamp, never wall
+    clock) since it was observed.
+
+ARC_WINDOW_MAX_PENDING_PER_VERB_FAMILY : int
+    Cap on concurrently pending failures tracked per (session, verb-family)
+    bucket (§3.3) — the oldest is evicted once a new failure exceeds it.
+
+ARC_FLAKE_SUPPRESS_MIN_COUNT : int
+    Number of proven flaky-retry flips (identical command, no intervening
+    edit, no env/cwd delta) for the same normalized command within a
+    session before near-threshold mutation-band matches for that command
+    are suppressed too (§3.4, Travis-CI base-rate defense).
+
+ARC_FLAKE_NEAR_THRESHOLD_MIN : float
+    Lower bound of the "near-identical" similarity sub-band subject to the
+    flaky-suppression rule above (§3.4) — a genuinely different mutation
+    at a lower score is never suppressed by this rule.
+
+ARC_TRANSIENT_MARKER_IDS : frozenset[str]
+    Marker ids (tool-output classification — see agent/markers.yaml, owned
+    by LANE-EPISODE) that mark a captured arc `low_confidence` (§3.5(b)):
+    the failure's stderr matched a transient-error signature, so the "fix"
+    may just be an environment retry rather than a real one.
 """
 from __future__ import annotations
 
@@ -824,6 +895,47 @@ EMBEDDING_THREAD_CAP: int = _resolve_embedding_thread_cap()
 # ---------------------------------------------------------------------------
 
 FETCH_MAX_IDS_PER_CALL: int = int(_cfg["fetch"]["max_ids_per_call"])
+
+# ---------------------------------------------------------------------------
+# Arc detection (memoization-l1-capture-design.md §3, LANE-ARC): command
+# normalization + mutation-similarity + streaming detector state machine.
+# ---------------------------------------------------------------------------
+
+_arc_cfg: dict[str, Any] = _cfg["arc_detection"]
+_arc_norm_cfg: dict[str, Any] = _arc_cfg["normalization"]
+
+ARC_NORM_UUID_REGEX: str = str(_arc_norm_cfg["uuid_regex"])
+ARC_NORM_VERSION_REGEX: str = str(_arc_norm_cfg["version_regex"])
+ARC_NORM_NUM_REGEX: str = str(_arc_norm_cfg["num_regex"])
+ARC_NORM_PATH_EXTENSION_REGEX: str = str(_arc_norm_cfg["path_extension_regex"])
+ARC_NORM_ENV_ASSIGNMENT_REGEX: str = str(_arc_norm_cfg["env_assignment_regex"])
+ARC_NORM_STDERR_MERGE_TOKEN: str = str(_arc_norm_cfg["stderr_merge_token"])
+ARC_NORM_MAX_VERB_TOKENS: int = int(_arc_norm_cfg["max_verb_tokens"])
+
+_arc_sim_cfg: dict[str, Any] = _arc_cfg["similarity"]
+
+ARC_SIMILARITY_VERB_WEIGHT: float = float(_arc_sim_cfg["verb_weight"])
+ARC_SIMILARITY_FLAG_WEIGHT: float = float(_arc_sim_cfg["flag_weight"])
+ARC_SIMILARITY_ARG_WEIGHT: float = float(_arc_sim_cfg["arg_weight"])
+ARC_SIMILARITY_VERB_SOFT_MATCH_MIN_RATIO: float = float(_arc_sim_cfg["verb_soft_match_min_ratio"])
+ARC_SIMILARITY_VERB_SOFT_MATCH_SCORE: float = float(_arc_sim_cfg["verb_soft_match_score"])
+ARC_MUTATION_BAND_MIN: float = float(_arc_sim_cfg["mutation_band_min"])
+ARC_MUTATION_BAND_MAX: float = float(_arc_sim_cfg["mutation_band_max"])
+
+_arc_window_cfg: dict[str, Any] = _arc_cfg["window"]
+
+ARC_WINDOW_MAX_COMMANDS: int = int(_arc_window_cfg["max_commands"])
+ARC_WINDOW_TTL_SECONDS: float = float(_arc_window_cfg["ttl_seconds"])
+ARC_WINDOW_MAX_PENDING_PER_VERB_FAMILY: int = int(_arc_window_cfg["max_pending_per_verb_family"])
+
+_arc_flake_cfg: dict[str, Any] = _arc_cfg["flake"]
+
+ARC_FLAKE_SUPPRESS_MIN_COUNT: int = int(_arc_flake_cfg["suppress_min_count"])
+ARC_FLAKE_NEAR_THRESHOLD_MIN: float = float(_arc_flake_cfg["near_threshold_min"])
+
+ARC_TRANSIENT_MARKER_IDS: frozenset[str] = frozenset(
+    str(m) for m in _arc_cfg["transient_marker_ids"]
+)
 
 # ---------------------------------------------------------------------------
 # Proactive context — bundled defaults (UPG-PRO). Runtime/deployment toggles
