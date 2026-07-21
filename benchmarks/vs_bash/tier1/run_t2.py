@@ -34,6 +34,15 @@ tree the vectr arm has already reset, never the other way around):
 `.vectrignore` is never touched in either arm (daemon-indexing infrastructure
 the fixture already carries, orthogonal to agent-facing guidance).
 
+Each task's seed patch is materialized under this run's own results
+directory (results/vectr-vs-bash/camel/<vectr-sha>/t2/<task_id>_seed.patch)
+-- gitignored, outside the fixture tree entirely, and never on a path a
+session could read. This intentionally diverges from
+~/.cache/vectr/bench/maven-settings.xml (a fixed, shared, non-per-run
+location used for the Maven settings file, which every task/arm reads but
+never writes) -- the seed patch is per-run output, not shared toolchain
+config, so it belongs with this run's other recorded artifacts.
+
 THIS SCRIPT NEVER SPAWNS `claude -p` UNLESS EXPLICITLY RUN WITHOUT --dry-run.
 Automation (subagents, CI, hooks) must only ever call this with --dry-run;
 live sessions burn the user's Claude Code quota AND mutate the shared
@@ -135,6 +144,18 @@ _PREAMBLE = (
 # never exercise (network research is not part of fixing a seeded local bug;
 # both arms have the exact same restriction).
 _DISALLOWED_TOOLS: tuple[str, ...] = ("WebSearch", "WebFetch")
+
+# Design requirement (module docstring): vectr arm always runs before bash
+# within a task -- the bash arm must always run against a tree the vectr arm
+# has already reset, never the reverse. `--arms` is honored as a SET of
+# which arms to run, never as an ORDER; this is the single source of truth
+# for the actual run order, applied both at the CLI layer (main) and inside
+# run_task itself (so the invariant holds for any caller, not just the CLI).
+_ARM_ORDER: tuple[str, ...] = ("vectr", "bash")
+
+
+def _normalize_arm_order(arms: list[str]) -> list[str]:
+    return [a for a in _ARM_ORDER if a in arms]
 
 # ---------------------------------------------------------------------------
 # vectr's on-disk artifact templates -- rendered from the SAME template files
@@ -397,17 +418,30 @@ def daemon_settle(base: str, *, max_wait_s: int = 300, poll_gap_s: int = 10) -> 
     """Poll GET /v1/status until two successive polls `poll_gap_s` apart
     report identical `total_chunks` AND `last_indexed` -- the daemon has
     stopped re-indexing the seed's file-tree mutation. Read-only; NEVER
-    starts, stops, or restarts the daemon. Gives up after `max_wait_s` and
-    proceeds with a logged warning -- a settle timeout is a data-quality
-    caveat on the run, not a reason to abort it."""
+    starts, stops, or restarts the daemon.
+
+    A poll miss -- unreachable daemon (URLError/ConnectionError/TimeoutError/
+    OSError) OR a truncated/invalid JSON body from `json.load` (a
+    json.JSONDecodeError, which is a ValueError -- plausible mid-reindex,
+    when the daemon's status endpoint is momentarily mid-write) -- is
+    treated as transient, not fatal: keep polling rather than aborting the
+    task on the very first hiccup. Gives up only after `max_wait_s`, at
+    which point it proceeds with a logged warning -- a settle timeout (or a
+    persistent poll miss) is a data-quality caveat on the run, not a reason
+    to abort it."""
     start = time.time()
     prev = None
+    last_poll_error: str | None = None
     while True:
         try:
             with urllib.request.urlopen(f"{base}/v1/status", timeout=10) as r:
                 status = json.load(r)
-        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
-            return False, f"cannot reach {base}/v1/status while settling: {exc}"
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError, ValueError) as exc:
+            last_poll_error = f"{type(exc).__name__}: {exc}"
+            if time.time() - start >= max_wait_s:
+                return False, f"settle timed out after {max_wait_s}s -- last poll error: {last_poll_error}"
+            time.sleep(poll_gap_s)
+            continue
         cur = (status.get("total_chunks"), status.get("last_indexed"))
         if prev is not None and cur == prev:
             return True, f"settled at total_chunks={cur[0]} last_indexed={cur[1]!r} after {time.time()-start:.1f}s"
@@ -439,12 +473,34 @@ def maven_settings_path() -> Path:
     return Path.home() / ".cache" / "vectr" / "bench" / "maven-settings.xml"
 
 
+# Maven emits one of a small, stable set of literal strings when a `test`
+# goal genuinely reaches and runs tests that then fail (as opposed to the
+# build never reaching the test phase at all -- a compile error, a missing
+# module, an OOM, etc). Used ONLY to label `gate_error` below for REPORTING;
+# it never changes the gate's pass/fail outcome (the exit code remains the
+# sole pass/fail signal, per the module docstring's honesty rules) or any
+# control flow -- classifying tool OUTPUT after the fact, not task-prompt
+# content (HEURISTIC-DIRECTIVE R5 is about query-content branching, not this).
+_MAVEN_TEST_FAILURE_MARKERS: tuple[str, ...] = ("There are test failures", "Tests run:")
+
+
+def _looks_like_genuine_test_failure(maven_output: str) -> bool:
+    return any(marker in maven_output for marker in _MAVEN_TEST_FAILURE_MARKERS)
+
+
 def run_gate(fixture_root: Path, java_home: str, gate_modules: str, gate_test: str,
              *, timeout_s: int = 600) -> dict:
     """`<fixture>/mvnw -q -s <maven-settings> -pl <gate_modules> test
     -Dtest=<gate_test>`, cwd=fixture, JAVA_HOME pinned to the resolved JDK 21.
     Exit 0 = pass. NEVER modifies the gate command, settings, or tests to
-    make anything pass."""
+    make anything pass.
+
+    `gate_error` (additive, reporting-only) distinguishes an infrastructure/
+    compile failure from a genuine red test: True when the gate did not pass
+    AND the combined maven output carries none of `_MAVEN_TEST_FAILURE_
+    MARKERS` (or the gate timed out outright, which by definition is not a
+    completed, genuinely-red test run). This changes no pass/fail logic --
+    `passed` is untouched and remains `returncode == 0`."""
     settings = maven_settings_path()
     cmd = [
         str(fixture_root / "mvnw"), "-q", "-s", str(settings),
@@ -457,11 +513,13 @@ def run_gate(fixture_root: Path, java_home: str, gate_modules: str, gate_test: s
         result = subprocess.run(
             cmd, cwd=str(fixture_root), env=env, capture_output=True, text=True, timeout=timeout_s,
         )
+        passed = result.returncode == 0
         return {
-            "passed": result.returncode == 0, "returncode": result.returncode,
+            "passed": passed, "returncode": result.returncode,
             "wall_s": round(time.time() - start, 2),
             "stdout_tail": result.stdout[-4000:], "stderr_tail": result.stderr[-4000:],
             "timed_out": False,
+            "gate_error": (not passed) and not _looks_like_genuine_test_failure(result.stdout + result.stderr),
         }
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
@@ -470,6 +528,7 @@ def run_gate(fixture_root: Path, java_home: str, gate_modules: str, gate_test: s
             "passed": False, "returncode": None, "wall_s": round(time.time() - start, 2),
             "stdout_tail": stdout[-4000:], "stderr_tail": stderr[-4000:],
             "timed_out": True,
+            "gate_error": True,
         }
 
 
@@ -641,16 +700,24 @@ def run_task(
         "vectr_artifacts_active": False, "agents_md_original": None,
     }
     row: dict = {"id": tid, "seed_invalid": False, "arms": {}}
+    # Tracked so a mid-arm-loop exception can be tagged with which arm was in
+    # flight ("arm reached if known" -- see main()'s per-task error handling).
+    current_arm: str | None = None
 
     try:
         # Step 1: verify fixture is git-clean before touching anything.
         verify_fixture_clean(fixture_root)
 
-        # Step 2: materialize + reverse-apply the seed patch.
+        # Step 2: materialize + reverse-apply the seed patch. seed_applied is
+        # flipped True BEFORE the (atomic) apply call itself -- strictly
+        # safer against the restore-skip class: if anything between the flag
+        # flip and the call were ever to change, the restore rail still
+        # attempts reset_fixture, which is itself a safe no-op when nothing
+        # was actually seeded.
         seed_patch_path = out_dir / f"{tid}_seed.patch"
         materialize_seed_patch(fixture_root, task["fix_sha"], seed_patch_path)
-        apply_seed_reverse(fixture_root, seed_patch_path)
         state["seed_applied"] = True
+        apply_seed_reverse(fixture_root, seed_patch_path)
         row["seed_patch_path"] = str(seed_patch_path.relative_to(_REPO_ROOT))
 
         # Step 3: hide .git so a session cannot discover the gold answer.
@@ -673,7 +740,14 @@ def run_task(
             return row
         print(f"  [{tid}] pre-gate correctly FAILS ({gate_pre['wall_s']}s) -- seed valid")
 
+        # Design requirement (module docstring): vectr arm always runs before
+        # bash within a task, regardless of the order the caller passed
+        # `arms` in -- normalized here (not only at the CLI layer, see
+        # main()) so the invariant holds for every caller of run_task.
+        arms = _normalize_arm_order(arms)
+
         for i, arm in enumerate(arms):
+            current_arm = arm
             mcp_config_path = mcp_config_path_by_arm[arm]
 
             # Step 6 (vectr arm only): write shipped artifacts before the session.
@@ -735,8 +809,10 @@ def run_task(
 
             if i < len(arms) - 1:
                 # Step 7: between arms -- re-seed, re-hide, re-settle.
-                apply_seed_reverse(fixture_root, seed_patch_path)
+                # (seed_applied flipped before the apply call -- see the
+                # step-2 comment above for the same rationale.)
                 state["seed_applied"] = True
+                apply_seed_reverse(fixture_root, seed_patch_path)
                 state["git_stash_path"] = hide_git(fixture_root)
                 state["git_hidden"] = True
                 settled, settle_msg = daemon_settle(base)
@@ -747,11 +823,28 @@ def run_task(
 
         return row
 
-    except Exception:
-        # Step 11: on ANY exception mid-task -- best-effort restore before
-        # re-raising. Never leave the fixture dirty or git-less.
-        _best_effort_restore(fixture_root, state)
+    except Exception as exc:
+        # Tag which arm (if any) was in flight when this Exception fired, so
+        # main()'s per-task error row (MEDIUM-2b) can report it -- the
+        # restore itself happens unconditionally in `finally` below, not
+        # here, so this tagging never has to run for a BaseException
+        # (KeyboardInterrupt/SystemExit) to still be restored.
+        exc.t2_task_id = tid  # type: ignore[attr-defined]
+        exc.t2_arm_reached = current_arm  # type: ignore[attr-defined]
         raise
+
+    finally:
+        # Step 11 (HIGH-1 safety rail): restore whatever is still active,
+        # REGARDLESS of how this function exits -- normal return, a plain
+        # Exception, or a BaseException such as KeyboardInterrupt/SystemExit.
+        # A Ctrl-C during a 900s session, a settle sleep, or a 600s gate must
+        # never unwind through only the `except Exception` above (which does
+        # not match BaseException) and leave the fixture git-less + seeded.
+        # _best_effort_restore is idempotent against its own state flags, so
+        # on the normal-return path (every flag already cleared) this is a
+        # no-op. Interrupts still propagate after the restore completes --
+        # `finally` never swallows the exception it runs alongside.
+        _best_effort_restore(fixture_root, state)
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +879,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: --arms must be a comma-separated subset of {sorted(valid_arms)}, got {args.arms!r}",
               file=sys.stderr)
         return 2
+    # `--arms` is a SET of which arms to run, never an ORDER -- vectr always
+    # runs before bash when both are selected (see _ARM_ORDER). Normalized
+    # here too so the printed plan and the dry-run preview already reflect
+    # the order that will actually execute.
+    requested_arms = _normalize_arm_order(requested_arms)
 
     base = f"http://{args.host}:{args.port}"
     tasks_path = _HERE / f"tasks_t2_{_CORPUS}.jsonl"
@@ -887,47 +985,81 @@ def main(argv: list[str] | None = None) -> int:
     # Live mode -- everything below mutates the shared fixture tree.
     # ------------------------------------------------------------------
     java_home = resolve_java_home()
-    results = []
-    for tid in task_ids:
-        task = tasks[tid]
-        print(f"\n{'=' * 88}\n[{tid}] starting\n{'=' * 88}")
-        row = run_task(
-            task, fixture_root, base, out_dir,
-            model=args.model, max_turns=args.max_turns,
-            session_timeout_s=args.timeout, gate_timeout_s=args.gate_timeout,
-            java_home=java_home, arms=requested_arms,
-            disallowed_tools=_DISALLOWED_TOOLS,
-            mcp_config_path_by_arm=mcp_config_path_by_arm, daemon_port=args.port,
-        )
-        results.append(row)
-        if row["seed_invalid"]:
-            print(f"[{tid}] SEED INVALID -- pre-gate passed, skipped")
-            continue
-        for arm, summary in row["arms"].items():
-            print(f"[{tid}/{arm}] gate_pre_passed={summary['gate_pre']['passed']} "
-                  f"gate_post_passed={summary['gate_post']['passed']} "
-                  f"is_error={summary['is_error']} timed_out={summary['timed_out']}")
-
-    aggregate = {
-        "corpus": _CORPUS,
-        "vectr_sha": sha,
-        "smoke_test": bool(args.smoke),
-        "port": args.port,
-        "model": args.model,
-        "max_turns": args.max_turns,
-        "arms": requested_arms,
-        "task_ids": task_ids,
-        "results": results,
-        "tasks_seed_invalid": sum(1 for r in results if r["seed_invalid"]),
-        "tasks_scored": sum(1 for r in results if not r["seed_invalid"]),
-    }
+    results: list[dict] = []
     stamp = time.strftime("%Y%m%dT%H%M%S")
     tag = "smoke" if args.smoke else "run"
     out_path = out_dir / f"t2_{tag}_{stamp}.json"
-    out_path.write_text(json.dumps(aggregate, indent=2))
+
+    def _write_aggregate() -> dict:
+        # Rewritten after EVERY task (not just once at the end) so a failure
+        # on a later task never discards the results already recorded for
+        # earlier ones -- also called unconditionally in the `finally` below
+        # so a run that raises out of the loop entirely (e.g. Ctrl-C) still
+        # leaves whatever was completed on disk.
+        agg = {
+            "corpus": _CORPUS,
+            "vectr_sha": sha,
+            "smoke_test": bool(args.smoke),
+            "port": args.port,
+            "model": args.model,
+            "max_turns": args.max_turns,
+            "arms": requested_arms,
+            "task_ids": task_ids,
+            "results": results,
+            "tasks_seed_invalid": sum(1 for r in results if r.get("seed_invalid")),
+            "tasks_errored": sum(1 for r in results if "error" in r),
+            "tasks_scored": sum(
+                1 for r in results if not r.get("seed_invalid") and "error" not in r
+            ),
+        }
+        out_path.write_text(json.dumps(agg, indent=2))
+        return agg
+
+    try:
+        for tid in task_ids:
+            task = tasks[tid]
+            print(f"\n{'=' * 88}\n[{tid}] starting\n{'=' * 88}")
+            try:
+                row = run_task(
+                    task, fixture_root, base, out_dir,
+                    model=args.model, max_turns=args.max_turns,
+                    session_timeout_s=args.timeout, gate_timeout_s=args.gate_timeout,
+                    java_home=java_home, arms=requested_arms,
+                    disallowed_tools=_DISALLOWED_TOOLS,
+                    mcp_config_path_by_arm=mcp_config_path_by_arm, daemon_port=args.port,
+                )
+            except Exception as exc:
+                # run_task's own try/finally has already restored the
+                # fixture (HIGH-1) before this propagates -- a failure on
+                # one task must not discard the aggregate for tasks already
+                # completed, nor abort the remaining tasks. A
+                # KeyboardInterrupt/SystemExit (BaseException, not caught
+                # here) still propagates straight out of this loop, after
+                # run_task's own restore -- Ctrl-C stops the whole run.
+                arm_reached = getattr(exc, "t2_arm_reached", None)
+                print(f"[{tid}] ERROR (arm_reached={arm_reached!r}): {exc!r} -- "
+                      f"recording error row, continuing to next task")
+                row = {
+                    "id": tid, "seed_invalid": False, "arms": {},
+                    "error": repr(exc), "arm_reached": arm_reached,
+                }
+            results.append(row)
+            _write_aggregate()
+            if row.get("seed_invalid"):
+                print(f"[{tid}] SEED INVALID -- pre-gate passed, skipped")
+                continue
+            if "error" in row:
+                continue
+            for arm, summary in row["arms"].items():
+                print(f"[{tid}/{arm}] gate_pre_passed={summary['gate_pre']['passed']} "
+                      f"gate_post_passed={summary['gate_post']['passed']} "
+                      f"is_error={summary['is_error']} timed_out={summary['timed_out']}")
+    finally:
+        aggregate = _write_aggregate()
 
     print("\n" + "=" * 88)
-    print(f"tasks_seed_invalid={aggregate['tasks_seed_invalid']}  tasks_scored={aggregate['tasks_scored']}")
+    print(f"tasks_seed_invalid={aggregate['tasks_seed_invalid']}  "
+          f"tasks_errored={aggregate['tasks_errored']}  tasks_scored={aggregate['tasks_scored']}")
     print(f"Results written: {out_path}")
     print("=" * 88)
     return 0

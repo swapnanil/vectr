@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -319,6 +320,55 @@ def test_capture_tree_changes_reports_diff_and_truncation_flag(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# daemon_settle -- urlopen fully mocked, no real network call (MEDIUM-2a
+# guard: a truncated/invalid JSON body -- json.JSONDecodeError, a ValueError
+# -- must be treated as a transient poll miss, not an immediate abort).
+# ---------------------------------------------------------------------------
+
+class _FakeHTTPResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def test_daemon_settle_treats_json_decode_error_as_transient_and_retries(monkeypatch):
+    calls = {"n": 0}
+
+    def _fake_urlopen(url, timeout=10):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeHTTPResponse(b"{not valid json")  # -> json.JSONDecodeError
+        return _FakeHTTPResponse(json.dumps({"total_chunks": 5, "last_indexed": "t1"}).encode())
+
+    monkeypatch.setattr(run_t2.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(run_t2.time, "sleep", lambda s: None)  # no real delay in the test
+
+    settled, msg = run_t2.daemon_settle("http://fake-host", max_wait_s=60, poll_gap_s=1)
+    assert settled is True
+    assert calls["n"] == 3  # 1 decode-error poll miss + 2 identical settled polls
+
+
+def test_daemon_settle_gives_up_after_max_wait_s_of_persistent_decode_errors(monkeypatch):
+    def _always_bad(url, timeout=10):
+        return _FakeHTTPResponse(b"not json at all")
+
+    monkeypatch.setattr(run_t2.urllib.request, "urlopen", _always_bad)
+    monkeypatch.setattr(run_t2.time, "sleep", lambda s: None)
+
+    settled, msg = run_t2.daemon_settle("http://fake-host", max_wait_s=0, poll_gap_s=1)
+    assert settled is False
+    assert "settle timed out" in msg
+
+
+# ---------------------------------------------------------------------------
 # Task-id uniqueness preflight
 # ---------------------------------------------------------------------------
 
@@ -363,6 +413,18 @@ def test_compose_command_includes_disallowed_tools_and_strict_mcp_config(tmp_pat
     p_idx = cmd.index("-p")
     assert "fix the bug" in cmd[p_idx + 1]
     assert cmd[p_idx + 1].startswith("You are working in the codebase")
+
+
+# ---------------------------------------------------------------------------
+# Arm order normalization (L-9): --arms is a SET of which arms to run, never
+# an ORDER -- vectr always runs before bash when both are selected.
+# ---------------------------------------------------------------------------
+
+def test_normalize_arm_order_puts_vectr_first_regardless_of_input_order():
+    assert run_t2._normalize_arm_order(["bash", "vectr"]) == ["vectr", "bash"]
+    assert run_t2._normalize_arm_order(["vectr", "bash"]) == ["vectr", "bash"]
+    assert run_t2._normalize_arm_order(["bash"]) == ["bash"]
+    assert run_t2._normalize_arm_order(["vectr"]) == ["vectr"]
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +488,54 @@ def test_run_gate_reports_timeout(tmp_path, monkeypatch):
     result = run_t2.run_gate(fixture, "/opt/jdk21", "core/camel-core", "SomeTest", timeout_s=1)
     assert result["passed"] is False
     assert result["timed_out"] is True
+    assert result["gate_error"] is True  # a timeout is not a completed, genuinely-red test run
+
+
+def test_run_gate_pass_never_sets_gate_error(tmp_path, monkeypatch):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "mvnw").write_text("#!/bin/sh\nexit 0\n")
+
+    def _fake_run(cmd, cwd, env, capture_output, text, timeout):
+        return subprocess.CompletedProcess(cmd, 0, stdout="BUILD SUCCESS", stderr="")
+
+    monkeypatch.setattr(run_t2.subprocess, "run", _fake_run)
+    result = run_t2.run_gate(fixture, "/opt/jdk21", "core/camel-core", "SomeTest", timeout_s=60)
+    assert result["gate_error"] is False
+
+
+def test_run_gate_genuine_test_failure_is_not_flagged_gate_error(tmp_path, monkeypatch):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "mvnw").write_text("#!/bin/sh\nexit 1\n")
+
+    def _fake_run(cmd, cwd, env, capture_output, text, timeout):
+        return subprocess.CompletedProcess(
+            cmd, 1,
+            stdout="Tests run: 3, Failures: 1, Errors: 0, Skipped: 0\nThere are test failures.\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(run_t2.subprocess, "run", _fake_run)
+    result = run_t2.run_gate(fixture, "/opt/jdk21", "core/camel-core", "SomeTest", timeout_s=60)
+    assert result["passed"] is False
+    assert result["gate_error"] is False  # genuine red test, not an infra/compile error
+
+
+def test_run_gate_infra_failure_is_flagged_gate_error(tmp_path, monkeypatch):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "mvnw").write_text("#!/bin/sh\nexit 1\n")
+
+    def _fake_run(cmd, cwd, env, capture_output, text, timeout):
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="[ERROR] Failed to execute goal ... : Compilation failure\n",
+        )
+
+    monkeypatch.setattr(run_t2.subprocess, "run", _fake_run)
+    result = run_t2.run_gate(fixture, "/opt/jdk21", "core/camel-core", "SomeTest", timeout_s=60)
+    assert result["passed"] is False
+    assert result["gate_error"] is True  # never reached the test phase -- not a genuine red test
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +578,104 @@ def test_best_effort_restore_recovers_git_and_seed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# run_task restore rail (HIGH-1, 2026-07-21 review): the fixture must be
+# fully restored (git present, seed reverted, vectr artifacts removed) no
+# matter HOW run_task exits mid-arm-loop -- a plain Exception (caught,
+# tagged, re-raised) or a BaseException such as KeyboardInterrupt (never
+# caught by `except Exception`, only by the unconditional `finally`).
+# daemon_settle/run_gate/run_claude_session are monkeypatched so this never
+# touches the network, Maven, or spawns a real `claude -p` session -- only a
+# real tempdir git repo is exercised, same convention as the rest of this
+# file.
+# ---------------------------------------------------------------------------
+
+def _make_task_fixture(tmp_path: Path) -> tuple[Path, str]:
+    """A tempdir git repo shaped enough like the real camel fixture for
+    run_task: an init (buggy) commit, a fix commit (source-only, same seed
+    convention as _make_seed_fixture), then a real AGENTS.md at the root
+    committed on top, with .vectrignore left untracked (matching the real
+    fixture's `?? .vectrignore`-only git-clean shape)."""
+    repo, fix_sha = _make_seed_fixture(tmp_path)
+    (repo / "AGENTS.md").write_text("# Camel\n\nReal project docs.\n")
+    _commit_all(repo, "add AGENTS.md")
+    (repo / ".vectrignore").write_text("target/\n")
+    return repo, fix_sha
+
+
+def _patch_run_task_externals(monkeypatch, *, session_raises: BaseException) -> None:
+    monkeypatch.setattr(run_t2, "daemon_settle", lambda base, **kw: (True, "settled (stub)"))
+    monkeypatch.setattr(run_t2, "run_gate", lambda *a, **kw: {
+        "passed": False, "returncode": 1, "wall_s": 0.01,
+        "stdout_tail": "", "stderr_tail": "", "timed_out": False, "gate_error": False,
+    })
+
+    def _raiser(cmd, cwd, timeout_s):
+        raise session_raises
+
+    monkeypatch.setattr(run_t2, "run_claude_session", _raiser)
+
+
+def _run_task_kwargs(repo: Path, fix_sha: str, out_dir: Path) -> dict:
+    task = {
+        "id": "T2-TEST", "fix_sha": fix_sha,
+        "gate_modules": "core", "gate_test": "WidgetTest",
+        "prompt": "fix the widget bug",
+    }
+    return dict(
+        task=task, fixture_root=repo, base="http://localhost:9999", out_dir=out_dir,
+        model="sonnet", max_turns=5, session_timeout_s=10, gate_timeout_s=10,
+        java_home="/fake/jdk21", arms=["vectr"],
+        disallowed_tools=("WebSearch", "WebFetch"),
+        mcp_config_path_by_arm={"vectr": out_dir / "mcp_vectr.json"},
+        daemon_port=8800,
+    )
+
+
+def test_run_task_restores_fixture_on_plain_exception_mid_arm_loop(tmp_path, monkeypatch):
+    repo, fix_sha = _make_task_fixture(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    # run_task records `seed_patch_path` relative to _REPO_ROOT (true for
+    # every real caller, since main() always builds out_dir under
+    # _REPO_ROOT/results/...) -- retargeted to tmp_path for this tempdir-only
+    # test so that relative_to() succeeds without touching the real repo.
+    monkeypatch.setattr(run_t2, "_REPO_ROOT", tmp_path)
+    _patch_run_task_externals(monkeypatch, session_raises=RuntimeError("boom mid-session"))
+
+    with pytest.raises(RuntimeError, match="boom mid-session") as excinfo:
+        run_t2.run_task(**_run_task_kwargs(repo, fix_sha, out_dir))
+    assert excinfo.value.t2_arm_reached == "vectr"
+
+    assert (repo / ".git").exists()
+    assert not (repo.parent / f"{repo.name}.git-stash").exists()
+    # seed reverted: reset_fixture restored HEAD's tracked content (the
+    # fix's `return 2`, not the seeded-bug `return 1`).
+    assert "return 2" in (repo / "src" / "main" / "Widget.java").read_text()
+    # vectr artifacts removed, AGENTS.md restored to its exact original bytes.
+    assert (repo / "AGENTS.md").read_text() == "# Camel\n\nReal project docs.\n"
+    assert not (repo / ".claude" / "settings.json").exists()
+    assert not (repo / ".mcp.json").exists()
+
+
+def test_run_task_restores_fixture_on_keyboard_interrupt_mid_arm_loop(tmp_path, monkeypatch):
+    repo, fix_sha = _make_task_fixture(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    monkeypatch.setattr(run_t2, "_REPO_ROOT", tmp_path)
+    _patch_run_task_externals(monkeypatch, session_raises=KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        run_t2.run_task(**_run_task_kwargs(repo, fix_sha, out_dir))
+
+    assert (repo / ".git").exists()
+    assert not (repo.parent / f"{repo.name}.git-stash").exists()
+    assert "return 2" in (repo / "src" / "main" / "Widget.java").read_text()
+    assert (repo / "AGENTS.md").read_text() == "# Camel\n\nReal project docs.\n"
+    assert not (repo / ".claude" / "settings.json").exists()
+    assert not (repo / ".mcp.json").exists()
+
+
+# ---------------------------------------------------------------------------
 # run_t1b.py timeout/hard-kill fix -- permanent regression coverage
 # ---------------------------------------------------------------------------
 
@@ -476,14 +684,34 @@ import run_t1b  # noqa: E402
 
 
 def test_run_claude_session_hard_kills_a_silent_child():
-    """UPG-T1-DRIVER-TIMEOUT-STALL: a child that stops producing stdout
-    entirely (never exits, never writes another line) must still be killed
-    at timeout_s and the session must return promptly with timed_out=True,
-    not hang past the timeout indefinitely."""
-    cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+    """UPG-T1-DRIVER-TIMEOUT-STALL, hardened per the 2026-07-21 review
+    (MEDIUM-3): a plain, descendant-less `sleep` is killed just as reliably
+    by a bare `proc.kill()` as by a process-group kill, so it does NOT
+    distinguish `start_new_session=True` + `os.killpg` from a regressed
+    version without them -- that gap was caught empirically (the previous
+    version of this test still passed with `start_new_session` removed).
+
+    Here the spawned `bash` backgrounds a second `sleep` before running its
+    own foreground `sleep`; the backgrounded process is a process-group
+    sibling that inherits the stdout pipe's write end. Only a process-group
+    kill (`killpg`) reaps both together and lets the read loop see EOF
+    promptly; a plain `proc.kill()` of just the `bash` parent leaves the
+    backgrounded `sleep` running (and the pipe held open) for its own full
+    30s. Manually verified (2026-07-21): this test FAILS (wall time ~30s,
+    not <10s) when `start_new_session=True` is temporarily removed from
+    run_claude_session's `subprocess.Popen` call, and passes again once
+    restored."""
+    cmd = ["bash", "-c", "sleep 30 & sleep 30"]
+    started = time.time()
     session = run_t1b.run_claude_session(cmd, cwd=".", timeout_s=2)
+    elapsed = time.time() - started
     assert session["timed_out"] is True
-    assert session["returncode"] is not None and session["returncode"] != 0
+    assert elapsed < 10, (
+        f"run_claude_session took {elapsed:.1f}s to return -- expected a "
+        f"prompt process-group kill (<10s), not the ~30s a lingering "
+        f"backgrounded grandchild would cause if only the direct child, "
+        f"not its whole process group, were killed"
+    )
 
 
 def test_run_claude_session_normal_exit_is_not_flagged_timed_out():
