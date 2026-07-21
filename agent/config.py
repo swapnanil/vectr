@@ -323,6 +323,12 @@ EPISODES_POST_TIMEOUT_S : float
     Hard timeout (seconds) the PostToolUse hook's detached worker holds its
     own POST /v1/episode call to, client-side.
 
+EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S : float
+    Age (seconds) beyond which an orphaned `vectr-episode-*.json` payload
+    temp file is swept by agent/episode_worker.py (adversarial-review LOW
+    item) — a `_spawn_episode_worker` spawn failure can leave one behind
+    with no process left to clean it up.
+
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT : float
 STRATEGY_DEFAULT_BM25_WEIGHT : float
     Fallback hybrid-search weights used before the first index-time codebase
@@ -835,6 +841,9 @@ EPISODES_DIGEST_MAX_CHARS: int = int(_episodes_cfg["digest_max_chars"])
 EPISODES_DIGEST_HEAD_LINES: int = int(_episodes_cfg["digest_head_lines"])
 EPISODES_DIGEST_TAIL_LINES: int = int(_episodes_cfg["digest_tail_lines"])
 EPISODES_POST_TIMEOUT_S: float = float(_episodes_cfg["post_timeout_s"])
+EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S: float = float(
+    _episodes_cfg["stale_temp_file_sweep_age_s"]
+)
 
 # ---------------------------------------------------------------------------
 # ingest_traces unresolved-caller/callee warning cap (UPG-7.3)

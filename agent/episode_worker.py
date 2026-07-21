@@ -26,9 +26,36 @@ noisy or hung tool call.
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import sys
+import tempfile
+import time
+
+
+def _sweep_stale_temp_files(max_age_s: float) -> None:
+    """Best-effort cleanup of orphaned `vectr-episode-*.json` payload files
+    (adversarial-review LOW item). The normal case never needs this: this
+    process deletes its OWN payload file above, unconditionally, before
+    doing anything else. This only catches the rarer case where
+    `_spawn_episode_worker` (main.py / agent/hook_cli.py) wrote a temp file
+    and then failed to actually launch a worker to consume it (e.g.
+    `subprocess.Popen` raising) — nothing else in that path is ever able to
+    clean it up. Runs opportunistically, once, on this already-detached
+    process's own time — never on the PostToolUse hook's foreground path
+    (spec §7 gate G2), and never raises."""
+    try:
+        pattern = os.path.join(tempfile.gettempdir(), "vectr-episode-*.json")
+        cutoff = time.time() - max_age_s
+        for path in glob.glob(pattern):
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                pass  # another worker already claimed/removed it — fine
+    except Exception:
+        pass  # sweep is best-effort; never let it affect this episode's post
 
 
 def main() -> None:
@@ -46,14 +73,20 @@ def main() -> None:
         except OSError:
             pass  # already gone, or never existed — nothing left to clean up
 
+    from agent.config import (
+        EPISODES_CLIENT_TRUNCATE_CHARS,
+        EPISODES_POST_TIMEOUT_S,
+        EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S,
+    )
+
+    _sweep_stale_temp_files(EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S)
+
     if not isinstance(envelope, dict):
         return
     port = envelope.get("port")
     payload = envelope.get("payload")
     if not isinstance(port, int) or not isinstance(payload, dict):
         return
-
-    from agent.config import EPISODES_CLIENT_TRUNCATE_CHARS, EPISODES_POST_TIMEOUT_S
 
     for field in ("stdout_tail", "stderr_tail"):
         value = payload.get(field)

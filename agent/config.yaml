@@ -1368,6 +1368,18 @@ episodes:
   # but a runaway background process must still bound itself.
   post_timeout_s: 2.0
 
+  # Age (seconds) beyond which an orphaned `vectr-episode-*.json` payload
+  # temp file is swept by agent/episode_worker.py (adversarial-review LOW
+  # item). The worker always deletes its OWN payload file in a `finally`
+  # block, but a spawn failure in `_spawn_episode_worker` (main.py /
+  # agent/hook_cli.py — the temp file is written before `subprocess.Popen`
+  # is attempted) can leave one behind with nothing left to clean it up.
+  # One hour is comfortably longer than any real worker run (a POST that
+  # completes or times out within `post_timeout_s` above), so anything
+  # still present past this age is unambiguously orphaned, never a
+  # legitimately in-flight one.
+  stale_temp_file_sweep_age_s: 3600
+
 embedding:
   # Default local (sentence-transformers) embedding model for the L3 content
   # index (UPG-EMBEDDER-SWAP-GRANITE). Dimension-compatible drop-in for the

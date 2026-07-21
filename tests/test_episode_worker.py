@@ -8,11 +8,13 @@ status or output."""
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from unittest.mock import patch
 
 from agent import episode_worker
-from agent.config import EPISODES_CLIENT_TRUNCATE_CHARS
+from agent.config import EPISODES_CLIENT_TRUNCATE_CHARS, EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S
 
 
 def _write_envelope(tmp_path, port, payload) -> str:
@@ -127,3 +129,74 @@ class TestPostFailureNeverRaises:
         with patch("sys.argv", ["episode_worker.py", path]):
             with patch("httpx.post", side_effect=httpx.TimeoutException("timed out")):
                 episode_worker.main()  # must not raise
+
+
+class TestStaleTempFileSweep:
+    """Adversarial-review LOW item: `_spawn_episode_worker` (main.py /
+    agent/hook_cli.py) writes its payload temp file BEFORE attempting
+    `subprocess.Popen`, inside a blanket try/except — if the spawn itself
+    fails, no worker process ever runs to hit this module's own
+    `finally: os.remove(payload_path)`, orphaning the file. This sweep is
+    the only thing that ever cleans those up, so it must reliably remove
+    stale ones and never touch fresh/still-in-flight ones."""
+
+    def _age_file(self, path, age_s: float) -> None:
+        stale_time = time.time() - age_s
+        os.utime(path, (stale_time, stale_time))
+
+    def test_stale_orphan_is_removed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+        orphan = tmp_path / "vectr-episode-orphan123.json"
+        orphan.write_text("{}")
+        self._age_file(orphan, EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S + 60)
+
+        episode_worker._sweep_stale_temp_files(EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S)
+
+        assert not orphan.exists()
+
+    def test_fresh_file_is_preserved(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+        fresh = tmp_path / "vectr-episode-fresh456.json"
+        fresh.write_text("{}")  # mtime = now, well under the sweep age
+
+        episode_worker._sweep_stale_temp_files(EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S)
+
+        assert fresh.exists()
+
+    def test_non_matching_filename_is_never_touched(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+        unrelated = tmp_path / "some-other-file.json"
+        unrelated.write_text("{}")
+        self._age_file(unrelated, EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S + 60)
+
+        episode_worker._sweep_stale_temp_files(EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S)
+
+        assert unrelated.exists()
+
+    def test_permission_error_on_remove_is_swallowed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+        orphan = tmp_path / "vectr-episode-locked789.json"
+        orphan.write_text("{}")
+        self._age_file(orphan, EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S + 60)
+        with patch("os.remove", side_effect=OSError("permission denied")):
+            episode_worker._sweep_stale_temp_files(EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S)
+        # must not raise; file remains since the (mocked) remove failed
+
+    def test_glob_failure_is_swallowed(self, monkeypatch):
+        with patch("glob.glob", side_effect=OSError("boom")):
+            episode_worker._sweep_stale_temp_files(EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S)  # must not raise
+
+    def test_main_invokes_sweep_alongside_normal_payload_handling(self, tmp_path, monkeypatch):
+        """The sweep runs as a side effect of a normal worker invocation
+        (main.py's own detached process), not on a separate schedule."""
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+        orphan = tmp_path / "vectr-episode-other-worker.json"
+        orphan.write_text("{}")
+        self._age_file(orphan, EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S + 60)
+
+        payload_path = _write_envelope(tmp_path, 8765, {"tool": "bash", "command": "ls"})
+        with patch("sys.argv", ["episode_worker.py", payload_path]):
+            with patch("httpx.post"):
+                episode_worker.main()
+
+        assert not orphan.exists()
