@@ -1878,11 +1878,12 @@ class TestVectrForget:
         monkeypatch.setenv("VECTR_MCP_ALL_TOOLS", "1")
         tools = handle_tools_list(session_id="fresh-session-no-notes")["tools"]
         names = {t["name"] for t in tools}
-        # UPG-MEMORY-STATE-MACHINE §4.2 added vectr_revoke/vectr_reinstate (18 = 16 + 2).
-        assert len(tools) == 18
+        # UPG-MEMORY-STATE-MACHINE §4.2 added vectr_revoke/vectr_reinstate (18 = 16 + 2);
+        # memoization-l3-distiller-design added vectr_distill (19 = 18 + 1).
+        assert len(tools) == 19
         assert {
             "vectr_recall", "vectr_forget", "vectr_promote", "vectr_revoke", "vectr_reinstate",
-            "vectr_snapshot", "vectr_snapshot_list", "vectr_resume",
+            "vectr_snapshot", "vectr_snapshot_list", "vectr_resume", "vectr_distill",
         } <= names
 
     def test_all_tools_env_flag_off_keeps_gating(self, monkeypatch) -> None:

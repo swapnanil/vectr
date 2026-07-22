@@ -1753,6 +1753,35 @@ class VectrService:
             return 0
         return self._episode_store.count_arcs_pending_distill(self._workspace_root)
 
+    def list_arcs(self, *, status: str = "pending", limit: int = 100) -> list[dict]:
+        """Read surface for `GET /v1/arcs` and `vectr_distill()`
+        (memoization-l3-distiller-design §2) — see
+        `EpisodeStore.list_arcs` for the returned shape."""
+        self._require_memory_layer()
+        return self._episode_store.list_arcs(
+            self._workspace_root, status=status, limit=limit,
+        )
+
+    def resolve_arcs_distilled(self, arc_ids: list[int], note_id: int) -> dict:
+        """Write-back for `vectr_remember(..., distilled_from=[...])`
+        (memoization-l3-distiller-design §3): marks `arc_ids` distilled
+        into `note_id`. Returns `{"resolved": [...], "unresolved": [...]}`
+        — idempotent, never raises on unknown/already-resolved ids."""
+        self._require_memory_layer()
+        return self._episode_store.resolve_arcs_distilled(
+            self._workspace_root, arc_ids, note_id,
+        )
+
+    def resolve_arcs_dismissed(self, arc_ids: list[int], reason: str) -> dict:
+        """Write-back for `vectr_distill(dismiss=[...], reason=...)` /
+        `POST /v1/arcs/dismiss` (memoization-l3-distiller-design §3).
+        Returns `{"resolved": [...], "unresolved": [...]}` — idempotent,
+        never raises on unknown/already-resolved ids."""
+        self._require_memory_layer()
+        return self._episode_store.resolve_arcs_dismissed(
+            self._workspace_root, arc_ids, reason,
+        )
+
     def promote_note(self, note_id: int, to: str) -> bool:
         """Explicit provenance promotion (TRIGGER-ENGINE wave 1,
         bm2-design-skeleton.md §5): auto -> agent -> human, one step at a
@@ -1950,6 +1979,12 @@ class VectrService:
             nudge = self._stale_task_nudge_line()
             if nudge and (ledger is None or ledger.remaining_budget() > 0):
                 fire_text = f"{fire_text}\n\n{nudge}" if fire_text else nudge
+            # memoization-l3-distiller-design §4: same session-start/
+            # post-compaction payload, one more additive line, budget-aware
+            # the same way the stale-task nudge above is.
+            arc_nudge = self._arc_distill_nudge_line()
+            if arc_nudge and (ledger is None or ledger.remaining_budget() > 0):
+                fire_text = f"{fire_text}\n\n{arc_nudge}" if fire_text else arc_nudge
             return fire_text
 
         # Path-anchored mode (UPG-9.6 contract; TRIGGER-ENGINE wave 2a adds
@@ -2446,6 +2481,24 @@ class VectrService:
             f"{MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS} days are still active "
             f"(oldest: #{oldest_id}) — vectr_remember(kind=\"task\", supersedes=<old id>) "
             "if the work moved on, or vectr_forget(note_id=...) if it's done."
+        )
+
+    def _arc_distill_nudge_line(self) -> str:
+        """One-line pending-arc distillation nudge, or "" when there are
+        none (memoization-l3-distiller-design §4) — appended to the same
+        session-start/post-compaction injection payload the stale-task
+        nudge above rides. Deterministic integer-count comparison on
+        vectr's own store — no content classification, nothing gated or
+        rerouted. Suppressed at count 0; suppressed in search-only mode by
+        construction, since the boot branch that calls this never runs
+        there (`_recall_impl` raises via `_require_memory_layer()` first)."""
+        count = self.count_arcs_pending_distill()
+        if count <= 0:
+            return ""
+        return (
+            f"{count} command-discovery arcs are pending distillation — call "
+            "vectr_distill() to review them and persist the lessons as notes "
+            "(or dismiss them)."
         )
 
     # ------------------------------------------------------------------

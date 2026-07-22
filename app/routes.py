@@ -8,6 +8,11 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from app.models import (
+    ArcRecord,
+    ArcResolveResult,
+    ArcsDismissRequest,
+    ArcsDismissResponse,
+    ArcsResponse,
     CommitNoteRequest,
     CommitNoteResponse,
     EpisodeRecord,
@@ -341,6 +346,13 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         # (UPG-MEMORY-STATE-MACHINE §4.2) a `contradicts` target that does
         # not exist — all caller input errors, never a server fault.
         raise HTTPException(status_code=422, detail={"error": "invalid_memory_object", "detail": str(exc)})
+    distilled = None
+    if body.distilled_from:
+        # memoization-l3-distiller-design §3 write-back: the note write
+        # already succeeded (note_id above); resolve the named arcs as a
+        # second step, never blocking the note write on it.
+        result = svc.resolve_arcs_distilled(body.distilled_from, note_id)
+        distilled = ArcResolveResult(resolved=result["resolved"], unresolved=result["unresolved"])
     return RememberResponse(
         note_id=note_id,
         # CLI-form hint (UPG-CLI-RECALL-HINT): this route is the CLI's `vectr
@@ -348,6 +360,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         # separate confirmation text in `vectr_remember(note_id=N)` form.
         message=f"Stored note #{note_id}. Recall with: vectr recall --id {note_id}",
         processing_ms=int((time.monotonic() - t0) * 1000),
+        distilled=distilled,
     )
 
 
@@ -663,6 +676,56 @@ async def episodes(
     )
     return EpisodesResponse(
         episodes=[EpisodeRecord(**row) for row in rows],
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.get("/v1/arcs", response_model=ArcsResponse)
+async def arcs(
+    request: Request,
+    status: str = Query(default="pending", description="pending | resolved | all"),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> ArcsResponse:
+    """Read surface for arc distillation
+    (memoization-l3-distiller-design §2): arc rows joined with their
+    episodes' summary fields — id/ts/cwd/confidence, the failure chain,
+    the mutation diff, the resolving success episode — plus
+    `total_pending`. Rendered facts only: no advice, no suggested kinds
+    (that judgment lives in static tool-surface text, never in generated
+    data)."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    if status not in ("pending", "resolved", "all"):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "invalid_status", "detail": "status must be pending, resolved, or all"},
+        )
+    rows = svc.list_arcs(status=status, limit=limit)
+    return ArcsResponse(
+        arcs=[ArcRecord(**row) for row in rows],
+        total_pending=svc.count_arcs_pending_distill(),
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/arcs/dismiss", response_model=ArcsDismissResponse)
+async def arcs_dismiss(body: ArcsDismissRequest, request: Request) -> ArcsDismissResponse:
+    """Write-back verdict: dismiss (memoization-l3-distiller-design §3) —
+    sets `distilled_at`/`dismissed_reason` on each named arc. Idempotent:
+    unknown/already-resolved ids come back in `unresolved`, never an
+    error."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    result = svc.resolve_arcs_dismissed(body.arc_ids, body.reason)
+    return ArcsDismissResponse(
+        resolved=result["resolved"],
+        unresolved=result["unresolved"],
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

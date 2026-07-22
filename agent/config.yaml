@@ -1350,8 +1350,8 @@ episodes:
   # Server-side digest cap (characters) for stdout_digest/stderr_digest —
   # applied AFTER the client-side truncation above, at insert time
   # (agent/episode_canon.py). Smaller than client_truncate_chars: the
-  # digest is what a human/L3 distiller actually reads back via
-  # GET /v1/episodes, not a full-fidelity log.
+  # digest is what a human or the distilling caller-LLM actually reads
+  # back via GET /v1/episodes, not a full-fidelity log.
   digest_max_chars: 2000
 
   # Lines kept from the start/end of a digest once it must be elided
@@ -1378,6 +1378,17 @@ episodes:
   # still present past this age is unambiguously orphaned, never a
   # legitimately in-flight one.
   stale_temp_file_sweep_age_s: 3600
+
+  # Arc distillation (memoization-l3-distiller-design §6): max arcs
+  # rendered per `vectr_distill()` no-args call, confidence-first
+  # (normal before any other value) then oldest-first — the rest stay
+  # pending for a later call.
+  distill_max_arcs_rendered: 10
+
+  # Hard cap (estimated tokens, agent/trigger_engine.py's token_estimate)
+  # on the same `vectr_distill()` render — whichever of this or
+  # distill_max_arcs_rendered above is reached first stops the render.
+  distill_render_token_cap: 2000
 
 embedding:
   # Default local (sentence-transformers) embedding model for the L3 content

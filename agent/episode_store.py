@@ -91,6 +91,20 @@ class EpisodeStore:
                     ON arcs(workspace, ts);
                 """
             )
+            self._migrate_arcs_columns(conn)
+
+    def _migrate_arcs_columns(self, conn: sqlite3.Connection) -> None:
+        """Additive migration (memoization-l3-distiller-design §3): a
+        pre-existing `arcs` table created before this lane's write-back
+        columns existed gets them added via `ALTER TABLE ... ADD COLUMN`
+        (nullable, no rewrite). `PRAGMA table_info` makes this tolerant of
+        both an already-migrated table and a brand-new one — always safe
+        to call unconditionally from `_init_db`."""
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(arcs)")}
+        if "distilled_note_id" not in existing:
+            conn.execute("ALTER TABLE arcs ADD COLUMN distilled_note_id INTEGER")
+        if "dismissed_reason" not in existing:
+            conn.execute("ALTER TABLE arcs ADD COLUMN dismissed_reason TEXT")
 
     def insert(
         self,
@@ -246,7 +260,7 @@ class EpisodeStore:
             )
 
     def count_arcs_pending_distill(self, workspace: str) -> int:
-        """Count of `workspace`'s arcs not yet L3-distilled (`distilled_at
+        """Count of `workspace`'s arcs not yet distilled (`distilled_at
         IS NULL`) — folded into `vectr_status`'s `arcs_pending_distill`
         field. The `arcs` table is always created by `_init_db` (this lane
         owns it, B2b); the try/except remains only as a defensive guard
@@ -262,6 +276,130 @@ class EpisodeStore:
             return int(row["n"]) if row else 0
         except sqlite3.OperationalError:
             return 0  # no `arcs` table (or schema mismatch) — defensive only
+
+    def list_arcs(
+        self,
+        workspace: str,
+        *,
+        status: str = "pending",
+        limit: int = 100,
+    ) -> list[dict]:
+        """Arc rows for `workspace`, joined with their episodes' summary
+        fields — per arc: id/ts/cwd/confidence, the failure chain (each
+        failure episode's verb/outcome/matched markers), the mutation diff,
+        and the success episode's verb/command
+        (memoization-l3-distiller-design §2). `status` selects `pending`
+        (`distilled_at IS NULL`, the default), `resolved` (`distilled_at
+        IS NOT NULL`), or `all`. Ordered confidence-first (`normal` before
+        any other value) then oldest-first — the order `vectr_distill()`
+        renders pending arcs in for review."""
+        if status not in ("pending", "resolved", "all"):
+            raise ValueError(f"unknown status: {status!r}")
+        clauses = ["workspace = ?"]
+        params: list = [workspace]
+        if status == "pending":
+            clauses.append("distilled_at IS NULL")
+        elif status == "resolved":
+            clauses.append("distilled_at IS NOT NULL")
+        where = " AND ".join(clauses)
+        out: list[dict] = []
+        with self._conn() as conn:
+            arc_rows = conn.execute(
+                f"SELECT * FROM arcs WHERE {where} "
+                "ORDER BY (confidence != 'normal'), ts ASC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+            for arc in arc_rows:
+                failure_ids = json.loads(arc["failure_episode_ids_json"] or "[]")
+                failures = []
+                for fid in failure_ids:
+                    erow = conn.execute(
+                        "SELECT id, verb, outcome, markers_json FROM episodes WHERE id = ?",
+                        (fid,),
+                    ).fetchone()
+                    if erow is not None:
+                        failures.append({
+                            "episode_id": erow["id"],
+                            "verb": erow["verb"],
+                            "outcome": erow["outcome"],
+                            "markers_matched": json.loads(erow["markers_json"] or "[]"),
+                        })
+                success = None
+                if arc["success_episode_id"] is not None:
+                    srow = conn.execute(
+                        "SELECT id, verb, cmd_raw FROM episodes WHERE id = ?",
+                        (arc["success_episode_id"],),
+                    ).fetchone()
+                    if srow is not None:
+                        success = {
+                            "episode_id": srow["id"],
+                            "verb": srow["verb"],
+                            "cmd_raw": srow["cmd_raw"],
+                        }
+                out.append({
+                    "id": arc["id"],
+                    "ts": arc["ts"],
+                    "cwd": arc["cwd"],
+                    "confidence": arc["confidence"],
+                    "mutation_diff": json.loads(arc["mutation_diff_json"] or "{}"),
+                    "failures": failures,
+                    "success": success,
+                    "distilled_at": arc["distilled_at"],
+                    "distilled_note_id": arc["distilled_note_id"],
+                    "dismissed_reason": arc["dismissed_reason"],
+                })
+        return out
+
+    def resolve_arcs_distilled(self, workspace: str, arc_ids: list[int], note_id: int) -> dict:
+        """Mark `arc_ids` as distilled into note `note_id`
+        (memoization-l3-distiller-design §3, the `vectr_remember(...,
+        distilled_from=[...])` write-back)."""
+        return self._resolve_arcs(
+            workspace, arc_ids, distilled_note_id=note_id, dismissed_reason=None,
+        )
+
+    def resolve_arcs_dismissed(self, workspace: str, arc_ids: list[int], reason: str) -> dict:
+        """Mark `arc_ids` as dismissed with `reason`
+        (memoization-l3-distiller-design §3, the `vectr_distill(dismiss=
+        [...], reason=...)` write-back)."""
+        return self._resolve_arcs(
+            workspace, arc_ids, distilled_note_id=None, dismissed_reason=reason,
+        )
+
+    def _resolve_arcs(
+        self,
+        workspace: str,
+        arc_ids: list[int],
+        *,
+        distilled_note_id: int | None,
+        dismissed_reason: str | None,
+    ) -> dict:
+        """Idempotent bulk resolve shared by both write-back verdicts: sets
+        `distilled_at = now` plus exactly one of `distilled_note_id` /
+        `dismissed_reason` on each row in `arc_ids` that exists in
+        `workspace` and is still pending (`distilled_at IS NULL`) — the
+        audit invariant (a resolved arc always shows HOW it resolved, never
+        both or neither). Ids that don't exist or are already resolved are
+        returned in `unresolved`, never raised as an error."""
+        now = time.time()
+        resolved: list[int] = []
+        unresolved: list[int] = []
+        with self._conn() as conn:
+            for arc_id in arc_ids:
+                row = conn.execute(
+                    "SELECT id FROM arcs WHERE id = ? AND workspace = ? AND distilled_at IS NULL",
+                    (arc_id, workspace),
+                ).fetchone()
+                if row is None:
+                    unresolved.append(arc_id)
+                    continue
+                conn.execute(
+                    "UPDATE arcs SET distilled_at = ?, distilled_note_id = ?, "
+                    "dismissed_reason = ? WHERE id = ?",
+                    (now, distilled_note_id, dismissed_reason, arc_id),
+                )
+                resolved.append(arc_id)
+        return {"resolved": resolved, "unresolved": unresolved}
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:

@@ -14,6 +14,8 @@ from agent.config import (
     POINTER_MODE_RETAIN_MIN_RELEVANCE,
     POINTER_MODE_RETAIN_EXCERPT_LINES,
     POINTER_MODE_RETAIN_LABEL,
+    EPISODES_DISTILL_MAX_ARCS_RENDERED,
+    EPISODES_DISTILL_RENDER_TOKEN_CAP,
 )
 from agent.render_paths import workspace_relpath
 
@@ -29,6 +31,7 @@ from integrations.mcp_server._schemas import (
     _MEMORY_WRITE_TOOLS,
     _MEMORY_TOOLS,
     _UTILITY_TOOLS,
+    _DISTILL_RULES_TEXT,
     MCP_TOOLS,
 )
 from integrations.mcp_server._session import (
@@ -663,6 +666,24 @@ def handle_tools_call(
         _reset_calls_since_save(session_id)
         service.note_remembered(session_id=session_id)
         enable_memory_for_session(session_id)
+        # memoization-l3-distiller-design §3: this note distills one or more
+        # pending arcs — resolve them as a second step, after the note write
+        # already succeeded, never blocking it. Malformed ids are dropped
+        # rather than failing the whole write (the note is already stored).
+        distill_suffix = ""
+        distilled_from = arguments.get("distilled_from") or None
+        if distilled_from:
+            try:
+                arc_ids = [int(a) for a in distilled_from]
+            except (TypeError, ValueError):
+                arc_ids = []
+            if arc_ids:
+                result = service.resolve_arcs_distilled(arc_ids, note_id)
+                resolved = result.get("resolved", [])
+                unresolved = result.get("unresolved", [])
+                distill_suffix = f"\n  Distilled arcs {resolved}"
+                if unresolved:
+                    distill_suffix += f" (unresolvable: {unresolved})"
         # UPG-SCOPE-SURFACE-BACK: an omitted scope is resolved from `kind`'s
         # default at write time (UPG-TRIGGER-SCOPE-KIND-DEFAULTS), but that
         # resolution was write-only — the caller had no way to learn where
@@ -703,7 +724,7 @@ def handle_tools_call(
             if parts:
                 echo = "\n  Stored — " + " · ".join(parts)
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}"}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}{distill_suffix}"}],
             "isError": False,
         }
 
@@ -752,6 +773,37 @@ def handle_tools_call(
         if not hint:
             hint = "No retrieved chunks to evict. Context window is clean."
         return {"content": [{"type": "text", "text": hint}], "isError": False}
+
+    # ---- vectr_distill ----
+    if tool_name == "vectr_distill":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
+        dismiss_arg = arguments.get("dismiss") or None
+        if dismiss_arg:
+            reason = (arguments.get("reason") or "").strip()
+            if not reason:
+                return _mcp_error("reason is required together with dismiss=")
+            try:
+                arc_ids = [int(a) for a in dismiss_arg]
+            except (TypeError, ValueError):
+                return _mcp_error("dismiss must be a list of integer arc ids")
+            result = service.resolve_arcs_dismissed(arc_ids, reason)
+            resolved = result.get("resolved", [])
+            unresolved = result.get("unresolved", [])
+            text = f"Dismissed arcs {resolved}."
+            if unresolved:
+                text += f" Unresolvable (unknown or already resolved): {unresolved}."
+            return {"content": [{"type": "text", "text": text}], "isError": False}
+
+        # No args: render pending arcs for review (memoization-l3-distiller-
+        # design §2) — confidence-first then oldest-first, already the order
+        # service.list_arcs returns.
+        rows = service.list_arcs(status="pending", limit=EPISODES_DISTILL_MAX_ARCS_RENDERED)
+        total_pending = service.count_arcs_pending_distill()
+        return {"content": [{"type": "text", "text": _format_pending_arcs(rows, total_pending)}], "isError": False}
 
     # ---- vectr_snapshot ----
     if tool_name == "vectr_snapshot":
@@ -1199,6 +1251,80 @@ def _format_fetch_results(entries: list[dict], workspace_root: str = "") -> str:
         from app.service import _FETCH_NOT_FOUND_NOTE
         lines.append(_FETCH_NOT_FOUND_NOTE)
     return "\n".join(lines)
+
+
+def _arc_age_str(ts: float | None) -> str:
+    """Coarse human age string for one arc's timestamp — same rounding
+    granularity as the working-memory note age renderer, kept independent
+    (arcs are a different, quarantined table) rather than importing that
+    module's private helper."""
+    if not ts:
+        return "unknown age"
+    import time as _time
+    delta = max(0.0, _time.time() - ts)
+    if delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta // 3600)}h ago"
+    return f"{int(delta // 86400)}d ago"
+
+
+def _format_arc_block(arc: dict) -> str:
+    """One arc's render block for vectr_distill()/GET /v1/arcs — rendered
+    facts only (memoization-l3-distiller-design §2): the failure chain,
+    the resolving success, and the mutation diff. No advice, no suggested
+    kind — that judgment is the static rules text surrounding this block,
+    never generated per-arc."""
+    lines = [
+        f"[arc #{arc['id']}] confidence={arc.get('confidence', 'normal')} "
+        f"· {_arc_age_str(arc.get('ts'))} · cwd={arc.get('cwd', '')}"
+    ]
+    for f in arc.get("failures") or []:
+        markers = ", ".join(f.get("markers_matched") or []) or "none"
+        lines.append(
+            f"  failed: {f.get('verb', '')} (outcome={f.get('outcome', '')}, markers={markers})"
+        )
+    success = arc.get("success")
+    if success:
+        lines.append(f"  succeeded: {success.get('verb', '')} — {success.get('cmd_raw', '')}")
+    mutation_diff = arc.get("mutation_diff") or {}
+    if mutation_diff:
+        lines.append(f"  mutation diff: {mutation_diff}")
+    return "\n".join(lines)
+
+
+def _format_pending_arcs(rows: list[dict], total_pending: int) -> str:
+    """Render vectr_distill()'s no-args response: the fixed distiller-rules
+    header (memoization-l3-distiller-design §5, verbatim static text) plus
+    as many arc blocks from `rows` as fit under
+    EPISODES_DISTILL_RENDER_TOKEN_CAP — the first block always renders even
+    if it alone exceeds the cap, so a render never comes back empty. `rows`
+    is already ordered confidence-first then oldest-first and capped at
+    EPISODES_DISTILL_MAX_ARCS_RENDERED by the caller; `total_pending` (the
+    workspace's full pending count) drives the trailing "N more" note when
+    either cap held some arcs back."""
+    from agent.trigger_engine import token_estimate
+
+    header = _DISTILL_RULES_TEXT
+    if not rows:
+        return f"{header}\n\nNo arcs pending distillation."
+    blocks: list[str] = []
+    used_tokens = token_estimate(header)
+    for arc in rows:
+        block = _format_arc_block(arc)
+        block_tokens = token_estimate(block)
+        if blocks and used_tokens + block_tokens > EPISODES_DISTILL_RENDER_TOKEN_CAP:
+            break
+        blocks.append(block)
+        used_tokens += block_tokens
+    text = header + "\n\n" + "\n\n".join(blocks)
+    remaining = total_pending - len(blocks)
+    if remaining > 0:
+        text += (
+            f"\n\n({remaining} more pending arc(s) not shown — call vectr_distill() "
+            "again after distilling or dismissing some.)"
+        )
+    return text
 
 
 def _mcp_error(message: str) -> dict:

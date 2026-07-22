@@ -298,6 +298,26 @@ class TestMcpDispatchSearchOnly:
         assert _SEARCH_ONLY_MSG in result["content"][0]["text"]
         svc.resume.assert_not_called()
 
+    def test_distill_returns_search_only_message(self):
+        """memoization-l3-distiller-design §4: arcs/distillation are
+        memory-layer, same availability rule as the rest of the memory
+        surface — suppressed entirely in search-only mode."""
+        from integrations.mcp_server import handle_tools_call
+        from app.service import _SEARCH_ONLY_MSG
+        svc = self._make_mock_service(search_only=True)
+
+        result = handle_tools_call("vectr_distill", {}, svc)
+        assert result["isError"] is False
+        assert _SEARCH_ONLY_MSG in result["content"][0]["text"]
+        svc.list_arcs.assert_not_called()
+
+        result = handle_tools_call(
+            "vectr_distill", {"dismiss": [1], "reason": "x"}, svc,
+        )
+        assert result["isError"] is False
+        assert _SEARCH_ONLY_MSG in result["content"][0]["text"]
+        svc.resolve_arcs_dismissed.assert_not_called()
+
     def test_evict_hint_stays_active_in_search_only_mode(self):
         """vectr_evict_hint advises on re-retrievable SEARCH chunks, not notes
         — it must remain active in search-only mode."""
@@ -486,6 +506,41 @@ class TestRestRoutesSearchOnly:
             with TestClient(app, raise_server_exceptions=False) as c:
                 app.state.service = svc
                 resp = c.post("/v1/memory/clear")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["detail"]["error"] == "search_only_mode"
+
+    def test_arcs_returns_503_in_search_only_mode(self):
+        from fastapi.testclient import TestClient
+        from api import app
+        from tests.conftest import _base_mock_service
+
+        svc = _base_mock_service()
+        svc.search_only = True
+
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                app.state.service = svc
+                resp = c.get("/v1/arcs")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["detail"]["error"] == "search_only_mode"
+
+    def test_arcs_dismiss_returns_503_in_search_only_mode(self):
+        from fastapi.testclient import TestClient
+        from api import app
+        from tests.conftest import _base_mock_service
+
+        svc = _base_mock_service()
+        svc.search_only = True
+
+        with patch("app.service.VectrService", return_value=svc):
+            with TestClient(app, raise_server_exceptions=False) as c:
+                app.state.service = svc
+                resp = c.post(
+                    "/v1/arcs/dismiss",
+                    json={"arc_ids": [1], "reason": "test"},
+                )
         assert resp.status_code == 503
         body = resp.json()
         assert body["detail"]["error"] == "search_only_mode"

@@ -255,6 +255,28 @@ _EXPLORATION_TOOLS = [
     },
 ]  # end _EXPLORATION_TOOLS
 
+# Distiller rules (memoization-l3-distiller-design §5) — the static prompt
+# surface for arc distillation. Defined once here and reused verbatim in
+# both the vectr_distill tool description below and the fixed header line
+# _dispatch.py prepends to every vectr_distill() render — never generated
+# from arc content, never gated on it.
+_DISTILL_RULES_TEXT = (
+    "Distiller rules: (1) recall-first dedupe — vectr_recall(query=<the lesson>) before "
+    "writing; if an existing note already covers it, dismiss the arc (reason: covered by "
+    "note #N) — if the arc proves an existing note wrong or outdated, use contradicts=/"
+    "supersedes= on that note instead of writing a duplicate. "
+    "(2) Generalize — store the lesson (what class of command fails, why, what fixed it), "
+    "not the transcript; keep concrete commands/paths only when they ARE the lesson. "
+    "(3) Kind mapping — an env/process/build fact -> kind='operational' (add triggers=[{'event': "
+    "'prompt-submit', 'semantic': True}, {'command': '<verb glob>'}] when the lesson is tied "
+    "to a command family); tied to specific files -> kind='gotcha' with those files as "
+    "anchors; a standing user rule -> kind='directive' (rare from arcs). "
+    "(4) Low-confidence arcs are dismissed unless the same lesson recurs across >= 2 arcs. "
+    "(5) Priority defaults to medium; high only when acting on the stale belief is costly "
+    "(e.g. false-pass verification traps). "
+    "(6) Batch cap — distill at most ~5 notes per sitting; leave the rest pending."
+)
+
 # Always-on memory write tools — visible from turn 1, no notes required.
 # vectr_remember: only way to create notes; hiding it is a catch-22.
 # vectr_evict_hint: fires on retrieval pressure, not note count.
@@ -412,6 +434,16 @@ _MEMORY_WRITE_TOOLS = [
                         "instead of its raw content, until vectr_reinstate reverses it."
                     ),
                 },
+                "distilled_from": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Optional: arc ids (from vectr_distill() or GET /v1/arcs) this note "
+                        "distills. After this note is stored, each named arc is marked "
+                        "distilled into it. Unknown/already-resolved ids are reported back "
+                        "in the confirmation, never an error."
+                    ),
+                },
             },
             "required": ["content"],
         },
@@ -435,6 +467,45 @@ _MEMORY_WRITE_TOOLS = [
             "NOT needed on short sessions — most useful after many vectr_search/vectr_locate calls."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "vectr_distill",
+        "annotations": {
+            "title": "Review and distill pending arcs",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        "description": (
+            "Review pending arcs — discovered failure->success moments captured automatically "
+            "from your own tool calls (e.g. a command that failed twice, then succeeded after an "
+            "edit) — and turn the ones worth keeping into working-memory notes. "
+            "Call with no arguments to render pending arcs for review, oldest and most-confident "
+            "first, token-bounded. For each arc worth keeping, call "
+            "vectr_remember(..., distilled_from=[arc_id]) to persist the lesson as a note (see "
+            "vectr_remember's own parameters for kind/priority/triggers). For arcs not worth "
+            "keeping, call vectr_distill(dismiss=[arc_id, ...], reason='...'). "
+            + _DISTILL_RULES_TEXT
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dismiss": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Arc ids (from this tool's own render or GET /v1/arcs) to dismiss "
+                        "without distilling into a note. Pass together with reason."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Required together with dismiss= — why these arcs are not worth distilling (e.g. 'covered by note #12', 'transient network flake').",
+                },
+            },
+            "required": [],
+        },
     },
 ]  # end _MEMORY_WRITE_TOOLS
 
@@ -800,5 +871,6 @@ MEMORY_READY_TOOLS = frozenset(
         "vectr_snapshot",
         "vectr_snapshot_list",
         "vectr_resume",
+        "vectr_distill",
     }
 )

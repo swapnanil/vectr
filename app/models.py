@@ -351,6 +351,16 @@ class RememberRequest(BaseModel):
             "this workspace."
         ),
     )
+    distilled_from: list[int] | None = Field(
+        default=None,
+        description=(
+            "Arc ids (from GET /v1/arcs or vectr_distill()) this note "
+            "distills (memoization-l3-distiller-design §3). After the note "
+            "write succeeds, each named arc is marked distilled into this "
+            "note's id. Unknown/already-resolved ids are reported back in "
+            "the response, never an error (idempotent)."
+        ),
+    )
 
     @field_validator("priority")
     @classmethod
@@ -392,6 +402,10 @@ class RememberResponse(BaseModel):
     note_id: int
     message: str
     processing_ms: int
+    distilled: ArcResolveResult | None = Field(
+        default=None,
+        description="Present only when `distilled_from` was passed — the arc ids resolved into this note vs. any that were unknown/already-resolved.",
+    )
 
 
 class RecallRequest(BaseModel):
@@ -761,6 +775,72 @@ class EpisodeRecord(BaseModel):
 
 class EpisodesResponse(BaseModel):
     episodes: list[EpisodeRecord]
+    processing_ms: int
+
+
+# ---------------------------------------------------------------------------
+# Arc distillation (memoization-l3-distiller-design)
+# ---------------------------------------------------------------------------
+
+class ArcFailureRecord(BaseModel):
+    """One failed attempt in an arc's failure chain."""
+
+    episode_id: int
+    verb: str
+    outcome: str
+    markers_matched: list[str]
+
+
+class ArcSuccessRecord(BaseModel):
+    """The episode that resolved an arc's failure chain."""
+
+    episode_id: int
+    verb: str
+    cmd_raw: str
+
+
+class ArcRecord(BaseModel):
+    """One row as returned by GET /v1/arcs / vectr_distill() — a discovered
+    failure->success discovery moment, joined with its episodes' summary
+    fields (memoization-l3-distiller-design §2). Rendered facts only — no
+    advice, no suggested kinds; that judgment lives in static tool-surface
+    text, never in generated data."""
+
+    id: int
+    ts: float
+    cwd: str
+    confidence: str
+    mutation_diff: dict
+    failures: list[ArcFailureRecord]
+    success: ArcSuccessRecord | None = None
+    distilled_at: float | None = None
+    distilled_note_id: int | None = None
+    dismissed_reason: str | None = None
+
+
+class ArcsResponse(BaseModel):
+    arcs: list[ArcRecord]
+    total_pending: int
+    processing_ms: int
+
+
+class ArcResolveResult(BaseModel):
+    """Idempotent bulk-resolve outcome (memoization-l3-distiller-design
+    §3): ids that were pending and are now resolved vs. ids that were
+    unknown or already resolved — never an error either way."""
+
+    resolved: list[int]
+    unresolved: list[int]
+
+
+class ArcsDismissRequest(BaseModel):
+    arc_ids: list[int] = Field(..., min_length=1, description="Arc ids to dismiss")
+    reason: str = Field(..., min_length=1, description="Why these arcs are not worth distilling")
+
+
+class ArcsDismissResponse(BaseModel):
+    resolved: list[int]
+    unresolved: list[int]
     processing_ms: int
 
 

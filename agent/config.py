@@ -329,6 +329,17 @@ EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S : float
     `_spawn_episode_worker` spawn failure can leave one behind with no
     process left to clean it up.
 
+EPISODES_DISTILL_MAX_ARCS_RENDERED : int
+    Max arcs rendered per `vectr_distill()` no-args call
+    (memoization-l3-distiller-design §6), confidence-first then
+    oldest-first — the rest stay pending for a later call.
+
+EPISODES_DISTILL_RENDER_TOKEN_CAP : int
+    Hard cap (estimated tokens, agent/trigger_engine.py's token_estimate)
+    on the same `vectr_distill()` render, alongside
+    EPISODES_DISTILL_MAX_ARCS_RENDERED above — whichever limit is hit
+    first stops the render.
+
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT : float
 STRATEGY_DEFAULT_BM25_WEIGHT : float
     Fallback hybrid-search weights used before the first index-time codebase
@@ -840,6 +851,8 @@ EPISODES_POST_TIMEOUT_S: float = float(_episodes_cfg["post_timeout_s"])
 EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S: float = float(
     _episodes_cfg["stale_temp_file_sweep_age_s"]
 )
+EPISODES_DISTILL_MAX_ARCS_RENDERED: int = int(_episodes_cfg["distill_max_arcs_rendered"])
+EPISODES_DISTILL_RENDER_TOKEN_CAP: int = int(_episodes_cfg["distill_render_token_cap"])
 
 # ---------------------------------------------------------------------------
 # ingest_traces unresolved-caller/callee warning cap (UPG-7.3)
