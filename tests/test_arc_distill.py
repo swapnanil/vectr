@@ -320,6 +320,53 @@ class TestArcsRestRoute:
         assert resp.json()["arcs"] == []
         assert resp.json()["total_pending"] == 0
 
+    def test_get_arcs_no_limit_param_applies_config_default(self, real_client):
+        """§2/§6: an omitted `limit` resolves to
+        `episodes.distill_max_arcs_rendered`, not a route-local hardcoded
+        number — insert more pending arcs than the config default and
+        confirm the unbounded-looking call still stops there."""
+        from agent.config import EPISODES_DISTILL_MAX_ARCS_RENDERED
+
+        client, svc = real_client
+        now = time_module.time()
+        extra = 3
+        for i in range(EPISODES_DISTILL_MAX_ARCS_RENDERED + extra):
+            _insert_arc(svc._episode_store, svc._workspace_root, ts=now - i)
+
+        resp = client.get("/v1/arcs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["arcs"]) == EPISODES_DISTILL_MAX_ARCS_RENDERED
+        assert data["total_pending"] == EPISODES_DISTILL_MAX_ARCS_RENDERED + extra
+
+    def test_get_arcs_default_limit_resolved_at_request_time(self, real_client, monkeypatch):
+        """The config value is read inside the route handler at request
+        time (`config.EPISODES_DISTILL_MAX_ARCS_RENDERED`, module-attribute
+        lookup), not captured once at import time — a config override
+        applied after the app module has already been imported must still
+        change the effective default on the next request."""
+        import agent.config as config_module
+
+        client, svc = real_client
+        now = time_module.time()
+        for i in range(5):
+            _insert_arc(svc._episode_store, svc._workspace_root, ts=now - i)
+
+        monkeypatch.setattr(config_module, "EPISODES_DISTILL_MAX_ARCS_RENDERED", 2)
+        resp = client.get("/v1/arcs")
+        assert resp.status_code == 200
+        assert len(resp.json()["arcs"]) == 2
+
+    def test_get_arcs_explicit_limit_overrides_config_default(self, real_client):
+        client, svc = real_client
+        now = time_module.time()
+        for i in range(5):
+            _insert_arc(svc._episode_store, svc._workspace_root, ts=now - i)
+
+        resp = client.get("/v1/arcs", params={"limit": 3})
+        assert resp.status_code == 200
+        assert len(resp.json()["arcs"]) == 3
+
     def test_dismiss_happy_path_then_status_resolved_reflects_it(self, real_client):
         client, svc = real_client
         _produce_one_pending_arc(client)
@@ -463,6 +510,47 @@ class TestRememberDistilledFromMcp:
         assert result["isError"] is False
         assert "Distilled arcs" not in result["content"][0]["text"]
 
+    def test_mixed_valid_and_non_integer_ids_resolves_the_valid_one_and_reports_the_rest(self, real_client):
+        """Live repro: distilled_from=[<valid arc id>, "abc"] must not
+        silently drop the ENTIRE batch — the note is written, the valid
+        arc id IS resolved, and the non-integer entry is reported back
+        rather than disappearing without a trace."""
+        client, svc = real_client
+        _produce_one_pending_arc(client)
+        arc_id = client.get("/v1/arcs").json()["arcs"][0]["id"]
+        from integrations.mcp_server import handle_tools_call
+
+        result = handle_tools_call(
+            "vectr_remember",
+            {"content": "flaky test needed -k filter fix", "distilled_from": [arc_id, "abc"]},
+            svc,
+            session_id="s1",
+        )
+        assert result["isError"] is False
+        text = result["content"][0]["text"]
+        assert f"Distilled arcs [{arc_id}]" in text
+        assert "Ignored non-integer distilled_from entries: ['abc']" in text
+        assert svc.count_arcs_pending_distill() == 0
+
+    def test_bool_entries_are_excluded_never_treated_as_arc_ids(self, real_client):
+        """`bool` is a subclass of `int` in Python — `isinstance(True, int)`
+        is True and a naive int-type check would silently resolve arc id
+        `1`/`0` for a caller-supplied `True`/`False`. Must be reported back
+        as invalid instead."""
+        client, svc = real_client
+        from integrations.mcp_server import handle_tools_call
+
+        result = handle_tools_call(
+            "vectr_remember",
+            {"content": "an ordinary note", "distilled_from": [True]},
+            svc,
+            session_id="s1",
+        )
+        assert result["isError"] is False
+        text = result["content"][0]["text"]
+        assert "Distilled arcs" not in text
+        assert "Ignored non-integer distilled_from entries: [True]" in text
+
 
 class TestArcDistillNudgeLine:
     def test_boot_recall_includes_nudge_when_arcs_pending(self, real_client):
@@ -507,6 +595,34 @@ class TestDistillRenderCaps:
         text = result["content"][0]["text"]
         assert text.count("[arc #") == EPISODES_DISTILL_MAX_ARCS_RENDERED
         assert f"({extra} more pending arc(s) not shown" in text
+
+    def test_render_trims_under_a_tiny_token_cap_with_explicit_truncation_indicator(self, real_client, monkeypatch):
+        """Under the shipped default (2000 tokens) 10 small arc blocks never
+        get close to the cap, so this branch of `_format_pending_arcs`
+        (`used_tokens + block_tokens > EPISODES_DISTILL_RENDER_TOKEN_CAP`)
+        never fires in the other tests above. Force it with a tiny
+        override and assert the render is trimmed WITH the same explicit
+        "N more pending arc(s) not shown" indicator the max-arcs-rendered
+        cap uses — never a silent cut."""
+        import integrations.mcp_server._dispatch as dispatch_module
+        from integrations.mcp_server import handle_tools_call
+
+        client, svc = real_client
+        now = time_module.time()
+        num_arcs = 5
+        for i in range(num_arcs):
+            _insert_arc(svc._episode_store, svc._workspace_root, ts=now - i)
+
+        # Small enough that only the first (always-rendered) block fits;
+        # large enough that the header alone doesn't already exceed it.
+        monkeypatch.setattr(dispatch_module, "EPISODES_DISTILL_RENDER_TOKEN_CAP", 1)
+
+        result = handle_tools_call("vectr_distill", {}, svc)
+        text = result["content"][0]["text"]
+        rendered = text.count("[arc #")
+        assert 0 < rendered < num_arcs
+        remaining = num_arcs - rendered
+        assert f"({remaining} more pending arc(s) not shown" in text
 
     def test_config_values_loaded_from_yaml_not_hardcoded_defaults(self):
         """Sanity that agent/config.py actually exports these two keys

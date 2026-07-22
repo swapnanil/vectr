@@ -7,6 +7,8 @@ import uuid
 from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
 from starlette.concurrency import run_in_threadpool
 
+import agent.config as config
+
 from app.models import (
     ArcRecord,
     ArcResolveResult,
@@ -684,7 +686,10 @@ async def episodes(
 async def arcs(
     request: Request,
     status: str = Query(default="pending", description="pending | resolved | all"),
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int | None = Query(
+        default=None, ge=1, le=1000,
+        description="defaults to episodes.distill_max_arcs_rendered (config.yaml) when omitted",
+    ),
 ) -> ArcsResponse:
     """Read surface for arc distillation
     (memoization-l3-distiller-design §2): arc rows joined with their
@@ -692,7 +697,10 @@ async def arcs(
     the mutation diff, the resolving success episode — plus
     `total_pending`. Rendered facts only: no advice, no suggested kinds
     (that judgment lives in static tool-surface text, never in generated
-    data)."""
+    data). An omitted `limit` resolves to `episodes.distill_max_arcs_rendered`
+    (memoization-l3-distiller-design §6) — the same cap the MCP `vectr_distill`
+    render uses — read from the config module at request time so a config
+    reload or test override is honored rather than baked in at import time."""
     t0 = time.monotonic()
     svc = _service(request)
     if getattr(svc, "search_only", False):
@@ -703,7 +711,8 @@ async def arcs(
             status_code=422,
             detail={"error": "invalid_status", "detail": "status must be pending, resolved, or all"},
         )
-    rows = svc.list_arcs(status=status, limit=limit)
+    resolved_limit = limit if limit is not None else config.EPISODES_DISTILL_MAX_ARCS_RENDERED
+    rows = svc.list_arcs(status=status, limit=resolved_limit)
     return ArcsResponse(
         arcs=[ArcRecord(**row) for row in rows],
         total_pending=svc.count_arcs_pending_distill(),

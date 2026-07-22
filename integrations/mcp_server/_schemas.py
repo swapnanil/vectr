@@ -440,8 +440,9 @@ _MEMORY_WRITE_TOOLS = [
                     "description": (
                         "Optional: arc ids (from vectr_distill() or GET /v1/arcs) this note "
                         "distills. After this note is stored, each named arc is marked "
-                        "distilled into it. Unknown/already-resolved ids are reported back "
-                        "in the confirmation, never an error."
+                        "distilled into it. Unknown/already-resolved ids, and any entry that "
+                        "is not itself an integer, are reported back in the confirmation, "
+                        "never an error and never silently dropped."
                     ),
                 },
             },

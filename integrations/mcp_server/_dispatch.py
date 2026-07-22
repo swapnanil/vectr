@@ -668,15 +668,22 @@ def handle_tools_call(
         enable_memory_for_session(session_id)
         # memoization-l3-distiller-design §3: this note distills one or more
         # pending arcs — resolve them as a second step, after the note write
-        # already succeeded, never blocking it. Malformed ids are dropped
-        # rather than failing the whole write (the note is already stored).
+        # already succeeded, never blocking it. The schema declares
+        # distilled_from as a list of integers; an element that is not
+        # genuinely an int (bool excluded — JSON true/false deserializes to
+        # a Python bool, a subclass of int, but is never a valid arc id) is
+        # reported back to the caller rather than silently dropped, and
+        # never causes a genuinely-int sibling in the same list to be lost.
         distill_suffix = ""
         distilled_from = arguments.get("distilled_from") or None
         if distilled_from:
-            try:
-                arc_ids = [int(a) for a in distilled_from]
-            except (TypeError, ValueError):
-                arc_ids = []
+            arc_ids: list[int] = []
+            invalid_arc_ids: list[Any] = []
+            for a in distilled_from:
+                if isinstance(a, int) and not isinstance(a, bool):
+                    arc_ids.append(a)
+                else:
+                    invalid_arc_ids.append(a)
             if arc_ids:
                 result = service.resolve_arcs_distilled(arc_ids, note_id)
                 resolved = result.get("resolved", [])
@@ -684,6 +691,8 @@ def handle_tools_call(
                 distill_suffix = f"\n  Distilled arcs {resolved}"
                 if unresolved:
                     distill_suffix += f" (unresolvable: {unresolved})"
+            if invalid_arc_ids:
+                distill_suffix += f"\n  Ignored non-integer distilled_from entries: {invalid_arc_ids!r}"
         # UPG-SCOPE-SURFACE-BACK: an omitted scope is resolved from `kind`'s
         # default at write time (UPG-TRIGGER-SCOPE-KIND-DEFAULTS), but that
         # resolution was write-only — the caller had no way to learn where
