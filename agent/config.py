@@ -209,13 +209,13 @@ INDEXING_FLOW_SECONDARY_MARKERS : tuple[str, ...]
     Secondary Flow-detection signals — Flow-only import syntax (UPG-JSFLOW-SYMBOLS).
 
 INDEXING_VECTOR_STORE_DISPATCH_MAX_WORKERS : int
-    Worker count of the dedicated executor a request-handling vector-store
-    call is dispatched to, off the event loop serving that request
-    (UPG-CHROMA-BLOCKING-EVENT-LOOP). Must stay 1 — see config.yaml comment.
+    Worker count of the dedicated executor a search/fetch request's
+    vector-store call is dispatched to, off the event loop serving that
+    request. Must stay 1 — see config.yaml comment.
 
 INDEXING_VECTOR_STORE_SLOW_CALL_WARN_SECONDS : float
     Seconds a single vector-store call may run before a WARNING is logged
-    naming the call and its elapsed time (UPG-CHROMA-BLOCKING-EVENT-LOOP).
+    naming the call and its elapsed time.
 
 SYMBOL_GRAPH_RESERVED_KEYWORDS : dict[str, frozenset[str]]
     Per-language keyword sets that must never be minted as a symbol name or
@@ -722,8 +722,7 @@ INDEXING_FLOW_SECONDARY_MARKERS: tuple[str, ...] = tuple(
     str(m) for m in _flow_cfg["secondary_markers"]
 )
 
-# UPG-CHROMA-BLOCKING-EVENT-LOOP: off-event-loop dispatch for request-handling
-# vector-store calls.
+# Off-event-loop dispatch for request-handling vector-store calls.
 _vsb_cfg: dict[str, Any] = _idx_cfg["vector_store_bridge"]
 
 INDEXING_VECTOR_STORE_DISPATCH_MAX_WORKERS: int = int(_vsb_cfg["dispatch_max_workers"])

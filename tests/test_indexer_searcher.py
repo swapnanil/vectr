@@ -263,6 +263,46 @@ class TestCodeIndexer:
         indexer.index_workspace()
         assert indexer.total_chunks == indexer._collection.count() > 0
 
+    def test_index_workspace_refreshes_counter_between_batches(
+        self, indexer, tmp_path, monkeypatch
+    ) -> None:
+        """A bulk index_workspace() must not leave total_chunks/last_indexed_ts
+        frozen for the whole call — an external caller polling those values to
+        detect "indexing is still in progress" needs to see them move as each
+        embed/upsert batch completes, not just once at the very end (which
+        would make it settle on a partial index mid-way through a large one).
+        """
+        import agent.indexer._core as core_module
+
+        # Shrink the batch size so a handful of files produces several
+        # embed/upsert batches instead of one.
+        monkeypatch.setattr(core_module, "_EMBED_BATCH_SIZE", 2)
+
+        for i in range(6):
+            make_py(tmp_path, f"m{i}.py", f"def f{i}():\n    return {i}\n")
+
+        observed_counts: list[int] = []
+        observed_timestamps: list[float] = []
+        original_refresh = indexer._refresh_chunk_count_caches
+
+        def _recording_refresh() -> None:
+            original_refresh()
+            observed_counts.append(indexer.total_chunks)
+            observed_timestamps.append(indexer.last_indexed_ts)
+
+        monkeypatch.setattr(indexer, "_refresh_chunk_count_caches", _recording_refresh)
+
+        indexer.index_workspace()
+
+        # More than one refresh happened during the call (per batch, not
+        # just once at the end), the counter only ever grows, and it ends
+        # higher than it started — proving both counters moved DURING the
+        # call rather than jumping straight from empty to final at the end.
+        assert len(observed_counts) > 2, observed_counts
+        assert observed_counts == sorted(observed_counts), observed_counts
+        assert observed_counts[0] < observed_counts[-1], observed_counts
+        assert observed_timestamps == sorted(observed_timestamps), observed_timestamps
+
     def test_total_chunks_read_never_calls_collection_count(self, indexer, tmp_path) -> None:
         """UPG-CHROMA-BLOCKING-EVENT-LOOP: total_chunks must be answerable
         without ever touching ChromaDB at read time — it is a cache
@@ -1995,6 +2035,36 @@ class TestDualVectorPurposeCollection:
         """A fresh/old-schema workspace has an empty purpose collection — must not raise."""
         embedding = indexer.embed_query("anything")
         result = indexer.query_vector_purpose(embedding, n_results=5)
+        assert result["ids"] == [[]]
+
+    def test_query_vector_purpose_survives_stale_positive_cache(self, indexer, tmp_path) -> None:
+        """The empty-collection guard in query_vector_purpose must read the
+        real collection count live, not the cached total_purpose_chunks
+        counter: if the cache is stale and still reports chunks present
+        while the real collection has just been emptied (e.g. mid-way
+        through a delete, before the cache is refreshed), querying the
+        actually-empty collection would raise (ChromaDB behaviour the guard
+        exists to shield against). A live read here is what lets this
+        degrade gracefully instead of surfacing that as a search 500.
+
+        Mocks the raise directly rather than relying on the currently
+        installed ChromaDB version to actually raise on an empty query, so
+        this test discriminates the cached-vs-live code path regardless of
+        that version-specific behaviour.
+        """
+        path = make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_file(path)
+        indexer.delete_file(path)
+
+        # Simulate a stale cache: still reports chunks present even though
+        # the real collection was just emptied above.
+        with patch.object(type(indexer), "total_purpose_chunks", new=5), patch.object(
+            indexer._purpose_collection,
+            "query",
+            side_effect=AssertionError("must not query an actually-empty collection"),
+        ):
+            embedding = indexer.embed_query("anything")
+            result = indexer.query_vector_purpose(embedding, n_results=5)
         assert result["ids"] == [[]]
 
     def test_query_vector_purpose_returns_results_after_index(self, indexer, tmp_path) -> None:

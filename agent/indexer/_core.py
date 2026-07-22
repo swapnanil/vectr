@@ -39,11 +39,11 @@ logger = logging.getLogger(__name__)
 @contextmanager
 def _timed_chroma_call(op_name: str):
     """Time a single blocking vector-store call and log one WARNING if it
-    exceeds the configured threshold (UPG-CHROMA-BLOCKING-EVENT-LOOP). The
-    store's own internal work (e.g. compacting a large collection) can hold
-    a call open far longer than its usual cost; this is the only visibility
-    vectr has into that from its side. Applied uniformly to every call site,
-    never conditioned on the caller or on what the call is for."""
+    exceeds the configured threshold. The store's own internal work (e.g.
+    compacting a large collection) can hold a call open far longer than its
+    usual cost; this is the only visibility vectr has into that from its
+    side. Applied uniformly to every call site, never conditioned on the
+    caller or on what the call is for."""
     start = time.monotonic()
     try:
         yield
@@ -130,9 +130,9 @@ class CodeIndexer:
         self._lang_chunk_counts: dict[str, int] = {}
         self._lang_files: dict[str, set[str]] = {}
         # Total chunk counts (body + purpose collections), read by
-        # `total_chunks`/`total_purpose_chunks` (UPG-CHROMA-BLOCKING-EVENT-LOOP).
-        # Seeded here from a real (but construction-time, always
-        # off-the-event-loop) count; refreshed the same way again by
+        # `total_chunks`/`total_purpose_chunks`. Seeded here from a real
+        # (but construction-time, always off-the-event-loop) count;
+        # refreshed the same way again by
         # `_refresh_chunk_count_caches` at the end of every mutation entry
         # point (index_file/delete_file/index_workspace) — never re-read
         # from the vector store on a later request.
@@ -150,10 +150,10 @@ class CodeIndexer:
         # Seed the per-language stats cache now, during construction — which
         # always runs off the event loop serving requests, either
         # synchronously before the daemon starts accepting them or on its own
-        # background thread (UPG-STDIO-MEMORY-READY's deferred-init path) —
-        # so `indexed_language_stats()` (read by both `/v1/status` and
+        # background thread (this service's deferred-init path) — so
+        # `indexed_language_stats()` (read by both `/v1/status` and
         # `/v1/map`) never performs its first-ever collection scan inside a
-        # live request (UPG-CHROMA-BLOCKING-EVENT-LOOP).
+        # live request.
         self._ensure_stats_seeded()
 
     def _workspace_hash(self) -> str:
@@ -405,6 +405,15 @@ class CodeIndexer:
                 batch_embeddings, _UPSERT_BATCH_SIZE, op_label="upsert (body)",
             )
             self._apply_chunk_delta(batch_metas, sign=1)
+            # Refresh after every batch, not just once the whole call
+            # finishes: a bulk/forced reindex can run for minutes, and an
+            # external caller polling `total_chunks`/`last_indexed_ts` to
+            # detect "indexing is still in progress" must see them keep
+            # moving throughout, not sit frozen at their pre-index values
+            # until the very end and then jump straight to a value that
+            # looks settled while the index is actually still incomplete.
+            self._last_indexed = time.time()
+            self._refresh_chunk_count_caches()
             if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
                 logger.info("  embedded %d/%d chunks...", i, total)
         logger.info("  content embed+upsert done: %d chunks in %.0fs",
@@ -439,8 +448,14 @@ class CodeIndexer:
                 deduped.append(c)
         chunks = deduped
 
-        # Remove old chunks for this file before re-indexing
-        self.delete_file(file_path)
+        # Remove old chunks for this file before re-indexing. Calls the
+        # internal helper directly rather than `delete_file()` — `index_file`
+        # always re-adds `file_path` to `_indexed_files` and refreshes the
+        # chunk-count caches itself a few lines below regardless of outcome,
+        # so going through the public method here would only do that same
+        # bookkeeping twice (and cost four `.count()` calls per file instead
+        # of two).
+        self._delete_chunks_for_file(file_path)
 
         # Streaming embed + upsert (same helper as index_workspace's Phase 3,
         # UPG-INDEX-MEM-STREAMING) — a single file's chunk count is already
@@ -704,10 +719,9 @@ class CodeIndexer:
         (always off the request event loop — construction either happens
         synchronously before the daemon starts serving requests, or on its
         own background thread), so this scan is never triggered by the
-        first live request to reach `indexed_language_stats()`
-        (UPG-CHROMA-BLOCKING-EVENT-LOOP). This method staying idempotent and
-        safe to call redundantly (the `_stats_seeded` guard below) is what
-        makes that eager call harmless.
+        first live request to reach `indexed_language_stats()`. This method
+        staying idempotent and safe to call redundantly (the `_stats_seeded`
+        guard below) is what makes that eager call harmless.
 
         `total_chunks`/`total_purpose_chunks` use a SEPARATE in-memory
         counter (`_total_chunks_cache`/`_purpose_chunks_cache`), not this
@@ -772,15 +786,16 @@ class CodeIndexer:
 
     def _refresh_chunk_count_caches(self) -> None:
         """Refresh `total_chunks`/`total_purpose_chunks` from a real, one-off
-        ChromaDB `.count()` call on each collection (UPG-CHROMA-BLOCKING-
-        EVENT-LOOP). Called once at the end of every mutation entry point —
-        `index_file`, `delete_file`, `index_workspace` — never per individual
-        upsert/delete inside them, so a bulk reindex still pays for this only
-        once per call, not once per batch. Always runs on whatever thread
+        ChromaDB `.count()` call on each collection. Called at the end of
+        every mutation entry point — `index_file`, `delete_file`,
+        `index_workspace` — and, inside `index_workspace`'s own bulk embed/
+        upsert loop, once per batch as well, so an external caller watching
+        these counters for indexing progress never sees them frozen for the
+        full duration of a large reindex. Always runs on whatever thread
         performed the mutation (the indexing/watcher thread, or a request's
         off-loop dispatch-executor thread — see agent/chroma_dispatch.py) —
         never on a request's own event-loop thread, since it is only ever
-        reached from inside one of those three methods.
+        reached from inside one of those methods.
 
         A real re-count (rather than incremental delta bookkeeping) is what
         makes this self-correcting: it is exactly as accurate as a live call
@@ -810,19 +825,20 @@ class CodeIndexer:
         (at most one in-flight mutation call, applied the moment that call
         finishes) for availability: a caller reading this must never wait on
         the vector store's own internal state, including while it is busy
-        compacting a large collection — a single `/v1/status` read blocking
-        behind exactly that once made every other request the daemon was
-        serving unreachable (UPG-CHROMA-BLOCKING-EVENT-LOOP).
+        compacting a large collection — a single status read blocking behind
+        exactly that once made every other request the daemon was serving
+        unreachable.
         """
         with self._stats_lock:
             return self._total_chunks_cache
 
     @property
     def total_purpose_chunks(self) -> int:
-        """Purpose-collection counterpart of `total_chunks` (ARCH-4
-        dual-vector pool entry) — same in-memory-counter treatment. Read by
-        `query_vector_purpose`'s empty-collection guard instead of a live
-        ChromaDB count() call."""
+        """Purpose-collection counterpart of `total_chunks` (the dual-vector
+        purpose collection's own pool-entry point) — same in-memory-counter
+        treatment, for reporting only. `query_vector_purpose`'s own
+        empty-collection guard deliberately reads a live count instead of
+        this cache — see that method's comment for why."""
         with self._stats_lock:
             return self._purpose_chunks_cache
 
@@ -1035,7 +1051,20 @@ class CodeIndexer:
         guards against ChromaDB raising on a query against zero rows, so old
         indexes degrade gracefully to body-only results until reindexed.
         """
-        count = self.total_purpose_chunks
+        # This count must be read live rather than from the cached
+        # `total_purpose_chunks` counter: the guard below exists specifically
+        # because a query against an ACTUALLY-empty collection raises, and a
+        # stale cached count that still shows chunks present (e.g. mid-way
+        # through a delete that has already emptied the real collection but
+        # not yet refreshed the cache) would let that exception through
+        # uncaught into the caller. This one read stays live for
+        # correctness; it is only reached from this method, which — like
+        # every vector-store-reaching call made from a request handler —
+        # already runs off the request event loop (the dedicated executor,
+        # or the watcher/indexing thread), so a live read here does not
+        # reintroduce loop-blocking risk.
+        with _timed_chroma_call("count"):
+            count = self._purpose_collection.count()
         if count == 0:
             return {"ids": [[]], "distances": [[]], "documents": [[]], "metadatas": [[]]}
         if languages:

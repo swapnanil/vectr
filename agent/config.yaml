@@ -691,17 +691,18 @@ indexing:
       - "import type "
       - "export type "
 
-  # UPG-CHROMA-BLOCKING-EVENT-LOOP: dispatch of vector-store calls made from
-  # a live request (REST route or MCP tool dispatch) off the single request
-  # event loop, so one slow call to the vector store (e.g. while it is
-  # compacting a large collection) cannot block every other in-flight
-  # request.
+  # Dispatch of search/fetch calls made from a live request (REST route or
+  # MCP tool dispatch) off the single request event loop, so one slow call
+  # to the vector store (e.g. while it is compacting a large collection)
+  # cannot block every other in-flight request.
   vector_store_bridge:
-    # Worker count of the dedicated executor a request-handling call to the
-    # vector store is dispatched to. Must stay 1: today every such call is
+    # Worker count of the dedicated executor a search/fetch request's call to
+    # the vector store is dispatched to (bulk operations such as a
+    # full-workspace index use their own separate thread pool and are not
+    # affected by this value). Must stay 1: today every search/fetch call is
     # implicitly serialized because it all ran on the one event-loop thread;
-    # raising this lets two request-handling calls touch the vector store
-    # concurrently for the first time, a new race this value exists to avoid.
+    # raising this lets two such calls touch the vector store concurrently
+    # for the first time, a new race this value exists to avoid.
     dispatch_max_workers: 1
     # Seconds a single vector-store call may run before a WARNING is logged
     # naming the call and its elapsed time. Purely observational — the call

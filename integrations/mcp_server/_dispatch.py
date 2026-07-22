@@ -160,11 +160,11 @@ def handle_tools_call(
                 "isError": False,
             }
 
-        # UPG-CHROMA-BLOCKING-EVENT-LOOP: dispatched off the request event
-        # loop through the service's dedicated executor — `handle_tools_call`
-        # itself already runs off-loop (its own callers hop it onto a thread
-        # pool), but as a plain synchronous function it must block-wait for
-        # the result rather than `await` it.
+        # Dispatched off the request event loop through the service's
+        # dedicated executor — `handle_tools_call` itself already runs
+        # off-loop (its own callers hop it onto a thread pool), but as a
+        # plain synchronous function it must block-wait for the result
+        # rather than `await` it.
         results, query_ms = dispatch_chroma_sync(
             service, service.search, query, n_results=n_results, language=language
         )
@@ -285,8 +285,7 @@ def handle_tools_call(
             return {"content": [{"type": "text", "text": _MEMORY_ONLY_MSG}], "isError": False}
 
         try:
-            # UPG-CHROMA-BLOCKING-EVENT-LOOP: same off-loop dispatch as
-            # vectr_search above.
+            # Same off-loop dispatch as vectr_search above.
             entries = dispatch_chroma_sync(service, service.fetch, ids)
         except ValueError as exc:
             return _mcp_error(str(exc))

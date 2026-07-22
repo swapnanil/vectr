@@ -1,20 +1,24 @@
-"""Off-event-loop dispatch for vector-store-reaching service calls
-(UPG-CHROMA-BLOCKING-EVENT-LOOP).
+"""Off-event-loop dispatch for search/fetch calls that reach the vector
+store.
 
 Every REST route and every MCP tool dispatch is served by the SAME request
-event loop. A synchronous call into the vector store (query/get/upsert/
-delete) can block for as long as the store's own internal work takes —
-including while it is compacting a large collection — and while it does,
-that one blocked call holds the entire loop, so no other request, not even
-an unrelated one, can be served until it returns.
+event loop. A synchronous call into the vector store (query/get) can block
+for as long as the store's own internal work takes — including while it is
+compacting a large collection — and while it does, that one blocked call
+holds the entire loop, so no other request, not even an unrelated one, can
+be served until it returns.
 
-``dispatch_chroma_sync``/``dispatch_chroma_async`` route such a call through
-ONE dedicated single-worker executor owned by the service, instead of
-running it in place on the caller's thread. A single worker preserves the
-request-at-a-time ordering these calls already had while they all ran
-directly on the one event-loop thread; dispatching to a bare/unbounded
-thread pool would let two vector-store-touching requests run concurrently
-for the first time — a new race this design avoids.
+``dispatch_chroma_sync``/``dispatch_chroma_async`` route such a search/fetch
+call through ONE dedicated single-worker executor owned by the service,
+instead of running it in place on the caller's thread. A single worker
+preserves the request-at-a-time ordering these calls already had while they
+all ran directly on the one event-loop thread; dispatching to a bare/
+unbounded thread pool would let two vector-store-touching requests run
+concurrently for the first time — a new race this design avoids. Bulk
+operations such as a full-workspace index are deliberately NOT routed
+through this module — they already run on their own separate thread pool
+and sharing this single-worker executor with them would serialize search/
+fetch behind however long the bulk operation takes.
 
 Callers pass the owning service object itself (not the executor), so a test
 double built without a real executor attached — most unit tests construct a
