@@ -1754,8 +1754,7 @@ class VectrService:
         return self._episode_store.count_arcs_pending_distill(self._workspace_root)
 
     def list_arcs(self, *, status: str = "pending", limit: int = 100) -> list[dict]:
-        """Read surface for `GET /v1/arcs` and `vectr_distill()`
-        (memoization-l3-distiller-design §2) — see
+        """Read surface for `GET /v1/arcs` and `vectr_distill()` — see
         `EpisodeStore.list_arcs` for the returned shape."""
         self._require_memory_layer()
         return self._episode_store.list_arcs(
@@ -1763,8 +1762,8 @@ class VectrService:
         )
 
     def resolve_arcs_distilled(self, arc_ids: list[int], note_id: int) -> dict:
-        """Write-back for `vectr_remember(..., distilled_from=[...])`
-        (memoization-l3-distiller-design §3): marks `arc_ids` distilled
+        """Write-back for `vectr_remember(..., distilled_from=[...])`:
+        marks `arc_ids` distilled
         into `note_id`. Returns `{"resolved": [...], "unresolved": [...]}`
         — idempotent, never raises on unknown/already-resolved ids."""
         self._require_memory_layer()
@@ -1774,7 +1773,7 @@ class VectrService:
 
     def resolve_arcs_dismissed(self, arc_ids: list[int], reason: str) -> dict:
         """Write-back for `vectr_distill(dismiss=[...], reason=...)` /
-        `POST /v1/arcs/dismiss` (memoization-l3-distiller-design §3).
+        `POST /v1/arcs/dismiss`.
         Returns `{"resolved": [...], "unresolved": [...]}` — idempotent,
         never raises on unknown/already-resolved ids."""
         self._require_memory_layer()
@@ -1979,7 +1978,7 @@ class VectrService:
             nudge = self._stale_task_nudge_line()
             if nudge and (ledger is None or ledger.remaining_budget() > 0):
                 fire_text = f"{fire_text}\n\n{nudge}" if fire_text else nudge
-            # memoization-l3-distiller-design §4: same session-start/
+            # Pending-arc nudge: same session-start/
             # post-compaction payload, one more additive line, budget-aware
             # the same way the stale-task nudge above is.
             arc_nudge = self._arc_distill_nudge_line()
@@ -2485,7 +2484,7 @@ class VectrService:
 
     def _arc_distill_nudge_line(self) -> str:
         """One-line pending-arc distillation nudge, or "" when there are
-        none (memoization-l3-distiller-design §4) — appended to the same
+        none — appended to the same
         session-start/post-compaction injection payload the stale-task
         nudge above rides. Deterministic integer-count comparison on
         vectr's own store — no content classification, nothing gated or

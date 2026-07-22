@@ -355,7 +355,7 @@ class RememberRequest(BaseModel):
         default=None,
         description=(
             "Arc ids (from GET /v1/arcs or vectr_distill()) this note "
-            "distills (memoization-l3-distiller-design §3). After the note "
+            "distills. After the note "
             "write succeeds, each named arc is marked distilled into this "
             "note's id. Unknown/already-resolved ids are reported back in "
             "the response, never an error (idempotent)."
@@ -779,7 +779,7 @@ class EpisodesResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Arc distillation (memoization-l3-distiller-design)
+# Arc distillation
 # ---------------------------------------------------------------------------
 
 class ArcFailureRecord(BaseModel):
@@ -802,7 +802,7 @@ class ArcSuccessRecord(BaseModel):
 class ArcRecord(BaseModel):
     """One row as returned by GET /v1/arcs / vectr_distill() — a discovered
     failure->success discovery moment, joined with its episodes' summary
-    fields (memoization-l3-distiller-design §2). Rendered facts only — no
+    fields. Rendered facts only — no
     advice, no suggested kinds; that judgment lives in static tool-surface
     text, never in generated data."""
 
@@ -825,8 +825,8 @@ class ArcsResponse(BaseModel):
 
 
 class ArcResolveResult(BaseModel):
-    """Idempotent bulk-resolve outcome (memoization-l3-distiller-design
-    §3): ids that were pending and are now resolved vs. ids that were
+    """Idempotent bulk-resolve outcome: ids that were pending and are
+    now resolved vs. ids that were
     unknown or already resolved — never an error either way."""
 
     resolved: list[int]

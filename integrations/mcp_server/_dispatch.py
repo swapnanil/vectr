@@ -666,7 +666,7 @@ def handle_tools_call(
         _reset_calls_since_save(session_id)
         service.note_remembered(session_id=session_id)
         enable_memory_for_session(session_id)
-        # memoization-l3-distiller-design §3: this note distills one or more
+        # This note distills one or more
         # pending arcs — resolve them as a second step, after the note write
         # already succeeded, never blocking it. The schema declares
         # distilled_from as a list of integers; an element that is not
@@ -807,9 +807,8 @@ def handle_tools_call(
                 text += f" Unresolvable (unknown or already resolved): {unresolved}."
             return {"content": [{"type": "text", "text": text}], "isError": False}
 
-        # No args: render pending arcs for review (memoization-l3-distiller-
-        # design §2) — confidence-first then oldest-first, already the order
-        # service.list_arcs returns.
+        # No args: render pending arcs for review — confidence-first then
+        # oldest-first, already the order service.list_arcs returns.
         rows = service.list_arcs(status="pending", limit=EPISODES_DISTILL_MAX_ARCS_RENDERED)
         total_pending = service.count_arcs_pending_distill()
         return {"content": [{"type": "text", "text": _format_pending_arcs(rows, total_pending)}], "isError": False}
@@ -1280,7 +1279,7 @@ def _arc_age_str(ts: float | None) -> str:
 
 def _format_arc_block(arc: dict) -> str:
     """One arc's render block for vectr_distill()/GET /v1/arcs — rendered
-    facts only (memoization-l3-distiller-design §2): the failure chain,
+    facts only: the failure chain,
     the resolving success, and the mutation diff. No advice, no suggested
     kind — that judgment is the static rules text surrounding this block,
     never generated per-arc."""
@@ -1304,7 +1303,7 @@ def _format_arc_block(arc: dict) -> str:
 
 def _format_pending_arcs(rows: list[dict], total_pending: int) -> str:
     """Render vectr_distill()'s no-args response: the fixed distiller-rules
-    header (memoization-l3-distiller-design §5, verbatim static text) plus
+    header (verbatim static text) plus
     as many arc blocks from `rows` as fit under
     EPISODES_DISTILL_RENDER_TOKEN_CAP — the first block always renders even
     if it alone exceeds the cap, so a render never comes back empty. `rows`

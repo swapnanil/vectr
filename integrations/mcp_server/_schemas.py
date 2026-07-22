@@ -255,7 +255,7 @@ _EXPLORATION_TOOLS = [
     },
 ]  # end _EXPLORATION_TOOLS
 
-# Distiller rules (memoization-l3-distiller-design §5) — the static prompt
+# Distiller rules — the static prompt
 # surface for arc distillation. Defined once here and reused verbatim in
 # both the vectr_distill tool description below and the fixed header line
 # _dispatch.py prepends to every vectr_distill() render — never generated

@@ -1379,7 +1379,7 @@ episodes:
   # legitimately in-flight one.
   stale_temp_file_sweep_age_s: 3600
 
-  # Arc distillation (memoization-l3-distiller-design §6): max arcs
+  # Arc distillation: max arcs
   # rendered per `vectr_distill()` no-args call, confidence-first
   # (normal before any other value) then oldest-first — the rest stay
   # pending for a later call.

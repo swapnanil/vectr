@@ -350,7 +350,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         raise HTTPException(status_code=422, detail={"error": "invalid_memory_object", "detail": str(exc)})
     distilled = None
     if body.distilled_from:
-        # memoization-l3-distiller-design §3 write-back: the note write
+        # Distillation write-back: the note write
         # already succeeded (note_id above); resolve the named arcs as a
         # second step, never blocking the note write on it.
         result = svc.resolve_arcs_distilled(body.distilled_from, note_id)
@@ -691,14 +691,13 @@ async def arcs(
         description="defaults to episodes.distill_max_arcs_rendered (config.yaml) when omitted",
     ),
 ) -> ArcsResponse:
-    """Read surface for arc distillation
-    (memoization-l3-distiller-design §2): arc rows joined with their
+    """Read surface for arc distillation: arc rows joined with their
     episodes' summary fields — id/ts/cwd/confidence, the failure chain,
     the mutation diff, the resolving success episode — plus
     `total_pending`. Rendered facts only: no advice, no suggested kinds
     (that judgment lives in static tool-surface text, never in generated
     data). An omitted `limit` resolves to `episodes.distill_max_arcs_rendered`
-    (memoization-l3-distiller-design §6) — the same cap the MCP `vectr_distill`
+    — the same cap the MCP `vectr_distill`
     render uses — read from the config module at request time so a config
     reload or test override is honored rather than baked in at import time."""
     t0 = time.monotonic()
@@ -722,7 +721,7 @@ async def arcs(
 
 @router.post("/v1/arcs/dismiss", response_model=ArcsDismissResponse)
 async def arcs_dismiss(body: ArcsDismissRequest, request: Request) -> ArcsDismissResponse:
-    """Write-back verdict: dismiss (memoization-l3-distiller-design §3) —
+    """Write-back verdict: dismiss —
     sets `distilled_at`/`dismissed_reason` on each named arc. Idempotent:
     unknown/already-resolved ids come back in `unresolved`, never an
     error."""

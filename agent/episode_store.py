@@ -94,9 +94,9 @@ class EpisodeStore:
             self._migrate_arcs_columns(conn)
 
     def _migrate_arcs_columns(self, conn: sqlite3.Connection) -> None:
-        """Additive migration (memoization-l3-distiller-design §3): a
-        pre-existing `arcs` table created before this lane's write-back
-        columns existed gets them added via `ALTER TABLE ... ADD COLUMN`
+        """Additive migration: a pre-existing `arcs` table created
+        before the distillation write-back columns existed gets them
+        added via `ALTER TABLE ... ADD COLUMN`
         (nullable, no rewrite). `PRAGMA table_info` makes this tolerant of
         both an already-migrated table and a brand-new one — always safe
         to call unconditionally from `_init_db`."""
@@ -262,10 +262,10 @@ class EpisodeStore:
     def count_arcs_pending_distill(self, workspace: str) -> int:
         """Count of `workspace`'s arcs not yet distilled (`distilled_at
         IS NULL`) — folded into `vectr_status`'s `arcs_pending_distill`
-        field. The `arcs` table is always created by `_init_db` (this lane
-        owns it, B2b); the try/except remains only as a defensive guard
-        against a pre-existing db file from before this lane owned the
-        table, never a normal-path outcome."""
+        field. The `arcs` table is always created by `_init_db`; the
+        try/except remains only as a defensive guard against a
+        pre-existing db file created before the `arcs` table existed,
+        never a normal-path outcome."""
         try:
             with self._conn() as conn:
                 row = conn.execute(
@@ -287,8 +287,7 @@ class EpisodeStore:
         """Arc rows for `workspace`, joined with their episodes' summary
         fields — per arc: id/ts/cwd/confidence, the failure chain (each
         failure episode's verb/outcome/matched markers), the mutation diff,
-        and the success episode's verb/command
-        (memoization-l3-distiller-design §2). `status` selects `pending`
+        and the success episode's verb/command. `status` selects `pending`
         (`distilled_at IS NULL`, the default), `resolved` (`distilled_at
         IS NOT NULL`), or `all`. Ordered confidence-first (`normal` before
         any other value) then oldest-first — the order `vectr_distill()`
@@ -351,17 +350,15 @@ class EpisodeStore:
         return out
 
     def resolve_arcs_distilled(self, workspace: str, arc_ids: list[int], note_id: int) -> dict:
-        """Mark `arc_ids` as distilled into note `note_id`
-        (memoization-l3-distiller-design §3, the `vectr_remember(...,
-        distilled_from=[...])` write-back)."""
+        """Mark `arc_ids` as distilled into note `note_id` (the
+        `vectr_remember(..., distilled_from=[...])` write-back)."""
         return self._resolve_arcs(
             workspace, arc_ids, distilled_note_id=note_id, dismissed_reason=None,
         )
 
     def resolve_arcs_dismissed(self, workspace: str, arc_ids: list[int], reason: str) -> dict:
-        """Mark `arc_ids` as dismissed with `reason`
-        (memoization-l3-distiller-design §3, the `vectr_distill(dismiss=
-        [...], reason=...)` write-back)."""
+        """Mark `arc_ids` as dismissed with `reason` (the
+        `vectr_distill(dismiss=[...], reason=...)` write-back)."""
         return self._resolve_arcs(
             workspace, arc_ids, distilled_note_id=None, dismissed_reason=reason,
         )

@@ -330,9 +330,9 @@ EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S : float
     process left to clean it up.
 
 EPISODES_DISTILL_MAX_ARCS_RENDERED : int
-    Max arcs rendered per `vectr_distill()` no-args call
-    (memoization-l3-distiller-design §6), confidence-first then
-    oldest-first — the rest stay pending for a later call.
+    Max arcs rendered per `vectr_distill()` no-args call,
+    confidence-first then oldest-first — the rest stay pending for a
+    later call.
 
 EPISODES_DISTILL_RENDER_TOKEN_CAP : int
     Hard cap (estimated tokens, agent/trigger_engine.py's token_estimate)
