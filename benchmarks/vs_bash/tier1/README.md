@@ -210,3 +210,84 @@ observed BUILD FAILUREs** -- every invocation was single-module (false-passing a
 had a reliable red/green loop; the reactor-paired driver gate was the only honest referee.
 Conclusion: adoption depth plus missing operational feedback-loop knowledge is the binding
 constraint, not retrieval quality -- direct evidence for hook-injected operational memoization.
+
+## Tier G4: single-note operational memoization A/B
+
+T2's finding above -- agents never got a reliable red/green Maven signal because nobody knew the
+multi-module verification pattern (`-am`, module-scoped `-Dtest`, avoiding `~/.m2`-masked
+false-passes) -- motivates a narrow, pre-registered follow-up: does seeding **exactly one**
+`operational`-kind note teaching that pattern change agent behavior on the one task where it
+matters? G4 is a controlled two-arm repeat of T2's `T2-02` task only, with a single manipulated
+variable (note count: 0 vs 1) and every other T2 config held fixed.
+
+Spec: `memoization-g4-preregistration.md` (frozen pre-registration -- the task, the exact note
+text, and the honest-verification/decision-rule definitions in that document are the single source
+of truth; `run_g4.py` and `g4_metrics.py` implement it, they do not reinterpret it).
+
+### Files
+
+- **`g4_metrics.py`** -- deterministic, pure transcript parser implementing the pre-registration's
+  honest-verification conditions (a)-(e), the false-pass count, and note-delivery detection. No
+  daemon/network/filesystem dependency; unit-tested on synthetic transcripts in
+  `test_g4_metrics.py`.
+- **`run_g4.py`** -- the driver. Reuses `run_t2.py`'s fixture reset/reseed, git hide/restore, gate
+  runner, session compose/spawn, and artifact-capture machinery via direct import (not copied);
+  adds the G4-specific per-session protocol (clear all notes, verify `notes_count == 0`, then for
+  the memory arm only seed the pre-registration's frozen note via `POST /v1/remember` and verify
+  `notes_count == 1`) and episode/arc-count bookkeeping before/after each session. Unit-tested in
+  `test_run_g4.py` (frozen note payload, session ordering, REST helpers against a mocked
+  `urlopen`, and the `--parse-only` decision-rule path against synthetic transcripts).
+
+### Design
+
+Two arms, **`memory`** and **`control`**, both running the *same* vectr-as-shipped configuration
+T2 used (on-disk init artifacts + hooks + `.mcp.json`, `--strict-mcp-config`) -- unlike T1c/T2's
+vectr-vs-bash split, G4 never removes vectr's tools from either arm. The only manipulated variable
+is note count at session start: memory arm seeds the one frozen operational note; control arm
+clears notes and seeds nothing. Six sessions run in the fixed order `M1, C1, M2, C2, M3, C3` (task
+`T2-02` only, `--model sonnet`, `--max-turns 40`, matching T2's preamble/disallowed-tools/JDK/Maven
+env). Per-session protocol: fixture reset + seed-patch reverse-apply + git hide + daemon settle +
+pre-gate (must fail) + clear all notes + verify `notes_count == 0` + (memory arm only) seed the
+frozen note + verify `notes_count == 1` + spawn session + post-gate + restore + artifact capture +
+reset. Episode/arc counts (`GET /v1/episodes` count, `arcs_pending_distill`) are recorded before
+and after each session without being cleared, so any pre-existing accumulation is visible in the
+aggregate output rather than hidden.
+
+### Honesty rules
+
+Same as T1b/T1c/T2 above, plus: the seeded note's `content`/`kind`/`priority`/`title`/`tags`/
+`triggers` are byte-frozen module-level constants in `run_g4.py`, copied verbatim from the
+pre-registration -- never edited, paraphrased, or task-specific-detail-injected to help the memory
+arm. Both arms use identical command composition, flags, and MCP config; the only difference
+between them is note count, enforced and verified via the REST surface before each session starts,
+never inferred. `run_g4.py` computes only the metrics and decision rule the pre-registration
+defines mechanically (see `g4_metrics.evaluate_transcript` and `--parse-only`'s decision-rule
+block) -- no verdict beyond that mechanical application.
+
+### Running
+
+```
+# ALWAYS start here -- prints all 6 composed commands + the full per-session protocol,
+# spawns nothing:
+./.venv/bin/python benchmarks/vs_bash/tier1/run_g4.py --dry-run
+
+# Parse already-recorded transcripts into the per-session metric table + decision rule,
+# without spawning anything:
+./.venv/bin/python benchmarks/vs_bash/tier1/run_g4.py --parse-only results/vectr-vs-bash/camel/<vectr-sha>/g4/
+
+# Real run (sentinel-gated; burns quota) -- one session at a time to start:
+./.venv/bin/python benchmarks/vs_bash/tier1/run_g4.py --sessions M1
+
+# Real run, full fixed order:
+./.venv/bin/python benchmarks/vs_bash/tier1/run_g4.py
+```
+
+Transcripts and the aggregate JSON land in `results/vectr-vs-bash/camel/<vectr-sha>/g4/`
+(gitignored -- regenerable run output, same convention as T1b/T1c/T2):
+
+- `mcp_config.json` -- the generated `--mcp-config` file (shared by both arms).
+- `<label>_<timestamp>.jsonl` -- the raw stream-json event transcript for one session (`M1`,
+  `C1`, `M2`, `C2`, `M3`, or `C3`).
+- `g4_run_<timestamp>.json` -- the aggregate: per-session honest-verification result, false-pass
+  count, note-delivery detection, episode/arc counts before/after, usage/wall-time, and the §6
+  decision rule's mechanical application across all 6 sessions.
