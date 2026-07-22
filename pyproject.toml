@@ -15,7 +15,7 @@ agent = ["config.yaml", "markers.yaml", "data/*.txt", "templates/*"]
 
 [project]
 name = "vectr"
-version = "1.4.0"
+version = "1.5.0"
 description = "Semantic codebase search + persistent working memory for AI code editors. Local, zero-config, MCP. No API key."
 readme = "README.md"
 license = { text = "MIT" }

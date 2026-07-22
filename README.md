@@ -11,10 +11,10 @@
 [![CI](https://github.com/swapnanil/vectr/actions/workflows/ci.yml/badge.svg)](https://github.com/swapnanil/vectr/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version 1.4.0](https://img.shields.io/badge/version-1.4.0-blue.svg)](CHANGELOG.md)
-[![MCP: 16 tools](https://img.shields.io/badge/MCP-16%20tools-blue.svg)](#16-mcp-tools)
+[![Version 1.5.0](https://img.shields.io/badge/version-1.5.0-blue.svg)](CHANGELOG.md)
+[![MCP: 19 tools](https://img.shields.io/badge/MCP-19%20tools-blue.svg)](#19-mcp-tools)
 
-Version 1.4.0 · Last updated 2026-07-20 · [CHANGELOG](CHANGELOG.md)
+Version 1.5.0 · Last updated 2026-07-23 · [CHANGELOG](CHANGELOG.md)
 
 Vectr gives AI code editors two things they lack: **semantic codebase search** and **persistent working memory** — both served over MCP with zero configuration.
 
@@ -202,11 +202,11 @@ No port, no daemon — a single foreground process framed as newline-delimited J
 3. **Hybrid search** — vector similarity + BM25 combined, weighted by codebase characteristics (large/unfamiliar → semantic-heavy; small/well-documented → BM25-heavy).
 4. **Symbol graph** — call edges, import chains, and HTTP routes (Flask/FastAPI/Express/Spring) are extracted and stored. `vectr_locate` uses 5 fallback strategies: exact match → suffix → same-module → unique-name → import-chain → fuzzy (edit distance ≤ 2).
 5. **Working memory** — `vectr_remember` stores structured notes to SQLite + ChromaDB. `vectr_recall` does semantic search over notes — not SQL LIKE — so multi-word queries always find relevant context.
-6. **MCP protocol** — 16 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
+6. **MCP protocol** — 19 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
 
 ---
 
-## 16 MCP tools
+## 19 MCP tools
 
 `vectr start` writes a `CLAUDE.md` into your workspace with this table and usage guidance — your AI code editor knows which tool to reach for without being prompted.
 
@@ -235,6 +235,9 @@ No port, no daemon — a single foreground process framed as newline-delimited J
 | Looking for a prior checkpoint | `vectr_snapshot_list()` |
 | Notes are stale after a large refactor | `vectr_forget(note_id=N)` per note, or `vectr_forget(all=true)` to clear |
 | An auto-captured note has been reviewed and still holds | `vectr_promote(note_id=N)` — raises its trust class one step (`auto` → `agent`); promotion to `human` is reserved for user-side surfaces, never the agent's call |
+| Automatically captured failure→success moments are waiting | `vectr_distill()` — renders pending arcs (a command failed, then passed after an edit) for review; persist a lesson with `vectr_remember(..., distilled_from=[arc_id])` or dismiss with `vectr_distill(dismiss=[...], reason)` |
+| A stored note turned out to be wrong | `vectr_revoke(note_id=N, reason)` — keeps the note visible as a deterrent ("previously believed …, revoked …") instead of deleting it, so the mistake is not silently re-derived; `vectr_remember(contradicts=N)` corrects and revokes in one step |
+| A revoked note was right after all | `vectr_reinstate(note_id=N)` — restores the original content |
 
 Workspace-scoped notes double as a shared bus for multi-agent workflows: an orchestrator and its subagents all read and write the same note store, so a subagent can call `vectr_remember(..., agent="coder-2")` with its findings before finishing, and the orchestrator recalls them instead of re-reading the subagent's full transcript. The `agent` param is never inferred — it's explicit attribution, and it shows up as a tag in `vectr_recall` index output.
 

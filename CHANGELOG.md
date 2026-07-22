@@ -1,9 +1,34 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 — 2026-07-23
+
+Automatic episode capture with arc distillation, a note lifecycle with
+revoke/reinstate, session resume, and an off-event-loop vector-store fix that
+keeps the daemon responsive while its index compacts. MCP surface grows from
+16 tools to 19.
 
 ### Working memory
-- New `vectr_resume` MCP tool (16th) + `vectr resume` CLI + `GET /v1/resume`:
+- Episode capture: on editors with session hooks, each tool invocation is
+  recorded as a deterministic local episode (command, outcome, failure
+  markers) — no model calls involved. A streaming detector groups episodes
+  into **arcs**: failure→success moments, e.g. a command that failed twice
+  and then passed after an edit. `vectr status` / `GET /v1/status` report
+  `episodes_count` and `arcs_pending_distill`.
+- New `vectr_distill` MCP tool + `GET /v1/arcs`: review pending arcs
+  (oldest and most-confident first, token-bounded), persist the ones worth
+  keeping as notes via `vectr_remember(..., distilled_from=[arc_id])`, and
+  dismiss the rest with a reason.
+- Note lifecycle: `vectr_revoke` flags a note as wrong **without deleting
+  it** — future recall shows a deterrent framing ("previously believed …,
+  revoked …") instead of the original content, so the mistake is not
+  silently re-derived. `vectr_reinstate` reverses it.
+  `vectr_remember(contradicts=N)` records a correction and revokes the old
+  note in one step. All transitions land in a note lifecycle event log.
+- Serving policy: new `operational` note kind with `command` triggers,
+  delivered on the command lane's hook fast path; a per-turn injection
+  ledger keeps any note from firing twice in the same turn, and fires are
+  recorded only when actually delivered.
+- New `vectr_resume` MCP tool + `vectr resume` CLI + `GET /v1/resume`:
   the most recent task note, the latest snapshot, and open gotchas with file
   anchors in one deterministic call, selected by the same shared helper
   session-start injection uses. Config: `behavior.resume.max_gotchas`
@@ -11,10 +36,45 @@
 - New note kind `decision` and recall sort `chronological` (oldest-first,
   dated index lines): architectural decisions accrue as notes and recall as
   an ADR-style timeline. Decisions are not auto-injected at session start.
+- Commit provenance: a git post-commit hook records each commit's message
+  and touched files as a working-memory note, so "when did we change X"
+  recalls instead of re-running `git log`.
+- Note ages under an hour render as seconds/minutes in recall output
+  instead of rounding to "0h".
+
+### Search correctness
+- Java `enum` methods now chunk correctly (the chunker descends through the
+  enum member-group wrapper node), and the chunker recurses into any AST
+  container node rather than class bodies only.
+- Rust `impl`-block members resolve for qualified `Type.method` locate and
+  trace.
+- `vectr_trace` with a qualified `Class.method` validates the class
+  qualifier before answering the callers path — no more caller lists for a
+  same-named method on a different class.
+- Near-miss suggestions for a misremembered qualified name are ranked by
+  similarity, and caller ties are broken beyond name identity.
+- Pointer-mode search keeps a result's code body when that result's own
+  score clears the confidence floor, instead of demoting it with the rest.
+
+### Reliability
+- Vector-store calls no longer run on the request event loop: search/fetch
+  dispatch through a dedicated executor, chunk counts are served from
+  caches refreshed on every mutation and embed batch, and any store call
+  slower than 5s logs a warning. Previously a single store call issued
+  during the store's internal compaction could freeze every HTTP and MCP
+  endpoint (observed: 41 minutes on a 2.6 GB index). New config:
+  `indexing.vector_store_bridge.dispatch_max_workers` (must stay 1) and
+  `indexing.vector_store_bridge.slow_call_warn_seconds`.
+- Version stamps no longer absorb a foreign git SHA when vectr is installed
+  editable under an unrelated repository checkout.
+- The MCP server reports its version from package metadata instead of a
+  hardcoded constant.
 
 ### Hygiene
 - Two staleness tests pinned file mtimes explicitly, fixing a CI-only
   coarse-clock flake.
+- GitHub release creation is skipped when the tag's release already exists,
+  making the release workflow re-runnable.
 
 ## 1.4.0 — 2026-07-20
 
