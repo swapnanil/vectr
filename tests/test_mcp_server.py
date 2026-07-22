@@ -747,6 +747,26 @@ class TestVectrStatus:
         result = handle_tools_call("vectr_status", {}, svc)
         assert "25" in result["content"][0]["text"]
 
+    def test_episode_and_arc_counts_in_output(self) -> None:
+        svc = _mock_service()
+        svc.status.return_value = {
+            **svc.status.return_value,
+            "episodes_count": 7,
+            "arcs_pending_distill": 2,
+        }
+        result = handle_tools_call("vectr_status", {}, svc)
+        text = result["content"][0]["text"]
+        assert "Episodes       : 7" in text
+        assert "Pending arcs   : 2" in text
+        assert "vectr_distill()" in text
+
+    def test_no_distill_hint_when_no_arcs_pending(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_status", {}, svc)
+        text = result["content"][0]["text"]
+        assert "Pending arcs   : 0" in text
+        assert "vectr_distill()" not in text
+
     def test_strategy_shown_when_available(self) -> None:
         svc = _mock_service()
         svc.status.return_value = {

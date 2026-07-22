@@ -155,6 +155,36 @@ class TestStatusEpisodeCounts:
         svc = _make_real_service(tmp_path, monkeypatch)
         assert svc.status()["arcs_pending_distill"] == 0
 
+    def test_status_route_serves_episode_and_arc_counts(self, real_episode_client, tmp_path):
+        """REST-level pin for the aggregates above. `StatusResponse` filters
+        the service dict: a key `status()` provides but the model does not
+        declare is silently dropped from `GET /v1/status` — which is exactly
+        what happened to episodes_count/arcs_pending_distill while only
+        service-level assertions existed. This test reads the ROUTE."""
+        client, _svc = real_episode_client
+        before = client.get("/v1/status").json()
+        assert before["episodes_count"] == 0
+        assert before["arcs_pending_distill"] == 0
+        fail = {
+            "session_id": "s1", "cwd": str(tmp_path), "tool": "bash",
+            "command": "python -m pytest tests/test_w.py -q", "rc": 1,
+            "stdout_tail": "1 failed, 3 passed",
+        }
+        assert client.post("/v1/episode", json=fail).status_code == 200
+        assert client.post("/v1/episode", json=fail).status_code == 200
+        assert client.post(
+            "/v1/episode",
+            json={"session_id": "s1", "cwd": str(tmp_path), "tool": "edit",
+                  "file_path": str(tmp_path / "w.py")},
+        ).status_code == 200
+        assert client.post(
+            "/v1/episode",
+            json={**fail, "rc": 0, "stdout_tail": "4 passed"},
+        ).status_code == 200
+        after = client.get("/v1/status").json()
+        assert after["episodes_count"] == 4
+        assert after["arcs_pending_distill"] == 1
+
 
 # ---------------------------------------------------------------------------
 # Quarantine invariant — episodes never surface via recall()

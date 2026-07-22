@@ -316,6 +316,14 @@ def handle_tools_call(
             if notes_count > 0
             else "  → no prior notes; skip vectr_recall"
         )
+        # Episode-capture aggregates: deterministic integer counts from
+        # vectr's own store, rendered on every call. The distill hint is
+        # count-gated only — no content classification.
+        episodes_count = status.get("episodes_count", 0)
+        arcs_pending = status.get("arcs_pending_distill", 0)
+        distill_hint = (
+            "  → call vectr_distill() to review them" if arcs_pending > 0 else ""
+        )
         mode = status.get("mode", "full")
         lines = [
             "Vectr status",
@@ -324,6 +332,8 @@ def handle_tools_call(
             f"  Total chunks   : {status['total_chunks']}",
             f"  Symbols indexed: {status.get('symbol_count', 'n/a')}",
             f"  Prior notes    : {notes_count}{recall_hint}",
+            f"  Episodes       : {episodes_count}",
+            f"  Pending arcs   : {arcs_pending}{distill_hint}",
             f"  Last indexed   : {status['last_indexed']}",
             f"  Embed model    : {status['embed_model']}",
             f"  Workspace      : {status['workspace_root']}",

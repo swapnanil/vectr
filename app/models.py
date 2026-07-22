@@ -131,6 +131,14 @@ class StatusResponse(BaseModel):
     symbol_count: int = 0
     languages: list[LanguageStat] = []
     notes_count: int = 0
+    # Episode-capture aggregates: plain counts, never rows (status is not a
+    # reader of episode content — only GET /v1/episodes is). Always an int —
+    # 0 in search-only mode or before the first episode write, mirroring
+    # notes_count's zero-safe contract. Declared here because the service
+    # dict is filtered through this model: an undeclared key is silently
+    # dropped from the REST response even when status() provides it.
+    episodes_count: int = 0
+    arcs_pending_distill: int = 0
     # Symbol-graph build trust signals (UPG-8.7): complete = no files failed
     # extraction; failed_files counts those skipped, so a partial graph is visible.
     symbol_graph_complete: bool = False
