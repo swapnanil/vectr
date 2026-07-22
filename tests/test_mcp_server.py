@@ -1219,7 +1219,8 @@ class TestRelativePathRender:
 # time, downstream of this dispatch layer (see test_working_context_store.py
 # for the write-time resolution itself).
 _DEFAULT_TRIGGER_PARAMS = dict(
-    triggers=None, provenance="agent", scope=None, anchors=None, supersedes=None, session_id=None,
+    triggers=None, provenance="agent", scope=None, anchors=None, supersedes=None,
+    contradicts=None, session_id=None,
 )
 
 
@@ -1375,7 +1376,8 @@ class TestVectrRemember:
             content="a gotcha about auth.py", tags=None, priority="medium",
             kind="gotcha", title="", agent="",
             triggers=[{"path": "src/auth.py", "event": "pre-edit"}],
-            provenance="auto", scope="repo", anchors=["src/auth.py"], supersedes=None, session_id=None,
+            provenance="auto", scope="repo", anchors=["src/auth.py"], supersedes=None,
+            contradicts=None, session_id=None,
         )
 
     def test_remember_passes_supersedes_as_int(self) -> None:
@@ -1384,12 +1386,35 @@ class TestVectrRemember:
         svc.remember.assert_called_once_with(
             content="corrected finding", tags=None, priority="medium",
             kind="finding", title="", agent="",
-            triggers=None, provenance="agent", scope=None, anchors=None, supersedes=7, session_id=None,
+            triggers=None, provenance="agent", scope=None, anchors=None, supersedes=7,
+            contradicts=None, session_id=None,
         )
 
     def test_remember_non_integer_supersedes_returns_error(self) -> None:
         svc = _mock_service()
         result = handle_tools_call("vectr_remember", {"content": "note", "supersedes": "not-a-number"}, svc)
+        assert result["isError"] is True
+        svc.remember.assert_not_called()
+
+    def test_remember_passes_contradicts_as_int(self) -> None:
+        """UPG-MEMORY-STATE-MACHINE §4.2: contradicts is a peer of
+        supersedes, coerced the same way (string -> int)."""
+        svc = _mock_service()
+        handle_tools_call(
+            "vectr_remember", {"content": "the API actually returns a dict", "contradicts": "7"}, svc
+        )
+        svc.remember.assert_called_once_with(
+            content="the API actually returns a dict", tags=None, priority="medium",
+            kind="finding", title="", agent="",
+            triggers=None, provenance="agent", scope=None, anchors=None, supersedes=None,
+            contradicts=7, session_id=None,
+        )
+
+    def test_remember_non_integer_contradicts_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call(
+            "vectr_remember", {"content": "note", "contradicts": "not-a-number"}, svc
+        )
         assert result["isError"] is True
         svc.remember.assert_not_called()
 
@@ -1853,8 +1878,12 @@ class TestVectrForget:
         monkeypatch.setenv("VECTR_MCP_ALL_TOOLS", "1")
         tools = handle_tools_list(session_id="fresh-session-no-notes")["tools"]
         names = {t["name"] for t in tools}
-        assert len(tools) == 16
-        assert {"vectr_recall", "vectr_forget", "vectr_promote", "vectr_snapshot", "vectr_snapshot_list", "vectr_resume"} <= names
+        # UPG-MEMORY-STATE-MACHINE §4.2 added vectr_revoke/vectr_reinstate (18 = 16 + 2).
+        assert len(tools) == 18
+        assert {
+            "vectr_recall", "vectr_forget", "vectr_promote", "vectr_revoke", "vectr_reinstate",
+            "vectr_snapshot", "vectr_snapshot_list", "vectr_resume",
+        } <= names
 
     def test_all_tools_env_flag_off_keeps_gating(self, monkeypatch) -> None:
         monkeypatch.delenv("VECTR_MCP_ALL_TOOLS", raising=False)
@@ -1940,6 +1969,120 @@ class TestVectrPromote:
         assert "vectr_promote" in {t["name"] for t in _MEMORY_TOOLS}
         write_names = {t["name"] for t in _MEMORY_WRITE_TOOLS}
         assert "vectr_promote" not in write_names
+
+
+# ---------------------------------------------------------------------------
+# vectr_revoke / vectr_reinstate (UPG-MEMORY-STATE-MACHINE §4.2)
+# ---------------------------------------------------------------------------
+
+class TestVectrRevoke:
+    def test_revoke_calls_service_with_hardcoded_agent_actor(self) -> None:
+        """MCP is the AI's own surface — actor is never a caller-supplied
+        argument here (unlike REST's optional actor field); it is always
+        'agent'."""
+        svc = _mock_service()
+        svc.revoke_note.return_value = True
+        result = handle_tools_call(
+            "vectr_revoke", {"note_id": 12, "reason": "turned out false"}, svc
+        )
+        svc.revoke_note.assert_called_once_with(12, "turned out false", actor="agent")
+        assert result["isError"] is False
+        assert "#12" in result["content"][0]["text"]
+
+    def test_revoke_missing_note_id_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_revoke", {"reason": "wrong"}, svc)
+        assert result["isError"] is True
+        svc.revoke_note.assert_not_called()
+
+    def test_revoke_missing_reason_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_revoke", {"note_id": 12}, svc)
+        assert result["isError"] is True
+        svc.revoke_note.assert_not_called()
+
+    def test_revoke_non_integer_note_id_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_revoke", {"note_id": "abc", "reason": "wrong"}, svc)
+        assert result["isError"] is True
+        svc.revoke_note.assert_not_called()
+
+    def test_revoke_not_found_returns_error(self) -> None:
+        svc = _mock_service()
+        svc.revoke_note.return_value = False
+        result = handle_tools_call("vectr_revoke", {"note_id": 999, "reason": "wrong"}, svc)
+        assert result["isError"] is True
+        assert "not found" in result["content"][0]["text"].lower()
+
+    def test_revoke_value_error_from_service_returns_mcp_error(self) -> None:
+        svc = _mock_service()
+        svc.revoke_note.side_effect = ValueError("actor must be one of: agent, human")
+        result = handle_tools_call("vectr_revoke", {"note_id": 12, "reason": "wrong"}, svc)
+        assert result["isError"] is True
+        assert "actor must be one of" in result["content"][0]["text"]
+
+    def test_revoke_in_tools_list(self) -> None:
+        names = {t["name"] for t in handle_tools_list()["tools"]}
+        assert "vectr_revoke" in names
+
+    def test_revoke_gated_with_other_memory_read_tools(self) -> None:
+        assert "vectr_revoke" in {t["name"] for t in _MEMORY_TOOLS}
+        write_names = {t["name"] for t in _MEMORY_WRITE_TOOLS}
+        assert "vectr_revoke" not in write_names
+
+
+class TestVectrReinstate:
+    def test_reinstate_calls_service_with_hardcoded_agent_actor(self) -> None:
+        svc = _mock_service()
+        svc.reinstate_note.return_value = True
+        result = handle_tools_call("vectr_reinstate", {"note_id": 12}, svc)
+        svc.reinstate_note.assert_called_once_with(12, actor="agent", reason=None)
+        assert result["isError"] is False
+        assert "#12" in result["content"][0]["text"]
+
+    def test_reinstate_with_reason(self) -> None:
+        svc = _mock_service()
+        svc.reinstate_note.return_value = True
+        result = handle_tools_call(
+            "vectr_reinstate", {"note_id": 12, "reason": "verified correct after all"}, svc
+        )
+        svc.reinstate_note.assert_called_once_with(12, actor="agent", reason="verified correct after all")
+        assert result["isError"] is False
+
+    def test_reinstate_missing_note_id_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_reinstate", {}, svc)
+        assert result["isError"] is True
+        svc.reinstate_note.assert_not_called()
+
+    def test_reinstate_non_integer_note_id_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_reinstate", {"note_id": "abc"}, svc)
+        assert result["isError"] is True
+        svc.reinstate_note.assert_not_called()
+
+    def test_reinstate_not_found_returns_error(self) -> None:
+        svc = _mock_service()
+        svc.reinstate_note.return_value = False
+        result = handle_tools_call("vectr_reinstate", {"note_id": 999}, svc)
+        assert result["isError"] is True
+        assert "not found" in result["content"][0]["text"].lower()
+
+    def test_reinstate_value_error_from_service_returns_mcp_error(self) -> None:
+        svc = _mock_service()
+        svc.reinstate_note.side_effect = ValueError("actor must be one of: agent, human")
+        result = handle_tools_call("vectr_reinstate", {"note_id": 12}, svc)
+        assert result["isError"] is True
+        assert "actor must be one of" in result["content"][0]["text"]
+
+    def test_reinstate_in_tools_list(self) -> None:
+        names = {t["name"] for t in handle_tools_list()["tools"]}
+        assert "vectr_reinstate" in names
+
+    def test_reinstate_gated_with_other_memory_read_tools(self) -> None:
+        assert "vectr_reinstate" in {t["name"] for t in _MEMORY_TOOLS}
+        write_names = {t["name"] for t in _MEMORY_WRITE_TOOLS}
+        assert "vectr_reinstate" not in write_names
 
 
 # ---------------------------------------------------------------------------

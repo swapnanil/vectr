@@ -145,6 +145,28 @@ class TestRememberRoute:
         assert "corrected finding" in active
         assert "old finding" not in active
 
+    def test_remember_contradicts_revokes_the_target_via_rest(self, client_real_memory) -> None:
+        """UPG-MEMORY-STATE-MACHINE §4.2: unlike supersedes, the target
+        stays a live recall candidate — rendered as anti-memory, not
+        excluded."""
+        client = client_real_memory
+        old = client.post("/v1/remember", json={"content": "the API returns a list"}).json()["note_id"]
+        new = client.post(
+            "/v1/remember",
+            json={"content": "the API actually returns a dict", "contradicts": old},
+        ).json()["note_id"]
+        assert new != old
+        full = client.post("/v1/recall", json={"detail": "full"}).json()["notes"]
+        assert "Previously believed" in full
+        assert "the API actually returns a dict" in full
+
+    def test_remember_contradicts_nonexistent_note_returns_422(self, client_real_memory) -> None:
+        resp = client_real_memory.post(
+            "/v1/remember", json={"content": "a correction", "contradicts": 999999}
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["error"] == "invalid_memory_object"
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/recall
@@ -730,6 +752,70 @@ class TestPromoteRoute:
         resp = client.post("/v1/promote", json={"note_id": note_id, "to": "human"})
         assert resp.status_code == 200
         assert resp.json()["provenance"] == "human"
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/revoke, POST /v1/reinstate (UPG-MEMORY-STATE-MACHINE §4.2)
+# ---------------------------------------------------------------------------
+
+class TestRevokeRoute:
+    def test_revoke_returns_200_with_mocked_service(self, client) -> None:
+        resp = client.post("/v1/revoke", json={"note_id": 1, "reason": "turned out false"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["note_id"] == 1
+        assert "processing_ms" in data
+
+    def test_revoke_missing_reason_returns_422(self, client) -> None:
+        resp = client.post("/v1/revoke", json={"note_id": 1})
+        assert resp.status_code == 422
+
+    def test_revoke_invalid_actor_returns_422(self, client) -> None:
+        resp = client.post(
+            "/v1/revoke", json={"note_id": 1, "reason": "wrong", "actor": "system"}
+        )
+        assert resp.status_code == 422
+
+    def test_revoke_via_rest_with_real_store(self, client_real_memory) -> None:
+        client = client_real_memory
+        note_id = client.post("/v1/remember", json={"content": "a finding"}).json()["note_id"]
+        resp = client.post("/v1/revoke", json={"note_id": note_id, "reason": "wrong", "actor": "human"})
+        assert resp.status_code == 200
+        recalled = client.post("/v1/recall", json={"detail": "full"}).json()["notes"]
+        assert "Previously believed" in recalled
+
+    def test_revoke_nonexistent_note_returns_404(self, client_real_memory) -> None:
+        resp = client_real_memory.post(
+            "/v1/revoke", json={"note_id": 999999, "reason": "wrong"}
+        )
+        assert resp.status_code == 404
+
+
+class TestReinstateRoute:
+    def test_reinstate_returns_200_with_mocked_service(self, client) -> None:
+        resp = client.post("/v1/reinstate", json={"note_id": 1})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["note_id"] == 1
+        assert "processing_ms" in data
+
+    def test_reinstate_invalid_actor_returns_422(self, client) -> None:
+        resp = client.post("/v1/reinstate", json={"note_id": 1, "actor": "system"})
+        assert resp.status_code == 422
+
+    def test_reinstate_via_rest_reverses_revoke(self, client_real_memory) -> None:
+        client = client_real_memory
+        note_id = client.post("/v1/remember", json={"content": "a finding"}).json()["note_id"]
+        client.post("/v1/revoke", json={"note_id": note_id, "reason": "wrong"})
+        resp = client.post("/v1/reinstate", json={"note_id": note_id, "reason": "verified correct"})
+        assert resp.status_code == 200
+        recalled = client.post("/v1/recall", json={"detail": "full"}).json()["notes"]
+        assert "a finding" in recalled
+        assert "Previously believed" not in recalled
+
+    def test_reinstate_nonexistent_note_returns_404(self, client_real_memory) -> None:
+        resp = client_real_memory.post("/v1/reinstate", json={"note_id": 999999})
+        assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------

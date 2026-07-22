@@ -65,7 +65,8 @@ def handle_tools_list(session_id: str | None = None, service: Any = None) -> dic
     """Return tools appropriate for this session.
 
     Always shown: exploration tools + vectr_remember + vectr_evict_hint.
-    Gated on notes existing: vectr_recall, vectr_forget, vectr_promote, vectr_snapshot, vectr_snapshot_list.
+    Gated on notes existing: vectr_recall, vectr_forget, vectr_promote, vectr_revoke,
+    vectr_reinstate, vectr_snapshot, vectr_snapshot_list.
     """
     # Hosted/registry deployments (e.g. a catalog's containerised inspector)
     # start with an empty note store but must still advertise the complete
@@ -636,16 +637,26 @@ def handle_tools_call(
                 supersedes = int(supersedes)
             except (TypeError, ValueError):
                 return _mcp_error("supersedes must be an integer note_id")
+        # UPG-MEMORY-STATE-MACHINE §4.2: contradicts is a peer of supersedes,
+        # not a replacement for it -- see remember()'s docstring for the
+        # exact revoked-event semantics.
+        contradicts = arguments.get("contradicts")
+        if contradicts is not None:
+            try:
+                contradicts = int(contradicts)
+            except (TypeError, ValueError):
+                return _mcp_error("contradicts must be an integer note_id")
         try:
             note_id = service.remember(
                 content=content, tags=tags, priority=priority, kind=kind, title=title, agent=agent,
                 triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
-                supersedes=supersedes, session_id=session_id,
+                supersedes=supersedes, contradicts=contradicts, session_id=session_id,
             )
         except ValueError as exc:
-            # Malformed triggers, an unrecognised provenance/scope, or a
-            # supersedes target that does not exist — a caller input error,
-            # surfaced plainly rather than raised as an unhandled exception.
+            # Malformed triggers, an unrecognised provenance/scope, a
+            # supersedes target, or a contradicts target that does not
+            # exist — a caller input error, surfaced plainly rather than
+            # raised as an unhandled exception.
             return _mcp_error(str(exc))
         # reset the turn-count nudge, the eviction advisor's remember-fatigue
         # counter (UPG-REMEMBER-BANNER-FATIGUE), and enable memory tools
@@ -869,6 +880,64 @@ def handle_tools_call(
             return _mcp_error(f"Note #{nid} not found.")
         return {
             "content": [{"type": "text", "text": f"Promoted note #{nid} to provenance='{to}'."}],
+            "isError": False,
+        }
+
+    # ---- vectr_revoke ----
+    if tool_name == "vectr_revoke":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
+        note_id = arguments.get("note_id")
+        reason = (arguments.get("reason") or "").strip()
+        if note_id is None:
+            return _mcp_error("note_id is required (the [#N] id shown by vectr_recall)")
+        try:
+            nid = int(note_id)
+        except (TypeError, ValueError):
+            return _mcp_error("note_id must be an integer (the [#N] id shown by vectr_recall)")
+        if not reason:
+            return _mcp_error("reason is required — shown verbatim in the deterrent framing")
+        # UPG-MEMORY-STATE-MACHINE §4.2: MCP is the AI's own surface, so
+        # actor is hardcoded here (never accepted as a caller argument) --
+        # only the REST /v1/revoke route a person's own CLI/UI calls can
+        # attribute a revocation to actor="human".
+        try:
+            revoked = service.revoke_note(nid, reason, actor="agent")
+        except ValueError as exc:
+            return _mcp_error(str(exc))
+        if not revoked:
+            return _mcp_error(f"Note #{nid} not found.")
+        return {
+            "content": [{"type": "text", "text": f"Revoked note #{nid}. It will now surface as a deterrent instead of its original content until reinstated."}],
+            "isError": False,
+        }
+
+    # ---- vectr_reinstate ----
+    if tool_name == "vectr_reinstate":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
+        note_id = arguments.get("note_id")
+        reason = arguments.get("reason") or None
+        if note_id is None:
+            return _mcp_error("note_id is required (the [#N] id shown by vectr_recall)")
+        try:
+            nid = int(note_id)
+        except (TypeError, ValueError):
+            return _mcp_error("note_id must be an integer (the [#N] id shown by vectr_recall)")
+        try:
+            reinstated = service.reinstate_note(nid, actor="agent", reason=reason)
+        except ValueError as exc:
+            return _mcp_error(str(exc))
+        if not reinstated:
+            return _mcp_error(f"Note #{nid} not found.")
+        return {
+            "content": [{"type": "text", "text": f"Reinstated note #{nid}. Its original content will surface again."}],
             "isError": False,
         }
 

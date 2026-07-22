@@ -238,6 +238,8 @@ def _base_mock_service():
     svc.eviction_hint.return_value = ""
     svc.remember.return_value = 1
     svc.promote_note.return_value = True
+    svc.revoke_note.return_value = True
+    svc.reinstate_note.return_value = True
     svc.recall.return_value = "# Working Notes (1 entries)\n\n[1] [HIGH] test content\n"
     svc.snapshot_session.return_value = "snap_abc123"
     svc.list_snapshots.return_value = [{"snapshot_id": "snap_abc123", "label": "test", "created_at": 0.0}]
@@ -297,15 +299,21 @@ def client_real_memory(tmp_path):
 
     def _remember(content, tags=None, priority="medium", session_id=None, kind="finding", title="",
                   agent="", triggers=None, provenance="agent", scope=None, anchors=None,
-                  supersedes=None):
+                  supersedes=None, contradicts=None):
         return real_store.remember(
             ws, content, tags, priority, session_id, kind=kind, title=title, author_id=agent,
             triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
-            supersedes=supersedes,
+            supersedes=supersedes, contradicts=contradicts,
         )
 
     svc.remember.side_effect = _remember
     svc.promote_note.side_effect = lambda note_id, to: real_store.promote(ws, note_id, to)
+    svc.revoke_note.side_effect = lambda note_id, reason, actor="agent": real_store.revoke_note(
+        ws, note_id, reason, actor=actor
+    )
+    svc.reinstate_note.side_effect = lambda note_id, actor="agent", reason=None: real_store.reinstate_note(
+        ws, note_id, actor=actor, reason=reason
+    )
 
     # TRIGGER-ENGINE wave 2a: a minimal per-session ledger registry mirroring
     # `VectrService._ledger_for`/`reset_trigger_ledger` so REST-level tests

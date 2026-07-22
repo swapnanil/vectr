@@ -14,6 +14,8 @@ Package layout:
   _types.py      — dataclasses (WorkingNote, SnapshotEntry), constants (VALID_KINDS, DEFAULT_KIND)
   _encryption.py — field-level encryption (_NoteEncryptor, _build_encryptor,
                    _FILE_PATH_RE, _extract_file_paths)
+  _events.py     — note lifecycle event log (NOTE_EVENT_KINDS, NOTE_EVENT_ACTORS,
+                   NOTE_LIFECYCLE_STATES, fold()) — UPG-MEMORY-STATE-MACHINE
   _store.py      — WorkingContextStore class (full store API)
 
 All names that existed on the flat agent/working_context_store.py module are
@@ -62,6 +64,14 @@ from agent.working_context_store._encryption import (
     _extract_file_paths,
 )
 
+# Note lifecycle event log (UPG-MEMORY-STATE-MACHINE)
+from agent.working_context_store._events import (
+    NOTE_EVENT_ACTORS,
+    NOTE_EVENT_KINDS,
+    NOTE_LIFECYCLE_STATES,
+    fold as fold_note_events,
+)
+
 # Store class
 from agent.working_context_store._store import WorkingContextStore, _note_title
 
@@ -87,6 +97,11 @@ __all__ = [
     "_NoteEncryptor",
     "_build_encryptor",
     "_extract_file_paths",
+    # Note lifecycle event log (UPG-MEMORY-STATE-MACHINE)
+    "NOTE_EVENT_KINDS",
+    "NOTE_EVENT_ACTORS",
+    "NOTE_LIFECYCLE_STATES",
+    "fold_note_events",
     # Store
     "WorkingContextStore",
     "_note_title",

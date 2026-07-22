@@ -337,6 +337,20 @@ class RememberRequest(BaseModel):
             "this workspace."
         ),
     )
+    contradicts: int | None = Field(
+        default=None,
+        description=(
+            "note_id this new note asserts was WRONG (UPG-MEMORY-STATE-"
+            "MACHINE) — distinct from `supersedes` ('replaced by something "
+            "better'): the target note stays a live recall/fire candidate "
+            "(never excluded), but every surface that renders it "
+            "afterward substitutes an anti-memory deterrent block for its "
+            "raw content until reinstated. Appends a `revoked` event to "
+            "the target, always actor='agent', reason=f'contradicted by "
+            "#<this note id>'. Rejected if the target does not exist in "
+            "this workspace."
+        ),
+    )
 
     @field_validator("priority")
     @classmethod
@@ -527,6 +541,63 @@ class PromoteRequest(BaseModel):
 class PromoteResponse(BaseModel):
     note_id: int
     provenance: str
+    processing_ms: int
+
+
+# 'system' is not settable via these REST requests — reserved for the one
+# deterministic, non-judgment transition (stale_flagged, anchor drift);
+# every REVOKE/REINSTATE call here is, definitionally, a judgment call, so
+# only 'agent'/'human' are ever accepted (same "REST is a person-operated
+# surface, so 'human' is reachable here but not from MCP" split as
+# PromoteRequest above / the vectr_revoke MCP tool, which hardcodes
+# actor='agent' and exposes no actor field at all).
+_NOTE_EVENT_ACTOR_VALUES = ("agent", "human")
+
+
+class RevokeRequest(BaseModel):
+    """Explicit revocation (UPG-MEMORY-STATE-MACHINE §4.2) — 'this note was
+    WRONG', appends a `revoked` event. The note stays a live recall/fire
+    candidate; every surface that renders it afterward substitutes an
+    anti-memory deterrent block for its raw content until reinstated."""
+
+    note_id: int = Field(..., description="Note to revoke")
+    reason: str = Field(..., min_length=1, description="Why this note is being revoked")
+    actor: str = Field(default="agent", description="agent | human")
+
+    @field_validator("actor")
+    @classmethod
+    def validate_actor(cls, v: str) -> str:
+        if v not in _NOTE_EVENT_ACTOR_VALUES:
+            raise ValueError(f"actor must be one of: {', '.join(_NOTE_EVENT_ACTOR_VALUES)}")
+        return v
+
+
+class RevokeResponse(BaseModel):
+    note_id: int
+    message: str
+    processing_ms: int
+
+
+class ReinstateRequest(BaseModel):
+    """Revert a revocation (UPG-MEMORY-STATE-MACHINE §4.2) — appends a
+    `reinstated` event. Always legal (revert-of-revert), one more event,
+    never a rewrite of the revocation it reverses."""
+
+    note_id: int = Field(..., description="Note to reinstate")
+    reason: str | None = Field(default=None, description="Optional reason for the reinstatement")
+    actor: str = Field(default="agent", description="agent | human")
+
+    @field_validator("actor")
+    @classmethod
+    def validate_actor(cls, v: str) -> str:
+        if v not in _NOTE_EVENT_ACTOR_VALUES:
+            raise ValueError(f"actor must be one of: {', '.join(_NOTE_EVENT_ACTOR_VALUES)}")
+        return v
+
+
+class ReinstateResponse(BaseModel):
+    note_id: int
+    message: str
     processing_ms: int
 
 

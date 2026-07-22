@@ -392,6 +392,16 @@ _MEMORY_WRITE_TOOLS = [
                         "it stops firing at every session-start once superseded."
                     ),
                 },
+                "contradicts": {
+                    "type": "integer",
+                    "description": (
+                        "Optional: the note_id this new note proves WRONG — distinct from "
+                        "supersedes (a normal replacement). The target note is revoked: it "
+                        "stays visible on every future recall/fire but rendered as a deterrent "
+                        "('previously believed... do not re-derive without verification') "
+                        "instead of its raw content, until vectr_reinstate reverses it."
+                    ),
+                },
             },
             "required": ["content"],
         },
@@ -648,6 +658,69 @@ _MEMORY_TOOLS = [
             "required": ["note_id", "to"],
         },
     },
+    {
+        "name": "vectr_revoke",
+        "annotations": {
+            "title": "Revoke a note",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        "description": (
+            "Flag a stored note as WRONG without deleting it — use when you've confirmed a "
+            "prior finding no longer holds (contradicted by newer evidence, or you got it "
+            "wrong the first time). Unlike vectr_forget, the note is not erased: it stays "
+            "visible on future vectr_recall/session-start as a deterrent — 'previously "
+            "believed..., revoked..., do not re-derive this without verification' — instead "
+            "of its original content, so nothing silently repeats the mistake. Reversible "
+            "with vectr_reinstate. Prefer passing contradicts=<note_id> directly to "
+            "vectr_remember when you're recording the correction anyway; use this tool when "
+            "you need to revoke without writing a replacement note."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "integer",
+                    "description": "ID of the note to revoke (the [#N] id from vectr_recall)",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why this note is being revoked (shown verbatim in the deterrent framing).",
+                },
+            },
+            "required": ["note_id", "reason"],
+        },
+    },
+    {
+        "name": "vectr_reinstate",
+        "annotations": {
+            "title": "Reinstate a revoked note",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        "description": (
+            "Reverse a prior vectr_revoke (or a contradicts= write) — the note returns to "
+            "active state and its original content, not the deterrent block, is shown again."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "integer",
+                    "description": "ID of the revoked note to reinstate (the [#N] id from vectr_recall)",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional: why this note is being reinstated.",
+                },
+            },
+            "required": ["note_id"],
+        },
+    },
 ]  # end _MEMORY_TOOLS
 
 # ingest_traces — not gated by session memory (always available)
@@ -711,6 +784,8 @@ MEMORY_READY_TOOLS = frozenset(
         "vectr_recall",
         "vectr_forget",
         "vectr_promote",
+        "vectr_revoke",
+        "vectr_reinstate",
         "vectr_status",
         "vectr_snapshot",
         "vectr_snapshot_list",

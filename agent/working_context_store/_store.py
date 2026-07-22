@@ -16,6 +16,7 @@ from typing import Callable
 
 from agent.working_context_store._audit import audit
 from agent.working_context_store._encryption import _build_encryptor, _extract_file_paths, _NoteEncryptor
+from agent.working_context_store._events import NOTE_EVENT_ACTORS, NOTE_EVENT_KINDS, fold as _fold_note_events
 from agent.working_context_store._types import (
     DEFAULT_KIND,
     DEFAULT_PROVENANCE,
@@ -46,6 +47,55 @@ def _hash_path_content(root: Path, raw_path: str) -> str | None:
         return hashlib.sha256(resolved.read_bytes()).hexdigest()[:16]
     except OSError:
         return None
+
+
+def _append_event(
+    conn: sqlite3.Connection,
+    workspace: str,
+    note_id: int,
+    event: str,
+    actor: str,
+    reason: str | None = None,
+    payload: str | None = None,
+    ts: float | None = None,
+) -> None:
+    """Append one row to `note_events` (UPG-MEMORY-STATE-MACHINE §4.1) on an
+    ALREADY-OPEN connection/transaction, so an event is always written in
+    the same transaction as the note mutation it documents (e.g. `remember
+    ()`'s `created` insert, or the `superseded` UPDATE it pairs with) —
+    never a separate commit that could observably split from its cause.
+    `event`/`actor` are validated against the closed protocol vocabularies
+    in _events.py; an invalid value is a programming error in THIS module,
+    not caller input (every public entry point below validates its own
+    caller-facing values before ever reaching here), so this asserts rather
+    than raising a caller-facing ValueError."""
+    assert event in NOTE_EVENT_KINDS, f"unknown note event kind: {event!r}"
+    assert actor in NOTE_EVENT_ACTORS, f"unknown note event actor: {actor!r}"
+    conn.execute(
+        """INSERT INTO note_events (workspace, note_id, event, actor, reason, payload, ts)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (workspace, note_id, event, actor, reason, payload, ts if ts is not None else time.time()),
+    )
+
+
+def _actor_for_provenance(provenance: str) -> str:
+    """The `created` event's actor, derived from the note's own provenance
+    (bm2-design-skeleton.md §5's existing human/agent/auto trust classes) —
+    not a separate caller-supplied value, since a note's provenance already
+    says who stands behind it. provenance='auto' ("captured by a mechanism
+    with no reviewing judgment") maps to actor='system', the same reserved
+    class `check_staleness()`'s `stale_flagged` events use for the one
+    other non-judgment transition; 'human'/'agent' map onto themselves."""
+    return "system" if provenance == "auto" else provenance
+
+
+def _actor_for_promotion(to: str) -> str:
+    """The `promoted` event's actor: promoting TO provenance='human' is,
+    definitionally, a human endorsing the note (mirrors the existing MCP
+    vectr_promote trust boundary — only a human-operated surface may ever
+    promote to 'human'); promoting to 'agent' (from 'auto') is an agent
+    decision either way."""
+    return "human" if to == "human" else "agent"
 
 
 def _path_trigger_candidates(workspace_root: str, file_path: str | None) -> tuple[str, ...] | None:
@@ -226,6 +276,7 @@ def _format_index_line(
     *,
     surface: str = "mcp",
     sort_by: str = "relevance",
+    note_states: dict[int, dict] | None = None,
 ) -> str:
     """One note's single index-tier line — hoisted from
     `format_notes_for_llm()`'s detail='index' loop body (unchanged rendering)
@@ -238,11 +289,22 @@ def _format_index_line(
     typically `vectr_recall(kind="decision", sort_by="chronological")`, an
     ADR-style decision timeline — reads as a dated sequence instead of a set
     of ages. Every other `sort_by` value renders exactly as before this
-    branch existed."""
+    branch existed.
+
+    `note_states` (UPG-MEMORY-STATE-MACHINE §4.1), when given, is the
+    `note_event_states()` fold result — an entry with state=='revoked' adds
+    a `[REVOKED]` marker, same shape as the pre-existing `[STALE]` marker
+    just below (an index line never shows content, so the full anti-memory
+    paragraph belongs on `_format_full_block`'s revoked branch instead; this
+    is just the signal that expanding this note will show one). Omitted
+    (None, the default) renders exactly as before this parameter existed."""
     n = note
     kind_label = n.kind if n.kind else DEFAULT_KIND
     title = _note_title(n)
     stale_marker = " [STALE]" if n.note_id in stale_warnings else ""
+    revoked_marker = (
+        " [REVOKED]" if note_states and note_states.get(n.note_id, {}).get("state") == "revoked" else ""
+    )
     id_str = f"#{n.note_id}" if surface == "mcp" else f"{n.note_id}"
     # UPG-SUBAGENT-MEMORY: caller-declared agent/subagent attribution
     # (author_id) — never inferred. Absent renders exactly as before.
@@ -250,12 +312,26 @@ def _format_index_line(
     if sort_by == "chronological":
         return (
             f"[{id_str}] {_date_str(n.created_at)} {kind_label}/{n.priority}{agent_marker}"
-            f" · {title}{stale_marker}"
+            f" · {title}{stale_marker}{revoked_marker}"
         )
     return (
         f"[{id_str}] {kind_label}/{n.priority}{agent_marker} · {title}"
-        f"  ({_age_str(n.created_at)}){stale_marker}"
+        f"  ({_age_str(n.created_at)}){stale_marker}{revoked_marker}"
     )
+
+
+# Anti-memory injection framing (UPG-MEMORY-STATE-MACHINE §4.3) — an output
+# template, not a query-classification list, so it lives here as a plain
+# constant rather than in config.yaml (same precedent as trigger_engine.py's
+# _HUMAN_FRAME/_AGENT_FRAME/_AUTO_FRAME provenance-framing templates: fixed
+# text shaping how a fact is PRESENTED, never text that inspects or reroutes
+# on prompt/query content). Field order and wording follow the design doc's
+# literal template.
+_ANTI_MEMORY_TEMPLATE = (
+    'Previously believed (recorded {created_date}, revoked {revoked_date}, '
+    'reason: {reason}): "{summary}". Do not re-derive this from other '
+    'sources without verification.'
+)
 
 
 def _scope_label(note: WorkingNote) -> str:
@@ -271,7 +347,11 @@ def _scope_label(note: WorkingNote) -> str:
     return note.scope
 
 
-def _format_full_block(note: WorkingNote, stale_warnings: dict[int, list[str]]) -> str:
+def _format_full_block(
+    note: WorkingNote,
+    stale_warnings: dict[int, list[str]],
+    note_states: dict[int, dict] | None = None,
+) -> str:
     """One note's multi-line 'full' detail block (age, tags, author,
     kind/provenance markers, provenance-framed content, staleness warnings)
     — hoisted from `format_notes_for_llm()`'s detail='full' loop body
@@ -279,7 +359,11 @@ def _format_full_block(note: WorkingNote, stale_warnings: dict[int, list[str]]) 
     render the same block for a trigger-fired note. Ends with a trailing
     blank line (its own line list's last element is "") so that joining
     several blocks with "\\n" reproduces the exact spacing
-    `format_notes_for_llm`'s original flat per-line loop produced."""
+    `format_notes_for_llm`'s original flat per-line loop produced.
+
+    `note_states` (UPG-MEMORY-STATE-MACHINE §4.1), when given, is the
+    `note_event_states()` fold result. Omitted (None, the default) renders
+    exactly as before this parameter existed."""
     from agent.trigger_engine import frame_prefix
 
     n = note
@@ -288,6 +372,32 @@ def _format_full_block(note: WorkingNote, stale_warnings: dict[int, list[str]]) 
     author_str = f"  @{n.author_id}" if n.author_id else ""
     stale_files = stale_warnings.get(n.note_id, [])
     stale_marker = " [STALE]" if stale_files else ""
+
+    # Anti-memory (§4.3): a revoked note substitutes this deterrent block for
+    # its raw content ENTIRELY — additive to the note's continued presence
+    # in the result set (never dropped, per the design doc), never a silent
+    # exclusion. Takes precedence over every other marker below (kind/
+    # provenance/scope/superseded) when note_states reports 'revoked' —
+    # revoked is definitionally the note's most recent lifecycle transition
+    # whenever the fold reports it, so it is the one signal that matters;
+    # rendering it alongside a possibly-stale superseded badge from an
+    # earlier, now-superseded-by-events transition would only muddy the one
+    # thing this block exists to communicate.
+    state_info = (note_states or {}).get(n.note_id)
+    if state_info is not None and state_info["state"] == "revoked":
+        revoked_date = _date_str(state_info["ts"]) if state_info["ts"] else _date_str(n.created_at)
+        reason = state_info["reason"] or "no reason given"
+        anti_memory = _ANTI_MEMORY_TEMPLATE.format(
+            created_date=_date_str(n.created_at),
+            revoked_date=revoked_date,
+            reason=reason,
+            summary=_note_title(n),
+        )
+        return "\n".join([
+            f"[{n.note_id}] [REVOKED]{tag_str}{author_str}",
+            f"  {anti_memory}",
+            "",
+        ])
 
     # superseded badge
     superseded_marker = ""
@@ -324,6 +434,16 @@ def _format_full_block(note: WorkingNote, stale_warnings: dict[int, list[str]]) 
     if stale_files:
         changed = ", ".join(stale_files)
         lines.append(f"  WARNING: These files changed after this note was written: {changed}")
+        # UPG-MEMORY-STATE-MACHINE §4.4: a declared-anchor drift (including a
+        # proxy anchor — a lockfile/CI-config/etc anchored the same way as
+        # any code file, standing in for "the process it encodes") gets its
+        # own structural verdict line, additive to the combined WARNING
+        # above (unchanged — still covers mtime/code_hash/symbol drift the
+        # same way it always has). "structural trust, not adjectives": the
+        # verdict names what changed and says verify, nothing more.
+        anchor_drift = [f for f in stale_files if f.endswith("[anchor_changed]")]
+        if anchor_drift:
+            lines.append(f"  VERDICT: anchor changed since — verify: {', '.join(anchor_drift)}")
         lines.append(f"  WARNING: Verify this note is still accurate before relying on it.")
     lines.append("")
     return "\n".join(lines)
@@ -634,6 +754,26 @@ class WorkingContextStore:
                 CREATE INDEX IF NOT EXISTS idx_symtrig_workspace ON symbol_triggers(workspace);
                 CREATE INDEX IF NOT EXISTS idx_symtrig_name ON symbol_triggers(workspace, symbol_name);
                 CREATE INDEX IF NOT EXISTS idx_symtrig_note ON symbol_triggers(workspace, note_id);
+
+                -- UPG-MEMORY-STATE-MACHINE §4.1 — append-only note lifecycle
+                -- log. Nothing here is ever UPDATEd or DELETEd (except the
+                -- cascade in forget(), which removes a note's rows entirely
+                -- along with the note itself); "current state" is always a
+                -- fold over this table (see _events.py's fold()), never a
+                -- column read directly. `id` (not `ts`) is the fold's
+                -- ordering key — see fold()'s docstring for why.
+                CREATE TABLE IF NOT EXISTS note_events (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace   TEXT NOT NULL,
+                    note_id     INTEGER NOT NULL,
+                    event       TEXT NOT NULL,
+                    actor       TEXT NOT NULL,
+                    reason      TEXT,
+                    payload     TEXT,
+                    ts          REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_note_events_note ON note_events(workspace, note_id, id);
             """)
             # P4: migrate existing databases that predate P4 columns
             existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)").fetchall()}
@@ -700,6 +840,7 @@ class WorkingContextStore:
         scope: str | None = None,
         anchors: list[str] | None = None,
         supersedes: int | None = None,
+        contradicts: int | None = None,
     ) -> int:
         """Store a working note. Returns the note_id.
 
@@ -782,6 +923,29 @@ class WorkingContextStore:
         supersede anything, including another human note.
         Distinct from the pre-existing `superseded_by` (author_id) column,
         which is set only by the unrelated code_hash-conflict path above.
+
+        `contradicts` (UPG-MEMORY-STATE-MACHINE §4.2): the note_id this note
+        asserts was WRONG — semantically distinct from `supersedes`
+        ("replaced by something better/newer"): the target note stays
+        exactly as recall()/fire() would otherwise show it (no
+        `valid_until`, still a live candidate on every surface) but with a
+        `revoked` event appended to its `note_events` log, `actor="agent"`,
+        `reason=f"contradicted by #{new_note_id}"` — always these exact
+        values; there is no separate actor/reason parameter here; a caller
+        wanting a custom reason or a human-attributed revocation uses
+        `revoke_note()`/`vectr_revoke` directly instead. Every surface that
+        renders the target note afterward (recall, fire, resume) substitutes
+        an anti-memory deterrent block for its raw content (see
+        `_format_full_block`) until a `reinstated` event is appended
+        (`reinstate_note()`) — always legal, revert-of-revert. Raises
+        ValueError if the target note does not exist in this workspace. No
+        human-provenance write-boundary guard (unlike `supersedes`): a
+        revoked note is never silently excluded from any surface — it stays
+        visible in deterrent framing, which is the opposite of the silent
+        muting `supersedes`' guard defends against, so vectr does not gate
+        who may raise the flag; judgment about whether the contradiction is
+        valid stays entirely caller-side (a human can always `reinstate_note
+        ()` a revocation it disagrees with).
         """
         from agent.trigger_engine import validate_triggers
 
@@ -883,6 +1047,18 @@ class WorkingContextStore:
                         "note (only a human-provenance write may)"
                     )
 
+            # contradicts (UPG-MEMORY-STATE-MACHINE §4.2): validate the
+            # target BEFORE insert, same half-applied-write guard as
+            # supersedes just above. No provenance write-boundary guard here
+            # — see the `contradicts` docstring for why.
+            if contradicts is not None:
+                contradicts_target = conn.execute(
+                    "SELECT note_id FROM notes WHERE workspace = ? AND note_id = ?",
+                    (workspace, contradicts),
+                ).fetchone()
+                if contradicts_target is None:
+                    raise ValueError(f"contradicts references note #{contradicts}, which does not exist in this workspace")
+
             # conflict resolution: if another note anchors the same code block, supersede it
             if code_hash:
                 conflicting = conn.execute(
@@ -912,6 +1088,15 @@ class WorkingContextStore:
                  triggers_json, provenance, scope, anchors_json, supersedes, branch_value),
             )
             note_id = cur.lastrowid
+
+            # UPG-MEMORY-STATE-MACHINE §4.1: every note's log starts with a
+            # `created` event — the fold's own "active" default already
+            # means this, but the log stays a complete history with no
+            # implicit first row (see NOTE_EVENT_KINDS's docstring).
+            _append_event(
+                conn, workspace, note_id, "created",
+                actor=_actor_for_provenance(provenance), ts=now,
+            )
 
             # TRIGGER-ENGINE wave 2b (bm2-design-skeleton.md §2/§5) — write-
             # time symbol->note index + signature-hash anchor for every
@@ -948,6 +1133,28 @@ class WorkingContextStore:
                     """UPDATE notes SET valid_until = ?, superseded_at = ?, superseded_by_note_id = ?
                        WHERE workspace = ? AND note_id = ?""",
                     (now, now, note_id, workspace, supersedes),
+                )
+                # UPG-MEMORY-STATE-MACHINE §4.1 migration: `supersedes`
+                # becomes sugar over the event log — the pre-existing
+                # column write above is unchanged (existing behaviour is
+                # never touched), this just also appends the generalized
+                # event, payload = the superseding (this) note's id.
+                _append_event(
+                    conn, workspace, supersedes, "superseded",
+                    actor=_actor_for_provenance(provenance), payload=str(note_id), ts=now,
+                )
+
+            # contradicts (UPG-MEMORY-STATE-MACHINE §4.2): "that note was
+            # WRONG" — appends `revoked` to the TARGET note's log, always
+            # actor="agent" and this exact reason text (see the
+            # `contradicts` docstring for why no other actor/reason is
+            # accepted here). Does NOT set valid_until — a revoked note
+            # stays a live recall()/fire() candidate so the anti-memory
+            # deterrent (`_format_full_block`) can surface in its place.
+            if contradicts is not None:
+                _append_event(
+                    conn, workspace, contradicts, "revoked",
+                    actor="agent", reason=f"contradicted by #{note_id}", payload=str(note_id), ts=now,
                 )
 
             # update author trust score registry (Bayesian: count-weighted)
@@ -1008,8 +1215,119 @@ class WorkingContextStore:
                 "UPDATE notes SET provenance = ? WHERE workspace = ? AND note_id = ?",
                 (to, workspace, note_id),
             )
+            # UPG-MEMORY-STATE-MACHINE §4.1 migration: existing promotion
+            # writes a `promoted` event — the pre-existing column write
+            # above is unchanged, this is purely additive audit history.
+            # payload records the new provenance rank reached.
+            _append_event(
+                conn, workspace, note_id, "promoted",
+                actor=_actor_for_promotion(to), payload=to,
+            )
         audit("PROMOTE", workspace=workspace, note_id=note_id, provenance=to)
         return True
+
+    def revoke_note(
+        self,
+        workspace: str,
+        note_id: int,
+        reason: str,
+        actor: str = "agent",
+    ) -> bool:
+        """Explicit revocation (UPG-MEMORY-STATE-MACHINE §4.2,
+        `vectr_revoke`): "this note was WRONG", proposed BY THE CALLER — the
+        one dedicated tool for a revocation with a custom reason/actor,
+        distinct from `remember(contradicts=...)`'s fixed
+        actor='agent'/auto-derived-reason shorthand for "the note I'm
+        writing right now contradicts an older one".
+
+        Appends a `revoked` event; does NOT set `valid_until` — the note
+        stays a live recall()/fire() candidate so every rendering surface
+        substitutes the anti-memory deterrent block for its raw content
+        (see `_format_full_block`) instead of silently excluding it.
+        Reversible at any time via `reinstate_note()` — always legal,
+        revert-of-revert, one more event, never a rewrite of this one.
+
+        `actor` must be one of NOTE_EVENT_ACTORS other than 'system'
+        (reserved for the one deterministic, non-judgment transition,
+        `stale_flagged` — a human/agent making an explicit revoke call is
+        always a judgment call, never automatic). Returns True if the note
+        exists and was revoked, False if it does not exist in this
+        workspace. Raises ValueError if `actor` is invalid.
+        """
+        if actor not in NOTE_EVENT_ACTORS or actor == "system":
+            raise ValueError(
+                f"actor must be one of: {', '.join(a for a in NOTE_EVENT_ACTORS if a != 'system')}"
+            )
+        note = self.get_note(workspace, note_id)
+        if note is None:
+            return False
+        with self._conn() as conn:
+            _append_event(conn, workspace, note_id, "revoked", actor=actor, reason=reason)
+        audit("REVOKE", workspace=workspace, note_id=note_id, actor=actor)
+        return True
+
+    def reinstate_note(
+        self,
+        workspace: str,
+        note_id: int,
+        actor: str = "agent",
+        reason: str | None = None,
+    ) -> bool:
+        """Revert a revocation (UPG-MEMORY-STATE-MACHINE §4.2,
+        `vectr_reinstate`) — appends a `reinstated` event, always legal
+        regardless of the note's current folded state (a no-op-in-spirit
+        reinstate on an already-active note is harmless, same "just append,
+        let the fold decide" philosophy as a repeat revoke). Returns True if
+        the note exists, False if it does not exist in this workspace.
+        Raises ValueError if `actor` is invalid (same restriction as
+        `revoke_note` — reinstatement is always a judgment call, never
+        `actor='system'`).
+        """
+        if actor not in NOTE_EVENT_ACTORS or actor == "system":
+            raise ValueError(
+                f"actor must be one of: {', '.join(a for a in NOTE_EVENT_ACTORS if a != 'system')}"
+            )
+        note = self.get_note(workspace, note_id)
+        if note is None:
+            return False
+        with self._conn() as conn:
+            _append_event(conn, workspace, note_id, "reinstated", actor=actor, reason=reason)
+        audit("REINSTATE", workspace=workspace, note_id=note_id, actor=actor)
+        return True
+
+    def note_event_states(
+        self, workspace: str, notes: list[WorkingNote],
+    ) -> dict[int, dict]:
+        """Batched fold of `note_events` for the given notes
+        (UPG-MEMORY-STATE-MACHINE §4.1) — one query, one fold pass per note,
+        for every surface that renders notes (`format_notes_for_llm()`,
+        `fire_and_format()`, `format_resume()`) to look up folded state
+        without a per-note round trip.
+
+        Returns {note_id: {"state": "active"|"superseded"|"revoked",
+        "reason": str|None, "actor": str|None, "ts": float|None}} — see
+        `_events.fold()` for exactly what reason/actor/ts mean. A note_id
+        with NO rows in `note_events` at all (pre-migration notes, or an
+        empty `notes` list) is simply absent from the returned dict; every
+        caller here treats a missing key as "active" (the same state an
+        intact created-only log would fold to), so old notes render exactly
+        as before this feature shipped.
+        """
+        if not notes:
+            return {}
+        note_ids = [n.note_id for n in notes]
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT note_id, event, actor, reason, payload, ts, id FROM note_events "
+                "WHERE workspace = ? AND note_id IN ({}) ORDER BY note_id, id ASC".format(
+                    ",".join("?" * len(note_ids))
+                ),
+                [workspace] + note_ids,
+            ).fetchall()
+        by_note: dict[int, list[dict]] = {}
+        for r in rows:
+            by_note.setdefault(r["note_id"], []).append(dict(r))
+        return {nid: _fold_note_events(evs) for nid, evs in by_note.items()}
 
     def recall(
         self,
@@ -1646,16 +1964,29 @@ class WorkingContextStore:
         `surface` controls the note-id form and expand hint exactly as
         `format_notes_for_llm()` does — 'mcp' -> `vectr_recall(note_id=N)`,
         'cli' -> `vectr recall --id N`.
+
+        UPG-MEMORY-STATE-MACHINE §4.1: internally folds `note_events` for
+        the task/gotchas being rendered so a revoked one carries the same
+        `[REVOKED]` marker `format_notes_for_llm()`/`fire_and_format()`
+        already show — no new parameter for callers, computed here from the
+        `workspace` this method already takes.
         """
         stale_warnings = stale_warnings or {}
         last_task = state["last_task"]
         gotchas = state["gotchas"]
         snapshot = state["snapshot"]
 
+        note_states = self.note_event_states(
+            workspace, ([last_task] if last_task is not None else []) + list(gotchas)
+        )
+
         sections: list[str] = []
 
         if last_task is not None:
-            sections.append("Last task:\n  " + _format_index_line(last_task, stale_warnings, surface=surface))
+            sections.append(
+                "Last task:\n  "
+                + _format_index_line(last_task, stale_warnings, surface=surface, note_states=note_states)
+            )
 
         if snapshot is not None:
             import datetime
@@ -1674,7 +2005,10 @@ class WorkingContextStore:
                 paths = [a[0] for a in (g.anchors or []) if a]
                 if paths:
                     anchor_str = "  [" + ", ".join(paths) + "]"
-                lines.append("  " + _format_index_line(g, stale_warnings, surface=surface) + anchor_str)
+                lines.append(
+                    "  " + _format_index_line(g, stale_warnings, surface=surface, note_states=note_states)
+                    + anchor_str
+                )
             if state.get("gotchas_truncated"):
                 gotcha_hint = (
                     'vectr_recall(kind="gotcha")' if surface == "mcp"
@@ -1779,6 +2113,14 @@ class WorkingContextStore:
             # the symbol graph for a note that no longer exists.
             conn.execute(
                 "DELETE FROM symbol_triggers WHERE workspace = ? AND note_id = ?",
+                (workspace, note_id),
+            )
+            # UPG-MEMORY-STATE-MACHINE §4.1: forget() stays the one true
+            # hard-delete escape hatch (the design doc's own framing) — a
+            # forgotten note's event log goes with it rather than becoming a
+            # dangling history for a note_id that no longer exists.
+            conn.execute(
+                "DELETE FROM note_events WHERE workspace = ? AND note_id = ?",
                 (workspace, note_id),
             )
         if count > 0 and self._notes_col is not None:
@@ -2056,9 +2398,18 @@ class WorkingContextStore:
             anchor's original hash, so both sides apply the identical rule.
 
         Returns {note_id: [stale_path/reason, ...]} — only stale notes included.
+
+        As a write side-effect (UPG-MEMORY-STATE-MACHINE §4.1/§4.4), every
+        note whose DECLARED anchor (not the mtime/code_hash content-prose
+        checks above — those are unrelated pre-existing signals) just
+        drifted gets an idempotent `stale_flagged` event appended to its
+        log — see `_flag_stale_anchors()`. This is the same "a read method
+        also has a write side-effect" shape `fire()` (stamps `last_fired`)
+        and `recall()` (bumps `last_accessed`) already have in this store.
         """
         root = Path(workspace_root)
         stale: dict[int, list[str]] = {}
+        anchor_drifted_ids: list[int] = []
 
         for note in notes:
             reasons: list[str] = []
@@ -2105,6 +2456,8 @@ class WorkingContextStore:
                 current_hash = _hash_path_content(root, anchor_path)
                 if current_hash is not None and current_hash != anchor_hash:
                     reasons.append(f"{anchor_path}[anchor_changed]")
+                    if note.note_id not in anchor_drifted_ids:
+                        anchor_drifted_ids.append(note.note_id)
 
             if reasons:
                 stale[note.note_id] = reasons
@@ -2144,7 +2497,54 @@ class WorkingContextStore:
                     if caveat not in reasons_for_note:
                         reasons_for_note.append(caveat)
 
+        self._flag_stale_anchors(workspace_root, anchor_drifted_ids)
         return stale
+
+    def _flag_stale_anchors(self, workspace: str, note_ids: list[int]) -> None:
+        """Idempotent write side-effect of `check_staleness()`
+        (UPG-MEMORY-STATE-MACHINE §4.1/§4.4): append one `stale_flagged`
+        event (`actor='system'` — the one deterministic, non-judgment
+        transition) for each note_id whose declared anchor just drifted
+        from its content hash at write time. The anchors mechanism is
+        already generic (any workspace-relative file path); a §4.4 proxy
+        anchor (a lockfile, CI config, Dockerfile, etc. anchored the same
+        way as any code file to stand in for "the process it encodes")
+        drifts through this exact same path — no separate mechanism.
+
+        Edge-triggered, not level-triggered: a note whose MOST RECENT event
+        is already `stale_flagged` is skipped — `check_staleness()` runs on
+        every recall()/fire() call while the drift persists, and writing a
+        fresh event on every one of those calls would flood the log with
+        duplicate history for a fact that hasn't changed since the last
+        flag. A note gets a NEW `stale_flagged` event only on the
+        transition INTO drift (first detection, or re-drifting after the
+        anchor was fixed). This is what "automatic, reversible" means for
+        staleness (as distinct from revoked/reinstated, whose reversal is
+        always one explicit event): reversal needs no event at all — once
+        the anchor is fixed, `check_staleness()` simply stops including the
+        note_id here on the next call, and a LATER re-drift writes a fresh
+        event rather than being silently suppressed forever by an old one.
+        """
+        if not note_ids:
+            return
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT ne.note_id, ne.event FROM note_events ne
+                   INNER JOIN (
+                       SELECT note_id, MAX(id) AS max_id FROM note_events
+                       WHERE workspace = ? AND note_id IN ({})
+                       GROUP BY note_id
+                   ) latest ON ne.note_id = latest.note_id AND ne.id = latest.max_id""".format(
+                    ",".join("?" * len(note_ids))
+                ),
+                [workspace] + note_ids,
+            ).fetchall()
+            latest_event_by_id = {r["note_id"]: r["event"] for r in rows}
+            now = time.time()
+            for nid in note_ids:
+                if latest_event_by_id.get(nid) == "stale_flagged":
+                    continue
+                _append_event(conn, workspace, nid, "stale_flagged", actor="system", ts=now)
 
     def fire(
         self,
@@ -2396,12 +2796,18 @@ class WorkingContextStore:
 
         ordered_ids = sorted(notes_by_id, key=lambda nid: total_order_key(notes_by_id[nid]))
         stale_by_id = {nid: r.stale_paths for nid, r in seen.items() if r.stale_paths}
+        # UPG-MEMORY-STATE-MACHINE §4.1/§4.3: fold note_events for every note
+        # about to be rendered so a revoked one gets the anti-memory
+        # deterrent block below instead of its raw content — computed here
+        # (not threaded in from a caller) since fire_and_format() already
+        # has both `workspace` and the exact note set that's about to render.
+        note_states = self.note_event_states(workspace, list(notes_by_id.values()))
 
         items = []
         for note_id in ordered_ids:
             note = notes_by_id[note_id]
-            full_text = _format_full_block(note, stale_by_id)
-            index_text = _format_index_line(note, stale_by_id, surface=surface)
+            full_text = _format_full_block(note, stale_by_id, note_states)
+            index_text = _format_index_line(note, stale_by_id, surface=surface, note_states=note_states)
             items.append((note, full_text, index_text))
 
         budget = ledger.remaining_budget() if ledger is not None else None
@@ -2538,6 +2944,14 @@ class WorkingContextStore:
             return "No working notes found."
 
         stale_warnings = stale_warnings or {}
+        # UPG-MEMORY-STATE-MACHINE §4.1/§4.3: fold note_events for every note
+        # about to render, so a revoked one carries `[REVOKED]`/the
+        # anti-memory deterrent block on every surface that recalls notes —
+        # computed here rather than threaded in from a caller (`notes[0]
+        # .workspace` — every note passed into one format call already
+        # shares a workspace, same assumption `check_staleness()`'s callers
+        # already make).
+        note_states = self.note_event_states(notes[0].workspace, notes)
 
         if detail == "index":
             if surface == "mcp":
@@ -2547,7 +2961,7 @@ class WorkingContextStore:
             header = f"# Working Notes — index ({len(notes)} entries; {expand_hint})\n"
             lines = [header]
             for n in notes:
-                lines.append(_format_index_line(n, stale_warnings, surface=surface, sort_by=sort_by))
+                lines.append(_format_index_line(n, stale_warnings, surface=surface, sort_by=sort_by, note_states=note_states))
             return "\n".join(lines)
 
         # detail == "full" (original behaviour, with stale warnings)
@@ -2559,5 +2973,5 @@ class WorkingContextStore:
 
         lines = [header]
         for n in notes:
-            lines.append(_format_full_block(n, stale_warnings))
+            lines.append(_format_full_block(n, stale_warnings, note_states))
         return "\n".join(lines)

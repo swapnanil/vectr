@@ -1409,6 +1409,7 @@ class VectrService:
         scope: str | None = None,
         anchors: list[str] | None = None,
         supersedes: int | None = None,
+        contradicts: int | None = None,
     ) -> int:
         """`agent` (UPG-SUBAGENT-MEMORY): optional caller-declared identifier
         for the agent/subagent authoring this note (e.g. "coder-2") — never
@@ -1425,6 +1426,11 @@ class VectrService:
         kind="directive", or a `supersedes` target that does not exist in
         this workspace). This method does no validation of its own so the
         store stays the single source of truth for these rules.
+
+        `contradicts` (UPG-MEMORY-STATE-MACHINE §4.2): note_id this new note
+        asserts was WRONG — passed straight through unchanged; see
+        `WorkingContextStore.remember()`'s docstring for the exact
+        `revoked` event this appends to the target.
 
         `scope`: None (the default) means OMITTED — the store resolves it to
         this note's kind's default scope at write time
@@ -1445,6 +1451,7 @@ class VectrService:
             scope=scope,
             anchors=anchors,
             supersedes=supersedes,
+            contradicts=contradicts,
         )
         self._bump_notes_epoch()
         return note_id
@@ -1716,6 +1723,31 @@ class VectrService:
         if promoted:
             self._bump_notes_epoch()
         return promoted
+
+    def revoke_note(self, note_id: int, reason: str, actor: str = "agent") -> bool:
+        """Explicit revocation (UPG-MEMORY-STATE-MACHINE §4.2): caller
+        (agent or human, never "system" — that actor is reserved for the
+        deterministic anchor-drift transition) asserts this note is wrong.
+        See `WorkingContextStore.revoke_note()` for the exact contract
+        (raises ValueError on an invalid actor; returns False if the note
+        does not exist). The note stays fire/recall-eligible afterward in
+        anti-memory (deterrent) form — this is not a delete."""
+        self._require_memory_layer()
+        revoked = self._context_store.revoke_note(self._workspace_root, note_id, reason, actor=actor)
+        if revoked:
+            self._bump_notes_epoch()
+        return revoked
+
+    def reinstate_note(self, note_id: int, actor: str = "agent", reason: str | None = None) -> bool:
+        """Revert-of-revert (UPG-MEMORY-STATE-MACHINE §4.2): always legal.
+        See `WorkingContextStore.reinstate_note()` for the exact contract
+        (raises ValueError on an invalid actor; returns False if the note
+        does not exist)."""
+        self._require_memory_layer()
+        reinstated = self._context_store.reinstate_note(self._workspace_root, note_id, actor=actor, reason=reason)
+        if reinstated:
+            self._bump_notes_epoch()
+        return reinstated
 
     def get_note(self, note_id: int):
         """Fetch a single note by ID (UPG-RECALL-HIERARCHY expand path)."""

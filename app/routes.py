@@ -31,9 +31,13 @@ from app.models import (
     PromoteResponse,
     RecallRequest,
     RecallResponse,
+    ReinstateRequest,
+    ReinstateResponse,
     RememberRequest,
     RememberResponse,
     ResumeResponse,
+    RevokeRequest,
+    RevokeResponse,
     SearchRequest,
     SearchResponse,
     SnapshotRequest,
@@ -328,12 +332,14 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
             scope=body.scope,
             anchors=body.anchors,
             supersedes=body.supersedes,
+            contradicts=body.contradicts,
         )
     except ValueError as exc:
         # TRIGGER-ENGINE wave 1: malformed triggers, an unrecognised
         # provenance/scope combination (e.g. provenance='auto' +
-        # kind='directive'), or a `supersedes` target that does not exist —
-        # all caller input errors, never a server fault.
+        # kind='directive'), a `supersedes` target that does not exist, or
+        # (UPG-MEMORY-STATE-MACHINE §4.2) a `contradicts` target that does
+        # not exist — all caller input errors, never a server fault.
         raise HTTPException(status_code=422, detail={"error": "invalid_memory_object", "detail": str(exc)})
     return RememberResponse(
         note_id=note_id,
@@ -425,6 +431,60 @@ async def promote(body: PromoteRequest, request: Request) -> PromoteResponse:
     return PromoteResponse(
         note_id=body.note_id,
         provenance=body.to,
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/revoke", response_model=RevokeResponse)
+async def revoke(body: RevokeRequest, request: Request) -> RevokeResponse:
+    """Explicit revocation (UPG-MEMORY-STATE-MACHINE §4.2): caller asserts
+    the target note is wrong. Zero-inference — vectr never decides a
+    revocation itself; this route only appends the event and returns. The
+    note is not deleted: it stays fire/recall-eligible afterward, rendered
+    in anti-memory (deterrent) form on every surface until `reinstated`
+    (see `/v1/reinstate`) or hard-deleted via `/v1/forget`.
+
+    Person-operated surface: `actor` defaults to "agent" but accepts
+    "human" explicitly (never "system" — that actor is reserved for the
+    deterministic anchor-drift transition in `check_staleness()`)."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    try:
+        revoked = svc.revoke_note(body.note_id, body.reason, actor=body.actor)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": "invalid_revocation", "detail": str(exc)})
+    if not revoked:
+        raise HTTPException(status_code=404, detail={"error": "note_not_found", "detail": f"Note #{body.note_id} not found."})
+    return RevokeResponse(
+        note_id=body.note_id,
+        message=f"Note #{body.note_id} revoked.",
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/reinstate", response_model=ReinstateResponse)
+async def reinstate(body: ReinstateRequest, request: Request) -> ReinstateResponse:
+    """Revert-of-revert (UPG-MEMORY-STATE-MACHINE §4.2): always legal.
+    Reverses a prior `/v1/revoke` (or a `contradicts=` write): the note
+    returns to active state and its raw content, not the anti-memory
+    deterrent block, is rendered again on every surface."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    try:
+        reinstated = svc.reinstate_note(body.note_id, actor=body.actor, reason=body.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": "invalid_reinstatement", "detail": str(exc)})
+    if not reinstated:
+        raise HTTPException(status_code=404, detail={"error": "note_not_found", "detail": f"Note #{body.note_id} not found."})
+    return ReinstateResponse(
+        note_id=body.note_id,
+        message=f"Note #{body.note_id} reinstated.",
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 
