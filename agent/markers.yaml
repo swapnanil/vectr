@@ -1,10 +1,10 @@
-# Versioned, protocol-level outcome-content marker table
-# (memoization-l1-capture-design §2.4). Every entry here is a regex over
-# TOOL OUTPUT (stdout/stderr digests) — R5-sanctioned, the same category as
-# classifying an exit code. This table must stay protocol-level: build
-# tools, test runners, and generic shell errors any codebase might invoke —
-# NEVER a project-specific or corpus-specific pattern. Additions go through
-# review (see agent/outcome.py, which loads and applies this table).
+# Versioned, protocol-level outcome-content marker table. Every entry here
+# is a regex over TOOL OUTPUT (stdout/stderr digests) — R5-sanctioned, the
+# same category as classifying an exit code. This table must stay
+# protocol-level: build tools, test runners, and generic shell errors any
+# codebase might invoke — NEVER a project-specific or corpus-specific
+# pattern. Additions go through review (see agent/outcome.py, which loads
+# and applies this table).
 version: 1
 markers:
   # --- Maven ---

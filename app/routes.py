@@ -606,9 +606,9 @@ async def forget(body: ForgetRequest, request: Request) -> dict:
 
 @router.post("/v1/episode", response_model=EpisodeResponse)
 async def episode(body: EpisodeRequest, request: Request) -> EpisodeResponse:
-    """PostToolUse hook write path (L1 episode capture,
-    memoization-l1-capture-design §2): one deterministic, zero-inference row
-    per Bash/Edit/Write/MultiEdit tool call. Called only by `vectr hook
+    """PostToolUse hook write path (episode capture): one deterministic,
+    zero-inference row per Bash/Edit/Write/MultiEdit tool call. Called only
+    by `vectr hook
     post-tool-use`'s detached worker, never by the editor's LLM directly.
 
     Quarantined by construction: this route is the ONLY write path into the
@@ -652,7 +652,7 @@ async def episodes(
 ) -> EpisodesResponse:
     """The only bulk reader of the `episodes` table besides the aggregate
     counts folded into `vectr_status` — deliberately not part of the
-    vectr_search/vectr_recall surface (memoization-l1-capture-design §2.5)."""
+    vectr_search/vectr_recall surface."""
     t0 = time.monotonic()
     svc = _service(request)
     if getattr(svc, "search_only", False):

@@ -1,8 +1,7 @@
-"""Pure stdout/stderr digest canonicalization (memoization-l1-capture-design
-§2.3): "canonicalized: cap length, keep head+tail, collapse repeated lines,
-hash elided middles". Runs on TOOL OUTPUT only (R5-sanctioned, the same
-category as exit-code/marker classification) — no prompt content is ever
-touched here.
+"""Pure stdout/stderr digest canonicalization: cap length, keep head+tail,
+collapse repeated lines, hash elided middles. Runs on TOOL OUTPUT only
+(R5-sanctioned, the same category as exit-code/marker classification) — no
+prompt content is ever touched here.
 
 No config dependency: caps are passed in by the caller (`app/service.py`,
 which reads them from `agent/config.py`) so this stays a plain, testable

@@ -33,8 +33,8 @@ rather than by sharing one module-level implementation — sharing a single
 implementation across both the always-imported `main.py` and this
 stdlib-only path would re-import everything this module exists to avoid.
 
-The `post-tool-use` branch (memoization-l1-capture-design §2) never touches
-`agent.config` or `httpx` in THIS process at all — it writes the raw episode
+The `post-tool-use` branch (episode capture) never touches `agent.config`
+or `httpx` in THIS process at all — it writes the raw episode
 facts to a private temp file and hands it to a detached
 `agent/episode_worker.py` child, which pays the `agent.config` import cost
 (and does the actual HTTP POST) entirely on its own time, decoupled from
@@ -372,8 +372,7 @@ def run_hook(hook_event: str) -> None:
             _emit_hook_context("UserPromptSubmit", notes)
 
         elif hook_event == "pre-tool-use":
-            # Command-family injection (memoization-l1-capture-design §5,
-            # UPG-MEMORY-STATE-MACHINE §5.2) — mirrors main.cmd_hook's own
+            # Command-family injection — mirrors main.cmd_hook's own
             # pre-tool-use branch byte-for-byte: a Bash call carries no
             # tool_input.file_path at all, only tool_input.command, so it
             # gets its own payload shape (no kind="gotcha" filter — the
@@ -404,8 +403,8 @@ def run_hook(hook_event: str) -> None:
             _emit_hook_context("PreToolUse", notes)
 
         elif hook_event == "post-tool-use":
-            # L1 episode capture (memoization-l1-capture-design §2): never
-            # emits a hookSpecificOutput envelope, never awaits the write.
+            # Episode capture: never emits a hookSpecificOutput envelope,
+            # never awaits the write.
             payload = _build_episode_payload(event)
             if payload is not None:
                 _spawn_episode_worker(port, payload)

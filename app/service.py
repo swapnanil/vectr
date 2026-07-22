@@ -278,21 +278,21 @@ class VectrService:
         if not self._search_only:
             self._context_store = WorkingContextStore(db_dir)
 
-        # L1 episode capture (memoization-l1-capture-design §2): its own
-        # store/connection to the SAME db file, deliberately never imported
-        # by `agent/searcher.py` or `agent/working_context_store` — episode
-        # rows cannot reach a vectr_search/vectr_recall result by
-        # construction. Same search-only gating as the context store above:
-        # no episodes table writer exists for a workspace that never records one.
+        # Episode capture: its own store/connection to the SAME db file,
+        # deliberately never imported by `agent/searcher.py` or
+        # `agent/working_context_store` — episode rows cannot reach a
+        # vectr_search/vectr_recall result by construction. Same
+        # search-only gating as the context store above: no episodes table
+        # writer exists for a workspace that never records one.
         from agent.episode_store import EpisodeStore
         self._episode_store: EpisodeStore | None = None
         if not self._search_only:
             self._episode_store = EpisodeStore(db_dir)
 
-        # Arc detector (adversarial-review fix B2b, design doc §3): one
-        # instance for this VectrService's lifetime, mirroring the episode
-        # store's own search-only gating immediately above — a workspace
-        # that never records an episode never needs a detector either. Its
+        # Arc detector: one instance for this VectrService's lifetime,
+        # mirroring the episode store's own search-only gating immediately
+        # above — a workspace that never records an episode never needs a
+        # detector either. Its
         # internal per-session state (app/arcs.py's `_SessionState`) is
         # in-memory only and reset on daemon restart; that is acceptable
         # because the design's pending-failure window is itself bounded
@@ -1266,9 +1266,9 @@ class VectrService:
             # background-construction window.
             "fully_ready": self.fully_ready,
             "embedder_ready": self.embedder_ready,
-            # L1 episode capture (memoization-l1-capture-design §2, §7 gate
-            # G2): a plain count, never the rows themselves — status is not a
-            # reader of episode content, only GET /v1/episodes is.
+            # Episode capture (spec §7 gate G2): a plain count, never the
+            # rows themselves — status is not a reader of episode content,
+            # only GET /v1/episodes is.
             "episodes_count": self.count_episodes(),
             # Best-effort: 0 until the arc detector's own table exists (see
             # `EpisodeStore.count_arcs_pending_distill`).
@@ -1564,7 +1564,7 @@ class VectrService:
         )
 
     # ------------------------------------------------------------------
-    # L1 episode capture (memoization-l1-capture-design §2)
+    # Episode capture
     # ------------------------------------------------------------------
 
     def record_episode(
@@ -1590,13 +1590,13 @@ class VectrService:
         canonicalization, outcome derivation — happens HERE, once,
         server-side, mirroring `record_commit_note`'s own "raw facts
         client-side, interpretation server-side" split; no embedding ever
-        happens on this path (memoization-l1-capture-design §2.2).
+        happens on this path.
 
         `description` (Bash tool_input.description, an LLM-authored one-line
         summary) is accepted for forward compatibility but not persisted —
-        the episode row schema (memoization-l1-capture-design §2 point 5)
-        has no column for it, and no logic here ever branches on its
-        content (R5: no query/prompt-content classification)."""
+        the episode row schema has no column for it, and no logic here
+        ever branches on its content (R5: no query/prompt-content
+        classification)."""
         self._require_memory_layer()
         from agent.episode_canon import canonicalize_digest
         from agent.outcome import derive_outcome
@@ -1604,9 +1604,9 @@ class VectrService:
 
         cmd_raw = command or ""
         if tool == "bash" and cmd_raw:
-            # Single canonical normalizer (adversarial-review fix B2): the
-            # duplicate `agent/episode_normalize.py` diverged from this one
-            # and is now deleted. `app/arcs.py`'s ArcDetector consumes the
+            # Single canonical normalizer: the duplicate
+            # `agent/episode_normalize.py` diverged from this one and is
+            # now deleted. `app/arcs.py`'s ArcDetector consumes the
             # exact same `NormalizedCommand` shape, so a persisted episode's
             # (verb, flags, args) always matches what the detector sees.
             parsed = normalize_command(cmd_raw)
@@ -1659,9 +1659,9 @@ class VectrService:
             ttl_days=EPISODES_TTL_DAYS,
         )
 
-        # Feed the arc detector (adversarial-review fix B2b, design doc
-        # §3/§3.5): config-gated so the write path can be disabled without
-        # touching the detector's own always-loaded config. The dict shape
+        # Feed the arc detector: config-gated so the write path can be
+        # disabled without touching the detector's own always-loaded
+        # config. The dict shape
         # matches app/arcs.py's documented `episode` contract exactly
         # (`markers`, not `markers_matched` — a deliberate naming
         # difference between the DB column and the detector's in-memory
@@ -1689,10 +1689,10 @@ class VectrService:
         return episode_id
 
     def _persist_arc(self, arc) -> None:
-        """Persist one `ArcDetector`-emitted arc (adversarial-review fix
-        B2b, design doc §3.5: "Emitted arcs live in ... an `arcs` table
-        ... L1 never writes notes") into the quarantined `arcs` table, and
-        stamp `arc_id` back onto every episode row the arc resolved. The
+        """Persist one `ArcDetector`-emitted arc into the quarantined
+        `arcs` table — episode capture itself never writes notes, and an
+        arc row is no exception — and stamp `arc_id` back onto every
+        episode row the arc resolved. The
         `episode_id` key read here was injected into each detector-episode
         dict in `record_episode`, above — `arc.failures_chain`/`arc.success`
         are those SAME dicts by reference (app/arcs.py stores episodes by

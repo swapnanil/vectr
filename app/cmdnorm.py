@@ -1,12 +1,10 @@
-"""Deterministic, structural command-line normalization (L1 capture design
-doc §3.1: `memoization-l1-capture-design.md`).
+"""Deterministic, structural command-line normalization for arc detection.
 
 Pure functions only — no I/O, no state, no imports from `app.routes` /
-`app.service`. Shared by `app/arcs.py` (in-memory similarity matching, this
-lane) and the episode write path (persisted `verb`/`flags_json`/`args_json`
-columns, a different lane) so both derive the exact same normalized triple
-from the same raw command string — the merge between the two lanes is then
-just "both call this module", nothing to reconcile.
+`app.service`. Shared by `app/arcs.py` (in-memory similarity matching) and
+the episode write path (persisted `verb`/`flags_json`/`args_json` columns)
+so both derive the exact same normalized triple from the same raw command
+string — nothing to reconcile between the two call sites.
 
 R5 scope note: everything classified here is the **argv structure of an
 already-issued tool call** (which token is a flag, a path, a version
@@ -52,7 +50,7 @@ class NormalizedCommand:
     `args` holds the RAW positional-argument tokens (concrete values, order
     preserved) alongside `arg_classes` — the same-length abstraction of each
     (`<PATH>`/`<VERSION>`/`<UUID>`/`<NUM>`, or the literal token when
-    unclassified) used for comparison only (§3.1/§3.2 of the design doc).
+    unclassified) used for comparison only.
     """
 
     verb: str
@@ -114,8 +112,8 @@ def _split_on_any(tokens: list[str], seps: frozenset[str]) -> list[list[str]]:
 
 
 def _strip_leading_cd(segments: list[list[str]]) -> list[list[str]]:
-    """Strip leading `cd <path> &&` segments (semantics-neutral decoration,
-    §3.1) — repeatedly, so `cd a && cd b && real-cmd` reduces to `real-cmd`."""
+    """Strip leading `cd <path> &&` segments (semantics-neutral decoration)
+    — repeatedly, so `cd a && cd b && real-cmd` reduces to `real-cmd`."""
     while segments and segments[0][0] == "cd" and len(segments[0]) <= 2:
         segments = segments[1:]
     return segments
@@ -127,12 +125,11 @@ def _is_display_only_stage(stage: list[str]) -> bool:
 
 def _strip_trailing_display_stages(pipeline_stages: list[list[str]]) -> list[list[str]]:
     """Drop a TRAILING run of display-only stages (`| tail -30`, `| cat`) —
-    §3.1: these only reshape output for a human, never change what
-    actually ran. A stage is only ever eligible while it is the last
-    remaining one, so a genuine multi-stage pipeline (`cat data.csv |
-    python train.py`) keeps every non-trailing stage's tokens (review
-    2026-07-22: unconditionally collapsing to stage 0 made distinct
-    pipelines normalize identical)."""
+    these only reshape output for a human, never change what actually ran.
+    A stage is only ever eligible while it is the last remaining one, so a
+    genuine multi-stage pipeline (`cat data.csv | python train.py`) keeps
+    every non-trailing stage's tokens (unconditionally collapsing to stage
+    0 made distinct pipelines normalize identical)."""
     while len(pipeline_stages) > 1 and _is_display_only_stage(pipeline_stages[-1]):
         pipeline_stages = pipeline_stages[:-1]
     return pipeline_stages
@@ -142,8 +139,8 @@ def _strip_env_and_wrapper_prefixes(stage: list[str]) -> tuple[list[str], list[s
     """Strip, iteratively and in any interleaving, leading bare env-var
     assignments (`FOO=bar cmd`) and transparent wrapper-prefix tokens
     (`timeout N`, `env VAR=...`, `nice [-n N]`, `nohup`, `stdbuf -xX`) from
-    the front of a pipeline stage — §3.1 (review 2026-07-22) — so the
-    WRAPPED command, not the wrapper, is what verb extraction sees.
+    the front of a pipeline stage so the WRAPPED command, not the wrapper,
+    is what verb extraction sees.
     Returns (remaining_tokens, env_assignment_names)."""
     tokens = list(stage)
     env_names: list[str] = []
@@ -231,9 +228,9 @@ def normalize_command(cmd_raw: str) -> NormalizedCommand:
 
     # Non-trailing downstream pipeline stages (`| python train.py` in `cat
     # data.csv | python train.py`) must stay in the comparison set so
-    # distinct pipelines never normalize identical (§3.1, review
-    # 2026-07-22) — every one of their tokens is folded into flags/args
-    # exactly like the primary stage's own remainder, preserving order.
+    # distinct pipelines never normalize identical — every one of their
+    # tokens is folded into flags/args exactly like the primary stage's
+    # own remainder, preserving order.
     for stage in downstream_stages:
         for tok in stage:
             if tok.startswith("-"):

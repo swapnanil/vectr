@@ -1,4 +1,4 @@
-"""Outcome derivation cascade (memoization-l1-capture-design §2.4).
+"""Outcome derivation cascade.
 
 Deterministic, first-hit-wins over four tiers: (1) content markers over tool
 OUTPUT — a versioned, protocol-level table (`agent/markers.yaml`, loaded
@@ -6,12 +6,12 @@ here); (2) the exit code, when present; (3) the editor's own `is_error`/
 `interrupted` flags, as a weak fallback; (4) `unknown`.
 
 Content markers are primary rather than the exit code because the exit code
-lies in the common case: the L1 capture design's own T2 research finding
-(25 real build-tool invocations across 8 sessions) observed 0 exit codes
-that actually surfaced a build failure — every failure was only visible in
-the tool's own printed output. Marker regexes run over stdout/stderr digests
-only — R5-sanctioned (tool OUTPUT classification, the same category as an
-exit code), never over prompt/task content.
+lies in the common case: a research finding across 25 real build-tool
+invocations in 8 sessions observed 0 exit codes that actually surfaced a
+build failure — every failure was only visible in the tool's own printed
+output. Marker regexes run over stdout/stderr digests only — R5-sanctioned
+(tool OUTPUT classification, the same category as an exit code), never over
+prompt/task content.
 """
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def derive_outcome(
     stdout_digest: str,
     stderr_digest: str,
 ) -> dict:
-    """Run the full §2.4 cascade. Returns:
+    """Run the full outcome-derivation cascade. Returns:
         {"outcome": str, "termination": str, "markers_matched": list[str]}
     `outcome` is always one of OUTCOME_VALUES; `termination` always one of
     TERMINATION_VALUES; `markers_matched` is the marker ids that fired

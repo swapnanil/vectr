@@ -296,9 +296,9 @@ HOOKS_POST_COMMIT_TIMEOUT_S : float
     actually keeps `git commit` from ever waiting on it.
 
 EPISODES_MAX_ROWS : int
-    Per-workspace ring-buffer size for the `episodes` table (L1 capture,
-    memoization-l1-capture-design §2) — rows beyond this count (newest kept)
-    are pruned on every write.
+    Per-workspace ring-buffer size for the `episodes` table (episode
+    capture) — rows beyond this count (newest kept) are pruned on every
+    write.
 
 EPISODES_TTL_DAYS : float
     TTL (days) beyond which an episode row is pruned on the next write,
@@ -325,9 +325,9 @@ EPISODES_POST_TIMEOUT_S : float
 
 EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S : float
     Age (seconds) beyond which an orphaned `vectr-episode-*.json` payload
-    temp file is swept by agent/episode_worker.py (adversarial-review LOW
-    item) — a `_spawn_episode_worker` spawn failure can leave one behind
-    with no process left to clean it up.
+    temp file is swept by agent/episode_worker.py — a
+    `_spawn_episode_worker` spawn failure can leave one behind with no
+    process left to clean it up.
 
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT : float
 STRATEGY_DEFAULT_BM25_WEIGHT : float
@@ -427,24 +427,24 @@ FETCH_MAX_IDS_PER_CALL : int
     surface so it can't be used as an unbounded bulk export of the index.
 
 ARC_DETECTION_ENABLED : bool
-    Master switch for arc detection (L1 capture design doc §3, LANE-ARC):
-    whether `VectrService.record_episode` feeds persisted bash/edit episodes
-    into `ArcDetector.observe()` at all. False disables the write-path call
-    only — the detector's own config below stays loaded either way.
+    Master switch for arc detection: whether `VectrService.record_episode`
+    feeds persisted bash/edit episodes into `ArcDetector.observe()` at all.
+    False disables the write-path call only — the detector's own config
+    below stays loaded either way.
 
 ARC_NORM_UUID_REGEX, ARC_NORM_VERSION_REGEX, ARC_NORM_NUM_REGEX,
 ARC_NORM_PATH_EXTENSION_REGEX : str
     Positional-argument abstraction-class regexes used by app/cmdnorm.py
-    (L1 capture design doc §3.1, LANE-ARC). Comparison-only classification
-    of argv structure — concrete values are always preserved alongside.
+    for command normalization. Comparison-only classification of argv
+    structure — concrete values are always preserved alongside.
 
 ARC_NORM_ENV_ASSIGNMENT_REGEX : str
     Matches a leading `NAME=value` env-var-assignment prefix token on a
-    Bash command (§3.1) — its name is captured, the token is stripped.
+    Bash command — its name is captured, the token is stripped.
 
 ARC_NORM_STDERR_MERGE_TOKEN : str
     Trailing redirect token stripped from the first pipeline stage
-    (`cmd 2>&1 | tail -30` -> `cmd`) — §3.1 semantics-neutral decoration.
+    (`cmd 2>&1 | tail -30` -> `cmd`) — semantics-neutral decoration.
 
 ARC_NORM_MAX_VERB_TOKENS : int
     Maximum leading tokens folded into a normalized command's `verb`
@@ -454,12 +454,12 @@ ARC_NORM_MAX_VERB_TOKENS : int
 
 ARC_NORM_WRAPPER_PREFIXES : dict[str, str]
     Transparent wrapper-prefix tokens (`timeout`, `env`, `nice`, `nohup`,
-    `stdbuf`) stripped iteratively before verb extraction (§3.1, review
-    2026-07-22) so the wrapped command — not the wrapper — becomes the
-    verb. Value names the wrapper's own token-consumption shape (`bare`,
-    `fixed_arg`, `nice_niceness`, `dash_flags`, `env_assignments`); see
-    app/cmdnorm.py. `xargs` is deliberately never in this map — its
-    argument is a command template, not the command that ran.
+    `stdbuf`) stripped iteratively before verb extraction so the wrapped
+    command — not the wrapper — becomes the verb. Value names the
+    wrapper's own token-consumption shape (`bare`, `fixed_arg`,
+    `nice_niceness`, `dash_flags`, `env_assignments`); see app/cmdnorm.py.
+    `xargs` is deliberately never in this map — its argument is a command
+    template, not the command that ran.
 
 ARC_NORM_NICE_NICENESS_FLAG : str
     The niceness-value flag (`-n`) recognized by the `nice_niceness`
@@ -467,68 +467,64 @@ ARC_NORM_NICE_NICENESS_FLAG : str
 
 ARC_NORM_PIPELINE_DISPLAY_ONLY_VERBS : frozenset[str]
     Verbs (`cat`, `tail`, `head`) whose pipeline stage is dropped only when
-    it is part of a TRAILING run of such stages (§3.1, review 2026-07-22) —
-    a non-trailing multi-stage pipeline always keeps every stage's tokens
-    in the comparison set.
+    it is part of a TRAILING run of such stages — a non-trailing
+    multi-stage pipeline always keeps every stage's tokens in the
+    comparison set.
 
 ARC_SIMILARITY_VERB_WEIGHT, ARC_SIMILARITY_FLAG_WEIGHT,
 ARC_SIMILARITY_ARG_WEIGHT : float
-    Composite mutation-similarity weights (L1 capture design doc §3.2,
-    LANE-ARC): score = verb_weight*verb + flag_weight*jaccard(flags) +
-    arg_weight*jaccard(args). Sum to 1.0.
+    Composite mutation-similarity weights: score = verb_weight*verb +
+    flag_weight*jaccard(flags) + arg_weight*jaccard(args). Sum to 1.0.
 
 ARC_SIMILARITY_VERB_SOFT_MATCH_MIN_RATIO : float
     Levenshtein ratio above which two non-identical verbs count as a soft
-    match (typo-fix verbs) rather than unrelated (§3.2).
+    match (typo-fix verbs) rather than unrelated.
 
 ARC_SIMILARITY_VERB_SOFT_MATCH_SCORE : float
-    Fixed verb-component score assigned to a soft verb match (§3.2) —
-    not the raw Levenshtein ratio.
+    Fixed verb-component score assigned to a soft verb match — not the
+    raw Levenshtein ratio.
 
 ARC_MUTATION_BAND_MIN, ARC_MUTATION_BAND_MAX : float
     Composite-similarity band a candidate failure->success pair must fall
-    in to count as a mutation arc (§3.2). A score of 1.0 (identical
-    normalized command) is never a mutation — it routes to the
-    edit-mediated/flaky check (§3.4) instead.
+    in to count as a mutation arc. A score of 1.0 (identical normalized
+    command) is never a mutation — it routes to the edit-mediated/flaky
+    check instead.
 
 ARC_WINDOW_MAX_COMMANDS : int
-    Sliding-window bound (§3.3): a pending failure or edit record ages out
-    once more than this many Bash/Edit episodes have since been observed
-    in the session.
+    Sliding-window bound: a pending failure or edit record ages out once
+    more than this many Bash/Edit episodes have since been observed in
+    the session.
 
 ARC_WINDOW_TTL_SECONDS : float
-    Sliding-window bound (§3.3): a pending failure or edit record ages out
-    once this many seconds have elapsed (by episode timestamp, never wall
+    Sliding-window bound: a pending failure or edit record ages out once
+    this many seconds have elapsed (by episode timestamp, never wall
     clock) since it was observed.
 
 ARC_WINDOW_MAX_PENDING_PER_VERB_FAMILY : int
     Cap on concurrently pending failures tracked per (session, verb-family,
-    cwd) bucket (§3.3) — the oldest is evicted once a new failure exceeds
-    it.
+    cwd) bucket — the oldest is evicted once a new failure exceeds it.
 
 ARC_TS_MONOTONIC_FALLBACK_SECONDS : float
     Step added to a session's last-seen `ts` to synthesize a
     strictly-increasing timestamp when an episode's own `ts` is
-    missing/None/unparseable (§2.1; review 2026-07-22: `observe()` must
-    never raise on this).
+    missing/None/unparseable (`observe()` must never raise on this).
 
 ARC_FLAKE_SUPPRESS_MIN_COUNT : int
     Number of proven flaky-retry flips (identical command, no intervening
-    edit, no env delta — cwd is a bucket key, see §3.3) for the same
-    normalized command within a session before near-threshold
-    mutation-band matches for that command are suppressed too (§3.4,
-    Travis-CI base-rate defense).
+    edit, no env delta — cwd is a bucket key) for the same normalized
+    command within a session before near-threshold mutation-band matches
+    for that command are suppressed too (Travis-CI base-rate defense).
 
 ARC_FLAKE_NEAR_THRESHOLD_MIN : float
     Lower bound of the "near-identical" similarity sub-band subject to the
-    flaky-suppression rule above (§3.4) — a genuinely different mutation
-    at a lower score is never suppressed by this rule.
+    flaky-suppression rule above — a genuinely different mutation at a
+    lower score is never suppressed by this rule.
 
 ARC_TRANSIENT_MARKER_IDS : frozenset[str]
-    Marker ids (tool-output classification — see agent/markers.yaml, owned
-    by LANE-EPISODE) that mark a captured arc `low_confidence` (§3.5(b)):
-    the failure's stderr matched a transient-error signature, so the "fix"
-    may just be an environment retry rather than a real one.
+    Marker ids (tool-output classification — see agent/markers.yaml) that
+    mark a captured arc `low_confidence`: the failure's stderr matched a
+    transient-error signature, so the "fix" may just be an environment
+    retry rather than a real one.
 """
 from __future__ import annotations
 
@@ -829,7 +825,7 @@ HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS: int = int(_hooks_cfg["commit_note_max_subje
 HOOKS_POST_COMMIT_TIMEOUT_S: float = float(_hooks_cfg["post_commit_timeout_s"])
 
 # ---------------------------------------------------------------------------
-# L1 episode capture (memoization-l1-capture-design §2)
+# Episode capture
 # ---------------------------------------------------------------------------
 
 _episodes_cfg: dict[str, Any] = _cfg["episodes"]
@@ -981,14 +977,14 @@ EMBEDDING_THREAD_CAP: int = _resolve_embedding_thread_cap()
 FETCH_MAX_IDS_PER_CALL: int = int(_cfg["fetch"]["max_ids_per_call"])
 
 # ---------------------------------------------------------------------------
-# Arc detection (memoization-l1-capture-design.md §3, LANE-ARC): command
-# normalization + mutation-similarity + streaming detector state machine.
+# Arc detection: command normalization + mutation-similarity + streaming
+# detector state machine.
 # ---------------------------------------------------------------------------
 
 _arc_cfg: dict[str, Any] = _cfg["arc_detection"]
 
-# Master switch (adversarial-review fix B2b) — whether the episode write
-# path feeds bash/edit episodes into ArcDetector.observe() at all.
+# Master switch — whether the episode write path feeds bash/edit episodes
+# into ArcDetector.observe() at all.
 ARC_DETECTION_ENABLED: bool = bool(_arc_cfg["enabled"])
 
 _arc_norm_cfg: dict[str, Any] = _arc_cfg["normalization"]

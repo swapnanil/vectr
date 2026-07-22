@@ -1,20 +1,18 @@
-"""Deterministic, streaming failure->success arc detection (L1 capture
-design doc §3: `memoization-l1-capture-design.md`).
+"""Deterministic, streaming failure->success arc detection.
 
 Pure functions plus one small stateful detector class — no HTTP-layer
 dependency, no imports from `app.routes` / `app.service`. Interface
-contract (wired into the episode write path by whichever lane lands
-second): `ArcDetector.observe(episode: dict) -> list[Arc]`.
+contract: `ArcDetector.observe(episode: dict) -> list[Arc]`.
 
 An "arc" is a discovery moment: one or more failed attempts at a command
 followed by a success that resolves them, chained together. This module
 never writes notes, never calls an LLM, and never touches query/prompt
 content — every classification here is over TOOL OUTPUT (episode outcome,
 markers) or TOOL-CALL argv structure (via app.cmdnorm), both sanctioned
-under R5 (see the design doc's §6 compliance ledger).
+under R5.
 
-`episode` dict — the fields this module reads (§2.3 schema, using the
-in-memory/API-level names, not the `_json`-suffixed DB column names):
+`episode` dict — the fields this module reads (the episode schema, using
+the in-memory/API-level names, not the `_json`-suffixed DB column names):
 `session_id`, `ts`, `cwd`, `tool` ("bash" | "edit"), `cmd_raw`, `outcome`
 ("success" | "failure" | "soft_failure" | "interrupted" | "unknown"),
 `termination`, `markers` (list[str] of matched marker ids), `env_delta_names`
@@ -71,10 +69,10 @@ class Arc:
     `failures_chain` is oldest-first; `mutation_diff` maps a subset of
     {verb, flag, arg, env, files} to an (old, new) pair — only the axes
     that actually changed are present. `cwd` is never a mutation_diff axis:
-    it is a pending-bucket key (§3.3, review 2026-07-22), so it cannot
-    differ between a chain's failures and its resolving success by
-    construction. `confidence` is "normal" or "low" (§3.5(b): a chained
-    failure's stderr matched a transient-error marker).
+    it is a pending-bucket key (review 2026-07-22), so it cannot differ
+    between a chain's failures and its resolving success by construction.
+    `confidence` is "normal" or "low" (a chained failure's stderr matched a
+    transient-error marker).
     """
 
     session_id: str
@@ -85,7 +83,7 @@ class Arc:
 
 
 # ---------------------------------------------------------------------------
-# Similarity (§3.2)
+# Similarity
 # ---------------------------------------------------------------------------
 
 
@@ -124,19 +122,19 @@ def _args_component(a: NormalizedCommand, b: NormalizedCommand) -> float:
     # positional argument (e.g. `cp src/a.py` -> `cp src/a.py src/b.py`,
     # both all-<PATH>) would jaccard to a perfect 1.0 purely because the
     # SET of classes present is unchanged — but 1.0 is reserved for
-    # is_identical_command's exact-equality check (§3.2: "Identical
-    # normalized command (1.0) is never a mutation"), so an unpenalized
-    # 1.0 here would make a genuine "added a missing argument" fix
-    # silently invisible to the mutation-band check.
+    # is_identical_command's exact-equality check (an identical normalized
+    # command is never a mutation), so an unpenalized 1.0 here would make
+    # a genuine "added a missing argument" fix silently invisible to the
+    # mutation-band check.
     class_jaccard = _jaccard(frozenset(a.arg_classes), frozenset(b.arg_classes))
     arity_ratio = min(len(a.args), len(b.args)) / max(len(a.args), len(b.args))
     return class_jaccard * arity_ratio
 
 
 def similarity(a: NormalizedCommand, b: NormalizedCommand) -> float:
-    """Composite mutation-similarity score (§3.2): 0.5*verb + 0.3*jaccard
-    (flags) + 0.2*jaccard(args), verb Levenshtein-softened above the
-    configured ratio. Identical normalized commands score exactly 1.0."""
+    """Composite mutation-similarity score: 0.5*verb + 0.3*jaccard(flags) +
+    0.2*jaccard(args), verb Levenshtein-softened above the configured
+    ratio. Identical normalized commands score exactly 1.0."""
     verb_score = _verb_component(a.verb, b.verb)
     flag_score = _jaccard(frozenset(a.flags), frozenset(b.flags))
     arg_score = _args_component(a, b)
@@ -153,7 +151,7 @@ def is_mutation_band(score: float) -> bool:
 
 def is_identical_command(a: NormalizedCommand, b: NormalizedCommand) -> bool:
     """True iff two normalized commands are textually the same invocation
-    (same verb, same flag set, same positional args in order) — the §3.4
+    (same verb, same flag set, same positional args in order) — the
     identical-command branch, decided by direct equality rather than a
     similarity-score threshold (never subject to floating-point slack)."""
     return a.verb == b.verb and frozenset(a.flags) == frozenset(b.flags) and a.args == b.args
@@ -164,15 +162,15 @@ def _command_signature(n: NormalizedCommand) -> tuple[Any, ...]:
 
 
 def _verb_family(n: NormalizedCommand) -> str:
-    """Coarse bucketing key for the pending-failure window (§3.3: "keyed by
-    verb-family") — the first token of the normalized verb (the invoked
+    """Coarse bucketing key for the pending-failure window, keyed by
+    verb-family — the first token of the normalized verb (the invoked
     binary: `pip`, `npm`, `git`, `./mvnw`), NOT the full absorbed verb
     string.
 
     The verb-absorption cap (app.cmdnorm) folds a trailing bareword target
     into the verb itself for shapes like `pip install requests` or `npm run
-    build` (matching the design doc's own `npm run build` example) — so the
-    token that actually varies between two retries of the "same" command
+    build` — so the token that actually varies between two retries of the
+    "same" command
     (a package name, a script name, a branch) can end up INSIDE the verb
     string rather than in args. Bucketing on the full verb would then put
     every distinct retry in its own singleton bucket and the fine-grained
@@ -185,7 +183,7 @@ def _verb_family(n: NormalizedCommand) -> str:
 
 
 def _bucket_key(n: NormalizedCommand, episode: dict[str, Any]) -> tuple[str, Any]:
-    """Pending-failure bucket key (§3.3, review 2026-07-22): `(verb-family,
+    """Pending-failure bucket key (review 2026-07-22): `(verb-family,
     cwd)`. cwd is a BUCKET KEY, not a mutation axis — the original draft
     listed cwd on both sides, which is contradictory: cwd-as-mutation-axis
     binds unrelated repos' builds into false arcs (the same command failing
@@ -222,8 +220,8 @@ def _parse_ts(ts: Any) -> float:
 
 
 # ---------------------------------------------------------------------------
-# mutation_diff (§3.3: "which of {verb, flag, arg, env, files} changed,
-# old->new" — cwd is the bucket key, never a diff axis; review 2026-07-22)
+# mutation_diff: which of {verb, flag, arg, env, files} changed, old->new —
+# cwd is the bucket key, never a diff axis (review 2026-07-22).
 # ---------------------------------------------------------------------------
 
 
@@ -233,11 +231,11 @@ def diff_episodes(
     new_norm: NormalizedCommand,
     new_episode: dict[str, Any],
 ) -> dict[str, tuple[Any, Any]]:
-    """Structural diff over {verb, flag, arg, env} (§3.3) — only the axes
-    that actually changed are present. `cwd` is deliberately never
-    computed here: it is the pending-bucket key (§3.3, review 2026-07-22),
-    so `old_episode`/`new_episode` always share the same cwd by
-    construction whenever this is called."""
+    """Structural diff over {verb, flag, arg, env} — only the axes that
+    actually changed are present. `cwd` is deliberately never computed
+    here: it is the pending-bucket key (review 2026-07-22), so
+    `old_episode`/`new_episode` always share the same cwd by construction
+    whenever this is called."""
     d: dict[str, tuple[Any, Any]] = {}
     if old_norm.verb != new_norm.verb:
         d["verb"] = (old_norm.verb, new_norm.verb)
@@ -272,7 +270,7 @@ def _normalize_episode(episode: dict[str, Any]) -> NormalizedCommand:
 
 
 # ---------------------------------------------------------------------------
-# Detector state machine (§3.3, §3.4, §3.5)
+# Detector state machine
 # ---------------------------------------------------------------------------
 
 
@@ -296,12 +294,12 @@ class _EditRecord:
 class _SessionState:
     command_count: int = 0
     last_ts: float = 0.0
-    # Keyed by (verb-family, cwd) — §3.3, review 2026-07-22.
+    # Keyed by (verb-family, cwd) — review 2026-07-22.
     pending: dict[tuple[str, Any], list[_PendingFailure]] = field(default_factory=dict)
     edits: list[_EditRecord] = field(default_factory=list)
     # Keyed by the identical-command signature that has proven flaky
     # (flipped outcome with no intervening edit/env delta — cwd cannot
-    # differ within a bucket) — §3.4.
+    # differ within a bucket).
     flake_counts: dict[tuple[Any, ...], int] = field(default_factory=dict)
 
 
@@ -360,7 +358,7 @@ class ArcDetector:
         if not normalized.verb:
             # An episode that normalizes to an empty verb (`2>&1` alone, an
             # env-assignment-only command) carries no comparable command
-            # structure — treated like outcome `unknown` (§3.1, review
+            # structure — treated like outcome `unknown` (review
             # 2026-07-22): never enters pending, never resolves one.
             return []
 
@@ -374,9 +372,9 @@ class ArcDetector:
         return []
 
     def _resolve_ts(self, state: _SessionState, ts_raw: Any) -> float:
-        """Episode timestamps are drift-tolerant (§2.1) — a missing/None/
-        unparseable `ts` must never raise (review 2026-07-22: the wiring
-        lane may not always supply one). Falls back to a small monotonic
+        """Episode timestamps are drift-tolerant — a missing/None/
+        unparseable `ts` must never raise (review 2026-07-22: the caller
+        may not always supply one). Falls back to a small monotonic
         step past the session's own last-seen ts so window/TTL math stays
         well-defined and strictly ordered; deterministic for a fixed replay
         sequence, never wall-clock-derived."""
@@ -433,10 +431,10 @@ class ArcDetector:
     ) -> tuple[list[_PendingFailure], set[int]]:
         """Walk backward through older pending failures, chaining each one
         that is similar to the CURRENT frontier (the success first, then
-        each newly-added chain member) — §3.3: "chain backward through
-        pending failures similar to either the success or the previous
-        chain member". Non-matching interleaved failures are simply
-        skipped, not treated as a stop condition."""
+        each newly-added chain member — a failure is chained if it is
+        similar to either the success or the previous chain member).
+        Non-matching interleaved failures are simply skipped, not treated
+        as a stop condition."""
         anchor = bucket[anchor_idx]
         chain = [anchor]
         used = {anchor_idx}
@@ -483,7 +481,7 @@ class ArcDetector:
             edited = self._intervening_edits(state, anchor.command_index, state.command_count)
             # cwd is never checked here: it is the bucket key above, so
             # `anchor` and `success_episode` share it by construction
-            # (§3.3, review 2026-07-22).
+            # (review 2026-07-22).
             env_delta = frozenset(anchor.episode.get("env_delta_names") or ()) != frozenset(
                 success_episode.get("env_delta_names") or ()
             )
@@ -504,8 +502,8 @@ class ArcDetector:
                 self._remove_indices(state, bucket_key, used)
                 return [arc]
 
-            # True flaky retry (§3.4): identical command, no edit, no env
-            # delta — suppressed, never emitted as an arc.
+            # True flaky retry: identical command, no edit, no env delta —
+            # suppressed, never emitted as an arc.
             signature = _command_signature(success_norm)
             state.flake_counts[signature] = state.flake_counts.get(signature, 0) + 1
             self._remove_indices(state, bucket_key, {anchor_idx})

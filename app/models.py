@@ -700,7 +700,7 @@ class TriggerResetResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# L1 episode capture (memoization-l1-capture-design §2)
+# Episode capture
 # ---------------------------------------------------------------------------
 
 class EpisodeRequest(BaseModel):
@@ -709,7 +709,7 @@ class EpisodeRequest(BaseModel):
     worker, never by the editor's LLM directly. Every field optional except
     `tool`: the hook forwards whatever the editor's PostToolUse payload
     actually contains, defensively (payload shape across editor versions is
-    not fully known — see the L1 capture design spec's G0 gate). ALL
+    not fully known — see the G0 live-capture gate). ALL
     interpretation (normalization, outcome derivation, digest
     canonicalization) happens server-side in `VectrService.record_episode`,
     the single source of truth for the resulting row's shape — mirroring

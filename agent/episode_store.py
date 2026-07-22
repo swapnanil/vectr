@@ -1,5 +1,4 @@
-"""EpisodeStore — SQLite-backed store for L1 tool-call episodes
-(memoization-l1-capture-design §2).
+"""EpisodeStore — SQLite-backed store for tool-call episodes.
 
 Structurally quarantined from working memory: episodes live in their own
 `episodes` table, in the SAME db file `WorkingContextStore` already writes
@@ -12,13 +11,13 @@ readers are `GET /v1/episodes` (`app/routes.py`) and the aggregate counts
 folded into `vectr_status` (`app/service.py`).
 
 No embedding, ever — episodes are keyed/temporal rows, not a semantic-search
-corpus (memoization-l1-capture-design §2.2).
+corpus.
 
-This module also owns the `arcs` table (adversarial-review fix B2b, design
-doc §3.5: "an `arcs` table with the chain, diff, confidence, cwd ... L1
-never writes notes") — one row per `app.arcs.ArcDetector`-emitted discovery
-moment (`app/service.py`'s `record_episode`/`_persist_arc`), quarantined
-exactly like `episodes`: still never a semantic-search or note-store input.
+This module also owns the `arcs` table: one row per chain/diff/confidence/cwd
+for each `app.arcs.ArcDetector`-emitted discovery moment (`app/service.py`'s
+`record_episode`/`_persist_arc`), quarantined exactly like `episodes` —
+episode capture itself never writes notes, and an arc row is still never a
+semantic-search or note-store input.
 """
 from __future__ import annotations
 
@@ -215,11 +214,10 @@ class EpisodeStore:
         failure_episode_ids: list[int],
         success_episode_id: int | None,
     ) -> int:
-        """Insert one `app.arcs.ArcDetector`-emitted arc (adversarial-review
-        fix B2b, design doc §3.5) — a discovery moment (one or more failed
-        attempts resolved by a success), quarantined in its own `arcs`
-        table exactly like `episodes` (never notes, never embedded).
-        Returns the new row's id."""
+        """Insert one `app.arcs.ArcDetector`-emitted arc — a discovery
+        moment (one or more failed attempts resolved by a success),
+        quarantined in its own `arcs` table exactly like `episodes` (never
+        notes, never embedded). Returns the new row's id."""
         with self._conn() as conn:
             cur = conn.execute(
                 """

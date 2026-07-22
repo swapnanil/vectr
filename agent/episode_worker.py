@@ -1,5 +1,4 @@
-"""Detached worker entrypoint for the PostToolUse episode-capture hook
-(memoization-l1-capture-design §2).
+"""Detached worker entrypoint for the PostToolUse episode-capture hook.
 
 `main.cmd_hook`'s "post-tool-use" branch (and `agent.hook_cli.run_hook`'s
 mirror of it) spawns this module via `python -m agent.episode_worker
@@ -35,9 +34,9 @@ import time
 
 
 def _sweep_stale_temp_files(max_age_s: float) -> None:
-    """Best-effort cleanup of orphaned `vectr-episode-*.json` payload files
-    (adversarial-review LOW item). The normal case never needs this: this
-    process deletes its OWN payload file above, unconditionally, before
+    """Best-effort cleanup of orphaned `vectr-episode-*.json` payload files.
+    The normal case never needs this: this process deletes its OWN payload
+    file above, unconditionally, before
     doing anything else. This only catches the rarer case where
     `_spawn_episode_worker` (main.py / agent/hook_cli.py) wrote a temp file
     and then failed to actually launch a worker to consume it (e.g.
@@ -91,9 +90,9 @@ def main() -> None:
     for field in ("stdout_tail", "stderr_tail"):
         value = payload.get(field)
         if isinstance(value, str) and len(value) > EPISODES_CLIENT_TRUNCATE_CHARS:
-            # Keep the TAIL, not the head (adversarial-review B1 follow-on
-            # fix): failure markers characteristically appear near the end
-            # of long output (agent/outcome.py), and agent/episode_canon.py's
+            # Keep the TAIL, not the head: failure markers characteristically
+            # appear near the end of long output (agent/outcome.py), and
+            # agent/episode_canon.py's
             # own digest step is head+tail-preserving on the assumption that
             # truncation upstream hasn't already discarded the tail. Slicing
             # the head here would silently drop exactly the signal that

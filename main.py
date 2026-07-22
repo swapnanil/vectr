@@ -20,8 +20,8 @@ import sys
 # a second implementation, parity-tested against this file's `cmd_hook`,
 # rather than a shared import).
 #
-# `post-tool-use` (memoization-l1-capture-design §2) belongs in this tuple
-# for the same reason as the other four: it fires on the harness's
+# `post-tool-use` (episode capture) belongs in this tuple for the same
+# reason as the other four: it fires on the harness's
 # synchronous turn loop (one PostToolUse per Bash/Edit/Write/MultiEdit call —
 # the highest-frequency event of all), and its own foreground budget (≤50ms
 # p95, spec §7 gate G2) cannot be met while paying this module's argparse
@@ -90,8 +90,7 @@ _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
 # agent.config just to send that one float on its hottest path.
 _HOOK_RECALL_LIMIT = 3
 
-# L1 episode capture (memoization-l1-capture-design §2, adversarial-review
-# fix B1) — hard cap on how much of a Bash/Edit tool's raw stdout/stderr this
+# Episode capture — hard cap on how much of a Bash/Edit tool's raw stdout/stderr this
 # FOREGROUND process (the one the editor harness is synchronously waiting
 # on, budget ≤50ms p95 per spec §7 gate G2) will ever json.dump into the
 # handoff temp file. Measured before this cap existed: a 1MB tool output
@@ -870,22 +869,20 @@ def _write_claude_hooks(workspace: str) -> None:
     # OBSERVABILITY): a file-reading tool has just as deterministic a
     # tool_input.file_path as Edit/Write, so it gets the same gotcha injection
     # at the moment the model is about to look at that file, not only when
-    # it's about to change it. Extended to Bash (memoization-l1-capture-design
-    # §5): a command-running tool call carries just as deterministic a
+    # it's about to change it. Extended to Bash: a command-running tool call
+    # carries just as deterministic a
     # tool_input.command as Edit/Write carries a file_path, so a note anchored
     # to a command family (the `command` trigger axis) fires at the moment the
     # model is about to run it, not only when it's about to touch a file.
     _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|Read|Bash",
                         command="vectr hook pre-tool-use")
-    # L1 episode capture (memoization-l1-capture-design §2) — PostToolUse
-    # (Bash|Edit|Write|MultiEdit): record one deterministic episode row per
-    # tool call. Foreground work is a stdin read + a detached-worker spawn
-    # only (see cmd_hook's "post-tool-use" branch) — never blocks the turn
-    # loop on the actual HTTP write.
+    # Episode capture — PostToolUse (Bash|Edit|Write|MultiEdit): record one
+    # deterministic episode row per tool call. Foreground work is a stdin
+    # read + a detached-worker spawn only (see cmd_hook's "post-tool-use"
+    # branch) — never blocks the turn loop on the actual HTTP write.
     _install_hook_group(hooks, "PostToolUse", matcher="Bash|Edit|Write|MultiEdit",
                         command="vectr hook post-tool-use")
-    # G0 live capture (2026-07-22, adversarial-review fix B5): PostToolUse
-    # fires ONLY on tool SUCCESS — a failed Bash call (non-zero exit) fires
+    # G0 live capture: PostToolUse fires ONLY on tool SUCCESS — a failed Bash call (non-zero exit) fires
     # PostToolUseFailure instead, and PostToolUse never fires for it at all.
     # Without this second group, every RED run (the failure half of every
     # failure->fix->success arc, arguably the most valuable episode class)
@@ -918,9 +915,9 @@ def _write_codex_hooks(workspace: str) -> None:
     could not confirm without a live smoke test; the `Edit|Write|apply_patch`
     union is harmless either way — an absent tool name simply never fires the
     hook — so it needs no live verification to ship safely. The PostToolUse
-    matcher includes `apply_patch` too (adversarial-review fix B4): without
-    it, no edit episode is ever captured under Codex, and the edit-mediated
-    arc (design doc §3.4 — the dominant real fix loop) can never form there.
+    matcher includes `apply_patch` too: without it, no edit episode is ever
+    captured under Codex, and the edit-mediated arc (the dominant real fix
+    loop) can never form there.
 
     Codex's hook surface documents no distinct failure-path event
     (research/codex-parity-2026-07.md lists only "PostToolUse" among its
@@ -944,17 +941,17 @@ def _write_codex_hooks(workspace: str) -> None:
     _install_hook_group(hooks, "SessionStart", matcher="startup|resume|clear|compact",
                         command="vectr hook session-start")
     _install_hook_group(hooks, "UserPromptSubmit", command="vectr hook user-prompt-submit")
-    # Adds Bash alongside apply_patch (memoization-l1-capture-design §5, same
-    # rationale as the PreToolUse group in _write_claude_hooks): an absent
+    # Adds Bash alongside apply_patch (same rationale as the PreToolUse group
+    # in _write_claude_hooks): an absent
     # tool name is a harmless no-op, so this needs no live verification of
     # Codex's exact shell-tool name to ship safely.
     _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|apply_patch|Bash",
                         command="vectr hook pre-tool-use")
-    # L1 episode capture (memoization-l1-capture-design §2) — see
-    # _write_claude_hooks's PostToolUse group for the rationale; same event
-    # and command apply unchanged under Codex's identical schema. The
-    # matcher adds `apply_patch` (fix B4, see module docstring) alongside
-    # the Claude-compat tool names, mirroring the PreToolUse matcher above.
+    # Episode capture — see _write_claude_hooks's PostToolUse group for the
+    # rationale; same event and command apply unchanged under Codex's
+    # identical schema. The matcher adds `apply_patch` (see module
+    # docstring) alongside the Claude-compat tool names, mirroring the
+    # PreToolUse matcher above.
     _install_hook_group(hooks, "PostToolUse", matcher="Bash|Edit|Write|MultiEdit|apply_patch",
                         command="vectr hook post-tool-use")
     _install_hook_group(hooks, "PreCompact", matcher="manual|auto",
@@ -2168,8 +2165,8 @@ def _tail_truncate(text: str, cap: int) -> str:
 
 def _build_episode_payload(event: dict) -> dict | None:
     """Build the `POST /v1/episode` payload from a raw PostToolUse (or
-    PostToolUseFailure) hook JSON event (memoization-l1-capture-design §2),
-    or None when `tool_name` isn't one this lane captures.
+    PostToolUseFailure) hook JSON event, or None when `tool_name` isn't one
+    episode capture handles.
 
     Shapes below are G0 live-verified (2026-07-22, real `claude -p` session,
     claude-code 2.1.181) — no longer defensive guesses:
@@ -2197,7 +2194,7 @@ def _build_episode_payload(event: dict) -> dict | None:
 
     stdout/stderr (or the failure-path error remainder) are tail-truncated
     to `_EPISODE_FOREGROUND_TRUNCATE_CHARS` HERE, before the temp-file
-    handoff (adversarial-review fix B1) — `agent/episode_worker.py` applies
+    handoff — `agent/episode_worker.py` applies
     its own, smaller, config-driven cap afterward as the real truncation;
     this is only a coarse foreground safety cap bounding this synchronous
     process's own json.dump cost against an arbitrarily large tool output.
@@ -2360,8 +2357,8 @@ def cmd_hook(args: argparse.Namespace) -> None:
     | session-start     | `source == "compact"`          | session-start + post-compaction     | POST /v1/recall {..., events: [both]} |
     | user-prompt-submit| —                              | prompt-submit                       | POST /v1/recall {query, ..., events: [prompt-submit], session_id, hook_event} |
     | pre-tool-use      | file-bearing tool (Edit/Write/Read) | pre-edit + that file's path   | POST /v1/recall {file_path, kind: gotcha, session_id, hook_event} |
-    | pre-tool-use      | command-running tool (Bash)    | pre-run + that command's normalized verb (§5.2) | POST /v1/recall {command, session_id, hook_event} |
-    | post-tool-use     | Bash/Edit/Write/MultiEdit      | n/a — a WRITE path (L1 episode capture, §2), not a recall/trigger event | POST /v1/episode {session_id, cwd, tool, command/file_path, ...}, via a DETACHED worker (never awaited here) |
+    | pre-tool-use      | command-running tool (Bash)    | pre-run + that command's normalized verb | POST /v1/recall {command, session_id, hook_event} |
+    | post-tool-use     | Bash/Edit/Write/MultiEdit      | n/a — a WRITE path (episode capture), not a recall/trigger event | POST /v1/episode {session_id, cwd, tool, command/file_path, ...}, via a DETACHED worker (never awaited here) |
     | pre-compact       | any `trigger`                  | ledger reset (§3)                   | POST /v1/snapshot (unchanged) + POST /v1/trigger/reset {session_id} |
     | post-commit       | n/a (fired by `git`, not the editor harness) | n/a — a WRITE path, not a recall/trigger event | POST /v1/commit-note {sha, subject, branch, files} |
 
@@ -2465,8 +2462,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # engine's pre-edit event (TRIGGER-ENGINE wave 2a) is merged in
             # server-side alongside this same file_path recall.
             #
-            # Command-family injection (memoization-l1-capture-design §5,
-            # UPG-MEMORY-STATE-MACHINE §5.2): a Bash call carries no
+            # Command-family injection: a Bash call carries no
             # `tool_input.file_path` at all, only `tool_input.command` — this
             # is a SEPARATE deterministic anchor (the 'command' trigger
             # primitive), not a file caveat, so it gets its own payload shape
@@ -2500,12 +2496,11 @@ def cmd_hook(args: argparse.Namespace) -> None:
             _emit_hook_context("PreToolUse", notes)
 
         elif args.hook_event == "post-tool-use":
-            # L1 episode capture (memoization-l1-capture-design §2): never
-            # emits a hookSpecificOutput envelope (nothing to inject) and
-            # never awaits the actual write — build the payload, hand it to
-            # a detached worker, return. A tool_name this lane doesn't
-            # capture (anything but Bash/Edit/Write/MultiEdit) yields None
-            # and is a silent no-op.
+            # Episode capture: never emits a hookSpecificOutput envelope
+            # (nothing to inject) and never awaits the actual write — build
+            # the payload, hand it to a detached worker, return. A
+            # tool_name episode capture doesn't handle (anything but
+            # Bash/Edit/Write/MultiEdit) yields None and is a silent no-op.
             payload = _build_episode_payload(event)
             if payload is not None:
                 _spawn_episode_worker(port, payload)

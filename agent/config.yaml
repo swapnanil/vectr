@@ -1330,11 +1330,10 @@ hooks:
   post_commit_timeout_s: 2.0
 
 episodes:
-  # L1 episode capture (memoization-l1-capture-design §2): PostToolUse hook
-  # -> POST /v1/episode -> the `episodes` table, quarantined from search and
-  # working-memory recall. Per-workspace ring buffer: rows beyond this count
-  # (newest kept) are pruned on every write, bounding table size regardless
-  # of session length.
+  # Episode capture: PostToolUse hook -> POST /v1/episode -> the `episodes`
+  # table, quarantined from search and working-memory recall. Per-workspace
+  # ring buffer: rows beyond this count (newest kept) are pruned on every
+  # write, bounding table size regardless of session length.
   max_rows: 5000
 
   # TTL (days) beyond which an episode row is pruned on the next write,
@@ -1369,9 +1368,9 @@ episodes:
   post_timeout_s: 2.0
 
   # Age (seconds) beyond which an orphaned `vectr-episode-*.json` payload
-  # temp file is swept by agent/episode_worker.py (adversarial-review LOW
-  # item). The worker always deletes its OWN payload file in a `finally`
-  # block, but a spawn failure in `_spawn_episode_worker` (main.py /
+  # temp file is swept by agent/episode_worker.py. The worker always
+  # deletes its OWN payload file in a `finally` block, but a spawn failure
+  # in `_spawn_episode_worker` (main.py /
   # agent/hook_cli.py — the temp file is written before `subprocess.Popen`
   # is attempted) can leave one behind with nothing left to clean it up.
   # One hour is comfortably longer than any real worker run (a POST that
@@ -1616,13 +1615,12 @@ proactive:
       max_entries: 256
 
 arc_detection:
-  # §3 of memoization-l1-capture-design.md (LANE-ARC) — deterministic
-  # streaming failure->success arc detector over TOOL-CALL episodes (argv
-  # structure of already-issued Bash/Edit/Write calls; R5-clean — never
-  # prompt content). See app/cmdnorm.py + app/arcs.py.
+  # Deterministic streaming failure->success arc detector over TOOL-CALL
+  # episodes (argv structure of already-issued Bash/Edit/Write calls;
+  # R5-clean — never prompt content). See app/cmdnorm.py + app/arcs.py.
 
-  # Master switch (adversarial-review fix B2b): whether `record_episode`
-  # feeds persisted bash/edit episodes into `ArcDetector.observe()` at all.
+  # Master switch: whether `record_episode` feeds persisted bash/edit
+  # episodes into `ArcDetector.observe()` at all.
   # The detector and its similarity/window machinery below stay loaded and
   # configured either way — this only gates whether the write path calls it.
   enabled: true
@@ -1649,8 +1647,8 @@ arc_detection:
     # from runaway-absorbing their arguments into the verb. Tune only
     # against the G1 replay corpus (benchmarks/arc_replay.py).
     max_verb_tokens: 3
-    # Transparent wrapper prefixes (review 2026-07-22, §3.1) stripped
-    # iteratively from the front of the primary pipeline stage BEFORE verb
+    # Transparent wrapper prefixes stripped iteratively from the front of
+    # the primary pipeline stage BEFORE verb
     # extraction, so the WRAPPED command — not the wrapper — is normalized
     # as the verb (`timeout 60 curl X` and `timeout 90 curl X` must
     # normalize identically so flaky suppression can compare them). Value
@@ -1679,9 +1677,8 @@ arc_detection:
     # stage's own first token only; a stage is never dropped if it isn't
     # the last remaining one, so a genuine multi-stage pipeline
     # (`cat data.csv | python train.py`) always keeps every non-trailing
-    # stage's tokens in the comparison set (review 2026-07-22: collapsing
-    # unconditionally to stage 0 made distinct pipelines normalize
-    # identical).
+    # stage's tokens in the comparison set (collapsing unconditionally to
+    # stage 0 made distinct pipelines normalize identical).
     pipeline_display_only_verbs:
       - cat
       - tail
@@ -1689,7 +1686,7 @@ arc_detection:
 
   similarity:
     # Composite score = verb_weight*verb + flag_weight*jaccard(flags) +
-    # arg_weight*jaccard(args) (§3.2). Must sum to 1.0.
+    # arg_weight*jaccard(args). Must sum to 1.0.
     verb_weight: 0.5
     flag_weight: 0.3
     arg_weight: 0.2
@@ -1699,40 +1696,38 @@ arc_detection:
     verb_soft_match_score: 0.7
     # Mutation band: mutation_band_min <= score < mutation_band_max. A
     # score of 1.0 (identical normalized command) is never a mutation — it
-    # routes to the edit-mediated/flaky check (§3.4) instead.
+    # routes to the edit-mediated/flaky check instead.
     mutation_band_min: 0.55
     mutation_band_max: 0.999
 
   window:
-    # Sliding per-session state (§3.3): a pending failure or edit record
-    # ages out of consideration once EITHER bound is exceeded.
+    # Sliding per-session state: a pending failure or edit record ages out
+    # of consideration once EITHER bound is exceeded.
     max_commands: 20
     ttl_seconds: 600
     max_pending_per_verb_family: 5
     # Fallback step (seconds) used to synthesize a strictly-increasing `ts`
-    # when an episode's own `ts` is missing/None/unparseable (§2.1
-    # drift-tolerant payloads; review 2026-07-22: observe() must never
-    # raise on this). Deterministic given a fixed replay sequence — never
-    # wall-clock-derived.
+    # when an episode's own `ts` is missing/None/unparseable (payloads are
+    # drift-tolerant; observe() must never raise on this). Deterministic
+    # given a fixed replay sequence — never wall-clock-derived.
     ts_monotonic_fallback_seconds: 0.001
 
   flake:
-    # §3.4 Travis-CI base-rate defense: once an identical command has
-    # flipped outcome (flaky retry — no intervening edit and no env delta;
-    # cwd is a pending-bucket key so it cannot differ within a match — see
-    # §3.3) this many times in a session, near-threshold mutation-band
-    # matches for that same normalized command are suppressed too, instead
-    # of emitted as arcs.
+    # Travis-CI base-rate defense: once an identical command has flipped
+    # outcome (flaky retry — no intervening edit and no env delta; cwd is
+    # a pending-bucket key so it cannot differ within a match) this many
+    # times in a session, near-threshold mutation-band matches for that
+    # same normalized command are suppressed too, instead of emitted as
+    # arcs.
     suppress_min_count: 2
     near_threshold_min: 0.95
 
-  # §3.5(b): marker ids (tool-output classification, sanctioned — see
-  # agent/markers.yaml, owned by LANE-EPISODE) that mark a captured arc
-  # low_confidence: the failure's stderr matched a transient-error
-  # signature, so the "fix" may just be an environment retry rather than a
-  # real one. LANE-ARC does not own the marker table; these names are
-  # reconciled against whichever ids agent/markers.yaml actually ships at
-  # LANE-EPISODE integration.
+  # Marker ids (tool-output classification, sanctioned — see
+  # agent/markers.yaml) that mark a captured arc low_confidence: the
+  # failure's stderr matched a transient-error signature, so the "fix" may
+  # just be an environment retry rather than a real one. Arc detection
+  # does not own the marker table; these names are reconciled against
+  # whichever ids agent/markers.yaml actually ships.
   transient_marker_ids:
     - generic.timeout
     - generic.connection_reset
