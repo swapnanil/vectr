@@ -372,7 +372,29 @@ def run_hook(hook_event: str) -> None:
             _emit_hook_context("UserPromptSubmit", notes)
 
         elif hook_event == "pre-tool-use":
-            file_path = ((event.get("tool_input") or {}).get("file_path") or "").strip()
+            # Command-family injection (memoization-l1-capture-design §5,
+            # UPG-MEMORY-STATE-MACHINE §5.2) — mirrors main.cmd_hook's own
+            # pre-tool-use branch byte-for-byte: a Bash call carries no
+            # tool_input.file_path at all, only tool_input.command, so it
+            # gets its own payload shape (no kind="gotcha" filter — the
+            # 'command' trigger primitive, any kind, is the entire surface
+            # server-side). The raw command string is forwarded as-is;
+            # normalization (app.cmdnorm) happens server-side in
+            # VectrService._recall_impl's command branch, never here — this
+            # module stays stdlib-only by design (see module docstring).
+            tool_name = (event.get("tool_name") or "").strip()
+            tool_input = event.get("tool_input") or {}
+            if tool_name == "Bash":
+                command = (tool_input.get("command") or "").strip()
+                if not command:
+                    return
+                payload = {"command": command, "hook_event": "PreToolUse"}
+                if session_id:
+                    payload["session_id"] = session_id
+                notes = _fetch_recall(port, payload)
+                _emit_hook_context("PreToolUse", notes)
+                return
+            file_path = (tool_input.get("file_path") or "").strip()
             if not file_path:
                 return
             payload = {"file_path": file_path, "kind": "gotcha", "hook_event": "PreToolUse"}

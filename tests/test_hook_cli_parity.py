@@ -96,6 +96,19 @@ FIXTURES = [
     ("user-prompt-submit", '{"cwd": "/p", "prompt": "lock flow", "session_id": "abc-123"}'),
     ("pre-tool-use", '{"cwd": "/p", "tool_input": {"file_path": "/p/agent/symbol_graph.py"}}'),
     ("pre-tool-use", '{"cwd": "/p", "tool_input": {}}'),
+    # Command-family injection (memoization-l1-capture-design §5.2, B1
+    # follow-up): the branch that was DEAD in run_hook prior to this fix —
+    # this is the exact fixture shape whose absence let that regression
+    # ship silently (both implementations must recall via `command`, never
+    # `file_path`, for a Bash tool call).
+    ("pre-tool-use", '{"cwd": "/p", "tool_name": "Bash", "tool_input": {"command": "pytest -q"}}'),
+    ("pre-tool-use", '{"cwd": "/p", "tool_name": "Bash", "tool_input": {"command": "  "}}'),  # blank command -> early return
+    ("pre-tool-use", '{"cwd": "/p", "tool_name": "Bash", "tool_input": {}}'),  # no command key at all
+    ("pre-tool-use", '{"cwd": "/p", "tool_name": "Bash", "tool_input": {"command": "pytest -q"}, "session_id": "abc-123"}'),
+    # A Bash tool_input that also happens to carry a file_path key (should
+    # never occur from a real harness, but proves tool_name=="Bash" is
+    # checked FIRST and always wins over a coincidentally-present file_path).
+    ("pre-tool-use", '{"cwd": "/p", "tool_name": "Bash", "tool_input": {"command": "pytest -q", "file_path": "/p/x.py"}}'),
     ("pre-compact", '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}'),
     ("pre-compact", '{"cwd": "/p"}'),
     ("session-start", '{"cwd": "/nowhere"}'),  # no daemon registered

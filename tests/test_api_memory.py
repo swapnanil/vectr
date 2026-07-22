@@ -697,6 +697,32 @@ class TestTriggerEngineLiveViaRest:
         ).json()["notes"]
         assert "must use ./.venv/bin/python" not in notes
 
+    def test_two_surfaces_same_turn_inject_once_via_rest(self, client_real_memory) -> None:
+        """N4 (memoization-l1-capture-design §5.3/§5.4, serving-policy
+        review): the turn-scoped injection ledger must be threaded through
+        the REST /v1/recall path, not only exercised at the store level —
+        a note with two live trigger axes (session-start and pre-edit) that
+        both match within the same turn (same session_id, no reset between
+        calls, exactly mirroring an editor that fires SessionStart then a
+        same-turn PreToolUse before the next UserPromptSubmit) must be
+        delivered by the FIRST surface only; the second surface's own,
+        different axis match is turn-deduped, not re-delivered."""
+        client = client_real_memory
+        client.post("/v1/remember", json={
+            "content": "auth.py: verify_token() must check expiry before signature",
+            "kind": "finding",
+            "triggers": [{"event": "session-start"}, {"path": "src/auth.py", "event": "pre-edit"}],
+        })
+        boot_notes = client.post(
+            "/v1/recall", json={"boot": True, "session_id": "sess-n4"},
+        ).json()["notes"]
+        assert "verify_token() must check expiry" in boot_notes
+
+        edit_notes = client.post(
+            "/v1/recall", json={"file_path": "src/auth.py", "session_id": "sess-n4"},
+        ).json()["notes"]
+        assert "verify_token() must check expiry" not in edit_notes
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/forget

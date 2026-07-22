@@ -2630,6 +2630,7 @@ class WorkingContextStore:
         ledger: "TriggerFireLedger | None" = None,
         now: float | None = None,
         session_id: str | None = None,
+        record_fires: bool = True,
     ) -> list["FireResult"]:
         """Live evaluation entry point (TRIGGER-ENGINE, bm2-design-skeleton.md
         §2/§4): evaluate every non-tombstoned note in `workspace` against one
@@ -2642,10 +2643,27 @@ class WorkingContextStore:
         `ledger`, if given (a per-session `TriggerFireLedger` — see
         `VectrService`'s per-session registry, mirroring its existing
         per-session `EvictionAdvisor` pattern), suppresses a note whose
-        matched trigger index already fired this session on that SAME axis; a
-        fresh fire is recorded into the ledger before returning. Passing no
-        ledger evaluates statelessly with no suppression (used by tests and
-        any one-shot caller that manages its own dedup).
+        matched trigger index already fired this session on that SAME axis
+        (the `eligible()` check below — this ALWAYS runs when `ledger` is
+        given, regardless of `record_fires`). Passing no ledger evaluates
+        statelessly with no suppression (used by tests and any one-shot
+        caller that manages its own dedup).
+
+        `record_fires` (wave 3, §5.3 — closes the "session ledger burns a
+        trigger on a non-delivery" finding), when True (the default),
+        records a fresh match into `ledger` before returning — the original,
+        still-correct contract for a caller like `VectrService.fire_triggers()`
+        whose every returned `FireResult` IS the delivery (no further
+        packing/dedup happens downstream). `fire_and_format()` below passes
+        `record_fires=False` instead: it calls `fire()` once per event in an
+        OR list and then still has to survive turn-ledger cross-surface
+        dedup AND budget packing before a note is actually injected — a note
+        that matches here but gets turn-deduped or budget-evicted there must
+        NOT be recorded as session-fired, or that axis is wrongly suppressed
+        for the rest of the session even though nothing was ever delivered.
+        `fire_and_format()` performs the real `record_fire()` call itself,
+        once per PACKED (i.e. actually-injected) note, after packing
+        decides survivors — see its own docstring.
 
         `session_id` enforces scope="session" notes and, combined with a
         current-branch lookup computed ONCE per call, scope="branch" notes
@@ -2815,7 +2833,7 @@ class WorkingContextStore:
             result.stale_paths = stale.get(note.note_id, [])
             results.append(result)
             fired_ids.append(note.note_id)
-            if ledger is not None and result.trigger_index is not None:
+            if record_fires and ledger is not None and result.trigger_index is not None:
                 ledger.record_fire(note.note_id, result.trigger_index, semantic=result.semantic)
 
         results.sort(key=lambda r: total_order_key(notes_by_id[r.note_id]))
@@ -2886,7 +2904,19 @@ class WorkingContextStore:
         CUMULATIVE across every call in one session (§3): the budget spent
         by earlier deliveries this session is subtracted before packing this
         one, and this delivery's own spend is recorded back into the ledger
-        before returning.
+        before returning. Every `fire()` call below passes
+        `record_fires=False` — this method, not `fire()` itself, is
+        responsible for calling `ledger.record_fire()`, and does so ONLY for
+        a note that survives all the way to `packed` (§5.3: "session ledger
+        burns a trigger on a non-delivery" fix). A note that matches here
+        but is then dropped by the turn-ledger dedup below or evicted by
+        `pack_injection()`'s budget must NOT be recorded as session-fired —
+        recording an unfired match would permanently suppress that axis for
+        the rest of the session even though nothing was ever actually
+        injected. `fire()`'s own `ledger.eligible()` gate (unaffected by
+        this) still runs on every call, so a note already recorded as fired
+        by an EARLIER, successfully-packed `fire_and_format()` call this
+        session is correctly excluded here too.
 
         `turn_ledger` (wave 3, §5.3/§5.4 — closes the arm-C double-dip
         finding), if given, is consulted TWICE: (1) after merging `seen`
@@ -2922,7 +2952,7 @@ class WorkingContextStore:
         for ev in event_list:
             for r in self.fire(
                 workspace, event=ev, file_path=file_path, command=command, query=query,
-                session_id=session_id, ledger=ledger, now=now,
+                session_id=session_id, ledger=ledger, now=now, record_fires=False,
             ):
                 if r.note_id not in seen:
                     seen[r.note_id] = r
@@ -2962,7 +2992,18 @@ class WorkingContextStore:
         packed = pack_injection(items, budget=budget)
         if not packed:
             return "", set()
+        # §5.3 fix: record each PACKED note's fire into the session ledger
+        # here — the only point in this method that knows which notes
+        # actually survived turn-dedup AND budget packing to reach real
+        # delivery. `fire()` itself was called with `record_fires=False`
+        # above specifically so a note that matched but was then dropped
+        # (turn-deduped or budget-evicted) never burns its axis's
+        # session-wide eligibility for nothing.
         if ledger is not None:
+            for p in packed:
+                result = seen.get(p.note_id)
+                if result is not None and result.trigger_index is not None:
+                    ledger.record_fire(p.note_id, result.trigger_index, semantic=result.semantic)
             spent = sum(token_estimate(p.text) for p in packed)
             ledger.record_spend(spent)
         if spend_turn_budget and turn_ledger is not None:

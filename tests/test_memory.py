@@ -2879,6 +2879,58 @@ class TestFireAndFormat:
         assert again_ids == {note_id}
         assert "verify_token() must check expiry" in again_text
 
+    def test_n1_note_matched_by_second_surface_but_turn_deduped_stays_eligible_next_turn(self, tmp_path) -> None:
+        """§5.3 fix: a note whose SECOND trigger axis matches a same-turn
+        surface but gets dropped by turn-ledger cross-surface dedup (already
+        claimed by the FIRST surface's own, different axis) must never have
+        that second axis recorded into the SESSION ledger — recording an
+        unfired match would permanently suppress it for the rest of the
+        session even though nothing from that axis was ever actually
+        injected. Same double-axis note shape as the G3 test above, but
+        asserting the session ledger's own eligibility rather than the
+        turn-level dedup it exercises."""
+        from agent.trigger_engine import TriggerFireLedger, TurnInjectionLedger
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(
+            ws, "auth.py: verify_token() must check expiry before signature",
+            kind="finding",
+            triggers=[{"event": "session-start"}, {"path": "src/auth.py", "event": "pre-edit"}],
+        )
+        ledger = TriggerFireLedger()
+        turn_ledger = TurnInjectionLedger()
+
+        # Surface 1: session-start (trigger_index 0) delivers and claims the
+        # note this turn.
+        boot_text, boot_ids = store.fire_and_format(
+            ws, events=["session-start"], ledger=ledger, turn_ledger=turn_ledger,
+            spend_turn_budget=True,
+        )
+        assert boot_ids == {note_id}
+
+        # Surface 2, SAME turn: the pre-edit axis (trigger_index 1) matches
+        # too, but is turn-deduped — already claimed by surface 1.
+        edit_text, edit_ids = store.fire_and_format(
+            ws, event="pre-edit", file_path="src/auth.py",
+            ledger=ledger, turn_ledger=turn_ledger, spend_turn_budget=True,
+        )
+        assert edit_ids == set()
+        assert edit_text == ""
+
+        # The pre-edit axis (index 1) was never actually delivered — it must
+        # still be session-eligible, not silently burned by the match that
+        # never made it through packing.
+        assert ledger.eligible(note_id, 1) is True
+
+        # Next turn (UserPromptSubmit boundary): the pre-edit axis fires and
+        # actually delivers now that nothing claims it first.
+        turn_ledger.reset()
+        again_text, again_ids = store.fire_and_format(
+            ws, event="pre-edit", file_path="src/auth.py",
+            ledger=ledger, turn_ledger=turn_ledger, spend_turn_budget=True,
+        )
+        assert again_ids == {note_id}
+        assert "verify_token() must check expiry" in again_text
+
 
 class TestInjectedFrame:
     """`_injected_frame()` (memoization-l1-capture-design.md §5.6) — the

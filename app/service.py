@@ -1962,19 +1962,32 @@ class VectrService:
         # heuristics) keeps the legacy path unchanged — the engine does not
         # cover it this wave.
         if file_path:
+            turn_ledger = self._turn_ledger_for(session_id)
             fire_text, fired_ids = self._context_store.fire_and_format(
                 self._workspace_root,
                 event="pre-edit",
                 file_path=file_path,
                 session_id=session_id,
                 ledger=self._ledger_for(session_id),
-                turn_ledger=self._turn_ledger_for(session_id),
+                turn_ledger=turn_ledger,
                 spend_turn_budget=True,
                 surface=surface,
             )
             legacy_notes = self._context_store.recall_for_path(
                 self._workspace_root, file_path, kind=kind, limit=limit, session_id=session_id)
-            legacy_notes = [n for n in legacy_notes if n.note_id not in fired_ids]
+            # `fired_ids` alone only excludes what THIS call's own engine
+            # fire delivered; a note claimed by an EARLIER surface this
+            # same turn (turn-deduped out of `fired_ids` here on purpose)
+            # must also be excluded from the legacy content-match fallback
+            # below, or the cross-surface dedup the turn ledger exists for
+            # (§5.3/§5.4) leaks back in through this pre-engine path — the
+            # same double-dip class `fire_and_format()`'s own turn-dedup
+            # prevents, just reached via a different code path.
+            legacy_notes = [
+                n for n in legacy_notes
+                if n.note_id not in fired_ids
+                and (turn_ledger is None or turn_ledger.eligible(n.note_id))
+            ]
             legacy_text = ""
             if legacy_notes:
                 stale = self._context_store.check_staleness(legacy_notes, self._workspace_root)
@@ -2020,6 +2033,7 @@ class VectrService:
         # `fire_and_format()` call site in this file that ever has both an
         # `events` list AND the actual prompt text available together.
         fire_text, fired_ids = "", set()
+        turn_ledger = self._turn_ledger_for(session_id)
         if events:
             fire_text, fired_ids = self._context_store.fire_and_format(
                 self._workspace_root,
@@ -2027,7 +2041,7 @@ class VectrService:
                 query=query,
                 session_id=session_id,
                 ledger=self._ledger_for(session_id),
-                turn_ledger=self._turn_ledger_for(session_id),
+                turn_ledger=turn_ledger,
                 spend_turn_budget=True,
                 surface=surface,
             )
@@ -2044,8 +2058,17 @@ class VectrService:
             sort_by=sort_by,
             session_id=session_id,
         )
-        if fired_ids:
-            notes = [n for n in notes if n.note_id not in fired_ids]
+        # Same cross-surface leak the file_path branch above guards
+        # against: `fired_ids` only reflects THIS call's own engine
+        # delivery, so a note claimed by an earlier surface this turn
+        # (correctly turn-deduped out of `fired_ids`) must still be
+        # excluded from the plain relevance-ranked `recall()` merge below.
+        if fired_ids or turn_ledger is not None:
+            notes = [
+                n for n in notes
+                if n.note_id not in fired_ids
+                and (turn_ledger is None or turn_ledger.eligible(n.note_id))
+            ]
         stale = self._context_store.check_staleness(notes, self._workspace_root)
         formatted = self._context_store.format_notes_for_llm(
             notes, stale_warnings=stale, detail=detail, surface=surface, sort_by=sort_by

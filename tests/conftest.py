@@ -291,7 +291,7 @@ def client_real_memory(tmp_path):
     """
     from api import app
     from agent.working_context_store import WorkingContextStore
-    from agent.trigger_engine import TriggerFireLedger
+    from agent.trigger_engine import TriggerFireLedger, TurnInjectionLedger
 
     svc = _base_mock_service()
     real_store = WorkingContextStore(str(tmp_path))
@@ -333,6 +333,28 @@ def client_real_memory(tmp_path):
 
     svc.reset_trigger_ledger.side_effect = _reset_trigger_ledger
 
+    # Serving-policy hardening (wave 3, §5.3/§5.4): a second, TURN-scoped
+    # registry mirroring `VectrService._turn_ledger_for`/`reset_turn_ledger`
+    # alongside `_ledgers`/`_ledger_for` above. Without this, a REST test
+    # against this REAL store could never exercise cross-surface same-turn
+    # dedup or the shared ≤500-token turn budget (`fire_and_format`'s
+    # `turn_ledger=None` default silently reproduces the pre-wave-3
+    # unbounded/undeduped behaviour, the same way `ledger=None` reproduces
+    # pre-wave-2a behaviour) — every `/v1/recall` request would look like
+    # its own fresh turn even when two hook surfaces fire within one.
+    _turn_ledgers: dict[str, TurnInjectionLedger] = {}
+
+    def _turn_ledger_for(session_id):
+        if not session_id:
+            return None
+        return _turn_ledgers.setdefault(session_id, TurnInjectionLedger())
+
+    def _reset_turn_ledger(session_id):
+        if session_id and session_id in _turn_ledgers:
+            _turn_ledgers[session_id].reset()
+
+    svc.reset_turn_ledger.side_effect = _reset_turn_ledger
+
     def _recall(query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
                 min_similarity=None, file_path=None, command=None, max_age_days=None, sort_by="relevance",
                 detail="index", note_id=None, surface="mcp", hook_event=None,
@@ -345,18 +367,36 @@ def client_real_memory(tmp_path):
             return real_store.format_notes_for_llm([note], stale_warnings=stale, detail="full", surface=surface)
         if boot:
             events_to_fire = events if events else ["session-start"]
+            # `spend_turn_budget` deliberately omitted (defaults False),
+            # mirroring `VectrService._recall_impl`'s boot branch exactly:
+            # session-start bulk keeps its own separate per-SESSION cap
+            # (`ledger`) rather than the smaller ordinary-turn allowance —
+            # the turn ledger's dedup CLAIM still runs via `turn_ledger`,
+            # so a note delivered at boot is still excluded from a same-
+            # turn PreToolUse/prompt-submit re-delivery.
             fire_text, _ = real_store.fire_and_format(
                 ws, events=events_to_fire, session_id=session_id,
-                ledger=_ledger_for(session_id), surface=surface,
+                ledger=_ledger_for(session_id), turn_ledger=_turn_ledger_for(session_id),
+                surface=surface,
             )
             return fire_text
         if file_path:
+            turn_ledger = _turn_ledger_for(session_id)
             fire_text, fired_ids = real_store.fire_and_format(
                 ws, event="pre-edit", file_path=file_path, session_id=session_id,
-                ledger=_ledger_for(session_id), surface=surface,
+                ledger=_ledger_for(session_id), turn_ledger=turn_ledger,
+                spend_turn_budget=True, surface=surface,
             )
             path_notes = real_store.recall_for_path(ws, file_path, kind=kind, limit=limit, session_id=session_id)
-            path_notes = [n for n in path_notes if n.note_id not in fired_ids]
+            # Mirrors VectrService._recall_impl's own fix: a note claimed by
+            # an EARLIER surface this turn (turn-deduped out of `fired_ids`
+            # here) must also be excluded from the legacy content-match
+            # fallback, not just from this call's own engine delivery.
+            path_notes = [
+                n for n in path_notes
+                if n.note_id not in fired_ids
+                and (turn_ledger is None or turn_ledger.eligible(n.note_id))
+            ]
             legacy_text = real_store.format_notes_for_llm(path_notes, detail=detail, surface=surface) if path_notes else ""
             if fire_text and legacy_text:
                 return fire_text + "\n\n" + legacy_text
@@ -364,19 +404,29 @@ def client_real_memory(tmp_path):
         if command:
             fire_text, _ = real_store.fire_and_format(
                 ws, event="pre-run", command=command, session_id=session_id,
-                ledger=_ledger_for(session_id), surface=surface,
+                ledger=_ledger_for(session_id), turn_ledger=_turn_ledger_for(session_id),
+                spend_turn_budget=True, surface=surface,
             )
             return fire_text
         fire_text, fired_ids = "", set()
+        turn_ledger = _turn_ledger_for(session_id)
         if events:
             fire_text, fired_ids = real_store.fire_and_format(
                 ws, events=events, session_id=session_id,
-                ledger=_ledger_for(session_id), surface=surface,
+                ledger=_ledger_for(session_id), turn_ledger=turn_ledger,
+                spend_turn_budget=True, surface=surface,
             )
         notes = real_store.recall(ws, query, tags, priority, limit, kind=kind, min_similarity=min_similarity,
                                   max_age_days=max_age_days, sort_by=sort_by, session_id=session_id)
-        if fired_ids:
-            notes = [n for n in notes if n.note_id not in fired_ids]
+        # Mirrors VectrService._recall_impl's own fix: exclude notes already
+        # claimed this turn by an EARLIER surface, not just this call's own
+        # engine delivery.
+        if fired_ids or turn_ledger is not None:
+            notes = [
+                n for n in notes
+                if n.note_id not in fired_ids
+                and (turn_ledger is None or turn_ledger.eligible(n.note_id))
+            ]
         formatted = real_store.format_notes_for_llm(notes, detail=detail, surface=surface, sort_by=sort_by)
         if fire_text and formatted:
             return fire_text + "\n\n" + formatted

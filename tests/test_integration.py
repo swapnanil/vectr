@@ -165,6 +165,35 @@ class TestFullPipelineFast:
         assert resp.status_code == 200
         assert "Signal.send" in resp.json()["notes"]
 
+    def test_turn_dedup_blocks_legacy_content_fallback_double_dip(self, real_service_client) -> None:
+        """N4 (memoization-l1-capture-design §5.3/§5.4, serving-policy
+        review): production VectrService._recall_impl bug found while
+        threading turn_ledger through the test conftest — a note whose
+        SECOND trigger axis is turn-deduped (already delivered by an
+        earlier surface this turn) must not leak back in through the
+        `file_path` branch's legacy recall_for_path() content-substring
+        fallback, which used to filter only against THIS call's own
+        fired_ids, not against the turn ledger's claimed set."""
+        client, svc, ws = real_service_client
+        unique = "XN4_TURN_DEDUP_PROBE_TOKEN_77X"
+        path = "src/n4_turn_dedup_probe.py"
+        session_id = "sess-n4-real-service-probe"
+
+        client.post("/v1/remember", json={
+            "content": f"{path}: {unique} must be checked before use",
+            "kind": "finding",
+            "triggers": [{"event": "session-start"}, {"path": path, "event": "pre-edit"}],
+        })
+        boot_notes = client.post(
+            "/v1/recall", json={"boot": True, "session_id": session_id},
+        ).json()["notes"]
+        assert unique in boot_notes
+
+        edit_notes = client.post(
+            "/v1/recall", json={"file_path": path, "session_id": session_id},
+        ).json()["notes"]
+        assert unique not in edit_notes
+
     def test_evict_hint_after_search(self, real_service_client, tmp_path) -> None:
         client, svc, ws = real_service_client
         py = Path(ws) / "signals.py"
