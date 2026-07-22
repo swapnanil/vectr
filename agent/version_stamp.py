@@ -30,6 +30,14 @@ def _git_short_sha(
     the bare package version rather than raising."""
     run = _run_git or subprocess.run
     try:
+        # `git rev-parse` walks UP from cwd, so an installed copy (whose
+        # repo_root is a site-packages parent) would otherwise pick up any
+        # enclosing checkout's HEAD — e.g. a package manager's own prefix
+        # repo — and stamp an unrelated SHA. Only a repo_root that is itself
+        # the top of a checkout (`.git` dir, or file for linked worktrees)
+        # counts as running from source.
+        if not (repo_root / ".git").exists():
+            return None
         result = run(
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=str(repo_root),

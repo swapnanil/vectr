@@ -23,10 +23,17 @@ def _fake_run(returncode: int = 0, stdout: str = "a1b2c3d\n"):
 
 class TestGitShortSha:
     def test_returns_sha_when_git_succeeds(self, tmp_path) -> None:
+        (tmp_path / ".git").mkdir()
+        sha = _git_short_sha(tmp_path, _run_git=_fake_run(0, "a1b2c3d\n"))
+        assert sha == "a1b2c3d"
+
+    def test_returns_sha_for_linked_worktree_git_file(self, tmp_path) -> None:
+        (tmp_path / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n")
         sha = _git_short_sha(tmp_path, _run_git=_fake_run(0, "a1b2c3d\n"))
         assert sha == "a1b2c3d"
 
     def test_returns_none_when_git_binary_missing(self, tmp_path) -> None:
+        (tmp_path / ".git").mkdir()
         def _raise(*a, **k):
             raise FileNotFoundError("git not found")
         assert _git_short_sha(tmp_path, _run_git=_raise) is None
@@ -35,12 +42,22 @@ class TestGitShortSha:
         sha = _git_short_sha(tmp_path, _run_git=_fake_run(returncode=128, stdout=""))
         assert sha is None
 
+    def test_enclosing_repo_sha_never_leaks_into_stamp(self, tmp_path) -> None:
+        """`git rev-parse` walks up from cwd, so a repo_root that is NOT
+        itself a checkout top (an installed copy under site-packages) must
+        stamp None even when git would happily answer with some enclosing
+        repository's HEAD — e.g. a package manager's own prefix repo."""
+        sha = _git_short_sha(tmp_path, _run_git=_fake_run(0, "d8deaca\n"))
+        assert sha is None
+
     def test_returns_none_on_timeout(self, tmp_path) -> None:
+        (tmp_path / ".git").mkdir()
         def _timeout(*a, **k):
             raise subprocess.TimeoutExpired(cmd="git", timeout=2)
         assert _git_short_sha(tmp_path, _run_git=_timeout) is None
 
     def test_returns_none_when_stdout_is_blank(self, tmp_path) -> None:
+        (tmp_path / ".git").mkdir()
         sha = _git_short_sha(tmp_path, _run_git=_fake_run(0, "   \n"))
         assert sha is None
 
