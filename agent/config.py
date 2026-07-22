@@ -1100,6 +1100,20 @@ MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP: int = int(_trig_inject_cfg["per_injectio
 MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP: int = int(_trig_inject_cfg["per_session_token_cap"])
 MEMORY_TRIGGER_CHARS_PER_TOKEN: int = int(_trig_inject_cfg["chars_per_token"])
 
+# Serving-policy hardening (UPG-MEMORY-STATE-MACHINE §5.4) — the ordinary-
+# turn allowance shared by every per-turn injection surface combined
+# (PreToolUse anchored/command-family + prompt-time semantic), and each
+# kind's override of the flat per-injection cap above. `per_kind_token_cap`
+# itself is a required key (direct subscript — a config.yaml missing the key
+# entirely raises KeyError at import); individual kind entries within it are
+# legitimately a partial mapping (a kind absent from it falls back to
+# MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP, consulted by trigger_engine.py's
+# pack_injection()), since not every kind needs a tighter override.
+MEMORY_TRIGGER_PER_TURN_TOKEN_CAP: int = int(_trig_inject_cfg["per_turn_token_cap"])
+MEMORY_TRIGGER_PER_KIND_TOKEN_CAP: dict[str, int] = {
+    str(kind): int(cap) for kind, cap in _trig_inject_cfg["per_kind_token_cap"].items()
+}
+
 # Trigger engine wave 2b (TRIGGER-ENGINE, bm2-design-skeleton.md §8) — the M
 # (semantic) primitive's fixed per-kind cosine thresholds. Built by direct
 # subscript against every kind already enumerated in kind_priority above, so
@@ -1111,6 +1125,9 @@ _trig_theta_cfg: dict[str, Any] = _trig_semantic_cfg["theta_by_kind"]
 MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND: dict[str, float] = {
     kind: float(_trig_theta_cfg[kind]) for kind in MEMORY_TRIGGER_KIND_PRIORITY
 }
+# Serving-policy hardening (§5.5) — see the cooldown_turns key's own
+# config.yaml comment for the turns-vs-wall-clock-seconds distinction.
+MEMORY_TRIGGER_SEMANTIC_COOLDOWN_TURNS: int = int(_trig_semantic_cfg["cooldown_turns"])
 
 # ---------------------------------------------------------------------------
 # UPG-TASK-SUPERSEDES-HYGIENE: vectr_status stale-task nudge thresholds.

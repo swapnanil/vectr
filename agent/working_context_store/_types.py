@@ -20,7 +20,17 @@ from dataclasses import dataclass
 #               project's life and is meant to be recalled as a group with
 #               `vectr_recall(kind="decision", sort_by="chronological")`,
 #               yielding an ADR-like decision timeline for free.
-VALID_KINDS: tuple[str, ...] = ("directive", "task", "gotcha", "finding", "reference", "decision")
+#   operational — an env/process/build fact (build quirks, CI gotchas,
+#               feedback-loop knowledge) that is not anchored to a single code
+#               file the way `gotcha` is (UPG-MEMORY-STATE-MACHINE §5.1).
+#               Primary surface is prompt-time semantic matching
+#               (UserPromptSubmit, embeddings only); a secondary PreToolUse
+#               command-family surface is opt-in via an explicit `triggers[]`
+#               override (§5.2). Always carries a last-confirmed/drift verdict
+#               (§4.4) rather than the plain provenance framing other kinds get.
+VALID_KINDS: tuple[str, ...] = (
+    "directive", "task", "gotcha", "finding", "reference", "decision", "operational",
+)
 DEFAULT_KIND = "finding"
 
 # Trigger engine wave 1 (TRIGGER-ENGINE, bm2-design-skeleton.md §2/§5) — closed
@@ -83,6 +93,7 @@ DEFAULT_SCOPE = "workspace"
 KIND_DEFAULT_SCOPES: dict[str, str] = {
     "task": "branch",
     "gotcha": "repo",
+    "operational": "repo",
 }
 
 # PROVENANCE_VALUES: trust/endorsement class (bm2-design-skeleton.md §5).

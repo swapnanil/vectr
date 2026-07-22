@@ -1440,6 +1440,7 @@ memory_triggers:
     kind_priority:
       - directive
       - gotcha
+      - operational
       - task
       - finding
       - reference
@@ -1459,6 +1460,22 @@ memory_triggers:
     # order; once the budget is exhausted, remaining notes are evicted from
     # the bottom of that same order.
     per_session_token_cap: 8000
+    # Serving-policy hardening (UPG-MEMORY-STATE-MACHINE §5.4): the ORDINARY-
+    # turn allowance, shared across every per-turn injection surface combined
+    # (PreToolUse anchored/command-family + prompt-time semantic). Session-
+    # start's own bulk boot delivery is a SEPARATE once-per-session allowance
+    # (per_session_token_cap above) and is never metered against this cap —
+    # see fire_and_format()'s `spend_turn_budget` flag.
+    per_turn_token_cap: 500
+    # Per-kind override of per_injection_token_cap (§5.4's research table:
+    # "directive <=400 total at boot; gotcha <=100; operational <=250").
+    # Optional per-kind entries — a kind absent here falls back to the flat
+    # per_injection_token_cap above; this key itself must exist (possibly
+    # empty), consulted via direct subscript in agent/config.py.
+    per_kind_token_cap:
+      directive: 400
+      gotcha: 100
+      operational: 250
     # Chars-per-token estimate used to size injected text against the two
     # caps above (same rough ratio as hooks.log_chars_per_token; kept as a
     # separate key since the two domains may need to diverge later).
@@ -1477,15 +1494,26 @@ memory_triggers:
     # no-query-heuristics rule — this is a numeric vector-similarity gate,
     # not a keyword/regex classifier). Tune by editing these numbers, never
     # by adding code. M is an explicit-trigger-only primitive this wave: no
-    # kind's default bundle includes it. One entry per memory kind
+    # kind's default bundle includes it, except `operational` (its PRIMARY
+    # surface — UPG-MEMORY-STATE-MACHINE §5.1). One entry per memory kind
     # (memory_triggers.total_order.kind_priority) is required — a missing
     # kind fails at import (agent/config.py), never silently defaults.
     theta_by_kind:
       directive: 0.72
       gotcha: 0.72
+      operational: 0.75
       task: 0.75
       finding: 0.78
       reference: 0.80
+    # Serving-policy hardening (§5.5): a note that fires via the M axis is
+    # session-cooldown-gated for this many TURNS (a UserPromptSubmit count,
+    # not wall-clock seconds — distinct from a trigger's own declared
+    # `cooldown` T-modifier, which is wall-clock and opt-in per trigger) —
+    # "probabilistic (semantic) hits get a per-note session cooldown", so an
+    # always-relevant note doesn't re-inject on every single turn.
+    # Deterministic (path/command-anchored) hits are unaffected — they keep
+    # the pre-existing per-session-per-axis fire ledger as their debounce.
+    cooldown_turns: 10
 
 proactive:
   # UPG-PRO — "Proactive context" (experimental). Deterministically surface the

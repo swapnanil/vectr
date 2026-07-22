@@ -35,7 +35,7 @@ from agent.config import (
     MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
 )
 from agent.eviction_advisor import EvictionAdvisor
-from agent.trigger_engine import TriggerFireLedger
+from agent.trigger_engine import TriggerFireLedger, TurnInjectionLedger
 from agent.version_stamp import compute_version_stamp
 
 logger = logging.getLogger(__name__)
@@ -321,6 +321,17 @@ class VectrService:
         # identity, so a caller with no session_id (see `_ledger_for`) simply
         # gets no suppression rather than sharing state across callers.
         self._trigger_ledgers: dict[str, TriggerFireLedger] = {}
+
+        # Per-turn cross-surface injection ledger (TRIGGER-ENGINE wave 3,
+        # UPG-MEMORY-STATE-MACHINE §5.3/§5.4) — a SEPARATE registry from
+        # `self._trigger_ledgers` immediately above: that ledger is
+        # session-scoped and only resets at compaction; this one is
+        # note_id-granular (not axis-granular) and resets every
+        # UserPromptSubmit (see `recall()`), closing the arm-C double-dip
+        # finding across session-start bulk / PreToolUse anchored-or-
+        # command-family / prompt-time semantic. Same LRU-bounded shape as
+        # the advisor/ledger registries above.
+        self._turn_ledgers: dict[str, TurnInjectionLedger] = {}
 
         self._indexing = False
         self._index_thread: threading.Thread | None = None
@@ -868,6 +879,36 @@ class VectrService:
         no-op."""
         if session_id and session_id in self._trigger_ledgers:
             self._trigger_ledgers[session_id].reset()
+
+    def _turn_ledger_for(self, session_id: str | None) -> TurnInjectionLedger | None:
+        """Look up (or create) the per-session `TurnInjectionLedger`
+        (TRIGGER-ENGINE wave 3, §5.3/§5.4), mirroring `_ledger_for` above.
+        `session_id=None` returns None rather than a shared fallback ledger
+        — same rationale as `_ledger_for`: cross-surface dedup only makes
+        sense within one session's identity."""
+        if not session_id:
+            return None
+        ledger = self._turn_ledgers.get(session_id)
+        if ledger is None:
+            if len(self._turn_ledgers) >= EVICTION_MAX_TRACKED_SESSIONS:
+                oldest_id = next(iter(self._turn_ledgers))
+                del self._turn_ledgers[oldest_id]
+            ledger = TurnInjectionLedger()
+            self._turn_ledgers[session_id] = ledger
+        else:
+            del self._turn_ledgers[session_id]
+            self._turn_ledgers[session_id] = ledger
+        return ledger
+
+    def reset_turn_ledger(self, session_id: str | None) -> None:
+        """Reset one session's per-turn dedup/budget ledger — called from
+        `recall()` at every UserPromptSubmit (§5.3: "reset at each
+        UserPromptSubmit"), never at PreCompact (that resets
+        `self._trigger_ledgers` above instead, a different lifecycle). A
+        caller with no session_id, or a session with no turn ledger yet, is
+        a no-op."""
+        if session_id and session_id in self._turn_ledgers:
+            self._turn_ledgers[session_id].reset()
 
     def fire_triggers(
         self,
@@ -1764,6 +1805,7 @@ class VectrService:
         boot: bool = False,
         min_similarity: float | None = None,
         file_path: str | None = None,
+        command: str | None = None,
         max_age_days: float | None = None,
         sort_by: str = "relevance",
         detail: str = "index",
@@ -1808,12 +1850,30 @@ class VectrService:
         paths those branches already provide. Both default to None, which
         reproduces today's ledger-less, budget-less, scope-unenforced
         behaviour exactly for any caller that predates this wave.
-        """
+
+        `command` (wave 3, UPG-MEMORY-STATE-MACHINE §5.2): the raw Bash
+        command about to run — `PreToolUse`'s new `Bash` matcher lane
+        (main.py's `cmd_hook`). Mutually exclusive with `file_path` at the
+        hook-call level (one PreToolUse event is either a file tool or a
+        Bash tool); threaded into `_recall_impl()`'s own `command` branch.
+
+        Serving-policy hardening (wave 3, §5.3/§5.5): a `hook_event`==
+        "UserPromptSubmit" call resets this session's per-turn injection
+        ledger (`reset_turn_ledger`) and advances its semantic-cooldown
+        turn counter BEFORE evaluating anything this turn — the one place
+        "reset at each UserPromptSubmit" (§5.3) is implemented, reusing the
+        hook signal `main.py`'s `user-prompt-submit` branch already sends
+        rather than adding a new endpoint."""
+        if hook_event == "UserPromptSubmit" and session_id:
+            self.reset_turn_ledger(session_id)
+            turn_counter_ledger = self._ledger_for(session_id)
+            if turn_counter_ledger is not None:
+                turn_counter_ledger.advance_turn()
         if hook_event is not None and min_similarity is None:
             min_similarity = HOOKS_MIN_SIMILARITY
         notes = self._recall_impl(
             query=query, tags=tags, priority=priority, limit=limit, kind=kind,
-            boot=boot, min_similarity=min_similarity, file_path=file_path,
+            boot=boot, min_similarity=min_similarity, file_path=file_path, command=command,
             max_age_days=max_age_days, sort_by=sort_by, detail=detail,
             note_id=note_id, surface=surface, session_id=session_id, events=events,
         )
@@ -1831,6 +1891,7 @@ class VectrService:
         boot: bool = False,
         min_similarity: float | None = None,
         file_path: str | None = None,
+        command: str | None = None,
         max_age_days: float | None = None,
         sort_by: str = "relevance",
         detail: str = "index",
@@ -1865,11 +1926,18 @@ class VectrService:
         if boot:
             events_to_fire = events if events else ["session-start"]
             ledger = self._ledger_for(session_id)
+            # `spend_turn_budget` deliberately omitted (defaults False):
+            # session-start bulk keeps its existing separate per-SESSION
+            # cap (`ledger`) rather than the smaller ordinary-turn
+            # allowance (§5.4) — the turn ledger's dedup CLAIM still runs
+            # via `turn_ledger` below, so a note delivered at boot is still
+            # excluded from a same-turn PreToolUse/prompt-submit re-delivery.
             fire_text, _ = self._context_store.fire_and_format(
                 self._workspace_root,
                 events=events_to_fire,
                 session_id=session_id,
                 ledger=ledger,
+                turn_ledger=self._turn_ledger_for(session_id),
                 surface=surface,
             )
             # UPG-NUDGE-HOOK-PATH-UNREACHABLE (B9): the stale-task hygiene nudge
@@ -1900,6 +1968,8 @@ class VectrService:
                 file_path=file_path,
                 session_id=session_id,
                 ledger=self._ledger_for(session_id),
+                turn_ledger=self._turn_ledger_for(session_id),
+                spend_turn_budget=True,
                 surface=surface,
             )
             legacy_notes = self._context_store.recall_for_path(
@@ -1913,6 +1983,27 @@ class VectrService:
             if fire_text and legacy_text:
                 return fire_text + "\n\n" + legacy_text
             return fire_text or legacy_text
+
+        # Command-anchored mode (wave 3, UPG-MEMORY-STATE-MACHINE §5.2):
+        # PreToolUse's new `Bash` matcher lane. No legacy-recall merge
+        # here — unlike the file_path branch above, there is no pre-
+        # existing content-substring path for command-anchored notes to
+        # fall back to; the 'command' trigger primitive is the entire
+        # surface. `spend_turn_budget=True`: this is an ordinary per-turn
+        # surface, metered against the shared ≤500-token turn allowance
+        # (§5.4), unlike session-start's boot delivery above.
+        if command:
+            fire_text, _ = self._context_store.fire_and_format(
+                self._workspace_root,
+                event="pre-run",
+                command=command,
+                session_id=session_id,
+                ledger=self._ledger_for(session_id),
+                turn_ledger=self._turn_ledger_for(session_id),
+                spend_turn_budget=True,
+                surface=surface,
+            )
+            return fire_text
 
         # Generic query mode (TRIGGER-ENGINE wave 2a): `events`, when given,
         # is the same opt-in merge the file_path branch above always applies
@@ -1936,6 +2027,8 @@ class VectrService:
                 query=query,
                 session_id=session_id,
                 ledger=self._ledger_for(session_id),
+                turn_ledger=self._turn_ledger_for(session_id),
+                spend_turn_budget=True,
                 surface=surface,
             )
 

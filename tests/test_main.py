@@ -2058,6 +2058,50 @@ class TestCmdHookPreToolUse:
         _, mock_fetch = self._run(stdin, "x", monkeypatch, capsys)
         assert "session_id" not in mock_fetch.call_args[0][1]
 
+    # memoization-l1-capture-design §5 — command-family trigger lane
+    def test_emits_command_payload_for_bash_tool(self, monkeypatch, capsys):
+        """A Bash tool call carries tool_input.command, not file_path — it
+        gets its own payload shape (the 'command' trigger axis), routed
+        through the same PreToolUse context-injection wire as the gotcha
+        file_path branch above."""
+        stdin = '{"cwd": "/p", "tool_name": "Bash", "tool_input": {"command": "pytest -q tests/"}}'
+        out, mock_fetch = self._run(
+            stdin, "[1] [OPERATIONAL] pytest must use ./.venv/bin/python", monkeypatch, capsys)
+        payload = json.loads(out)
+        assert payload["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert "pytest must use ./.venv/bin/python" in payload["hookSpecificOutput"]["additionalContext"]
+        sent = mock_fetch.call_args[0][1]
+        assert sent["command"] == "pytest -q tests/"
+        assert "file_path" not in sent
+        # No kind="gotcha" filter: the 'command' trigger primitive (any
+        # kind) is the whole surface, unlike the legacy file_path recall.
+        assert "kind" not in sent
+        assert sent["hook_event"] == "PreToolUse"
+
+    def test_bash_empty_command_injects_nothing(self, monkeypatch, capsys):
+        stdin = '{"cwd": "/p", "tool_name": "Bash", "tool_input": {"command": "  "}}'
+        out, mock_fetch = self._run(stdin, "x", monkeypatch, capsys)
+        mock_fetch.assert_not_called()
+        assert out.strip() == ""
+
+    def test_bash_threads_session_id_into_command_payload(self, monkeypatch, capsys):
+        stdin = ('{"cwd": "/p", "tool_name": "Bash", "tool_input": {"command": "pytest -q"}, '
+                  '"session_id": "abc-123"}')
+        _, mock_fetch = self._run(stdin, "x", monkeypatch, capsys)
+        assert mock_fetch.call_args[0][1]["session_id"] == "abc-123"
+
+    def test_bash_tool_name_never_reads_file_path(self, monkeypatch, capsys):
+        """A Bash tool call is routed on tool_name alone, before the generic
+        file_path fallback — even if tool_input carried a stray file_path
+        key, the command branch must win and the payload must be
+        command-shaped, never a mix of both."""
+        stdin = ('{"cwd": "/p", "tool_name": "Bash", '
+                 '"tool_input": {"command": "pytest -q", "file_path": "/p/README.md"}}')
+        _, mock_fetch = self._run(stdin, "x", monkeypatch, capsys)
+        sent = mock_fetch.call_args[0][1]
+        assert sent["command"] == "pytest -q"
+        assert "file_path" not in sent
+
 
 class TestCmdHookPreCompact:
     def test_snapshots_with_trigger_in_label_and_emits_nothing(self, monkeypatch, capsys):
@@ -2177,12 +2221,14 @@ class TestInitHooks:
 
     def test_writes_pretooluse_hook_with_edit_write_read_matcher(self, tmp_path):
         """UPG-HOOK-INJECT-OBSERVABILITY (c): matcher extended to Read so
-        gotcha injection also fires on file-reading tools, not only edits."""
+        gotcha injection also fires on file-reading tools, not only edits.
+        Extended again (memoization-l1-capture-design §5) to Bash so the
+        'command' trigger axis fires on the about-to-run command."""
         m._write_claude_hooks(str(tmp_path))
         data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
         groups = data["hooks"]["PreToolUse"]
         assert len(groups) == 1
-        assert groups[0]["matcher"] == "Edit|Write|Read"
+        assert groups[0]["matcher"] == "Edit|Write|Read|Bash"
         assert groups[0]["hooks"][0]["command"] == "vectr hook pre-tool-use"
 
     def test_writes_precompact_hook(self, tmp_path):
@@ -3593,10 +3639,13 @@ class TestCodexHooks:
 
     def test_pretooluse_matcher_covers_codex_apply_patch(self, tmp_path):
         """Codex's native edit tool is apply_patch; the matcher unions it with
-        the Claude-compat Edit|Write names so it fires whichever Codex uses."""
+        the Claude-compat Edit|Write names so it fires whichever Codex uses.
+        Also unions Bash (memoization-l1-capture-design §5) for the 'command'
+        trigger axis — an absent tool name is a harmless no-op, so this needs
+        no live verification of Codex's exact shell-tool name to ship safely."""
         m._write_codex_hooks(str(tmp_path))
         hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())["hooks"]
-        assert hooks["PreToolUse"][0]["matcher"] == "Edit|Write|apply_patch"
+        assert hooks["PreToolUse"][0]["matcher"] == "Edit|Write|apply_patch|Bash"
         assert hooks["PreToolUse"][0]["hooks"][0]["command"] == "vectr hook pre-tool-use"
 
     def test_precompact_matcher(self, tmp_path):

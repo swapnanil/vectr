@@ -49,7 +49,9 @@ from agent.config import (
     MEMORY_TRIGGER_CHARS_PER_TOKEN,
     MEMORY_TRIGGER_KIND_PRIORITY,
     MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP,
+    MEMORY_TRIGGER_PER_KIND_TOKEN_CAP,
     MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP,
+    MEMORY_TRIGGER_PER_TURN_TOKEN_CAP,
     MEMORY_TRIGGER_PRIORITY_RANK,
 )
 from agent.working_context_store._types import DEFAULT_SCOPE, EVENT_VALUES, WorkingNote
@@ -58,7 +60,7 @@ from agent.working_context_store._types import DEFAULT_SCOPE, EVENT_VALUES, Work
 # kind injects its index-tier one-liner. Not config.yaml: this is the kind
 # taxonomy's own injection policy, the same closed-vocabulary category as
 # VALID_KINDS/EVENT_VALUES, not a tunable weight.
-FULL_TEXT_KINDS: tuple[str, ...] = ("directive", "gotcha")
+FULL_TEXT_KINDS: tuple[str, ...] = ("directive", "gotcha", "operational")
 
 
 # ---------------------------------------------------------------------------
@@ -66,12 +68,13 @@ FULL_TEXT_KINDS: tuple[str, ...] = ("directive", "gotcha")
 # ---------------------------------------------------------------------------
 
 def validate_trigger(trigger: dict) -> None:
-    """Raise ValueError if `trigger` is not a well-formed P/S/M/E/T primitive.
+    """Raise ValueError if `trigger` is not a well-formed P/S/M/E/T/command primitive.
 
     A trigger must declare at least one of 'path' (P), 'event' (E), 'symbol'
-    (S — TRIGGER-ENGINE wave 2b, bm2-design-skeleton.md §2), or 'semantic'
-    (M — wave 2b, §8) — T (not_before/expires_visibility/cooldown) is a
-    modifier only and can never fire a trigger by itself.
+    (S — TRIGGER-ENGINE wave 2b, bm2-design-skeleton.md §2), 'semantic'
+    (M — wave 2b, §8), or 'command' (wave 3, UPG-MEMORY-STATE-MACHINE §5.2) —
+    T (not_before/expires_visibility/cooldown) is a modifier only and can
+    never fire a trigger by itself.
 
     'symbol' names a code symbol resolved at fire time against the pre-built
     code symbol graph (the same store `vectr_locate`/`vectr_trace` use) — it
@@ -85,23 +88,34 @@ def validate_trigger(trigger: dict) -> None:
     embedder) computes that boolean; this module never touches the vector or
     the prompt text itself (no-query-heuristics rule).
 
-    Both compose with 'path'/'event' under the SAME conjunction rule those
-    two already use (every declared axis in one trigger dict must ALL
+    'command' is a glob string matched against the NORMALIZED VERB of a
+    Bash tool call about to run (e.g. "pytest*", "./mvnw*") — the same
+    fnmatch mechanism 'path' already uses, against tool-call structure the
+    caller already resolved via `app.cmdnorm.normalize_command()` (the one
+    shared normalizer; this module never parses a raw command string
+    itself). Tool-call argv classification is sanctioned by the
+    no-query-heuristics rule (only prompt/query CONTENT classification is
+    forbidden) — see agent/trigger_engine.py's module docstring.
+
+    All four (path/symbol/semantic/command) compose with 'event' under the
+    SAME conjunction rule (every declared axis in one trigger dict must ALL
     match); a trigger may declare at most one value per axis by
     construction (each axis is a single dict key)."""
     if not isinstance(trigger, dict):
         raise ValueError(
-            "each trigger must be an object with 'path', 'event', 'symbol', and/or 'semantic' keys"
+            "each trigger must be an object with 'path', 'event', 'symbol', "
+            "'semantic', and/or 'command' keys"
         )
     path = trigger.get("path")
     event = trigger.get("event")
     symbol = trigger.get("symbol")
     semantic = trigger.get("semantic")
-    if path is None and event is None and symbol is None and semantic is None:
+    command = trigger.get("command")
+    if path is None and event is None and symbol is None and semantic is None and command is None:
         raise ValueError(
-            "a trigger must declare at least one of 'path', 'event', 'symbol', or 'semantic' — "
-            "T (not_before/expires_visibility/cooldown) is a modifier only "
-            "and never fires alone"
+            "a trigger must declare at least one of 'path', 'event', 'symbol', "
+            "'semantic', or 'command' — T (not_before/expires_visibility/cooldown) "
+            "is a modifier only and never fires alone"
         )
     if path is not None and not isinstance(path, str):
         raise ValueError("trigger 'path' must be a glob string")
@@ -111,6 +125,8 @@ def validate_trigger(trigger: dict) -> None:
         raise ValueError("trigger 'symbol' must be a non-empty string naming a code symbol")
     if semantic is not None and not isinstance(semantic, bool):
         raise ValueError("trigger 'semantic' must be a boolean")
+    if command is not None and (not isinstance(command, str) or not command):
+        raise ValueError("trigger 'command' must be a non-empty glob string naming a command verb")
     for key in ("not_before", "expires_visibility", "cooldown"):
         value = trigger.get(key)
         if value is not None and not isinstance(value, (int, float)):
@@ -170,6 +186,19 @@ def default_bundle_for_kind(
                  architectural decision is meant to be pulled on demand as a
                  group (vectr_recall(kind="decision",
                  sort_by="chronological")), not pushed into every session.
+    - operational: env/process/build facts (UPG-MEMORY-STATE-MACHINE §5.1).
+                 Primary surface is prompt-time semantic matching — the
+                 SAME θ-gated M primitive as finding/reference, but
+                 (unlike them) given a real default bundle since
+                 operational facts are meant to resurface proactively, not
+                 only on an explicit `triggers[]` override. The secondary
+                 PreToolUse command-family surface (§5.2, the 'command'
+                 axis) is opt-in only — a caller that wants a note to also
+                 fire beside a specific command family declares an explicit
+                 `triggers=[{"command": "..."}]` override, which fully
+                 replaces this default bundle rather than adding to it (the
+                 same replace-not-merge rule every kind's explicit
+                 `triggers[]` already follows).
     """
     if kind == "directive":
         return [{"event": "session-start"}, {"event": "post-compaction"}]
@@ -181,7 +210,23 @@ def default_bundle_for_kind(
             for anchor in (anchors or [])
             if anchor and anchor[0]
         ]
+    if kind == "operational":
+        return [{"event": "prompt-submit", "semantic": True}]
     return []
+
+
+def effective_triggers(note: WorkingNote) -> list[dict]:
+    """The trigger bundle `evaluate_note()` actually walks for `note`:
+    its own explicit `triggers[]` when non-empty, else its kind's default
+    bundle (`default_bundle_for_kind()`) resolved fresh from the note's
+    current kind/anchors/priority. Single source of truth for "replace-
+    not-merge" resolution — `evaluate_note()` uses it directly, and a
+    caller needing to know WHICH axes a note would be evaluated against
+    without re-running the whole evaluation (e.g.
+    `WorkingContextStore.fire()`'s semantic-candidate prefilter, which
+    must not miss a note relying on an implicit default bundle) calls this
+    instead of re-deriving the same replace-not-merge rule a second time."""
+    return note.triggers if note.triggers else default_bundle_for_kind(note.kind, note.anchors, note.priority)
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +246,12 @@ class FireResult:
     # staleness machinery — never computed here, this module never touches
     # the filesystem (evaluate_note is pure).
     stale_paths: list[str] = field(default_factory=list)
+    # Whether the WINNING trigger declared the M (semantic) axis (wave 3,
+    # §5.5) — lets the caller apply the semantic-only session cooldown
+    # (TriggerFireLedger.eligible(..., semantic=True)) without re-deriving
+    # which trigger index matched or re-walking default_bundle_for_kind()
+    # itself; this module already knows it at match time.
+    semantic: bool = False
 
 
 def _trigger_matches(
@@ -210,6 +261,7 @@ def _trigger_matches(
     *,
     resolved_symbols: frozenset[str] | None = None,
     semantic_matched: bool | None = None,
+    command_verb: str | None = None,
 ) -> tuple[bool, str]:
     """Conjunction check for ONE trigger's declared P/E/S/M primitives
     against the current lifecycle state. Returns (matched, human-readable
@@ -245,12 +297,26 @@ def _trigger_matches(
     text, only the boolean outcome. `None` means "not evaluated this call"
     (no embedder attached, embedder still warming up, or the note declares
     no semantic axis) — a trigger declaring 'semantic' then deterministically
-    does not match; never an error."""
+    does not match; never an error.
+
+    `command_verb` (wave 3, UPG-MEMORY-STATE-MACHINE §5.2) is the NORMALIZED
+    verb of the Bash command about to run, resolved ONCE per `fire()` call
+    by the caller via `app.cmdnorm.normalize_command()` (this module never
+    parses a raw command string itself — purity invariant, same category as
+    `path_candidates`). The 'command' primitive fnmatch-globs the trigger's
+    declared pattern against it, exactly like 'path' globs against a
+    resolved file path. `None` means no Bash command this call (every other
+    lifecycle moment) — a trigger declaring 'command' then deterministically
+    does not match; never an error, never a fuzzy guess."""
     path_pattern = trigger.get("path")
     want_event = trigger.get("event")
     want_symbol = trigger.get("symbol")
     want_semantic = trigger.get("semantic")
-    if path_pattern is None and want_event is None and want_symbol is None and want_semantic is None:
+    want_command = trigger.get("command")
+    if (
+        path_pattern is None and want_event is None and want_symbol is None
+        and want_semantic is None and want_command is None
+    ):
         return False, ""  # malformed (should have been rejected by validate_trigger)
 
     if path_pattern is not None:
@@ -266,6 +332,9 @@ def _trigger_matches(
     if want_semantic:
         if semantic_matched is not True:
             return False, ""
+    if want_command is not None:
+        if command_verb is None or not fnmatch.fnmatch(command_verb, want_command):
+            return False, ""
 
     parts = []
     if path_pattern is not None:
@@ -274,6 +343,8 @@ def _trigger_matches(
         parts.append(f"symbol {want_symbol}")
     if want_semantic:
         parts.append("semantic")
+    if want_command is not None:
+        parts.append(f"command {want_command}")
     desc = " + ".join(parts) if parts else ""
     if want_event is not None:
         desc = f"{desc} at {want_event}" if desc else f"event {want_event}"
@@ -352,6 +423,7 @@ def evaluate_note(
     branch: str | None = None,
     resolved_symbols: frozenset[str] | None = None,
     semantic_matched: bool | None = None,
+    command_verb: str | None = None,
 ) -> FireResult:
     """Deterministic, total (never raises for well-formed input), linear-in-
     triggers evaluation of whether `note` fires for the given lifecycle state.
@@ -389,7 +461,9 @@ def evaluate_note(
     function never touches the symbol graph itself, only a caller-resolved
     set of names. `semantic_matched` (wave 2b, §8) is likewise passed
     straight through for the M primitive — a single precomputed boolean for
-    this note, never a vector or prompt text."""
+    this note, never a vector or prompt text. `command_verb` (wave 3, §5.2)
+    is likewise passed straight through for the 'command' primitive — the
+    caller-normalized Bash verb, never a raw command string."""
     if now is None:
         now = time.time()
 
@@ -405,7 +479,7 @@ def evaluate_note(
     if not permitted:
         return FireResult(note.note_id, False, scope_reason)
 
-    triggers = note.triggers if note.triggers else default_bundle_for_kind(note.kind, note.anchors, note.priority)
+    triggers = effective_triggers(note)
     if not triggers:
         return FireResult(note.note_id, False, "no triggers declared for this note/kind")
 
@@ -413,6 +487,7 @@ def evaluate_note(
         matched, desc = _trigger_matches(
             trig, event, path_candidates,
             resolved_symbols=resolved_symbols, semantic_matched=semantic_matched,
+            command_verb=command_verb,
         )
         if not matched:
             continue
@@ -430,6 +505,7 @@ def evaluate_note(
             explanation=f"fired: trigger {idx + 1} — {desc}",
             trigger_index=idx,
             faded=faded,
+            semantic=bool(trig.get("semantic")),
         )
     return FireResult(note.note_id, False, "no declared trigger matched this event/path")
 
@@ -504,17 +580,52 @@ class TriggerFireLedger:
     tokens that delivery actually packed; `remaining_budget()` is what the
     next delivery has left to spend. `reset()` also zeroes the spend —
     compaction makes the whole budget available again, consistent with
-    previously-fired memories becoming re-eligible."""
+    previously-fired memories becoming re-eligible.
+
+    Serving-policy hardening (wave 3, §5.5): the M (semantic) axis gets a
+    DIFFERENT re-eligibility rule than every other axis — "probabilistic
+    (semantic) hits get a per-note session cooldown (~10 turns)" rather than
+    "fires once per session, ever". `eligible()`/`record_fire()` accept an
+    optional `semantic=True` + `cooldown_turns=N`: when both are given, the
+    (note_id, trigger_index) pair becomes re-eligible again once at least
+    `cooldown_turns` UserPromptSubmit turns (`advance_turn()`) have passed
+    since it last fired, instead of never. Deterministic (path/command-
+    anchored) axes are unaffected — they keep the plain forever-this-session
+    suppression above, which already serves as their debounce (every
+    lifecycle moment a session-scoped ledger instance covers is bounded by
+    the next compaction reset, same as before this wave)."""
 
     def __init__(self) -> None:
         self._fired: dict[int, set[int]] = {}
         self._spent_tokens: int = 0
+        self._semantic_last_fired_turn: dict[tuple[int, int], int] = {}
+        self._turn: int = 0
 
-    def eligible(self, note_id: int, trigger_index: int) -> bool:
+    def advance_turn(self) -> None:
+        """Call once per UserPromptSubmit — advances the turn counter the
+        semantic-axis cooldown above is measured in. Deliberately NOT called
+        by `reset()`: the turn count is wall-session progress, not
+        fire/spend eligibility state, so a compaction event resetting
+        eligibility does not also rewind how many turns have elapsed."""
+        self._turn += 1
+
+    def eligible(
+        self,
+        note_id: int,
+        trigger_index: int,
+        *,
+        semantic: bool = False,
+        cooldown_turns: int | None = None,
+    ) -> bool:
+        if semantic and cooldown_turns is not None:
+            last_turn = self._semantic_last_fired_turn.get((note_id, trigger_index))
+            return last_turn is None or (self._turn - last_turn) >= cooldown_turns
         return trigger_index not in self._fired.get(note_id, set())
 
-    def record_fire(self, note_id: int, trigger_index: int) -> None:
+    def record_fire(self, note_id: int, trigger_index: int, *, semantic: bool = False) -> None:
         self._fired.setdefault(note_id, set()).add(trigger_index)
+        if semantic:
+            self._semantic_last_fired_turn[(note_id, trigger_index)] = self._turn
 
     def remaining_budget(self) -> int:
         return max(0, MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP - self._spent_tokens)
@@ -524,6 +635,72 @@ class TriggerFireLedger:
 
     def reset(self) -> None:
         self._fired.clear()
+        self._spent_tokens = 0
+        # Restores full re-eligibility for the semantic axis too (§3 "cleared
+        # on compaction" is a per-session-ledger-wide contract — every other
+        # axis's suppression is cleared by `_fired.clear()` above; the
+        # semantic axis's suppression lives in this separate dict instead,
+        # so it needs its own clear to avoid a note that fired via the
+        # semantic axis just before compaction staying wrongly suppressed
+        # afterward). `_turn` itself is deliberately NOT reset here — see
+        # `advance_turn()`'s docstring: it is wall-session progress, not
+        # eligibility state, and clearing the dict above already makes
+        # `last_turn is None` for every note regardless of `_turn`'s value.
+        self._semantic_last_fired_turn.clear()
+
+
+# ---------------------------------------------------------------------------
+# Per-turn cross-surface dedup + budget ledger (UPG-MEMORY-STATE-MACHINE §5.3
+# /§5.4) — closes the arm-C double-dip finding.
+# ---------------------------------------------------------------------------
+
+class TurnInjectionLedger:
+    """Per-turn, cross-SURFACE dedup + budget, daemon-side, reset at every
+    UserPromptSubmit — distinct from `TriggerFireLedger` above (session-
+    scoped, per-(note_id, trigger_index) axis, persists across turns and
+    only resets at compaction).
+
+    vectr has THREE independent injection surfaces that each call
+    `fire()`/`fire_and_format()` on their own schedule: session-start bulk,
+    PreToolUse (file-anchored or command-family), and prompt-time semantic.
+    Without a shared ledger, the SAME note can match more than one surface
+    in the SAME turn and get injected twice — the documented arm-C
+    double-dip. This ledger is note_id-granular (not axis-granular — which
+    SURFACE claimed it doesn't matter, only that exactly one did) and is
+    shared by every surface's `fire_and_format()` call this turn via the
+    SAME instance (`VectrService`'s per-session registry): the first
+    surface to match a note claims it; a later surface's `fire_and_format()`
+    call filters that note_id out before it ever reaches the injection
+    budget pack, so it is never even considered for injection twice — never
+    silently dropped from the FIRST surface's delivery, only suppressed
+    everywhere else this turn.
+
+    `remaining_turn_budget()` bounds the ORDINARY-turn allowance (§5.4,
+    default 500 tokens) shared by every per-turn surface combined.
+    Session-start's own once-per-session bulk delivery is deliberately NOT
+    metered here — see `WorkingContextStore.fire_and_format()`'s
+    `spend_turn_budget` flag — it keeps its existing separate
+    per-session cap (`TriggerFireLedger.remaining_budget()`); the dedup
+    claim above still applies to it, only the budget accounting does not."""
+
+    def __init__(self) -> None:
+        self._claimed: set[int] = set()
+        self._spent_tokens: int = 0
+
+    def eligible(self, note_id: int) -> bool:
+        return note_id not in self._claimed
+
+    def claim(self, note_id: int) -> None:
+        self._claimed.add(note_id)
+
+    def remaining_turn_budget(self) -> int:
+        return max(0, MEMORY_TRIGGER_PER_TURN_TOKEN_CAP - self._spent_tokens)
+
+    def record_turn_spend(self, tokens: int) -> None:
+        self._spent_tokens += max(0, tokens)
+
+    def reset(self) -> None:
+        self._claimed.clear()
         self._spent_tokens = 0
 
 
@@ -600,7 +777,14 @@ def pack_injection(
         text, tier = (full_text, "full") if prefer_full else (index_text, "index")
         tokens = token_estimate(text)
 
-        if tier == "full" and tokens > MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP:
+        # Per-kind cap (§5.4's research table: directive<=400, gotcha<=100,
+        # operational<=250) overrides the flat per-injection cap for kinds
+        # that declare one; a kind absent from the override falls back to
+        # the single global cap, unchanged from before this wave.
+        per_injection_cap = MEMORY_TRIGGER_PER_KIND_TOKEN_CAP.get(
+            note.kind, MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP
+        )
+        if tier == "full" and tokens > per_injection_cap:
             text, tier, tokens = index_text, "index", token_estimate(index_text)
 
         if tokens > budget:

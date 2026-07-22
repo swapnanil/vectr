@@ -656,6 +656,47 @@ class TestTriggerEngineLiveViaRest:
         assert "ephemeral scratch note" not in client.post(
             "/v1/recall", json={}).json()["notes"]
 
+    # memoization-l1-capture-design §5 — command-family trigger lane
+    def test_command_trigger_fires_on_matching_normalized_verb(self, client_real_memory) -> None:
+        """The 'command' trigger axis globs against the NORMALIZED verb
+        (app/cmdnorm.py), not the raw command string — 'pytest -q tests/'
+        must match a trigger declared against the 'pytest' verb."""
+        client = client_real_memory
+        client.post("/v1/remember", json={
+            "content": "pytest must use ./.venv/bin/python, not global python",
+            "kind": "operational", "triggers": [{"command": "pytest"}],
+        })
+        notes = client.post(
+            "/v1/recall", json={"command": "pytest -q tests/test_foo.py"}).json()["notes"]
+        assert "must use ./.venv/bin/python" in notes
+
+    def test_command_trigger_is_silent_for_a_different_verb(self, client_real_memory) -> None:
+        client = client_real_memory
+        client.post("/v1/remember", json={
+            "content": "pytest must use ./.venv/bin/python, not global python",
+            "kind": "operational", "triggers": [{"command": "pytest"}],
+        })
+        notes = client.post(
+            "/v1/recall", json={"command": "git status"}).json()["notes"]
+        assert "must use ./.venv/bin/python" not in notes
+
+    def test_command_trigger_does_not_fire_via_a_query_that_names_the_command(self, client_real_memory) -> None:
+        """The 'command' axis only ever matches PreToolUse's normalized
+        VERB (app/cmdnorm.py), passed through recall()'s dedicated `command`
+        field — never a query string. Mentioning 'pytest' in a semantic
+        query must not fire the trigger through the query/events path (the
+        no-query-heuristics rule: only the caller-declared `command` field,
+        never parsed prompt content, drives this axis)."""
+        client = client_real_memory
+        client.post("/v1/remember", json={
+            "content": "pytest must use ./.venv/bin/python, not global python",
+            "kind": "operational", "triggers": [{"command": "pytest"}],
+        })
+        notes = client.post(
+            "/v1/recall", json={"query": "how do I run pytest", "events": ["prompt-submit"]},
+        ).json()["notes"]
+        assert "must use ./.venv/bin/python" not in notes
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/forget

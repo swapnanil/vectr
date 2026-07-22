@@ -16,10 +16,13 @@ import pytest
 from agent.trigger_engine import (
     FULL_TEXT_KINDS,
     MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP,
+    MEMORY_TRIGGER_PER_TURN_TOKEN_CAP,
     FireResult,
     PackedItem,
     TriggerFireLedger,
+    TurnInjectionLedger,
     default_bundle_for_kind,
+    effective_triggers,
     evaluate_note,
     frame_prefix,
     pack_injection,
@@ -111,6 +114,20 @@ class TestValidateTrigger:
         with pytest.raises(ValueError):
             validate_trigger({"semantic": "yes"})
 
+    def test_command_only_is_valid(self) -> None:
+        validate_trigger({"command": "pytest*"})
+
+    def test_command_and_event_is_valid(self) -> None:
+        validate_trigger({"command": "pytest*", "event": "pre-run"})
+
+    def test_non_string_command_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            validate_trigger({"command": 123})
+
+    def test_empty_string_command_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            validate_trigger({"command": ""})
+
     def test_non_dict_rejected(self) -> None:
         with pytest.raises(ValueError):
             validate_trigger("not a dict")  # type: ignore[arg-type]
@@ -189,6 +206,47 @@ class TestDefaultBundleForKind:
     @pytest.mark.parametrize("kind", ["finding", "reference"])
     def test_finding_and_reference_get_no_default_bundle(self, kind: str) -> None:
         assert default_bundle_for_kind(kind, None) == []
+
+    def test_operational_defaults_to_prompt_time_semantic_matching(self) -> None:
+        """§5.1: operational's primary surface is the same θ-gated M
+        primitive as finding/reference, but (unlike them) given a real
+        default bundle so it resurfaces proactively without an explicit
+        `triggers[]` override. The command-family surface is opt-in only
+        (see default_bundle_for_kind's own docstring) — no anchors here
+        should NOT add a command trigger to this default bundle."""
+        assert default_bundle_for_kind("operational", None) == [
+            {"event": "prompt-submit", "semantic": True}
+        ]
+
+
+class TestEffectiveTriggers:
+    """`effective_triggers()` — the single source of truth for "explicit
+    triggers[] replace, never merge with, the kind's default bundle" that
+    both `evaluate_note()` and any caller needing to know a note's bundle
+    WITHOUT running a full evaluation (e.g. WorkingContextStore.fire()'s
+    semantic-candidate prefilter) must consult, so the two never drift."""
+
+    def test_explicit_triggers_are_returned_verbatim(self) -> None:
+        note = _note(kind="directive", triggers=[{"event": "pre-run"}])
+        assert effective_triggers(note) == [{"event": "pre-run"}]
+
+    def test_empty_explicit_triggers_falls_back_to_kind_default(self) -> None:
+        note = _note(kind="directive", triggers=[])
+        assert effective_triggers(note) == default_bundle_for_kind("directive", note.anchors, note.priority)
+
+    def test_operational_with_no_explicit_triggers_resolves_to_its_semantic_default(self) -> None:
+        """Regression guard: this is the exact resolution
+        WorkingContextStore.fire()'s semantic-candidate prefilter must also
+        see, or an operational note relying on its implicit default bundle
+        never gets its vector fetched/compared and can never fire (bug
+        caught while wiring §5.1's default bundle — see fire()'s own
+        notes_wanting_semantic comment)."""
+        note = _note(kind="operational", triggers=[])
+        assert effective_triggers(note) == [{"event": "prompt-submit", "semantic": True}]
+
+    def test_finding_with_no_explicit_triggers_resolves_to_empty(self) -> None:
+        note = _note(kind="finding", triggers=[])
+        assert effective_triggers(note) == []
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +367,36 @@ class TestEvaluateNote:
         result = evaluate_note(note, event="prompt-submit", semantic_matched=True)
         assert result.fired is True
         assert "semantic at prompt-submit" in result.explanation
+
+    def test_command_only_trigger_matches_when_verb_glob_matches(self) -> None:
+        note = _note(triggers=[{"command": "pytest*"}])
+        result = evaluate_note(note, command_verb="pytest")
+        assert result.fired is True
+        assert "command pytest*" in result.explanation
+
+    def test_command_only_trigger_does_not_match_a_different_verb(self) -> None:
+        note = _note(triggers=[{"command": "pytest*"}])
+        result = evaluate_note(note, command_verb="git")
+        assert result.fired is False
+
+    def test_command_trigger_never_fires_when_command_verb_is_none(self) -> None:
+        """Degradation: no Bash tool call this lifecycle moment (every other
+        PreToolUse/event) — a command trigger deterministically does not
+        fire, never an error, mirroring the semantic-axis None contract."""
+        note = _note(triggers=[{"command": "pytest*"}])
+        result = evaluate_note(note, command_verb=None)
+        assert result.fired is False
+
+    def test_command_and_event_conjunction_requires_both(self) -> None:
+        note = _note(triggers=[{"command": "pytest*", "event": "pre-run"}])
+        # command matches, event doesn't
+        assert evaluate_note(note, event="pre-edit", command_verb="pytest").fired is False
+        # event matches, command doesn't
+        assert evaluate_note(note, event="pre-run", command_verb="git").fired is False
+        # both match
+        result = evaluate_note(note, event="pre-run", command_verb="pytest")
+        assert result.fired is True
+        assert "command pytest*" in result.explanation
 
     def test_or_composition_first_match_wins(self) -> None:
         note = _note(triggers=[{"event": "pre-run"}, {"event": "pre-edit"}])
@@ -633,6 +721,91 @@ class TestTriggerFireLedger:
         ledger.reset()
         assert ledger.remaining_budget() == MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP
 
+    # Serving-policy hardening (wave 3, §5.5) — semantic-only repeat cooldown
+    def test_semantic_axis_is_eligible_on_first_fire_with_no_turn_advanced(self) -> None:
+        ledger = TriggerFireLedger()
+        assert ledger.eligible(note_id=1, trigger_index=0, semantic=True, cooldown_turns=10) is True
+
+    def test_semantic_axis_is_ineligible_the_very_next_turn(self) -> None:
+        """A semantic fire on turn N must not re-fire on turn N+1 — the
+        cooldown counts in TURNS, not sessions, so one `advance_turn()` must
+        already suppress it (distinct from the deterministic axes' plain
+        forever-this-session suppression, which needs no turn counting)."""
+        ledger = TriggerFireLedger()
+        ledger.record_fire(note_id=1, trigger_index=0, semantic=True)
+        ledger.advance_turn()
+        assert ledger.eligible(note_id=1, trigger_index=0, semantic=True, cooldown_turns=10) is False
+
+    def test_semantic_axis_is_eligible_again_after_cooldown_turns_elapse(self) -> None:
+        ledger = TriggerFireLedger()
+        ledger.record_fire(note_id=1, trigger_index=0, semantic=True)
+        for _ in range(10):
+            ledger.advance_turn()
+        assert ledger.eligible(note_id=1, trigger_index=0, semantic=True, cooldown_turns=10) is True
+
+    def test_non_semantic_axis_ignores_turn_advancement_entirely(self) -> None:
+        """A deterministic (path/command/symbol) fire keeps the pre-existing
+        forever-this-session suppression — turns elapsing must never make it
+        eligible again within the same (uncompacted) session."""
+        ledger = TriggerFireLedger()
+        ledger.record_fire(note_id=1, trigger_index=0, semantic=False)
+        for _ in range(50):
+            ledger.advance_turn()
+        assert ledger.eligible(note_id=1, trigger_index=0, semantic=False) is False
+
+    def test_reset_clears_semantic_cooldown_state_too(self) -> None:
+        ledger = TriggerFireLedger()
+        ledger.record_fire(note_id=1, trigger_index=0, semantic=True)
+        ledger.advance_turn()
+        ledger.reset()
+        assert ledger.eligible(note_id=1, trigger_index=0, semantic=True, cooldown_turns=10) is True
+
+
+class TestTurnInjectionLedger:
+    """Serving-policy hardening (wave 3, §5.3/§5.4) — the per-turn,
+    cross-surface dedup + budget ledger that closes the arm-C double-dip."""
+
+    def test_fresh_ledger_is_eligible_for_any_note(self) -> None:
+        ledger = TurnInjectionLedger()
+        assert ledger.eligible(note_id=1) is True
+
+    def test_claiming_a_note_makes_it_ineligible_this_turn(self) -> None:
+        ledger = TurnInjectionLedger()
+        ledger.claim(note_id=1)
+        assert ledger.eligible(note_id=1) is False
+
+    def test_claiming_one_note_does_not_affect_another(self) -> None:
+        ledger = TurnInjectionLedger()
+        ledger.claim(note_id=1)
+        assert ledger.eligible(note_id=2) is True
+
+    def test_fresh_ledger_has_the_full_per_turn_budget(self) -> None:
+        ledger = TurnInjectionLedger()
+        assert ledger.remaining_turn_budget() == MEMORY_TRIGGER_PER_TURN_TOKEN_CAP
+
+    def test_record_turn_spend_is_cumulative(self) -> None:
+        ledger = TurnInjectionLedger()
+        ledger.record_turn_spend(100)
+        ledger.record_turn_spend(50)
+        assert ledger.remaining_turn_budget() == MEMORY_TRIGGER_PER_TURN_TOKEN_CAP - 150
+
+    def test_record_turn_spend_never_drives_budget_negative(self) -> None:
+        ledger = TurnInjectionLedger()
+        ledger.record_turn_spend(MEMORY_TRIGGER_PER_TURN_TOKEN_CAP + 5_000)
+        assert ledger.remaining_turn_budget() == 0
+
+    def test_reset_clears_both_claims_and_spend(self) -> None:
+        """UserPromptSubmit resets this ledger every turn (§5.3) — both the
+        note_id claim set and the cumulative spend must return to fresh
+        state, or a note legitimately due again next turn would stay
+        wrongly suppressed, or the budget would stay wrongly exhausted."""
+        ledger = TurnInjectionLedger()
+        ledger.claim(note_id=1)
+        ledger.record_turn_spend(MEMORY_TRIGGER_PER_TURN_TOKEN_CAP)
+        ledger.reset()
+        assert ledger.eligible(note_id=1) is True
+        assert ledger.remaining_turn_budget() == MEMORY_TRIGGER_PER_TURN_TOKEN_CAP
+
 
 # ---------------------------------------------------------------------------
 # Provenance framing
@@ -717,6 +890,27 @@ class TestPackInjection:
         note = _note(note_id=1, kind="directive")
         oversized_full = "X" * (MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP * MEMORY_TRIGGER_CHARS_PER_TOKEN * 2)
         packed = pack_injection([(note, oversized_full, "short index line")])
+        assert packed[0].tier == "index"
+        assert packed[0].text == "short index line"
+
+    @pytest.mark.parametrize("kind", ["directive", "gotcha", "operational"])
+    def test_per_kind_cap_overrides_the_flat_per_injection_cap(self, kind: str) -> None:
+        """directive/gotcha/operational each declare their own
+        `per_kind_token_cap` override (agent/config.yaml) rather than
+        sharing the flat MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP — text sized
+        to fit under the flat cap but OVER the (smaller) kind-specific cap
+        must still downgrade to the index tier."""
+        from agent.config import (
+            MEMORY_TRIGGER_CHARS_PER_TOKEN,
+            MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP,
+            MEMORY_TRIGGER_PER_KIND_TOKEN_CAP,
+        )
+        kind_cap = MEMORY_TRIGGER_PER_KIND_TOKEN_CAP[kind]
+        assert kind_cap < MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP  # precondition for this test to mean anything
+        note = _note(note_id=1, kind=kind)
+        # sized to clear the flat cap but not the kind-specific one
+        text = "X" * ((kind_cap + 1) * MEMORY_TRIGGER_CHARS_PER_TOKEN)
+        packed = pack_injection([(note, text, "short index line")])
         assert packed[0].tier == "index"
         assert packed[0].text == "short index line"
 

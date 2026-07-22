@@ -247,7 +247,7 @@ class MapSaveResponse(BaseModel):
 # Memory / working context
 # ---------------------------------------------------------------------------
 
-_VALID_KINDS = ("directive", "task", "gotcha", "finding", "reference", "decision")
+_VALID_KINDS = ("directive", "task", "gotcha", "finding", "reference", "decision", "operational")
 
 # TRIGGER-ENGINE wave 1 (bm2-design-skeleton.md §1/§2/§5) — mirrors
 # agent.working_context_store._types.SCOPE_VALUES/PROVENANCE_VALUES. Kept as
@@ -271,7 +271,7 @@ class RememberRequest(BaseModel):
     content: str = Field(..., min_length=1, description="Working note to store")
     tags: list[str] | None = Field(default=None, description="Topic tags")
     priority: str = Field(default="medium", description="high | medium | low")
-    kind: str = Field(default="finding", description="directive | task | gotcha | finding | reference | decision")
+    kind: str = Field(default="finding", description="directive | task | gotcha | finding | reference | decision | operational")
     session_id: str | None = Field(default=None)
     title: str = Field(default="", description="Short label for index-tier display (optional; derived from first content line if empty)")
     agent: str = Field(
@@ -398,11 +398,12 @@ class RecallRequest(BaseModel):
     query: str | None = Field(default=None)
     tags: list[str] | None = Field(default=None)
     priority: str | None = Field(default=None)
-    kind: str | None = Field(default=None, description="Filter by kind: directive | task | gotcha | finding | reference | decision")
+    kind: str | None = Field(default=None, description="Filter by kind: directive | task | gotcha | finding | reference | decision | operational")
     limit: int = Field(default=10, ge=1, le=100)
     boot: bool = Field(default=False, description="Boot mode (UPG-9.2): unconditional directives + high-priority tasks; ignores query/tags/priority/kind/limit")
     min_similarity: float | None = Field(default=None, ge=0.0, le=1.0, description="Relevance cutoff (UPG-5.1): drop semantic matches below this cosine similarity; only applies with a query")
     file_path: str | None = Field(default=None, description="Path-anchored recall (UPG-9.6): notes recorded against this file (basename/relpath match); for the PreToolUse gotcha hook")
+    command: str | None = Field(default=None, description="Command-anchored recall (UPG-MEMORY-STATE-MACHINE §5): raw about-to-run shell command (Bash tool_input.command) for the PreToolUse command-family trigger; normalized via app.cmdnorm before matching")
     max_age_days: float | None = Field(default=None, gt=0.0, description="Time filter (UPG-RECALL-HIERARCHY): only return notes created within this many days")
     sort_by: str = Field(default="relevance", description="Sort order (UPG-RECALL-HIERARCHY, UPG-DECISION-TIMELINE): relevance | recency | priority | chronological (oldest-first; index lines render the creation date)")
     detail: str = Field(default="index", description="Detail level (UPG-RECALL-HIERARCHY): 'index' = one-line summary per note (default, token-bounded); 'full' = full bodies")

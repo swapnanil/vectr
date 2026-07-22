@@ -367,6 +367,7 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
         boot=body.boot,
         min_similarity=body.min_similarity,
         file_path=body.file_path,
+        command=body.command,
         max_age_days=body.max_age_days,
         sort_by=body.sort_by,
         detail=body.detail,

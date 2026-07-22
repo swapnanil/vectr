@@ -334,6 +334,56 @@ _ANTI_MEMORY_TEMPLATE = (
 )
 
 
+# Serving-policy hardening (UPG-MEMORY-STATE-MACHINE §5.6) — the unified
+# framing template for TRIGGER-fired (injected) notes: "structural trust,
+# never imperative, no hedge adjectives". Replaces trigger_engine.py's
+# provenance-hedged `frame_prefix()` (DIRECTIVE/"memory to verify"/"auto-
+# captured") ONLY on this delivery path (`fire_and_format()` via
+# `_format_full_block(..., injected=True)`) — a note pulled through a direct
+# `vectr_recall`/manual-expand call keeps the existing provenance framing
+# unchanged, since that path is a deliberate caller query, not an unsolicited
+# injection the caller needs to weigh trust on sight for. A fixed protocol
+# string shaping how a fact is PRESENTED (same category as _ANTI_MEMORY_
+# TEMPLATE and trigger_engine.py's own frame constants), not query-
+# classification, so it lives here as a plain constant rather than in
+# config.yaml.
+_INJECTED_FRAME_TEMPLATE = "Recorded {date} (anchor: {target}, status: {status}): "
+
+
+def _injected_frame(note: WorkingNote, stale_warnings: dict[int, list[str]]) -> str:
+    """The structural-trust framing prefix for one ACTIVE (non-revoked)
+    injected note (§5.6/§4.4). `anchor: <target>` names the note's first
+    declared anchor path, or "none" when it has no declared anchors —
+    proxy anchors (§4.4: lockfiles/CI configs/etc standing in for "the
+    process they encode") are anchors like any other, so no special-casing
+    is needed here beyond reading `note.anchors[0]`.
+
+    `status` is derived from the SAME deterministic anchor-drift signal
+    `check_staleness()` already writes into `stale_warnings` (the
+    `[anchor_changed]`-suffixed reason, §4.4) — never re-derived here, just
+    read: drift present -> "changed since — verify". No drift and the note
+    is kind="operational" -> "last confirmed <date>" (§4.4 "Option D,
+    unconditional": operational facts carry a recency verdict even when
+    nothing has been proven to have drifted, since env/process facts decay
+    by elapsed time, not just by a hash mismatch). Otherwise -> "matches
+    current state"."""
+    date = _date_str(note.created_at)
+    target = (
+        note.anchors[0][0]
+        if note.anchors and note.anchors[0] and note.anchors[0][0]
+        else "none"
+    )
+    stale_files = stale_warnings.get(note.note_id, [])
+    anchor_drifted = any(f.endswith("[anchor_changed]") for f in stale_files)
+    if anchor_drifted:
+        status = "changed since — verify"
+    elif note.kind == "operational":
+        status = f"last confirmed {date}"
+    else:
+        status = "matches current state"
+    return _INJECTED_FRAME_TEMPLATE.format(date=date, target=target, status=status)
+
+
 def _scope_label(note: WorkingNote) -> str:
     """Human-readable scope label for the 'full' detail render
     (UPG-SCOPE-SURFACE-BACK): the bare scope value, or 'branch (<name>)' when
@@ -351,6 +401,7 @@ def _format_full_block(
     note: WorkingNote,
     stale_warnings: dict[int, list[str]],
     note_states: dict[int, dict] | None = None,
+    injected: bool = False,
 ) -> str:
     """One note's multi-line 'full' detail block (age, tags, author,
     kind/provenance markers, provenance-framed content, staleness warnings)
@@ -363,7 +414,20 @@ def _format_full_block(
 
     `note_states` (UPG-MEMORY-STATE-MACHINE §4.1), when given, is the
     `note_event_states()` fold result. Omitted (None, the default) renders
-    exactly as before this parameter existed."""
+    exactly as before this parameter existed.
+
+    `injected` (§5.6, wave 3), when true, renders the ACTIVE-note content
+    line through the unified structural-trust framing template
+    (`_injected_frame()`) instead of `frame_prefix()`'s provenance-hedged
+    imperative wording — `fire_and_format()` is the only caller that ever
+    passes True (an unsolicited trigger delivery); a direct
+    `vectr_recall`/manual-expand call via `format_notes_for_llm()` never
+    does, and keeps today's framing unchanged. The revoked/anti-memory
+    branch immediately below is COMPLETELY UNAFFECTED by this flag — §4.3's
+    "Anti-memory shares the per-turn ledger and budget like any injection"
+    means anti-memory composes WITH the injected surface, not that it also
+    adopts this content-line template; its own deterrent wording already
+    is the injected framing for a revoked note."""
     from agent.trigger_engine import frame_prefix
 
     n = note
@@ -423,13 +487,22 @@ def _format_full_block(
     # additive only, index-tier lines are untouched (token-budgeted).
     scope_marker = f" [scope={_scope_label(n)}]"
 
-    lines = [
-        f"[{n.note_id}] [{n.priority.upper()}]{kind_marker}{provenance_marker}{scope_marker}{tag_str}{author_str}  ({age_str})"
-        f"{stale_marker}{superseded_marker}",
+    if injected:
+        # Serving-policy hardening (§5.6): structural trust, never
+        # imperative — the verdict comes from deterministic machine state
+        # (anchor hash match/drift, or an operational note's recency),
+        # never a hedge adjective.
+        content_line = f"  {_injected_frame(n, stale_warnings)}{n.content}"
+    else:
         # Provenance framing (§5): only a human-provenance directive ever
         # renders as an unhedged imperative; agent-provenance is framed as
         # memory to verify; auto-provenance carries the weakest framing.
-        f"  {frame_prefix(n.provenance, n.kind)}{n.content}",
+        content_line = f"  {frame_prefix(n.provenance, n.kind)}{n.content}"
+
+    lines = [
+        f"[{n.note_id}] [{n.priority.upper()}]{kind_marker}{provenance_marker}{scope_marker}{tag_str}{author_str}  ({age_str})"
+        f"{stale_marker}{superseded_marker}",
+        content_line,
     ]
     if stale_files:
         changed = ", ".join(stale_files)
@@ -849,7 +922,7 @@ class WorkingContextStore:
         superseded before the new note is inserted.
 
         `kind` is one of VALID_KINDS (directive|task|gotcha|finding|reference|
-        decision); an unrecognised value falls back to DEFAULT_KIND.
+        decision|operational); an unrecognised value falls back to DEFAULT_KIND.
 
         `title` is a short label for index-tier display (UPG-RECALL-HIERARCHY).
         When empty, a fallback is derived from the first non-empty line of content,
@@ -2552,6 +2625,7 @@ class WorkingContextStore:
         *,
         event: str | None = None,
         file_path: str | None = None,
+        command: str | None = None,
         query: str | None = None,
         ledger: "TriggerFireLedger | None" = None,
         now: float | None = None,
@@ -2595,15 +2669,38 @@ class WorkingContextStore:
         passed into `evaluate_note()`; `trigger_engine.py` never resolves a
         path itself (purity invariant).
 
+        `command` (wave 3, UPG-MEMORY-STATE-MACHINE §5.2), when given, is a
+        raw Bash command about to run (`PreToolUse`'s `Bash` matcher lane) —
+        normalized into its VERB exactly once here via
+        `app.cmdnorm.normalize_command()` (the single shared normalizer, also
+        used by `app/arcs.py`'s arc detection; never re-implemented) and
+        passed through as `command_verb` for the 'command' trigger primitive.
+        Classifying the argv of a tool call the caller is ABOUT to run is
+        tool-call structure, not prompt/query content (no-query-heuristics
+        rule's sanctioned carve-out — see agent/trigger_engine.py's module
+        docstring and the design doc's §6 compliance ledger).
+
         Every note that actually fires has its `last_fired` column stamped to
         `now` — this is what makes a trigger's `cooldown` T-modifier
         meaningful on the NEXT evaluation (evaluate_note() reads `last_fired`
-        directly off the note)."""
-        from agent.config import MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND
-        from agent.trigger_engine import evaluate_note, total_order_key
+        directly off the note). A note whose winning trigger declared the M
+        (semantic) axis is additionally gated by `ledger`'s per-note
+        session-turn cooldown (§5.5) rather than the plain forever-this-
+        session suppression every other axis gets — see
+        `TriggerFireLedger.eligible()`'s docstring."""
+        from agent.config import (
+            MEMORY_TRIGGER_SEMANTIC_COOLDOWN_TURNS,
+            MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND,
+        )
+        from agent.trigger_engine import effective_triggers, evaluate_note, total_order_key
 
         if now is None:
             now = time.time()
+
+        command_verb: str | None = None
+        if command:
+            from app.cmdnorm import normalize_command
+            command_verb = normalize_command(command).verb
 
         branch = _current_git_branch(Path(workspace))
         path_candidates = _path_trigger_candidates(workspace, file_path)
@@ -2649,8 +2746,17 @@ class WorkingContextStore:
         # already-stored vector (reused, never re-embedded) is gated by a
         # fixed per-kind theta — no runtime adaptation, no query parsing.
         semantic_matched_by_id: dict[int, bool] = {}
+        # `effective_triggers()` resolves each note's ACTUAL evaluated bundle
+        # (explicit triggers[], or its kind's default bundle when none are
+        # declared — same replace-not-merge rule evaluate_note() itself
+        # applies) rather than reading `n.triggers` directly: a note relying
+        # on an implicit default bundle with a semantic axis (e.g.
+        # kind="operational", §5.1) would otherwise never have its vector
+        # fetched here, so `evaluate_note()` would always see
+        # `semantic_matched=None` for it and the trigger could never fire —
+        # a real bug caught while wiring operational's default bundle.
         notes_wanting_semantic = [
-            n for n in notes if any(t.get("semantic") for t in n.triggers)
+            n for n in notes if any(t.get("semantic") for t in effective_triggers(n))
         ]
         if (
             query
@@ -2693,20 +2799,24 @@ class WorkingContextStore:
                 session_id=session_id, branch=branch,
                 resolved_symbols=resolved_symbols,
                 semantic_matched=semantic_matched_by_id.get(note.note_id),
+                command_verb=command_verb,
             )
             if not result.fired:
                 continue
-            if (
-                ledger is not None
-                and result.trigger_index is not None
-                and not ledger.eligible(note.note_id, result.trigger_index)
-            ):
-                continue
+            if ledger is not None and result.trigger_index is not None:
+                cooldown_turns = (
+                    MEMORY_TRIGGER_SEMANTIC_COOLDOWN_TURNS if result.semantic else None
+                )
+                if not ledger.eligible(
+                    note.note_id, result.trigger_index,
+                    semantic=result.semantic, cooldown_turns=cooldown_turns,
+                ):
+                    continue
             result.stale_paths = stale.get(note.note_id, [])
             results.append(result)
             fired_ids.append(note.note_id)
             if ledger is not None and result.trigger_index is not None:
-                ledger.record_fire(note.note_id, result.trigger_index)
+                ledger.record_fire(note.note_id, result.trigger_index, semantic=result.semantic)
 
         results.sort(key=lambda r: total_order_key(notes_by_id[r.note_id]))
 
@@ -2721,7 +2831,7 @@ class WorkingContextStore:
 
         audit(
             "TRIGGER_FIRE", workspace=workspace, trigger_event=event or "",
-            file_path=file_path or "", fired=len(results),
+            file_path=file_path or "", command=command_verb or "", fired=len(results),
         )
         return results
 
@@ -2732,9 +2842,12 @@ class WorkingContextStore:
         events: list[str] | None = None,
         event: str | None = None,
         file_path: str | None = None,
+        command: str | None = None,
         query: str | None = None,
         session_id: str | None = None,
         ledger: "TriggerFireLedger | None" = None,
+        turn_ledger: "TurnInjectionLedger | None" = None,
+        spend_turn_budget: bool = False,
         surface: str = "mcp",
         now: float | None = None,
     ) -> tuple[str, set[int]]:
@@ -2751,6 +2864,10 @@ class WorkingContextStore:
         one-event case; when both are omitted, `fire()` is called once with
         `event=None` (matches its own default, e.g. a plain PreToolUse
         file_path-only check with no event name).
+
+        `command` (wave 3, §5.2) is forwarded to every `fire()` call
+        unchanged — see `fire()`'s own docstring for the normalization
+        contract.
 
         `query` (TRIGGER-ENGINE wave 2b, §8) is forwarded to every `fire()`
         call unchanged — the M primitive's ONE activity embedding is
@@ -2769,7 +2886,32 @@ class WorkingContextStore:
         CUMULATIVE across every call in one session (§3): the budget spent
         by earlier deliveries this session is subtracted before packing this
         one, and this delivery's own spend is recorded back into the ledger
-        before returning."""
+        before returning.
+
+        `turn_ledger` (wave 3, §5.3/§5.4 — closes the arm-C double-dip
+        finding), if given, is consulted TWICE: (1) after merging `seen`
+        across the OR event list, any note_id another surface already
+        claimed THIS TURN (`turn_ledger.eligible()` is False) is dropped
+        before it is even considered for packing — never delivered twice in
+        one turn, regardless of how many separate surfaces matched it; (2)
+        after `pack_injection()` decides which notes actually survive the
+        budget, every SURVIVING note_id is claimed
+        (`turn_ledger.claim()`) — a note that gets evicted for budget
+        reasons is deliberately NOT claimed, so it remains eligible for a
+        later surface this same turn to still deliver it (never silently
+        dropped for the whole turn just because an earlier, budget-
+        exhausted surface merely matched it).
+
+        `spend_turn_budget`, when True, additionally caps this call's
+        packing budget by `turn_ledger.remaining_turn_budget()` (the ≤500
+        ordinary-turn allowance shared by every per-turn surface combined,
+        §5.4) and records this delivery's spend back into it. Session-
+        start's own bulk boot delivery passes False (the default) — it
+        keeps its existing separate `ledger`-cumulative per-SESSION cap
+        only; the turn-ledger CLAIM above still runs for it regardless, so
+        a note delivered at boot is still correctly excluded from a
+        same-turn PreToolUse/prompt-submit re-delivery, it is just never
+        counted against the smaller per-turn allowance."""
         from agent.trigger_engine import pack_injection, token_estimate, total_order_key
 
         event_list = events if events else ([event] if event is not None else [None])
@@ -2779,11 +2921,14 @@ class WorkingContextStore:
         seen: dict[int, "FireResult"] = {}
         for ev in event_list:
             for r in self.fire(
-                workspace, event=ev, file_path=file_path, query=query, session_id=session_id,
-                ledger=ledger, now=now,
+                workspace, event=ev, file_path=file_path, command=command, query=query,
+                session_id=session_id, ledger=ledger, now=now,
             ):
                 if r.note_id not in seen:
                     seen[r.note_id] = r
+
+        if turn_ledger is not None:
+            seen = {nid: r for nid, r in seen.items() if turn_ledger.eligible(nid)}
 
         if not seen:
             return "", set()
@@ -2806,17 +2951,25 @@ class WorkingContextStore:
         items = []
         for note_id in ordered_ids:
             note = notes_by_id[note_id]
-            full_text = _format_full_block(note, stale_by_id, note_states)
+            full_text = _format_full_block(note, stale_by_id, note_states, injected=True)
             index_text = _format_index_line(note, stale_by_id, surface=surface, note_states=note_states)
             items.append((note, full_text, index_text))
 
         budget = ledger.remaining_budget() if ledger is not None else None
+        if spend_turn_budget and turn_ledger is not None:
+            turn_budget = turn_ledger.remaining_turn_budget()
+            budget = turn_budget if budget is None else min(budget, turn_budget)
         packed = pack_injection(items, budget=budget)
         if not packed:
             return "", set()
         if ledger is not None:
             spent = sum(token_estimate(p.text) for p in packed)
             ledger.record_spend(spent)
+        if spend_turn_budget and turn_ledger is not None:
+            turn_ledger.record_turn_spend(sum(token_estimate(p.text) for p in packed))
+        if turn_ledger is not None:
+            for p in packed:
+                turn_ledger.claim(p.note_id)
 
         header = f"# Triggered Memory ({len(packed)} fired)\n"
         text = header + "\n\n".join(p.text for p in packed)

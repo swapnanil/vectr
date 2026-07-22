@@ -334,7 +334,7 @@ def client_real_memory(tmp_path):
     svc.reset_trigger_ledger.side_effect = _reset_trigger_ledger
 
     def _recall(query=None, tags=None, priority=None, limit=10, kind=None, boot=False,
-                min_similarity=None, file_path=None, max_age_days=None, sort_by="relevance",
+                min_similarity=None, file_path=None, command=None, max_age_days=None, sort_by="relevance",
                 detail="index", note_id=None, surface="mcp", hook_event=None,
                 session_id=None, events=None):
         if note_id is not None:
@@ -361,6 +361,12 @@ def client_real_memory(tmp_path):
             if fire_text and legacy_text:
                 return fire_text + "\n\n" + legacy_text
             return fire_text or legacy_text
+        if command:
+            fire_text, _ = real_store.fire_and_format(
+                ws, event="pre-run", command=command, session_id=session_id,
+                ledger=_ledger_for(session_id), surface=surface,
+            )
+            return fire_text
         fire_text, fired_ids = "", set()
         if events:
             fire_text, fired_ids = real_store.fire_and_format(

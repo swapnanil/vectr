@@ -311,14 +311,20 @@ _MEMORY_WRITE_TOOLS = [
                         "'finding' = a relevance-ranked learning; 'reference' = a pointer (URL/ticket); "
                         "'decision' = an architectural/design decision plus its why — not auto-injected, "
                         "recall the group chronologically with vectr_recall(kind=\"decision\", "
-                        "sort_by=\"chronological\") for an ADR-style decision history. "
+                        "sort_by=\"chronological\") for an ADR-style decision history; "
+                        "'operational' = a build/env/process fact (a build quirk, a CI gotcha, "
+                        "feedback-loop knowledge — e.g. 'tests must run via ./.venv/bin/python'), not "
+                        "anchored to a single code file the way 'gotcha' is. Surfaces mainly via "
+                        "prompt-time semantic recall; declare an explicit triggers=[{'command': "
+                        "'<verb-glob>'}] override to also surface it right before a matching shell "
+                        "command runs. "
                         "When a new kind='task' note replaces an earlier checkpoint (the work moved on, "
                         "the old note is no longer the current state), pass supersedes=<old note_id> so "
                         "the stale checkpoint stops firing at every future session-start instead of "
                         "piling up alongside the new one."
                     ),
                     "default": "finding",
-                    "enum": ["directive", "task", "gotcha", "finding", "reference", "decision"],
+                    "enum": ["directive", "task", "gotcha", "finding", "reference", "decision", "operational"],
                 },
                 "title": {
                     "type": "string",
@@ -493,9 +499,9 @@ _MEMORY_TOOLS = [
                 },
                 "kind": {
                     "type": "string",
-                    "description": "Filter to one memory kind: 'directive' | 'task' | 'gotcha' | 'finding' | 'reference' | 'decision'",
+                    "description": "Filter to one memory kind: 'directive' | 'task' | 'gotcha' | 'finding' | 'reference' | 'decision' | 'operational'",
                     "nullable": True,
-                    "enum": ["directive", "task", "gotcha", "finding", "reference", "decision"],
+                    "enum": ["directive", "task", "gotcha", "finding", "reference", "decision", "operational"],
                 },
                 "sort_by": {
                     "type": "string",

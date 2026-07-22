@@ -2823,6 +2823,156 @@ class TestFireAndFormat:
         assert len(note_ids) == 1
         assert "never push to main" in text
 
+    # -----------------------------------------------------------------
+    # G3 — arm-C double-dip regression (memoization-l1-capture-design §5.3)
+    # -----------------------------------------------------------------
+    def test_g3_same_note_matched_by_two_surfaces_in_one_turn_injects_once(self, tmp_path) -> None:
+        """Recreates the arm-C double-dip shape: ONE note declares TWO
+        separate trigger axes (session-start bulk delivery AND a
+        pre-edit file-anchored trigger) — two DIFFERENT (note_id,
+        trigger_index) pairs, so a session-scoped `TriggerFireLedger`'s
+        per-axis dedup alone would NOT catch this (each axis fires exactly
+        once on its own axis, legitimately). Only the NEW note_id-granular
+        `TurnInjectionLedger`, shared across BOTH surfaces' `fire_and_format`
+        calls within the same turn, must collapse this to a single
+        injection — proving the fix, not just the ledger's own unit
+        contract already covered by TestTurnInjectionLedger."""
+        from agent.trigger_engine import TurnInjectionLedger
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(
+            ws, "auth.py: verify_token() must check expiry before signature",
+            kind="finding",
+            triggers=[{"event": "session-start"}, {"path": "src/auth.py", "event": "pre-edit"}],
+        )
+        turn_ledger = TurnInjectionLedger()
+
+        # Surface 1: session-start bulk delivery (boot).
+        boot_text, boot_ids = store.fire_and_format(
+            ws, events=["session-start"], turn_ledger=turn_ledger, spend_turn_budget=True,
+        )
+        assert boot_ids == {note_id}
+        assert "verify_token() must check expiry" in boot_text
+
+        # Surface 2: PreToolUse file-anchored trigger, SAME turn (turn_ledger
+        # not reset in between — a real UserPromptSubmit reset happens only
+        # at the NEXT turn boundary).
+        edit_text, edit_ids = store.fire_and_format(
+            ws, event="pre-edit", file_path="src/auth.py",
+            turn_ledger=turn_ledger, spend_turn_budget=True,
+        )
+        assert edit_ids == set()  # already claimed by surface 1 this turn
+        assert edit_text == ""
+
+        # Single injection within budget: the note's content appears exactly
+        # once across the whole turn's combined output, never twice.
+        combined = boot_text + edit_text
+        assert combined.count("verify_token() must check expiry") == 1
+        assert turn_ledger.remaining_turn_budget() >= 0  # never driven negative
+
+        # A later turn (reset, mirroring UserPromptSubmit) restores
+        # eligibility — the dedup is per-turn, not permanent.
+        turn_ledger.reset()
+        again_text, again_ids = store.fire_and_format(
+            ws, event="pre-edit", file_path="src/auth.py",
+            turn_ledger=turn_ledger, spend_turn_budget=True,
+        )
+        assert again_ids == {note_id}
+        assert "verify_token() must check expiry" in again_text
+
+
+class TestInjectedFrame:
+    """`_injected_frame()` (memoization-l1-capture-design.md §5.6) — the
+    unified structural-trust framing template for a trigger-fired note:
+    'Recorded <date> (anchor: <target>, status: <verdict>): '. `<verdict>`
+    is always read from deterministic machine state (check_staleness()'s
+    own anchor-drift signal, or the note's kind), never asserted freeform."""
+
+    def _note(self, **overrides):
+        from agent.working_context_store._types import WorkingNote
+        base = dict(
+            note_id=1, workspace="/ws", content="c", tags=[], priority="medium",
+            created_at=1700000000.0, last_accessed=1700000000.0, kind="finding",
+        )
+        base.update(overrides)
+        return WorkingNote(**base)
+
+    def test_template_shape_has_recorded_date_anchor_and_status(self, tmp_path) -> None:
+        from agent.working_context_store._store import _injected_frame, _date_str
+        note = self._note()
+        frame = _injected_frame(note, stale_warnings={})
+        assert frame == f"Recorded {_date_str(note.created_at)} (anchor: none, status: matches current state): "
+
+    def test_anchor_target_names_the_first_declared_anchor(self, tmp_path) -> None:
+        from agent.working_context_store._store import _injected_frame
+        note = self._note(anchors=[["src/auth.py", "abc123"], ["src/other.py", None]])
+        frame = _injected_frame(note, stale_warnings={})
+        assert "anchor: src/auth.py" in frame
+
+    def test_no_anchors_renders_target_as_none(self, tmp_path) -> None:
+        from agent.working_context_store._store import _injected_frame
+        note = self._note(anchors=[])
+        frame = _injected_frame(note, stale_warnings={})
+        assert "anchor: none" in frame
+
+    def test_anchor_drift_present_reports_changed_since_verify(self, tmp_path) -> None:
+        """`status` is READ from check_staleness()'s own
+        '[anchor_changed]'-suffixed reason, never re-derived — same
+        deterministic signal §4.4 already computes, not a second heuristic."""
+        from agent.working_context_store._store import _injected_frame
+        note = self._note(note_id=7, anchors=[["src/auth.py", "abc123"]])
+        stale_warnings = {7: ["src/auth.py [anchor_changed]"]}
+        frame = _injected_frame(note, stale_warnings)
+        assert "status: changed since — verify" in frame
+
+    def test_operational_kind_with_no_drift_reports_last_confirmed_date(self, tmp_path) -> None:
+        """§4.4 'Option D, unconditional': an operational fact carries a
+        recency verdict even when nothing has been proven to have drifted —
+        env/process facts decay by elapsed time, not just by hash mismatch."""
+        from agent.working_context_store._store import _injected_frame, _date_str
+        note = self._note(kind="operational")
+        frame = _injected_frame(note, stale_warnings={})
+        assert f"status: last confirmed {_date_str(note.created_at)}" in frame
+
+    def test_ordinary_kind_with_no_drift_reports_matches_current_state(self, tmp_path) -> None:
+        from agent.working_context_store._store import _injected_frame
+        for kind in ("directive", "task", "gotcha", "finding", "reference", "decision"):
+            note = self._note(kind=kind)
+            frame = _injected_frame(note, stale_warnings={})
+            assert "status: matches current state" in frame
+
+    def test_anchor_drift_takes_precedence_over_operational_recency(self, tmp_path) -> None:
+        """Drift is a stronger signal than the unconditional recency verdict
+        — an operational note whose anchor has actually changed must warn
+        'changed since — verify', not fall back to 'last confirmed'."""
+        from agent.working_context_store._store import _injected_frame
+        note = self._note(note_id=3, kind="operational", anchors=[["Makefile", "abc"]])
+        stale_warnings = {3: ["Makefile [anchor_changed]"]}
+        frame = _injected_frame(note, stale_warnings)
+        assert "status: changed since — verify" in frame
+
+    def test_injected_framing_appears_in_fire_and_format_output_for_operational_note(self, tmp_path) -> None:
+        """End-to-end: fire_and_format() renders the injected framing (not
+        frame_prefix()'s provenance-hedged wording) for a live operational
+        note delivered through the trigger engine's M (semantic) axis —
+        proves the template actually reaches the caller, not just the
+        unit-level function. Uses the same _fixed_vector_store helper as
+        TestFireSemanticPrimitive (a fixed cosine-1.0 pair) rather than a
+        precomputed bool, since fire()/fire_and_format() compute the
+        cosine internally from real embeddings — no shortcut param exists
+        on the public entry point, by design (no-query-heuristics rule:
+        this is the one place raw prompt text is embedded, never parsed).
+        No explicit triggers[] — relies on operational's own default
+        bundle (§5.1) to prove the framing composes with that default."""
+        store = _fixed_vector_store(tmp_path, [1.0, 0.0], [1.0, 0.0])
+        ws = str(tmp_path)
+        content = "pytest must run via the venv python, not global python"
+        store.remember(ws, content, kind="operational")
+        text, note_ids = store.fire_and_format(ws, event="prompt-submit", query="anything")
+        assert len(note_ids) == 1
+        assert "Recorded " in text
+        assert "anchor: none" in text
+        assert "status: last confirmed" in text
+
 
 # ---------------------------------------------------------------------------
 # B9: Semantic recall — embed_fn + ChromaDB cosine similarity

@@ -870,8 +870,12 @@ def _write_claude_hooks(workspace: str) -> None:
     # OBSERVABILITY): a file-reading tool has just as deterministic a
     # tool_input.file_path as Edit/Write, so it gets the same gotcha injection
     # at the moment the model is about to look at that file, not only when
-    # it's about to change it.
-    _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|Read",
+    # it's about to change it. Extended to Bash (memoization-l1-capture-design
+    # §5): a command-running tool call carries just as deterministic a
+    # tool_input.command as Edit/Write carries a file_path, so a note anchored
+    # to a command family (the `command` trigger axis) fires at the moment the
+    # model is about to run it, not only when it's about to touch a file.
+    _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|Read|Bash",
                         command="vectr hook pre-tool-use")
     # L1 episode capture (memoization-l1-capture-design §2) — PostToolUse
     # (Bash|Edit|Write|MultiEdit): record one deterministic episode row per
@@ -940,7 +944,11 @@ def _write_codex_hooks(workspace: str) -> None:
     _install_hook_group(hooks, "SessionStart", matcher="startup|resume|clear|compact",
                         command="vectr hook session-start")
     _install_hook_group(hooks, "UserPromptSubmit", command="vectr hook user-prompt-submit")
-    _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|apply_patch",
+    # Adds Bash alongside apply_patch (memoization-l1-capture-design §5, same
+    # rationale as the PreToolUse group in _write_claude_hooks): an absent
+    # tool name is a harmless no-op, so this needs no live verification of
+    # Codex's exact shell-tool name to ship safely.
+    _install_hook_group(hooks, "PreToolUse", matcher="Edit|Write|apply_patch|Bash",
                         command="vectr hook pre-tool-use")
     # L1 episode capture (memoization-l1-capture-design §2) — see
     # _write_claude_hooks's PostToolUse group for the rationale; same event
@@ -2352,7 +2360,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
     | session-start     | `source == "compact"`          | session-start + post-compaction     | POST /v1/recall {..., events: [both]} |
     | user-prompt-submit| —                              | prompt-submit                       | POST /v1/recall {query, ..., events: [prompt-submit], session_id, hook_event} |
     | pre-tool-use      | file-bearing tool (Edit/Write/Read) | pre-edit + that file's path   | POST /v1/recall {file_path, kind: gotcha, session_id, hook_event} |
-    | pre-tool-use      | command-running tool           | pre-run                             | no live caller this wave — PreToolUse's matcher (`_write_claude_hooks`) only reaches Edit/Write/Read, so a command-running tool call never reaches this hook yet |
+    | pre-tool-use      | command-running tool (Bash)    | pre-run + that command's normalized verb (§5.2) | POST /v1/recall {command, session_id, hook_event} |
     | post-tool-use     | Bash/Edit/Write/MultiEdit      | n/a — a WRITE path (L1 episode capture, §2), not a recall/trigger event | POST /v1/episode {session_id, cwd, tool, command/file_path, ...}, via a DETACHED worker (never awaited here) |
     | pre-compact       | any `trigger`                  | ledger reset (§3)                   | POST /v1/snapshot (unchanged) + POST /v1/trigger/reset {session_id} |
     | post-commit       | n/a (fired by `git`, not the editor harness) | n/a — a WRITE path, not a recall/trigger event | POST /v1/commit-note {sha, subject, branch, files} |
@@ -2363,8 +2371,9 @@ def cmd_hook(args: argparse.Namespace) -> None:
     note whose ONLY explicit trigger is `post-compaction` (not covered by the
     directive kind-default bundle, which already includes `session-start`) is
     folded into that one call rather than inventing a new delivery point.
-    `pre-run`/`pre-commit` remain declared-but-inert this wave (no lifecycle
-    moment maps to them — never an error, bm2-design-skeleton.md §2).
+    `pre-run` is now live (wave 3, §5.2 — see the pre-tool-use row above);
+    `pre-commit` remains declared-but-inert this wave (no lifecycle moment
+    maps to it — never an error, bm2-design-skeleton.md §2).
 
     `post-commit` (UPG-COMMIT-MEMORY-HOOK) is fundamentally different from
     the five events above: it is invoked directly by `git` (installed by
@@ -2455,7 +2464,33 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # `_write_claude_hooks`, not a content-based guess made here. The
             # engine's pre-edit event (TRIGGER-ENGINE wave 2a) is merged in
             # server-side alongside this same file_path recall.
-            file_path = ((event.get("tool_input") or {}).get("file_path") or "").strip()
+            #
+            # Command-family injection (memoization-l1-capture-design §5,
+            # UPG-MEMORY-STATE-MACHINE §5.2): a Bash call carries no
+            # `tool_input.file_path` at all, only `tool_input.command` — this
+            # is a SEPARATE deterministic anchor (the 'command' trigger
+            # primitive), not a file caveat, so it gets its own payload shape
+            # rather than being forced through file_path. Which tool name
+            # reaches this hook as Bash is, again, a matcher decision made by
+            # `_write_claude_hooks`/`_write_codex_hooks`, not a guess here.
+            # No `kind="gotcha"` filter: unlike the legacy file_path recall
+            # below, there is no pre-existing content-substring fallback for
+            # command-anchored notes — the 'command' trigger primitive (any
+            # kind) is the entire surface, server-side in
+            # `VectrService._recall_impl`'s `command` branch.
+            tool_name = (event.get("tool_name") or "").strip()
+            tool_input = event.get("tool_input") or {}
+            if tool_name == "Bash":
+                command = (tool_input.get("command") or "").strip()
+                if not command:
+                    return
+                payload = {"command": command, "hook_event": "PreToolUse"}
+                if session_id:
+                    payload["session_id"] = session_id
+                notes = _fetch_recall(port, payload)
+                _emit_hook_context("PreToolUse", notes)
+                return
+            file_path = (tool_input.get("file_path") or "").strip()
             if not file_path:
                 return
             payload = {"file_path": file_path, "kind": "gotcha", "hook_event": "PreToolUse"}
@@ -3431,7 +3466,7 @@ def main() -> None:
     p_remember.add_argument("content", help="The note content to store")
     p_remember.add_argument("--tags", action="append", metavar="TAG", help="Topic tag (repeatable)")
     p_remember.add_argument("--priority", choices=["high", "medium", "low"], default="medium")
-    p_remember.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference", "decision"],
+    p_remember.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference", "decision", "operational"],
                             default="finding", help="Memory kind (controls injection policy)")
     p_remember.add_argument("--title", default="", help="Short label for index-tier display (optional; derived from first content line if empty)")
     p_remember.add_argument("--agent", default="", help="Optional agent/subagent identifier for multi-agent shared-memory attribution (e.g. 'coder-2'); never inferred")
@@ -3442,7 +3477,7 @@ def main() -> None:
     p_recall.add_argument("query", nargs="?", default=None, help="Semantic recall query (optional)")
     p_recall.add_argument("--tags", action="append", metavar="TAG", help="Filter by tag (repeatable)")
     p_recall.add_argument("--priority", choices=["high", "medium", "low"], default=None)
-    p_recall.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference", "decision"],
+    p_recall.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference", "decision", "operational"],
                           default=None, help="Filter to one memory kind")
     p_recall.add_argument("--boot", action="store_true",
                           help="Boot mode: unconditional directives + high-priority tasks (for SessionStart hooks)")
