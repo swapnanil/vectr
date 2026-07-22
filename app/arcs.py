@@ -51,6 +51,11 @@ from app.cmdnorm import NormalizedCommand, classify_arg, normalize_command
 
 _PENDING_OUTCOMES = frozenset({"failure", "soft_failure"})
 _IGNORED_OUTCOMES = frozenset({"interrupted", "unknown", None})
+# agent/outcome.py's TERMINATION_VALUES that mean "the run was cut short by
+# the user or a signal, not by its own completion" — trap (d): none of these
+# may ever enter or resolve a pending arc, independent of the `outcome`
+# check above (adversarial review 2026-07-22).
+_INTERRUPTED_TERMINATIONS = frozenset({"interrupted", "cancelled", "signal"})
 _MUTATION_DIFF_AXES = ("verb", "flag", "arg", "env", "files")
 
 
@@ -340,10 +345,15 @@ class ArcDetector:
 
         # tool == "bash"
         outcome = episode.get("outcome")
-        if outcome in _IGNORED_OUTCOMES or episode.get("termination") == "interrupted":
+        if outcome in _IGNORED_OUTCOMES or episode.get("termination") in _INTERRUPTED_TERMINATIONS:
             # Trap (d): interrupted/unknown episodes never enter pending and
             # never resolve one either — an interleaved command that
-            # "simply matches nothing".
+            # "simply matches nothing". The termination check is a second,
+            # independent gate on the outcome one above (adversarial review
+            # 2026-07-22): outcome.py already maps a signal/cancelled
+            # termination to outcome="interrupted" before this ever runs,
+            # but this guard holds even if a future outcome-derivation path
+            # regresses that ordering.
             return []
 
         normalized = _normalize_episode(episode)

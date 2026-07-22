@@ -93,16 +93,20 @@ def derive_outcome(
     failure_hit = any(kind == "failure" for _, kind in matched)
     success_hit = any(kind == "success" for _, kind in matched)
 
-    if failure_hit:
+    if interrupted or termination in ("signal", "cancelled"):
+        # A user- or signal-terminated run never becomes an arc endpoint
+        # (spec trap (d)): the run didn't complete, so neither the exit
+        # code nor content markers get a vote — a Ctrl-C mid-test can
+        # print failure-looking output (partial "N failed" summary lines,
+        # tracebacks) that would otherwise misclassify this as a real
+        # failure/soft_failure and feed a false arc.
+        outcome = "interrupted"
+    elif failure_hit:
         outcome = "soft_failure" if (rc is None or rc == 0) else "failure"
     elif success_hit:
         outcome = "success"
-    elif termination == "signal":
-        outcome = "interrupted"
     elif rc is not None:
         outcome = "success" if rc == 0 else "failure"
-    elif interrupted:
-        outcome = "interrupted"
     elif is_error:
         outcome = "failure"
     else:

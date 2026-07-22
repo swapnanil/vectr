@@ -414,6 +414,42 @@ class TestTraps:
         arcs = d.observe(make_episode(ts=1, cmd_raw="mvn test -Dtest=Bar", outcome="success"))
         assert len(arcs) == 1
 
+    def test_interrupted_with_real_termination_value_never_enters_pending(self) -> None:
+        """Adversarial re-review (2026-07-22): `termination` is never
+        literally "interrupted" (agent/outcome.py's TERMINATION_VALUES are
+        normal/signal/timeout/cancelled/unknown) — the old
+        `episode.get("termination") == "interrupted"` guard was dead code.
+        The real values a Ctrl-C (SIGINT, rc=130) or SIGTERM (rc=143)
+        produce are outcome="interrupted" with termination="cancelled" or
+        "signal". Both must be independently sufficient to keep the episode
+        out of pending, per the broadened _INTERRUPTED_TERMINATIONS guard."""
+        for outcome, termination in (("interrupted", "cancelled"), ("interrupted", "signal")):
+            d = ArcDetector()
+            d.observe(
+                make_episode(
+                    ts=0, cmd_raw="pytest tests/x.py", outcome=outcome, termination=termination
+                )
+            )
+            state = d._sessions["s1"]
+            assert state.pending == {}
+            arcs = d.observe(make_episode(ts=1, cmd_raw="pytest tests/x.py", outcome="success"))
+            assert arcs == []
+
+    def test_interrupted_edit_then_identical_success_emits_zero_arcs(self) -> None:
+        """Reviewer's exact end-to-end repro: Ctrl-C'd `pytest tests/x.py`
+        -> edit x.py -> identical green rerun must never be read as a
+        resolved failure->success arc — the "failure" never happened, the
+        run was cancelled."""
+        d = ArcDetector()
+        d.observe(
+            make_episode(
+                ts=0, cmd_raw="pytest tests/x.py", outcome="interrupted", termination="cancelled"
+            )
+        )
+        d.observe(make_episode(ts=1, tool="edit", file_path="/repo/tests/x.py"))
+        arcs = d.observe(make_episode(ts=2, cmd_raw="pytest tests/x.py", outcome="success"))
+        assert arcs == []
+
 
 # ---------------------------------------------------------------------------
 # Episode/session plumbing

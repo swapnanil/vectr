@@ -309,6 +309,45 @@ class TestArcDetectionWiring:
         assert len(edit_rows) == 1
         assert edit_rows[0]["arc_id"] is None
 
+    def test_interrupted_episode_edit_then_identical_success_emits_zero_arcs(
+        self, real_episode_client,
+    ):
+        """Adversarial re-review (2026-07-22, spec trap (d)): the reviewer's
+        exact repro — Ctrl-C'd `pytest tests/x.py` (SIGINT, rc=130,
+        interrupted=True) -> edit x.py -> identical green rerun. Before the
+        outcome.py/arcs.py fix this derived outcome="failure" (the
+        `elif rc is not None` branch ran before any interrupted check) and
+        was let into the pending bucket by app/arcs.py's dead-literal
+        `termination == "interrupted"` guard, producing exactly ONE false
+        arc. Must now emit zero — the run never completed, so it's not a
+        real failure->success pair."""
+        client, svc = real_episode_client
+        import time as time_module
+        base_ts = time_module.time()
+
+        resp = client.post("/v1/episode", json={
+            "session_id": "s1", "cwd": "/repo", "tool": "bash",
+            "command": "pytest tests/x.py", "rc": 130, "is_error": True,
+            "interrupted": True, "stderr_tail": "Exit code 130\n",
+            "ts": base_ts,
+        })
+        assert resp.status_code == 200
+        client.post("/v1/episode", json={
+            "session_id": "s1", "cwd": "/repo", "tool": "edit",
+            "file_path": "/repo/tests/x.py", "ts": base_ts + 1,
+        })
+        resp = client.post("/v1/episode", json={
+            "session_id": "s1", "cwd": "/repo", "tool": "bash",
+            "command": "pytest tests/x.py", "rc": 0, "ts": base_ts + 2,
+        })
+        assert resp.status_code == 200
+
+        assert svc.status()["arcs_pending_distill"] == 0
+        rows = svc.list_episodes(session_id="s1")
+        assert all(r["arc_id"] is None for r in rows)
+        interrupted_row = next(r for r in rows if r["cmd_raw"] == "pytest tests/x.py" and r["rc"] == 130)
+        assert interrupted_row["outcome"] == "interrupted"
+
     def test_disabled_via_config_flag_records_episodes_without_ever_calling_detector(
         self, real_episode_client, monkeypatch,
     ):

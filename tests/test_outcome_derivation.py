@@ -175,3 +175,62 @@ class TestZeroCountNeverFalsePositivesAsFailure:
         )
         assert result["outcome"] == "failure"
         assert "jest.failed" in result["markers_matched"]
+
+
+class TestInterruptedWinsOverRcAndMarkers:
+    """Adversarial re-review fix (2026-07-22, spec trap (d)): a
+    user-interrupted command (Ctrl-C -> SIGINT, or a SIGTERM) must derive
+    outcome="interrupted" — never "failure"/"soft_failure" — regardless of
+    what its exit code or printed output look like. Before this fix,
+    `elif rc is not None` ran before any interrupted check, so
+    PostToolUseFailure's rc=130/143 (128+signum, POSIX convention) with
+    is_interrupt=True fell straight into the rc!=0 -> "failure" branch,
+    and a Ctrl-C mid-test that happened to print a partial "N failed"
+    summary line hit the marker-failure branch first regardless. Both
+    must be inert once `interrupted` is set — the run never completed, so
+    it can never become an arc endpoint (app/arcs.py's pending guard)."""
+
+    def test_sigint_rc_130_with_interrupted_flag_is_interrupted(self):
+        result = derive_outcome(
+            rc=130, is_error=True, interrupted=True,
+            stdout_digest="", stderr_digest="Exit code 130",
+        )
+        assert result["outcome"] == "interrupted"
+        assert result["termination"] == "cancelled"
+
+    def test_sigterm_rc_143_with_interrupted_flag_is_interrupted(self):
+        result = derive_outcome(
+            rc=143, is_error=True, interrupted=True,
+            stdout_digest="", stderr_digest="Exit code 143",
+        )
+        assert result["outcome"] == "interrupted"
+        assert result["termination"] == "cancelled"
+
+    def test_sigterm_rc_143_without_interrupted_flag_is_still_interrupted(self):
+        """A raw 128+signum exit code alone (no editor-supplied `interrupted`
+        flag) already meant termination="signal" pre-fix; must still map to
+        outcome="interrupted", not "failure"."""
+        result = derive_outcome(
+            rc=143, is_error=False, interrupted=False,
+            stdout_digest="", stderr_digest="",
+        )
+        assert result["outcome"] == "interrupted"
+        assert result["termination"] == "signal"
+
+    def test_failure_marker_in_interrupted_output_does_not_override(self):
+        """Reviewer's precedence case: a Ctrl-C mid-`pytest` run can still
+        print a "N failed" partial summary before the process dies — that
+        marker match must not win over `interrupted`."""
+        result = derive_outcome(
+            rc=130, is_error=True, interrupted=True,
+            stdout_digest="", stderr_digest="2 failed, 1 passed in 0.4s",
+        )
+        assert result["outcome"] == "interrupted"
+        assert "pytest.failed" in result["markers_matched"]  # matched, but not decisive
+
+    def test_success_marker_in_interrupted_output_does_not_override(self):
+        result = derive_outcome(
+            rc=130, is_error=True, interrupted=True,
+            stdout_digest="5 passed in 0.4s", stderr_digest="",
+        )
+        assert result["outcome"] == "interrupted"
