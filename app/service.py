@@ -2059,11 +2059,22 @@ class VectrService:
             session_id=session_id,
         )
         # Same cross-surface leak the file_path branch above guards
-        # against: `fired_ids` only reflects THIS call's own engine
-        # delivery, so a note claimed by an earlier surface this turn
-        # (correctly turn-deduped out of `fired_ids`) must still be
-        # excluded from the plain relevance-ranked `recall()` merge below.
-        if fired_ids or turn_ledger is not None:
+        # against, but ONLY when `events` is given — i.e. this call is
+        # itself standing in for an injection surface (main.py's
+        # UserPromptSubmit hook passing events=["prompt-submit"]
+        # alongside `query`), not a caller's own deliberate
+        # `vectr_recall(query=...)` lookup. A plain direct recall has no
+        # `events` and must never be turn-deduped: it is an explicit
+        # request for a note's content, not a passive injection surface —
+        # suppressing it because some OTHER surface already injected the
+        # note earlier this turn would silently hide the note (worst case,
+        # only its budget-capped index line was ever injected, and the
+        # caller can no longer expand the full body this turn). `fired_ids`
+        # is always empty here when `events` is falsy (the `if events:`
+        # block above never ran), so this condition is equivalent to
+        # "only when the injection-surface fire_and_format call above
+        # actually ran."
+        if events:
             notes = [
                 n for n in notes
                 if n.note_id not in fired_ids

@@ -194,6 +194,66 @@ class TestFullPipelineFast:
         ).json()["notes"]
         assert unique not in edit_notes
 
+    def test_direct_recall_is_never_turn_deduped(self, real_service_client) -> None:
+        """Fix-#3 regression (sentinel re-verification, memoization-l1-
+        capture-design §5.3/§5.4): scoping the turn_ledger exclusion added
+        for N4 to injection-surface calls only (`events` given). The direct
+        MCP vectr_recall handler (integrations/mcp_server/_dispatch.py)
+        always threads session_id but never passes `events`/`hook_event` —
+        a plain caller-initiated `vectr_recall(query=...)` is a deliberate
+        request for a note's content, not a passive injection surface, and
+        must never be silently dropped just because some OTHER surface
+        (e.g. the prompt-submit hook) already injected the same note
+        earlier this turn. Only the injection-surface merge itself (this
+        call passing `events=[...]`, standing in for the hook) may still
+        dedupe against the turn ledger — proven by the second assertion
+        below, which re-fires the SAME events-bearing call and confirms it
+        stays deduped."""
+        client, svc, ws = real_service_client
+        unique = "XDIRECT_RECALL_NO_TURN_DEDUP_TOKEN_88X"
+        session_id = "sess-direct-recall-probe"
+
+        client.post("/v1/remember", json={
+            "content": f"{unique}: retry budget must be checked before a network call",
+            "kind": "finding",
+            "triggers": [{"event": "prompt-submit"}],
+        })
+
+        # Surface 1: the prompt-submit hook merge (events=["prompt-submit"])
+        # delivers and claims the note this turn.
+        hook_notes = client.post(
+            "/v1/recall",
+            json={"query": unique, "events": ["prompt-submit"], "session_id": session_id},
+        ).json()["notes"]
+        assert unique in hook_notes
+
+        # Surface 2, SAME turn, SAME session: a plain direct recall with no
+        # `events` — this must still see the note. Before the fix, the
+        # turn_ledger.eligible() check ran unconditionally whenever
+        # session_id was present, silently dropping it here.
+        direct_notes = client.post(
+            "/v1/recall", json={"query": unique, "session_id": session_id},
+        ).json()["notes"]
+        assert unique in direct_notes
+
+        # Control: a fresh session (no claim) also sees the note, confirming
+        # the claimed-session case above isn't passing merely because the
+        # note is unconditionally returned regardless of ledger state.
+        fresh_notes = client.post(
+            "/v1/recall", json={"query": unique, "session_id": "sess-direct-recall-fresh"},
+        ).json()["notes"]
+        assert unique in fresh_notes
+
+        # The injection-surface merge itself (events=["prompt-submit"]
+        # again, same session) must still be turn-deduped — this fix only
+        # scopes the exclusion away from plain direct recall, it does not
+        # remove it from the injection-surface path itself.
+        hook_notes_again = client.post(
+            "/v1/recall",
+            json={"query": unique, "events": ["prompt-submit"], "session_id": session_id},
+        ).json()["notes"]
+        assert unique not in hook_notes_again
+
     def test_evict_hint_after_search(self, real_service_client, tmp_path) -> None:
         client, svc, ws = real_service_client
         py = Path(ws) / "signals.py"

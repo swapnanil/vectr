@@ -420,8 +420,12 @@ def client_real_memory(tmp_path):
                                   max_age_days=max_age_days, sort_by=sort_by, session_id=session_id)
         # Mirrors VectrService._recall_impl's own fix: exclude notes already
         # claimed this turn by an EARLIER surface, not just this call's own
-        # engine delivery.
-        if fired_ids or turn_ledger is not None:
+        # engine delivery — but ONLY when `events` is given, i.e. this call
+        # itself stands in for an injection surface. A plain direct
+        # `vectr_recall(query=...)` (no `events`) must never be turn-deduped
+        # — it is a deliberate lookup, not a passive injection surface, and
+        # `fired_ids` is always empty here when `events` is falsy anyway.
+        if events:
             notes = [
                 n for n in notes
                 if n.note_id not in fired_ids
