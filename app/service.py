@@ -5,11 +5,14 @@ import logging
 import os
 import threading
 import time
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agent.config import (
     DEFAULT_PORT,
+    INDEXING_VECTOR_STORE_DISPATCH_MAX_WORKERS,
     STRATEGY_DEFAULT_BM25_WEIGHT,
     STRATEGY_DEFAULT_SEMANTIC_WEIGHT,
     STRATEGY_KNOWN_FRAMEWORKS,
@@ -402,6 +405,37 @@ class VectrService:
         # graph and a rebuild is overwriting it right now.
         self._symbol_graph_rebuilding = threading.Event()
 
+        # UPG-CHROMA-BLOCKING-EVENT-LOOP: every vector-store-reaching call
+        # made from an async request handler (REST route or MCP tool
+        # dispatch — both served by the same event loop) is routed through
+        # this single dedicated executor via agent.chroma_dispatch instead of
+        # running in place, so a slow vector-store call (e.g. one blocked
+        # behind the store's own internal compaction) cannot hold the loop
+        # and freeze every other in-flight request. A single worker preserves
+        # the request-at-a-time ordering these calls already had while they
+        # ran directly on the one event-loop thread — see config.yaml's
+        # `indexing.vector_store_bridge.dispatch_max_workers` comment for why
+        # this must stay 1. Created in phase 1 (unconditionally, before
+        # `defer_search_init` is even checked) so it exists for the lifetime
+        # of the service regardless of when/whether phase 2 completes.
+        self._chroma_executor = ThreadPoolExecutor(
+            max_workers=INDEXING_VECTOR_STORE_DISPATCH_MAX_WORKERS,
+            thread_name_prefix="vectr-chroma",
+        )
+        # Safety net: a ThreadPoolExecutor's worker thread blocks indefinitely
+        # waiting for work and is only stopped by an explicit shutdown() (or
+        # interpreter exit) — a VectrService instance that is dropped without
+        # going through its own shutdown() (a short-lived script, a failed
+        # startup elsewhere, a test fixture with no teardown) would otherwise
+        # leak that thread for the rest of the process's life. weakref.finalize
+        # guarantees the executor is shut down when this service is garbage-
+        # collected even if shutdown() was never called; whichever of the two
+        # runs first wins and the other becomes a safe no-op (finalize runs
+        # its callback at most once).
+        self._chroma_executor_finalizer = weakref.finalize(
+            self, self._chroma_executor.shutdown, wait=False, cancel_futures=True,
+        )
+
         if not defer_search_init:
             self._init_search_layer()
 
@@ -736,6 +770,17 @@ class VectrService:
         # native worker-thread pool for the rest of the process's life.
         if self._indexer is not None:
             self._indexer.close()
+        # Release the dedicated vector-store-dispatch executor
+        # (UPG-CHROMA-BLOCKING-EVENT-LOOP) — created unconditionally in phase
+        # 1, so always present regardless of how far phase 2 got. Invoked
+        # through its finalizer (see __init__) rather than calling
+        # shutdown() directly so an explicit call here and the garbage-
+        # collection safety net can never both run: whichever fires first
+        # wins, the other is then a no-op. cancel_futures=True: any call
+        # still queued (not yet started) is dropped rather than waited out
+        # during shutdown; wait=False so shutdown itself never blocks on a
+        # call already in flight.
+        self._chroma_executor_finalizer()
 
     # ------------------------------------------------------------------
     # Call counters — all callers (parent + sub-agents) hit the same server,

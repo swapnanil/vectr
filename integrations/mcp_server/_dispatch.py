@@ -17,6 +17,7 @@ from agent.config import (
     EPISODES_DISTILL_MAX_ARCS_RENDERED,
     EPISODES_DISTILL_RENDER_TOKEN_CAP,
 )
+from agent.chroma_dispatch import dispatch_chroma_sync
 from agent.render_paths import workspace_relpath
 
 
@@ -159,8 +160,13 @@ def handle_tools_call(
                 "isError": False,
             }
 
-        results, query_ms = service.search(
-            query, n_results=n_results, language=language
+        # UPG-CHROMA-BLOCKING-EVENT-LOOP: dispatched off the request event
+        # loop through the service's dedicated executor — `handle_tools_call`
+        # itself already runs off-loop (its own callers hop it onto a thread
+        # pool), but as a plain synchronous function it must block-wait for
+        # the result rather than `await` it.
+        results, query_ms = dispatch_chroma_sync(
+            service, service.search, query, n_results=n_results, language=language
         )
 
         # Record the rendered chunks into the calling session's eviction
@@ -279,7 +285,9 @@ def handle_tools_call(
             return {"content": [{"type": "text", "text": _MEMORY_ONLY_MSG}], "isError": False}
 
         try:
-            entries = service.fetch(ids)
+            # UPG-CHROMA-BLOCKING-EVENT-LOOP: same off-loop dispatch as
+            # vectr_search above.
+            entries = dispatch_chroma_sync(service, service.fetch, ids)
         except ValueError as exc:
             return _mcp_error(str(exc))
 

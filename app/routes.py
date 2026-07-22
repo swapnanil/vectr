@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 import agent.config as config
+from agent.chroma_dispatch import dispatch_chroma_async
 
 from app.models import (
     ArcRecord,
@@ -123,12 +124,14 @@ async def index(body: IndexRequest, request: Request) -> IndexResponse:
         from app.service import _MEMORY_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
     try:
-        # UPG-REST-STARVATION requirement #1: a full-workspace index is
-        # bulk chroma/embedding work — run it off the event-loop thread so a
-        # large `/v1/index` call never blocks every other request for its
-        # full duration (previously `svc.index()` ran directly on the async
-        # handler, holding the event loop for as long as indexing took).
-        files, chunks, elapsed = await run_in_threadpool(svc.index, body.path, force=body.force)
+        # UPG-REST-STARVATION requirement #1 / UPG-CHROMA-BLOCKING-EVENT-LOOP:
+        # a full-workspace index is bulk vector-store/embedding work — run it
+        # off the event-loop thread, via the same dedicated single-worker
+        # executor every other vector-store-reaching route uses, so a large
+        # `/v1/index` call never blocks every other request for its full
+        # duration and never runs concurrently with another vector-store call
+        # from a different request.
+        files, chunks, elapsed = await dispatch_chroma_async(svc, svc.index, body.path, force=body.force)
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"error": "index_failed", "detail": str(exc)})
     return IndexResponse(
@@ -147,7 +150,12 @@ async def search(body: SearchRequest, request: Request) -> SearchResponse:
         from app.service import _MEMORY_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
     try:
-        results, query_ms = svc.search(body.query, n_results=body.n_results, language=body.language)
+        # UPG-CHROMA-BLOCKING-EVENT-LOOP: search reaches the vector store
+        # (embed + query) — dispatched off this route's event loop through
+        # the service's dedicated executor rather than run in place.
+        results, query_ms = await dispatch_chroma_async(
+            svc, svc.search, body.query, n_results=body.n_results, language=body.language
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"error": "search_failed", "detail": str(exc)})
 
@@ -185,7 +193,9 @@ async def fetch(body: FetchRequest, request: Request) -> FetchResponse:
         from app.service import _MEMORY_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "memory_only_mode", "detail": _MEMORY_ONLY_MSG})
     try:
-        entries = svc.fetch(body.ids)
+        # UPG-CHROMA-BLOCKING-EVENT-LOOP: fetch is a direct vector-store get
+        # by id — same off-loop dispatch as search above.
+        entries = await dispatch_chroma_async(svc, svc.fetch, body.ids)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"error": "too_many_ids", "detail": str(exc)})
     except Exception as exc:

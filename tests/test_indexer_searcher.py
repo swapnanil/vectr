@@ -243,6 +243,42 @@ class TestCodeIndexer:
         indexer.index_workspace()
         assert indexer.total_chunks > 0
 
+    def test_total_chunks_cache_matches_real_count_after_index_file(self, indexer, tmp_path) -> None:
+        # UPG-CHROMA-BLOCKING-EVENT-LOOP: total_chunks is refreshed from a
+        # real collection.count() at the end of index_file, never read live
+        # from chroma on every access — confirm it matches the real count.
+        path = make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_file(path)
+        assert indexer.total_chunks == indexer._collection.count() > 0
+
+    def test_total_chunks_cache_matches_real_count_after_delete_file(self, indexer, tmp_path) -> None:
+        path = make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_file(path)
+        indexer.delete_file(path)
+        assert indexer.total_chunks == indexer._collection.count() == 0
+
+    def test_total_chunks_cache_matches_real_count_after_index_workspace(self, indexer, tmp_path) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        make_py(tmp_path, "b.py", "def b(): pass")
+        indexer.index_workspace()
+        assert indexer.total_chunks == indexer._collection.count() > 0
+
+    def test_total_chunks_read_never_calls_collection_count(self, indexer, tmp_path) -> None:
+        """UPG-CHROMA-BLOCKING-EVENT-LOOP: total_chunks must be answerable
+        without ever touching ChromaDB at read time — it is a cache
+        refreshed only at the end of a mutation method (see
+        _refresh_chunk_count_caches). A slow/blocked collection.count() call
+        (chroma compacting, e.g.) must never delay a total_chunks read."""
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        n = indexer.total_chunks
+
+        def _must_not_be_called():
+            raise AssertionError("total_chunks must not call collection.count() at read time")
+
+        with patch.object(indexer._collection, "count", side_effect=_must_not_be_called):
+            assert indexer.total_chunks == n
+
     def test_indexed_file_count_property(self, indexer, tmp_path) -> None:
         make_py(tmp_path, "a.py", "def a(): pass")
         make_py(tmp_path, "b.py", "def b(): pass")
@@ -294,11 +330,11 @@ class TestCodeIndexer:
         bulk reindex contend with the writer for the whole collection (see
         agent/indexer/_core.py's _ensure_stats_seeded / _apply_chunk_delta).
 
-        total_chunks deliberately reads ChromaDB's native `.count()` instead
-        (cheap, and always ground truth even across an out-of-band
-        collection mutation — see test_force_rebuilds_after_collection_desync),
-        so it is exercised alongside indexed_language_stats() here to
-        confirm it never routes through the paginated scan either.
+        total_chunks reads its own separately-maintained in-memory counter
+        (UPG-CHROMA-BLOCKING-EVENT-LOOP — never a live ChromaDB call, so a
+        caller reading it never waits on the vector store), so it is
+        exercised alongside indexed_language_stats() here to confirm it
+        never routes through the paginated scan either.
 
         `indexer._collection` is a real ChromaDB collection, so the
         paginated stats-scan signature (a `limit=` page kwarg, distinct from
@@ -1863,19 +1899,28 @@ class TestIndexingHygiene:
         n = indexer.total_chunks
         assert n > 0
 
-        # Simulate a cache/collection desync: wipe the collection but keep the
-        # mtime cache (the exact trap UPG-8.5 describes).
+        # Simulate a cache/collection desync: wipe the collection directly
+        # (bypassing delete_file/_apply_chunk_delta) but keep the mtime cache
+        # (the exact trap UPG-8.5 describes). This out-of-band mutation is
+        # exactly the case total_chunks's in-memory counter does NOT track
+        # (UPG-CHROMA-BLOCKING-EVENT-LOOP: it is refreshed only by the
+        # tracked index_file/delete_file/index_workspace mutation paths, by
+        # design — see total_chunks's docstring) — verify the real
+        # collection state directly here instead.
         ids, _, _ = indexer.get_all_documents()
         indexer._collection.delete(ids=ids)
-        assert indexer.total_chunks == 0
+        assert indexer._collection.count() == 0
 
         # Without force, the stale mtime cache says "nothing to re-index".
         indexer.index_workspace(force=False)
-        assert indexer.total_chunks == 0
+        assert indexer._collection.count() == 0
 
-        # force=True ignores the cache and rebuilds.
+        # force=True ignores the cache and rebuilds — this DOES go through
+        # the tracked upsert path, so the cached total_chunks is correct
+        # again afterwards.
         indexer.index_workspace(force=True)
         assert indexer.total_chunks == n
+        assert indexer._collection.count() == n
 
     def test_force_does_not_duplicate_chunks(self, indexer, tmp_path) -> None:
         make_py(tmp_path, "a.py", "def a(): pass")

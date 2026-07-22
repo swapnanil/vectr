@@ -8,6 +8,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
 
 import chromadb
@@ -16,6 +17,9 @@ import numpy as np
 from agent.chunk_quality import build_purpose_text, is_symbol_bearing_chunk
 from agent.config import DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED
 from agent.config import EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL
+from agent.config import (
+    INDEXING_VECTOR_STORE_SLOW_CALL_WARN_SECONDS as _CHROMA_SLOW_CALL_WARN_SECONDS,
+)
 from agent.indexer._constants import (
     EXCLUDED_DIRS,
     _FILE_BATCH_SIZE,
@@ -30,6 +34,26 @@ from agent.indexer._chunking import chunk_file
 from agent.indexer._types import CodeChunk
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _timed_chroma_call(op_name: str):
+    """Time a single blocking vector-store call and log one WARNING if it
+    exceeds the configured threshold (UPG-CHROMA-BLOCKING-EVENT-LOOP). The
+    store's own internal work (e.g. compacting a large collection) can hold
+    a call open far longer than its usual cost; this is the only visibility
+    vectr has into that from its side. Applied uniformly to every call site,
+    never conditioned on the caller or on what the call is for."""
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed = time.monotonic() - start
+        if elapsed > _CHROMA_SLOW_CALL_WARN_SECONDS:
+            logger.warning(
+                "chroma %s blocked %.1fs — vector store may be compacting",
+                op_name, elapsed,
+            )
 
 
 def _chunk_metadata(c: CodeChunk) -> dict:
@@ -54,18 +78,20 @@ def _upsert_in_batches(
     metadatas: list[dict],
     embeddings: list[list[float]],
     batch_size: int,
+    op_label: str = "upsert",
 ) -> None:
     """Upsert one embed-batch's rows into `collection` in `batch_size` slices
     (SQLite's 999-variable limit: 6 metadata fields x 100 rows = 600 <= 999).
     Bounded to a single embed-batch's worth of rows by every caller, so this
     never itself becomes an O(corpus) structure."""
     for j in range(0, len(ids), batch_size):
-        collection.upsert(
-            ids=ids[j: j + batch_size],
-            documents=documents[j: j + batch_size],
-            metadatas=metadatas[j: j + batch_size],
-            embeddings=embeddings[j: j + batch_size],
-        )
+        with _timed_chroma_call(op_label):
+            collection.upsert(
+                ids=ids[j: j + batch_size],
+                documents=documents[j: j + batch_size],
+                metadatas=metadatas[j: j + batch_size],
+                embeddings=embeddings[j: j + batch_size],
+            )
 
 
 class CodeIndexer:
@@ -89,26 +115,30 @@ class CodeIndexer:
         self._last_indexed: float = 0.0
         self._indexed_files: set[str] = set()
         # Incrementally-maintained per-language stats (UPG-3.1/3.3,
-        # UPG-REST-STARVATION). Seeded once (lazily, on first read) by a full
-        # metadata scan, then updated by `_apply_chunk_delta` on every
-        # subsequent insert/delete instead of ever re-scanning the collection
-        # — see `_ensure_stats_seeded`'s docstring for why this replaced a
-        # count-keyed rescan-on-change cache that re-scanned the whole
-        # collection on every call while the chunk count was still changing
-        # (i.e. throughout a bulk reindex), making `indexed_language_stats()`
-        # an O(corpus) operation contending with the writer.
-        #
-        # `total_chunks` itself is NOT tracked here — it reads
-        # `self._collection.count()` directly (a cheap native count, not a
-        # metadata scan), so it is always ground truth even if a chunk is
-        # removed by something other than `index_file`/`delete_file`/
-        # `index_workspace` (e.g. a caller mutating `_collection` directly).
-        # Only the per-language breakdown needs incremental tracking, since
-        # there is no equivalent cheap native call for it.
+        # UPG-REST-STARVATION). Seeded once by a full metadata scan (now done
+        # eagerly below, during construction — see the call to
+        # `_ensure_stats_seeded()` at the end of this method), then updated by
+        # `_apply_chunk_delta` on every subsequent insert/delete instead of
+        # ever re-scanning the collection — see `_ensure_stats_seeded`'s
+        # docstring for why this replaced a count-keyed rescan-on-change cache
+        # that re-scanned the whole collection on every call while the chunk
+        # count was still changing (i.e. throughout a bulk reindex), making
+        # `indexed_language_stats()` an O(corpus) operation contending with
+        # the writer.
         self._stats_lock = threading.Lock()
         self._stats_seeded = False
         self._lang_chunk_counts: dict[str, int] = {}
         self._lang_files: dict[str, set[str]] = {}
+        # Total chunk counts (body + purpose collections), read by
+        # `total_chunks`/`total_purpose_chunks` (UPG-CHROMA-BLOCKING-EVENT-LOOP).
+        # Seeded here from a real (but construction-time, always
+        # off-the-event-loop) count; refreshed the same way again by
+        # `_refresh_chunk_count_caches` at the end of every mutation entry
+        # point (index_file/delete_file/index_workspace) — never re-read
+        # from the vector store on a later request.
+        self._total_chunks_cache: int = 0
+        self._purpose_chunks_cache: int = 0
+        self._refresh_chunk_count_caches()
 
         # Deferred: look up get_embed_provider through the package namespace so that
         # test-time monkeypatching of agent.indexer.get_embed_provider is honoured
@@ -116,6 +146,15 @@ class CodeIndexer:
         # in the same module namespace that patches target).
         import agent.indexer as _idx
         self._embed_provider = _idx.get_embed_provider(embed_model)
+
+        # Seed the per-language stats cache now, during construction — which
+        # always runs off the event loop serving requests, either
+        # synchronously before the daemon starts accepting them or on its own
+        # background thread (UPG-STDIO-MEMORY-READY's deferred-init path) —
+        # so `indexed_language_stats()` (read by both `/v1/status` and
+        # `/v1/map`) never performs its first-ever collection scan inside a
+        # live request (UPG-CHROMA-BLOCKING-EVENT-LOOP).
+        self._ensure_stats_seeded()
 
     def _workspace_hash(self) -> str:
         return hashlib.md5(str(self.workspace_root).encode()).hexdigest()[:12]
@@ -171,6 +210,8 @@ class CodeIndexer:
             self._lang_chunk_counts = {}
             self._lang_files = {}
             self._stats_seeded = True
+            self._total_chunks_cache = 0
+            self._purpose_chunks_cache = 0
 
     @property
     def all_roots(self) -> list[Path]:
@@ -285,6 +326,7 @@ class CodeIndexer:
             self._write_embed_model_stamp()  # cheap no-op when already current
             logger.info("All %d files up to date — nothing to re-index", len(all_files))
             self._last_indexed = time.time()
+            self._refresh_chunk_count_caches()
             return len(self._indexed_files), self.total_chunks
 
         logger.info(
@@ -322,6 +364,7 @@ class CodeIndexer:
 
         if not all_chunks:
             self._last_indexed = time.time()
+            self._refresh_chunk_count_caches()
             return len(self._indexed_files), self.total_chunks
 
         # Phase 2: delete stale chunks for re-indexed files (no-op for brand-new files).
@@ -359,7 +402,7 @@ class CodeIndexer:
             batch_embeddings = self._embed_provider.embed(batch_docs)
             _upsert_in_batches(
                 self._collection, batch_ids, batch_docs, batch_metas,
-                batch_embeddings, _UPSERT_BATCH_SIZE,
+                batch_embeddings, _UPSERT_BATCH_SIZE, op_label="upsert (body)",
             )
             self._apply_chunk_delta(batch_metas, sign=1)
             if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
@@ -377,6 +420,7 @@ class CodeIndexer:
         self._write_embed_model_stamp()
 
         self._last_indexed = time.time()
+        self._refresh_chunk_count_caches()
         return len(self._indexed_files), self.total_chunks
 
     def index_file(self, file_path: str) -> int:
@@ -414,13 +458,14 @@ class CodeIndexer:
             )
             _upsert_in_batches(
                 self._collection, batch_ids, batch_docs, batch_metas,
-                batch_embeddings, _FILE_BATCH_SIZE,
+                batch_embeddings, _FILE_BATCH_SIZE, op_label="upsert (body)",
             )
             self._apply_chunk_delta(batch_metas, sign=1)
 
         self._upsert_purpose_vectors(chunks)
 
         self._indexed_files.add(file_path)
+        self._refresh_chunk_count_caches()
         return len(chunks)
 
     def delete_file(self, file_path: str) -> int:
@@ -431,6 +476,7 @@ class CodeIndexer:
         (UPG-WATCH-REVERT-CHURN)."""
         removed = self._delete_chunks_for_file(file_path)
         self._indexed_files.discard(file_path)
+        self._refresh_chunk_count_caches()
         return removed
 
     def _delete_chunks_for_file(self, file_path: str) -> int:
@@ -443,18 +489,22 @@ class CodeIndexer:
         """
         removed = 0
         try:
-            existing = self._collection.get(where={"file_path": file_path})
+            with _timed_chroma_call("get"):
+                existing = self._collection.get(where={"file_path": file_path})
             ids = existing["ids"]
             if ids:
-                self._collection.delete(ids=ids)
+                with _timed_chroma_call("delete"):
+                    self._collection.delete(ids=ids)
                 self._apply_chunk_delta(existing.get("metadatas") or [], sign=-1)
                 removed = len(ids)
         except Exception:
             pass
         try:
-            existing_p = self._purpose_collection.get(where={"file_path": file_path})
+            with _timed_chroma_call("get"):
+                existing_p = self._purpose_collection.get(where={"file_path": file_path})
             if existing_p["ids"]:
-                self._purpose_collection.delete(ids=existing_p["ids"])
+                with _timed_chroma_call("delete"):
+                    self._purpose_collection.delete(ids=existing_p["ids"])
         except Exception:
             pass
         return removed
@@ -504,7 +554,7 @@ class CodeIndexer:
                 batch_embeddings = self._embed_provider.embed(batch_docs)
                 _upsert_in_batches(
                     self._purpose_collection, batch_ids, batch_docs, batch_metas,
-                    batch_embeddings, _UPSERT_BATCH_SIZE,
+                    batch_embeddings, _UPSERT_BATCH_SIZE, op_label="upsert (purpose)",
                 )
                 done += len(batch_ids)
             if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
@@ -596,7 +646,8 @@ class CodeIndexer:
         paths: set[str] = set()
         offset = 0
         while True:
-            page = self._collection.get(include=["metadatas"], limit=_PAGE, offset=offset)
+            with _timed_chroma_call("get"):
+                page = self._collection.get(include=["metadatas"], limit=_PAGE, offset=offset)
             ids = page["ids"]
             if not ids:
                 break
@@ -649,9 +700,18 @@ class CodeIndexer:
         chunk count, which was still changing on every watcher write),
         directly contending with the collection the watcher was writing to.
 
-        `total_chunks` deliberately does NOT use this cache (see its
-        docstring) — it reads `self._collection.count()` directly, which
-        is both cheap and always ground truth.
+        Now also run eagerly once at the end of `CodeIndexer.__init__`
+        (always off the request event loop — construction either happens
+        synchronously before the daemon starts serving requests, or on its
+        own background thread), so this scan is never triggered by the
+        first live request to reach `indexed_language_stats()`
+        (UPG-CHROMA-BLOCKING-EVENT-LOOP). This method staying idempotent and
+        safe to call redundantly (the `_stats_seeded` guard below) is what
+        makes that eager call harmless.
+
+        `total_chunks`/`total_purpose_chunks` use a SEPARATE in-memory
+        counter (`_total_chunks_cache`/`_purpose_chunks_cache`), not this
+        cache — see `total_chunks`'s docstring.
         """
         if self._stats_seeded:
             return
@@ -663,7 +723,8 @@ class CodeIndexer:
             files: dict[str, set[str]] = {}
             offset = 0
             while True:
-                page = self._collection.get(include=["metadatas"], limit=_PAGE, offset=offset)
+                with _timed_chroma_call("get"):
+                    page = self._collection.get(include=["metadatas"], limit=_PAGE, offset=offset)
                 ids = page["ids"]
                 if not ids:
                     break
@@ -709,21 +770,61 @@ class CodeIndexer:
                     if files is not None:
                         files.discard(fp)
 
+    def _refresh_chunk_count_caches(self) -> None:
+        """Refresh `total_chunks`/`total_purpose_chunks` from a real, one-off
+        ChromaDB `.count()` call on each collection (UPG-CHROMA-BLOCKING-
+        EVENT-LOOP). Called once at the end of every mutation entry point —
+        `index_file`, `delete_file`, `index_workspace` — never per individual
+        upsert/delete inside them, so a bulk reindex still pays for this only
+        once per call, not once per batch. Always runs on whatever thread
+        performed the mutation (the indexing/watcher thread, or a request's
+        off-loop dispatch-executor thread — see agent/chroma_dispatch.py) —
+        never on a request's own event-loop thread, since it is only ever
+        reached from inside one of those three methods.
+
+        A real re-count (rather than incremental delta bookkeeping) is what
+        makes this self-correcting: it is exactly as accurate as a live call
+        would have been for anything that mutated the collection through one
+        of these three methods, and it does not need special-case handling
+        for a collection changed some other way (a test simulating a desync,
+        an external tool) — the next call through any of the three methods
+        re-syncs it regardless of how it went stale.
+        """
+        with _timed_chroma_call("count"):
+            total = self._collection.count()
+        with _timed_chroma_call("count"):
+            purpose_total = self._purpose_collection.count()
+        with self._stats_lock:
+            self._total_chunks_cache = total
+            self._purpose_chunks_cache = purpose_total
+
     @property
     def total_chunks(self) -> int:
         """Total chunk count in the body collection.
 
-        Reads `self._collection.count()` directly rather than any
-        maintained cache: ChromaDB's native count is already O(1) (not a
-        metadata scan), so there is nothing to gain by caching it, and
-        caching it would mean `total_chunks` could go stale relative to
-        the real collection if anything ever mutates `_collection` outside
-        `index_file`/`delete_file`/`index_workspace` (tests simulating a
-        desync, an external tool, a future maintenance script). Only the
-        per-language breakdown below is incrementally cached, since there
-        is no equivalent cheap native call for it.
+        Returns an in-memory counter, refreshed from a real ChromaDB count at
+        construction and again at the end of every mutation entry point
+        (`index_file`/`delete_file`/`index_workspace`, via
+        `_refresh_chunk_count_caches`) — never a live call into the vector
+        store made from this property itself. This trades bounded staleness
+        (at most one in-flight mutation call, applied the moment that call
+        finishes) for availability: a caller reading this must never wait on
+        the vector store's own internal state, including while it is busy
+        compacting a large collection — a single `/v1/status` read blocking
+        behind exactly that once made every other request the daemon was
+        serving unreachable (UPG-CHROMA-BLOCKING-EVENT-LOOP).
         """
-        return self._collection.count()
+        with self._stats_lock:
+            return self._total_chunks_cache
+
+    @property
+    def total_purpose_chunks(self) -> int:
+        """Purpose-collection counterpart of `total_chunks` (ARCH-4
+        dual-vector pool entry) — same in-memory-counter treatment. Read by
+        `query_vector_purpose`'s empty-collection guard instead of a live
+        ChromaDB count() call."""
+        with self._stats_lock:
+            return self._purpose_chunks_cache
 
     @property
     def last_indexed_ts(self) -> float:
@@ -832,11 +933,12 @@ class CodeIndexer:
         all_meta: list[dict] = []
         offset = 0
         while True:
-            page = self._collection.get(
-                include=["documents", "metadatas"],
-                limit=_PAGE,
-                offset=offset,
-            )
+            with _timed_chroma_call("get"):
+                page = self._collection.get(
+                    include=["documents", "metadatas"],
+                    limit=_PAGE,
+                    offset=offset,
+                )
             batch_ids = page["ids"]
             if not batch_ids:
                 break
@@ -865,12 +967,13 @@ class CodeIndexer:
             where = {"language": language}
         else:
             where = None
-        return self._collection.query(
-            query_embeddings=[query_embedding],
-            n_results=min(n_results, max(1, self._collection.count())),
-            where=where,
-            include=["documents", "metadatas", "distances"],
-        )
+        with _timed_chroma_call("query"):
+            return self._collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(n_results, max(1, self.total_chunks)),
+                where=where,
+                include=["documents", "metadatas", "distances"],
+            )
 
     def get_chunk_cosine_similarities(
         self, query_embedding: list[float], chunk_ids: list[str]
@@ -887,7 +990,8 @@ class CodeIndexer:
         if not chunk_ids or not query_embedding:
             return {}
         try:
-            batch = self._collection.get(ids=chunk_ids, include=["embeddings"])
+            with _timed_chroma_call("get"):
+                batch = self._collection.get(ids=chunk_ids, include=["embeddings"])
         except Exception:
             return {}
         result: dict[str, float] = {}
@@ -931,7 +1035,7 @@ class CodeIndexer:
         guards against ChromaDB raising on a query against zero rows, so old
         indexes degrade gracefully to body-only results until reindexed.
         """
-        count = self._purpose_collection.count()
+        count = self.total_purpose_chunks
         if count == 0:
             return {"ids": [[]], "distances": [[]], "documents": [[]], "metadatas": [[]]}
         if languages:
@@ -940,12 +1044,13 @@ class CodeIndexer:
             where = {"language": language}
         else:
             where = None
-        return self._purpose_collection.query(
-            query_embeddings=[query_embedding],
-            n_results=min(n_results, max(1, count)),
-            where=where,
-            include=["documents", "metadatas", "distances"],
-        )
+        with _timed_chroma_call("query"):
+            return self._purpose_collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(n_results, max(1, count)),
+                where=where,
+                include=["documents", "metadatas", "distances"],
+            )
 
     def fetch_chunks(self, ids: list[str]) -> list[dict]:
         """Deterministic re-fetch by chunk id (UPG-CTX-EVICT part a).
@@ -975,7 +1080,8 @@ class CodeIndexer:
             )
         if not ids:
             return []
-        batch = self._collection.get(ids=ids, include=["documents", "metadatas"])
+        with _timed_chroma_call("get"):
+            batch = self._collection.get(ids=ids, include=["documents", "metadatas"])
         found_ids = batch.get("ids") or []
         found_docs = batch.get("documents") or []
         found_metas = batch.get("metadatas") or []
@@ -1012,7 +1118,8 @@ class CodeIndexer:
         if not chunk_ids:
             return {}
         try:
-            batch = self._collection.get(ids=chunk_ids, include=["documents", "metadatas"])
+            with _timed_chroma_call("get"):
+                batch = self._collection.get(ids=chunk_ids, include=["documents", "metadatas"])
         except Exception:
             return {}
         ids_raw = batch.get("ids") or []
