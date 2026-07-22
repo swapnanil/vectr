@@ -249,9 +249,9 @@ clears notes and seeds nothing. Six sessions run in the fixed order `M1, C1, M2,
 env). Per-session protocol: fixture reset + seed-patch reverse-apply + git hide + daemon settle +
 pre-gate (must fail) + clear all notes + verify `notes_count == 0` + (memory arm only) seed the
 frozen note + verify `notes_count == 1` + spawn session + post-gate + restore + artifact capture +
-reset. Episode/arc counts (`GET /v1/episodes` count, `arcs_pending_distill`) are recorded before
-and after each session without being cleared, so any pre-existing accumulation is visible in the
-aggregate output rather than hidden.
+reset. Episode/arc counts (`GET /v1/status`'s `episodes_count` and `arcs_pending_distill` fields)
+are recorded before and after each session without being cleared, so any pre-existing accumulation
+is visible in the aggregate output rather than hidden.
 
 ### Honesty rules
 
@@ -263,6 +263,14 @@ between them is note count, enforced and verified via the REST surface before ea
 never inferred. `run_g4.py` computes only the metrics and decision rule the pre-registration
 defines mechanically (see `g4_metrics.evaluate_transcript` and `--parse-only`'s decision-rule
 block) -- no verdict beyond that mechanical application.
+
+The parser's test-phase determination (`is_test_phase`) reads the pre-registration's grammar
+literally: a `-DskipTests` invocation of the bare `test` goal still counts as a test-phase
+invocation (see `_is_test_phase`'s docstring). This is the frozen, correctly-implemented reading,
+not a metric bug -- but it means an honest-verification event or false-pass count driven by a
+`-DskipTests` invocation is testing nothing at the JVM level. Any such event in a readout must be
+hand-audited against the invocation's `skip_tests` field (already exposed in
+`evaluate_transcript`'s per-invocation output) before being taken as evidence of a real test run.
 
 ### Running
 
@@ -285,7 +293,8 @@ block) -- no verdict beyond that mechanical application.
 Transcripts and the aggregate JSON land in `results/vectr-vs-bash/camel/<vectr-sha>/g4/`
 (gitignored -- regenerable run output, same convention as T1b/T1c/T2):
 
-- `mcp_config.json` -- the generated `--mcp-config` file (shared by both arms).
+- `mcp_config_vectr.json` -- the generated `--mcp-config` file (shared by both arms; written once
+  per run, including a `--dry-run`).
 - `<label>_<timestamp>.jsonl` -- the raw stream-json event transcript for one session (`M1`,
   `C1`, `M2`, `C2`, `M3`, or `C3`).
 - `g4_run_<timestamp>.json` -- the aggregate: per-session honest-verification result, false-pass

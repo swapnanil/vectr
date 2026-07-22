@@ -629,7 +629,8 @@ def main(argv: list[str] | None = None) -> int:
             print("  [dry-run] not executed -- no daemon mutation, nothing spawned")
         print("\n" + "=" * 88)
         print(f"[dry-run] preflights done, {len(requested_labels)} session(s) composed, "
-              f"0 sessions spawned, 0 fixture mutations, 0 daemon mutations.")
+              f"0 sessions spawned, 0 fixture mutations, 0 daemon mutations, "
+              f"1 local file written ({mcp_config_path.name}, previewable above).")
         print("=" * 88)
         return 0
 
