@@ -361,17 +361,16 @@ invalidated at the launch-posture assert.)
 \subsection{Mechanism: deterministic delivery, proven on two channels}
 \label{sec:mechanism}
 
-{\sloppy
 \textbf{Proxy (CS):} 262 API requests: 241 reached the injection decision ---
 5 injected, 236 correctly skipped --- and 21 (by subtraction; the
 status file carries no per-type counter) did not; zero injection or
 upstream errors. The proxy's own status counters are the published
 ledger for this channel (\path{proxy-status.json}); the grading-time
-daemon audit additionally recorded six \texttt{PROACTIVE\_\allowbreak INJECT} events
+daemon audit additionally recorded six \texttt{PROACTIVE\_INJECT} events
 anchoring the seeded notes, quoted in the published grade file --- one
 more than the proxy's injected count, plausibly the pre-launch
 injection probe, now unreconcilable because that daemon log predates
-this archive's excerpt policy and was not retained.\par}
+this archive's excerpt policy and was not retained.
 
 \textbf{Native hooks (H$\times$2):} the prompt-submit hook injected a three-note
 index at launch in both runs, behaviorally confirmed in H1 by the
@@ -403,7 +402,7 @@ which carries API-latency and agent-path noise:
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{@{}lrrr@{}}
+\begin{tabularx}{\textwidth}{@{}l>{\raggedleft\arraybackslash}X>{\raggedleft\arraybackslash}Xr@{}}
 \toprule
 \textbf{metric} & \textbf{vanilla mean ($n=3$)} & \textbf{tool-equipped mean ($n=6$, pilot; store cold in 5 of 6)} & \textbf{$\Delta$} \\
 \midrule
@@ -413,7 +412,7 @@ cost & \$7.20 & \$5.08 & $-$30\% \\
 turns & 106.3 & 77.0 & $-$28\% \\
 wall (s) & 2123.6 & 1432.8 & $-$33\% \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table}
 
 Five of the six pooled runs ran with an empty store, so this table
@@ -831,37 +830,37 @@ from the same repository.
 
 \begin{thebibliography}{29}
 
-\bibitem{triggerbench} TriggerBench: Investigating Prospective Memory for Large Language Models. arXiv:2606.23459, 2026.
+\bibitem{triggerbench} TriggerBench: Investigating Prospective Memory for Large Language Models. \href{https://arxiv.org/abs/2606.23459}{arXiv:2606.23459}, 2026.
 
-\bibitem{memtrack} MEMTRACK: Evaluating Long-Term Memory and State Tracking in Multi-Platform Dynamic Agent Environments. arXiv:2510.01353, 2025.
+\bibitem{memtrack} MEMTRACK: Evaluating Long-Term Memory and State Tracking in Multi-Platform Dynamic Agent Environments. \href{https://arxiv.org/abs/2510.01353}{arXiv:2510.01353}, 2025.
 
-\bibitem{agentnative} Are We Ready For An Agent-Native Memory System? arXiv:2606.24775, 2026.
+\bibitem{agentnative} Are We Ready For An Agent-Native Memory System? \href{https://arxiv.org/abs/2606.24775}{arXiv:2606.24775}, 2026.
 
-\bibitem{projectmem} PROJECTMEM: A Local-First, Event-Sourced Memory and Judgment Layer for AI Coding Agents. arXiv:2606.12329, 2026.
+\bibitem{projectmem} PROJECTMEM: A Local-First, Event-Sourced Memory and Judgment Layer for AI Coding Agents. \href{https://arxiv.org/abs/2606.12329}{arXiv:2606.12329}, 2026.
 
-\bibitem{userascode} User as Code: Executable Memory for Personalized Agents. arXiv:2606.16707, 2026.
+\bibitem{userascode} User as Code: Executable Memory for Personalized Agents. \href{https://arxiv.org/abs/2606.16707}{arXiv:2606.16707}, 2026.
 
-\bibitem{sweexplore} SWE-Explore: Benchmarking How Coding Agents Explore Repositories. arXiv:2606.07297, 2026.
+\bibitem{sweexplore} SWE-Explore: Benchmarking How Coding Agents Explore Repositories. \href{https://arxiv.org/abs/2606.07297}{arXiv:2606.07297}, 2026.
 
-\bibitem{proactivemem} Beyond Static Summarization: Proactive Memory Extraction for LLM Agents. arXiv:2601.04463, 2026.
+\bibitem{proactivemem} Beyond Static Summarization: Proactive Memory Extraction for LLM Agents. \href{https://arxiv.org/abs/2601.04463}{arXiv:2601.04463}, 2026.
 
-\bibitem{recmem} RecMem: Recurrence-based Memory Consolidation for Efficient and Effective Long-Running LLM Agents. arXiv:2605.16045, 2026.
+\bibitem{recmem} RecMem: Recurrence-based Memory Consolidation for Efficient and Effective Long-Running LLM Agents. \href{https://arxiv.org/abs/2605.16045}{arXiv:2605.16045}, 2026.
 
-\bibitem{ssgm} Governing Evolving Memory in LLM Agents: Risks, Mechanisms, and the Stability and Safety Governed Memory (SSGM) Framework. arXiv:2603.11768, 2026.
+\bibitem{ssgm} Governing Evolving Memory in LLM Agents: Risks, Mechanisms, and the Stability and Safety Governed Memory (SSGM) Framework. \href{https://arxiv.org/abs/2603.11768}{arXiv:2603.11768}, 2026.
 
-\bibitem{recursummary} Recursively Summarizing Enables Long-Term Dialogue Memory in Large Language Models. arXiv:2308.15022, 2023.
+\bibitem{recursummary} Recursively Summarizing Enables Long-Term Dialogue Memory in Large Language Models. \href{https://arxiv.org/abs/2308.15022}{arXiv:2308.15022}, 2023.
 
-\bibitem{memgpt} MemGPT: Towards LLMs as Operating Systems. arXiv:2310.08560, 2023.
+\bibitem{memgpt} MemGPT: Towards LLMs as Operating Systems. \href{https://arxiv.org/abs/2310.08560}{arXiv:2310.08560}, 2023.
 
-\bibitem{memzero} Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory. arXiv:2504.19413, 2025.
+\bibitem{memzero} Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory. \href{https://arxiv.org/abs/2504.19413}{arXiv:2504.19413}, 2025.
 
-\bibitem{zep} Zep: A Temporal Knowledge Graph Architecture for Agent Memory. arXiv:2501.13956, 2025.
+\bibitem{zep} Zep: A Temporal Knowledge Graph Architecture for Agent Memory. \href{https://arxiv.org/abs/2501.13956}{arXiv:2501.13956}, 2025.
 
-\bibitem{amem} A-MEM: Agentic Memory for LLM Agents. arXiv:2502.12110, 2025.
+\bibitem{amem} A-MEM: Agentic Memory for LLM Agents. \href{https://arxiv.org/abs/2502.12110}{arXiv:2502.12110}, 2025.
 
-\bibitem{sleeper} Plant, Persist, Trigger: Sleeper Attack on Large Language Model Agents. arXiv:2605.28201, 2026.
+\bibitem{sleeper} Plant, Persist, Trigger: Sleeper Attack on Large Language Model Agents. \href{https://arxiv.org/abs/2605.28201}{arXiv:2605.28201}, 2026.
 
-\bibitem{fieldreport} anthropics/claude-code issue \#34556: ``Persistent Memory Across Context Compactions (59 compactions, built our own).'' Field report, 2026.
+\bibitem{fieldreport} anthropics/claude-code issue \#34556: ``Persistent Memory Across Context Compactions (59 compactions, built our own).'' Field report, 2026. \url{https://github.com/anthropics/claude-code/issues/34556}
 
 \bibitem{craik} F.~I.~M. Craik and R.~S. Lockhart. Levels of processing: A framework for memory research. \emph{Journal of Verbal Learning and Verbal Behavior}, 11:671--684, 1972.
 
