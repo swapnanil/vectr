@@ -14,7 +14,9 @@
 [![Version 1.5.0](https://img.shields.io/badge/version-1.5.0-blue.svg)](CHANGELOG.md)
 [![MCP: 19 tools](https://img.shields.io/badge/MCP-19%20tools-blue.svg)](#19-mcp-tools)
 
-Version 1.5.0 · Last updated 2026-07-23 · [CHANGELOG](CHANGELOG.md)
+Version 1.5.0 · Last updated 2026-07-24 · [CHANGELOG](CHANGELOG.md)
+
+Research: the memory design is grounded in our paper [Delivery, Not Storage: Cue-Anchored Working Memory as a Harness Property for Coding Agents](https://arxiv.org/abs/2607.20972) (arXiv:2607.20972).
 
 Vectr gives AI code editors two things they lack: **semantic codebase search** and **persistent working memory** — both served over MCP with zero configuration.
 

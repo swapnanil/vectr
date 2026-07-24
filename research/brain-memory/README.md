@@ -2,7 +2,8 @@
 
 **Start here:** [`delivery-not-storage.md`](delivery-not-storage.md) —
 *Delivery, Not Storage: Cue-Anchored Working Memory as a Harness
-Property for Coding Agents.*
+Property for Coding Agents.* Published as
+[arXiv:2607.20972](https://arxiv.org/abs/2607.20972) (cs.AI, cross-listed cs.SE).
 
 The paper's argument in one paragraph: coding agents persist knowledge
 only as documents — deliberately written, deliberately retrieved — and
