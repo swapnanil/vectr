@@ -1004,6 +1004,29 @@ class VectrService:
             self._turn_ledgers[session_id] = ledger
         return ledger
 
+    def _existing_turn_ledger(self, session_id: str | None) -> TurnInjectionLedger | None:
+        """Look up a per-session `TurnInjectionLedger` WITHOUT ever
+        allocating one (UPG-PROXY-CROSS-CHANNEL-DEDUP).
+
+        `proactive_context` (the proxy channel) uses this instead of
+        `_turn_ledger_for` above. The proxy channel's session_id is a
+        sha256 of the first user message (`agent/proactive/proxy.py`'s
+        `_session_id`) and is, today, disjoint from the editor-supplied
+        session id the hook/trigger-engine surfaces use — see
+        UPG-PROXY-COOLDOWN-SESSION-IDENTITY (P2). Under heavy
+        multi-subagent use, every new first-user-message mints a fresh
+        proxy session id; if this allocated a ledger on miss, that churn
+        would consume slots in the `EVICTION_MAX_TRACKED_SESSIONS`-bounded
+        `_turn_ledgers` LRU and could evict a live editor session's real
+        `TurnInjectionLedger` mid-turn — the exact double-dip
+        `TurnInjectionLedger` exists to prevent (see the G3 regression
+        test). A lookup-only accessor costs nothing when the namespaces
+        don't collide, and starts deduping for free the moment session
+        identity is unified, with no further code change here."""
+        if not session_id:
+            return None
+        return self._turn_ledgers.get(session_id)
+
     def reset_turn_ledger(self, session_id: str | None) -> None:
         """Reset one session's per-turn dedup/budget ledger — called from
         `recall()` at every UserPromptSubmit (§5.3: "reset at each
@@ -2439,6 +2462,16 @@ class VectrService:
         if self._search_only:
             # No working-memory layer in search-only mode; nothing to inject.
             return empty
+        # UPG-PROXY-LOOPBACK-BYPASS: unconditional, channel-independent bind
+        # refusal — sits BEFORE and INDEPENDENT of the master-switch/channel
+        # policy below. A client-supplied `channel` label (its default value
+        # is "proxy") must never be able to route around this: a non-loopback
+        # bind fails closed to the empty result for every channel, including
+        # the proxy channel's own launch-is-consent exemption from the
+        # master switch just below.
+        from agent.proactive.settings import proactive_bind_is_loopback
+        if not proactive_bind_is_loopback():
+            return empty
         from agent.proactive.settings import ProactiveSettings
         settings = ProactiveSettings.from_env()
         # The master opt-in gates AMBIENT surfaces (hooks read the transcript
@@ -2447,7 +2480,8 @@ class VectrService:
         # pointed their client at it — that launch IS the consent for this
         # channel. The daemon is localhost-only and already serves notes to
         # local callers ungated (recall/search), so honoring the proxy channel
-        # here adds no exposure beyond existing endpoints.
+        # here adds no exposure beyond existing endpoints. (The bind check
+        # above already ensures "localhost-only" is actually true at runtime.)
         if not settings.enabled and channel != "proxy":
             return empty
         from agent.proactive.matcher import ProactiveMatcher
@@ -2501,8 +2535,28 @@ class VectrService:
             note_limit=max(settings.max_items_per_event * 2, settings.max_items_per_event),
         )
         candidates = matcher.match(window)
+        # UPG-PROXY-CROSS-CHANNEL-DEDUP: consult the SAME per-session
+        # TurnInjectionLedger the hook/trigger-engine surfaces share (see
+        # `_turn_ledger_for`) so a note already claimed this turn by that
+        # surface is not re-injected here, and vice versa. Additive to the
+        # gate's own anchor-id cooldown ledger, never a replacement.
+        #
+        # LOOKUP-ONLY, never allocate: use `_existing_turn_ledger`, not
+        # `_turn_ledger_for`. KNOWN LIMITATION (out of scope here, filed as
+        # UPG-PROXY-COOLDOWN-SESSION-IDENTITY, P2): the proxy channel
+        # derives `session_id` from a sha256 of the first user message
+        # (agent/proactive/proxy.py's `_session_id`), disjoint today from
+        # the editor-supplied session id hook/trigger-engine surfaces use —
+        # so this namespace mismatch means a proxy call would otherwise
+        # allocate a ledger no hook surface will ever consult, for zero
+        # dedup benefit, while consuming eviction-LRU slots and risking
+        # evicting a live editor session's real ledger under heavy
+        # multi-subagent session churn. Looking up only: zero cost when the
+        # namespaces don't collide, and starts deduping for free the moment
+        # session identity is unified, no further code change needed here.
         result = self._proactive_gate(settings).select(
-            candidates, session_id=session_id, structural_only=structural_only
+            candidates, session_id=session_id, structural_only=structural_only,
+            turn_ledger=self._existing_turn_ledger(session_id),
         )
         if not result.is_empty():
             self._record_proactive_injection(channel, result)

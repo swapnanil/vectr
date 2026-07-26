@@ -2867,6 +2867,65 @@ class TestFireAndFormat:
         # once across the whole turn's combined output, never twice.
         combined = boot_text + edit_text
         assert combined.count("verify_token() must check expiry") == 1
+
+    def test_proxy_and_hook_surfaces_share_one_turn_ledger_note_injects_once(self, tmp_path) -> None:
+        """UPG-PROXY-CROSS-CHANNEL-DEDUP — sibling to the G3 regression above,
+        covering the PROXY channel's gate alongside a hook/trigger-engine
+        surface. Before this fix the two channels kept entirely separate
+        ledgers (different objects AND different key spaces: `TurnInjection
+        Ledger` is note_id-keyed, the proxy's own `LedgerStore` cooldown is
+        anchor_id-keyed with no cross-reference), so the same note could
+        inject via both channels in one turn. Sharing ONE `TurnInjection
+        Ledger` instance across `WorkingContextStore.fire_and_format()`
+        (hook surface) and `agent.proactive.gate.ProactiveGate.select()`
+        (proxy surface, via its new `turn_ledger` parameter) closes it."""
+        from agent.proactive.gate import ProactiveGate
+        from agent.proactive.types import Candidate
+        from agent.trigger_engine import TurnInjectionLedger
+
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(
+            ws, "auth.py: verify_token() must check expiry before signature",
+            kind="finding",
+            triggers=[{"path": "src/auth.py", "event": "pre-edit"}],
+        )
+        turn_ledger = TurnInjectionLedger()
+
+        # Surface 1: hook/trigger-engine PreToolUse file-anchored delivery —
+        # actually injects and claims note_id in the shared turn ledger.
+        hook_text, hook_ids = store.fire_and_format(
+            ws, event="pre-edit", file_path="src/auth.py",
+            turn_ledger=turn_ledger, spend_turn_budget=True,
+        )
+        assert hook_ids == {note_id}
+        assert "verify_token() must check expiry" in hook_text
+
+        # Surface 2: the proxy channel's gate, SAME turn (same turn_ledger
+        # instance) — a structural candidate for the SAME note_id must be
+        # suppressed, mirroring the hook-vs-hook G3 case above but across
+        # channels this time.
+        gate = ProactiveGate(
+            min_similarity=0.35, max_items_per_event=3, max_chars_per_event=800,
+            cooldown_items=30,
+        )
+        proxy_candidate = Candidate(
+            kind="note_structural", line="note about auth.py",
+            score=1.0, anchor_id=f"note:{note_id}", is_structural=True,
+        )
+        out = gate.select(
+            [proxy_candidate], session_id="proxy-session", turn_ledger=turn_ledger
+        )
+        assert out.is_empty()  # already claimed by surface 1 this turn
+
+        # Non-vacuous: the SAME candidate against a FRESH TurnInjectionLedger
+        # (a fresh turn) DOES get admitted — proving the suppression above
+        # came from the shared ledger, not a floor/structural-match failure.
+        fresh_out = gate.select(
+            [proxy_candidate], session_id="proxy-session-2",
+            turn_ledger=TurnInjectionLedger(),
+        )
+        assert fresh_out.item_count == 1
+        assert fresh_out.anchor_ids == (f"note:{note_id}",)
         assert turn_ledger.remaining_turn_budget() >= 0  # never driven negative
 
         # A later turn (reset, mirroring UserPromptSubmit) restores

@@ -1499,6 +1499,16 @@ def _do_start(
         "VECTR_WORKSPACE": workspace,
         "VECTR_PORT": str(port),
         "VECTR_EXTRA_ROOTS": json.dumps(extra_roots or []),
+        # UPG-PROXY-LOOPBACK-BYPASS: the daemon process has no other way to
+        # learn the host it was actually bound to (the `--host` argument
+        # below is only visible to this launcher process) — plumb it through
+        # so in-process gates (agent/proactive/settings.py's unconditional
+        # bind check) can refuse to serve proactive injection over a
+        # non-loopback bind regardless of config toggles or client-supplied
+        # fields. Absence of this var (e.g. a daemon started some other way,
+        # or in-process/test usage) is treated as this function's own
+        # documented default bind, 127.0.0.1 — never as non-loopback.
+        "VECTR_BIND_HOST": host,
     }
     if memory_only:
         env["VECTR_MEMORY_ONLY"] = "1"
