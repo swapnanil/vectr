@@ -1408,6 +1408,19 @@ episodes:
   # distill_max_arcs_rendered above is reached first stops the render.
   distill_render_token_cap: 2000
 
+  # PreCompact boundary-preservation surface (GET /v1/boundary/precompact):
+  # master switch. False makes the route return an empty `text` with HTTP
+  # 200 instead of the rendered nudge — the pre-compact hook branch then has
+  # nothing to print, so compaction proceeds exactly as if the surface did
+  # not exist.
+  boundary_precompact_enabled: true
+
+  # Hard cap (estimated tokens, agent/trigger_engine.py's token_estimate) on
+  # the rendered boundary-preservation text. The arc-independent base text
+  # always fits under this cap; the appended pending-arc count sentence is
+  # dropped (base text alone returned) if adding it would exceed the cap.
+  boundary_precompact_token_cap: 200
+
 embedding:
   # Default local (sentence-transformers) embedding model for the L3 content
   # index (UPG-EMBEDDER-SWAP-GRANITE). Dimension-compatible drop-in for the

@@ -22,6 +22,8 @@ from agent.config import (
     SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED,
     SEARCH_IDENTIFIER_HINT_NEARMISS_MAX,
     ARC_DETECTION_ENABLED,
+    BOUNDARY_PRECOMPACT_ENABLED,
+    BOUNDARY_PRECOMPACT_TOKEN_CAP,
     EMBEDDING_DEFAULT_MODEL,
     EPISODES_DIGEST_HEAD_LINES,
     EPISODES_DIGEST_MAX_CHARS,
@@ -38,12 +40,23 @@ from agent.config import (
     MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
 )
 from agent.eviction_advisor import EvictionAdvisor
-from agent.trigger_engine import TriggerFireLedger, TurnInjectionLedger
+from agent.trigger_engine import TriggerFireLedger, TurnInjectionLedger, token_estimate
 from agent.version_stamp import compute_version_stamp
 
 logger = logging.getLogger(__name__)
 
 _DB_DIR_ENV = "VECTR_DB_DIR"
+
+# PreCompact boundary-preservation surface (GET /v1/boundary/precompact):
+# arc-independent base text, always rendered when the surface is enabled.
+# Static product copy, not a tunable — see `agent/config.yaml`'s
+# `episodes.boundary_precompact_*` keys for the enable switch and token cap.
+_BOUNDARY_PRECOMPACT_BASE_TEXT = (
+    "Before this context is replaced: preserve, in the summary, the concrete things this session LEARNED "
+    "that are not already written down — commands that failed and what actually fixed them, environment and "
+    "build facts specific to this machine or repo, and conventions discovered by reading the code. Keep them "
+    "as specific statements (the command, the flag, the path), not as a topic list."
+)
 
 
 def _cache_dir_slug(workspace_root: str) -> str:
@@ -2569,6 +2582,59 @@ class VectrService:
             "vectr_distill() to review them and persist the lessons as notes "
             "(or dismiss them)."
         )
+
+    def _boundary_precompact_text(self) -> str:
+        """Render the PreCompact boundary-preservation text for
+        GET /v1/boundary/precompact.
+
+        Server-rendered so the product copy has one home — the pre-compact
+        hook branch (main.py / agent/hook_cli.py) only fetches and prints
+        this verbatim as plain text, never composes it itself.
+
+        Returns "" when the surface is disabled by config. Otherwise
+        returns the arc-independent base text (BOUNDARY_PRECOMPACT_ENABLED
+        guards the whole call, not just the arc sentence), with ONE
+        pending-arc count sentence appended when
+        `count_arcs_pending_distill()` is positive AND the combined text
+        still fits BOUNDARY_PRECOMPACT_TOKEN_CAP (agent/trigger_engine.py's
+        token_estimate — the same estimator every other injection surface
+        uses). The base text alone is small enough to always fit; only the
+        arc sentence is ever dropped for budget.
+
+        Deterministic count comparison on vectr's own store, same as
+        `_arc_distill_nudge_line` above — no content classification,
+        nothing gated or rerouted by query/session content. Contains no
+        note bodies or ids: notes are already durable and already
+        re-injected after compaction via the SessionStart `compact`
+        matcher (UPG-9.4) — restating them here would double the same
+        information rather than adding to it.
+        """
+        if not BOUNDARY_PRECOMPACT_ENABLED:
+            return ""
+        text = _BOUNDARY_PRECOMPACT_BASE_TEXT
+        count = self.count_arcs_pending_distill()
+        if count > 0:
+            arc_sentence = (
+                f"{count} command-discovery arc(s) recorded this session are still "
+                "pending distillation; keep the reasoning about what they mean."
+            )
+            candidate = f"{text}\n\n{arc_sentence}"
+            if token_estimate(candidate) <= BOUNDARY_PRECOMPACT_TOKEN_CAP:
+                text = candidate
+        return text
+
+    def boundary_precompact(self) -> dict:
+        """Read surface for `GET /v1/boundary/precompact` — the rendered
+        text (`_boundary_precompact_text` above) alongside the current
+        pending-arc count. Memory-layer gated by the caller: the route
+        checks `search_only` before calling here (mirroring `GET
+        /v1/arcs`), since `count_arcs_pending_distill()` is already
+        zero-safe in search-only mode and there is nothing else here to
+        guard."""
+        return {
+            "text": self._boundary_precompact_text(),
+            "arcs_pending": self.count_arcs_pending_distill(),
+        }
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
