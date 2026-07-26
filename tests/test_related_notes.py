@@ -10,6 +10,7 @@ tautological.
 """
 from __future__ import annotations
 
+import logging
 import math
 
 import chromadb
@@ -198,6 +199,29 @@ class TestRelatedActiveNotesFailSafe:
         store._notes_col.query = _boom  # simulate a real backend failure, not a return-shape mock
 
         assert store.related_active_notes(WS, note_id, limit=5, min_similarity=0.5) == []
+
+    def test_swallowed_failure_is_logged_at_debug(self, tmp_path, caplog) -> None:
+        """The fail-safe returns [] on any error, which is ALSO the correct
+        answer for most writes — so a permanently broken lookup would stay
+        invisible and every other test would still pass. The debug log is
+        the only thing that distinguishes 'nothing was near' from 'this is
+        broken', so assert it actually fires."""
+        embedder = _ControlledEmbedder({"solo note 2": BASE_VEC})
+        store = _store(tmp_path, embedder)
+        note_id = store.remember(WS, "solo note 2")
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated chroma failure")
+
+        store._notes_col.query = _boom
+
+        with caplog.at_level(logging.DEBUG, logger="agent.working_context_store._related"):
+            assert store.related_active_notes(WS, note_id, limit=5, min_similarity=0.5) == []
+
+        assert any(
+            "related_active_notes failed" in r.message and r.exc_info is not None
+            for r in caplog.records
+        )
 
 
 class TestRelatedActiveNotesZeroInference:

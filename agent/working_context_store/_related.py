@@ -11,12 +11,15 @@ supplies the judgment.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, TYPE_CHECKING, TypedDict
 
 from agent.chroma_dispatch import timed_chroma_call
 
 if TYPE_CHECKING:
     from agent.working_context_store._store import WorkingContextStore
+
+logger = logging.getLogger(__name__)
 
 
 class RelatedNote(TypedDict):
@@ -185,4 +188,9 @@ def related_active_notes(
     except Exception:
         # A related-notes failure must never break or slow-fail the write
         # path that calls this — always degrade to "nothing to offer".
+        # Logged at debug, never re-raised: without this the feature could
+        # break outright and stay invisible, since "no related notes" is
+        # also the correct answer for most writes and every test would
+        # still pass against a permanently-dead lookup.
+        logger.debug("related_active_notes failed for note %s; returning []", note_id, exc_info=True)
         return []
