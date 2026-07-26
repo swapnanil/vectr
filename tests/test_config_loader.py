@@ -358,6 +358,38 @@ class TestConfigLoaderMemoryTriggerSemanticTheta:
             cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND.update(original)
 
 
+class TestConfigLoaderMemoryWrite:
+    """memory_write.* — write-time offer knobs (related-notes lookup +
+    proxy-anchor suggestions) computed alongside remember(). Additive-only
+    config: no hardcoded thresholds anywhere in agent/working_context_store/
+    _related.py or agent/proxy_anchors.py, everything comes from these
+    direct-subscript constants."""
+
+    def test_related_notes_defaults(self) -> None:
+        assert cfg.MEMORY_WRITE_RELATED_ENABLED is True
+        assert cfg.MEMORY_WRITE_RELATED_LIMIT == 3
+        assert cfg.MEMORY_WRITE_RELATED_MIN_SIMILARITY == 0.75
+
+    def test_related_notes_types(self) -> None:
+        assert isinstance(cfg.MEMORY_WRITE_RELATED_ENABLED, bool)
+        assert isinstance(cfg.MEMORY_WRITE_RELATED_LIMIT, int)
+        assert isinstance(cfg.MEMORY_WRITE_RELATED_MIN_SIMILARITY, float)
+
+    def test_related_notes_min_similarity_matches_operational_theta(self) -> None:
+        """Deliberately pinned to the same conservative bar as
+        memory_triggers.semantic.theta_by_kind.operational — see both
+        config.yaml comments for why."""
+        assert cfg.MEMORY_WRITE_RELATED_MIN_SIMILARITY == cfg.MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND["operational"]
+
+    def test_proxy_anchor_suggestions_defaults(self) -> None:
+        assert cfg.MEMORY_WRITE_PROXY_SUGGEST_ENABLED is True
+        assert cfg.MEMORY_WRITE_PROXY_SUGGEST_LIMIT == 4
+
+    def test_proxy_anchor_suggestions_types(self) -> None:
+        assert isinstance(cfg.MEMORY_WRITE_PROXY_SUGGEST_ENABLED, bool)
+        assert isinstance(cfg.MEMORY_WRITE_PROXY_SUGGEST_LIMIT, int)
+
+
 class TestConfigLoaderYamlBoolHardening:
     """UPG-YAML-BOOL: the config loader must not let YAML-1.1 bool literals
     (on/off/yes/no) corrupt a string-typed list — pyyaml's default resolver

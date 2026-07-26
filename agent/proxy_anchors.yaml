@@ -1,0 +1,152 @@
+# Versioned, protocol-level proxy-anchor table. Maps a PROCESS DOMAIN — a
+# category of engineering process such as "how dependencies are pinned" or
+# "how the app is containerized" — to the workspace files that ENCODE that
+# process. A change to one of those files means the process MAY have
+# changed; it is a deterministic glob-presence signal only, never proof that
+# a working-memory note ABOUT that process is now wrong. vectr supplies the
+# "this file changed" fact, the caller LLM judges whether it matters (same
+# division of labor as the rest of the working-memory layer: vectr appends/
+# folds/hashes, judgment stays caller-side).
+#
+# Every entry MUST stay protocol-level: files any codebase in that ecosystem
+# might plausibly have, matched by ecosystem-standard name/extension
+# convention alone — NEVER a project-specific application path or a
+# repo-specific directory name. Glob patterns are relative, forward-slash
+# POSIX paths, matched against a workspace root with pathlib's Path.glob()
+# (see agent/proxy_anchors.py, which loads and applies this table). A `**/`
+# prefix is used only where nested/per-module files of that kind are a
+# genuinely common ecosystem convention (e.g. a per-service Dockerfile in a
+# monorepo) — dependency-manifest domains are deliberately kept root-scoped
+# (non-recursive) instead, since a recursive scan for e.g. package.json
+# would also walk an installed node_modules tree and drown out the real
+# manifest. Additions go through review — the same discipline already
+# applied to agent/markers.yaml's outcome-marker table.
+version: 1
+domains:
+  # --- Language/package-manager dependency manifests + lockfiles ---
+  - id: python.dependencies
+    globs:
+      - requirements.txt
+      - requirements-*.txt
+      - requirements/*.txt
+      - Pipfile
+      - Pipfile.lock
+      - pyproject.toml
+      - poetry.lock
+      - uv.lock
+      - setup.py
+      - setup.cfg
+      - environment.yml
+      - environment.yaml
+
+  - id: node.dependencies
+    globs:
+      - package.json
+      - package-lock.json
+      - yarn.lock
+      - pnpm-lock.yaml
+      - npm-shrinkwrap.json
+      - bun.lockb
+
+  - id: rust.dependencies
+    globs:
+      - Cargo.toml
+      - Cargo.lock
+
+  - id: go.dependencies
+    globs:
+      - go.mod
+      - go.sum
+      - go.work
+      - go.work.sum
+
+  - id: ruby.dependencies
+    globs:
+      - Gemfile
+      - Gemfile.lock
+      - "*.gemspec"
+
+  - id: jvm.build
+    globs:
+      - pom.xml
+      - build.gradle
+      - build.gradle.kts
+      - settings.gradle
+      - settings.gradle.kts
+      - gradle.properties
+      - build.sbt
+
+  # --- CI pipeline definitions (each tool has one canonical, fixed
+  # location relative to the repo root — never scanned recursively) ---
+  - id: ci.pipeline
+    globs:
+      - .github/workflows/*.yml
+      - .github/workflows/*.yaml
+      - .gitlab-ci.yml
+      - .circleci/config.yml
+      - azure-pipelines.yml
+      - Jenkinsfile
+      - .travis.yml
+      - bitbucket-pipelines.yml
+      - .drone.yml
+      - .buildkite/pipeline.yml
+
+  # --- Container build/orchestration descriptors. Recursive: a per-service
+  # Dockerfile/compose file in a subdirectory is a standard monorepo
+  # pattern, and (unlike node_modules/site-packages) an installed
+  # dependency tree essentially never ships one of these. ---
+  - id: container.build
+    globs:
+      - "**/Dockerfile"
+      - "**/Dockerfile.*"
+      - "**/docker-compose.yml"
+      - "**/docker-compose.yaml"
+      - "**/compose.yml"
+      - "**/compose.yaml"
+
+  # --- Pinned toolchain/runtime version files (root-scoped by convention:
+  # version managers resolve these by walking UP from cwd, not down) ---
+  - id: toolchain.version
+    globs:
+      - .tool-versions
+      - .nvmrc
+      - .python-version
+      - .ruby-version
+      - .node-version
+      - rust-toolchain
+      - rust-toolchain.toml
+      - .java-version
+
+  # --- Generic build-task runners. Recursive: multi-module native builds
+  # commonly nest one of these per module. ---
+  - id: build.task
+    globs:
+      - "**/Makefile"
+      - "**/makefile"
+      - "**/GNUmakefile"
+      - "**/Justfile"
+      - "**/justfile"
+      - "**/Taskfile.yml"
+      - "**/Taskfile.yaml"
+      - "**/CMakeLists.txt"
+
+  # --- Deploy/hosting descriptors (root-scoped: each platform looks for
+  # its file at the repo root) ---
+  - id: deploy.config
+    globs:
+      - Procfile
+      - app.yaml
+      - vercel.json
+      - netlify.toml
+      - fly.toml
+      - render.yaml
+      - serverless.yml
+      - serverless.yaml
+
+  # --- Pre-commit / local-hook configuration ---
+  - id: precommit.hooks
+    globs:
+      - .pre-commit-config.yaml
+      - .husky/*
+      - lefthook.yml
+      - lefthook.yaml
