@@ -697,6 +697,38 @@ class TestCodeSearcher:
         results, _ = s.search("func", n_results=3)
         assert len(results) <= 3
 
+    def test_search_degrades_to_empty_when_total_chunks_cache_reads_zero(
+        self, indexer, tmp_path
+    ) -> None:
+        """UPG-NOTES-CHROMA-BLOCKING-EVENT-LOOP (item D): `search()` gates on
+        the in-memory `total_chunks` counter (agent/searcher.py), never on a
+        live collection read, so this pins the exact class of degradation a
+        stale counter can cause — even with real chunks still present in the
+        collection, a stale-zero cache must short-circuit to an EMPTY result
+        (never raise, never return wrong/mismatched rows, never touch the
+        collection at all) — the same bounded-staleness trade-off
+        `total_chunks`'s own docstring describes.
+        """
+        s = self._indexed_searcher(indexer, tmp_path, """
+            def authenticate_user(username: str, password: str) -> bool:
+                return True
+        """)
+        assert indexer.total_chunks > 0  # real chunks are present in the collection
+
+        # Simulate the cache going stale independently of the real collection
+        # state (the class of staleness item D asked to be documented, not a
+        # scenario vectr's single-daemon-per-workspace architecture can
+        # actually produce — see the out-of-process-writer note below).
+        indexer._total_chunks_cache = 0
+
+        results, ms = s.search("authenticate user function")
+
+        assert results == []
+        assert ms == 0
+        # Confirms the short-circuit fires (an empty-result degradation),
+        # rather than any attempt reaching the still-populated collection
+        # that could raise or return stale/mismatched rows instead.
+
 
 # ---------------------------------------------------------------------------
 # UPG-RESULT-FLOOR: sub-floor cross-encoder-relevance results are trimmed

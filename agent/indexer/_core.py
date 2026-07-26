@@ -8,18 +8,15 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
 from pathlib import Path
 
 import chromadb
 import numpy as np
 
+from agent.chroma_dispatch import timed_chroma_call as _timed_chroma_call
 from agent.chunk_quality import build_purpose_text, is_symbol_bearing_chunk
 from agent.config import DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED
 from agent.config import EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL
-from agent.config import (
-    INDEXING_VECTOR_STORE_SLOW_CALL_WARN_SECONDS as _CHROMA_SLOW_CALL_WARN_SECONDS,
-)
 from agent.indexer._constants import (
     EXCLUDED_DIRS,
     _FILE_BATCH_SIZE,
@@ -34,26 +31,6 @@ from agent.indexer._chunking import chunk_file
 from agent.indexer._types import CodeChunk
 
 logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def _timed_chroma_call(op_name: str):
-    """Time a single blocking vector-store call and log one WARNING if it
-    exceeds the configured threshold. The store's own internal work (e.g.
-    compacting a large collection) can hold a call open far longer than its
-    usual cost; this is the only visibility vectr has into that from its
-    side. Applied uniformly to every call site, never conditioned on the
-    caller or on what the call is for."""
-    start = time.monotonic()
-    try:
-        yield
-    finally:
-        elapsed = time.monotonic() - start
-        if elapsed > _CHROMA_SLOW_CALL_WARN_SECONDS:
-            logger.warning(
-                "chroma %s blocked %.1fs — vector store may be compacting",
-                op_name, elapsed,
-            )
 
 
 def _chunk_metadata(c: CodeChunk) -> dict:

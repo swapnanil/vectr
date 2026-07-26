@@ -667,7 +667,9 @@ def handle_tools_call(
             except (TypeError, ValueError):
                 return _mcp_error("contradicts must be an integer note_id")
         try:
-            note_id = service.remember(
+            note_id = dispatch_chroma_sync(
+                service,
+                service.remember,
                 content=content, tags=tags, priority=priority, kind=kind, title=title, agent=agent,
                 triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
                 supersedes=supersedes, contradicts=contradicts, session_id=session_id,
@@ -781,7 +783,9 @@ def handle_tools_call(
                 note_id_arg = int(note_id_arg)
             except (TypeError, ValueError):
                 note_id_arg = None
-        text = service.recall(
+        text = dispatch_chroma_sync(
+            service,
+            service.recall,
             query=query, tags=tags, priority=priority, limit=limit, kind=kind, boot=boot,
             detail=detail, sort_by=sort_by, max_age_days=max_age_days, note_id=note_id_arg,
             session_id=session_id,
@@ -896,7 +900,7 @@ def handle_tools_call(
                 nid = int(note_id)
             except (TypeError, ValueError):
                 return _mcp_error("note_id must be an integer (the [#N] id shown by vectr_recall)")
-            if service.forget_note(nid):
+            if dispatch_chroma_sync(service, service.forget_note, nid):
                 return {
                     "content": [{"type": "text", "text": f"Deleted note #{nid}."}],
                     "isError": False,
@@ -906,7 +910,7 @@ def handle_tools_call(
                 "isError": False,
             }
         if arguments.get("all") is True:
-            deleted = service.forget_all()
+            deleted = dispatch_chroma_sync(service, service.forget_all)
             return {
                 "content": [{"type": "text", "text": f"Deleted {deleted} working-memory notes. Starting fresh."}],
                 "isError": False,

@@ -442,6 +442,25 @@ class VectrService:
         self._chroma_executor_finalizer = weakref.finalize(
             self, self._chroma_executor.shutdown, wait=False, cancel_futures=True,
         )
+        # UPG-NOTES-CHROMA-BLOCKING-EVENT-LOOP: this `wait=False` only governs
+        # what THIS finalizer/shutdown() call blocks on — it does not opt this
+        # executor's worker thread out of `concurrent.futures.thread._python_exit`,
+        # a module-level `atexit` hook every `ThreadPoolExecutor` registers into
+        # unconditionally (verified against the running interpreter's stdlib:
+        # `inspect.getsource(concurrent.futures.thread._python_exit)`). At real
+        # interpreter exit that hook wakes every still-tracked worker thread and
+        # `.join()`s each one with no timeout, regardless of any executor's own
+        # `wait=` argument. `concurrent.futures` exposes no supported way to opt
+        # an executor's threads out of it. In practice this only extends process
+        # exit by however long whatever chroma call is in flight at that exact
+        # moment takes (the same bounded, `slow_call_warn_seconds`-watched
+        # operations already logged elsewhere) — it cannot hang indefinitely
+        # under normal operation, and calling `shutdown()` here (already done,
+        # see above) during a graceful daemon stop lets the worker exit on its
+        # own well before this hook ever runs. Documented rather than worked
+        # around: building a private thread pool to sidestep a stdlib atexit
+        # hook is out of proportion to this exposure. See UPG-CHROMA-EXECUTOR-
+        # ATEXIT-JOIN for the proposed follow-up if this ever needs revisiting.
 
         if not defer_search_init:
             self._init_search_layer()

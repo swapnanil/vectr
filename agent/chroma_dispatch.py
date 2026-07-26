@@ -33,10 +33,43 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Any, Callable, TypeVar
 
+from agent.config import (
+    INDEXING_VECTOR_STORE_SLOW_CALL_WARN_SECONDS as _CHROMA_SLOW_CALL_WARN_SECONDS,
+)
+
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def timed_chroma_call(op_name: str):
+    """Time a single blocking vector-store call and log one WARNING if it
+    exceeds the configured threshold. The store's own internal work (e.g.
+    compacting a large collection) can hold a call open far longer than its
+    usual cost; this is the only visibility vectr has into that from its
+    side. Applied uniformly to every call site that reaches ChromaDB —
+    code-collection and notes-collection alike — never conditioned on the
+    caller or on what the call is for. Shared here (rather than duplicated
+    per collection) so both call sets use one threshold and one message
+    format that can't drift apart.
+    """
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed = time.monotonic() - start
+        if elapsed > _CHROMA_SLOW_CALL_WARN_SECONDS:
+            logger.warning(
+                "chroma %s blocked %.1fs — vector store may be compacting",
+                op_name, elapsed,
+            )
 
 
 def _executor_of(service: Any) -> ThreadPoolExecutor | None:
