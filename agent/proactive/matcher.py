@@ -238,20 +238,41 @@ class ProactiveMatcher:
 
         # UPG-PROXY-REVOKED-LEAK: fold lifecycle state for the UNION of every
         # note either matcher found, ONCE — never per-note, never per-matcher
-        # — before rendering a single candidate line. A source that doesn't
-        # implement note_states() (e.g. an older test fake) degrades to an
-        # empty dict, and a note_id absent from that dict is "active" by
-        # note_event_states()'s own documented contract, so this is fully
-        # backward compatible with a source that predates this method.
+        # — before rendering a single candidate line.
+        #
+        # Two distinct failure modes, deliberately handled differently,
+        # because conflating them reintroduces the very defect this fixes:
+        #
+        #   (a) The source does not implement note_states() at all (an older
+        #       fake or a backend predating this protocol method). That is a
+        #       STATIC property of the source, checked with getattr() and not
+        #       by catching AttributeError — every note is active, which is
+        #       exactly note_event_states()'s documented contract for an
+        #       absent note_id. Backward compatible, renders raw content.
+        #
+        #   (b) The source implements it but the CALL FAILS (e.g. the
+        #       note_events table is unreadable mid-migration). Lifecycle
+        #       state is then UNKNOWN, and "unknown" must never be rendered
+        #       as "active" — that would put a revoked note's raw content
+        #       back into injected context as apparent fact, which is the
+        #       defect. Fail CLOSED: drop every note candidate for this
+        #       window. M4 code search is unaffected (it carries no note
+        #       lifecycle), so the caller degrades to code context only
+        #       rather than to wrong memory.
         matched_notes: dict[int, WorkingNote] = {}
         for note in structural_notes:
             matched_notes.setdefault(note.note_id, note)
         for note, _score in semantic_scored:
             matched_notes.setdefault(note.note_id, note)
-        try:
-            note_states = self._source.note_states(list(matched_notes.values()))
-        except Exception:
-            note_states = {}
+        note_states: dict[int, dict] = {}
+        _states_fn = getattr(self._source, "note_states", None)
+        if _states_fn is not None:
+            try:
+                note_states = _states_fn(list(matched_notes.values()))
+            except Exception:
+                structural_notes = []
+                semantic_scored = []
+                note_states = {}
 
         if self._structural_note and window.file_paths:
             anchors = {p: Path(p).name or p for p in window.file_paths}

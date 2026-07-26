@@ -279,3 +279,50 @@ class TestRevokedNoteDeterrentRendering:
             semantic_note=False, code_search=False,
         ).match(w)
         assert cands == []
+
+
+# -- UPG-PROXY-REVOKED-LEAK: unknown lifecycle state must fail CLOSED -------
+
+class _FailingStateSource(_Source):
+    """Implements note_states() but the call FAILS -- e.g. the note_events
+    table is unreadable mid-migration. Distinct from _Source, which does
+    not implement the method at all."""
+
+    def note_states(self, notes):
+        raise RuntimeError("note_events unreadable")
+
+
+def test_note_states_failure_drops_note_candidates_instead_of_rendering_raw():
+    """A note_states() that RAISES leaves lifecycle state unknown. Unknown
+    must never be rendered as active: a revoked note would otherwise have
+    its raw content injected as apparent fact, which is exactly the defect
+    UPG-PROXY-REVOKED-LEAK fixes. Fail closed -- drop the note candidates.
+
+    Non-vacuity: the identical source shape whose note_states() SUCCEEDS
+    (returning no state, i.e. all-active) does render the note, proving the
+    match itself is real and the drop is caused by the failure alone."""
+    n = _note(1, "resolver.py holds the workspace lock")
+    window = ProactiveWindow(text="workspace lock", file_paths=["/x/resolver.py"])
+
+    failing = _matcher(_FailingStateSource(structural=[n], semantic=[(n, 0.9)]))
+    assert [c for c in failing.match(window) if c.kind.startswith("note_")] == []
+
+    working = _matcher(_StatefulSource(structural=[n], semantic=[(n, 0.9)], states={}))
+    assert [c for c in working.match(window) if c.kind.startswith("note_")] != []
+
+
+def test_note_states_failure_still_yields_code_candidates():
+    """Failing closed drops NOTE candidates only. M4 code-search hits carry
+    no note lifecycle, so they must survive -- the caller degrades to code
+    context rather than losing the whole injection."""
+    n = _note(1, "resolver.py holds the workspace lock")
+    hit = SearchResult(
+        file_path="/x/resolver.py", lines="1-4", symbol_name="lock",
+        language="python", score=0.9, content="def lock():\n    ...",
+    )
+    src = _FailingStateSource(structural=[n], semantic=[(n, 0.9)], code=[hit])
+    kinds = {c.kind for c in _matcher(src).match(
+        ProactiveWindow(text="workspace lock", file_paths=["/x/resolver.py"])
+    )}
+    assert "code_semantic" in kinds
+    assert not any(k.startswith("note_") for k in kinds)
