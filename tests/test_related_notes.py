@@ -233,3 +233,72 @@ class TestRelatedActiveNotesZeroInference:
 
         assert embedder.call_count == 1
         assert any(r["note_id"] == near_id for r in related)
+
+
+class TestRelatedActiveNotesOverFetch:
+    """The "working_memory" ChromaDB collection is GLOBAL — one collection
+    shared by every workspace a daemon serves — and the vector query carries
+    no per-workspace `where` clause, so workspace / expiry / lifecycle
+    filtering all happens in SQL AFTER the search. The lookup must therefore
+    over-fetch candidates rather than requesting exactly `limit + 1`, or
+    nearer-but-filtered-out neighbours silently starve the result to [].
+
+    Both tests below FAIL against an `n_results=limit + 1` implementation
+    and pass with the `limit * 3` over-fetch, so they pin the behaviour
+    rather than restating it.
+    """
+
+    def test_foreign_workspace_neighbours_do_not_starve_the_result(self, tmp_path) -> None:
+        base = "base content ofw"
+        other_a = "other workspace note a"
+        other_b = "other workspace note b"
+        near_a = "same workspace near note a"
+        near_b = "same workspace near note b"
+        embedder = _ControlledEmbedder({
+            base: BASE_VEC,
+            # The two NEAREST neighbours belong to a different workspace and
+            # are dropped by the SQL workspace filter after the search.
+            other_a: _unit_vector_at_cosine(0.99),
+            other_b: _unit_vector_at_cosine(0.98),
+            near_a: _unit_vector_at_cosine(0.95),
+            near_b: _unit_vector_at_cosine(0.94),
+        })
+        store = _store(tmp_path, embedder)
+        store.remember("/some/other/workspace", other_a)
+        store.remember("/some/other/workspace", other_b)
+        near_a_id = store.remember(WS, near_a)
+        near_b_id = store.remember(WS, near_b)
+        base_id = store.remember(WS, base)
+
+        related = store.related_active_notes(WS, base_id, limit=2, min_similarity=0.5)
+
+        assert [r["note_id"] for r in related] == [near_a_id, near_b_id]
+
+    def test_revoked_neighbours_do_not_starve_the_result(self, tmp_path) -> None:
+        base = "base content rev"
+        revoked_a = "revoked near note a"
+        revoked_b = "revoked near note b"
+        active_a = "active near note a"
+        active_b = "active near note b"
+        embedder = _ControlledEmbedder({
+            base: BASE_VEC,
+            # The two NEAREST neighbours are revoked and are dropped by the
+            # folded-lifecycle-state filter after the search.
+            revoked_a: _unit_vector_at_cosine(0.99),
+            revoked_b: _unit_vector_at_cosine(0.98),
+            active_a: _unit_vector_at_cosine(0.95),
+            active_b: _unit_vector_at_cosine(0.94),
+        })
+        store = _store(tmp_path, embedder)
+        revoked_a_id = store.remember(WS, revoked_a)
+        revoked_b_id = store.remember(WS, revoked_b)
+        active_a_id = store.remember(WS, active_a)
+        active_b_id = store.remember(WS, active_b)
+        base_id = store.remember(WS, base)
+
+        assert store.revoke_note(WS, revoked_a_id, reason="wrong") is True
+        assert store.revoke_note(WS, revoked_b_id, reason="wrong") is True
+
+        related = store.related_active_notes(WS, base_id, limit=2, min_similarity=0.5)
+
+        assert [r["note_id"] for r in related] == [active_a_id, active_b_id]

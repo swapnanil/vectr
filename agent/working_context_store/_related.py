@@ -97,9 +97,24 @@ def related_active_notes(
 
         with timed_chroma_call("count"):
             col_count = col.count()
+        if col_count == 0:
+            return []
 
+        # Over-fetch before filtering, don't ask for exactly what we return.
+        # The "working_memory" collection is GLOBAL — one collection shared
+        # by every workspace this daemon serves — and the query carries no
+        # per-workspace `where` clause, so EVERY filter applied below
+        # (workspace, valid_until expiry, folded lifecycle state) runs in
+        # SQL AFTER the vector search. Requesting `limit + 1` would budget
+        # only for dropping the note itself, so a few nearest neighbours
+        # that happen to belong to another workspace — or to be already
+        # revoked/superseded/expired — would starve the result to [] even
+        # though close active notes exist here. `limit * 3` is the same
+        # over-fetch `_semantic_recall` uses against this collection for
+        # the same reason; the final `related[:limit]` still bounds output.
+        n_query = min(max(limit * 3, limit + 1), col_count)
         with timed_chroma_call("query"):
-            results = col.query(query_embeddings=[vec], n_results=min(limit + 1, col_count))
+            results = col.query(query_embeddings=[vec], n_results=n_query)
 
         if not results or not results.get("ids") or not results["ids"][0]:
             return []
