@@ -415,6 +415,12 @@ class RelatedNoteModel(BaseModel):
     note_id: int
     title: str
     kind: str
+    # Carried through from the RelatedNote TypedDict, which has always
+    # computed it. Without this field pydantic's default extra='ignore'
+    # silently dropped it, so a REST caller could not tell a high-priority
+    # related note from a low-priority one — exactly the signal that
+    # decides whether a near-duplicate is worth acting on.
+    priority: str
     similarity: float
     created_at: float
 

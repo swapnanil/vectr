@@ -25,7 +25,9 @@ class TestRememberRouteRelatedNotesReal:
         client.post("/v1/memory/clear", json={})
 
         content = "shared exact content for REST near-duplicate similarity"
-        first = client.post("/v1/remember", json={"content": content})
+        first = client.post(
+            "/v1/remember", json={"content": content, "priority": "high", "kind": "gotcha"}
+        )
         assert first.status_code == 200
         base_id = first.json()["note_id"]
 
@@ -37,10 +39,13 @@ class TestRememberRouteRelatedNotesReal:
         hit = data["related"][0]
         assert hit["note_id"] == base_id
         assert isinstance(hit["title"], str)
-        assert isinstance(hit["kind"], str)
         assert isinstance(hit["similarity"], float)
         assert isinstance(hit["created_at"], float)
-        assert "priority" not in hit  # RelatedNoteModel deliberately excludes it
+        # kind and priority must round-trip with their REAL values, not merely
+        # be present as strings: they are what lets a caller tell a high-priority
+        # gotcha it may be contradicting from an incidental low-priority note.
+        assert hit["kind"] == "gotcha"
+        assert hit["priority"] == "high"
 
         client.post("/v1/memory/clear", json={})
 
