@@ -607,6 +607,32 @@ class TestRecallForPathUPG96:
         notes = store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha")
         assert len(notes) == 1
 
+    def test_declared_absolute_anchor_is_recalled_via_absolute_query(self, tmp_path) -> None:
+        """remember()'s own docstring allows a declared anchor to be either
+        workspace-relative OR absolute. An absolute anchor's JSON-serialized
+        form is `".../gate.py"` — the character immediately before the
+        basename is "/", not a quote — so a QUOTED SQL LIKE pattern
+        (`%"gate.py"%`) would never match it, silently excluding the note
+        from the candidate pool before the Python-side exact-match filter
+        ever runs. The anchors SQL prefilter must stay unquoted (a true
+        superset), same as the content prefilter. Content deliberately
+        carries no mention of the basename anywhere, so this can only pass
+        via the anchors path, not the content-boundary path (non-vacuity)."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        (tmp_path / "src").mkdir()
+        abs_anchor = str(tmp_path / "src" / "gate.py")
+        store.remember(
+            ws, "the retry loop here needs a backoff cap", kind="gotcha",
+            anchors=[abs_anchor],
+        )
+        # A real hook always sends an absolute file_path; this also causes
+        # _path_trigger_candidates() to derive the workspace-relative form
+        # ("src/gate.py") as a second candidate internally, exercising both
+        # halves of the fix in one realistic call.
+        notes = store.recall_for_path(ws, abs_anchor, kind="gotcha")
+        assert len(notes) == 1
+        assert "gate.py" not in notes[0].content
+
     def test_declared_anchor_for_different_file_does_not_leak_by_substring(self, tmp_path) -> None:
         """A note anchored to uv_regate.py must not surface for gate.py just
         because the anchor string happens to contain "gate.py" as a

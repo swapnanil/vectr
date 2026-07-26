@@ -2252,6 +2252,15 @@ class WorkingContextStore:
             min(limit * MEMORY_RECALL_FOR_PATH_OVERFETCH_MULTIPLIER, MEMORY_RECALL_FOR_PATH_OVERFETCH_CEILING),
         )
 
+        # The anchors LIKE arms are UNQUOTED — same superset treatment as the
+        # content arms above, not the tighter quoted form. A declared anchor
+        # is legitimately either workspace-relative OR absolute (remember()'s
+        # own `anchors` docstring), and an absolute anchor's JSON-serialized
+        # form is `".../<basename>"` — the character right before the
+        # basename is "/", not a quote, so a quoted `%"<basename>"%` pattern
+        # would silently never match an absolute anchor. `_anchors_exact_match()`
+        # below is what does the precise narrowing; the SQL step here only
+        # needs to guarantee no true match is excluded from the pool.
         sql = (
             "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
             "AND (content LIKE ? OR content LIKE ? OR anchors LIKE ? OR anchors LIKE ?)"
@@ -2260,8 +2269,8 @@ class WorkingContextStore:
             workspace,
             f"%{basename}%",
             f"%{relpath_or_basename}%",
-            f'%"{basename}"%',
-            f'%"{relpath_or_basename}"%',
+            f"%{basename}%",
+            f"%{relpath_or_basename}%",
         ]
         if kind:
             sql += " AND kind = ?"
