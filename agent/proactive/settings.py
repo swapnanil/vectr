@@ -24,6 +24,7 @@ independent gates here, and only one of them is unconditional:
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 
 from agent import config as _c
@@ -213,18 +214,49 @@ def _is_loopback(host: str) -> bool:
     return _is_loopback_host(host)
 
 
+def _bind_host_from_argv() -> str | None:
+    """Deterministically parse a `--host <value>` / `--host=<value>` pair out
+    of the CURRENT PROCESS's own `sys.argv`, or None if absent.
+
+    Plain positional argument parsing, not a query-content heuristic — this
+    reads this process's own launch invocation, never a query or a config
+    value. Handles both the space-separated and `=`-joined uvicorn/argparse
+    forms. In-process/test usage (pytest, the MCP server) has no `--host` in
+    its own argv, so this always resolves to None there — no test churn."""
+    argv = sys.argv
+    for i, arg in enumerate(argv):
+        if arg == "--host" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--host="):
+            return arg[len("--host="):]
+    return None
+
+
 def _current_bind_host() -> str:
     """The daemon's actual bind host for THIS process.
 
-    `main.py`'s `_do_start` sets `VECTR_BIND_HOST` on the uvicorn subprocess
-    env to the exact `--host` it launched with (UPG-PROXY-LOOPBACK-BYPASS) —
-    the daemon process has no other way to learn its own bind address. When
-    the var is absent (in-process/test usage, or a daemon started outside
-    `_do_start`), fall back to `_do_start`'s own documented default bind,
-    127.0.0.1 — never treat an unset value as non-loopback, or every
-    in-process caller (tests, the MCP server sharing the daemon's process)
-    would be spuriously refused."""
-    return os.environ.get("VECTR_BIND_HOST", "").strip() or "127.0.0.1"
+    Resolution order:
+    1. `VECTR_BIND_HOST` — `main.py`'s `_do_start` sets this on the uvicorn
+       subprocess env to the exact `--host` it launched with
+       (UPG-PROXY-LOOPBACK-BYPASS).
+    2. This process's own `sys.argv` `--host` — covers a daemon started
+       outside `_do_start` (e.g. `uvicorn api:app --host 0.0.0.0` run
+       directly), which has no VECTR_BIND_HOST but IS launched with the same
+       `--host` argument uvicorn itself reads; without this fallback such a
+       daemon would be silently treated as loopback and would still serve
+       proactive injection over a non-loopback bind.
+    3. `127.0.0.1` — `_do_start`'s own documented default bind. Only reached
+       when neither of the above is present (in-process/test usage, or the
+       MCP server sharing the daemon's process) — never treat a fully
+       unspecified bind as non-loopback, or every in-process caller would be
+       spuriously refused."""
+    env_host = os.environ.get("VECTR_BIND_HOST", "").strip()
+    if env_host:
+        return env_host
+    argv_host = _bind_host_from_argv()
+    if argv_host:
+        return argv_host
+    return "127.0.0.1"
 
 
 def proactive_bind_is_loopback() -> bool:

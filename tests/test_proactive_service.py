@@ -170,6 +170,27 @@ def test_proxy_and_hook_channels_share_one_turn_ledger(tmp_path, monkeypatch):
     assert f"note:{nid}" in reset_out["anchor_ids"]
 
 
+def test_proxy_call_with_unseen_session_id_does_not_allocate_turn_ledger(tmp_path, monkeypatch):
+    """`proactive_context` must consult the shared TurnInjectionLedger
+    LOOKUP-ONLY (`_existing_turn_ledger`), never allocate one
+    (`_turn_ledger_for`). The proxy channel's session_id (sha256 of the
+    first user message) is, today, disjoint from the editor-supplied
+    session id hook/trigger-engine surfaces use — if a proxy call allocated
+    a ledger no hook surface will ever look up, that churn would consume
+    slots in the EVICTION_MAX_TRACKED_SESSIONS-bounded `_turn_ledgers` LRU
+    for zero dedup benefit, risking eviction of a live editor session's real
+    ledger under heavy multi-subagent session churn."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    svc.remember("resolver.py holds the workspace lock; drops on scope exit", kind="gotcha")
+    assert len(svc._turn_ledgers) == 0
+
+    svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="never-seen-before", channel="proxy",
+    )
+    assert len(svc._turn_ledgers) == 0
+    assert "never-seen-before" not in svc._turn_ledgers
+
+
 # -- recall_scored (UPG-PRO-1) ----------------------------------------------
 
 def test_recall_scored_returns_scores(tmp_path, monkeypatch):
