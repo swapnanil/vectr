@@ -880,6 +880,21 @@ class ArcResolveResult(BaseModel):
     unresolved: list[int]
 
 
+class BoundaryPrecompactResponse(BaseModel):
+    """`GET /v1/boundary/precompact` — the rendered PreCompact
+    boundary-preservation text (see `VectrService._boundary_precompact_text`)
+    plus the pending-arc count it was rendered from. `text` is "" (never
+    absent) when the surface is disabled by config
+    (`episodes.boundary_precompact_enabled`) — the pre-compact hook branch
+    treats an empty string as "nothing to print", not an error. Declared
+    here (pydantic filters undeclared keys on a `response_model`) so both
+    fields survive the REST boundary even if the service dict ever grows
+    another key."""
+
+    text: str
+    arcs_pending: int
+
+
 class ArcsDismissRequest(BaseModel):
     arc_ids: list[int] = Field(..., min_length=1, description="Arc ids to dismiss")
     reason: str = Field(..., min_length=1, description="Why these arcs are not worth distilling")

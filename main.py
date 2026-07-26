@@ -2051,6 +2051,26 @@ def _fetch_recall(port: int, payload: dict) -> str:
         return ""
 
 
+def _fetch_boundary_precompact(port: int) -> str:
+    """GET /v1/boundary/precompact and return its `text` field, or '' on ANY
+    failure (daemon absent, connection refused, non-2xx status such as the
+    search-only-mode 503, malformed JSON) — never raises.
+
+    Used by the PreCompact hook branch to fetch the boundary-preservation
+    text; the branch prints whatever this returns as PLAIN TEXT (never the
+    `hookSpecificOutput` JSON envelope other hook events use), matching the
+    editor harness's PreCompact contract: its stdout is appended verbatim as
+    custom compact instructions, not parsed as JSON.
+    """
+    import httpx
+    try:
+        resp = httpx.get(f"{_api_base(port)}/v1/boundary/precompact", timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("text", "") or ""
+    except Exception:
+        return ""
+
+
 def _post_snapshot(port: int, label: str) -> bool:
     """POST /v1/snapshot; True on success, False on any failure (never raises).
 
@@ -2317,6 +2337,21 @@ def _emit_hook_context(event_name: str, text: str) -> None:
     }))
 
 
+def _emit_hook_plain_text(text: str) -> None:
+    """Print `text` verbatim to stdout — only when non-empty.
+
+    Deliberately NOT `_emit_hook_context`: the PreCompact hook's stdout is
+    consumed by the editor harness as raw trimmed plain text and appended
+    as custom compact instructions, NOT parsed as a `hookSpecificOutput`
+    JSON envelope — emitting that envelope here would inject the literal
+    JSON string into the summarizer's instructions as garbage. Used only by
+    the pre-compact branch below.
+    """
+    if not text.strip():
+        return
+    print(text)
+
+
 def _resolve_hook_instance(cwd: str) -> dict | None:
     """Find the running daemon serving `cwd`, or None.
 
@@ -2359,7 +2394,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
     | pre-tool-use      | file-bearing tool (Edit/Write/Read) | pre-edit + that file's path   | POST /v1/recall {file_path, kind: gotcha, session_id, hook_event} |
     | pre-tool-use      | command-running tool (Bash)    | pre-run + that command's normalized verb | POST /v1/recall {command, session_id, hook_event} |
     | post-tool-use     | Bash/Edit/Write/MultiEdit      | n/a — a WRITE path (episode capture), not a recall/trigger event | POST /v1/episode {session_id, cwd, tool, command/file_path, ...}, via a DETACHED worker (never awaited here) |
-    | pre-compact       | any `trigger`                  | ledger reset (§3)                   | POST /v1/snapshot (unchanged) + POST /v1/trigger/reset {session_id} |
+    | pre-compact       | any `trigger`                  | ledger reset (§3)                   | POST /v1/snapshot (unchanged) + POST /v1/trigger/reset {session_id} + GET /v1/boundary/precompact (printed as PLAIN TEXT via `_emit_hook_plain_text`, never the `hookSpecificOutput` envelope — see that function's docstring) |
     | post-commit       | n/a (fired by `git`, not the editor harness) | n/a — a WRITE path, not a recall/trigger event | POST /v1/commit-note {sha, subject, branch, files} |
 
     `session-start` with `source == "compact"` is the deterministic first
@@ -2507,8 +2542,9 @@ def cmd_hook(args: argparse.Namespace) -> None:
 
         elif args.hook_event == "pre-compact":
             # Seal working memory before /compact replaces the conversation (UPG-9.7).
-            # No context is emitted — compaction discards it anyway; the boot set is
-            # re-injected afterwards by the SessionStart `compact` matcher (UPG-9.4).
+            # No hookSpecificOutput context is emitted here — compaction discards it
+            # anyway; the boot set is re-injected afterwards by the SessionStart
+            # `compact` matcher (UPG-9.4).
             trigger = (event.get("trigger") or "manual").strip() or "manual"
             label = f"pre-compact-{trigger}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
             _post_snapshot(port, label)
@@ -2519,6 +2555,12 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # tracked ledger (or no session_id at all) is a no-op.
             if session_id:
                 _post_trigger_reset(port, session_id)
+            # Boundary-preservation nudge (distinct from the two calls above):
+            # steers the summarizer itself, so it must reach stdout as PLAIN
+            # TEXT via `_emit_hook_plain_text`, never the JSON envelope
+            # `_emit_hook_context` emits (see that function's docstring for
+            # why the two are not interchangeable on this hook event).
+            _emit_hook_plain_text(_fetch_boundary_precompact(port))
 
         elif args.hook_event == "post-commit":
             # UPG-COMMIT-MEMORY-HOOK: fired by git itself, post-commit — no

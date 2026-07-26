@@ -161,6 +161,34 @@ def _post_json(port: int, path: str, payload: dict, timeout: float = 30) -> dict
         return None
 
 
+def _get_json(port: int, path: str, timeout: float = 30) -> tuple[int, dict | None]:
+    """GET `http://localhost:<port><path>`; return (status_code, parsed body)
+    — body is None on connection failure, timeout, or malformed
+    response/JSON, in which case status_code is -1. Never raises.
+
+    Unlike `_post_json`, the caller needs the status code too (e.g. to
+    distinguish a disabled-config 200/{"text": ""} from a search-only-mode
+    503), so this returns both rather than collapsing non-2xx to None.
+    """
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: localhost:{port}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("ascii")
+    try:
+        with socket.create_connection(("localhost", port), timeout=timeout) as sock:
+            sock.sendall(request)
+            raw = _recv_full_response(sock)
+        parsed = _parse_http_response(raw)
+        if parsed is None:
+            return -1, None
+        status_code, body = parsed
+        return status_code, json.loads(body.decode("utf-8"))
+    except Exception:
+        return -1, None
+
+
 def _read_hook_stdin() -> dict:
     """Read the Claude Code hook event JSON from stdin; {} if absent/invalid."""
     try:
@@ -207,6 +235,27 @@ def _fetch_recall(port: int, payload: dict) -> str:
     if body is None:
         return ""
     return body.get("notes", "") or ""
+
+
+def _fetch_boundary_precompact(port: int) -> str:
+    """GET /v1/boundary/precompact and return its `text` field, or '' on ANY
+    failure (daemon absent, connection refused, non-2xx status such as the
+    search-only-mode 503, malformed JSON) — never raises. Mirrors main.py's
+    `_fetch_boundary_precompact` exactly (see its docstring for the
+    PreCompact plain-text contract this feeds)."""
+    status_code, body = _get_json(port, "/v1/boundary/precompact")
+    if status_code != 200 or not isinstance(body, dict):
+        return ""
+    return body.get("text", "") or ""
+
+
+def _emit_hook_plain_text(text: str) -> None:
+    """Print `text` verbatim to stdout — only when non-empty. Mirrors
+    main.py's `_emit_hook_plain_text` exactly (see its docstring for why
+    this is not `_emit_hook_context`)."""
+    if not text.strip():
+        return
+    print(text)
 
 
 def _post_snapshot(port: int, label: str) -> bool:
@@ -415,5 +464,6 @@ def run_hook(hook_event: str) -> None:
             _post_snapshot(port, label)
             if session_id:
                 _post_trigger_reset(port, session_id)
+            _emit_hook_plain_text(_fetch_boundary_precompact(port))
     except Exception:
         pass  # hook safety: never propagate

@@ -42,15 +42,23 @@ class _FastBindHTTPServer(ThreadingHTTPServer):
 
 
 class _StubDaemonHandler(BaseHTTPRequestHandler):
-    """Canned JSON bodies for /v1/recall, /v1/snapshot, /v1/trigger/reset —
-    enough of the real daemon's contract for both httpx (main.cmd_hook) and
-    urllib (agent.hook_cli.run_hook) to round-trip through identically."""
+    """Canned JSON bodies for /v1/recall, /v1/snapshot, /v1/trigger/reset,
+    /v1/boundary/precompact — enough of the real daemon's contract for both
+    httpx (main.cmd_hook) and the stdlib socket client (agent.hook_cli.run_hook)
+    to round-trip through identically."""
 
     RESPONSES = {
         "/v1/recall": {"notes": "[1] lock_workspace() at resolver.rs:214"},
         "/v1/snapshot": {"ok": True},
         "/v1/trigger/reset": {"ok": True},
     }
+
+    # (status_code, body) for GET /v1/boundary/precompact — overridden per
+    # test via the server instance's own `boundary_response` attribute
+    # (see `stub_daemon`'s `request.param` below) so different scenarios
+    # (normal text / disabled-config empty text / search-only 503) reuse
+    # the same handler class.
+    DEFAULT_BOUNDARY_RESPONSE = (200, {"text": "Preserve concrete findings from this session.", "arcs_pending": 0})
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -62,13 +70,36 @@ class _StubDaemonHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):
+        if self.path == "/v1/boundary/precompact":
+            status_code, body_dict = getattr(
+                self.server, "boundary_response", self.DEFAULT_BOUNDARY_RESPONSE,
+            )
+            body = json.dumps(body_dict).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def log_message(self, *args):
         pass  # keep test output quiet
 
 
 @pytest.fixture
-def stub_daemon():
+def stub_daemon(request):
+    """`request.param`, when set via `@pytest.mark.parametrize(...,
+    indirect=True)`, is a `(status_code, body_dict)` tuple overriding
+    GET /v1/boundary/precompact's response for that test only — every
+    other fixture in this file leaves it unset and gets the handler's
+    default non-empty-text response."""
     server = _FastBindHTTPServer(("127.0.0.1", 0), _StubDaemonHandler)
+    boundary_response = getattr(request, "param", None)
+    if boundary_response is not None:
+        server.boundary_response = boundary_response
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -200,3 +231,88 @@ class TestPostToolUseParity:
         assert canonical_out == ""
         assert slim_out == ""
         assert canonical_calls == slim_calls
+
+
+class TestPreCompactBoundaryTextParity:
+    """PreCompact boundary-preservation text (LANE-L3): both implementations
+    fetch GET /v1/boundary/precompact and print its `text` field verbatim as
+    PLAIN TEXT — never the `hookSpecificOutput` JSON envelope every other
+    hook event uses. Split out from the shared FIXTURES table above because
+    each scenario needs the stub daemon's own boundary-route response to
+    vary (normal text / disabled-config empty text / search-only 503)."""
+
+    def _run_both(self, tmp_path, stub_daemon, monkeypatch, capsys, stdin_json):
+        reg = _registry_pointing_at(tmp_path, stub_daemon)
+        monkeypatch.setattr(m, "InstanceRegistry", lambda *a, **k: reg)
+        monkeypatch.setattr(hook_cli, "InstanceRegistry", lambda *a, **k: reg)
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_json))
+        m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
+        canonical_out = capsys.readouterr().out
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_json))
+        hook_cli.run_hook("pre-compact")
+        slim_out = capsys.readouterr().out
+        return canonical_out, slim_out
+
+    @pytest.mark.parametrize("stub_daemon", [
+        (200, {"text": "Preserve concrete findings from this session.", "arcs_pending": 2}),
+    ], indirect=True)
+    def test_prints_plain_text_never_json_envelope(self, tmp_path, stub_daemon, monkeypatch, capsys):
+        canonical_out, slim_out = self._run_both(
+            tmp_path, stub_daemon, monkeypatch, capsys,
+            '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}',
+        )
+        assert canonical_out == slim_out
+        assert canonical_out.strip() == "Preserve concrete findings from this session."
+        assert "hookSpecificOutput" not in canonical_out
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(canonical_out)
+
+    @pytest.mark.parametrize("stub_daemon", [
+        (200, {"text": "", "arcs_pending": 0}),
+    ], indirect=True)
+    def test_prints_nothing_when_text_is_empty(self, tmp_path, stub_daemon, monkeypatch, capsys):
+        canonical_out, slim_out = self._run_both(
+            tmp_path, stub_daemon, monkeypatch, capsys,
+            '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}',
+        )
+        assert canonical_out == slim_out == ""
+
+    @pytest.mark.parametrize("stub_daemon", [
+        (503, {"detail": {"error": "search_only_mode"}}),
+    ], indirect=True)
+    def test_prints_nothing_when_route_returns_503(self, tmp_path, stub_daemon, monkeypatch, capsys):
+        canonical_out, slim_out = self._run_both(
+            tmp_path, stub_daemon, monkeypatch, capsys,
+            '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}',
+        )
+        assert canonical_out == slim_out == ""
+
+    @pytest.mark.parametrize("stub_daemon", [
+        (200, "not-a-json-object-with-text"),  # malformed shape: a bare string body
+    ], indirect=True)
+    def test_prints_nothing_on_malformed_body(self, tmp_path, stub_daemon, monkeypatch, capsys):
+        canonical_out, slim_out = self._run_both(
+            tmp_path, stub_daemon, monkeypatch, capsys,
+            '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}',
+        )
+        assert canonical_out == slim_out == ""
+
+    def test_prints_nothing_when_daemon_unreachable(self, tmp_path, monkeypatch, capsys):
+        # No matching registry entry at all -> both implementations return
+        # before ever attempting the boundary-text GET.
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        monkeypatch.setattr(m, "InstanceRegistry", lambda *a, **k: reg)
+        monkeypatch.setattr(hook_cli, "InstanceRegistry", lambda *a, **k: reg)
+        stdin_json = '{"cwd": "/nowhere", "trigger": "auto", "session_id": "abc-123"}'
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_json))
+        m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
+        canonical_out = capsys.readouterr().out
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_json))
+        hook_cli.run_hook("pre-compact")
+        slim_out = capsys.readouterr().out
+
+        assert canonical_out == slim_out == ""

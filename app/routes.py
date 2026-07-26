@@ -16,6 +16,7 @@ from app.models import (
     ArcsDismissRequest,
     ArcsDismissResponse,
     ArcsResponse,
+    BoundaryPrecompactResponse,
     CommitNoteRequest,
     CommitNoteResponse,
     EpisodeRecord,
@@ -761,6 +762,26 @@ async def arcs_dismiss(body: ArcsDismissRequest, request: Request) -> ArcsDismis
         resolved=result["resolved"],
         unresolved=result["unresolved"],
         processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.get("/v1/boundary/precompact", response_model=BoundaryPrecompactResponse)
+async def boundary_precompact(request: Request) -> BoundaryPrecompactResponse:
+    """PreCompact boundary-preservation surface: the text the pre-compact
+    hook branch (main.py / agent/hook_cli.py) prints verbatim as PLAIN TEXT
+    for the summarizer to read — never as a `hookSpecificOutput` JSON
+    envelope (the PreCompact hook's stdout is not parsed as one). Server-
+    rendered (`VectrService._boundary_precompact_text`) so the product copy
+    has one home; `text` is "" (still HTTP 200) when
+    `episodes.boundary_precompact_enabled` is false."""
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    result = svc.boundary_precompact()
+    return BoundaryPrecompactResponse(
+        text=result["text"],
+        arcs_pending=result["arcs_pending"],
     )
 
 
