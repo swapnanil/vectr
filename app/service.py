@@ -2525,6 +2525,20 @@ class VectrService:
                 except Exception:
                     return []
 
+            def note_states(self, notes):
+                # UPG-PROXY-REVOKED-LEAK: batched fold, called once by
+                # ProactiveMatcher.match() for the union of matched notes —
+                # never per-note. A failure here (e.g. a note_events table
+                # migration in progress) degrades to {}, which the matcher
+                # treats as every note being active — the same behavior as
+                # before this method existed, never a hard error.
+                try:
+                    return service._context_store.note_event_states(
+                        service._workspace_root, notes
+                    )
+                except Exception:
+                    return {}
+
         matcher = ProactiveMatcher(
             _ServiceMatchSource(),
             min_similarity=settings.min_similarity,

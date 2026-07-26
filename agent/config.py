@@ -1191,3 +1191,14 @@ MEMORY_WRITE_PROXY_SUGGEST_LIMIT: int = int(_proxy_suggest_cfg["limit"])
 _hygiene_cfg: dict[str, Any] = _cfg["memory_hygiene"]
 MEMORY_HYGIENE_STALE_TASK_WARN_COUNT: int = int(_hygiene_cfg["stale_task_warn_count"])
 MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS: int = int(_hygiene_cfg["stale_task_warn_age_days"])
+
+# ---------------------------------------------------------------------------
+# UPG-PROXY-SUBSTRING-ANCHOR: recall_for_path() SQL over-fetch pool sizing.
+# See agent/working_context_store/_store.py:recall_for_path() and the
+# memory_recall_for_path config.yaml comment for why the SQL prefilter must
+# over-fetch before the Python-side path-boundary filter narrows it down.
+# ---------------------------------------------------------------------------
+
+_recall_for_path_cfg: dict[str, Any] = _cfg["memory_recall_for_path"]
+MEMORY_RECALL_FOR_PATH_OVERFETCH_MULTIPLIER: int = int(_recall_for_path_cfg["overfetch_multiplier"])
+MEMORY_RECALL_FOR_PATH_OVERFETCH_CEILING: int = int(_recall_for_path_cfg["overfetch_ceiling"])

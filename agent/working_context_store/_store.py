@@ -130,6 +130,60 @@ def _path_trigger_candidates(workspace_root: str, file_path: str | None) -> tupl
     return tuple(candidates)
 
 
+def _is_path_identifier_char(ch: str) -> bool:
+    """A char that extends a filename/identifier token: alphanumeric, "_",
+    or "-". Used by `_path_boundary_match()` to tell a genuine path
+    boundary ("/", whitespace, quotes, punctuation, string start/end) apart
+    from a longer identifier that merely contains the needle as a
+    substring (e.g. "uv_regate.py" contains "gate.py")."""
+    return ch.isalnum() or ch in ("_", "-")
+
+
+def _path_boundary_match(text: str, needle: str) -> bool:
+    """True if `needle` (a file basename or relative path) occurs in `text`
+    at a genuine path boundary, not merely as a substring.
+
+    UPG-PROXY-SUBSTRING-ANCHOR: unanchored substring matching lets
+    "gate.py" false-match inside "uv_regate.py", and "gate.py" false-match
+    a longer extension like "gate.pyc"/"gate.pyx". A match only counts
+    when the character immediately before the occurrence is not
+    identifier-class (or the occurrence starts the string) AND the
+    character immediately after is not identifier-class (or the
+    occurrence ends the string). Callers that need a cheap prefilter
+    (e.g. a SQL LIKE clause) should treat this function's result as the
+    precise filter applied afterward, not a replacement for the prefilter
+    — see `recall_for_path()`."""
+    if not needle:
+        return False
+    start = 0
+    while True:
+        idx = text.find(needle, start)
+        if idx == -1:
+            return False
+        before_ok = idx == 0 or not _is_path_identifier_char(text[idx - 1])
+        after_idx = idx + len(needle)
+        after_ok = after_idx >= len(text) or not _is_path_identifier_char(text[after_idx])
+        if before_ok and after_ok:
+            return True
+        start = idx + 1
+
+
+def _anchors_exact_match(
+    anchors: "list[list[str]] | None", path_candidates: tuple[str, ...] | None
+) -> bool:
+    """True when a note's declared `anchors` (already-parsed
+    `[[path, hash_or_None], ...]`, see `WorkingNote.anchors`) contains one
+    of a file's candidate path forms EXACTLY — the strongest possible
+    signal a note is about that file, independent of whatever its prose
+    content happens to mention. `path_candidates` is
+    `_path_trigger_candidates()`'s output (as-given + workspace-relative
+    forms) for the file being recalled."""
+    if not anchors or not path_candidates:
+        return False
+    declared = {a[0] for a in anchors if a}
+    return any(c in declared for c in path_candidates)
+
+
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Plain dot-product cosine similarity between two equal-length vectors.
     Used only by the M (semantic) trigger primitive (TRIGGER-ENGINE wave 2b,
@@ -2152,11 +2206,23 @@ class WorkingContextStore:
         """Recall notes anchored to a specific file (UPG-9.6).
 
         Matches notes whose content mentions the file's basename or its
-        workspace-relative path — the anchor a typed gotcha actually carries
-        ("index_file in symbol_graph.py takes workspace first"). Combined with
-        `kind="gotcha"` this powers the PreToolUse hook: editing a file surfaces
-        the caveat recorded against it, and an unrelated file matches nothing.
-        Not semantic — a substring anchor avoids false "nearby file" hits.
+        workspace-relative path at a genuine path boundary, or whose
+        declared `anchors` list the file exactly — the anchor a typed
+        gotcha actually carries ("index_file in symbol_graph.py takes
+        workspace first"). Combined with `kind="gotcha"` this powers the
+        PreToolUse hook: editing a file surfaces the caveat recorded
+        against it, and an unrelated file matches nothing.
+
+        UPG-PROXY-SUBSTRING-ANCHOR: the SQL LIKE clause is a cheap SUPERSET
+        prefilter only (it would match "gate.py" inside "uv_regate.py");
+        `_path_boundary_match()` and `_anchors_exact_match()` narrow it down
+        to genuine matches afterward. Because that narrowing happens after
+        the SQL fetch, the fetch pulls a bounded over-fetched pool (see
+        `memory_recall_for_path` in config.yaml) rather than exactly
+        `limit` rows — otherwise a true match could be discarded before the
+        boundary filter ever saw it, purely because it didn't fit in an
+        under-sized SQL LIMIT. Not semantic — a substring anchor avoids
+        false "nearby file" hits.
 
         session_id: scope="session" enforcement, same as recall(). `file_path`
         (already a parameter here) also enforces scope="path-subtree" — the
@@ -2169,15 +2235,43 @@ class WorkingContextStore:
         candidate-matching fix as the P trigger primitive, applied here to
         the scope check).
         """
+        from agent.config import (
+            MEMORY_RECALL_FOR_PATH_OVERFETCH_CEILING,
+            MEMORY_RECALL_FOR_PATH_OVERFETCH_MULTIPLIER,
+        )
+
         basename = Path(file_path).name
         if not basename:
             return []
         path_candidates = _path_trigger_candidates(workspace, file_path)
         relpath = next((c for c in (path_candidates or ()) if c != file_path), "")
+        relpath_or_basename = relpath if relpath else basename
 
-        sql = ("SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
-               "AND (content LIKE ? OR content LIKE ?)")
-        params: list = [workspace, f"%{basename}%", f"%{relpath}%" if relpath else f"%{basename}%"]
+        pool_size = max(
+            limit,
+            min(limit * MEMORY_RECALL_FOR_PATH_OVERFETCH_MULTIPLIER, MEMORY_RECALL_FOR_PATH_OVERFETCH_CEILING),
+        )
+
+        # The anchors LIKE arms are UNQUOTED — same superset treatment as the
+        # content arms above, not the tighter quoted form. A declared anchor
+        # is legitimately either workspace-relative OR absolute (remember()'s
+        # own `anchors` docstring), and an absolute anchor's JSON-serialized
+        # form is `".../<basename>"` — the character right before the
+        # basename is "/", not a quote, so a quoted `%"<basename>"%` pattern
+        # would silently never match an absolute anchor. `_anchors_exact_match()`
+        # below is what does the precise narrowing; the SQL step here only
+        # needs to guarantee no true match is excluded from the pool.
+        sql = (
+            "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
+            "AND (content LIKE ? OR content LIKE ? OR anchors LIKE ? OR anchors LIKE ?)"
+        )
+        params: list = [
+            workspace,
+            f"%{basename}%",
+            f"%{relpath_or_basename}%",
+            f"%{basename}%",
+            f"%{relpath_or_basename}%",
+        ]
         if kind:
             sql += " AND kind = ?"
             params.append(kind)
@@ -2192,11 +2286,24 @@ class WorkingContextStore:
             " (CASE WHEN kind = 'task' THEN 1.0 ELSE decay_score END) DESC,"
             " created_at DESC, note_id DESC LIMIT ?"
         )
-        params.append(limit)
+        params.append(pool_size)
 
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
-        notes = [self._row_to_note(r) for r in rows]
+        pool = [self._row_to_note(r) for r in rows]
+
+        matched: list[WorkingNote] = []
+        for note in pool:
+            if _anchors_exact_match(note.anchors, path_candidates):
+                matched.append(note)
+                continue
+            content = note.content or ""
+            if _path_boundary_match(content, basename) or (
+                relpath and _path_boundary_match(content, relpath)
+            ):
+                matched.append(note)
+        notes = matched[:limit]
+
         notes = _scope_filter(notes, session_id=session_id, file_path=path_candidates)
         audit("RECALL", workspace=workspace, query=basename, notes_returned=len(notes), method="path")
         return notes

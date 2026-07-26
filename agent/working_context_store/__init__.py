@@ -32,6 +32,8 @@ re-exported here so every existing import site keeps working unchanged:
   from agent.working_context_store import _extract_file_paths
   from agent.working_context_store import _FILE_PATH_RE
   from agent.working_context_store import _note_title
+  from agent.working_context_store import _path_boundary_match
+  from agent.working_context_store import _anchors_exact_match
 """
 from __future__ import annotations
 
@@ -73,7 +75,12 @@ from agent.working_context_store._events import (
 )
 
 # Store class
-from agent.working_context_store._store import WorkingContextStore, _note_title
+from agent.working_context_store._store import (
+    WorkingContextStore,
+    _anchors_exact_match,
+    _note_title,
+    _path_boundary_match,
+)
 
 __all__ = [
     # Audit
@@ -105,4 +112,6 @@ __all__ = [
     # Store
     "WorkingContextStore",
     "_note_title",
+    "_path_boundary_match",
+    "_anchors_exact_match",
 ]

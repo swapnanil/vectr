@@ -20,6 +20,12 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from agent.proactive.types import Candidate, ProactiveWindow
+from agent.working_context_store._store import (
+    _ANTI_MEMORY_TEMPLATE,
+    _date_str,
+    _note_title,
+    _path_boundary_match,
+)
 from agent.working_context_store._types import WorkingNote
 
 
@@ -39,6 +45,16 @@ class MatchSource(Protocol):
     def code_search(self, text: str, n_results: int) -> list:
         ...
 
+    def note_states(self, notes: list[WorkingNote]) -> dict[int, dict]:
+        """Batched fold of note-lifecycle state for the given notes (UPG-
+        MEMORY-STATE-MACHINE), keyed by note_id -> {"state": "active"|
+        "superseded"|"revoked", "reason": str|None, "actor": str|None,
+        "ts": float|None} — see `WorkingContextStore.note_event_states()`.
+        A note_id absent from the returned dict means active. Called ONCE
+        per `match()` invocation for the union of every note the other
+        matchers found, never per-note."""
+        ...
+
 
 def _one_line(text: str) -> str:
     """Collapse to a single whitespace-normalised line (injected context is
@@ -55,7 +71,7 @@ def _cap(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
-def _note_summary(note: WorkingNote) -> str:
+def _raw_summary(note: WorkingNote) -> str:
     if note.title and note.title.strip():
         return note.title.strip()
     for line in note.content.splitlines():
@@ -64,10 +80,69 @@ def _note_summary(note: WorkingNote) -> str:
     return ""
 
 
-def _structural_note_candidate(note: WorkingNote, anchor: str, max_chars: int) -> Candidate:
-    summary = _note_summary(note)
+def _revoked_summary(note: WorkingNote, state: dict) -> str:
+    """Deterrent rendering for a revoked note (UPG-PROXY-REVOKED-LEAK):
+    reuses the shared `_ANTI_MEMORY_TEMPLATE` (agent/working_context_store/
+    _store.py) rather than inventing separate deterrent copy — the same
+    wording a revoked note gets on the multi-line `/v1/recall` surface
+    (`_format_full_block()`), so this single-line proxy injection agrees
+    with it.
+
+    The template's own trailing "Do not re-derive this from other sources
+    without verification." clause is relocated to the FRONT of the
+    rendered text — a physical substring of the template's own output, not
+    new wording — so that `_cap()`'s right-truncation can only ever cut
+    the tail (the quoted raw claim) and can never remove the deterrent
+    warning itself. `rpartition(". ")` finds this split point exactly:
+    the deterrent sentence has no internal ". " of its own, so whatever
+    occurs in `reason`/`summary` text, the LAST ". " in the formatted
+    string is always the boundary right before it."""
+    revoked_date = _date_str(state["ts"]) if state.get("ts") else _date_str(note.created_at)
+    reason = state.get("reason") or "no reason given"
+    anti_memory = _ANTI_MEMORY_TEMPLATE.format(
+        created_date=_date_str(note.created_at),
+        revoked_date=revoked_date,
+        reason=reason,
+        summary=_note_title(note),
+    )
+    prefix, sep, clause = anti_memory.rpartition(". ")
+    if not sep:
+        return anti_memory
+    return f"{clause} {prefix}."
+
+
+def _note_summary(note: WorkingNote, state: dict | None = None) -> str:
+    """The candidate line's summary text. A note whose folded lifecycle
+    state (UPG-MEMORY-STATE-MACHINE) is "revoked" renders through the
+    anti-memory deterrent instead of its raw content — a revoked note
+    still injects (catching an agent about to re-assert a wrong belief is
+    the highest-value injection), it just never injects as raw fact."""
+    if state and state.get("state") == "revoked":
+        return _revoked_summary(note, state)
+    return _raw_summary(note)
+
+
+def _kind_label(note: WorkingNote, state: dict | None) -> str:
+    """The kind marker for the candidate line: "REVOKED" takes precedence
+    over the bare kind name so the injected line clearly flags a revoked
+    note rather than reading like an ordinary kind label."""
+    if state and state.get("state") == "revoked":
+        return "REVOKED"
+    return note.kind
+
+
+def _structural_note_candidate(
+    note: WorkingNote,
+    anchor: str,
+    is_declared_anchor: bool,
+    max_chars: int,
+    state: dict | None = None,
+) -> Candidate:
+    summary = _note_summary(note, state)
+    kind_label = _kind_label(note, state)
+    relation = "anchored to" if is_declared_anchor else "mentions"
     line = _cap(
-        f"note #{note.note_id} ({note.kind}, anchored to {anchor}): {summary}", max_chars
+        f"note #{note.note_id} ({kind_label}, {relation} {anchor}): {summary}", max_chars
     )
     return Candidate(
         kind="note_structural",
@@ -78,9 +153,12 @@ def _structural_note_candidate(note: WorkingNote, anchor: str, max_chars: int) -
     )
 
 
-def _semantic_note_candidate(note: WorkingNote, score: float, max_chars: int) -> Candidate:
-    summary = _note_summary(note)
-    line = _cap(f"note #{note.note_id} ({note.kind}): {summary}", max_chars)
+def _semantic_note_candidate(
+    note: WorkingNote, score: float, max_chars: int, state: dict | None = None
+) -> Candidate:
+    summary = _note_summary(note, state)
+    kind_label = _kind_label(note, state)
+    line = _cap(f"note #{note.note_id} ({kind_label}): {summary}", max_chars)
     return Candidate(
         kind="note_semantic",
         line=line,
@@ -141,29 +219,65 @@ class ProactiveMatcher:
         candidates: list[Candidate] = []
 
         # M1 — structural file match: exact file path -> anchored notes (1.0).
+        structural_notes: list[WorkingNote] = []
         if self._structural_note and window.file_paths:
             try:
-                notes = self._source.structural_notes(window.file_paths)
+                structural_notes = self._source.structural_notes(window.file_paths)
             except Exception:
-                notes = []
-            anchors = {p: Path(p).name or p for p in window.file_paths}
-            for note in notes:
-                anchor = _first_anchor(note, anchors) or "file"
-                candidates.append(
-                    _structural_note_candidate(note, anchor, self._max_chars)
-                )
+                structural_notes = []
 
         # M3 — semantic note match: cosine recall above the similarity floor.
+        semantic_scored: list[tuple[WorkingNote, float]] = []
         if self._semantic_note and window.text.strip():
             try:
-                scored = self._source.semantic_notes(
+                semantic_scored = self._source.semantic_notes(
                     window.text, self._min_similarity, self._note_limit
                 )
             except Exception:
-                scored = []
-            for note, score in scored:
+                semantic_scored = []
+
+        # UPG-PROXY-REVOKED-LEAK: fold lifecycle state for the UNION of every
+        # note either matcher found, ONCE — never per-note, never per-matcher
+        # — before rendering a single candidate line. A source that doesn't
+        # implement note_states() (e.g. an older test fake) degrades to an
+        # empty dict, and a note_id absent from that dict is "active" by
+        # note_event_states()'s own documented contract, so this is fully
+        # backward compatible with a source that predates this method.
+        matched_notes: dict[int, WorkingNote] = {}
+        for note in structural_notes:
+            matched_notes.setdefault(note.note_id, note)
+        for note, _score in semantic_scored:
+            matched_notes.setdefault(note.note_id, note)
+        try:
+            note_states = self._source.note_states(list(matched_notes.values()))
+        except Exception:
+            note_states = {}
+
+        if self._structural_note and window.file_paths:
+            anchors = {p: Path(p).name or p for p in window.file_paths}
+            for note in structural_notes:
+                state = note_states.get(note.note_id)
+                if state and state.get("state") == "superseded":
+                    # Already excluded via valid_until in the normal path;
+                    # defensive skip if one still reaches the renderer —
+                    # never render a superseded note's raw content as an
+                    # active fact.
+                    continue
+                found = _first_anchor(note, anchors)
+                anchor, is_declared_anchor = found if found is not None else ("file", True)
                 candidates.append(
-                    _semantic_note_candidate(note, score, self._max_chars)
+                    _structural_note_candidate(
+                        note, anchor, is_declared_anchor, self._max_chars, state
+                    )
+                )
+
+        if self._semantic_note and window.text.strip():
+            for note, score in semantic_scored:
+                state = note_states.get(note.note_id)
+                if state and state.get("state") == "superseded":
+                    continue
+                candidates.append(
+                    _semantic_note_candidate(note, score, self._max_chars, state)
                 )
 
         # M4 — semantic code match: hybrid search hits (opt-in; needs an index).
@@ -178,13 +292,24 @@ class ProactiveMatcher:
         return candidates
 
 
-def _first_anchor(note: WorkingNote, anchors: dict[str, str]) -> str | None:
-    """Return the display anchor (basename) of the first window file whose
-    basename appears in the note content — a deterministic substring check that
-    mirrors the store's own path-anchor recall, so the injected line names the
-    file the note is actually about."""
+def _first_anchor(note: WorkingNote, anchors: dict[str, str]) -> tuple[str, bool] | None:
+    """Return (label, is_declared_anchor) for the display anchor of the
+    first window file this note is actually about.
+
+    UPG-PROXY-SUBSTRING-ANCHOR/2b: the note's DECLARED `anchors` column is
+    checked first — an exact match there is the strongest signal, and the
+    caller may honestly say "anchored to X". Only when no declared anchor
+    matches does this fall back to a boundary-matched content mention,
+    using the SAME `_path_boundary_match()` rule `recall_for_path()` uses
+    (shared, not forked) — the caller must render that case as "mentions
+    X", a materially weaker provenance claim than "anchored to X". Returns
+    None when the note is about none of the window's files."""
+    declared = {a[0] for a in (note.anchors or []) if a}
+    for _path, base in anchors.items():
+        if base and (base in declared or _path in declared):
+            return base, True
     content = note.content or ""
     for _path, base in anchors.items():
-        if base and base in content:
-            return base
+        if base and _path_boundary_match(content, base):
+            return base, False
     return None
