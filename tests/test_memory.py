@@ -579,6 +579,54 @@ class TestRecallForPathUPG96:
         store.remember("/repo", "x", kind="gotcha")
         assert store.recall_for_path("/repo", "", kind="gotcha") == []
 
+    def test_substring_basename_does_not_false_match(self, tmp_path) -> None:
+        """UPG-PROXY-SUBSTRING-ANCHOR: unanchored substring matching would
+        let "gate.py" false-match inside "uv_regate.py"; a note only about
+        uv_regate.py must not be returned for the file "gate.py"."""
+        store = _store(tmp_path)
+        store.remember("/repo", "see uv_regate.py for details", kind="gotcha")
+        assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
+
+    def test_longer_extension_does_not_false_match(self, tmp_path) -> None:
+        """"gate.py" must not match content that actually mentions
+        "gate.pyc"/"gate.pyx" — a longer identifier sharing the same prefix."""
+        store = _store(tmp_path)
+        store.remember("/repo", "open gate.pyc for the compiled bytecode", kind="gotcha")
+        store.remember("/repo", "gate.pyx is the cython source", kind="gotcha")
+        assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
+
+    def test_declared_anchor_exact_match_wins_even_without_content_mention(self, tmp_path) -> None:
+        """A note's declared `anchors` are the strongest signal — a note
+        anchored to gate.py must match even if its prose content never
+        spells the filename out."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the retry loop here needs a backoff cap", kind="gotcha",
+            anchors=["gate.py"],
+        )
+        notes = store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha")
+        assert len(notes) == 1
+
+    def test_declared_anchor_for_different_file_does_not_leak_by_substring(self, tmp_path) -> None:
+        """A note anchored to uv_regate.py must not surface for gate.py just
+        because the anchor string happens to contain "gate.py" as a
+        substring."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the retry loop here needs a backoff cap", kind="gotcha",
+            anchors=["uv_regate.py"],
+        )
+        assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
+
+    def test_boundary_matched_basename_at_string_boundaries_still_matches(self, tmp_path) -> None:
+        """Real path boundaries (string start/end, punctuation, quotes) must
+        still count as a match, not just whitespace."""
+        store = _store(tmp_path)
+        store.remember("/repo", "gate.py: verify_token must check expiry", kind="gotcha")
+        store.remember("/repo", 'the file "gate.py" was touched', kind="gotcha")
+        notes = store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha")
+        assert len(notes) == 2
+
 
 # ---------------------------------------------------------------------------
 # format_notes_for_llm
