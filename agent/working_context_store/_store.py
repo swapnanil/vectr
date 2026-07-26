@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from agent.chroma_dispatch import timed_chroma_call
 from agent.working_context_store._audit import audit
 from agent.working_context_store._encryption import _build_encryptor, _extract_file_paths, _NoteEncryptor
 from agent.working_context_store._events import NOTE_EVENT_ACTORS, NOTE_EVENT_KINDS, fold as _fold_note_events
@@ -1246,7 +1247,8 @@ class WorkingContextStore:
         if self._notes_col is not None and self._embed_fn is not None:
             try:
                 vec = self._embed_fn([content])[0]
-                self._notes_col.upsert(ids=[str(note_id)], embeddings=[vec])
+                with timed_chroma_call("upsert"):
+                    self._notes_col.upsert(ids=[str(note_id)], embeddings=[vec])
             except Exception:
                 pass  # embedding failure never blocks the write path
 
@@ -1616,13 +1618,15 @@ class WorkingContextStore:
         see recall()'s docstring; the same post-LIMIT trade-off applies.
         """
         # Cap n_results at collection size to avoid ChromaDB errors on small collections
-        col_count = self._notes_col.count()
+        with timed_chroma_call("count"):
+            col_count = self._notes_col.count()
         if col_count == 0:
             return []
         n_query = min(limit * 3, col_count)
 
         q_vec = self._embed_query_fn([query])[0]
-        results = self._notes_col.query(query_embeddings=[q_vec], n_results=n_query)
+        with timed_chroma_call("query"):
+            results = self._notes_col.query(query_embeddings=[q_vec], n_results=n_query)
 
         if not results or not results["ids"] or not results["ids"][0]:
             return []
@@ -1752,7 +1756,8 @@ class WorkingContextStore:
         }
         merged[_NOTES_EMBED_MODEL_KEY] = self._embed_model
         try:
-            self._notes_col.modify(metadata=merged)
+            with timed_chroma_call("modify"):
+                self._notes_col.modify(metadata=merged)
         except Exception:
             pass
 
@@ -1769,7 +1774,8 @@ class WorkingContextStore:
         stamped = self._stored_notes_embed_model()
         if stamped == self._embed_model:
             return
-        count = self._notes_col.count()
+        with timed_chroma_call("count"):
+            count = self._notes_col.count()
         if count == 0:
             self._write_notes_embed_model_stamp()
             return
@@ -1816,7 +1822,8 @@ class WorkingContextStore:
             batch_ids = ids[start:start + _NOTES_REEMBED_BATCH_SIZE]
             batch_contents = contents[start:start + _NOTES_REEMBED_BATCH_SIZE]
             vectors = self._embed_fn(batch_contents)
-            self._notes_col.upsert(ids=batch_ids, embeddings=vectors)
+            with timed_chroma_call("upsert"):
+                self._notes_col.upsert(ids=batch_ids, embeddings=vectors)
         return len(contents)
 
     def backfill_missing_vectors(self) -> int:
@@ -1846,7 +1853,8 @@ class WorkingContextStore:
         if not rows:
             return 0
 
-        existing_ids: set[str] = set(self._notes_col.get(include=[])["ids"])
+        with timed_chroma_call("get"):
+            existing_ids: set[str] = set(self._notes_col.get(include=[])["ids"])
 
         ids: list[str] = []
         contents: list[str] = []
@@ -1869,7 +1877,8 @@ class WorkingContextStore:
             batch_ids = ids[start:start + _NOTES_REEMBED_BATCH_SIZE]
             batch_contents = contents[start:start + _NOTES_REEMBED_BATCH_SIZE]
             vectors = self._embed_fn(batch_contents)
-            self._notes_col.upsert(ids=batch_ids, embeddings=vectors)
+            with timed_chroma_call("upsert"):
+                self._notes_col.upsert(ids=batch_ids, embeddings=vectors)
         logger.info("vectr: backfilled %d working-memory note vector(s)", len(contents))
         return len(contents)
 
@@ -2198,7 +2207,8 @@ class WorkingContextStore:
             )
         if count > 0 and self._notes_col is not None:
             try:
-                self._notes_col.delete(ids=[str(note_id)])
+                with timed_chroma_call("delete"):
+                    self._notes_col.delete(ids=[str(note_id)])
             except Exception:
                 pass
         return count > 0
@@ -2266,9 +2276,11 @@ class WorkingContextStore:
             conn.execute("DELETE FROM symbol_triggers WHERE workspace = ?", (workspace,))
         if deleted > 0 and self._notes_col is not None:
             try:
-                existing_ids = self._notes_col.get(include=[])["ids"]
+                with timed_chroma_call("get"):
+                    existing_ids = self._notes_col.get(include=[])["ids"]
                 if existing_ids:
-                    self._notes_col.delete(ids=existing_ids)
+                    with timed_chroma_call("delete"):
+                        self._notes_col.delete(ids=existing_ids)
             except Exception:
                 pass
         audit("FORGET_ALL", workspace=workspace, deleted=deleted)
@@ -2288,9 +2300,11 @@ class WorkingContextStore:
             conn.execute("DELETE FROM symbol_triggers")
         if self._notes_col is not None:
             try:
-                existing_ids = self._notes_col.get(include=[])["ids"]
+                with timed_chroma_call("get"):
+                    existing_ids = self._notes_col.get(include=[])["ids"]
                 if existing_ids:
-                    self._notes_col.delete(ids=existing_ids)
+                    with timed_chroma_call("delete"):
+                        self._notes_col.delete(ids=existing_ids)
             except Exception:
                 pass
         audit("FORGET_ALL_WORKSPACES", deleted=deleted)
@@ -2784,10 +2798,11 @@ class WorkingContextStore:
         ):
             try:
                 activity_vector = self._embed_query_fn([query])[0]
-                fetched = self._notes_col.get(
-                    ids=[str(n.note_id) for n in notes_wanting_semantic],
-                    include=["embeddings"],
-                )
+                with timed_chroma_call("get"):
+                    fetched = self._notes_col.get(
+                        ids=[str(n.note_id) for n in notes_wanting_semantic],
+                        include=["embeddings"],
+                    )
                 vector_by_id = dict(zip(fetched["ids"], fetched["embeddings"]))
             except Exception:
                 activity_vector, vector_by_id = None, {}

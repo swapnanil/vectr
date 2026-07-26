@@ -340,7 +340,9 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         from app.service import _SEARCH_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
     try:
-        note_id = svc.remember(
+        note_id = await dispatch_chroma_async(
+            svc,
+            svc.remember,
             content=body.content,
             tags=body.tags,
             priority=body.priority,
@@ -387,7 +389,9 @@ async def recall(body: RecallRequest, request: Request) -> RecallResponse:
     if getattr(svc, "search_only", False):
         from app.service import _SEARCH_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
-    notes_text = svc.recall(
+    notes_text = await dispatch_chroma_async(
+        svc,
+        svc.recall,
         query=body.query,
         tags=body.tags,
         priority=body.priority,
@@ -531,7 +535,9 @@ async def commit_note(body: CommitNoteRequest, request: Request) -> CommitNoteRe
     if getattr(svc, "search_only", False):
         from app.service import _SEARCH_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
-    note_id = svc.record_commit_note(
+    note_id = await dispatch_chroma_async(
+        svc,
+        svc.record_commit_note,
         sha=body.sha, subject=body.subject, branch=body.branch, files=body.files,
     )
     return CommitNoteResponse(
@@ -554,7 +560,9 @@ async def proactive(body: ProactiveRequest, request: Request) -> ProactiveRespon
         # No working-memory layer to draw from; inject nothing (never 503 here).
         return ProactiveResponse(processing_ms=int((time.monotonic() - t0) * 1000))
     try:
-        result = svc.proactive_context(
+        result = await dispatch_chroma_async(
+            svc,
+            svc.proactive_context,
             text=body.text,
             file_paths=body.file_paths,
             symbols=body.symbols,
@@ -611,7 +619,7 @@ async def memory_clear(request: Request) -> dict:
     if getattr(svc, "search_only", False):
         from app.service import _SEARCH_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
-    deleted = svc.forget_all()
+    deleted = await dispatch_chroma_async(svc, svc.forget_all)
     return {"deleted": deleted}
 
 
@@ -623,10 +631,10 @@ async def forget(body: ForgetRequest, request: Request) -> dict:
         from app.service import _SEARCH_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
     if body.note_id is not None:
-        deleted = svc.forget_note(body.note_id)
+        deleted = await dispatch_chroma_async(svc, svc.forget_note, body.note_id)
         return {"deleted": 1 if deleted else 0, "note_id": body.note_id, "found": deleted}
     if body.all:
-        return {"deleted": svc.forget_all()}
+        return {"deleted": await dispatch_chroma_async(svc, svc.forget_all)}
     raise HTTPException(
         status_code=422,
         detail="Pass note_id to delete one note, or all=true to clear every note.",
