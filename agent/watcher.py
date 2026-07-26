@@ -241,7 +241,7 @@ class CodeWatcher(FileSystemEventHandler):
             if root_regexes and any(rx.search(rel.as_posix()) for rx in root_regexes):
                 return True
             root_gitignore = self._gitignore_patterns.get(str(root))
-            if root_gitignore and matches_gitignore_pattern(p, root_gitignore):
+            if root_gitignore and matches_gitignore_pattern(rel, root_gitignore):
                 return True
             return False
         return bool(set(p.parts) & self._excluded_dirs)

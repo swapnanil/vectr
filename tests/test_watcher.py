@@ -198,6 +198,23 @@ class TestIsExcluded:
         # but a real excluded dir *inside* the workspace still excludes
         assert watcher._is_excluded(str(root / "node_modules" / "x.js")) is True
 
+    def test_gitignore_pattern_matches_relative_not_absolute(self, tmp_path):
+        # UPG-GITIGNORE-ABSPATH-COLLISION: a root's own .gitignore "tmp/"
+        # entry must not exclude the entire workspace when the root itself
+        # lives under a dir named tmp — only components below the root count,
+        # matching should_index_file's rel_path contract.
+        from pathlib import Path
+        root = tmp_path / "tmp" / "proj"
+        (root / "src").mkdir(parents=True)
+        (root / ".gitignore").write_text("tmp/\n", encoding="utf-8")
+        indexer = MagicMock()
+        indexer.workspace_root = str(root)
+        indexer.all_roots = [Path(root)]
+        watcher = CodeWatcher(indexer)
+        assert watcher._is_excluded(str(root / "src" / "main.py")) is False
+        # the same entry still excludes a real tmp/ below the root
+        assert watcher._is_excluded(str(root / "tmp" / "cache.py")) is True
+
     def test_vectrignore_applied_across_extra_roots(self, tmp_path):
         # Extra roots each contribute their own .vectrignore entries.
         from pathlib import Path

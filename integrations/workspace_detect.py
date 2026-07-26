@@ -306,7 +306,7 @@ def should_index_file(
             if regex.search(rel_posix):
                 return False
 
-    if matches_gitignore_pattern(path, gitignore_patterns):
+    if matches_gitignore_pattern(rel_path, gitignore_patterns):
         return False
 
     return True

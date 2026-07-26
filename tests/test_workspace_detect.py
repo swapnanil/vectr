@@ -267,6 +267,37 @@ class TestMatchesGitignorePattern:
         assert should_index_file(str(f), patterns) is False
 
 
+class TestGitignoreAbsPathCollision:
+    # UPG-GITIGNORE-ABSPATH-COLLISION: gitignore/.vectrignore patterns must be
+    # matched against the workspace-RELATIVE path, exactly like excluded dir
+    # names and re: regexes above them in should_index_file — a workspace
+    # living under an ancestor named like an ignore entry (a checkout under
+    # /tmp, a CI job dir under build/) must not have every file excluded by
+    # its own absolute prefix.
+    def test_workspace_under_ignored_named_ancestor_still_indexed(self, tmp_path) -> None:
+        root = tmp_path / "tmp" / "proj"
+        (root / "src").mkdir(parents=True)
+        f = root / "src" / "app.py"
+        f.write_text("x = 1\n", encoding="utf-8")
+        assert should_index_file(str(f), ["tmp/"], workspace_root=str(root)) is True
+
+    def test_ignored_dir_below_root_still_excluded(self, tmp_path) -> None:
+        root = tmp_path / "tmp" / "proj"
+        (root / "tmp").mkdir(parents=True)
+        f = root / "tmp" / "fixture.py"
+        f.write_text("x = 1\n", encoding="utf-8")
+        assert should_index_file(str(f), ["tmp/"], workspace_root=str(root)) is False
+
+    def test_path_scoped_glob_matches_workspace_relative(self, tmp_path) -> None:
+        # A path-scoped glob entry (docs/*) now matches the workspace-relative
+        # path; against the absolute path it could never match at all.
+        root = tmp_path / "tmp" / "proj"
+        (root / "docs").mkdir(parents=True)
+        f = root / "docs" / "conf.py"
+        f.write_text("x = 1\n", encoding="utf-8")
+        assert should_index_file(str(f), ["docs/*"], workspace_root=str(root)) is False
+
+
 # ---------------------------------------------------------------------------
 # T19: .vectrignore support
 # ---------------------------------------------------------------------------
