@@ -246,7 +246,7 @@ class TestMcpDispatchSearchOnly:
         result = handle_tools_call("vectr_remember", {"content": "a finding"}, svc)
         assert result["isError"] is False
         assert _SEARCH_ONLY_MSG in result["content"][0]["text"]
-        svc.remember.assert_not_called()
+        svc.remember_with_extras.assert_not_called()
 
     def test_recall_returns_search_only_message(self):
         from integrations.mcp_server import handle_tools_call

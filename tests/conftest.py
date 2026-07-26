@@ -237,6 +237,15 @@ def _base_mock_service():
     svc.should_evict.return_value = False
     svc.eviction_hint.return_value = ""
     svc.remember.return_value = 1
+    # /v1/remember dispatches remember_with_extras(), not remember() — a bare
+    # MagicMock return here would validate against RememberResponse only by
+    # accident (MagicMock's default __int__/__iter__ stubs), while an f-string
+    # embedding outcome.note_id would still leak a "<MagicMock ...>" repr into
+    # the confirmation message. Return the REAL outcome type.
+    from app.service import RememberOutcome
+    svc.remember_with_extras.return_value = RememberOutcome(
+        note_id=1, related=[], proxy_anchor_suggestions=[],
+    )
     svc.promote_note.return_value = True
     svc.revoke_note.return_value = True
     svc.reinstate_note.return_value = True
@@ -306,7 +315,46 @@ def client_real_memory(tmp_path):
             supersedes=supersedes, contradicts=contradicts,
         )
 
+    def _remember_with_extras(content, tags=None, priority="medium", session_id=None,
+                               kind="finding", title="", agent="", triggers=None,
+                               provenance="agent", scope=None, anchors=None,
+                               supersedes=None, contradicts=None):
+        """Mirrors VectrService.remember_with_extras's own gating (app/
+        service.py) against this fixture's real store, so /v1/remember
+        REST tests routed through this fixture get a REAL RememberOutcome
+        (real RelatedNote list, real proxy-anchor list) rather than a bare
+        MagicMock return. This store has no embedder attached, so `related`
+        is always [] here (the same real fail-open path a genuinely
+        embedder-less store takes in production); `proxy_anchor_suggestions`
+        is real glob presence against `tmp_path`, needing no embedder."""
+        from app.service import RememberOutcome
+        from agent.proxy_anchors import suggest_proxy_anchors
+        from agent.config import (
+            MEMORY_WRITE_RELATED_ENABLED,
+            MEMORY_WRITE_RELATED_LIMIT,
+            MEMORY_WRITE_RELATED_MIN_SIMILARITY,
+            MEMORY_WRITE_PROXY_SUGGEST_ENABLED,
+            MEMORY_WRITE_PROXY_SUGGEST_LIMIT,
+        )
+        note_id = _remember(
+            content, tags, priority, session_id, kind, title, agent, triggers,
+            provenance, scope, anchors, supersedes, contradicts,
+        )
+        related = []
+        if MEMORY_WRITE_RELATED_ENABLED:
+            related = real_store.related_active_notes(
+                ws, note_id, limit=MEMORY_WRITE_RELATED_LIMIT,
+                min_similarity=MEMORY_WRITE_RELATED_MIN_SIMILARITY,
+            )
+        proxy_anchor_suggestions = []
+        if MEMORY_WRITE_PROXY_SUGGEST_ENABLED and kind == "operational" and not anchors:
+            proxy_anchor_suggestions = suggest_proxy_anchors(ws, MEMORY_WRITE_PROXY_SUGGEST_LIMIT)
+        return RememberOutcome(
+            note_id=note_id, related=related, proxy_anchor_suggestions=proxy_anchor_suggestions,
+        )
+
     svc.remember.side_effect = _remember
+    svc.remember_with_extras.side_effect = _remember_with_extras
     svc.promote_note.side_effect = lambda note_id, to: real_store.promote(ws, note_id, to)
     svc.revoke_note.side_effect = lambda note_id, reason, actor="agent": real_store.revoke_note(
         ws, note_id, reason, actor=actor

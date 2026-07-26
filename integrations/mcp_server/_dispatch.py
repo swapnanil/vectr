@@ -667,9 +667,9 @@ def handle_tools_call(
             except (TypeError, ValueError):
                 return _mcp_error("contradicts must be an integer note_id")
         try:
-            note_id = dispatch_chroma_sync(
+            outcome = dispatch_chroma_sync(
                 service,
-                service.remember,
+                service.remember_with_extras,
                 content=content, tags=tags, priority=priority, kind=kind, title=title, agent=agent,
                 triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
                 supersedes=supersedes, contradicts=contradicts, session_id=session_id,
@@ -680,6 +680,7 @@ def handle_tools_call(
             # exist — a caller input error, surfaced plainly rather than
             # raised as an unhandled exception.
             return _mcp_error(str(exc))
+        note_id = outcome.note_id
         # reset the turn-count nudge, the eviction advisor's remember-fatigue
         # counter (UPG-REMEMBER-BANNER-FATIGUE), and enable memory tools
         _reset_calls_since_save(session_id)
@@ -751,8 +752,37 @@ def handle_tools_call(
                 parts.append(f"first line: {first_line}")
             if parts:
                 echo = "\n  Stored — " + " · ".join(parts)
+        # Write-time related-notes offer (agent/working_context_store/_related.py):
+        # nearest-by-similarity only, never a contradiction verdict — the caller
+        # LLM judges whether one is now stale. Empty unless `outcome.related` is
+        # non-empty (config-gated in remember_with_extras).
+        related_suffix = ""
+        if outcome.related:
+            rendered = []
+            for r in outcome.related:
+                related_title = r["title"]
+                if len(related_title) > 60:
+                    related_title = related_title[:57] + "..."
+                rendered.append(f"#{r['note_id']} \"{related_title}\" ({r['similarity']:.2f})")
+            related_suffix = (
+                "\nRelated existing notes (nearest by similarity — not a contradiction "
+                f"judgment): {', '.join(rendered)}. If one is now wrong, pass "
+                "supersedes=<id> on a corrected note or call vectr_revoke."
+            )
+        # Write-time proxy-anchor offer (agent/proxy_anchors.py): glob presence
+        # only, never a claim that the note is stale. Empty unless
+        # `outcome.proxy_anchor_suggestions` is non-empty (config- and
+        # kind/anchors-gated in remember_with_extras).
+        proxy_suffix = ""
+        if outcome.proxy_anchor_suggestions:
+            proxy_suffix = (
+                f"\nProcess files present here: {', '.join(outcome.proxy_anchor_suggestions)}. "
+                "To anchor this note to one, re-store it with anchors=[...] and "
+                "supersedes=<note_id>. A changed anchor means the process MAY have "
+                "changed, never that the note is wrong."
+            )
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}{distill_suffix}"}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}{distill_suffix}{related_suffix}{proxy_suffix}"}],
             "isError": False,
         }
 

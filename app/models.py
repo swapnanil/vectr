@@ -406,6 +406,19 @@ class RememberRequest(BaseModel):
         return v
 
 
+class RelatedNoteModel(BaseModel):
+    """One nearest EXISTING, currently-active note surfaced alongside a
+    fresh write (agent/working_context_store/_related.py) — a similarity
+    ranking only, never a contradiction judgment. The caller decides
+    whether this note is still correct, superseded, or unrelated."""
+
+    note_id: int
+    title: str
+    kind: str
+    similarity: float
+    created_at: float
+
+
 class RememberResponse(BaseModel):
     note_id: int
     message: str
@@ -413,6 +426,26 @@ class RememberResponse(BaseModel):
     distilled: ArcResolveResult | None = Field(
         default=None,
         description="Present only when `distilled_from` was passed — the arc ids resolved into this note vs. any that were unknown/already-resolved.",
+    )
+    related: list[RelatedNoteModel] = Field(
+        default_factory=list,
+        description=(
+            "Nearest EXISTING active notes to the one just written, nearest-first "
+            "(agent/working_context_store/_related.py) — empty unless "
+            "memory_write.related_notes.enabled and at least one candidate clears "
+            "the configured similarity floor. Similarity is closeness, never a "
+            "contradiction verdict; the caller judges whether one is now stale."
+        ),
+    )
+    proxy_anchor_suggestions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Workspace-relative proxy-anchor file paths present in this workspace "
+            "(agent/proxy_anchors.py) — empty unless memory_write."
+            "proxy_anchor_suggestions.enabled, kind='operational', and this call "
+            "passed no anchors. Presence is glob-detected only, never content-read; "
+            "re-store with anchors=[...] to attach one."
+        ),
     )
 
 
