@@ -32,16 +32,16 @@ That is the whole setup. Vectr writes the MCP config for your editor, then index
 
 ---
 
-## How vectr differs from Mem0
+## How vectr differs from other AI agent memory tools
 
-Mem0 is the best known memory layer for AI applications, and it is a strong general-purpose tool. It is also the project people most often compare vectr to, so here is the difference stated plainly. Mem0 facts below are taken from its public README and checked on 2026-07-26.
+There is a healthy category of general-purpose memory layers for AI agents, and the good ones solve a real problem well. Vectr is most often compared to them, so here is the difference stated plainly. The left column describes the design these tools tend to share, not any one product; individual tools vary, so check the one you are considering.
 
-| | Mem0 | Vectr |
+| | A typical memory layer | Vectr |
 |---|---|---|
-| **How memory reaches the model** | The agent or developer calls `add()` and `search()` explicitly. Memory arrives only when something decides to ask for it. | Every note carries trigger conditions over `{path, symbol, semantic, event, temporal}`. On editors with session hooks the harness evaluates them deterministically and injects the match. The agent never has to remember to ask. |
-| **Domain** | "Universal memory layer for AI Agents." General purpose, spanning assistants, support, healthcare, and productivity apps. | Code native. A symbol graph, AST chunking, semantic code search, and working memory fused in one daemon, so a note can be anchored to a real symbol or path rather than a string. |
-| **Inference** | Requires an LLM to function. Defaults to `gpt-5-mini` for extraction and `text-embedding-3-small` for embedding. | Zero internal LLM calls, by design. A local embedding model, no provider account, no API key. |
-| **Deployment** | Library, self-hosted server, or the managed Mem0 Platform. | One local daemon bound to `127.0.0.1`, one per workspace. Team mode is available and opt in. |
+| **How memory reaches the model** | The agent or developer calls an explicit store-and-retrieve API, `add()` and `search()` or the equivalent. Memory arrives only when something decides to ask for it. | Every note carries trigger conditions over `{path, symbol, semantic, event, temporal}`. On editors with session hooks the harness evaluates them deterministically and injects the match. The agent never has to remember to ask. |
+| **Domain** | Generic conversational memory, aimed broadly at assistants and applications rather than at source code. Notes are strings about a user or a session. | Code native. A symbol graph, AST chunking, semantic code search, and working memory fused in one daemon, so a note can be anchored to a real symbol or path rather than a string. |
+| **Inference** | Commonly runs note extraction through an LLM and embeds through a provider API, so an API key and a provider account are part of the setup. | Zero internal LLM calls, by design. A local embedding model, no provider account, no API key. |
+| **Deployment** | Usually a library or a self-hosted server, frequently with a managed cloud tier alongside it. | One local daemon bound to `127.0.0.1`, one per workspace. Team mode is available and opt in. |
 
 **Why the first row is the one that matters.** Storage is not the bottleneck. Retrieval that an agent must volunteer to call is, because it largely does not call it. In our controlled evaluation the agent performed **0 memory operations across 114 turns** even when the store was pre-seeded with knowledge directly relevant to its task. Deterministic injection delivered in every injection-equipped run, with zero false-alarm fires across the audit-logged trigger evaluations. Under repeated compaction, ten facts held only in the conversation were absent from 106 of 108 forced compactions, while the same ten facts injected from a harness-owned store arrived intact across 138 of 138 compact-resumes.
 
