@@ -3,8 +3,15 @@ deterministic glob-presence suggestion (no content inspection whatsoever).
 """
 from __future__ import annotations
 
+import os
+
+import yaml
+
+import agent.proxy_anchors as _proxy_anchors
 from agent.proxy_anchors import (
     PROXY_ANCHOR_MANIFEST_VERSION,
+    _MANIFEST_PATH,
+    _MAX_DIRS_SCANNED,
     load_manifest,
     suggest_proxy_anchors,
 )
@@ -115,3 +122,164 @@ class TestSuggestProxyAnchors:
         result = suggest_proxy_anchors(tmp_path, limit=10)
         assert result == ["services/api/Dockerfile"]
         assert "\\" not in result[0]
+
+
+class TestRecursiveWalkPruning:
+    """A recursive glob's Dockerfile/Makefile match must come from THIS
+    workspace's own tree, never from a dependency/build-output subtree —
+    node_modules/, .venv/, target/, etc. encode a dependency's process, not
+    this workspace's (see agent/proxy_anchors.py's `_PRUNED_DIR_NAMES`)."""
+
+    def test_dockerfile_in_node_modules_is_not_suggested(self, tmp_path) -> None:
+        vendored = tmp_path / "node_modules" / "some-pkg"
+        vendored.mkdir(parents=True)
+        (vendored / "Dockerfile").write_text("FROM alpine\n")
+
+        assert suggest_proxy_anchors(tmp_path, limit=10) == []
+
+    def test_dockerfile_at_root_is_still_suggested(self, tmp_path) -> None:
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "Dockerfile").write_text("FROM alpine\n")
+
+        assert suggest_proxy_anchors(tmp_path, limit=10) == ["Dockerfile"]
+
+    def test_makefile_in_venv_is_not_suggested(self, tmp_path) -> None:
+        vendored = tmp_path / ".venv" / "lib"
+        vendored.mkdir(parents=True)
+        (vendored / "Makefile").write_text("all:\n\techo hi\n")
+
+        assert suggest_proxy_anchors(tmp_path, limit=10) == []
+
+    def test_makefile_in_target_is_not_suggested(self, tmp_path) -> None:
+        vendored = tmp_path / "target" / "release"
+        vendored.mkdir(parents=True)
+        (vendored / "Makefile").write_text("all:\n\techo hi\n")
+
+        assert suggest_proxy_anchors(tmp_path, limit=10) == []
+
+    def test_dockerfile_and_makefile_together_only_root_and_service_survive(self, tmp_path) -> None:
+        (tmp_path / "Makefile").write_text("all:\n\techo hi\n")
+        service = tmp_path / "services" / "api"
+        service.mkdir(parents=True)
+        (service / "Dockerfile").write_text("FROM alpine\n")
+        vendored = tmp_path / "node_modules" / "some-pkg"
+        vendored.mkdir(parents=True)
+        (vendored / "Dockerfile").write_text("FROM alpine\n")
+        (vendored / "Makefile").write_text("all:\n\techo hi\n")
+
+        result = suggest_proxy_anchors(tmp_path, limit=10)
+        assert result == ["services/api/Dockerfile", "Makefile"]
+
+
+class TestRecursiveWalkDepth:
+    """Nothing several directory levels deep is this workspace's own build
+    ritual — it is either generated output or a dependency's own tree
+    that happened not to match a pruned name. `_MAX_RECURSIVE_DEPTH` bounds
+    this independent of directory naming."""
+
+    def test_dockerfile_at_depth_2_is_suggested(self, tmp_path) -> None:
+        nested = tmp_path / "a" / "b"
+        nested.mkdir(parents=True)
+        (nested / "Dockerfile").write_text("FROM alpine\n")
+
+        assert suggest_proxy_anchors(tmp_path, limit=10) == ["a/b/Dockerfile"]
+
+    def test_dockerfile_at_depth_6_is_not_suggested(self, tmp_path) -> None:
+        nested = tmp_path / "a" / "b" / "c" / "d" / "e" / "f"
+        nested.mkdir(parents=True)
+        (nested / "Dockerfile").write_text("FROM alpine\n")
+
+        assert suggest_proxy_anchors(tmp_path, limit=10) == []
+
+
+class TestRecursiveWalkBudget:
+    def test_max_dirs_scanned_budget_is_respected(self, tmp_path, monkeypatch) -> None:
+        # A wide, flat tree with no matches anywhere below the root: the
+        # loop can never reach `limit`, so every recursive domain must be
+        # evaluated — the exact worst case the walk budget guards against.
+        for i in range(5000):
+            (tmp_path / f"d{i}").mkdir()
+        (tmp_path / "package.json").write_text("{}")
+
+        real_scandir = os.scandir
+        calls = {"count": 0}
+
+        def counting_scandir(path):
+            calls["count"] += 1
+            return real_scandir(path)
+
+        monkeypatch.setattr(_proxy_anchors.os, "scandir", counting_scandir)
+
+        suggest_proxy_anchors(tmp_path, limit=100)
+
+        # A handful of root-scoped *wildcard* manifest globs (e.g.
+        # "requirements-*.txt", "*.gemspec") also call os.scandir once
+        # each via pathlib itself before a recursive domain is ever
+        # reached — irrelevant to what this test guards, so the bound
+        # allows generous headroom for that constant, tree-size-independent
+        # overhead while still proving the walk never approaches the
+        # tree's real size (5001 directories).
+        assert calls["count"] <= _MAX_DIRS_SCANNED + 50
+
+    def test_recursive_candidates_are_walked_once_per_call_not_per_glob(self, tmp_path, monkeypatch) -> None:
+        # container.build + build.task together declare 14 recursive
+        # globs; a shared walk means the tree is walked once regardless.
+        (tmp_path / "package.json").write_text("{}")
+
+        real_collect = _proxy_anchors._collect_recursive_candidates
+        calls = {"count": 0}
+
+        def counting_collect(root):
+            calls["count"] += 1
+            return real_collect(root)
+
+        monkeypatch.setattr(_proxy_anchors, "_collect_recursive_candidates", counting_collect)
+
+        suggest_proxy_anchors(tmp_path, limit=100)
+
+        # package.json alone can never satisfy limit=100, so every one of
+        # the manifest's 14 recursive globs (container.build + build.task)
+        # is reached — a per-glob walk would call this 14 times, a shared
+        # one exactly once.
+        assert calls["count"] == 1
+
+
+class TestRecursiveWalkRobustness:
+    def test_permission_denied_subdirectory_does_not_raise_or_lose_root_matches(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        (tmp_path / "Dockerfile").write_text("FROM alpine\n")
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        (blocked / "Dockerfile").write_text("FROM alpine\n")
+
+        real_scandir = os.scandir
+
+        def failing_scandir(path):
+            if os.path.basename(os.fspath(path)) == "blocked":
+                raise PermissionError("denied")
+            return real_scandir(path)
+
+        monkeypatch.setattr(_proxy_anchors.os, "scandir", failing_scandir)
+
+        result = suggest_proxy_anchors(tmp_path, limit=10)
+
+        assert result == ["Dockerfile"]
+
+    def test_deterministic_across_repeated_calls_with_recursive_matches(self, tmp_path) -> None:
+        (tmp_path / "Makefile").write_text("all:\n\techo hi\n")
+        for i in range(20):
+            svc = tmp_path / "services" / f"svc{i}"
+            svc.mkdir(parents=True)
+            (svc / "Dockerfile").write_text("FROM alpine\n")
+
+        first = suggest_proxy_anchors(tmp_path, limit=10)
+        for _ in range(5):
+            assert suggest_proxy_anchors(tmp_path, limit=10) == first
+
+
+class TestManifestVersion:
+    def test_manifest_version_matches_yaml_version_field(self) -> None:
+        raw = _MANIFEST_PATH.read_text(encoding="utf-8")
+        data = yaml.safe_load(raw)
+        assert PROXY_ANCHOR_MANIFEST_VERSION == int(data["version"])
