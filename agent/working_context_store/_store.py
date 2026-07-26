@@ -367,7 +367,23 @@ def _injected_frame(note: WorkingNote, stale_warnings: dict[int, list[str]]) -> 
     unconditional": operational facts carry a recency verdict even when
     nothing has been proven to have drifted, since env/process facts decay
     by elapsed time, not just by a hash mismatch). Otherwise -> "matches
-    current state"."""
+    current state".
+
+    Drift on a kind="operational" note gets one further, PURELY ADDITIVE
+    refinement: the leading "changed since — verify" text is unchanged
+    (never reordered, never dropped — an operational note's anchor having
+    drifted is still exactly as urgent as any other note's), but a strict
+    suffix is appended naming the anchor target and the note's original
+    "last confirmed" date. This is the honest reading of a §4.4 proxy
+    anchor: a lockfile/CI-config/Dockerfile/etc. anchored to an operational
+    note stands in for the PROCESS it encodes, not for the note's content
+    directly, so its drift means "the process this note describes may have
+    changed" — a signal to re-verify, never a claim that the note itself is
+    now wrong. Naming that plainly (rather than folding it into the same
+    unqualified "changed since — verify" a code-anchored note gets) keeps
+    the caller from over-trusting a stale environment fact while also not
+    under-selling it as a flat contradiction. Non-operational drift and the
+    no-drift branches are completely untouched by this refinement."""
     date = _date_str(note.created_at)
     target = (
         note.anchors[0][0]
@@ -376,7 +392,9 @@ def _injected_frame(note: WorkingNote, stale_warnings: dict[int, list[str]]) -> 
     )
     stale_files = stale_warnings.get(note.note_id, [])
     anchor_drifted = any(f.endswith("[anchor_changed]") for f in stale_files)
-    if anchor_drifted:
+    if anchor_drifted and note.kind == "operational":
+        status = f"changed since — verify; {target} is a proxy for this process, last confirmed {date}"
+    elif anchor_drifted:
         status = "changed since — verify"
     elif note.kind == "operational":
         status = f"last confirmed {date}"
@@ -2488,18 +2506,22 @@ class WorkingContextStore:
 
         As a write side-effect (UPG-MEMORY-STATE-MACHINE §4.1/§4.4), every
         note whose DECLARED anchor (not the mtime/code_hash content-prose
-        checks above — those are unrelated pre-existing signals) just
-        drifted gets an idempotent `stale_flagged` event appended to its
-        log — see `_flag_stale_anchors()`. This is the same "a read method
-        also has a write side-effect" shape `fire()` (stamps `last_fired`)
-        and `recall()` (bumps `last_accessed`) already have in this store.
+        checks above — those are unrelated pre-existing signals) is
+        currently drifted gets an idempotent `stale_flagged` event appended
+        to its log, keyed on a SIGNATURE of that note's drifted anchors
+        (sorted `path:current_hash` pairs, sha256[:16] — order-independent
+        and deterministic), not merely on "is it drifted" — see
+        `_flag_stale_anchors()`. This is the same "a read method also has a
+        write side-effect" shape `fire()` (stamps `last_fired`) and
+        `recall()` (bumps `last_accessed`) already have in this store.
         """
         root = Path(workspace_root)
         stale: dict[int, list[str]] = {}
-        anchor_drifted_ids: list[int] = []
+        anchor_drift_sigs: dict[int, str] = {}
 
         for note in notes:
             reasons: list[str] = []
+            drift_pairs: list[tuple[str, str]] = []
 
             # superseded notes are always stale
             if note.valid_until is not None:
@@ -2543,8 +2565,12 @@ class WorkingContextStore:
                 current_hash = _hash_path_content(root, anchor_path)
                 if current_hash is not None and current_hash != anchor_hash:
                     reasons.append(f"{anchor_path}[anchor_changed]")
-                    if note.note_id not in anchor_drifted_ids:
-                        anchor_drifted_ids.append(note.note_id)
+                    drift_pairs.append((anchor_path, current_hash))
+
+            if drift_pairs:
+                anchor_drift_sigs[note.note_id] = hashlib.sha256(
+                    ";".join(f"{p}:{h}" for p, h in sorted(drift_pairs)).encode()
+                ).hexdigest()[:16]
 
             if reasons:
                 stale[note.note_id] = reasons
@@ -2584,54 +2610,81 @@ class WorkingContextStore:
                     if caveat not in reasons_for_note:
                         reasons_for_note.append(caveat)
 
-        self._flag_stale_anchors(workspace_root, anchor_drifted_ids)
+        self._flag_stale_anchors(workspace_root, anchor_drift_sigs)
         return stale
 
-    def _flag_stale_anchors(self, workspace: str, note_ids: list[int]) -> None:
+    def _flag_stale_anchors(self, workspace: str, drift_sigs: dict[int, str]) -> None:
         """Idempotent write side-effect of `check_staleness()`
         (UPG-MEMORY-STATE-MACHINE §4.1/§4.4): append one `stale_flagged`
         event (`actor='system'` — the one deterministic, non-judgment
-        transition) for each note_id whose declared anchor just drifted
-        from its content hash at write time. The anchors mechanism is
-        already generic (any workspace-relative file path); a §4.4 proxy
-        anchor (a lockfile, CI config, Dockerfile, etc. anchored the same
-        way as any code file to stand in for "the process it encodes")
-        drifts through this exact same path — no separate mechanism.
+        transition) for each note_id in `drift_sigs` whose declared anchor
+        is currently drifted from its content hash at write time, keyed by
+        `drift_sigs[note_id]` — a sha256[:16] signature of that note's
+        drifted anchors (sorted `path:current_hash` pairs; see
+        `check_staleness()`). The anchors mechanism is already generic (any
+        workspace-relative file path); a §4.4 proxy anchor (a lockfile, CI
+        config, Dockerfile, etc. anchored the same way as any code file to
+        stand in for "the process it encodes") drifts through this exact
+        same path — no separate mechanism.
 
-        Edge-triggered, not level-triggered: a note whose MOST RECENT event
-        is already `stale_flagged` is skipped — `check_staleness()` runs on
-        every recall()/fire() call while the drift persists, and writing a
-        fresh event on every one of those calls would flood the log with
-        duplicate history for a fact that hasn't changed since the last
-        flag. A note gets a NEW `stale_flagged` event only on the
-        transition INTO drift (first detection, or re-drifting after the
-        anchor was fixed). This is what "automatic, reversible" means for
-        staleness (as distinct from revoked/reinstated, whose reversal is
-        always one explicit event): reversal needs no event at all — once
-        the anchor is fixed, `check_staleness()` simply stops including the
-        note_id here on the next call, and a LATER re-drift writes a fresh
-        event rather than being silently suppressed forever by an old one.
+        Signature-keyed, not merely edge-triggered: a note is skipped only
+        when its MOST RECENT `stale_flagged` event's `payload` already
+        equals its current drift signature — not merely when the most
+        recent event of ANY kind is `stale_flagged`. This distinction
+        matters in two directions:
+          - An intervening lifecycle event (revoke/reinstate/promote) while
+            the anchor stays drifted in the exact same way never admits a
+            duplicate audit row — the comparison looks past it to the last
+            `stale_flagged` row's payload, which is unchanged.
+          - A genuinely NEW drift of the same anchor (the file changed
+            again, to different content) always writes a fresh event,
+            because its signature differs from whatever the last
+            `stale_flagged` row recorded — it is never permanently
+            suppressed by an old, now-stale signature.
+        `check_staleness()` runs on every recall()/fire() call while a
+        drift persists, and writing a fresh event on every one of those
+        calls (or on every unrelated lifecycle event) would flood the log
+        with duplicate history for a fact that hasn't actually changed
+        since the last flag; comparing signatures rather than "is the
+        latest event stale_flagged" is what keeps that idempotent without
+        also silently swallowing a real re-drift.
+
+        This is what "automatic, reversible" still means for staleness (as
+        distinct from revoked/reinstated, whose reversal is always one
+        explicit event): a fixed anchor needs no "un-stale" event at all —
+        once it's fixed, `check_staleness()` simply stops passing that
+        note_id in `drift_sigs` on the next call, so nothing is written and
+        nothing here needs to notice the recovery.
+
+        Pre-migration compatibility: `stale_flagged` rows written before
+        this signature scheme existed carry `payload = NULL`. `None` never
+        equals a signature string, so the first check after upgrade always
+        appends one fresh event carrying the current signature — a single,
+        correct one-time "resync" row, not a bug — and steady state (no
+        further rows while the drift is unchanged) resumes immediately
+        after.
         """
-        if not note_ids:
+        if not drift_sigs:
             return
+        note_ids = list(drift_sigs.keys())
         with self._conn() as conn:
             rows = conn.execute(
-                """SELECT ne.note_id, ne.event FROM note_events ne
+                """SELECT ne.note_id, ne.payload FROM note_events ne
                    INNER JOIN (
                        SELECT note_id, MAX(id) AS max_id FROM note_events
-                       WHERE workspace = ? AND note_id IN ({})
+                       WHERE workspace = ? AND note_id IN ({}) AND event = 'stale_flagged'
                        GROUP BY note_id
                    ) latest ON ne.note_id = latest.note_id AND ne.id = latest.max_id""".format(
                     ",".join("?" * len(note_ids))
                 ),
                 [workspace] + note_ids,
             ).fetchall()
-            latest_event_by_id = {r["note_id"]: r["event"] for r in rows}
+            latest_sig_by_id = {r["note_id"]: r["payload"] for r in rows}
             now = time.time()
-            for nid in note_ids:
-                if latest_event_by_id.get(nid) == "stale_flagged":
+            for nid, sig in drift_sigs.items():
+                if latest_sig_by_id.get(nid) == sig:
                     continue
-                _append_event(conn, workspace, nid, "stale_flagged", actor="system", ts=now)
+                _append_event(conn, workspace, nid, "stale_flagged", actor="system", payload=sig, ts=now)
 
     def fire(
         self,
