@@ -2583,9 +2583,16 @@ class VectrService:
             "(or dismiss them)."
         )
 
-    def _boundary_precompact_text(self) -> str:
+    def _boundary_precompact_text(self, arcs_pending: int | None = None) -> str:
         """Render the PreCompact boundary-preservation text for
         GET /v1/boundary/precompact.
+
+        `arcs_pending` lets the caller pass a count it has ALREADY read, so
+        one request renders from a single store snapshot; omitted, the count
+        is read here. `boundary_precompact()` below passes it — otherwise the
+        rendered sentence and the response's own `arcs_pending` field would
+        come from two separate reads and could disagree if an arc landed
+        between them.
 
         Server-rendered so the product copy has one home — the pre-compact
         hook branch (main.py / agent/hook_cli.py) only fetches and prints
@@ -2612,7 +2619,9 @@ class VectrService:
         if not BOUNDARY_PRECOMPACT_ENABLED:
             return ""
         text = _BOUNDARY_PRECOMPACT_BASE_TEXT
-        count = self.count_arcs_pending_distill()
+        count = (
+            self.count_arcs_pending_distill() if arcs_pending is None else arcs_pending
+        )
         if count > 0:
             arc_sentence = (
                 f"{count} command-discovery arc(s) recorded this session are still "
@@ -2630,10 +2639,16 @@ class VectrService:
         checks `search_only` before calling here (mirroring `GET
         /v1/arcs`), since `count_arcs_pending_distill()` is already
         zero-safe in search-only mode and there is nothing else here to
-        guard."""
+        guard.
+
+        The pending count is read ONCE and shared with the renderer, so the
+        count named in `text` and the `arcs_pending` field are always the
+        same number — and one request costs one store read, not two, on a
+        hook path that runs while compaction waits."""
+        arcs_pending = self.count_arcs_pending_distill()
         return {
-            "text": self._boundary_precompact_text(),
-            "arcs_pending": self.count_arcs_pending_distill(),
+            "text": self._boundary_precompact_text(arcs_pending=arcs_pending),
+            "arcs_pending": arcs_pending,
         }
 
     # ------------------------------------------------------------------

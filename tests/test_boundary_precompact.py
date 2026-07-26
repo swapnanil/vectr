@@ -179,6 +179,36 @@ class TestBoundaryPrecompactRenderer:
         assert result["arcs_pending"] == 1
         assert result["text"] == real_service._boundary_precompact_text()
 
+    def test_boundary_precompact_reads_the_count_once(self, real_service):
+        """One response = one store snapshot. The renderer must be handed the
+        count the response reports, not read its own: two reads could straddle
+        a newly-formed arc and publish a `text` naming a different number than
+        the `arcs_pending` field beside it."""
+        _insert_pending_arc(real_service)
+        calls = {"n": 0}
+        real_count = real_service.count_arcs_pending_distill
+
+        def counting():
+            calls["n"] += 1
+            return real_count()
+
+        real_service.count_arcs_pending_distill = counting
+        try:
+            result = real_service.boundary_precompact()
+        finally:
+            real_service.count_arcs_pending_distill = real_count
+
+        assert calls["n"] == 1, f"expected a single store read, got {calls['n']}"
+        assert f"{result['arcs_pending']} command-discovery arc(s)" in result["text"]
+
+    def test_renderer_honors_an_explicitly_passed_count(self, real_service):
+        """The passed count wins over the store, so the caller's snapshot is
+        what gets rendered."""
+        _insert_pending_arc(real_service)  # store says 1
+        text = real_service._boundary_precompact_text(arcs_pending=7)
+        assert "7 command-discovery arc(s)" in text
+        assert "1 command-discovery arc(s)" not in text
+
 
 # ---------------------------------------------------------------------------
 # GET /v1/boundary/precompact
