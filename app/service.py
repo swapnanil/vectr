@@ -7,6 +7,7 @@ import threading
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,10 +37,17 @@ from agent.config import (
     HOOKS_MIN_SIMILARITY,
     MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
     MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
+    MEMORY_WRITE_RELATED_ENABLED,
+    MEMORY_WRITE_RELATED_LIMIT,
+    MEMORY_WRITE_RELATED_MIN_SIMILARITY,
+    MEMORY_WRITE_PROXY_SUGGEST_ENABLED,
+    MEMORY_WRITE_PROXY_SUGGEST_LIMIT,
 )
 from agent.eviction_advisor import EvictionAdvisor
+from agent.proxy_anchors import suggest_proxy_anchors
 from agent.trigger_engine import TriggerFireLedger, TurnInjectionLedger
 from agent.version_stamp import compute_version_stamp
+from agent.working_context_store._related import RelatedNote
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +174,19 @@ def _format_commit_note_content(
         )
         lines.append(f"Active task: [#{task_note.note_id}] {task_title}")
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class RememberOutcome:
+    """Return shape of `VectrService.remember_with_extras()` — the write
+    itself (`note_id`) plus two strictly-additive write-time offers computed
+    alongside it (see that method's docstring for the exact gating). Never
+    replaces the plain `remember()` -> int contract: this is a NEW method,
+    kept separate so existing callers (and the 495+ test call sites against
+    `remember()`) are untouched."""
+    note_id: int
+    related: list[RelatedNote]
+    proxy_anchor_suggestions: list[str]
 
 
 class VectrService:
@@ -1566,6 +1587,96 @@ class VectrService:
         )
         self._bump_notes_epoch()
         return note_id
+
+    def remember_with_extras(
+        self,
+        content: str,
+        tags: list[str] | None = None,
+        priority: str = "medium",
+        session_id: str | None = None,
+        kind: str = "finding",
+        title: str = "",
+        agent: str = "",
+        triggers: list[dict] | None = None,
+        provenance: str = "agent",
+        scope: str | None = None,
+        anchors: list[str] | None = None,
+        supersedes: int | None = None,
+        contradicts: int | None = None,
+    ) -> RememberOutcome:
+        """Same parameters and same write as `remember()`, plus two
+        strictly-additive write-time offers for the caller LLM — never a
+        second write, never a gate on the first one.
+
+        The write always succeeds or raises exactly as `remember()` does
+        (this method calls it directly, so every existing validation error
+        propagates unchanged). Once `note_id` exists, computing the two
+        offers below is wrapped in one `try/except Exception`: any failure
+        there — including one offer succeeding and the other raising — logs
+        at debug and degrades the WHOLE extras computation to empty lists.
+        A related-notes/proxy-anchor lookup must never turn a successful
+        write into a failed response.
+
+        `related`: the nearest existing ACTIVE notes to this one, computed
+        only when `MEMORY_WRITE_RELATED_ENABLED` — see
+        `agent/working_context_store/_related.py` for the exact contract
+        (nearest-by-similarity only, never a contradiction judgment).
+
+        `proxy_anchor_suggestions`: workspace-relative paths of proxy-anchor
+        files present in this workspace (see `agent/proxy_anchors.py`),
+        computed only when ALL of: `MEMORY_WRITE_PROXY_SUGGEST_ENABLED`,
+        `kind == "operational"`, and the caller passed no `anchors` on this
+        call. That triple gate is deliberate: offer an anchor exactly when
+        an operational note arrives with none, never when the caller
+        already made that choice.
+        """
+        note_id = self.remember(
+            content=content,
+            tags=tags,
+            priority=priority,
+            session_id=session_id,
+            kind=kind,
+            title=title,
+            agent=agent,
+            triggers=triggers,
+            provenance=provenance,
+            scope=scope,
+            anchors=anchors,
+            supersedes=supersedes,
+            contradicts=contradicts,
+        )
+
+        related: list[RelatedNote] = []
+        proxy_anchor_suggestions: list[str] = []
+        try:
+            if MEMORY_WRITE_RELATED_ENABLED and self._context_store is not None:
+                related = self._context_store.related_active_notes(
+                    self._workspace_root,
+                    note_id,
+                    limit=MEMORY_WRITE_RELATED_LIMIT,
+                    min_similarity=MEMORY_WRITE_RELATED_MIN_SIMILARITY,
+                )
+            if (
+                MEMORY_WRITE_PROXY_SUGGEST_ENABLED
+                and kind == "operational"
+                and not anchors
+            ):
+                proxy_anchor_suggestions = suggest_proxy_anchors(
+                    self._workspace_root, MEMORY_WRITE_PROXY_SUGGEST_LIMIT,
+                )
+        except Exception:
+            logger.debug(
+                "remember_with_extras: write-time offer computation failed for note #%s",
+                note_id, exc_info=True,
+            )
+            related = []
+            proxy_anchor_suggestions = []
+
+        return RememberOutcome(
+            note_id=note_id,
+            related=related,
+            proxy_anchor_suggestions=proxy_anchor_suggestions,
+        )
 
     def _current_task_note(self):
         """The most recent kind='task' note, if any — SAME selection boot

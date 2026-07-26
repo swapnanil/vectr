@@ -280,9 +280,12 @@ class TestMemoryRoutesDispatchOffLoop:
             svc._chroma_executor.shutdown(wait=True)
 
     def test_remember_dispatches_off_loop(self) -> None:
+        from app.service import RememberOutcome
         svc = _memory_mock_service()
-        seen, effect = _capture_thread(42)
-        svc.remember.side_effect = effect
+        seen, effect = _capture_thread(
+            RememberOutcome(note_id=42, related=[], proxy_anchor_suggestions=[]),
+        )
+        svc.remember_with_extras.side_effect = effect
         resp = self._run(svc, lambda c: c.post("/v1/remember", json={"content": "a note"}))
         assert resp.status_code == 200
         assert resp.json()["note_id"] == 42
@@ -366,10 +369,13 @@ class TestMemoryMcpToolsDispatchOffLoop:
 
     def test_vectr_remember_dispatches_through_the_shared_executor(self) -> None:
         from integrations.mcp_server._dispatch import handle_tools_call
+        from app.service import RememberOutcome
 
         svc = _memory_mock_service()
-        seen, effect = _capture_thread(11)
-        svc.remember.side_effect = effect
+        seen, effect = _capture_thread(
+            RememberOutcome(note_id=11, related=[], proxy_anchor_suggestions=[]),
+        )
+        svc.remember_with_extras.side_effect = effect
         svc.get_note.return_value = None
         try:
             result = handle_tools_call(
