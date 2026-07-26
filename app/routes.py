@@ -42,6 +42,7 @@ from app.models import (
     RecallResponse,
     ReinstateRequest,
     ReinstateResponse,
+    RelatedNoteModel,
     RememberRequest,
     RememberResponse,
     ResumeResponse,
@@ -341,9 +342,9 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         from app.service import _SEARCH_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
     try:
-        note_id = await dispatch_chroma_async(
+        outcome = await dispatch_chroma_async(
             svc,
-            svc.remember,
+            svc.remember_with_extras,
             content=body.content,
             tags=body.tags,
             priority=body.priority,
@@ -365,6 +366,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         # (UPG-MEMORY-STATE-MACHINE §4.2) a `contradicts` target that does
         # not exist — all caller input errors, never a server fault.
         raise HTTPException(status_code=422, detail={"error": "invalid_memory_object", "detail": str(exc)})
+    note_id = outcome.note_id
     distilled = None
     if body.distilled_from:
         # Distillation write-back: the note write
@@ -380,6 +382,8 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         message=f"Stored note #{note_id}. Recall with: vectr recall --id {note_id}",
         processing_ms=int((time.monotonic() - t0) * 1000),
         distilled=distilled,
+        related=[RelatedNoteModel(**r) for r in outcome.related],
+        proxy_anchor_suggestions=outcome.proxy_anchor_suggestions,
     )
 
 

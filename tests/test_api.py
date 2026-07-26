@@ -705,8 +705,11 @@ class TestClientAttributionHeader:
     def _remember_call(self, client, headers, arguments):
         # The working-memory layer must be enabled for the remember branch to run.
         from api import app
+        from app.service import RememberOutcome
         app.state.service.search_only = False
-        app.state.service.remember.return_value = 7
+        app.state.service.remember_with_extras.return_value = RememberOutcome(
+            note_id=7, related=[], proxy_anchor_suggestions=[],
+        )
         return client.post(
             "/mcp",
             json={
@@ -723,7 +726,7 @@ class TestClientAttributionHeader:
             client, {"X-Vectr-Client": "bob"}, {"content": "a team finding"},
         )
         assert resp.status_code == 200
-        _, kwargs = svc.remember.call_args
+        _, kwargs = svc.remember_with_extras.call_args
         assert kwargs["agent"] == "bob"
 
     def test_explicit_agent_wins_over_client_label(self, client) -> None:
@@ -734,7 +737,7 @@ class TestClientAttributionHeader:
             {"content": "a finding", "agent": "coder-2"},
         )
         assert resp.status_code == 200
-        _, kwargs = svc.remember.call_args
+        _, kwargs = svc.remember_with_extras.call_args
         assert kwargs["agent"] == "coder-2"
 
     def test_no_header_no_attribution(self, client) -> None:
@@ -742,7 +745,7 @@ class TestClientAttributionHeader:
         svc = app.state.service
         resp = self._remember_call(client, {}, {"content": "a solo finding"})
         assert resp.status_code == 200
-        _, kwargs = svc.remember.call_args
+        _, kwargs = svc.remember_with_extras.call_args
         assert kwargs["agent"] == ""
 
 

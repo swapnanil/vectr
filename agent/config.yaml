@@ -1556,6 +1556,42 @@ memory_triggers:
     # the pre-existing per-session-per-axis fire ledger as their debounce.
     cooldown_turns: 10
 
+memory_write:
+  # Write-time offers computed alongside a remember() call — additive
+  # context for the caller LLM, never a gate on the write itself (a fresh
+  # write always succeeds regardless of what either offer below finds).
+
+  related_notes:
+    # Surfaces the nearest EXISTING ACTIVE notes to the one just written, so
+    # the caller LLM can judge whether one is superseded or contradicted
+    # (agent/working_context_store/_related.py). Purely additive: this
+    # never blocks, rewrites, or reorders the write — it only appends a
+    # candidate list the caller may act on or ignore.
+    enabled: true
+    # How many candidates to surface. Small on purpose — this is a nudge
+    # alongside a write, not a second recall() call; a long list would cost
+    # more caller attention than the offer is worth.
+    limit: 3
+    # Similarity floor a candidate must clear to be offered at all. Set to
+    # the same value as memory_triggers.semantic.theta_by_kind.operational
+    # (0.75), deliberately conservative: no threshold can separate a
+    # contradiction from an agreement — correct and incorrect notes'
+    # semantic-similarity distributions overlap — so this bar is set for
+    # CLOSENESS (is this candidate worth the caller's attention at all),
+    # never for correctness (that judgment always stays caller-side).
+    min_similarity: 0.75
+
+  proxy_anchor_suggestions:
+    # Surfaces which protocol-level proxy-anchor files (agent/
+    # proxy_anchors.yaml — dependency lockfiles, CI configs, container/
+    # build/deploy descriptors) are actually present in the workspace, so a
+    # note about a process domain can be anchored to the file that encodes
+    # it. Glob presence only — no content is read to compute this.
+    enabled: true
+    # Small on purpose, same reasoning as related_notes.limit above: this
+    # rides along with a write, it does not replace a deliberate lookup.
+    limit: 4
+
 proactive:
   # UPG-PRO — "Proactive context" (experimental). Deterministically surface the
   # relevant working-memory note / structural match at a sanctioned delivery

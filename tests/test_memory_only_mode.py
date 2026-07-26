@@ -296,8 +296,11 @@ class TestMcpDispatchMemoryOnly:
     def test_remember_not_blocked_in_memory_only_mode(self):
         """vectr_remember must always work regardless of mode."""
         from integrations.mcp_server import handle_tools_call
+        from app.service import RememberOutcome
         svc = self._make_mock_service(memory_only=True)
-        svc.remember.return_value = 7
+        svc.remember_with_extras.return_value = RememberOutcome(
+            note_id=7, related=[], proxy_anchor_suggestions=[],
+        )
 
         result = handle_tools_call("vectr_remember", {"content": "important finding"}, svc)
         assert result["isError"] is False

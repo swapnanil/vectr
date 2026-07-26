@@ -33,7 +33,7 @@ from integrations.mcp_server import (
     _reset_calls_since_save,
 )
 
-from app.service import VectrService
+from app.service import RememberOutcome, VectrService
 from tests._seam import assert_seam_call
 
 
@@ -92,6 +92,14 @@ def _mock_service():
     svc.trace_with_snippets.return_value = {}
     svc.format_trace.return_value = "No trace."
     svc.remember.return_value = 42
+    # vectr_remember dispatches remember_with_extras(), not remember() — a
+    # bare MagicMock return would only validate `outcome.note_id` etc. by
+    # accident (MagicMock's default __int__/__iter__ stubs). Individual
+    # tests below override this per-case (return_value or side_effect) when
+    # they need a specific note_id or an error path.
+    svc.remember_with_extras.return_value = RememberOutcome(
+        note_id=42, related=[], proxy_anchor_suggestions=[],
+    )
     # UPG-SCOPE-SURFACE-BACK: the MCP remember confirmation looks up the
     # resolved note via get_note() to surface its scope — a real WorkingNote
     # (not a bare MagicMock stand-in) so that lookup renders a real scope
@@ -346,7 +354,9 @@ class TestAdaptiveToolRegistration:
         from unittest.mock import MagicMock
         sid = "sess-remember-005"
         svc = MagicMock()
-        svc.remember.return_value = 1
+        svc.remember_with_extras.return_value = RememberOutcome(
+            note_id=1, related=[], proxy_anchor_suggestions=[],
+        )
         svc.search_only = False
 
         assert not is_memory_enabled(sid)
@@ -1248,7 +1258,7 @@ class TestVectrRemember:
     def test_remember_calls_service(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "Found auth bug"}, svc)
-        svc.remember.assert_called_once_with(
+        svc.remember_with_extras.assert_called_once_with(
             content="Found auth bug", tags=None, priority="medium", kind="finding", title="", agent="",
             **_DEFAULT_TRIGGER_PARAMS,
         )
@@ -1323,7 +1333,7 @@ class TestVectrRemember:
             "tags": ["wip", "rate-limit"],
             "priority": "high",
         }, svc)
-        svc.remember.assert_called_once_with(
+        svc.remember_with_extras.assert_called_once_with(
             content="Fix rate limiter",
             tags=["wip", "rate-limit"],
             priority="high",
@@ -1341,7 +1351,7 @@ class TestVectrRemember:
     def test_remember_invalid_priority_clamps_to_medium(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "note", "priority": "urgent"}, svc)
-        svc.remember.assert_called_once_with(
+        svc.remember_with_extras.assert_called_once_with(
             content="note", tags=None, priority="medium", kind="finding", title="", agent="",
             **_DEFAULT_TRIGGER_PARAMS,
         )
@@ -1350,7 +1360,7 @@ class TestVectrRemember:
         """UPG-9.3: an explicit kind reaches the service."""
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "never push to main", "kind": "directive"}, svc)
-        svc.remember.assert_called_once_with(
+        svc.remember_with_extras.assert_called_once_with(
             content="never push to main", tags=None,
             priority="medium", kind="directive", title="", agent="",
             **_DEFAULT_TRIGGER_PARAMS,
@@ -1362,7 +1372,7 @@ class TestVectrRemember:
         handle_tools_call("vectr_remember", {
             "content": "def acquire_lock(): ...", "title": "workspace lock acquisition",
         }, svc)
-        svc.remember.assert_called_once_with(
+        svc.remember_with_extras.assert_called_once_with(
             content="def acquire_lock(): ...", tags=None, priority="medium",
             kind="finding", title="workspace lock acquisition", agent="",
             **_DEFAULT_TRIGGER_PARAMS,
@@ -1374,7 +1384,7 @@ class TestVectrRemember:
         handle_tools_call("vectr_remember", {
             "content": "found the bug in the parser", "agent": "coder-2",
         }, svc)
-        svc.remember.assert_called_once_with(
+        svc.remember_with_extras.assert_called_once_with(
             content="found the bug in the parser", tags=None, priority="medium",
             kind="finding", title="", agent="coder-2",
             **_DEFAULT_TRIGGER_PARAMS,
@@ -1392,7 +1402,7 @@ class TestVectrRemember:
             "scope": "repo",
             "anchors": ["src/auth.py"],
         }, svc)
-        svc.remember.assert_called_once_with(
+        svc.remember_with_extras.assert_called_once_with(
             content="a gotcha about auth.py", tags=None, priority="medium",
             kind="gotcha", title="", agent="",
             triggers=[{"path": "src/auth.py", "event": "pre-edit"}],
@@ -1403,7 +1413,7 @@ class TestVectrRemember:
     def test_remember_passes_supersedes_as_int(self) -> None:
         svc = _mock_service()
         handle_tools_call("vectr_remember", {"content": "corrected finding", "supersedes": "7"}, svc)
-        svc.remember.assert_called_once_with(
+        svc.remember_with_extras.assert_called_once_with(
             content="corrected finding", tags=None, priority="medium",
             kind="finding", title="", agent="",
             triggers=None, provenance="agent", scope=None, anchors=None, supersedes=7,
@@ -1414,7 +1424,7 @@ class TestVectrRemember:
         svc = _mock_service()
         result = handle_tools_call("vectr_remember", {"content": "note", "supersedes": "not-a-number"}, svc)
         assert result["isError"] is True
-        svc.remember.assert_not_called()
+        svc.remember_with_extras.assert_not_called()
 
     def test_remember_passes_contradicts_as_int(self) -> None:
         """UPG-MEMORY-STATE-MACHINE §4.2: contradicts is a peer of
@@ -1423,7 +1433,7 @@ class TestVectrRemember:
         handle_tools_call(
             "vectr_remember", {"content": "the API actually returns a dict", "contradicts": "7"}, svc
         )
-        svc.remember.assert_called_once_with(
+        svc.remember_with_extras.assert_called_once_with(
             content="the API actually returns a dict", tags=None, priority="medium",
             kind="finding", title="", agent="",
             triggers=None, provenance="agent", scope=None, anchors=None, supersedes=None,
@@ -1436,14 +1446,14 @@ class TestVectrRemember:
             "vectr_remember", {"content": "note", "contradicts": "not-a-number"}, svc
         )
         assert result["isError"] is True
-        svc.remember.assert_not_called()
+        svc.remember_with_extras.assert_not_called()
 
     def test_remember_value_error_from_service_returns_mcp_error(self) -> None:
         """A malformed trigger, bad provenance/scope combo, or a supersedes
         target that doesn't exist all surface as `isError: True`, not a
         raised exception reaching the dispatch caller."""
         svc = _mock_service()
-        svc.remember.side_effect = ValueError("provenance='auto' is not allowed on kind='directive'")
+        svc.remember_with_extras.side_effect = ValueError("provenance='auto' is not allowed on kind='directive'")
         result = handle_tools_call("vectr_remember", {
             "content": "an unreviewed standing rule", "kind": "directive", "provenance": "auto",
         }, svc)
@@ -1466,7 +1476,7 @@ class TestVectrRemember:
         text = result["content"][0]["text"].lower()
         assert "human" in text
         assert "user-side" in text or "person" in text
-        svc.remember.assert_not_called()
+        svc.remember_with_extras.assert_not_called()
 
     def test_remember_provenance_agent_still_works(self) -> None:
         svc = _mock_service()
@@ -1474,7 +1484,7 @@ class TestVectrRemember:
             "content": "a note", "provenance": "agent",
         }, svc)
         assert result["isError"] is False
-        svc.remember.assert_called_once()
+        svc.remember_with_extras.assert_called_once()
 
     def test_remember_provenance_auto_still_works(self) -> None:
         svc = _mock_service()
@@ -1482,13 +1492,13 @@ class TestVectrRemember:
             "content": "a note", "provenance": "auto",
         }, svc)
         assert result["isError"] is False
-        svc.remember.assert_called_once()
+        svc.remember_with_extras.assert_called_once()
 
     def test_remember_provenance_omitted_defaults_to_agent(self) -> None:
         svc = _mock_service()
         result = handle_tools_call("vectr_remember", {"content": "a note"}, svc)
         assert result["isError"] is False
-        svc.remember.assert_called_once_with(
+        svc.remember_with_extras.assert_called_once_with(
             content="a note", tags=None, priority="medium",
             kind="finding", title="", agent="",
             **_DEFAULT_TRIGGER_PARAMS,
@@ -1500,7 +1510,7 @@ class TestVectrRemember:
         MCP dispatch's existing ValueError-to-_mcp_error path, same as any
         other remember() validation error."""
         svc = _mock_service()
-        svc.remember.side_effect = ValueError(
+        svc.remember_with_extras.side_effect = ValueError(
             "supersedes references note #7, which is provenance='human' -- "
             "a write whose own provenance is not 'human' may not supersede "
             "a human-provenance note"
@@ -1510,6 +1520,183 @@ class TestVectrRemember:
         }, svc)
         assert result["isError"] is True
         assert "human" in result["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Write-time offers — related notes + proxy-anchor suggestions
+# (integrations/mcp_server/_dispatch.py's vectr_remember confirmation suffix)
+# ---------------------------------------------------------------------------
+
+class TestVectrRememberWriteTimeOffersSuffixRendering:
+    """Render-only coverage: given a RememberOutcome shape, does the
+    confirmation text append the right suffix, worded exactly, additive
+    only? Config/kind/anchors gating itself lives in
+    VectrService.remember_with_extras (tests/test_remember_extras.py) — this
+    class exercises what handle_tools_call does with whatever outcome it
+    receives."""
+
+    def test_related_suffix_present_with_data(self) -> None:
+        svc = _mock_service()
+        svc.remember_with_extras.return_value = RememberOutcome(
+            note_id=42,
+            related=[{
+                "note_id": 7, "title": "an older note about the same thing",
+                "kind": "finding", "priority": "medium", "similarity": 0.81,
+                "created_at": 0.0,
+            }],
+            proxy_anchor_suggestions=[],
+        )
+        result = handle_tools_call("vectr_remember", {"content": "a new note"}, svc)
+        text = result["content"][0]["text"]
+        assert (
+            "Related existing notes (nearest by similarity — not a "
+            "contradiction judgment):"
+        ) in text
+        assert '#7 "an older note about the same thing" (0.81)' in text
+        assert "supersedes=<id> on a corrected note or call vectr_revoke." in text
+
+    def test_related_suffix_truncates_long_titles_around_60_chars(self) -> None:
+        svc = _mock_service()
+        long_title = "A" * 80
+        svc.remember_with_extras.return_value = RememberOutcome(
+            note_id=42,
+            related=[{
+                "note_id": 7, "title": long_title, "kind": "finding",
+                "priority": "medium", "similarity": 0.9, "created_at": 0.0,
+            }],
+            proxy_anchor_suggestions=[],
+        )
+        result = handle_tools_call("vectr_remember", {"content": "a new note"}, svc)
+        text = result["content"][0]["text"]
+        assert "A" * 57 + "..." in text
+        assert "A" * 80 not in text
+
+    def test_related_suffix_absent_when_related_is_empty(self) -> None:
+        svc = _mock_service()  # default RememberOutcome from _mock_service has related=[]
+        result = handle_tools_call("vectr_remember", {"content": "a new note"}, svc)
+        assert "Related existing notes" not in result["content"][0]["text"]
+
+    def test_proxy_suffix_present_with_data(self) -> None:
+        svc = _mock_service()
+        svc.remember_with_extras.return_value = RememberOutcome(
+            note_id=42, related=[],
+            proxy_anchor_suggestions=["Dockerfile", ".github/workflows/ci.yml"],
+        )
+        result = handle_tools_call(
+            "vectr_remember", {"content": "deploy note", "kind": "operational"}, svc,
+        )
+        text = result["content"][0]["text"]
+        assert "Process files present here: Dockerfile, .github/workflows/ci.yml." in text
+        assert "re-store it with anchors=[...] and supersedes=<note_id>." in text
+        assert (
+            "A changed anchor means the process MAY have changed, "
+            "never that the note is wrong."
+        ) in text
+
+    def test_proxy_suffix_absent_when_proxy_anchor_suggestions_is_empty(self) -> None:
+        svc = _mock_service()  # default RememberOutcome has proxy_anchor_suggestions=[]
+        result = handle_tools_call(
+            "vectr_remember", {"content": "deploy note", "kind": "operational"}, svc,
+        )
+        assert "Process files present here" not in result["content"][0]["text"]
+
+    def test_neither_suffix_ever_asserts_the_existing_note_is_wrong(self) -> None:
+        """Honest-label guard: nearest-by-similarity and glob-presence are
+        never rendered as a verdict that an existing note IS stale/wrong/
+        conflicting -- the caller LLM judges that, never vectr."""
+        svc = _mock_service()
+        svc.remember_with_extras.return_value = RememberOutcome(
+            note_id=42,
+            related=[{
+                "note_id": 7, "title": "x", "kind": "finding",
+                "priority": "medium", "similarity": 0.9, "created_at": 0.0,
+            }],
+            proxy_anchor_suggestions=["Dockerfile"],
+        )
+        result = handle_tools_call(
+            "vectr_remember", {"content": "deploy note", "kind": "operational"}, svc,
+        )
+        text = result["content"][0]["text"].lower()
+        # "is wrong"/"contradiction" appear only inside the fixed disclaimer
+        # phrases ("never that the note is wrong", "not a contradiction
+        # judgment") -- stripping those exact phrases must leave no residual
+        # assertive claim that the existing note IS wrong/stale/conflicting.
+        residual = text.replace("never that the note is wrong", "")
+        residual = residual.replace("not a contradiction judgment", "")
+        assert "is wrong" not in residual
+        assert "is stale" not in residual
+        assert "is conflicting" not in residual
+        assert "contradiction" not in residual
+
+
+# ---------------------------------------------------------------------------
+# Write-time offers — gating end to end, through a REAL service
+# ---------------------------------------------------------------------------
+
+class TestVectrRememberWriteTimeOffersGatingEndToEnd:
+    """Unlike the render-only class above, this exercises a REAL
+    VectrService so remember_with_extras()'s actual config/kind/anchors
+    gates run -- confirms the MCP confirmation text reflects the real gate,
+    not a mocked stand-in for it."""
+
+    def _make_service(self, tmp_path, monkeypatch):
+        from tests.conftest import _DummyEmbedProvider
+        from agent import indexer as idx_module
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _: _DummyEmbedProvider())
+        with patch("integrations.vscode_bridge.configure_all"), \
+             patch("integrations.workspace_detect.find_workspace_root", return_value=str(tmp_path)), \
+             patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp_path / "db")}):
+            from app.service import VectrService
+            return VectrService(workspace_root=str(tmp_path))
+
+    def test_proxy_suffix_present_for_operational_kind_no_anchors(self, tmp_path, monkeypatch) -> None:
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12\n")
+        svc = self._make_service(tmp_path, monkeypatch)
+        result = handle_tools_call(
+            "vectr_remember", {"content": "deploy note", "kind": "operational"}, svc,
+        )
+        assert "Process files present here: Dockerfile." in result["content"][0]["text"]
+
+    def test_proxy_suffix_absent_for_non_operational_kind(self, tmp_path, monkeypatch) -> None:
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12\n")
+        svc = self._make_service(tmp_path, monkeypatch)
+        result = handle_tools_call(
+            "vectr_remember", {"content": "a finding", "kind": "finding"}, svc,
+        )
+        assert "Process files present here" not in result["content"][0]["text"]
+
+    def test_proxy_suffix_absent_when_anchors_already_supplied(self, tmp_path, monkeypatch) -> None:
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12\n")
+        svc = self._make_service(tmp_path, monkeypatch)
+        result = handle_tools_call("vectr_remember", {
+            "content": "deploy note", "kind": "operational", "anchors": ["Dockerfile"],
+        }, svc)
+        assert "Process files present here" not in result["content"][0]["text"]
+
+    def test_proxy_suffix_absent_when_config_flag_disabled(self, tmp_path, monkeypatch) -> None:
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12\n")
+        svc = self._make_service(tmp_path, monkeypatch)
+        monkeypatch.setattr("app.service.MEMORY_WRITE_PROXY_SUGGEST_ENABLED", False)
+        result = handle_tools_call(
+            "vectr_remember", {"content": "deploy note", "kind": "operational"}, svc,
+        )
+        assert "Process files present here" not in result["content"][0]["text"]
+
+    def test_related_suffix_present_on_near_duplicate(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        content = "shared exact content for MCP related-notes end-to-end test"
+        handle_tools_call("vectr_remember", {"content": content}, svc)
+        result = handle_tools_call("vectr_remember", {"content": content}, svc)
+        assert "Related existing notes" in result["content"][0]["text"]
+
+    def test_related_suffix_absent_when_config_flag_disabled(self, tmp_path, monkeypatch) -> None:
+        svc = self._make_service(tmp_path, monkeypatch)
+        monkeypatch.setattr("app.service.MEMORY_WRITE_RELATED_ENABLED", False)
+        content = "shared exact content for MCP disabled-gate end-to-end test"
+        handle_tools_call("vectr_remember", {"content": content}, svc)
+        result = handle_tools_call("vectr_remember", {"content": content}, svc)
+        assert "Related existing notes" not in result["content"][0]["text"]
 
 
 # ---------------------------------------------------------------------------

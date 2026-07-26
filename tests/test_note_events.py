@@ -12,6 +12,8 @@ Two layers:
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 
 
@@ -387,6 +389,201 @@ class TestProxyAnchorDrift:
                 (ws, note_id),
             ).fetchall()
         assert rows[0]["n"] == 0
+
+
+class TestStaleFlagDriftSignature:
+    """UPG-STALE-FLAG-DOUBLE-EVENT: `_flag_stale_anchors()` suppresses a
+    duplicate `stale_flagged` audit row by comparing the note's CURRENT
+    drift signature (a sha256[:16] of its drifted anchors' sorted
+    `path:current_hash` pairs) against the payload of its own MOST RECENT
+    `stale_flagged` event — never against the most recent event of ANY
+    kind. This closes two gaps in the older edge-trigger: an intervening
+    lifecycle event (revoke/reinstate/promote) no longer admits a
+    duplicate row, and a genuinely NEW drift of the same anchor is no
+    longer permanently suppressed by an old signature."""
+
+    def _stale_rows(self, store, ws, note_id):
+        with store._conn() as conn:
+            return conn.execute(
+                "SELECT payload FROM note_events WHERE workspace = ? AND note_id = ? "
+                "AND event = 'stale_flagged' ORDER BY id",
+                (ws, note_id),
+            ).fetchall()
+
+    def test_drift_detected_once_writes_one_row_with_a_payload(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "requirements.lock"
+        f.write_text("v1")
+        note_id = store.remember(ws, "lockfile pin", kind="reference", anchors=["requirements.lock"])
+        f.write_text("v2")
+        notes = store.recall(ws)
+        store.check_staleness(notes, ws)
+        rows = self._stale_rows(store, ws, note_id)
+        assert len(rows) == 1
+        assert rows[0]["payload"] is not None
+
+    def test_repeated_checks_of_unchanged_drift_stay_at_one_row(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "requirements.lock"
+        f.write_text("v1")
+        note_id = store.remember(ws, "lockfile pin", kind="reference", anchors=["requirements.lock"])
+        f.write_text("v2")
+        notes = store.recall(ws)
+        store.check_staleness(notes, ws)
+        store.check_staleness(notes, ws)
+        store.check_staleness(notes, ws)
+        rows = self._stale_rows(store, ws, note_id)
+        assert len(rows) == 1
+
+    def test_intervening_lifecycle_event_does_not_admit_a_duplicate_row(self, tmp_path) -> None:
+        """THE REGRESSION this task fixes: revoking then reinstating the
+        note between two checks of the exact same unchanged drift must not
+        cause a second `stale_flagged` row. Against the old "most recent
+        event of ANY kind" implementation this fails, because the most
+        recent event becomes `reinstated`, not `stale_flagged`, so the old
+        suppression check no longer sees a match and re-flags."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "requirements.lock"
+        f.write_text("v1")
+        note_id = store.remember(ws, "lockfile pin", kind="reference", anchors=["requirements.lock"])
+        f.write_text("v2")
+        notes = store.recall(ws)
+        store.check_staleness(notes, ws)
+        store.revoke_note(ws, note_id, "double-checking, unrelated to the drift")
+        store.reinstate_note(ws, note_id)
+        store.check_staleness(notes, ws)
+        rows = self._stale_rows(store, ws, note_id)
+        assert len(rows) == 1
+
+    def test_intervening_promote_does_not_admit_a_duplicate_row(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "requirements.lock"
+        f.write_text("v1")
+        note_id = store.remember(
+            ws, "lockfile pin", kind="reference", anchors=["requirements.lock"], provenance="auto",
+        )
+        f.write_text("v2")
+        notes = store.recall(ws)
+        store.check_staleness(notes, ws)
+        store.promote(ws, note_id, "agent")
+        store.check_staleness(notes, ws)
+        rows = self._stale_rows(store, ws, note_id)
+        assert len(rows) == 1
+
+    def test_new_drift_of_the_same_anchor_writes_a_second_distinct_row(self, tmp_path) -> None:
+        """The previously-missed gap: a SECOND, genuinely different drift of
+        the same anchor must write its own fresh event, not be silently
+        swallowed forever by the first stale_flagged row."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "requirements.lock"
+        f.write_text("v1")
+        note_id = store.remember(ws, "lockfile pin", kind="reference", anchors=["requirements.lock"])
+        f.write_text("v2")
+        notes = store.recall(ws)
+        store.check_staleness(notes, ws)
+        f.write_text("v3")
+        store.check_staleness(notes, ws)
+        rows = self._stale_rows(store, ws, note_id)
+        assert len(rows) == 2
+        assert rows[0]["payload"] != rows[1]["payload"]
+        assert rows[0]["payload"] is not None and rows[1]["payload"] is not None
+
+    def test_anchor_restored_reports_no_new_row_and_stops_appearing(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "requirements.lock"
+        f.write_text("v1")
+        note_id = store.remember(ws, "lockfile pin", kind="reference", anchors=["requirements.lock"])
+        f.write_text("v2")
+        notes = store.recall(ws)
+        stale = store.check_staleness(notes, ws)
+        assert note_id in stale
+        f.write_text("v1")  # restored to write-time content
+        stale_again = store.check_staleness(notes, ws)
+        assert note_id not in stale_again
+        rows = self._stale_rows(store, ws, note_id)
+        assert len(rows) == 1  # restoring the anchor writes no event of its own
+
+    def test_premigration_null_payload_row_gets_one_resync_then_settles(self, tmp_path) -> None:
+        """Backward compatibility: a `stale_flagged` row written before this
+        signature scheme existed carries `payload = NULL`. `None` never
+        equals a real signature, so the first check after upgrade appends
+        exactly one fresh event carrying the current signature, and steady
+        state (no further rows for the same unchanged drift) resumes
+        immediately."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "requirements.lock"
+        f.write_text("v1")
+        note_id = store.remember(ws, "lockfile pin", kind="reference", anchors=["requirements.lock"])
+        f.write_text("v2")
+        with store._conn() as conn:
+            conn.execute(
+                "INSERT INTO note_events (workspace, note_id, event, actor, reason, payload, ts) "
+                "VALUES (?, ?, 'stale_flagged', 'system', NULL, NULL, ?)",
+                (ws, note_id, time.time()),
+            )
+        notes = store.recall(ws)
+        store.check_staleness(notes, ws)
+        rows = self._stale_rows(store, ws, note_id)
+        assert len(rows) == 2
+        assert rows[0]["payload"] is None
+        assert rows[1]["payload"] is not None
+        store.check_staleness(notes, ws)
+        rows_after = self._stale_rows(store, ws, note_id)
+        assert len(rows_after) == 2  # steady state resumed, no third row
+
+    def test_signature_is_order_independent_and_set_specific(self, tmp_path) -> None:
+        """Two notes whose drifted anchor sets are the SAME paths+hashes
+        must produce the SAME signature (order-independent — anchors are
+        declared in whatever order the caller listed them); a note with a
+        genuinely different drifted anchor set must produce a different
+        one."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        a = tmp_path / "a.lock"
+        b = tmp_path / "b.lock"
+        a.write_text("a1")
+        b.write_text("b1")
+        note_same_order = store.remember(
+            ws, "two-anchor note", kind="reference", anchors=["a.lock", "b.lock"],
+        )
+        note_reverse_order = store.remember(
+            ws, "same two anchors, declared in reverse", kind="reference", anchors=["b.lock", "a.lock"],
+        )
+        note_different_set = store.remember(
+            ws, "only one of the two anchors", kind="reference", anchors=["a.lock"],
+        )
+        a.write_text("a2")
+        b.write_text("b2")
+        notes = store.recall(ws)
+        store.check_staleness(notes, ws)
+        rows_same = self._stale_rows(store, ws, note_same_order)
+        rows_reverse = self._stale_rows(store, ws, note_reverse_order)
+        rows_different = self._stale_rows(store, ws, note_different_set)
+        assert rows_same[0]["payload"] == rows_reverse[0]["payload"]
+        assert rows_same[0]["payload"] != rows_different[0]["payload"]
+
+    def test_fold_lifecycle_state_unaffected_by_any_number_of_stale_flagged_rows(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "requirements.lock"
+        f.write_text("v1")
+        note_id = store.remember(ws, "lockfile pin", kind="reference", anchors=["requirements.lock"])
+        f.write_text("v2")
+        notes = store.recall(ws)
+        store.check_staleness(notes, ws)
+        f.write_text("v3")
+        store.check_staleness(notes, ws)
+        note = store.get_note(ws, note_id)
+        states = store.note_event_states(ws, [note])
+        assert states[note_id]["state"] == "active"
+
+        store.revoke_note(ws, note_id, "unrelated to the drift")
+        f.write_text("v4")
+        notes_after_revoke = store.recall(ws)
+        store.check_staleness(notes_after_revoke, ws)
+        note = store.get_note(ws, note_id)
+        states = store.note_event_states(ws, [note])
+        assert states[note_id]["state"] == "revoked"
+        rows = self._stale_rows(store, ws, note_id)
+        assert len(rows) == 3  # three distinct drifts, unaffected by the revoke in between
 
 
 class TestForgetCascade:

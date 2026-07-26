@@ -1167,6 +1167,23 @@ MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND: dict[str, float] = {
 MEMORY_TRIGGER_SEMANTIC_COOLDOWN_TURNS: int = int(_trig_semantic_cfg["cooldown_turns"])
 
 # ---------------------------------------------------------------------------
+# Write-time offers computed alongside remember() — additive only, never a
+# gate on the write. See agent/working_context_store/_related.py and
+# agent/proxy_anchors.py.
+# ---------------------------------------------------------------------------
+
+_mem_write_cfg: dict[str, Any] = _cfg["memory_write"]
+
+_related_notes_cfg: dict[str, Any] = _mem_write_cfg["related_notes"]
+MEMORY_WRITE_RELATED_ENABLED: bool = bool(_related_notes_cfg["enabled"])
+MEMORY_WRITE_RELATED_LIMIT: int = int(_related_notes_cfg["limit"])
+MEMORY_WRITE_RELATED_MIN_SIMILARITY: float = float(_related_notes_cfg["min_similarity"])
+
+_proxy_suggest_cfg: dict[str, Any] = _mem_write_cfg["proxy_anchor_suggestions"]
+MEMORY_WRITE_PROXY_SUGGEST_ENABLED: bool = bool(_proxy_suggest_cfg["enabled"])
+MEMORY_WRITE_PROXY_SUGGEST_LIMIT: int = int(_proxy_suggest_cfg["limit"])
+
+# ---------------------------------------------------------------------------
 # UPG-TASK-SUPERSEDES-HYGIENE: vectr_status stale-task nudge thresholds.
 # Nudge only — never decay, auto-supersede, or auto-expire a note.
 # ---------------------------------------------------------------------------
