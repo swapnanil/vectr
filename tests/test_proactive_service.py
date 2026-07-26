@@ -87,6 +87,38 @@ def test_proactive_dedup_cooldown_across_calls(tmp_path, monkeypatch):
     assert second["item_count"] == 0  # cooldown suppresses the repeat
 
 
+def test_proactive_revoked_note_renders_deterrent_not_raw_content(tmp_path, monkeypatch):
+    """UPG-PROXY-REVOKED-LEAK end-to-end: proactive_context() must render a
+    revoked note's anti-memory deterrent -- never its raw content as active
+    fact -- through the FULL service stack (store -> recall_for_path() ->
+    _ServiceMatchSource.note_states() -> ProactiveMatcher -> gate -> context
+    string). Non-vacuity: the same note, while still active, injects its raw
+    content verbatim first, proving the match itself is real and not an
+    artifact of the revoked-state rendering path."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit", kind="gotcha"
+    )
+    active = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="s1"
+    )
+    assert active["item_count"] >= 1
+    assert "workspace lock" in active["context"]
+
+    svc.revoke_note(nid, reason="wrong assumption")
+
+    # A different session_id: the dedup cooldown suppresses a repeat
+    # injection for the SAME anchor within a session regardless of this fix,
+    # so reusing "s1" here would produce a false pass/fail either way.
+    revoked = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="s2"
+    )
+    assert revoked["item_count"] >= 1
+    assert f"note:{nid}" in revoked["anchor_ids"]
+    assert "REVOKED" in revoked["context"]
+    assert "Do not re-derive" in revoked["context"]
+
+
 # -- recall_scored (UPG-PRO-1) ----------------------------------------------
 
 def test_recall_scored_returns_scores(tmp_path, monkeypatch):
