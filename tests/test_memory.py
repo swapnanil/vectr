@@ -3002,6 +3002,39 @@ class TestInjectedFrame:
         frame = _injected_frame(note, stale_warnings)
         assert "status: changed since — verify" in frame
 
+    def test_operational_drift_status_ladder_is_a_strict_suffix(self, tmp_path) -> None:
+        """UPG-STALE-FLAG-DOUBLE-EVENT / proxy-anchor rendering: an
+        operational note whose anchor drifted gets the SAME leading
+        'changed since — verify' text every other drifted note gets
+        (unchanged precedence, see the sibling test above), plus a strict
+        ADDITIVE suffix naming the anchor target and the original 'last
+        confirmed' date — the honest reading of a proxy anchor (a
+        lockfile/CI-config/Dockerfile standing in for "the process it
+        encodes"): drift means the process MAY have changed, never that
+        the note itself is wrong."""
+        from agent.working_context_store._store import _injected_frame, _date_str
+        note = self._note(note_id=3, kind="operational", anchors=[["Makefile", "abc"]])
+        stale_warnings = {3: ["Makefile [anchor_changed]"]}
+        frame = _injected_frame(note, stale_warnings)
+        assert "status: changed since — verify" in frame
+        assert f"Makefile is a proxy for this process, last confirmed {_date_str(note.created_at)}" in frame
+
+    def test_nonoperational_drift_carries_no_proxy_suffix(self, tmp_path) -> None:
+        """The proxy suffix is kind-keyed, never applied outside
+        kind='operational' — a finding/gotcha/etc. anchor drift stays the
+        byte-exact 'changed since — verify' string with nothing appended,
+        proving the branch is additive-only and does not leak."""
+        from agent.working_context_store._store import _injected_frame, _date_str
+        for kind in ("finding", "gotcha", "directive", "task", "reference", "decision"):
+            note = self._note(note_id=9, kind=kind, anchors=[["Makefile", "abc"]])
+            stale_warnings = {9: ["Makefile [anchor_changed]"]}
+            frame = _injected_frame(note, stale_warnings)
+            assert frame == (
+                f"Recorded {_date_str(note.created_at)} (anchor: Makefile, "
+                f"status: changed since — verify): "
+            )
+            assert "proxy for this process" not in frame
+
     def test_injected_framing_appears_in_fire_and_format_output_for_operational_note(self, tmp_path) -> None:
         """End-to-end: fire_and_format() renders the injected framing (not
         frame_prefix()'s provenance-hedged wording) for a live operational
