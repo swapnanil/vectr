@@ -349,6 +349,17 @@ EPISODES_DISTILL_RENDER_TOKEN_CAP : int
     EPISODES_DISTILL_MAX_ARCS_RENDERED above — whichever limit is hit
     first stops the render.
 
+BOUNDARY_PRECOMPACT_ENABLED : bool
+    Master switch for the PreCompact boundary-preservation surface
+    (GET /v1/boundary/precompact). False makes the route return an empty
+    text with HTTP 200 rather than the rendered nudge.
+
+BOUNDARY_PRECOMPACT_TOKEN_CAP : int
+    Hard cap (estimated tokens, agent/trigger_engine.py's token_estimate)
+    on the rendered boundary-preservation text. The arc-independent base
+    text always fits; a pending-arc count sentence is appended only when
+    it still fits under this cap.
+
 STRATEGY_DEFAULT_SEMANTIC_WEIGHT : float
 STRATEGY_DEFAULT_BM25_WEIGHT : float
     Fallback hybrid-search weights used before the first index-time codebase
@@ -868,6 +879,8 @@ EPISODES_STALE_TEMP_FILE_SWEEP_AGE_S: float = float(
 )
 EPISODES_DISTILL_MAX_ARCS_RENDERED: int = int(_episodes_cfg["distill_max_arcs_rendered"])
 EPISODES_DISTILL_RENDER_TOKEN_CAP: int = int(_episodes_cfg["distill_render_token_cap"])
+BOUNDARY_PRECOMPACT_ENABLED: bool = bool(_episodes_cfg["boundary_precompact_enabled"])
+BOUNDARY_PRECOMPACT_TOKEN_CAP: int = int(_episodes_cfg["boundary_precompact_token_cap"])
 
 # ---------------------------------------------------------------------------
 # ingest_traces unresolved-caller/callee warning cap (UPG-7.3)

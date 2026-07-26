@@ -2104,12 +2104,20 @@ class TestCmdHookPreToolUse:
 
 
 class TestCmdHookPreCompact:
+    """Every test here patches `main._fetch_boundary_precompact` explicitly
+    (even the ones not asserting on it) so `cmd_hook` never makes a REAL
+    network call to the mocked port 8765 in this test's fixtures — that
+    port is a live daemon's convention elsewhere in this workspace, and a
+    test must never depend on (or accidentally reach) whatever real daemon
+    may be listening there."""
+
     def test_snapshots_with_trigger_in_label_and_emits_nothing(self, monkeypatch, capsys):
         import argparse
         from unittest.mock import patch
         monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/p", "trigger": "auto"}'))
         with patch("main.InstanceRegistry") as MockReg, \
-             patch("main._post_snapshot", return_value=True) as mock_snap:
+             patch("main._post_snapshot", return_value=True) as mock_snap, \
+             patch("main._fetch_boundary_precompact", return_value=""):
             MockReg.return_value.get.return_value = {"port": 8765}
             m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
         # snapshot taken with a label carrying the trigger; no context injected.
@@ -2122,7 +2130,8 @@ class TestCmdHookPreCompact:
         from unittest.mock import patch
         monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/p", "trigger": "manual"}'))
         with patch("main.InstanceRegistry") as MockReg, \
-             patch("main._post_snapshot", return_value=False):
+             patch("main._post_snapshot", return_value=False), \
+             patch("main._fetch_boundary_precompact", return_value=""):
             MockReg.return_value.get.return_value = {"port": 8765}
             m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))  # must not raise
 
@@ -2134,7 +2143,8 @@ class TestCmdHookPreCompact:
             '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}'))
         with patch("main.InstanceRegistry") as MockReg, \
              patch("main._post_snapshot", return_value=True), \
-             patch("main._post_trigger_reset", return_value=True) as mock_reset:
+             patch("main._post_trigger_reset", return_value=True) as mock_reset, \
+             patch("main._fetch_boundary_precompact", return_value=""):
             MockReg.return_value.get.return_value = {"port": 8765}
             m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
         mock_reset.assert_called_once_with(8765, "abc-123")
@@ -2145,7 +2155,8 @@ class TestCmdHookPreCompact:
         monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/p", "trigger": "auto"}'))
         with patch("main.InstanceRegistry") as MockReg, \
              patch("main._post_snapshot", return_value=True), \
-             patch("main._post_trigger_reset", return_value=True) as mock_reset:
+             patch("main._post_trigger_reset", return_value=True) as mock_reset, \
+             patch("main._fetch_boundary_precompact", return_value=""):
             MockReg.return_value.get.return_value = {"port": 8765}
             m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
         mock_reset.assert_not_called()
@@ -2157,9 +2168,66 @@ class TestCmdHookPreCompact:
             '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}'))
         with patch("main.InstanceRegistry") as MockReg, \
              patch("main._post_snapshot", return_value=True), \
-             patch("main._post_trigger_reset", return_value=False):
+             patch("main._post_trigger_reset", return_value=False), \
+             patch("main._fetch_boundary_precompact", return_value=""):
             MockReg.return_value.get.return_value = {"port": 8765}
             m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))  # must not raise
+
+    # --- Boundary-preservation text (LANE-L3) ---------------------------
+
+    def test_prints_boundary_text_as_plain_text(self, monkeypatch, capsys):
+        """PreCompact's stdout is consumed by the editor harness as raw
+        plain text appended to the summarizer's instructions, NOT parsed as
+        a `hookSpecificOutput` JSON envelope — so a non-empty boundary text
+        must be printed verbatim, never wrapped."""
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._post_snapshot", return_value=True), \
+             patch("main._post_trigger_reset", return_value=True), \
+             patch("main._fetch_boundary_precompact", return_value="Preserve concrete findings."):
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
+        out = capsys.readouterr().out
+        assert out.strip() == "Preserve concrete findings."
+        assert "hookSpecificOutput" not in out
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(out)
+
+    def test_prints_nothing_when_boundary_text_is_empty(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO('{"cwd": "/p", "trigger": "auto"}'))
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._post_snapshot", return_value=True), \
+             patch("main._fetch_boundary_precompact", return_value=""):
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
+        assert capsys.readouterr().out.strip() == ""
+
+    def test_fetch_boundary_precompact_returns_empty_string_when_daemon_unreachable(self):
+        """`_fetch_boundary_precompact` never raises on a connection failure
+        — a down/absent daemon degrades to "", the same fail-safe contract
+        as `_fetch_recall`/`_post_snapshot`/`_post_trigger_reset`."""
+        # Port 1 is a reserved, never-listening port on every platform —
+        # guaranteed connection refusal, no real network dependency.
+        assert m._fetch_boundary_precompact(1) == ""
+
+    def test_boundary_fetch_and_snapshot_and_trigger_reset_all_occur_in_order(self, monkeypatch, capsys):
+        import argparse
+        from unittest.mock import patch
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            '{"cwd": "/p", "trigger": "auto", "session_id": "abc-123"}'))
+        calls: list[str] = []
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("main._post_snapshot", side_effect=lambda *a, **k: calls.append("snapshot") or True), \
+             patch("main._post_trigger_reset", side_effect=lambda *a, **k: calls.append("trigger_reset") or True), \
+             patch("main._fetch_boundary_precompact", side_effect=lambda *a, **k: calls.append("boundary_fetch") or ""):
+            MockReg.return_value.get.return_value = {"port": 8765}
+            m.cmd_hook(argparse.Namespace(hook_event="pre-compact"))
+        assert calls == ["snapshot", "trigger_reset", "boundary_fetch"]
 
 
 class TestHookInstanceResolution:
