@@ -2,14 +2,17 @@
 
 Turns a set of scored `Candidate`s into 0..K emitted items packed into one
 deterministic block. Every rule is numeric and deterministic — a similarity
-floor, a per-event budget, a per-session dedup/cooldown ledger, and a stable
-sort. There is no branch that reads conversation content to decide *what kind*
-of help to give; the gate only orders, thresholds, and concatenates.
+floor (unbypassable, structural exact matches included), a per-event budget,
+a per-session dedup/cooldown ledger, an optional ADDITIVE cross-channel
+per-turn dedup (UPG-PROXY-CROSS-CHANNEL-DEDUP), and a stable sort. There is
+no branch that reads conversation content to decide *what kind* of help to
+give; the gate only orders, thresholds, and concatenates.
 """
 from __future__ import annotations
 
 import threading
 from collections import OrderedDict, deque
+from typing import Protocol, runtime_checkable
 
 from agent.proactive.types import Candidate, InjectionResult
 
@@ -80,6 +83,34 @@ class LedgerStore:
                 led.add(aid)
 
 
+@runtime_checkable
+class TurnLedger(Protocol):
+    """Structural type for `agent.trigger_engine.TurnInjectionLedger`
+    (UPG-PROXY-CROSS-CHANNEL-DEDUP). Declared here by shape rather than
+    imported, so this low-level gating module stays decoupled from the
+    trigger-engine package; the service layer passes its real
+    `TurnInjectionLedger` instance straight through `select()`'s
+    `turn_ledger` parameter."""
+
+    def eligible(self, note_id: int) -> bool: ...
+
+    def claim(self, note_id: int) -> None: ...
+
+
+def _note_id_from_anchor(anchor_id: str) -> int | None:
+    """Parse the note id out of a `note:<id>` anchor_id, or None for a
+    non-note anchor (e.g. `chunk:<...>` from the code-search matcher) —
+    the cross-channel turn ledger is note-granular only, matching the
+    hook/trigger-engine side's own `TurnInjectionLedger` (keyed on
+    `WorkingNote.note_id`, which has no equivalent for a code chunk)."""
+    if not anchor_id.startswith("note:"):
+        return None
+    try:
+        return int(anchor_id[len("note:"):])
+    except ValueError:
+        return None
+
+
 class ProactiveGate:
     """Applies floor -> dedup/cooldown -> budget -> deterministic pack."""
 
@@ -103,12 +134,25 @@ class ProactiveGate:
         *,
         session_id: str = "",
         structural_only: bool = False,
+        turn_ledger: TurnLedger | None = None,
     ) -> InjectionResult:
         """Deterministically pick and pack the items to inject.
 
         `structural_only` (a static per-channel policy, never a content read)
         drops every semantic candidate — used by the high-frequency channels
         where only exact matches are cheap enough to be worth the budget.
+
+        `turn_ledger` (UPG-PROXY-CROSS-CHANNEL-DEDUP), if given, is the SAME
+        per-session `TurnInjectionLedger` the hook/trigger-engine surfaces
+        share (via the service's `_turn_ledger_for`) — ADDITIVE to, never a
+        replacement for, this gate's own anchor-id cooldown `_ledger` below
+        (which covers code-chunk candidates too, and provides cross-TURN
+        cooldown this ledger does not). A note_id another surface already
+        claimed this turn is dropped before packing; every note_id that
+        SURVIVES the budget below is claimed here so a later surface this
+        same turn will not re-inject it either — a note matched here but
+        evicted for budget is deliberately left unclaimed, mirroring
+        `WorkingContextStore.fire_and_format()`'s own turn-ledger contract.
         """
         if self._max_items == 0 or self._max_chars == 0:
             return InjectionResult.empty()
@@ -121,29 +165,38 @@ class ProactiveGate:
             if cur is None or (c.score, -c.provenance_rank) > (cur.score, -cur.provenance_rank):
                 best[c.anchor_id] = c
 
-        # 2. Floor + per-channel policy: drop below-floor semantic candidates;
-        #    structural exact matches bypass the floor entirely.
+        # 2. Floor + per-channel policy: `structural_only` drops every
+        #    non-structural candidate (a static per-channel policy); every
+        #    remaining candidate — structural or semantic — must then clear
+        #    the similarity floor. No exemption: a floor configured above
+        #    1.0 admits nothing, including exact structural matches (which
+        #    score exactly 1.0).
         eligible: list[Candidate] = []
         for c in best.values():
-            if c.is_structural:
-                eligible.append(c)
-                continue
-            if structural_only:
+            if structural_only and not c.is_structural:
                 continue
             if c.score >= self._min_similarity:
                 eligible.append(c)
 
-        # 3. Cooldown: drop anything already emitted for this session recently.
+        # 3. Cross-channel per-turn dedup (additive — see docstring above).
+        if turn_ledger is not None:
+            eligible = [
+                c for c in eligible
+                if _note_id_from_anchor(c.anchor_id) is None
+                or turn_ledger.eligible(_note_id_from_anchor(c.anchor_id))
+            ]
+
+        # 4. Cooldown: drop anything already emitted for this session recently.
         if session_id:
             eligible = [c for c in eligible if not self._ledger.seen(session_id, c.anchor_id)]
 
         if not eligible:
             return InjectionResult.empty()
 
-        # 4. Deterministic order: score desc, provenance rank asc, anchor_id asc.
+        # 5. Deterministic order: score desc, provenance rank asc, anchor_id asc.
         eligible.sort(key=lambda c: (-c.score, c.provenance_rank, c.anchor_id))
 
-        # 5. Budget: at most K items and T chars. Each candidate `line` is capped
+        # 6. Budget: at most K items and T chars. Each candidate `line` is capped
         #    to T by the matcher, so a single item always fits; stop at the first
         #    item that would overflow the running character total.
         selected: list[Candidate] = []
@@ -163,6 +216,11 @@ class ProactiveGate:
 
         if session_id:
             self._ledger.record(session_id, [c.anchor_id for c in selected])
+        if turn_ledger is not None:
+            for c in selected:
+                note_id = _note_id_from_anchor(c.anchor_id)
+                if note_id is not None:
+                    turn_ledger.claim(note_id)
 
         body = "\n".join(c.line for c in selected)
         context = f"{_HEADER}\n{body}"

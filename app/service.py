@@ -2439,6 +2439,16 @@ class VectrService:
         if self._search_only:
             # No working-memory layer in search-only mode; nothing to inject.
             return empty
+        # UPG-PROXY-LOOPBACK-BYPASS: unconditional, channel-independent bind
+        # refusal — sits BEFORE and INDEPENDENT of the master-switch/channel
+        # policy below. A client-supplied `channel` label (its default value
+        # is "proxy") must never be able to route around this: a non-loopback
+        # bind fails closed to the empty result for every channel, including
+        # the proxy channel's own launch-is-consent exemption from the
+        # master switch just below.
+        from agent.proactive.settings import proactive_bind_is_loopback
+        if not proactive_bind_is_loopback():
+            return empty
         from agent.proactive.settings import ProactiveSettings
         settings = ProactiveSettings.from_env()
         # The master opt-in gates AMBIENT surfaces (hooks read the transcript
@@ -2447,7 +2457,8 @@ class VectrService:
         # pointed their client at it — that launch IS the consent for this
         # channel. The daemon is localhost-only and already serves notes to
         # local callers ungated (recall/search), so honoring the proxy channel
-        # here adds no exposure beyond existing endpoints.
+        # here adds no exposure beyond existing endpoints. (The bind check
+        # above already ensures "localhost-only" is actually true at runtime.)
         if not settings.enabled and channel != "proxy":
             return empty
         from agent.proactive.matcher import ProactiveMatcher
@@ -2501,8 +2512,20 @@ class VectrService:
             note_limit=max(settings.max_items_per_event * 2, settings.max_items_per_event),
         )
         candidates = matcher.match(window)
+        # UPG-PROXY-CROSS-CHANNEL-DEDUP: consult the SAME per-session
+        # TurnInjectionLedger the hook/trigger-engine surfaces share (see
+        # `_turn_ledger_for`) so a note already claimed this turn by that
+        # surface is not re-injected here, and vice versa. Additive to the
+        # gate's own anchor-id cooldown ledger, never a replacement. KNOWN
+        # LIMITATION (out of scope here, filed as UPG-PROXY-COOLDOWN-
+        # SESSION-IDENTITY, P2): the proxy channel derives `session_id` from
+        # a sha256 of the first user message (agent/proactive/proxy.py's
+        # `_session_id`), while hook/trigger-engine surfaces use the
+        # editor-supplied session id — this only collapses a duplicate when
+        # both channels happen to present the SAME session id.
         result = self._proactive_gate(settings).select(
-            candidates, session_id=session_id, structural_only=structural_only
+            candidates, session_id=session_id, structural_only=structural_only,
+            turn_ledger=self._turn_ledger_for(session_id),
         )
         if not result.is_empty():
             self._record_proactive_injection(channel, result)
