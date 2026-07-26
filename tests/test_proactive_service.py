@@ -87,6 +87,142 @@ def test_proactive_dedup_cooldown_across_calls(tmp_path, monkeypatch):
     assert second["item_count"] == 0  # cooldown suppresses the repeat
 
 
+# -- loopback bind enforcement (UPG-PROXY-LOOPBACK-BYPASS) ------------------
+
+def test_proactive_refuses_non_loopback_bind_on_proxy_channel(tmp_path, monkeypatch):
+    # B4: channel="proxy" is the field's DEFAULT and was exempt from BOTH the
+    # master switch and the bind check. The bind refusal must be
+    # unconditional and channel-independent: it fires even for the proxy
+    # channel's own launch-is-consent exemption, and even with the master
+    # switch on.
+    monkeypatch.setenv("VECTR_BIND_HOST", "0.0.0.0")
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    svc.remember("resolver.py holds the workspace lock; drops on scope exit", kind="gotcha")
+    out = svc.proactive_context(text="", file_paths=["/abs/resolver.py"], session_id="s1", channel="proxy")
+    assert out == {"context": "", "item_count": 0, "anchor_ids": [], "scores": []}
+
+
+def test_proactive_refuses_non_loopback_bind_regardless_of_channel(tmp_path, monkeypatch):
+    monkeypatch.setenv("VECTR_BIND_HOST", "10.0.0.5")
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    svc.remember("resolver.py holds the workspace lock; drops on scope exit", kind="gotcha")
+    for channel in ("proxy", "hook", "SessionStart", "anything-a-client-sends"):
+        out = svc.proactive_context(
+            text="", file_paths=["/abs/resolver.py"], session_id="s1", channel=channel
+        )
+        assert out["item_count"] == 0, channel
+
+
+def test_proactive_still_injects_on_loopback_bind(tmp_path, monkeypatch):
+    # Regression guard: the new bind check must not break the ordinary,
+    # default (loopback) posture — VECTR_BIND_HOST unset falls back to
+    # 127.0.0.1, which is loopback.
+    monkeypatch.delenv("VECTR_BIND_HOST", raising=False)
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    nid = svc.remember("resolver.py holds the workspace lock; drops on scope exit", kind="gotcha")
+    out = svc.proactive_context(text="", file_paths=["/abs/resolver.py"], session_id="s1", channel="proxy")
+    assert f"note:{nid}" in out["anchor_ids"]
+
+
+# -- cross-channel dedup (UPG-PROXY-CROSS-CHANNEL-DEDUP) --------------------
+
+def test_proxy_and_hook_channels_share_one_turn_ledger(tmp_path, monkeypatch):
+    """Integration proof (service level) that `proactive_context` (proxy)
+    and `recall`/`_recall_impl` (hook/trigger-engine surface) consult the
+    SAME per-session `TurnInjectionLedger` via `_turn_ledger_for` — the same
+    note must not inject twice across both channels in one turn under a
+    shared session id."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    (tmp_path / "resolver.py").write_text("# lock resolver\n")
+    abs_path = str(tmp_path / "resolver.py")
+    nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit",
+        kind="gotcha",
+        anchors=["resolver.py"],
+    )
+    sid = "shared-session"
+
+    # Surface 1 (hook/trigger-engine): PreToolUse file-anchored delivery
+    # fires the note's declared pre-edit trigger and claims it.
+    hook_text = svc.recall(file_path=abs_path, session_id=sid, hook_event="PreToolUse")
+    assert "resolver.py" in hook_text
+
+    # Surface 2 (proxy channel), SAME session/turn: already claimed by
+    # surface 1 this turn -> must NOT re-inject.
+    proxy_out = svc.proactive_context(
+        text="", file_paths=[abs_path], session_id=sid, channel="proxy",
+    )
+    assert f"note:{nid}" not in proxy_out["anchor_ids"]
+
+    # Non-vacuous: a FRESH session's proxy call (ledger untouched) DOES
+    # inject the same note.
+    fresh_out = svc.proactive_context(
+        text="", file_paths=[abs_path], session_id="fresh-session", channel="proxy",
+    )
+    assert f"note:{nid}" in fresh_out["anchor_ids"]
+
+    # After the shared session's turn boundary (a real UserPromptSubmit),
+    # the proxy channel becomes eligible again.
+    svc.reset_turn_ledger(sid)
+    reset_out = svc.proactive_context(
+        text="", file_paths=[abs_path], session_id=sid, channel="proxy",
+    )
+    assert f"note:{nid}" in reset_out["anchor_ids"]
+
+
+def test_proxy_call_with_unseen_session_id_does_not_allocate_turn_ledger(tmp_path, monkeypatch):
+    """`proactive_context` must consult the shared TurnInjectionLedger
+    LOOKUP-ONLY (`_existing_turn_ledger`), never allocate one
+    (`_turn_ledger_for`). The proxy channel's session_id (sha256 of the
+    first user message) is, today, disjoint from the editor-supplied
+    session id hook/trigger-engine surfaces use — if a proxy call allocated
+    a ledger no hook surface will ever look up, that churn would consume
+    slots in the EVICTION_MAX_TRACKED_SESSIONS-bounded `_turn_ledgers` LRU
+    for zero dedup benefit, risking eviction of a live editor session's real
+    ledger under heavy multi-subagent session churn."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    svc.remember("resolver.py holds the workspace lock; drops on scope exit", kind="gotcha")
+    assert len(svc._turn_ledgers) == 0
+
+    svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="never-seen-before", channel="proxy",
+    )
+    assert len(svc._turn_ledgers) == 0
+    assert "never-seen-before" not in svc._turn_ledgers
+
+
+def test_proactive_revoked_note_renders_deterrent_not_raw_content(tmp_path, monkeypatch):
+    """UPG-PROXY-REVOKED-LEAK end-to-end: proactive_context() must render a
+    revoked note's anti-memory deterrent -- never its raw content as active
+    fact -- through the FULL service stack (store -> recall_for_path() ->
+    _ServiceMatchSource.note_states() -> ProactiveMatcher -> gate -> context
+    string). Non-vacuity: the same note, while still active, injects its raw
+    content verbatim first, proving the match itself is real and not an
+    artifact of the revoked-state rendering path."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit", kind="gotcha"
+    )
+    active = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="s1"
+    )
+    assert active["item_count"] >= 1
+    assert "workspace lock" in active["context"]
+
+    svc.revoke_note(nid, reason="wrong assumption")
+
+    # A different session_id: the dedup cooldown suppresses a repeat
+    # injection for the SAME anchor within a session regardless of this fix,
+    # so reusing "s1" here would produce a false pass/fail either way.
+    revoked = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="s2"
+    )
+    assert revoked["item_count"] >= 1
+    assert f"note:{nid}" in revoked["anchor_ids"]
+    assert "REVOKED" in revoked["context"]
+    assert "Do not re-derive" in revoked["context"]
+
+
 # -- recall_scored (UPG-PRO-1) ----------------------------------------------
 
 def test_recall_scored_returns_scores(tmp_path, monkeypatch):

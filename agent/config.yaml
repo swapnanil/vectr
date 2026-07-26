@@ -844,6 +844,29 @@ memory_hygiene:
   # note from last month's finished work gets surfaced.
   stale_task_warn_age_days: 7
 
+memory_recall_for_path:
+  # UPG-PROXY-SUBSTRING-ANCHOR: recall_for_path() answers "which notes are
+  # relevant to this file path" for the PreToolUse hook and the proactive
+  # matcher's structural candidate. The SQL LIKE prefilter is intentionally a
+  # cheap SUPERSET (unanchored substring match can over-match, e.g. "gate.py"
+  # inside "uv_regate.py") — a Python-side path-boundary filter narrows the
+  # superset down to true matches afterward. Because the boundary filter runs
+  # AFTER the SQL fetch, the SQL step must over-fetch more rows than the
+  # caller's requested limit, or a true match could be filtered out of a
+  # too-small candidate pool before ever being counted.
+
+  # Candidate pool size = min(limit * overfetch_multiplier, overfetch_ceiling).
+  # 4x gives the boundary filter enough headroom to discard false substring
+  # hits (e.g. several "*_gate.py" siblings) without still finding fewer than
+  # `limit` true matches in the common case of a handful of relevant notes.
+  overfetch_multiplier: 4
+
+  # Hard ceiling on the SQL-fetched candidate pool regardless of the
+  # multiplier above, so a large `limit` from a caller can't force an
+  # unbounded table scan. 200 is generously above any realistic per-path
+  # note count while keeping the query cheap.
+  overfetch_ceiling: 200
+
 symbol_graph:
   # UPG-JSFLOW-SYMBOLS: language keywords that must never be minted as a
   # symbol name or call-edge target. A desynced parse (e.g. Flow syntax

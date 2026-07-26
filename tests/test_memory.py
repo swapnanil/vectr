@@ -579,6 +579,80 @@ class TestRecallForPathUPG96:
         store.remember("/repo", "x", kind="gotcha")
         assert store.recall_for_path("/repo", "", kind="gotcha") == []
 
+    def test_substring_basename_does_not_false_match(self, tmp_path) -> None:
+        """UPG-PROXY-SUBSTRING-ANCHOR: unanchored substring matching would
+        let "gate.py" false-match inside "uv_regate.py"; a note only about
+        uv_regate.py must not be returned for the file "gate.py"."""
+        store = _store(tmp_path)
+        store.remember("/repo", "see uv_regate.py for details", kind="gotcha")
+        assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
+
+    def test_longer_extension_does_not_false_match(self, tmp_path) -> None:
+        """"gate.py" must not match content that actually mentions
+        "gate.pyc"/"gate.pyx" — a longer identifier sharing the same prefix."""
+        store = _store(tmp_path)
+        store.remember("/repo", "open gate.pyc for the compiled bytecode", kind="gotcha")
+        store.remember("/repo", "gate.pyx is the cython source", kind="gotcha")
+        assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
+
+    def test_declared_anchor_exact_match_wins_even_without_content_mention(self, tmp_path) -> None:
+        """A note's declared `anchors` are the strongest signal — a note
+        anchored to gate.py must match even if its prose content never
+        spells the filename out."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the retry loop here needs a backoff cap", kind="gotcha",
+            anchors=["gate.py"],
+        )
+        notes = store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha")
+        assert len(notes) == 1
+
+    def test_declared_absolute_anchor_is_recalled_via_absolute_query(self, tmp_path) -> None:
+        """remember()'s own docstring allows a declared anchor to be either
+        workspace-relative OR absolute. An absolute anchor's JSON-serialized
+        form is `".../gate.py"` — the character immediately before the
+        basename is "/", not a quote — so a QUOTED SQL LIKE pattern
+        (`%"gate.py"%`) would never match it, silently excluding the note
+        from the candidate pool before the Python-side exact-match filter
+        ever runs. The anchors SQL prefilter must stay unquoted (a true
+        superset), same as the content prefilter. Content deliberately
+        carries no mention of the basename anywhere, so this can only pass
+        via the anchors path, not the content-boundary path (non-vacuity)."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        (tmp_path / "src").mkdir()
+        abs_anchor = str(tmp_path / "src" / "gate.py")
+        store.remember(
+            ws, "the retry loop here needs a backoff cap", kind="gotcha",
+            anchors=[abs_anchor],
+        )
+        # A real hook always sends an absolute file_path; this also causes
+        # _path_trigger_candidates() to derive the workspace-relative form
+        # ("src/gate.py") as a second candidate internally, exercising both
+        # halves of the fix in one realistic call.
+        notes = store.recall_for_path(ws, abs_anchor, kind="gotcha")
+        assert len(notes) == 1
+        assert "gate.py" not in notes[0].content
+
+    def test_declared_anchor_for_different_file_does_not_leak_by_substring(self, tmp_path) -> None:
+        """A note anchored to uv_regate.py must not surface for gate.py just
+        because the anchor string happens to contain "gate.py" as a
+        substring."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the retry loop here needs a backoff cap", kind="gotcha",
+            anchors=["uv_regate.py"],
+        )
+        assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
+
+    def test_boundary_matched_basename_at_string_boundaries_still_matches(self, tmp_path) -> None:
+        """Real path boundaries (string start/end, punctuation, quotes) must
+        still count as a match, not just whitespace."""
+        store = _store(tmp_path)
+        store.remember("/repo", "gate.py: verify_token must check expiry", kind="gotcha")
+        store.remember("/repo", 'the file "gate.py" was touched', kind="gotcha")
+        notes = store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha")
+        assert len(notes) == 2
+
 
 # ---------------------------------------------------------------------------
 # format_notes_for_llm
@@ -2867,6 +2941,65 @@ class TestFireAndFormat:
         # once across the whole turn's combined output, never twice.
         combined = boot_text + edit_text
         assert combined.count("verify_token() must check expiry") == 1
+
+    def test_proxy_and_hook_surfaces_share_one_turn_ledger_note_injects_once(self, tmp_path) -> None:
+        """UPG-PROXY-CROSS-CHANNEL-DEDUP — sibling to the G3 regression above,
+        covering the PROXY channel's gate alongside a hook/trigger-engine
+        surface. Before this fix the two channels kept entirely separate
+        ledgers (different objects AND different key spaces: `TurnInjection
+        Ledger` is note_id-keyed, the proxy's own `LedgerStore` cooldown is
+        anchor_id-keyed with no cross-reference), so the same note could
+        inject via both channels in one turn. Sharing ONE `TurnInjection
+        Ledger` instance across `WorkingContextStore.fire_and_format()`
+        (hook surface) and `agent.proactive.gate.ProactiveGate.select()`
+        (proxy surface, via its new `turn_ledger` parameter) closes it."""
+        from agent.proactive.gate import ProactiveGate
+        from agent.proactive.types import Candidate
+        from agent.trigger_engine import TurnInjectionLedger
+
+        store, ws = _store(tmp_path), str(tmp_path)
+        note_id = store.remember(
+            ws, "auth.py: verify_token() must check expiry before signature",
+            kind="finding",
+            triggers=[{"path": "src/auth.py", "event": "pre-edit"}],
+        )
+        turn_ledger = TurnInjectionLedger()
+
+        # Surface 1: hook/trigger-engine PreToolUse file-anchored delivery —
+        # actually injects and claims note_id in the shared turn ledger.
+        hook_text, hook_ids = store.fire_and_format(
+            ws, event="pre-edit", file_path="src/auth.py",
+            turn_ledger=turn_ledger, spend_turn_budget=True,
+        )
+        assert hook_ids == {note_id}
+        assert "verify_token() must check expiry" in hook_text
+
+        # Surface 2: the proxy channel's gate, SAME turn (same turn_ledger
+        # instance) — a structural candidate for the SAME note_id must be
+        # suppressed, mirroring the hook-vs-hook G3 case above but across
+        # channels this time.
+        gate = ProactiveGate(
+            min_similarity=0.35, max_items_per_event=3, max_chars_per_event=800,
+            cooldown_items=30,
+        )
+        proxy_candidate = Candidate(
+            kind="note_structural", line="note about auth.py",
+            score=1.0, anchor_id=f"note:{note_id}", is_structural=True,
+        )
+        out = gate.select(
+            [proxy_candidate], session_id="proxy-session", turn_ledger=turn_ledger
+        )
+        assert out.is_empty()  # already claimed by surface 1 this turn
+
+        # Non-vacuous: the SAME candidate against a FRESH TurnInjectionLedger
+        # (a fresh turn) DOES get admitted — proving the suppression above
+        # came from the shared ledger, not a floor/structural-match failure.
+        fresh_out = gate.select(
+            [proxy_candidate], session_id="proxy-session-2",
+            turn_ledger=TurnInjectionLedger(),
+        )
+        assert fresh_out.item_count == 1
+        assert fresh_out.anchor_ids == (f"note:{note_id}",)
         assert turn_ledger.remaining_turn_budget() >= 0  # never driven negative
 
         # A later turn (reset, mirroring UserPromptSubmit) restores

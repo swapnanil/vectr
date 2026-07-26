@@ -33,7 +33,9 @@ class Candidate:
     line: str            # rendered, self-describing injected text
     score: float         # 1.0 for exact structural; cosine/hybrid otherwise
     anchor_id: str       # stable dedup id, e.g. "note:12" / "chunk:foo.py:1-9"
-    is_structural: bool  # True => bypasses the semantic similarity floor
+    is_structural: bool  # True => exact structural match (score 1.0); still
+                          # subject to the gate's similarity floor like any
+                          # other candidate — see agent/proactive/gate.py
 
     @property
     def provenance_rank(self) -> int:

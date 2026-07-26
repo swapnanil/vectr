@@ -142,6 +142,57 @@ class TestCmdStart:
 
 
 # ---------------------------------------------------------------------------
+# _do_start: VECTR_BIND_HOST env plumbing (UPG-PROXY-LOOPBACK-BYPASS)
+# ---------------------------------------------------------------------------
+# The daemon subprocess has no other way to learn the host it was actually
+# bound to (the `--host` value only lives in this launcher process's argv) —
+# `_do_start` must forward it via VECTR_BIND_HOST so the in-process
+# unconditional bind gate (agent/proactive/settings.py::proactive_bind_is_loopback)
+# can tell a non-loopback bind apart from the documented default.
+
+class TestDoStartBindHostEnv:
+    def _capture_env(self, ws, wh, **kwargs) -> dict:
+        captured_env: dict = {}
+
+        def _mock_popen(cmd, env, **kw):
+            captured_env.update(env)
+            proc = MagicMock()
+            proc.pid = 99999
+            return proc
+
+        with patch("subprocess.Popen", side_effect=_mock_popen), \
+             patch("main.InstanceRegistry") as MockReg, \
+             patch("main._migrate_legacy_files"), \
+             patch("builtins.open", MagicMock()):
+            MockReg.return_value.register = MagicMock()
+            m._do_start(ws, 8765, wh, **kwargs)
+
+        return captured_env
+
+    def test_explicit_host_is_plumbed_through(self, tmp_path):
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        env = self._capture_env(ws, wh, host="0.0.0.0")
+        assert env.get("VECTR_BIND_HOST") == "0.0.0.0"
+
+    def test_default_host_is_plumbed_as_loopback(self, tmp_path):
+        # No explicit `host=` kwarg -> `_do_start`'s own default (127.0.0.1)
+        # must still be forwarded, never left unset (an unset var falls back
+        # to loopback in-process too, but the daemon should carry its own
+        # actual bind explicitly rather than relying on that fallback).
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        env = self._capture_env(ws, wh)
+        assert env.get("VECTR_BIND_HOST") == "127.0.0.1"
+
+    def test_non_default_loopback_alias_is_plumbed_verbatim(self, tmp_path):
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        env = self._capture_env(ws, wh, host="localhost")
+        assert env.get("VECTR_BIND_HOST") == "localhost"
+
+
+# ---------------------------------------------------------------------------
 # cmd_stop
 # ---------------------------------------------------------------------------
 

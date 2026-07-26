@@ -18,6 +18,11 @@ def _note(note_id, content, kind="finding", title=""):
 
 
 class _Source:
+    """Deliberately does NOT implement note_states() -- the pre-UPG-PROXY-
+    REVOKED-LEAK MatchSource shape. Every test using this fake exercises
+    the backward-compat degrade-to-{} path (a missing note_states() call
+    means every note is treated as active)."""
+
     def __init__(self, structural=None, semantic=None, code=None):
         self._structural = structural or []
         self._semantic = semantic or []
@@ -37,6 +42,19 @@ class _Source:
         return list(self._code)
 
 
+class _StatefulSource(_Source):
+    """Same as _Source but implements note_states() -- used by revoked/
+    superseded lifecycle tests."""
+
+    def __init__(self, structural=None, semantic=None, code=None, states=None):
+        super().__init__(structural=structural, semantic=semantic, code=code)
+        self._states = states or {}
+
+    def note_states(self, notes):
+        self.calls.append(("note_states", tuple(n.note_id for n in notes)))
+        return dict(self._states)
+
+
 def _matcher(source, **kw):
     defaults = dict(min_similarity=0.35, max_chars_per_event=800,
                     structural_note=True, semantic_note=True, code_search=True)
@@ -45,6 +63,11 @@ def _matcher(source, **kw):
 
 
 def test_structural_note_scores_one_and_anchors():
+    """UPG-PROXY-SUBSTRING-ANCHOR/2b: this note has no DECLARED anchor --
+    it only matched because window file_paths' basename ("resolver.py")
+    appears in its content. That is a "mentions" claim, not "anchored
+    to" -- see test_structural_note_declared_anchor_says_anchored_to for
+    the genuine declared-anchor case."""
     n = _note(1, "gotcha: resolver.py lock drops on scope exit")
     src = _Source(structural=[n])
     w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
@@ -52,8 +75,22 @@ def test_structural_note_scores_one_and_anchors():
     assert len(cands) == 1
     c = cands[0]
     assert c.kind == "note_structural" and c.score == 1.0 and c.is_structural
-    assert "anchored to resolver.py" in c.line
+    assert "mentions resolver.py" in c.line
     assert c.anchor_id == "note:1"
+
+
+def test_structural_note_declared_anchor_says_anchored_to():
+    """A note whose declared `anchors` column actually contains the
+    window file gets the stronger "anchored to X" wording -- even when
+    its prose content never spells the filename out."""
+    n = _note(12, "the backoff cap here needs tuning")
+    n.anchors = [["resolver.py", None]]
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 1
+    assert "anchored to resolver.py" in cands[0].line
+    assert "mentions" not in cands[0].line
 
 
 def test_semantic_note_respects_floor():
@@ -113,3 +150,179 @@ def test_source_error_is_swallowed():
     w = ProactiveWindow(text="lock", file_paths=["/x/a.py"])
     cands = _matcher(_Boom()).match(w)
     assert cands == []  # a failing source degrades to no candidates, never raises
+
+
+def test_source_without_note_states_degrades_gracefully_to_active():
+    """A MatchSource that predates note_states() (an older fake or backend)
+    must not break -- a missing note_states() call is treated as every
+    note being active, matching note_event_states()'s own contract for a
+    note_id absent from the fold."""
+    n = _note(10, "some finding")
+    src = _Source(structural=[n])  # _Source deliberately has no note_states
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 1
+    assert "REVOKED" not in cands[0].line
+
+
+def test_note_states_called_once_for_the_union_of_matched_notes():
+    """note_states() must be called exactly once per match(), for the
+    UNION of every note either the structural or semantic matcher found
+    -- never once per note, never once per matcher."""
+    shared = _note(20, "shared note matched by both matchers")
+    structural_only = _note(21, "structural only")
+    src = _StatefulSource(
+        structural=[shared, structural_only],
+        semantic=[(shared, 0.9)],
+    )
+    w = ProactiveWindow(text="shared note", file_paths=["/abs/resolver.py"], symbols=[])
+    _matcher(src).match(w)
+    note_states_calls = [c for c in src.calls if c[0] == "note_states"]
+    assert len(note_states_calls) == 1
+    assert set(note_states_calls[0][1]) == {20, 21}
+
+
+class TestRevokedNoteDeterrentRendering:
+    """UPG-PROXY-REVOKED-LEAK: a revoked note must never inject its raw
+    content as active fact -- it still injects (catching an agent about
+    to re-assert a wrong belief is the highest-value injection), just
+    rendered through the anti-memory deterrent instead."""
+
+    def test_structural_revoked_note_renders_deterrent_first(self):
+        n = _note(30, "the retry timeout is 30 seconds", kind="gotcha")
+        w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+
+        # Non-vacuity: the SAME note, while still active, surfaces its raw
+        # content verbatim -- proving the match itself is real, not just
+        # an artifact of the revoked-state rendering path.
+        active_cands = _matcher(
+            _Source(structural=[n]), semantic_note=False, code_search=False
+        ).match(w)
+        assert len(active_cands) == 1
+        assert "the retry timeout is 30 seconds" in active_cands[0].line
+
+        states = {30: {"state": "revoked", "reason": "wrong assumption",
+                       "actor": "agent", "ts": time.time()}}
+        revoked_cands = _matcher(
+            _StatefulSource(structural=[n], states=states),
+            semantic_note=False, code_search=False,
+        ).match(w)
+        assert len(revoked_cands) == 1
+        line = revoked_cands[0].line
+        assert "REVOKED" in line
+        assert "Do not re-derive" in line
+        # The deterrent clause is placed FIRST so _cap() truncation can
+        # never remove it while leaving the raw claim still legible.
+        assert line.index("Do not re-derive") < line.index("Previously believed")
+
+    def test_semantic_revoked_note_renders_deterrent_first(self):
+        n = _note(31, "cache eviction runs every 5 minutes", kind="gotcha")
+        w = ProactiveWindow(text="how does cache eviction work")
+
+        active_cands = _matcher(
+            _Source(semantic=[(n, 0.9)]), structural_note=False, code_search=False
+        ).match(w)
+        assert len(active_cands) == 1
+        assert "cache eviction runs every 5 minutes" in active_cands[0].line
+
+        states = {31: {"state": "revoked", "reason": "outdated",
+                       "actor": "agent", "ts": time.time()}}
+        revoked_cands = _matcher(
+            _StatefulSource(semantic=[(n, 0.9)], states=states),
+            structural_note=False, code_search=False,
+        ).match(w)
+        assert len(revoked_cands) == 1
+        line = revoked_cands[0].line
+        assert "REVOKED" in line
+        assert line.index("Do not re-derive") < line.index("Previously believed")
+
+    def test_truncation_preserves_deterrent_over_raw_quote(self):
+        """A tight per-event char budget must cut the tail-positioned raw
+        quoted claim before it ever cuts the front-positioned deterrent
+        warning."""
+        n = _note(32, "a very specific raw claim about default timeout values", kind="gotcha")
+        w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+        states = {32: {"state": "revoked", "reason": "wrong",
+                       "actor": "agent", "ts": time.time()}}
+
+        # Uncapped line, to locate exactly where the deterrent clause ends.
+        uncapped = _matcher(
+            _StatefulSource(structural=[n], states=states),
+            semantic_note=False, code_search=False, max_chars_per_event=10_000,
+        ).match(w)
+        full_line = uncapped[0].line
+        deterrent_end = full_line.index("without verification.") + len("without verification.")
+        assert full_line.index("Do not re-derive") < full_line.index(
+            '"a very specific raw claim'
+        )
+
+        # A budget that fits the deterrent clause but not the raw quote.
+        tight = _matcher(
+            _StatefulSource(structural=[n], states=states),
+            semantic_note=False, code_search=False, max_chars_per_event=deterrent_end + 5,
+        ).match(w)
+        tight_line = tight[0].line
+        assert "Do not re-derive this from other sources without verification." in tight_line
+        assert "a very specific raw claim about default timeout values" not in tight_line
+
+    def test_superseded_note_reaching_renderer_is_skipped(self):
+        """Superseded notes are normally excluded via valid_until before
+        ever reaching the matcher; this is a defensive check that if one
+        still reaches here, it is skipped rather than rendered as an
+        active fact."""
+        n = _note(33, "old cache size was 128mb")
+        w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+        states = {33: {"state": "superseded", "reason": None,
+                       "actor": "agent", "ts": time.time()}}
+        cands = _matcher(
+            _StatefulSource(structural=[n], states=states),
+            semantic_note=False, code_search=False,
+        ).match(w)
+        assert cands == []
+
+
+# -- UPG-PROXY-REVOKED-LEAK: unknown lifecycle state must fail CLOSED -------
+
+class _FailingStateSource(_Source):
+    """Implements note_states() but the call FAILS -- e.g. the note_events
+    table is unreadable mid-migration. Distinct from _Source, which does
+    not implement the method at all."""
+
+    def note_states(self, notes):
+        raise RuntimeError("note_events unreadable")
+
+
+def test_note_states_failure_drops_note_candidates_instead_of_rendering_raw():
+    """A note_states() that RAISES leaves lifecycle state unknown. Unknown
+    must never be rendered as active: a revoked note would otherwise have
+    its raw content injected as apparent fact, which is exactly the defect
+    UPG-PROXY-REVOKED-LEAK fixes. Fail closed -- drop the note candidates.
+
+    Non-vacuity: the identical source shape whose note_states() SUCCEEDS
+    (returning no state, i.e. all-active) does render the note, proving the
+    match itself is real and the drop is caused by the failure alone."""
+    n = _note(1, "resolver.py holds the workspace lock")
+    window = ProactiveWindow(text="workspace lock", file_paths=["/x/resolver.py"])
+
+    failing = _matcher(_FailingStateSource(structural=[n], semantic=[(n, 0.9)]))
+    assert [c for c in failing.match(window) if c.kind.startswith("note_")] == []
+
+    working = _matcher(_StatefulSource(structural=[n], semantic=[(n, 0.9)], states={}))
+    assert [c for c in working.match(window) if c.kind.startswith("note_")] != []
+
+
+def test_note_states_failure_still_yields_code_candidates():
+    """Failing closed drops NOTE candidates only. M4 code-search hits carry
+    no note lifecycle, so they must survive -- the caller degrades to code
+    context rather than losing the whole injection."""
+    n = _note(1, "resolver.py holds the workspace lock")
+    hit = SearchResult(
+        file_path="/x/resolver.py", lines="1-4", symbol_name="lock",
+        language="python", score=0.9, content="def lock():\n    ...",
+    )
+    src = _FailingStateSource(structural=[n], semantic=[(n, 0.9)], code=[hit])
+    kinds = {c.kind for c in _matcher(src).match(
+        ProactiveWindow(text="workspace lock", file_paths=["/x/resolver.py"])
+    )}
+    assert "code_semantic" in kinds
+    assert not any(k.startswith("note_") for k in kinds)

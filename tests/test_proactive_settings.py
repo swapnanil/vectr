@@ -8,6 +8,7 @@ from agent.proactive.settings import (
     ProactiveSettings,
     derive_provider_timeout_s,
     enforce_proactive_bind,
+    proactive_bind_is_loopback,
     proactive_enabled,
 )
 
@@ -59,6 +60,80 @@ def test_enforce_refuses_non_loopback_when_enabled():
     # Loopback is fine; config-off is fine even on non-loopback (nothing to refuse).
     enforce_proactive_bind("127.0.0.1", True)
     enforce_proactive_bind("0.0.0.0", False)
+
+
+# -- unconditional bind check (UPG-PROXY-LOOPBACK-BYPASS) -------------------
+
+
+def test_bind_is_loopback_reads_the_plumbed_env_var(monkeypatch):
+    monkeypatch.setenv("VECTR_BIND_HOST", "127.0.0.1")
+    assert proactive_bind_is_loopback() is True
+    monkeypatch.setenv("VECTR_BIND_HOST", "localhost")
+    assert proactive_bind_is_loopback() is True
+    monkeypatch.setenv("VECTR_BIND_HOST", "0.0.0.0")
+    assert proactive_bind_is_loopback() is False
+    monkeypatch.setenv("VECTR_BIND_HOST", "10.0.0.5")
+    assert proactive_bind_is_loopback() is False
+
+
+def test_bind_is_loopback_defaults_to_loopback_when_unset(monkeypatch):
+    # Absent VECTR_BIND_HOST (in-process/test usage that never went through
+    # main.py's `_do_start` subprocess spawn) must fall back to the
+    # documented default bind, 127.0.0.1 — never be mistaken for
+    # non-loopback and spuriously refuse in-process callers.
+    monkeypatch.delenv("VECTR_BIND_HOST", raising=False)
+    assert proactive_bind_is_loopback() is True
+
+
+def test_bind_is_loopback_is_unconditional_no_config_argument():
+    # Unlike proactive_enabled/enforce_proactive_bind, this check takes no
+    # config_enabled argument at all — it cannot be skipped by a config
+    # toggle, which is exactly the point (UPG-PROXY-LOOPBACK-BYPASS).
+    import inspect
+
+    sig = inspect.signature(proactive_bind_is_loopback)
+    assert list(sig.parameters) == []
+
+
+# -- argv --host fallback (a daemon started outside main.py's _do_start) ----
+
+
+def test_bind_falls_back_to_argv_host_space_separated(monkeypatch):
+    # A daemon launched directly (e.g. `uvicorn api:app --host 0.0.0.0`,
+    # bypassing main.py's `_do_start`) has no VECTR_BIND_HOST but IS invoked
+    # with the same --host argument uvicorn itself reads — this must not be
+    # silently treated as loopback.
+    monkeypatch.delenv("VECTR_BIND_HOST", raising=False)
+    monkeypatch.setattr("sys.argv", ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8765"])
+    assert proactive_bind_is_loopback() is False
+
+
+def test_bind_falls_back_to_argv_host_equals_form(monkeypatch):
+    monkeypatch.delenv("VECTR_BIND_HOST", raising=False)
+    monkeypatch.setattr("sys.argv", ["uvicorn", "api:app", "--host=0.0.0.0"])
+    assert proactive_bind_is_loopback() is False
+
+
+def test_bind_argv_host_loopback_value_still_loopback(monkeypatch):
+    monkeypatch.delenv("VECTR_BIND_HOST", raising=False)
+    monkeypatch.setattr("sys.argv", ["uvicorn", "api:app", "--host", "127.0.0.1"])
+    assert proactive_bind_is_loopback() is True
+
+
+def test_bind_env_var_takes_precedence_over_argv(monkeypatch):
+    # Resolution order: VECTR_BIND_HOST, then argv --host, then 127.0.0.1.
+    monkeypatch.setenv("VECTR_BIND_HOST", "127.0.0.1")
+    monkeypatch.setattr("sys.argv", ["uvicorn", "api:app", "--host", "0.0.0.0"])
+    assert proactive_bind_is_loopback() is True
+
+
+def test_bind_absent_env_and_absent_argv_defaults_to_loopback(monkeypatch):
+    # Neither VECTR_BIND_HOST nor a --host in argv (ordinary in-process/test
+    # usage, e.g. this very pytest invocation) — must resolve to loopback,
+    # not be mistaken for non-loopback.
+    monkeypatch.delenv("VECTR_BIND_HOST", raising=False)
+    monkeypatch.setattr("sys.argv", ["pytest", "tests/test_proactive_settings.py"])
+    assert proactive_bind_is_loopback() is True
 
 
 # -- provider-timeout / outer-budget ordering invariant (UPG-PROXY-BUDGET-40MS) --

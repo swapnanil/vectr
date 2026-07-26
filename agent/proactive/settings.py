@@ -5,14 +5,26 @@ Layers deployment/runtime env vars over the bundled `config.yaml` defaults
 product-behaviour defaults live in yaml, runtime toggles in env. Nothing here is
 persisted.
 
-Also owns the localhost-only enforcement (design §10): proactive context — proxy
-included — is refused whenever the daemon/proxy is bound beyond loopback (the
-team / shared-instance signature), because it reads the conversation, the most
-sensitive data on the machine.
+Also owns the localhost-only enforcement (design §10). There are two
+independent gates here, and only one of them is unconditional:
+
+- `enforce_proactive_bind`/`proactive_enabled` are CONFIG-GATED: they only
+  refuse a non-loopback bind when proactive is explicitly enabled
+  (`config_enabled=True`). A non-loopback bind with proactive left off is a
+  legitimate, supported team/shared-instance posture and must be allowed to
+  start.
+- `proactive_bind_is_loopback` is UNCONDITIONAL: the actual runtime gate
+  inside `proactive_context` consults it before any config/channel check, so
+  a non-loopback bind refuses proactive injection for every channel — the
+  proxy channel included — regardless of the master switch or a client-
+  supplied `channel` label. Proactive context reads the conversation, the
+  most sensitive data on the machine, so this refusal cannot be a config
+  toggle a caller can route around.
 """
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 
 from agent import config as _c
@@ -200,6 +212,68 @@ def _is_loopback(host: str) -> bool:
     from main import _is_loopback_host
 
     return _is_loopback_host(host)
+
+
+def _bind_host_from_argv() -> str | None:
+    """Deterministically parse a `--host <value>` / `--host=<value>` pair out
+    of the CURRENT PROCESS's own `sys.argv`, or None if absent.
+
+    Plain positional argument parsing, not a query-content heuristic — this
+    reads this process's own launch invocation, never a query or a config
+    value. Handles both the space-separated and `=`-joined uvicorn/argparse
+    forms. In-process/test usage (pytest, the MCP server) has no `--host` in
+    its own argv, so this always resolves to None there — no test churn."""
+    argv = sys.argv
+    for i, arg in enumerate(argv):
+        if arg == "--host" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--host="):
+            return arg[len("--host="):]
+    return None
+
+
+def _current_bind_host() -> str:
+    """The daemon's actual bind host for THIS process.
+
+    Resolution order:
+    1. `VECTR_BIND_HOST` — `main.py`'s `_do_start` sets this on the uvicorn
+       subprocess env to the exact `--host` it launched with
+       (UPG-PROXY-LOOPBACK-BYPASS).
+    2. This process's own `sys.argv` `--host` — covers a daemon started
+       outside `_do_start` (e.g. `uvicorn api:app --host 0.0.0.0` run
+       directly), which has no VECTR_BIND_HOST but IS launched with the same
+       `--host` argument uvicorn itself reads; without this fallback such a
+       daemon would be silently treated as loopback and would still serve
+       proactive injection over a non-loopback bind.
+    3. `127.0.0.1` — `_do_start`'s own documented default bind. Only reached
+       when neither of the above is present (in-process/test usage, or the
+       MCP server sharing the daemon's process) — never treat a fully
+       unspecified bind as non-loopback, or every in-process caller would be
+       spuriously refused."""
+    env_host = os.environ.get("VECTR_BIND_HOST", "").strip()
+    if env_host:
+        return env_host
+    argv_host = _bind_host_from_argv()
+    if argv_host:
+        return argv_host
+    return "127.0.0.1"
+
+
+def proactive_bind_is_loopback() -> bool:
+    """Unconditional, channel-independent bind check for the proactive
+    injection gate (UPG-PROXY-LOOPBACK-BYPASS).
+
+    Unlike `proactive_enabled`/`enforce_proactive_bind` below, this does NOT
+    take a `config_enabled` argument and must never be skipped by one: it is
+    the runtime refusal `proactive_context` consults BEFORE any config or
+    `channel` branch, so a non-loopback bind refuses proactive injection —
+    including the proxy channel's own launch-is-consent exemption from the
+    master switch — for every caller. A non-loopback bind with proactive
+    left off entirely is still a legitimate startup (see
+    `enforce_proactive_bind`'s docstring); this function only governs
+    whether proactive context is ever served, not whether the daemon may
+    start."""
+    return _is_loopback(_current_bind_host())
 
 
 def proactive_enabled(bind_host: str, config_enabled: bool, api_key: str | None = None) -> bool:
