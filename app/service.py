@@ -1010,15 +1010,18 @@ class VectrService:
 
         `proactive_context` (the proxy channel) uses this instead of
         `_turn_ledger_for` above. The proxy channel's session_id is a
-        sha256 of the first user message (`agent/proactive/proxy.py`'s
-        `_session_id`) and is, today, disjoint from the editor-supplied
-        session id the hook/trigger-engine surfaces use — see
-        UPG-PROXY-COOLDOWN-SESSION-IDENTITY (P2). Under heavy
-        multi-subagent use, every new first-user-message mints a fresh
-        proxy session id; if this allocated a ledger on miss, that churn
-        would consume slots in the `EVICTION_MAX_TRACKED_SESSIONS`-bounded
-        `_turn_ledgers` LRU and could evict a live editor session's real
-        `TurnInjectionLedger` mid-turn — the exact double-dip
+        per-process instance id minted once by `VectrProxy.__init__`
+        (`agent/proactive/proxy.py`'s `self._instance_id`, prefixed
+        `proxy-` — see UPG-PROXY-COOLDOWN-SESSION-IDENTITY) and is, by
+        construction, disjoint from the editor-supplied session id the
+        hook/trigger-engine surfaces use: the two namespaces are never
+        meant to collide, so this stays a guaranteed lookup miss on the
+        proxy path. If this allocated a ledger on miss instead, one entry
+        per proxy PROCESS (not per conversation, so far less churn than the
+        old per-first-message identity, but still a distinct process-scoped
+        id) would consume a slot in the `EVICTION_MAX_TRACKED_SESSIONS`-
+        bounded `_turn_ledgers` LRU and could evict a live editor session's
+        real `TurnInjectionLedger` mid-turn — the exact double-dip
         `TurnInjectionLedger` exists to prevent (see the G3 regression
         test). A lookup-only accessor costs nothing when the namespaces
         don't collide, and starts deduping for free the moment session
@@ -2598,17 +2601,18 @@ class VectrService:
         #
         # LOOKUP-ONLY, never allocate: use `_existing_turn_ledger`, not
         # `_turn_ledger_for`. KNOWN LIMITATION (out of scope here, filed as
-        # UPG-PROXY-COOLDOWN-SESSION-IDENTITY, P2): the proxy channel
-        # derives `session_id` from a sha256 of the first user message
-        # (agent/proactive/proxy.py's `_session_id`), disjoint today from
-        # the editor-supplied session id hook/trigger-engine surfaces use —
-        # so this namespace mismatch means a proxy call would otherwise
-        # allocate a ledger no hook surface will ever consult, for zero
-        # dedup benefit, while consuming eviction-LRU slots and risking
-        # evicting a live editor session's real ledger under heavy
-        # multi-subagent session churn. Looking up only: zero cost when the
-        # namespaces don't collide, and starts deduping for free the moment
-        # session identity is unified, no further code change needed here.
+        # UPG-PROXY-COOLDOWN-SESSION-IDENTITY): the proxy channel's
+        # `session_id` is a per-proxy-PROCESS instance id
+        # (agent/proactive/proxy.py's `VectrProxy._instance_id`, prefixed
+        # `proxy-`), by construction disjoint from the editor-supplied
+        # session id hook/trigger-engine surfaces use — so this namespace
+        # mismatch means a proxy call would otherwise allocate a ledger no
+        # hook surface will ever consult, for zero dedup benefit, while
+        # consuming eviction-LRU slots and risking evicting a live editor
+        # session's real ledger under heavy multi-subagent session churn.
+        # Looking up only: zero cost when the namespaces don't collide, and
+        # starts deduping for free the moment session identity is unified,
+        # no further code change needed here.
         result = self._proactive_gate(settings).select(
             candidates, session_id=session_id, structural_only=structural_only,
             turn_ledger=self._existing_turn_ledger(session_id),
