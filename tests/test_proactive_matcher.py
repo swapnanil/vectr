@@ -4,8 +4,18 @@ from __future__ import annotations
 
 import time
 
+from agent.config import (
+    PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+    PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
+    PROACTIVE_STRUCTURAL_SCORE_MENTION,
+)
 from agent.proactive.matcher import ProactiveMatcher
-from agent.proactive.types import ProactiveWindow
+from agent.proactive.types import (
+    STRUCTURAL_TIER_DECLARED_ANCHOR,
+    STRUCTURAL_TIER_GOTCHA_MENTION,
+    STRUCTURAL_TIER_MENTION,
+    ProactiveWindow,
+)
 from agent.searcher import SearchResult
 from agent.working_context_store._types import WorkingNote
 
@@ -56,8 +66,13 @@ class _StatefulSource(_Source):
 
 
 def _matcher(source, **kw):
-    defaults = dict(min_similarity=0.35, max_chars_per_event=800,
-                    structural_note=True, semantic_note=True, code_search=True)
+    defaults = dict(
+        min_similarity=0.35, max_chars_per_event=800,
+        structural_note=True, semantic_note=True, code_search=True,
+        structural_score_declared_anchor=PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+        structural_score_gotcha_mention=PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
+        structural_score_mention=PROACTIVE_STRUCTURAL_SCORE_MENTION,
+    )
     defaults.update(kw)
     return ProactiveMatcher(source, **defaults)
 
@@ -67,14 +82,22 @@ def test_structural_note_scores_one_and_anchors():
     it only matched because window file_paths' basename ("resolver.py")
     appears in its content. That is a "mentions" claim, not "anchored
     to" -- see test_structural_note_declared_anchor_says_anchored_to for
-    the genuine declared-anchor case."""
+    the genuine declared-anchor case.
+
+    UPG-PROXY-INJECT-PRECISION lever 2: a plain content-mention match on a
+    non-gotcha kind ("finding" here) is the weakest evidence tier (Tier C
+    / STRUCTURAL_TIER_MENTION) and scores PROACTIVE_STRUCTURAL_SCORE_MENTION
+    -- no longer the flat 1.0 every structural match used to get regardless
+    of how it was found."""
     n = _note(1, "gotcha: resolver.py lock drops on scope exit")
     src = _Source(structural=[n])
     w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
     cands = _matcher(src, semantic_note=False, code_search=False).match(w)
     assert len(cands) == 1
     c = cands[0]
-    assert c.kind == "note_structural" and c.score == 1.0 and c.is_structural
+    assert c.kind == "note_structural" and c.is_structural
+    assert c.score == PROACTIVE_STRUCTURAL_SCORE_MENTION
+    assert c.structural_tier == STRUCTURAL_TIER_MENTION
     assert "mentions resolver.py" in c.line
     assert c.anchor_id == "note:1"
 
@@ -82,15 +105,41 @@ def test_structural_note_scores_one_and_anchors():
 def test_structural_note_declared_anchor_says_anchored_to():
     """A note whose declared `anchors` column actually contains the
     window file gets the stronger "anchored to X" wording -- even when
-    its prose content never spells the filename out."""
+    its prose content never spells the filename out. UPG-PROXY-INJECT-
+    PRECISION lever 2: a declared anchor is the strongest evidence tier
+    (Tier A) and scores PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR."""
     n = _note(12, "the backoff cap here needs tuning")
     n.anchors = [["resolver.py", None]]
     src = _Source(structural=[n])
     w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
     cands = _matcher(src, semantic_note=False, code_search=False).match(w)
     assert len(cands) == 1
-    assert "anchored to resolver.py" in cands[0].line
-    assert "mentions" not in cands[0].line
+    c = cands[0]
+    assert "anchored to resolver.py" in c.line
+    assert "mentions" not in c.line
+    assert c.score == PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR
+    assert c.structural_tier == STRUCTURAL_TIER_DECLARED_ANCHOR
+
+
+def test_structural_note_gotcha_mention_is_middle_tier():
+    """UPG-PROXY-INJECT-PRECISION lever 2: a content-mention match (no
+    declared anchor) on a kind="gotcha" note is Tier B -- stronger than a
+    plain mention on any other kind, weaker than a declared anchor,
+    scoring strictly between PROACTIVE_STRUCTURAL_SCORE_MENTION and
+    PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR."""
+    n = _note(7, "resolver.py: the retry timeout is 30 seconds", kind="gotcha")
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c.score == PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION
+    assert c.structural_tier == STRUCTURAL_TIER_GOTCHA_MENTION
+    assert (
+        PROACTIVE_STRUCTURAL_SCORE_MENTION
+        < c.score
+        < PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR
+    )
 
 
 def test_semantic_note_respects_floor():
@@ -326,3 +375,87 @@ def test_note_states_failure_still_yields_code_candidates():
     )}
     assert "code_semantic" in kinds
     assert not any(k.startswith("note_") for k in kinds)
+
+
+# -- UPG-PROXY-AUDIT-DURABLE: Candidate.state carries the folded lifecycle --
+# state through to the gate/audit line (previously computed here and thrown
+# away after rendering).
+
+class TestCandidateStateCarriage:
+    def test_note_with_no_state_entry_is_active(self):
+        """note_event_states()'s documented contract: a note_id absent from
+        the fold is active. The Candidate.state carried for it must say so
+        explicitly, not just render raw content and leave state implicit."""
+        n = _note(40, "some finding")
+        src = _StatefulSource(structural=[n], states={})
+        w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+        cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+        assert len(cands) == 1
+        assert cands[0].state == "active"
+
+    def test_source_without_note_states_defaults_candidate_state_to_active(self):
+        """Same default for the backward-compat path: a MatchSource that
+        predates note_states() entirely still carries an honest "active"
+        state, never a blank or missing value."""
+        n = _note(41, "some finding")
+        src = _Source(structural=[n])  # no note_states() at all
+        w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+        cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+        assert len(cands) == 1
+        assert cands[0].state == "active"
+
+    def test_revoked_note_candidate_carries_revoked_state(self):
+        n = _note(42, "the retry timeout is 30 seconds", kind="gotcha")
+        states = {42: {"state": "revoked", "reason": "wrong assumption",
+                       "actor": "agent", "ts": time.time()}}
+        src = _StatefulSource(structural=[n], states=states)
+        w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+        cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+        assert len(cands) == 1
+        assert cands[0].state == "revoked"
+        assert "REVOKED" in cands[0].line  # rendering and state agree
+
+    def test_semantic_note_candidate_carries_state_too(self):
+        n = _note(43, "cache eviction runs every 5 minutes", kind="gotcha")
+        states = {43: {"state": "revoked", "reason": "outdated",
+                       "actor": "agent", "ts": time.time()}}
+        src = _StatefulSource(semantic=[(n, 0.9)], states=states)
+        w = ProactiveWindow(text="how does cache eviction work")
+        cands = _matcher(src, structural_note=False, code_search=False).match(w)
+        assert len(cands) == 1
+        assert cands[0].state == "revoked"
+
+    def test_code_search_candidate_state_is_not_applicable_not_active(self):
+        """A code-search hit has no note lifecycle. Labeling it "active"
+        would dishonestly imply lifecycle tracking that does not exist for
+        it -- it must carry the distinct, explicit not-applicable value."""
+        from agent.proactive.types import CANDIDATE_STATE_NOT_APPLICABLE
+
+        r = SearchResult(file_path="resolver.py", lines="10-20", symbol_name="lock",
+                         language="python", score=0.72, content="def lock():\n    ...")
+        src = _Source(code=[r])
+        w = ProactiveWindow(text="lock acquisition")
+        cands = _matcher(src, structural_note=False, semantic_note=False).match(w)
+        assert len(cands) == 1
+        assert cands[0].state == CANDIDATE_STATE_NOT_APPLICABLE
+        assert cands[0].state != "active"
+
+    def test_fail_closed_drop_leaves_surviving_code_candidate_state_intact(self):
+        """When note_states() raises, note candidates are dropped entirely
+        (see test_note_states_failure_still_yields_code_candidates); the
+        surviving code candidate's state must still be the honest
+        not-applicable value, unaffected by the note-lifecycle failure."""
+        from agent.proactive.types import CANDIDATE_STATE_NOT_APPLICABLE
+
+        n = _note(1, "resolver.py holds the workspace lock")
+        hit = SearchResult(
+            file_path="/x/resolver.py", lines="1-4", symbol_name="lock",
+            language="python", score=0.9, content="def lock():\n    ...",
+        )
+        src = _FailingStateSource(structural=[n], semantic=[(n, 0.9)], code=[hit])
+        cands = _matcher(src).match(
+            ProactiveWindow(text="workspace lock", file_paths=["/x/resolver.py"])
+        )
+        code_cands = [c for c in cands if c.kind == "code_semantic"]
+        assert len(code_cands) == 1
+        assert code_cands[0].state == CANDIDATE_STATE_NOT_APPLICABLE

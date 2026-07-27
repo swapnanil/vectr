@@ -2437,6 +2437,7 @@ class VectrService:
             max_items_per_event=settings.max_items_per_event,
             max_chars_per_event=settings.max_chars_per_event,
             cooldown_items=settings.cooldown_items,
+            max_weak_structural_items=settings.max_weak_structural_items,
             ledger_store=self._proactive_ledger,
         )
 
@@ -2499,13 +2500,31 @@ class VectrService:
 
         class _ServiceMatchSource:
             def structural_notes(self, paths):
+                # UPG-PROXY-INJECT-PRECISION lever 1 + 1b: the structural
+                # channel only ever admits notes whose `kind` is on the
+                # declared eligibility allowlist (a static NOTE PROPERTY,
+                # never a read of query/window content) — `task`/`directive`
+                # notes are excluded by default since they describe
+                # in-progress work or standing rules, not durable facts about
+                # this file. `recall_for_path` itself is untouched; this is a
+                # filter-after-return. Because the filter can only shrink the
+                # pool, the requested pool is over-fetched by a configured
+                # multiplier (capped by an absolute ceiling) so the filter
+                # cannot starve the channel down to fewer than
+                # `max_items_per_event` eligible notes when the path has a
+                # healthy mix of kinds.
+                pool_size = min(
+                    settings.max_items_per_event * settings.structural_overfetch_multiplier,
+                    settings.structural_overfetch_ceiling,
+                )
                 seen: dict[int, object] = {}
                 for p in paths:
                     try:
                         for note in service._context_store.recall_for_path(
-                            service._workspace_root, p, limit=settings.max_items_per_event * 2
+                            service._workspace_root, p, limit=pool_size
                         ):
-                            seen.setdefault(note.note_id, note)
+                            if note.kind in settings.structural_kinds:
+                                seen.setdefault(note.note_id, note)
                     except Exception:
                         continue
                 return list(seen.values())
@@ -2550,6 +2569,25 @@ class VectrService:
             semantic_note=settings.matcher_semantic_note,
             code_search=settings.matcher_code_search,
             note_limit=max(settings.max_items_per_event * 2, settings.max_items_per_event),
+            # UPG-PROXY-INJECT-ROLE-PROVENANCE: directive notes are excluded
+            # CHANNEL-SCOPED, not globally — only the "proxy" channel appends
+            # injected context into the newest USER-authored message on the
+            # wire (agent/proactive/request_window.py's append_context_block,
+            # the only production caller of which is agent/proactive/proxy.py,
+            # which always passes channel="proxy"). A hypothetical future
+            # channel that injects somewhere other than a user turn (e.g. a
+            # session-start system message, matching how the hook/trigger-
+            # engine surface already delivers directives correctly via a
+            # wholly separate path — WorkingContextStore.fire_and_format(),
+            # never this matcher/gate at all) should keep seeing directives.
+            # Same precedent as `channel != "proxy"` at this method's master-
+            # switch check above.
+            exclude_directive_notes=(
+                settings.proxy_exclude_directive_notes and channel == "proxy"
+            ),
+            structural_score_declared_anchor=settings.structural_score_declared_anchor,
+            structural_score_gotcha_mention=settings.structural_score_gotcha_mention,
+            structural_score_mention=settings.structural_score_mention,
         )
         candidates = matcher.match(window)
         # UPG-PROXY-CROSS-CHANNEL-DEDUP: consult the SAME per-session
@@ -2589,12 +2627,20 @@ class VectrService:
             self._proactive_injection_counts[channel] = (
                 self._proactive_injection_counts.get(channel, 0) + 1
             )
-        # Metadata-only audit (design §9): ids + scores + counts, never the
-        # conversation text or note bodies.
+        # Metadata-only audit (design §9): ids + scores + counts + size + per-
+        # item lifecycle state, never the conversation text or note bodies.
+        # `chars` is the exact length of the injected `context` string (what
+        # actually enters the prompt) so budget adherence
+        # (`max_chars_per_event`) is observable from the durable log without
+        # reconstruction. `states` is positionally aligned with `anchors` —
+        # joining them tells an operator which selected items were injected
+        # as raw assertions ("active") vs. deterrents ("revoked"), which
+        # `items` alone cannot.
         from agent.working_context_store import audit as _audit
         _audit(
             "PROACTIVE_INJECT", workspace=self._workspace_root, channel=channel,
             items=result.item_count, anchors=",".join(result.anchor_ids),
+            chars=len(result.context), states=",".join(result.states),
         )
 
     def get_proactive_injection_counts(self) -> dict:

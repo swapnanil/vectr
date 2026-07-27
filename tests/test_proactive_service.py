@@ -223,6 +223,117 @@ def test_proactive_revoked_note_renders_deterrent_not_raw_content(tmp_path, monk
     assert "Do not re-derive" in revoked["context"]
 
 
+# -- structural-channel precision (UPG-PROXY-INJECT-PRECISION) --------------
+
+def test_proactive_task_kind_note_excluded_from_structural_channel(tmp_path, monkeypatch):
+    """Lever 1: `_ServiceMatchSource.structural_notes()` filters on
+    `note.kind` (a static, config-declared allowlist -- never query
+    content). A kind="task" note anchored to the exact window file is
+    excluded end to end, while a kind="gotcha" note anchored to the same
+    file still injects -- proving the filter is real, not vacuous."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    task_nid = svc.remember(
+        "still investigating the resolver.py retry path", kind="task",
+        anchors=["resolver.py"],
+    )
+    gotcha_nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit", kind="gotcha",
+        anchors=["resolver.py"],
+    )
+    out = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="s1",
+    )
+    assert f"note:{gotcha_nid}" in out["anchor_ids"]
+    assert f"note:{task_nid}" not in out["anchor_ids"]
+
+
+def test_proactive_kind_filtered_note_never_claimed_in_turn_ledger(tmp_path, monkeypatch):
+    """Ledger rule pin, end to end through the real service +
+    TurnInjectionLedger (UPG-PROXY-INJECT-PRECISION ledger rule): a note
+    excluded by lever 1's kind filter never becomes a `Candidate`, so it is
+    never eligible to be claimed -- confirmed here against the actual
+    per-session ledger the proxy/hook surfaces share, not a stand-in."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    task_nid = svc.remember(
+        "still investigating the resolver.py retry path", kind="task",
+        anchors=["resolver.py"],
+    )
+    gotcha_nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit", kind="gotcha",
+        anchors=["resolver.py"],
+    )
+    sid = "s-ledger-pin"
+    turn_ledger = svc._turn_ledger_for(sid)  # pre-allocate so proactive_context
+                                              # (lookup-only) can find it.
+    out = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id=sid,
+    )
+    assert f"note:{gotcha_nid}" in out["anchor_ids"]
+    assert turn_ledger.eligible(gotcha_nid) is False  # delivered: claimed
+    assert turn_ledger.eligible(task_nid) is True      # kind-filtered: NEVER claimed
+
+
+def test_proactive_directive_kind_note_excluded_from_structural_channel(tmp_path, monkeypatch):
+    """Lever 1's `structural_kinds` allowlist excludes kind="directive" for
+    the same reason it excludes "task" (config.yaml's `proactive.
+    structural_kinds` comment: "not a durable fact about the file"). This is
+    a distinct, independent mechanism from the sibling `proxy.
+    exclude_directive_notes` toggle referenced in that same config.yaml
+    comment (authority-confusion rationale, not file-relevance) -- that
+    toggle is not implemented on this branch (merged separately by another
+    lane into a different target than this branch's base). This test pins
+    ONLY this lane's own exclusion path: a kind="directive" note anchored to
+    the exact window file never reaches the structural channel, regardless
+    of whether any other exclusion toggle exists.
+
+    The combined-lanes case this test deliberately does not cover -- both
+    mechanisms live at once, and one toggled off while the other stays on --
+    is pinned post-merge in tests/test_proactive_p1_composite.py, which
+    records the asymmetry the two configs produce together: turning
+    `exclude_directive_notes` off does NOT restore directives here, because
+    `structural_kinds` removes them upstream of that toggle's own check and
+    is not itself channel-scoped."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    directive_nid = svc.remember(
+        "always run resolver.py's migration script before deploy", kind="directive",
+        anchors=["resolver.py"],
+    )
+    gotcha_nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit", kind="gotcha",
+        anchors=["resolver.py"],
+    )
+    out = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="s-directive",
+    )
+    assert f"note:{gotcha_nid}" in out["anchor_ids"]
+    assert f"note:{directive_nid}" not in out["anchor_ids"]
+
+
+def test_structural_overfetch_survives_task_noise_starvation(tmp_path, monkeypatch):
+    """Lever 1b: `recall_for_path()`'s OLD fixed `limit == max_items_per_event
+    * 2` (6 at the default) would push a single eligible-kind anchored note
+    past the truncation cutoff once 6+ more-recent kind="task" notes pile up
+    on the same file -- the exact starvation lever 1b exists to fix. Plants
+    the gold note FIRST (so it is the oldest), then 6 task notes AFTER (so
+    `recall_for_path`'s recency tie-break -- every fresh note ties at
+    (author_trust_score, decay_score) == (1.0, 1.0) regardless of kind --
+    ranks all 6 ahead of it): under the OLD limit of 6 the gold note falls
+    out of the pool entirely (position 7 of 7); under the NEW default
+    `min(max_items_per_event * structural_overfetch_multiplier,
+    structural_overfetch_ceiling) == min(3*4, 60) == 12` it survives."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    gold_nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit", kind="gotcha",
+        anchors=["resolver.py"],
+    )
+    for j in range(6):
+        svc.remember(f"still investigating resolver.py (session {j})", kind="task")
+    out = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="s-overfetch",
+    )
+    assert f"note:{gold_nid}" in out["anchor_ids"]
+
+
 # -- recall_scored (UPG-PRO-1) ----------------------------------------------
 
 def test_recall_scored_returns_scores(tmp_path, monkeypatch):

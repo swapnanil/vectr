@@ -61,11 +61,21 @@ class DaemonInjectionProvider:
         context = data.get("context") or ""
         if not context:
             return InjectionResult.empty()
+        # `states` is deliberately left empty here and is NOT a claim that
+        # every item is active. Per-item lifecycle state is daemon-side
+        # metadata: it is folded, rendered and audited inside
+        # `VectrService.proactive_context()` (UPG-PROXY-AUDIT-DURABLE), and
+        # `/v1/proactive`'s `ProactiveResponse` intentionally does not carry
+        # it — widening that response model would change a contract asserted
+        # by exact-equality tests for no consumer that needs it. Nothing on
+        # the proxy side reads `.states`; an empty tuple here means "not
+        # transported", never "no revoked items".
         return InjectionResult(
             context=context,
             item_count=int(data.get("item_count") or 0),
             anchor_ids=tuple(data.get("anchor_ids") or ()),
             scores=tuple(data.get("scores") or ()),
+            states=(),
         )
 
     async def aclose(self) -> None:

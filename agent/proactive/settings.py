@@ -64,6 +64,13 @@ def _env_str(name: str, default: str) -> str:
     return raw
 
 
+def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 @dataclass(frozen=True)
 class ProactiveSettings:
     """Fully-resolved proactive-context settings (env over yaml defaults)."""
@@ -88,6 +95,7 @@ class ProactiveSettings:
     proxy_inject_budget_ms: int
     proxy_inject_provider_timeout_fraction: float
     proxy_inject_provider_timeout_max_s: float
+    proxy_exclude_directive_notes: bool
 
     cache_enabled: bool
     cache_max_entries: int
@@ -97,6 +105,17 @@ class ProactiveSettings:
     response_cache_enabled: bool
     response_cache_ttl_seconds: float
     response_cache_max_entries: int
+
+    # UPG-PROXY-INJECT-PRECISION: structural-channel eligibility/overfetch/
+    # scoring knobs (levers 1, 1b, 2, 3 — see agent/config.yaml's
+    # `proactive.structural_*` / `proactive.max_weak_structural_items` block).
+    structural_kinds: tuple[str, ...]
+    structural_overfetch_multiplier: int
+    structural_overfetch_ceiling: int
+    structural_score_declared_anchor: float
+    structural_score_gotcha_mention: float
+    structural_score_mention: float
+    max_weak_structural_items: int
 
     @classmethod
     def from_env(cls) -> "ProactiveSettings":
@@ -147,6 +166,10 @@ class ProactiveSettings:
                 "VECTR_PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_MAX_S",
                 _c.PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_MAX_S,
             ),
+            proxy_exclude_directive_notes=_env_bool(
+                "VECTR_PROACTIVE_PROXY_EXCLUDE_DIRECTIVE_NOTES",
+                _c.PROACTIVE_PROXY_EXCLUDE_DIRECTIVE_NOTES,
+            ),
             cache_enabled=_env_bool("VECTR_PROACTIVE_CACHE", _c.PROACTIVE_CACHE_ENABLED),
             cache_max_entries=_env_int(
                 "VECTR_PROACTIVE_CACHE_MAX_ENTRIES", _c.PROACTIVE_CACHE_MAX_ENTRIES
@@ -166,6 +189,33 @@ class ProactiveSettings:
             response_cache_max_entries=_env_int(
                 "VECTR_PROACTIVE_RESPONSE_CACHE_MAX_ENTRIES",
                 _c.PROACTIVE_RESPONSE_CACHE_MAX_ENTRIES,
+            ),
+            structural_kinds=_env_csv(
+                "VECTR_PROACTIVE_STRUCTURAL_KINDS", _c.PROACTIVE_STRUCTURAL_KINDS
+            ),
+            structural_overfetch_multiplier=_env_int(
+                "VECTR_PROACTIVE_STRUCTURAL_OVERFETCH_MULTIPLIER",
+                _c.PROACTIVE_STRUCTURAL_OVERFETCH_MULTIPLIER,
+            ),
+            structural_overfetch_ceiling=_env_int(
+                "VECTR_PROACTIVE_STRUCTURAL_OVERFETCH_CEILING",
+                _c.PROACTIVE_STRUCTURAL_OVERFETCH_CEILING,
+            ),
+            structural_score_declared_anchor=_env_float(
+                "VECTR_PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR",
+                _c.PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+            ),
+            structural_score_gotcha_mention=_env_float(
+                "VECTR_PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION",
+                _c.PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
+            ),
+            structural_score_mention=_env_float(
+                "VECTR_PROACTIVE_STRUCTURAL_SCORE_MENTION",
+                _c.PROACTIVE_STRUCTURAL_SCORE_MENTION,
+            ),
+            max_weak_structural_items=_env_int(
+                "VECTR_PROACTIVE_MAX_WEAK_STRUCTURAL_ITEMS",
+                _c.PROACTIVE_MAX_WEAK_STRUCTURAL_ITEMS,
             ),
         )
 
