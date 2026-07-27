@@ -182,6 +182,38 @@ per-request ephemeral and the cooldown ring then suppresses repeats, so a plante
 note typically enters the model's context on **exactly one turn** — and utility
 depends on that turn arriving before the agent has committed to an approach.
 
+### Measured delivery rate: 0 of 4
+
+The pilot could not produce a utility number, because across three scenarios plus
+one controlled reproduction the proxy delivered **zero** injections. Captured
+request shapes (a diagnostic proxy chained in front of the vectr proxy):
+
+```
+req#1 roles=['user','system']                        APPENDABLE=False  paths=[]
+req#2 roles=['user','system','assistant','user']     APPENDABLE=True   paths=[]
+req#3 roles=[...,'assistant','user']                 APPENDABLE=True   paths=['Read:file_path']
+req#4 roles=[...]                                    APPENDABLE=True   paths=['Read:file_path','Edit:file_path']
+```
+
+The agent's first request carries a trailing `system` message, and
+`append_context_block` appends only when the last message is a `user` turn. The
+daemon nevertheless retrieves the note on that request, writes its
+`PROACTIVE_INJECT` line, and charges the anchor against the per-process cooldown
+ring. Requests 2-4 are appendable *and* carry the file anchor, but the ring now
+suppresses the note. The note gets exactly one shot, and it is spent on the one
+request that structurally cannot receive it.
+
+Reproduction: proxy metrics `{'requests':5,'injected':0,'inject_skipped':4,
+'inject_bypassed_error':0}` alongside exactly one `PROACTIVE_INJECT` event.
+Elimination identifies req#1 as the consumer — req#2 and req#3 are appendable, so
+had either retrieved the note, `injected` would be at least 1. The provider is not
+the cause: measured at 2.7-34.7 ms against a 600 ms derived timeout, returning
+content every time, with `inject_bypassed_error` at 0.
+
+Until that is fixed, an arm-A cell in this harness is expected to come back
+VACUOUS, and the harness reporting it as such rather than as a negative utility
+result is the harness working correctly.
+
 Related, verified by direct probe: structural matching keys on paths **mentioned in
 the note's text**, not on a note's declared `triggers` path globs. A note whose text
 names no path but declares `triggers: [{"path": "**/beta.py"}]` was not injected for
