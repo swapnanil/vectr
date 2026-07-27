@@ -92,13 +92,39 @@ The runner sets `VECTR_AUDIT_LOG` and parses `PROACTIVE_INJECT` lines:
 PROACTIVE_INJECT workspace=… channel=proxy items=N anchors=note:1,note:2 chars=N states=active
 ```
 
+**Retrieval is not delivery.** Two independent sources are required, because
+they answer different questions and were observed to disagree:
+
+- the daemon's `PROACTIVE_INJECT` audit line proves **retrieval** — the note was
+  selected and handed to the proxy;
+- the proxy's own `injected` metric proves **delivery** — a context block was
+  actually appended to a request the model saw.
+
+The first arm-A pilot cell had the daemon logging `items=1 anchors=note:1
+chars=314` next to proxy metrics `injected: 0, inject_skipped: 11`.
+`append_context_block` refuses to append when the request's last message is not a
+`user` turn, so the note was selected, charged against its cooldown slot, and
+dropped. Had the audit line alone counted, that cell would have been scored a
+valid "injection happened and the note changed nothing" — a false negative about
+the product, produced by the measurement instrument. It is instead VACUOUS.
+
 Validity rule per arm:
 
-- `inject` — valid iff the planted anchor appears in at least one event.
-- `no-inject` — valid iff there are **zero** inject events.
+- `inject` — valid iff the planted anchor was retrieved **and** the proxy
+  reports `injected > 0`.
+- `no-inject` — valid iff there are **zero** post-offset inject events **and**
+  the proxy reports `injected == 0`.
 
 Anchor membership is an exact split-on-comma match, so `note:4` is never satisfied
 by `note:41`.
+
+Events are counted only from a byte offset taken **after** the preflight probe.
+The daemon writes one audit log for everything it serves, and the preflight calls
+`/v1/proactive` directly, so the harness's own retrieval lands in the same file as
+the proxy's. Without the offset a perfectly clean `--no-inject` control reads as
+contaminated by an event the proxy never sent — the first pilot cell failed exactly
+this way, with proxy metrics `injected: 0` next to one audit event of exactly the
+preflight's char count.
 
 ## Isolation
 

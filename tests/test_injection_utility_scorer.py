@@ -344,6 +344,129 @@ def test_non_vacuity_detects_the_planted_anchor(tmp_path):
     assert nv["total_chars_injected"] == 180
 
 
+def test_non_vacuity_excludes_preflight_events_before_the_offset(tmp_path):
+    """The harness's own preflight probe must not count as an arm's injection.
+
+    The daemon writes ONE audit log, and the preflight reachability probe calls
+    /v1/proactive directly -- so its retrieval lands in the same file the proxy's
+    injections do. Without an offset a `--no-inject` control reads as
+    contaminated by an event the proxy never sent. Regression test for exactly
+    that false verdict, observed on the first pilot cell.
+    """
+    log = tmp_path / "audit.log"
+    preflight = (
+        "2026-07-27T10:00:00Z PROACTIVE_INJECT workspace=/ws channel=proxy items=1 "
+        "anchors=note:1 chars=336 states=active\n"
+    )
+    log.write_text(preflight)
+    offset = len(preflight.encode("utf-8"))
+
+    # Counted from byte 0 the control looks contaminated.
+    assert scorer.non_vacuity(log, "note:1")["inject_events"] == 1
+
+    # Counted from the post-preflight offset it is correctly clean.
+    nv = scorer.non_vacuity(log, "note:1", since_offset=offset)
+    assert nv["inject_events"] == 0
+    assert nv["planted_note_injected"] is False
+    assert nv["audit_since_offset"] == offset
+
+    # A real proxy injection appended afterwards is still seen.
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write(
+            "2026-07-27T10:00:05Z PROACTIVE_INJECT workspace=/ws channel=proxy items=1 "
+            "anchors=note:1 chars=336 states=active\n"
+        )
+    nv2 = scorer.non_vacuity(log, "note:1", since_offset=offset)
+    assert nv2["inject_events"] == 1
+    assert nv2["planted_note_injected"] is True
+
+
+def _planted_event(chars: int = 314) -> str:
+    return (
+        "2026-07-27T10:00:00Z PROACTIVE_INJECT workspace=/ws channel=proxy items=1 "
+        f"anchors=note:1 chars={chars} states=active\n"
+    )
+
+
+def test_retrieval_without_delivery_is_vacuous_not_a_negative_result(tmp_path):
+    """The headline failure mode this harness exists to not fall for.
+
+    Observed live on the first arm-A pilot cell: the daemon logged
+    `items=1 anchors=note:1 chars=314` while the proxy reported
+    `injected=0, inject_skipped=11`. `append_context_block` refuses to append
+    when the request's last message is not a `user` turn, so the note was
+    selected, charged against its cooldown slot, and then dropped — the model
+    never saw it.
+
+    If the audit line alone counted as proof, that cell would be scored a valid
+    "injection happened and the note did not change behaviour". It must instead
+    be VACUOUS and excluded.
+    """
+    log = tmp_path / "audit.log"
+    log.write_text(_planted_event())
+
+    nv = scorer.non_vacuity(log, "note:1", proxy_injected=0)
+    assert nv["planted_note_retrieved"] is True
+    assert nv["planted_note_delivered"] is False
+    assert nv["retrieved_but_not_delivered"] is True
+    # The conjunction is what the runner gates arm-A validity on.
+    assert nv["planted_note_injected"] is False
+    assert nv["delivery_unverified"] is False
+
+
+def test_retrieval_with_delivery_is_non_vacuous(tmp_path):
+    log = tmp_path / "audit.log"
+    log.write_text(_planted_event())
+
+    nv = scorer.non_vacuity(log, "note:1", proxy_injected=1)
+    assert nv["planted_note_retrieved"] is True
+    assert nv["planted_note_delivered"] is True
+    assert nv["retrieved_but_not_delivered"] is False
+    assert nv["planted_note_injected"] is True
+
+
+def test_delivery_without_retrieval_of_the_planted_note_is_still_vacuous(tmp_path):
+    """The proxy injected *something*, but not our note — proves nothing."""
+    log = tmp_path / "audit.log"
+    log.write_text(
+        "2026-07-27T10:00:00Z PROACTIVE_INJECT workspace=/ws channel=proxy items=1 "
+        "anchors=note:99 chars=120 states=active\n"
+    )
+    nv = scorer.non_vacuity(log, "note:1", proxy_injected=1)
+    assert nv["planted_note_retrieved"] is False
+    assert nv["planted_note_delivered"] is True
+    assert nv["planted_note_injected"] is False
+
+
+def test_missing_proxy_metric_degrades_to_retrieval_and_says_so(tmp_path):
+    """Absent the proxy metric, never silently over-claim delivery."""
+    log = tmp_path / "audit.log"
+    log.write_text(_planted_event())
+
+    nv = scorer.non_vacuity(log, "note:1")
+    assert nv["planted_note_retrieved"] is True
+    assert nv["planted_note_delivered"] is None
+    assert nv["delivery_unverified"] is True
+    assert nv["retrieved_but_not_delivered"] is False
+    # Falls back to retrieval rather than failing closed on a missing metric...
+    assert nv["planted_note_injected"] is True
+
+
+def test_control_arm_is_contaminated_by_proxy_injection_even_with_clean_audit(tmp_path):
+    """Arm B validity must also consider the proxy metric.
+
+    An empty post-offset audit window is not by itself proof the control was
+    clean; a delivered block with no matching audit line still contaminates it.
+    """
+    log = tmp_path / "audit.log"
+    log.write_text("")
+    nv = scorer.non_vacuity(log, "note:1", proxy_injected=2)
+    assert nv["inject_events"] == 0
+    assert nv["planted_note_delivered"] is True
+    # The runner ANDs these two; neither alone is sufficient.
+    assert not (nv["inject_events"] == 0 and (nv["proxy_injected"] or 0) == 0)
+
+
 def test_non_vacuity_rejects_a_different_anchor(tmp_path):
     """An injection that fired for some OTHER note is not evidence for ours."""
     log = tmp_path / "audit.log"

@@ -298,12 +298,23 @@ _INJECT_LINE = re.compile(r"PROACTIVE_INJECT\b(?P<rest>.*)$")
 _KV = re.compile(r"(\w+)=([^\s]*)")
 
 
-def parse_injection_events(audit_log: Path) -> list[dict[str, str]]:
-    """Parse PROACTIVE_INJECT lines out of a VECTR_AUDIT_LOG file."""
+def parse_injection_events(
+    audit_log: Path, *, since_offset: int = 0
+) -> list[dict[str, str]]:
+    """Parse PROACTIVE_INJECT lines out of a VECTR_AUDIT_LOG file.
+
+    `since_offset` skips the first N bytes. The daemon writes ONE audit log for
+    everything it serves, and the harness's own preflight reachability probe
+    calls /v1/proactive directly -- so its retrieval lands in the same file as
+    the proxy's. Counting from a byte offset taken after the probe is what keeps
+    the harness's own traffic out of the arm's non-vacuity verdict; without it a
+    `--no-inject` control looks contaminated by an event the proxy never sent.
+    """
     events: list[dict[str, str]] = []
     if not audit_log.exists():
         return events
-    for line in audit_log.read_text(encoding="utf-8", errors="replace").splitlines():
+    raw = audit_log.read_bytes()[since_offset:].decode("utf-8", errors="replace")
+    for line in raw.splitlines():
         m = _INJECT_LINE.search(line)
         if not m:
             continue
@@ -311,24 +322,62 @@ def parse_injection_events(audit_log: Path) -> list[dict[str, str]]:
     return events
 
 
-def non_vacuity(audit_log: Path, planted_anchor: str) -> dict[str, Any]:
+def non_vacuity(
+    audit_log: Path,
+    planted_anchor: str,
+    *,
+    since_offset: int = 0,
+    proxy_injected: int | None = None,
+) -> dict[str, Any]:
     """Did the PLANTED note actually reach the prompt at least once?
 
     An injection-ON run whose audit log never shows the planted anchor is
     INVALID -- the arm did not test what it claims to test -- and must be
     excluded and reported as such, never counted as "the note did not help".
+
+    Only events at or after `since_offset` count; see `parse_injection_events`.
+
+    TWO INDEPENDENT SOURCES ARE REQUIRED, because they answer different
+    questions and can disagree:
+
+    * the daemon's PROACTIVE_INJECT audit line proves RETRIEVAL -- the note was
+      selected and handed to the proxy;
+    * the proxy's own `injected` metric proves DELIVERY -- the context block was
+      actually appended to the request the model saw.
+
+    Retrieval without delivery is real and was observed on the first pilot arm-A
+    cell: the daemon logged `items=1 anchors=note:1 chars=314` while the proxy
+    reported `injected=0, inject_skipped=11`. `append_context_block` refuses to
+    append when the request's last message is not a `user` turn, so the note was
+    retrieved, counted against its cooldown slot, and then dropped -- it never
+    reached the model. Treating the audit line alone as proof of injection would
+    score that cell as a valid "the note did not help" result when in fact
+    nothing was ever injected. Pass `proxy_injected` whenever it is available.
     """
-    events = parse_injection_events(audit_log)
+    events = parse_injection_events(audit_log, since_offset=since_offset)
     hits = [
         e for e in events
         if planted_anchor in (e.get("anchors") or "").split(",")
     ]
+    retrieved = bool(hits)
+    delivered = None if proxy_injected is None else proxy_injected > 0
     return {
         "audit_log_present": audit_log.exists(),
+        "audit_since_offset": since_offset,
         "inject_events": len(events),
         "planted_anchor": planted_anchor,
         "planted_anchor_injections": len(hits),
-        "planted_note_injected": bool(hits),
+        # Retrieval: the daemon selected and served the planted note.
+        "planted_note_retrieved": retrieved,
+        # Delivery: the proxy actually appended a context block to a request.
+        "proxy_injected": proxy_injected,
+        "planted_note_delivered": delivered,
+        # The conjunction is what makes an arm-A cell non-vacuous. When the
+        # proxy metric is unavailable this falls back to retrieval alone and
+        # `delivery_unverified` says so, rather than silently over-claiming.
+        "planted_note_injected": retrieved if delivered is None else (retrieved and delivered),
+        "delivery_unverified": delivered is None,
+        "retrieved_but_not_delivered": bool(retrieved and delivered is False),
         "total_chars_injected": sum(int(e.get("chars") or 0) for e in events),
         "events": events,
     }

@@ -209,6 +209,7 @@ class Cell:
         self.vectr = args.vectr_bin
         self.proxy_proc: subprocess.Popen | None = None
         self.note_id: int | None = None
+        self.audit_offset: int = 0
         self.baselines: dict[str, str] = {}
         self.record: dict[str, Any] = {
             "run_id": self.run_id,
@@ -366,12 +367,32 @@ class Cell:
             or preflight["turn2_with_file_anchor"]["planted_present"]
         )
         self.record["planted_note_reachable_preflight"] = reachable
+        # The probe just retrieved through the daemon, which appends to the SAME
+        # audit log the proxy's injections land in. Everything written up to here
+        # is the harness's own traffic; non-vacuity must count only what follows.
+        # Wait for the size to settle first -- the daemon writes the audit line
+        # after responding, so reading immediately can miss the probe's own line
+        # and let it leak past the offset into the arm's event count.
+        self.audit_offset = self._settled_audit_size()
+        self.record["audit_offset_after_preflight"] = self.audit_offset
         if not reachable and not self.args.allow_unreachable:
             raise SystemExit(
                 "ABORT: the planted note is not retrievable on EITHER probe, so this "
                 "scenario cannot test injection utility. Fix the scenario (not the "
                 "score); re-run with --allow-unreachable to record it anyway."
             )
+
+    def _settled_audit_size(self, *, quiet_s: float = 0.6, limit_s: float = 8.0) -> int:
+        """Byte size of the audit log once it has stopped growing."""
+        deadline = time.time() + limit_s
+        last = self.audit_log.stat().st_size if self.audit_log.exists() else 0
+        while time.time() < deadline:
+            time.sleep(quiet_s)
+            now = self.audit_log.stat().st_size if self.audit_log.exists() else 0
+            if now == last:
+                return now
+            last = now
+        return last
 
     def start_proxy(self) -> None:
         # The daemon may have taken the port this proxy would have used.
@@ -467,20 +488,37 @@ class Cell:
         )
         self.record["score"] = result
 
-        nv = scorer.non_vacuity(self.audit_log, self.record.get("planted_anchor", ""))
+        proxy_injected = (self.record.get("proxy_metrics") or {}).get("injected")
+        nv = scorer.non_vacuity(
+            self.audit_log,
+            self.record.get("planted_anchor", ""),
+            since_offset=self.audit_offset,
+            proxy_injected=proxy_injected,
+        )
         self.record["non_vacuity"] = nv
 
         if self.arm == "inject":
             valid = bool(nv["planted_note_injected"])
-            reason = "" if valid else (
-                "arm A ran but the planted note never appears in a PROACTIVE_INJECT "
-                "audit event — the injection path did not fire, so this cell tests "
-                "nothing and must be excluded, not read as 'the note did not help'"
-            )
+            if nv["retrieved_but_not_delivered"]:
+                reason = (
+                    "arm A retrieved the planted note (daemon logged a PROACTIVE_INJECT "
+                    "audit event for it) but the proxy reports injected=0 — the context "
+                    "block was never appended to any request, so the model never saw the "
+                    "note. The cell is VACUOUS: exclude it, and do not read it as 'the "
+                    "note did not help'. See UPG-PROXY-APPEND-BURNS-COOLDOWN."
+                )
+            elif not valid:
+                reason = (
+                    "arm A ran but the planted note never appears in a PROACTIVE_INJECT "
+                    "audit event — the injection path did not fire, so this cell tests "
+                    "nothing and must be excluded, not read as 'the note did not help'"
+                )
+            else:
+                reason = ""
         else:
-            valid = nv["inject_events"] == 0
+            valid = nv["inject_events"] == 0 and (proxy_injected or 0) == 0
             reason = "" if valid else (
-                "arm B recorded PROACTIVE_INJECT events — the no-injection control is "
+                "arm B recorded injection activity — the no-injection control is "
                 "contaminated and the pair must be discarded"
             )
         self.record["valid"] = valid
@@ -512,10 +550,14 @@ class Cell:
                   f"planted={t2['planted_present']}")
         nv = r.get("non_vacuity", {})
         print()
-        print("  NON-VACUITY (durable audit log):")
+        print("  NON-VACUITY (post-preflight bytes only; retrieval AND delivery):")
         print(f"    PROACTIVE_INJECT events        : {nv.get('inject_events')}")
         print(f"    events carrying planted anchor : {nv.get('planted_anchor_injections')}")
-        print(f"    chars injected (all events)    : {nv.get('total_chars_injected')}")
+        print(f"    chars retrieved (all events)   : {nv.get('total_chars_injected')}")
+        print(f"    RETRIEVED (daemon audit)       : {nv.get('planted_note_retrieved')}")
+        print(f"    DELIVERED (proxy injected>0)   : {nv.get('planted_note_delivered')}")
+        if nv.get("retrieved_but_not_delivered"):
+            print("    ** retrieved but NEVER appended to a request — model never saw it **")
         print(f"    proxy metrics                  : {r.get('proxy_metrics')}")
         print()
         print(f"  PRIMARY CHECK  {s.get('primary_check')} -> utility_hit={s.get('utility_hit')}")
