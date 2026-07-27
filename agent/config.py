@@ -1105,6 +1105,7 @@ PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_FRACTION: float = float(
 PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_MAX_S: float = float(
     _proxy_cfg["inject_provider_timeout_max_s"]
 )
+PROACTIVE_PROXY_EXCLUDE_DIRECTIVE_NOTES: bool = bool(_proxy_cfg["exclude_directive_notes"])
 
 _cache_cfg: dict[str, Any] = _pro_cfg["cache"]
 PROACTIVE_CACHE_ENABLED: bool = bool(_cache_cfg["enabled"])

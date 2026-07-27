@@ -1687,6 +1687,21 @@ proactive:
     # timeout mechanism.
     inject_provider_timeout_fraction: 0.8
     inject_provider_timeout_max_s: 2.0
+    # UPG-PROXY-INJECT-ROLE-PROVENANCE: the proxy channel appends context
+    # into the newest USER-authored message on the wire (see
+    # agent/proactive/request_window.py's append_context_block), so an
+    # injected note reads with user authority to the receiving model. A
+    # directive-kind note is written as an imperative ("always do X",
+    # "never do Y"), so the envelope framing in agent/proactive/gate.py
+    # reduces but does not eliminate the risk that it is read as an
+    # instruction from the current user turn rather than a recalled
+    # standing rule from a prior session. Directive notes are therefore
+    # excluded from THIS channel by default. This is a filter on the
+    # note's `kind` property (a static structural field), never a read of
+    # conversation content — the hook/trigger-engine channel injects
+    # directives at session start through a separate delivery path (never
+    # into a user turn) and is unaffected by this toggle either way.
+    exclude_directive_notes: true
 
   # Org-wide caching of vectr-layer artifacts (semantic search results, recall
   # results, embedding computations) — SAFE, invalidation-aware, attributed.
