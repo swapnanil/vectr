@@ -19,7 +19,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from agent.proactive.types import Candidate, ProactiveWindow
+from agent.proactive.types import (
+    CANDIDATE_STATE_NOT_APPLICABLE,
+    Candidate,
+    ProactiveWindow,
+)
 from agent.working_context_store._store import (
     _ANTI_MEMORY_TEMPLATE,
     _date_str,
@@ -131,6 +135,16 @@ def _kind_label(note: WorkingNote, state: dict | None) -> str:
     return note.kind
 
 
+def _state_label(state: dict | None) -> str:
+    """The folded lifecycle state to carry onto the `Candidate` for the audit
+    line (UPG-PROXY-AUDIT-DURABLE). Mirrors `note_event_states()`'s own
+    documented contract: a note absent from the fold (or with no fold result
+    at all) is "active" — the same default every other renderer here uses."""
+    if state and state.get("state"):
+        return state["state"]
+    return "active"
+
+
 def _structural_note_candidate(
     note: WorkingNote,
     anchor: str,
@@ -150,6 +164,7 @@ def _structural_note_candidate(
         score=1.0,
         anchor_id=f"note:{note.note_id}",
         is_structural=True,
+        state=_state_label(state),
     )
 
 
@@ -165,6 +180,7 @@ def _semantic_note_candidate(
         score=float(score),
         anchor_id=f"note:{note.note_id}",
         is_structural=False,
+        state=_state_label(state),
     )
 
 
@@ -188,6 +204,7 @@ def _code_candidate(result, max_chars: int) -> Candidate:
         score=score,
         anchor_id=f"chunk:{chunk_id}",
         is_structural=False,
+        state=CANDIDATE_STATE_NOT_APPLICABLE,
     )
 
 

@@ -5,8 +5,11 @@ from agent.proactive.gate import LedgerStore, ProactiveGate, SessionLedger
 from agent.proactive.types import Candidate
 
 
-def _cand(kind, line, score, anchor, structural):
-    return Candidate(kind=kind, line=line, score=score, anchor_id=anchor, is_structural=structural)
+def _cand(kind, line, score, anchor, structural, state="active"):
+    return Candidate(
+        kind=kind, line=line, score=score, anchor_id=anchor, is_structural=structural,
+        state=state,
+    )
 
 
 def _gate(**kw):
@@ -193,3 +196,30 @@ def test_chunk_candidates_unaffected_by_turn_ledger():
     cands = [_cand("code_semantic", "hit", 0.9, "chunk:foo.py:1-9", False)]
     out = _gate().select(cands, session_id="", turn_ledger=turn_ledger)
     assert out.item_count == 1  # non-note anchors have no note_id to check
+
+
+# -- UPG-PROXY-AUDIT-DURABLE: states carried through to InjectionResult -----
+
+def test_selected_states_positionally_aligned_with_anchor_ids():
+    cands = [
+        _cand("note_structural", "kept", 1.0, "note:1", True, state="revoked"),
+        _cand("note_semantic", "also kept", 0.9, "note:2", False, state="active"),
+    ]
+    out = _gate(max_items_per_event=2).select(cands, session_id="")
+    assert out.anchor_ids == ("note:1", "note:2")
+    assert out.states == ("revoked", "active")
+
+
+def test_empty_result_has_empty_states_tuple():
+    out = _gate().select([], session_id="")
+    assert out.states == ()
+
+
+def test_budget_evicted_candidate_state_not_carried_into_result():
+    cands = [
+        _cand("note_structural", "kept", 1.0, "note:1", True, state="active"),
+        _cand("note_structural", "evicted", 0.9, "note:2", True, state="revoked"),
+    ]
+    out = _gate(max_items_per_event=1).select(cands, session_id="")
+    assert out.anchor_ids == ("note:1",)
+    assert out.states == ("active",)
