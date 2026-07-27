@@ -229,4 +229,5 @@ class ProactiveGate:
             item_count=len(selected),
             anchor_ids=tuple(c.anchor_id for c in selected),
             scores=tuple(round(c.score, 4) for c in selected),
+            states=tuple(c.state for c in selected),
         )

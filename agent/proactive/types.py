@@ -18,6 +18,14 @@ PROVENANCE_RANK: dict[str, int] = {
     "code_semantic": 2,
 }
 
+# The folded note-lifecycle state (UPG-MEMORY-STATE-MACHINE) a non-note
+# candidate carries — a code-search hit has no note to fold state for, and
+# rendering it as "active" would honestly mislabel it as an assertion under
+# lifecycle tracking. Kept as an explicit, named value (not blank/None) so an
+# audit reader always sees an honest label positionally aligned with every
+# other candidate's state, never a silent gap.
+CANDIDATE_STATE_NOT_APPLICABLE = "n/a"
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -36,6 +44,12 @@ class Candidate:
     is_structural: bool  # True => exact structural match (score 1.0); still
                           # subject to the gate's similarity floor like any
                           # other candidate — see agent/proactive/gate.py
+    state: str = "active"  # folded note-lifecycle state ("active" |
+                          # "superseded" | "revoked") for a note candidate, or
+                          # CANDIDATE_STATE_NOT_APPLICABLE for a non-note
+                          # candidate (UPG-PROXY-AUDIT-DURABLE). Metadata
+                          # carried through to the audit line only — never
+                          # used to reorder or reweight the candidate itself.
 
     @property
     def provenance_rank(self) -> int:
@@ -65,18 +79,19 @@ class InjectionResult:
     """The gate's decision for one delivery moment.
 
     `context` is the packed block to inject ("" means inject nothing). The
-    metadata fields are audit-safe: ids and scores, never conversation text or
-    note bodies.
+    metadata fields are audit-safe: ids, scores, and lifecycle states — never
+    conversation text or note bodies.
     """
 
     context: str
     item_count: int
     anchor_ids: tuple[str, ...]
     scores: tuple[float, ...]
+    states: tuple[str, ...] = ()  # positionally aligned with anchor_ids/scores
 
     @staticmethod
     def empty() -> "InjectionResult":
-        return InjectionResult(context="", item_count=0, anchor_ids=(), scores=())
+        return InjectionResult(context="", item_count=0, anchor_ids=(), scores=(), states=())
 
     def is_empty(self) -> bool:
         return self.item_count == 0 or not self.context

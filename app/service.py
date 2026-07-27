@@ -2589,12 +2589,20 @@ class VectrService:
             self._proactive_injection_counts[channel] = (
                 self._proactive_injection_counts.get(channel, 0) + 1
             )
-        # Metadata-only audit (design §9): ids + scores + counts, never the
-        # conversation text or note bodies.
+        # Metadata-only audit (design §9): ids + scores + counts + size + per-
+        # item lifecycle state, never the conversation text or note bodies.
+        # `chars` is the exact length of the injected `context` string (what
+        # actually enters the prompt) so budget adherence
+        # (`max_chars_per_event`) is observable from the durable log without
+        # reconstruction. `states` is positionally aligned with `anchors` —
+        # joining them tells an operator which selected items were injected
+        # as raw assertions ("active") vs. deterrents ("revoked"), which
+        # `items` alone cannot.
         from agent.working_context_store import audit as _audit
         _audit(
             "PROACTIVE_INJECT", workspace=self._workspace_root, channel=channel,
             items=result.item_count, anchors=",".join(result.anchor_ids),
+            chars=len(result.context), states=",".join(result.states),
         )
 
     def get_proactive_injection_counts(self) -> dict:
