@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import threading
 import time
 import weakref
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -162,6 +164,15 @@ _FETCH_NOT_FOUND_NOTE = (
 # `record_commit_note`'s docstring).
 _COMMIT_NOTE_TAG = "auto-provenance"
 _COMMIT_NOTE_AGENT_ID = "git-post-commit-hook"
+
+# Ceiling on deferred-charge proactive retrievals held awaiting delivery
+# confirmation (UPG-PROXY-APPEND-BURNS-COOLDOWN). Only entries between a
+# caller's retrieval and its confirmation live here — a handful even under
+# heavy concurrent proxy traffic — so this is a runaway guard, not a working
+# size. Hardcoded rather than configurable for the same reason
+# `agent.proactive.gate.LedgerStore` hardcodes its own `max_sessions` bound:
+# it is a memory-safety invariant, not a tuning knob.
+PROACTIVE_MAX_PENDING_DELIVERIES = 256
 
 
 def _format_commit_note_content(
@@ -392,6 +403,27 @@ class VectrService:
         self._proactive_injection_counts: dict[str, int] = {}
         self._proactive_injection_lock = threading.Lock()
         self._proactive_ledger = None  # agent.proactive.gate.LedgerStore
+
+        # Deferred-charge retrievals awaiting delivery confirmation
+        # (UPG-PROXY-APPEND-BURNS-COOLDOWN): delivery_token -> the retrieval
+        # metadata needed to charge the cooldown ledger and write a truthful
+        # PROACTIVE_INJECT line once the caller confirms the block was actually
+        # appended. Bounded LRU with its own lock, same discipline as
+        # `agent.proactive.gate.LedgerStore`: a long-lived daemon serving a
+        # chatty proxy can never grow unbounded state here.
+        #
+        # CONCURRENCY RESIDUAL (accepted, see `proactive_context`): the charge
+        # now lands one round-trip after selection, so two proxy requests in
+        # flight AT THE SAME TIME can both select the same note before either
+        # confirms, and it is injected twice. Requests through one proxy are
+        # serialised by the model turn between them, so this needs genuinely
+        # concurrent traffic (e.g. parallel subagents sharing a proxy) to
+        # occur. A duplicated note line is noise; the alternative — charging at
+        # retrieval — silently loses the note entirely, which is the P0 this
+        # replaces. Overflow eviction fails the same safe way: an evicted entry
+        # is simply never charged, so its note may be injected again later.
+        self._proactive_pending: "OrderedDict[str, dict]" = OrderedDict()
+        self._proactive_pending_lock = threading.Lock()
 
         # Org-wide vectr-artifact cache (UPG-PRO caching) — off unless enabled.
         # Bumped monotonically on every note mutation so recall artifacts keyed
@@ -2459,16 +2491,47 @@ class VectrService:
         session_id: str = "",
         channel: str = "proxy",
         structural_only: bool = False,
+        defer_charge: bool = False,
+        confirm_token: str = "",
     ) -> dict:
         """Run the matcher + gate over an already-assembled window and return
         packed proactive context (UPG-PRO-7 subset serving the proxy).
 
         Honors the master opt-in and the memory layer being present. Returns an
         empty result (never an error) when disabled or when nothing clears the
-        floor + budget, so a caller can always forward unmodified. Records a
-        metadata-only PROACTIVE_INJECT audit event on a real injection.
+        floor + budget, so a caller can always forward unmodified.
+
+        CHARGE TIMING (UPG-PROXY-APPEND-BURNS-COOLDOWN). By default this method
+        charges at RETRIEVAL: the gate records the selected anchors in the
+        cooldown ledger and a PROACTIVE_INJECT audit event is written here and
+        now. That is correct for any caller where returning the block IS
+        delivering it, and it is this method's unchanged historical behaviour.
+
+        A caller that cannot know at this point whether the block will reach
+        the model — the proxy, which only afterwards discovers whether the
+        request body can carry it — passes `defer_charge=True`. Then nothing is
+        charged and no PROACTIVE_INJECT is written; a `delivery_token` is
+        returned instead, and the caller hands it back as `confirm_token` on a
+        later call once the block is confirmed appended. Only then is the
+        cooldown charged and PROACTIVE_INJECT emitted.
+
+        `confirm_token` is consumed FIRST, before this request's own matching
+        and selection. That ordering is the invariant that keeps deferred
+        charging safe: by the time the gate consults the cooldown ledger, every
+        previously-delivered anchor is already recorded in it, so a note cannot
+        be selected twice in a sequence of requests.
         """
+        # Deliberately the historical FOUR keys. The deferred-charge fields are
+        # added only on the path that actually defers, so the shape of "injected
+        # nothing" is unchanged for every existing caller and assertion; there
+        # is by definition no delivery to confirm on this path. `routes.py`
+        # reads both fields with `.get`, so their absence is not a KeyError.
         empty = {"context": "", "item_count": 0, "anchor_ids": [], "scores": []}
+        # Confirmation is charged even when the checks below decide to inject
+        # nothing this time round — it settles a PREVIOUS delivery and must not
+        # be dropped because, say, this window happens to be empty.
+        if confirm_token:
+            self._confirm_proactive_delivery(confirm_token)
         if self._search_only:
             # No working-memory layer in search-only mode; nothing to inject.
             return empty
@@ -2622,36 +2685,183 @@ class VectrService:
         result = self._proactive_gate(settings).select(
             candidates, session_id=session_id, structural_only=structural_only,
             turn_ledger=self._existing_turn_ledger(session_id),
+            # Deferred callers charge on confirmed delivery instead; the gate's
+            # cooldown/turn-ledger READS are unaffected either way.
+            record=not defer_charge,
         )
-        if not result.is_empty():
-            self._record_proactive_injection(channel, result)
-        return {
+        out = {
             "context": result.context,
             "item_count": result.item_count,
             "anchor_ids": list(result.anchor_ids),
             "scores": list(result.scores),
         }
+        if result.is_empty():
+            # Nothing selected: no delivery exists to confirm later, so this
+            # keeps the historical four-key shape whether or not the caller
+            # asked to defer.
+            return out
+        if not defer_charge:
+            self._record_proactive_injection(channel, result)
+            return out
+        # Deferred: the two extra keys appear on exactly the path that produces
+        # something to confirm. `charge_deferred` is the feature-detect signal a
+        # caller uses to tell "this daemon deferred" from "this daemon predates
+        # deferred charging and has already charged at retrieval".
+        out["delivery_token"] = self._defer_proactive_charge(
+            channel, session_id, result
+        )
+        out["charge_deferred"] = True
+        return out
+
+    def _defer_proactive_charge(self, channel: str, session_id: str, result) -> str:
+        """Park a selected-but-unconfirmed result and return its opaque token.
+
+        Writes a PROACTIVE_RETRIEVE audit event carrying exactly the metadata
+        PROACTIVE_INJECT will later carry, so the durable log distinguishes
+        "these items were selected and handed to a caller" from "these items
+        reached the model" — see `_record_proactive_injection` for the full
+        event contract.
+
+        The parked entry holds the retrieval-time metadata (`chars`, `states`)
+        that only this side knows: `/v1/proactive`'s response deliberately does
+        not transport per-item lifecycle state, so replaying it from here at
+        confirm time is what keeps the PROACTIVE_INJECT line's shape — and its
+        anchors/states positional alignment — byte-identical to the
+        charge-at-retrieval path.
+        """
+        token = secrets.token_hex(8)
+        entry = {
+            "channel": channel,
+            "session_id": session_id,
+            "anchor_ids": tuple(result.anchor_ids),
+            "item_count": result.item_count,
+            "chars": len(result.context),
+            "states": tuple(result.states),
+        }
+        with self._proactive_pending_lock:
+            self._proactive_pending[token] = entry
+            while len(self._proactive_pending) > PROACTIVE_MAX_PENDING_DELIVERIES:
+                # Oldest-first eviction, bounding daemon state exactly like the
+                # gate's own session ledger. An evicted entry is simply never
+                # charged: its note may be injected again later (noise), which
+                # is the safe direction — the failure this replaces was losing
+                # the note permanently.
+                self._proactive_pending.popitem(last=False)
+        from agent.working_context_store import audit as _audit
+        _audit(
+            "PROACTIVE_RETRIEVE", workspace=self._workspace_root, channel=channel,
+            items=result.item_count, anchors=",".join(result.anchor_ids),
+            chars=len(result.context), states=",".join(result.states), token=token,
+        )
+        return token
+
+    def _confirm_proactive_delivery(self, token: str) -> bool:
+        """Charge a deferred retrieval whose block the caller confirms reached
+        the model. Returns True when a pending entry was settled.
+
+        Idempotent by construction: the entry is POPPED, so replaying the same
+        token charges nothing the second time. An unknown or already-evicted
+        token is a silent no-op — never an error, since this runs inside a
+        request the caller must be able to complete regardless.
+        """
+        if not token:
+            return False
+        with self._proactive_pending_lock:
+            entry = self._proactive_pending.pop(token, None)
+        if entry is None:
+            return False
+
+        session_id = entry["session_id"]
+        anchor_ids = entry["anchor_ids"]
+        if session_id and self._proactive_ledger is not None and anchor_ids:
+            self._proactive_ledger.record(session_id, anchor_ids)
+        # Cross-channel turn dedup: claim here rather than at selection, so the
+        # claim marks a real delivery. LOOKUP-ONLY, exactly as on the selection
+        # path — `_existing_turn_ledger`, never `_turn_ledger_for` — so the
+        # proxy channel's process-scoped session id still cannot allocate a
+        # ledger entry and evict a live editor session's real one. Today this
+        # is a guaranteed miss on the proxy path; it starts deduping for free
+        # if session identity is ever unified.
+        turn_ledger = self._existing_turn_ledger(session_id)
+        if turn_ledger is not None:
+            from agent.proactive.gate import _note_id_from_anchor
+            for aid in anchor_ids:
+                note_id = _note_id_from_anchor(aid)
+                if note_id is not None:
+                    turn_ledger.claim(note_id)
+
+        self._emit_proactive_injection(
+            entry["channel"],
+            items=entry["item_count"],
+            anchors=anchor_ids,
+            chars=entry["chars"],
+            states=entry["states"],
+            token=token,
+        )
+        return True
 
     def _record_proactive_injection(self, channel: str, result) -> None:
+        self._emit_proactive_injection(
+            channel,
+            items=result.item_count,
+            anchors=tuple(result.anchor_ids),
+            chars=len(result.context),
+            states=tuple(result.states),
+        )
+
+    def _emit_proactive_injection(
+        self, channel: str, *, items: int, anchors, chars: int, states, token: str = "",
+    ) -> None:
+        """Count and durably record ONE injection that reached the model.
+
+        AUDIT EVENT CONTRACT (UPG-PROXY-AUDIT-CLAIMS-UNDELIVERED-INJECTION).
+        `PROACTIVE_INJECT` means DELIVERED — the block entered the model's
+        context. It is written here and only here, from two places:
+
+          * the charge-at-retrieval path, where returning the block IS
+            delivering it (`proactive_context` with `defer_charge=False`); and
+          * `_confirm_proactive_delivery`, when a deferred caller confirms the
+            block was appended. Deferred retrievals additionally emit a
+            `PROACTIVE_RETRIEVE` event at selection time (see
+            `_defer_proactive_charge`), so a log consumer reads the pair as:
+            RETRIEVE = selected and handed to a caller; INJECT = confirmed
+            delivered; RETRIEVE with no matching INJECT (join on `token=`) =
+            selected but NOT delivered. Legacy callers emit no RETRIEVE line at
+            all, which is itself the signal that the log is recording the
+            retrieval-time contract.
+
+        UNDER-REPORT RESIDUAL, deliberate: on the deferred path a caller that
+        delivers the block and then dies before its next call never returns the
+        token, so no PROACTIVE_INJECT is written and the cooldown is never
+        charged for an injection that DID reach the model. `PROACTIVE_INJECT`
+        and `proactive_injection_counts` are therefore a strict LOWER BOUND on
+        delivery across caller crashes. That is the correct direction to fail —
+        the defect this replaces over-reported, asserting injections that never
+        happened — but a consumer must not read the count as exact.
+
+        Metadata-only (design §9): ids + counts + size + per-item lifecycle
+        state, never the conversation text or note bodies. `chars` is the exact
+        length of the injected `context` string (what actually enters the
+        prompt) so budget adherence (`max_chars_per_event`) is observable from
+        the durable log without reconstruction. `states` is positionally
+        aligned with `anchors` — joining them tells an operator which selected
+        items were injected as raw assertions ("active") vs. deterrents
+        ("revoked"), which `items` alone cannot. `token` appears only on the
+        deferred path, where it joins the line to its `PROACTIVE_RETRIEVE`.
+        """
         with self._proactive_injection_lock:
             self._proactive_injection_counts[channel] = (
                 self._proactive_injection_counts.get(channel, 0) + 1
             )
-        # Metadata-only audit (design §9): ids + scores + counts + size + per-
-        # item lifecycle state, never the conversation text or note bodies.
-        # `chars` is the exact length of the injected `context` string (what
-        # actually enters the prompt) so budget adherence
-        # (`max_chars_per_event`) is observable from the durable log without
-        # reconstruction. `states` is positionally aligned with `anchors` —
-        # joining them tells an operator which selected items were injected
-        # as raw assertions ("active") vs. deterrents ("revoked"), which
-        # `items` alone cannot.
         from agent.working_context_store import audit as _audit
-        _audit(
-            "PROACTIVE_INJECT", workspace=self._workspace_root, channel=channel,
-            items=result.item_count, anchors=",".join(result.anchor_ids),
-            chars=len(result.context), states=",".join(result.states),
+        fields = dict(
+            workspace=self._workspace_root, channel=channel,
+            items=items, anchors=",".join(anchors),
+            chars=chars, states=",".join(states),
         )
+        if token:
+            fields["token"] = token
+        _audit("PROACTIVE_INJECT", **fields)
 
     def get_proactive_injection_counts(self) -> dict:
         with self._proactive_injection_lock:

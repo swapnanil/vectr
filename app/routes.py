@@ -574,6 +574,8 @@ async def proactive(body: ProactiveRequest, request: Request) -> ProactiveRespon
             session_id=body.session_id,
             channel=body.channel,
             structural_only=body.structural_only,
+            defer_charge=body.defer_charge,
+            confirm_token=body.confirm_token,
         )
     except Exception:
         result = {"context": "", "item_count": 0, "anchor_ids": [], "scores": []}
@@ -582,6 +584,12 @@ async def proactive(body: ProactiveRequest, request: Request) -> ProactiveRespon
         item_count=result["item_count"],
         anchor_ids=result["anchor_ids"],
         scores=result["scores"],
+        # `.get` because the deferred-charge fields are additive: a service
+        # that predates them (or a test double standing in for one) returns the
+        # older 4-key result, and must keep working rather than KeyError into
+        # the caller's request path.
+        delivery_token=result.get("delivery_token", ""),
+        charge_deferred=result.get("charge_deferred", False),
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

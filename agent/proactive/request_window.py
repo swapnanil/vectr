@@ -175,6 +175,56 @@ def cache_prefix_signature(body: dict) -> str:
     return json.dumps(prefix, sort_keys=True, ensure_ascii=False, default=str)
 
 
+def can_append_context(body: dict) -> bool:
+    """Whether `append_context_block` can append to this request body.
+
+    PURELY STRUCTURAL. This predicate reads only the request's SHAPE — the
+    presence and type of `messages`, and the `role` field of the trailing
+    message. It never reads message text, tool inputs, note content, or any
+    other payload, and it never classifies, routes, or gates on what the
+    conversation is ABOUT. (Same hard rule as `assemble_window`'s exact-key
+    anchor extraction above: no query-side heuristics anywhere in the
+    request path.)
+
+    Split out as its own predicate so the proxy can ask "would an injection
+    land?" BEFORE spending a retrieval on this request (see
+    `agent/proactive/proxy.py`'s `_maybe_inject`) — the alternative is
+    retrieving, being refused here, and burning the note's cooldown slot on a
+    request that structurally cannot receive it (UPG-PROXY-APPEND-BURNS-
+    COOLDOWN). `append_context_block` delegates to this function, so there is
+    exactly ONE definition of appendability and the pre-check can never drift
+    from the append itself.
+
+    Only a trailing `user` message is appendable, and that restriction is
+    load-bearing rather than conservative — measured against real editor
+    request shapes:
+
+      * The editor's FIRST request ends with a `system`-role message (an
+        8.7 KB harness system-reminder) that CARRIES the last `cache_control`
+        breakpoint. Appending into the last *user* message there — which sits
+        BEFORE that breakpoint — provably changes `cache_prefix_signature()`
+        and destroys the cached prefix.
+      * Appending into the trailing `system` message itself is cache-safe but
+        would give injected content harness/system-role provenance, a
+        regression of the role-provenance envelope (see `gate.py`).
+      * Synthesising a new trailing `user` message is cache-safe but fabricates
+        a conversation turn the user never sent.
+
+    So a non-appendable request is DEFERRED, not reshaped: nothing is
+    retrieved, nothing is charged, and the note is delivered on the next
+    appendable request instead (one model turn later).
+    """
+    messages = body.get("messages") if isinstance(body, dict) else None
+    if not isinstance(messages, list) or not messages:
+        return False
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "user":
+        return False
+    # A content shape `append_context_block` cannot extend is not appendable
+    # either — kept here so the pre-check and the append agree exactly.
+    return isinstance(last.get("content"), (str, list))
+
+
 def append_context_block(body: dict, context: str) -> tuple[dict, bool]:
     """Return a copy of `body` with `context` appended as the newest content,
     after the last cache breakpoint. Returns (new_body, injected).
@@ -183,15 +233,13 @@ def append_context_block(body: dict, context: str) -> tuple[dict, bool]:
     when that message is a `user` turn — the canonical newest-content position.
     If there is no appendable trailing user message, the body is returned
     unchanged and injected=False (fail-open: forward as-is rather than risk
-    reshaping the conversation). The input `body` is never mutated.
+    reshaping the conversation). Appendability is decided by
+    `can_append_context` above — see there for why only a trailing user turn
+    qualifies. The input `body` is never mutated.
     """
     if not context or not context.strip():
         return body, False
-    messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
-        return body, False
-    last = messages[-1]
-    if not isinstance(last, dict) or last.get("role") != "user":
+    if not can_append_context(body):
         return body, False
 
     new_body = copy.deepcopy(body)
@@ -206,6 +254,6 @@ def append_context_block(body: dict, context: str) -> tuple[dict, bool]:
         last_msg["content"] = [{"type": "text", "text": content}, injected_block]
     elif isinstance(content, list):
         last_msg["content"] = list(content) + [injected_block]
-    else:
+    else:  # pragma: no cover - `can_append_context` already excludes this shape
         return body, False
     return new_body, True
