@@ -1630,9 +1630,12 @@ proactive:
 
   # Semantic floor for note injection (reuses the recall UPG-5.1 cutoff shape).
   # A candidate note whose cosine similarity to the assembled window is below
-  # this is dropped, so an off-topic conversation injects nothing. Structural
-  # (exact file-path) matches bypass the floor — an exact match is not a guess.
-  # A numeric threshold, never keyword logic (no-query-heuristics hard rule).
+  # this is dropped, so an off-topic conversation injects nothing. The floor
+  # applies to EVERY candidate, structural included — a structural match no
+  # longer bypasses it (UPG-PROXY-LOOPBACK-BYPASS composite hardening); what
+  # keeps a genuine structural match clearing the floor is the tiered score
+  # below (structural_scores), not an exemption. A numeric threshold, never
+  # keyword logic (no-query-heuristics hard rule).
   min_similarity: 0.35
 
   # Per-delivery injection budget. At most this many items, and at most this
@@ -1647,12 +1650,90 @@ proactive:
   # suppressed, so the same note is not re-injected turn after turn.
   cooldown_items: 30
 
+  # Structural (path-anchored) channel relevance gate (UPG-PROXY-INJECT-
+  # PRECISION). `recall_for_path()` answers "which notes mention or are
+  # anchored to this file", which is the right question for a durable caveat
+  # (a gotcha) but the wrong one for a note that documents a moment in time
+  # (a task/progress checkpoint that happens to name a file it touched). Every
+  # key below reads only STRUCTURAL note properties already in hand
+  # (note.kind, note.anchors, or a numeric threshold) — never the window,
+  # query, or conversation content (no-query-heuristics hard rule).
+
+  # Kinds eligible for the structural (path-anchored) channel. A note whose
+  # kind is not in this list can still reach the agent through the semantic
+  # channel (a genuine content match against the conversation) or the
+  # session-start / PreToolUse kind="gotcha" surfaces — this list only gates
+  # the exact-file-path lookup. "task" is excluded by default: a task note
+  # documents a moment in time, not a durable fact about the file, and on a
+  # reference measurement it was 63% of the raw structural pool without being
+  # more relevant than the rest. "directive" is excluded here for the same
+  # not-a-file-fact reason; a SEPARATE toggle (proxy.exclude_directive_notes,
+  # below) independently controls directive visibility for a different
+  # reason (authority confusion) — the two mechanisms are deliberately kept
+  # apart rather than unified.
+  structural_kinds:
+    - gotcha
+    - finding
+    - decision
+    - operational
+    - reference
+
+  # Structural-channel overfetch: the pool size requested per file from
+  # recall_for_path(), BEFORE the structural_kinds filter above narrows it.
+  # Same shape as memory_recall_for_path's own multiplier/ceiling (see that
+  # block) but this is a separate, one-layer-up pool: it exists because the
+  # structural_kinds filter above can otherwise starve the channel now that
+  # the most common on-file note kind (task) is excluded. Pool size =
+  # min(max_items_per_event * overfetch_multiplier, overfetch_ceiling).
+  # Measured on a reference 436-note store: at multiplier 2 (the previous
+  # hardcoded `limit*2`), 4 of 44 file basenames were starved (fewer allowed-
+  # kind notes retrieved than were actually available, including the two
+  # heaviest files in the store); at multiplier 4, zero were starved, and
+  # multipliers 6/8 gave no further benefit.
+  structural_overfetch_multiplier: 4
+
+  # Hard ceiling on the structural pool regardless of the multiplier above
+  # (same role as memory_recall_for_path.overfetch_ceiling). 60 covers
+  # max_items_per_event up to 15 at the default 4x multiplier while staying a
+  # small fraction of recall_for_path's own 200-row SQL ceiling, so configuring
+  # an unusually large per-event budget still cannot force a large per-file
+  # table scan.
+  structural_overfetch_ceiling: 60
+
+  # Tiered structural-match scores (replaces a flat hardcoded 1.0 that made
+  # the similarity floor above inert for every structural candidate and let
+  # weak evidence always crowd out genuine semantic matches). Each tier is
+  # derived only from structural properties the matcher already computes —
+  # never from query or window content.
+  structural_scores:
+    # Tier A: the note's OWN declared `anchors` list names this file — the
+    # strongest claim a note can make about a file, since it says so itself.
+    declared_anchor: 1.0
+    # Tier B: the file is only mentioned in the note's content (not a
+    # declared anchor), but the note's kind is "gotcha" — the exact case
+    # recall_for_path()'s own docstring says it was built for (a caveat
+    # recorded against a file, meant to resurface when that file is touched).
+    gotcha_mention: 0.9
+    # Tier C: a content mention only, in any other kind the structural_kinds
+    # allowlist admits. Weak evidence — the note merely name-drops the file
+    # somewhere in its body — deliberately scored so it no longer
+    # automatically outranks a genuine semantic match.
+    mention: 0.6
+
+  # Per-delivery cap on Tier-C ("weak mention") structural items: at most
+  # this many are ever selected in one injection, so a burst of low-
+  # confidence file mentions cannot fill the whole item budget and crowd out
+  # stronger structural or semantic evidence. A capped item is simply
+  # skipped, not injected, and — like any other filtered/uninjected
+  # candidate — is never claimed in the turn-injection ledger.
+  max_weak_structural_items: 1
+
   # Matchers — each runs unconditionally on every window (no content branch
   # chooses which to run); enabling/disabling one is a STATIC toggle here, never
   # a runtime read of the conversation. Turning code_search on requires a built
   # code index; it degrades to nothing when none exists.
   matchers:
-    structural_note: true    # M1: exact file-path -> anchored note (score 1.0)
+    structural_note: true    # M1: exact file-path -> anchored note (tiered score; see structural_scores above)
     semantic_note: true      # M3: cosine note recall above min_similarity
     code_search: false       # M4: hybrid code search (opt-in; needs an index)
 

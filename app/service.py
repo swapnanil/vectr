@@ -2437,6 +2437,7 @@ class VectrService:
             max_items_per_event=settings.max_items_per_event,
             max_chars_per_event=settings.max_chars_per_event,
             cooldown_items=settings.cooldown_items,
+            max_weak_structural_items=settings.max_weak_structural_items,
             ledger_store=self._proactive_ledger,
         )
 

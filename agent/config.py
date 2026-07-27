@@ -1085,6 +1085,25 @@ PROACTIVE_MAX_ITEMS_PER_EVENT: int = int(_pro_cfg["max_items_per_event"])
 PROACTIVE_MAX_CHARS_PER_EVENT: int = int(_pro_cfg["max_chars_per_event"])
 PROACTIVE_COOLDOWN_ITEMS: int = int(_pro_cfg["cooldown_items"])
 
+# UPG-PROXY-INJECT-PRECISION: structural (path-anchored) channel relevance
+# gate. Every value below is a STATIC config threshold or a note.kind
+# allowlist — never derived from query/window content (no-query-heuristics
+# rule). See the matching config.yaml comment block for the full rationale.
+PROACTIVE_STRUCTURAL_KINDS: tuple[str, ...] = tuple(str(k) for k in _pro_cfg["structural_kinds"])
+PROACTIVE_STRUCTURAL_OVERFETCH_MULTIPLIER: int = int(_pro_cfg["structural_overfetch_multiplier"])
+PROACTIVE_STRUCTURAL_OVERFETCH_CEILING: int = int(_pro_cfg["structural_overfetch_ceiling"])
+
+_pro_structural_scores_cfg: dict[str, Any] = _pro_cfg["structural_scores"]
+PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR: float = float(
+    _pro_structural_scores_cfg["declared_anchor"]
+)
+PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION: float = float(
+    _pro_structural_scores_cfg["gotcha_mention"]
+)
+PROACTIVE_STRUCTURAL_SCORE_MENTION: float = float(_pro_structural_scores_cfg["mention"])
+
+PROACTIVE_MAX_WEAK_STRUCTURAL_ITEMS: int = int(_pro_cfg["max_weak_structural_items"])
+
 _pro_matchers_cfg: dict[str, Any] = _pro_cfg["matchers"]
 PROACTIVE_MATCHER_STRUCTURAL_NOTE: bool = bool(_pro_matchers_cfg["structural_note"])
 PROACTIVE_MATCHER_SEMANTIC_NOTE: bool = bool(_pro_matchers_cfg["semantic_note"])

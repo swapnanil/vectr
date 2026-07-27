@@ -14,7 +14,7 @@ import threading
 from collections import OrderedDict, deque
 from typing import Protocol, runtime_checkable
 
-from agent.proactive.types import Candidate, InjectionResult
+from agent.proactive.types import STRUCTURAL_TIER_MENTION, Candidate, InjectionResult
 
 # One-line header so the model knows the provenance and trust level of what
 # follows. Fixed overhead, not counted against the item budget.
@@ -121,11 +121,13 @@ class ProactiveGate:
         max_items_per_event: int,
         max_chars_per_event: int,
         cooldown_items: int,
+        max_weak_structural_items: int,
         ledger_store: LedgerStore | None = None,
     ) -> None:
         self._min_similarity = min_similarity
         self._max_items = max(0, max_items_per_event)
         self._max_chars = max(0, max_chars_per_event)
+        self._max_weak_structural_items = max(0, max_weak_structural_items)
         self._ledger = ledger_store or LedgerStore(cooldown_items)
 
     def select(
@@ -199,17 +201,34 @@ class ProactiveGate:
         # 6. Budget: at most K items and T chars. Each candidate `line` is capped
         #    to T by the matcher, so a single item always fits; stop at the first
         #    item that would overflow the running character total.
+        #
+        #    UPG-PROXY-INJECT-PRECISION lever 3: at most
+        #    `max_weak_structural_items` Tier-C ("weak mention") structural
+        #    candidates are selected per delivery moment — a check against
+        #    `Candidate.structural_tier`, a STRUCTURAL PROPERTY of the match
+        #    computed by the matcher, never a read of window/query content. A
+        #    capped item is skipped (never appended to `selected`, never
+        #    counted against the char budget), leaving its slot for a
+        #    stronger candidate later in `eligible`'s score-descending order.
         selected: list[Candidate] = []
         used_chars = 0
+        weak_structural_selected = 0
         for c in eligible:
             if len(selected) >= self._max_items:
                 break
+            if (
+                c.structural_tier == STRUCTURAL_TIER_MENTION
+                and weak_structural_selected >= self._max_weak_structural_items
+            ):
+                continue
             line = c.line
             add_chars = len(line) + (1 if selected else 0)  # newline separator
             if used_chars + add_chars > self._max_chars:
                 break
             selected.append(c)
             used_chars += add_chars
+            if c.structural_tier == STRUCTURAL_TIER_MENTION:
+                weak_structural_selected += 1
 
         if not selected:
             return InjectionResult.empty()
