@@ -114,6 +114,15 @@ class InjectionResult:
     # "no revoked items"; see agent/proactive/provider.py, which reconstructs
     # a result from the daemon's `/v1/proactive` response and cannot know it.
     states: tuple[str, ...] = ()
+    # Opaque confirm handle for a DEFERRED-CHARGE retrieval (UPG-PROXY-APPEND-
+    # BURNS-COOLDOWN). Non-empty only when the daemon selected these items
+    # WITHOUT charging their cooldown slots, and is waiting to be told whether
+    # they were actually delivered. The proxy hands it back verbatim once the
+    # block is confirmed appended; it is never parsed, and it carries no
+    # content. Empty means "nothing to confirm" — either the gate charged at
+    # selection (the default, and what every non-proxy channel does) or the
+    # daemon predates deferred charging.
+    delivery_token: str = ""
 
     @staticmethod
     def empty() -> "InjectionResult":

@@ -567,6 +567,11 @@ class ProactiveRequest(BaseModel):
     session_id: str = Field(default="", description="Per-conversation id for dedup/cooldown")
     channel: str = Field(default="proxy", description="Delivery channel label (e.g. 'proxy'); used for per-channel policy + metrics")
     structural_only: bool = Field(default=False, description="Emit only exact structural matches (a static per-channel policy, not a content decision)")
+    # UPG-PROXY-APPEND-BURNS-COOLDOWN. Both default to today's behaviour, so a
+    # caller that predates deferred charging (an older `vectr proxy`) gets
+    # retrieval-time charging exactly as before — no field, no change.
+    defer_charge: bool = Field(default=False, description="Select WITHOUT charging the cooldown ledger; the caller confirms delivery later via confirm_token. Callers that cannot observe delivery (the proxy) set this")
+    confirm_token: str = Field(default="", description="A delivery_token from an earlier deferred response whose block was confirmed delivered; charged before this request's own selection. Opaque, never parsed")
 
 
 class ProactiveResponse(BaseModel):
@@ -575,6 +580,12 @@ class ProactiveResponse(BaseModel):
     anchor_ids: list[str] = Field(default_factory=list)
     scores: list[float] = Field(default_factory=list)
     processing_ms: int = 0
+    # UPG-PROXY-APPEND-BURNS-COOLDOWN. `charge_deferred` is the FEATURE-DETECT
+    # signal: a daemon that predates deferred charging simply has no such field
+    # in its response model, so a new proxy reading it back as False knows the
+    # daemon already charged at retrieval and that there is nothing to confirm.
+    delivery_token: str = Field(default="", description="Opaque handle to confirm delivery of this result (empty when the ledger was charged at selection)")
+    charge_deferred: bool = Field(default=False, description="True when this result's cooldown slots are NOT yet charged and await confirmation")
 
 
 class ForgetRequest(BaseModel):

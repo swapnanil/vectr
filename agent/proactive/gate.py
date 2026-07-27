@@ -160,12 +160,32 @@ class ProactiveGate:
         session_id: str = "",
         structural_only: bool = False,
         turn_ledger: TurnLedger | None = None,
+        record: bool = True,
     ) -> InjectionResult:
         """Deterministically pick and pack the items to inject.
 
         `structural_only` (a static per-channel policy, never a content read)
         drops every semantic candidate — used by the high-frequency channels
         where only exact matches are cheap enough to be worth the budget.
+
+        `record` (UPG-PROXY-APPEND-BURNS-COOLDOWN) controls whether SELECTION
+        also CHARGES — i.e. writes the selected anchors into the cooldown
+        `_ledger` and claims their note ids in `turn_ledger`. It defaults to
+        True, which is retrieval-time charging: correct, and byte-identical to
+        this method's historical behaviour, for any channel where retrieval IS
+        delivery (the hook/trigger-engine surfaces, which see the packed result
+        directly). The PROXY channel is the one place where it is not: the
+        proxy retrieves over HTTP and only afterwards discovers whether the
+        request body can actually carry the block. Charging there at selection
+        spends a note's one cooldown slot on a request that may never receive
+        it. Those callers pass `record=False` and charge later, on confirmed
+        delivery (see `VectrService.proactive_context`).
+
+        `record=False` changes ONLY the two write-backs. Every READ stays
+        exactly as it is — the cooldown `seen()` filter in step 4 and the
+        `turn_ledger.eligible()` filter in step 3 both still apply, so an
+        uncharged selection is still suppressed by whatever WAS charged before
+        it.
 
         `turn_ledger` (UPG-PROXY-CROSS-CHANNEL-DEDUP), if given, is the SAME
         per-session `TurnInjectionLedger` the hook/trigger-engine surfaces
@@ -256,13 +276,18 @@ class ProactiveGate:
         if not selected:
             return InjectionResult.empty()
 
-        if session_id:
-            self._ledger.record(session_id, [c.anchor_id for c in selected])
-        if turn_ledger is not None:
-            for c in selected:
-                note_id = _note_id_from_anchor(c.anchor_id)
-                if note_id is not None:
-                    turn_ledger.claim(note_id)
+        # Charge (see `record` in the docstring): skipped wholesale when the
+        # caller will charge later on confirmed delivery. Both write-backs move
+        # together — charging one ledger but not the other would leave the two
+        # dedup surfaces disagreeing about what has been emitted.
+        if record:
+            if session_id:
+                self._ledger.record(session_id, [c.anchor_id for c in selected])
+            if turn_ledger is not None:
+                for c in selected:
+                    note_id = _note_id_from_anchor(c.anchor_id)
+                    if note_id is not None:
+                        turn_ledger.claim(note_id)
 
         body = "\n".join(c.line for c in selected)
         context = f"{_ENVELOPE_OPEN}\n{body}\n{_ENVELOPE_CLOSE}"

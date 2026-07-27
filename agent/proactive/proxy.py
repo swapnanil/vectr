@@ -43,7 +43,11 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from agent.proactive.cache import ResponseCache
-from agent.proactive.request_window import append_context_block, assemble_window
+from agent.proactive.request_window import (
+    append_context_block,
+    assemble_window,
+    can_append_context,
+)
 from agent.proactive.settings import ProactiveSettings
 from agent.proactive.types import InjectionResult, ProactiveWindow
 
@@ -83,12 +87,29 @@ class InjectionProvider(Protocol):
     ) -> InjectionResult:
         ...
 
+    def confirm_delivery(self, token: str) -> None:
+        """OPTIONAL (UPG-PROXY-APPEND-BURNS-COOLDOWN). Called once the block
+        from a result carrying a non-empty `delivery_token` is confirmed
+        appended to the outgoing body, so the provider can charge that
+        retrieval's cooldown slots. Must not block: it is invoked inline on the
+        request path.
+
+        Providers may omit it — the proxy calls it only when present, so a
+        third-party or test provider written against the older surface keeps
+        working (and simply never defers a charge)."""
+        ...
+
 
 @dataclass
 class ProxyMetrics:
     requests: int = 0
     injected: int = 0
     inject_skipped: int = 0
+    # Subset of `inject_skipped` (both are bumped): requests refused before any
+    # retrieval because no block could be appended to them. Broken out because
+    # "we never asked" and "we asked and got nothing" are different diagnoses
+    # for the same skipped count.
+    inject_skipped_not_appendable: int = 0
     inject_bypassed_error: int = 0
     upstream_errors: int = 0
     response_cache_hits: int = 0
@@ -104,6 +125,7 @@ class ProxyMetrics:
                 "requests": self.requests,
                 "injected": self.injected,
                 "inject_skipped": self.inject_skipped,
+                "inject_skipped_not_appendable": self.inject_skipped_not_appendable,
                 "inject_bypassed_error": self.inject_bypassed_error,
                 "upstream_errors": self.upstream_errors,
                 "response_cache_hits": self.response_cache_hits,
@@ -246,6 +268,27 @@ class VectrProxy:
             logger.debug("proactive inject skipped: empty window")
             return forward_bytes, False
 
+        # UPG-PROXY-APPEND-BURNS-COOLDOWN: decide appendability BEFORE spending
+        # a retrieval. This request's shape is already known here, and if no
+        # block can land on it there is nothing to gain by asking the daemon —
+        # while there is real harm in asking: the retrieval would charge (or,
+        # with deferred charging, park) a note for a request that structurally
+        # cannot carry it. Editors do send such requests: the first request of
+        # a session ends with a harness `system` message, which is exactly when
+        # a freshly-relevant note would otherwise be spent and then suppressed
+        # for the rest of the process. Skipping here defers the note to the
+        # next appendable request — one model turn later — with its slot
+        # intact. Purely structural: `can_append_context` reads roles and
+        # shape, never content.
+        if not can_append_context(body):
+            self.metrics.bump("inject_skipped")
+            self.metrics.bump("inject_skipped_not_appendable")
+            logger.debug(
+                "proactive inject skipped: request not appendable "
+                "(deferred, no retrieval attempted)"
+            )
+            return forward_bytes, False
+
         budget_s = max(self._settings.proxy_inject_budget_ms, 1) / 1000.0
         started = time.monotonic()
         try:
@@ -276,6 +319,16 @@ class VectrProxy:
             self.metrics.bump("inject_skipped")
             logger.debug("proactive inject skipped: append failed")
             return forward_bytes, False
+        # Delivery is confirmed only here, past the append — this is the exact
+        # point the daemon cannot observe, and the reason the charge is
+        # deferred to it (UPG-PROXY-APPEND-BURNS-COOLDOWN). Guarded rather than
+        # assumed: `confirm_delivery` is an optional part of the
+        # `InjectionProvider` surface, and `delivery_token` is empty whenever
+        # the daemon already charged at retrieval.
+        if result.delivery_token:
+            confirm = getattr(self._provider, "confirm_delivery", None)
+            if callable(confirm):
+                confirm(result.delivery_token)
         self.metrics.bump("injected")
         return json.dumps(new_body).encode("utf-8"), True
 
