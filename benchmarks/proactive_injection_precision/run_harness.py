@@ -28,12 +28,14 @@ relevance at run time.
 
 Usage:
     python3 benchmarks/proactive_injection_precision/run_harness.py \\
-        --db /Users/swapnanilsaha/dev/vectr/tmp/proactive-precision-db
+        --db tmp/proactive-precision-db
 
-`--db` must be a fresh or harness-owned directory -- it is used verbatim as
-VECTR_DB_DIR, so pick a path this run may freely create/reuse (the fixture
-rule: only ever point this at something under vectr/tmp/, never a real
-workspace's cache).
+`--db` must be a FRESH directory (delete it first if re-running -- this
+script never clears an existing one) -- it is used verbatim as VECTR_DB_DIR,
+so pick a path this run may freely create (the fixture rule: only ever point
+this at something under vectr/tmp/, never a real workspace's cache). Reusing
+a non-empty `--db` across runs silently accumulates notes across invocations
+and corrupts the ground-truth-to-note-id mapping this harness relies on.
 
 Exit code: 0 always (this is a MEASUREMENT tool, not a pass/fail gate --
 the anti-gaming floor from the UPG-PROXY-INJECT-PRECISION brief is a
@@ -109,6 +111,11 @@ def run(db_dir: Path) -> dict:
     deterrents = 0
     strict_tp = 0
     charitable_tp = 0
+    assertion_strict_tp = 0  # strict_tp restricted to non-deterrent items --
+                              # a deterrent's job is to warn the caller off a
+                              # wrong prior belief, not to assert new content,
+                              # so it is a category error to grade its
+                              # "precision" the same way as a normal item.
     total_injected = 0
 
     for i, path in enumerate(gt.window_files):
@@ -139,6 +146,8 @@ def run(db_dir: Path) -> dict:
                 deterrents += 1
             else:
                 assertions += 1
+                if is_strict_tp:
+                    assertion_strict_tp += 1
             rows.append(
                 dict(anchor_id=anchor_id, note_id=nid, score=score, tier=tier,
                      kind=note_kind, category=category, window=note_window,
@@ -150,6 +159,7 @@ def run(db_dir: Path) -> dict:
     slots_available = len(gt.window_files) * PROACTIVE_MAX_ITEMS_PER_EVENT
     strict_precision = strict_tp / total_injected if total_injected else 0.0
     charitable_precision = charitable_tp / total_injected if total_injected else 0.0
+    assertion_strict_precision = assertion_strict_tp / assertions if assertions else 0.0
 
     return dict(
         per_window=per_window,
@@ -161,6 +171,8 @@ def run(db_dir: Path) -> dict:
         charitable_precision=charitable_precision,
         strict_tp=strict_tp,
         charitable_tp=charitable_tp,
+        assertion_strict_tp=assertion_strict_tp,
+        assertion_strict_precision=assertion_strict_precision,
         tier_counts=tier_counts,
         kind_counts_injected=kind_counts_injected,
         category_counts=category_counts,
@@ -200,6 +212,10 @@ def _print_report(r: dict) -> None:
           f"{r['strict_tp']}/{r['items_injected']} = {100.0 * r['strict_precision']:.1f}%")
     print(f"CHARITABLE precision (gold + weak-but-eligible, exact window match): "
           f"{r['charitable_tp']}/{r['items_injected']} = {100.0 * r['charitable_precision']:.1f}%")
+    print(f"STRICT precision over ASSERTIONS ONLY (excludes deterrent-rendered "
+          f"items, which warn off a prior belief rather than assert content): "
+          f"{r['assertion_strict_tp']}/{r['assertions']} = "
+          f"{100.0 * r['assertion_strict_precision']:.1f}%")
     print()
     print("(SYNTHETIC data -- these numbers describe this generated store, not any real")
     print(" workspace. The 55% strict / 12-of-20-windows figures from the UPG brief are an")

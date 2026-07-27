@@ -117,8 +117,15 @@ def build_synthetic_store(svc) -> GroundTruth:
         # Tier C: content-mention only, eligible kind, but OFF-topic -- the
         # basename appears only incidentally in a note that is really about
         # something else (a batch refactor note listing touched files).
-        other_a = f"module_{(i + 3) % WINDOW_COUNT:02d}.py"
-        other_b = f"module_{(i + 7) % WINDOW_COUNT:02d}.py"
+        # `other_a`/`other_b` deliberately use a namespace disjoint from
+        # "module_NN.py" (the real window basenames) -- reusing that pattern
+        # here would make window i's off-topic note ALSO substring-match
+        # whichever other windows' basenames happen to land on it, silently
+        # inflating THEIR recall_for_path() pool by notes that have nothing
+        # to do with this window and were never accounted for in this
+        # module's noise budget (see TASK_NOISE_PER_WINDOW below).
+        other_a = f"legacy_{i:02d}_a.py"
+        other_b = f"legacy_{i:02d}_b.py"
         nid = svc.remember(
             f"refactor touched {other_a}, {basename}, {other_b}; no "
             f"behavior change intended, just import cleanup.",
