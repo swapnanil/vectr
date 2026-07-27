@@ -311,6 +311,31 @@ def test_proactive_directive_kind_note_excluded_from_structural_channel(tmp_path
     assert f"note:{directive_nid}" not in out["anchor_ids"]
 
 
+def test_structural_overfetch_survives_task_noise_starvation(tmp_path, monkeypatch):
+    """Lever 1b: `recall_for_path()`'s OLD fixed `limit == max_items_per_event
+    * 2` (6 at the default) would push a single eligible-kind anchored note
+    past the truncation cutoff once 6+ more-recent kind="task" notes pile up
+    on the same file -- the exact starvation lever 1b exists to fix. Plants
+    the gold note FIRST (so it is the oldest), then 6 task notes AFTER (so
+    `recall_for_path`'s recency tie-break -- every fresh note ties at
+    (author_trust_score, decay_score) == (1.0, 1.0) regardless of kind --
+    ranks all 6 ahead of it): under the OLD limit of 6 the gold note falls
+    out of the pool entirely (position 7 of 7); under the NEW default
+    `min(max_items_per_event * structural_overfetch_multiplier,
+    structural_overfetch_ceiling) == min(3*4, 60) == 12` it survives."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    gold_nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit", kind="gotcha",
+        anchors=["resolver.py"],
+    )
+    for j in range(6):
+        svc.remember(f"still investigating resolver.py (session {j})", kind="task")
+    out = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="s-overfetch",
+    )
+    assert f"note:{gold_nid}" in out["anchor_ids"]
+
+
 # -- recall_scored (UPG-PRO-1) ----------------------------------------------
 
 def test_recall_scored_returns_scores(tmp_path, monkeypatch):
