@@ -286,15 +286,13 @@ def test_proactive_directive_kind_note_excluded_from_structural_channel(tmp_path
     the exact window file never reaches the structural channel, regardless
     of whether any other exclusion toggle exists.
 
-    TODO(sentinel, post-merge): once `proxy.exclude_directive_notes` lands on
-    this branch's merge target, add a combined-lanes test asserting the two
-    mechanisms do not double-suppress or conflict -- i.e. a directive note is
-    excluded by exactly the expected path, and toggling one off while the
-    other stays on still yields the correct exclude/include outcome (a
-    directive note excluded by structural_kinds alone should behave
-    identically whether exclude_directive_notes is on or off, since
-    structural_kinds already removes it upstream of that toggle's own
-    check)."""
+    The combined-lanes case this test deliberately does not cover -- both
+    mechanisms live at once, and one toggled off while the other stays on --
+    is pinned post-merge in tests/test_proactive_p1_composite.py, which
+    records the asymmetry the two configs produce together: turning
+    `exclude_directive_notes` off does NOT restore directives here, because
+    `structural_kinds` removes them upstream of that toggle's own check and
+    is not itself channel-scoped."""
     svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
     directive_nid = svc.remember(
         "always run resolver.py's migration script before deploy", kind="directive",
