@@ -2550,6 +2550,22 @@ class VectrService:
             semantic_note=settings.matcher_semantic_note,
             code_search=settings.matcher_code_search,
             note_limit=max(settings.max_items_per_event * 2, settings.max_items_per_event),
+            # UPG-PROXY-INJECT-ROLE-PROVENANCE: directive notes are excluded
+            # CHANNEL-SCOPED, not globally — only the "proxy" channel appends
+            # injected context into the newest USER-authored message on the
+            # wire (agent/proactive/request_window.py's append_context_block,
+            # the only production caller of which is agent/proactive/proxy.py,
+            # which always passes channel="proxy"). A hypothetical future
+            # channel that injects somewhere other than a user turn (e.g. a
+            # session-start system message, matching how the hook/trigger-
+            # engine surface already delivers directives correctly via a
+            # wholly separate path — WorkingContextStore.fire_and_format(),
+            # never this matcher/gate at all) should keep seeing directives.
+            # Same precedent as `channel != "proxy"` at this method's master-
+            # switch check above.
+            exclude_directive_notes=(
+                settings.proxy_exclude_directive_notes and channel == "proxy"
+            ),
         )
         candidates = matcher.match(window)
         # UPG-PROXY-CROSS-CHANNEL-DEDUP: consult the SAME per-session
