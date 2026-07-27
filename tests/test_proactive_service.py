@@ -273,6 +273,44 @@ def test_proactive_kind_filtered_note_never_claimed_in_turn_ledger(tmp_path, mon
     assert turn_ledger.eligible(task_nid) is True      # kind-filtered: NEVER claimed
 
 
+def test_proactive_directive_kind_note_excluded_from_structural_channel(tmp_path, monkeypatch):
+    """Lever 1's `structural_kinds` allowlist excludes kind="directive" for
+    the same reason it excludes "task" (config.yaml's `proactive.
+    structural_kinds` comment: "not a durable fact about the file"). This is
+    a distinct, independent mechanism from the sibling `proxy.
+    exclude_directive_notes` toggle referenced in that same config.yaml
+    comment (authority-confusion rationale, not file-relevance) -- that
+    toggle is not implemented on this branch (merged separately by another
+    lane into a different target than this branch's base). This test pins
+    ONLY this lane's own exclusion path: a kind="directive" note anchored to
+    the exact window file never reaches the structural channel, regardless
+    of whether any other exclusion toggle exists.
+
+    TODO(sentinel, post-merge): once `proxy.exclude_directive_notes` lands on
+    this branch's merge target, add a combined-lanes test asserting the two
+    mechanisms do not double-suppress or conflict -- i.e. a directive note is
+    excluded by exactly the expected path, and toggling one off while the
+    other stays on still yields the correct exclude/include outcome (a
+    directive note excluded by structural_kinds alone should behave
+    identically whether exclude_directive_notes is on or off, since
+    structural_kinds already removes it upstream of that toggle's own
+    check)."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    directive_nid = svc.remember(
+        "always run resolver.py's migration script before deploy", kind="directive",
+        anchors=["resolver.py"],
+    )
+    gotcha_nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit", kind="gotcha",
+        anchors=["resolver.py"],
+    )
+    out = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="s-directive",
+    )
+    assert f"note:{gotcha_nid}" in out["anchor_ids"]
+    assert f"note:{directive_nid}" not in out["anchor_ids"]
+
+
 # -- recall_scored (UPG-PRO-1) ----------------------------------------------
 
 def test_recall_scored_returns_scores(tmp_path, monkeypatch):
