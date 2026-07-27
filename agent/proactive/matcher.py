@@ -8,7 +8,7 @@ never a runtime read of the conversation (the no-query-heuristics hard rule).
 The matchers do not implement retrieval themselves; they call a `MatchSource`,
 which the daemon backs with the existing recall / path-anchor / search paths.
 The honest shipped subset is:
-  M1 structural_note  — exact file-path -> anchored note (score 1.0)
+  M1 structural_note  — exact file-path -> anchored/mentioning note (tiered score)
   M3 semantic_note    — cosine note recall above the similarity floor
   M4 code_semantic    — hybrid code search (opt-in; needs a built index)
 M2 (symbol-definition via locate) is defined by the design but deferred here;
@@ -30,6 +30,9 @@ from typing import Protocol, runtime_checkable
 
 from agent.proactive.types import (
     CANDIDATE_STATE_NOT_APPLICABLE,
+    STRUCTURAL_TIER_DECLARED_ANCHOR,
+    STRUCTURAL_TIER_GOTCHA_MENTION,
+    STRUCTURAL_TIER_MENTION,
     Candidate,
     ProactiveWindow,
 )
@@ -176,6 +179,9 @@ def _structural_note_candidate(
     anchor: str,
     is_declared_anchor: bool,
     max_chars: int,
+    score_declared_anchor: float,
+    score_gotcha_mention: float,
+    score_mention: float,
     state: dict | None = None,
 ) -> Candidate:
     summary = _note_summary(note, state)
@@ -187,13 +193,27 @@ def _structural_note_candidate(
         f"{summary}",
         max_chars,
     )
+    # UPG-PROXY-INJECT-PRECISION lever 2: a tiered score, replacing a flat
+    # hardcoded 1.0. Each branch reads only a STRUCTURAL property already in
+    # hand — `is_declared_anchor` (computed above by `_first_anchor` from
+    # `note.anchors`) or `note.kind` — never window/query content.
+    if is_declared_anchor:
+        score = score_declared_anchor
+        tier = STRUCTURAL_TIER_DECLARED_ANCHOR
+    elif note.kind == "gotcha":
+        score = score_gotcha_mention
+        tier = STRUCTURAL_TIER_GOTCHA_MENTION
+    else:
+        score = score_mention
+        tier = STRUCTURAL_TIER_MENTION
     return Candidate(
         kind="note_structural",
         line=line,
-        score=1.0,
+        score=score,
         anchor_id=f"note:{note.note_id}",
         is_structural=True,
         state=_state_label(state),
+        structural_tier=tier,
     )
 
 
@@ -249,6 +269,9 @@ class ProactiveMatcher:
         *,
         min_similarity: float,
         max_chars_per_event: int,
+        structural_score_declared_anchor: float,
+        structural_score_gotcha_mention: float,
+        structural_score_mention: float,
         structural_note: bool = True,
         semantic_note: bool = True,
         code_search: bool = False,
@@ -259,6 +282,9 @@ class ProactiveMatcher:
         self._source = source
         self._min_similarity = min_similarity
         self._max_chars = max_chars_per_event
+        self._structural_score_declared_anchor = structural_score_declared_anchor
+        self._structural_score_gotcha_mention = structural_score_gotcha_mention
+        self._structural_score_mention = structural_score_mention
         self._structural_note = structural_note
         self._semantic_note = semantic_note
         self._code_search = code_search
@@ -352,7 +378,11 @@ class ProactiveMatcher:
                 anchor, is_declared_anchor = found if found is not None else ("file", True)
                 candidates.append(
                     _structural_note_candidate(
-                        note, anchor, is_declared_anchor, self._max_chars, state
+                        note, anchor, is_declared_anchor, self._max_chars,
+                        self._structural_score_declared_anchor,
+                        self._structural_score_gotcha_mention,
+                        self._structural_score_mention,
+                        state,
                     )
                 )
 

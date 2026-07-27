@@ -4,8 +4,18 @@ from __future__ import annotations
 
 import time
 
+from agent.config import (
+    PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+    PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
+    PROACTIVE_STRUCTURAL_SCORE_MENTION,
+)
 from agent.proactive.matcher import ProactiveMatcher
-from agent.proactive.types import ProactiveWindow
+from agent.proactive.types import (
+    STRUCTURAL_TIER_DECLARED_ANCHOR,
+    STRUCTURAL_TIER_GOTCHA_MENTION,
+    STRUCTURAL_TIER_MENTION,
+    ProactiveWindow,
+)
 from agent.searcher import SearchResult
 from agent.working_context_store._types import WorkingNote
 
@@ -56,8 +66,13 @@ class _StatefulSource(_Source):
 
 
 def _matcher(source, **kw):
-    defaults = dict(min_similarity=0.35, max_chars_per_event=800,
-                    structural_note=True, semantic_note=True, code_search=True)
+    defaults = dict(
+        min_similarity=0.35, max_chars_per_event=800,
+        structural_note=True, semantic_note=True, code_search=True,
+        structural_score_declared_anchor=PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+        structural_score_gotcha_mention=PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
+        structural_score_mention=PROACTIVE_STRUCTURAL_SCORE_MENTION,
+    )
     defaults.update(kw)
     return ProactiveMatcher(source, **defaults)
 
@@ -67,14 +82,22 @@ def test_structural_note_scores_one_and_anchors():
     it only matched because window file_paths' basename ("resolver.py")
     appears in its content. That is a "mentions" claim, not "anchored
     to" -- see test_structural_note_declared_anchor_says_anchored_to for
-    the genuine declared-anchor case."""
+    the genuine declared-anchor case.
+
+    UPG-PROXY-INJECT-PRECISION lever 2: a plain content-mention match on a
+    non-gotcha kind ("finding" here) is the weakest evidence tier (Tier C
+    / STRUCTURAL_TIER_MENTION) and scores PROACTIVE_STRUCTURAL_SCORE_MENTION
+    -- no longer the flat 1.0 every structural match used to get regardless
+    of how it was found."""
     n = _note(1, "gotcha: resolver.py lock drops on scope exit")
     src = _Source(structural=[n])
     w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
     cands = _matcher(src, semantic_note=False, code_search=False).match(w)
     assert len(cands) == 1
     c = cands[0]
-    assert c.kind == "note_structural" and c.score == 1.0 and c.is_structural
+    assert c.kind == "note_structural" and c.is_structural
+    assert c.score == PROACTIVE_STRUCTURAL_SCORE_MENTION
+    assert c.structural_tier == STRUCTURAL_TIER_MENTION
     assert "mentions resolver.py" in c.line
     assert c.anchor_id == "note:1"
 
@@ -82,15 +105,41 @@ def test_structural_note_scores_one_and_anchors():
 def test_structural_note_declared_anchor_says_anchored_to():
     """A note whose declared `anchors` column actually contains the
     window file gets the stronger "anchored to X" wording -- even when
-    its prose content never spells the filename out."""
+    its prose content never spells the filename out. UPG-PROXY-INJECT-
+    PRECISION lever 2: a declared anchor is the strongest evidence tier
+    (Tier A) and scores PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR."""
     n = _note(12, "the backoff cap here needs tuning")
     n.anchors = [["resolver.py", None]]
     src = _Source(structural=[n])
     w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
     cands = _matcher(src, semantic_note=False, code_search=False).match(w)
     assert len(cands) == 1
-    assert "anchored to resolver.py" in cands[0].line
-    assert "mentions" not in cands[0].line
+    c = cands[0]
+    assert "anchored to resolver.py" in c.line
+    assert "mentions" not in c.line
+    assert c.score == PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR
+    assert c.structural_tier == STRUCTURAL_TIER_DECLARED_ANCHOR
+
+
+def test_structural_note_gotcha_mention_is_middle_tier():
+    """UPG-PROXY-INJECT-PRECISION lever 2: a content-mention match (no
+    declared anchor) on a kind="gotcha" note is Tier B -- stronger than a
+    plain mention on any other kind, weaker than a declared anchor,
+    scoring strictly between PROACTIVE_STRUCTURAL_SCORE_MENTION and
+    PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR."""
+    n = _note(7, "resolver.py: the retry timeout is 30 seconds", kind="gotcha")
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c.score == PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION
+    assert c.structural_tier == STRUCTURAL_TIER_GOTCHA_MENTION
+    assert (
+        PROACTIVE_STRUCTURAL_SCORE_MENTION
+        < c.score
+        < PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR
+    )
 
 
 def test_semantic_note_respects_floor():

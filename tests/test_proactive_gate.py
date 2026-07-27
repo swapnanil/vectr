@@ -1,20 +1,27 @@
 """Gating policy tests (UPG-PRO-5): floor, budget, dedup/cooldown, determinism."""
 from __future__ import annotations
 
+from agent.config import PROACTIVE_MAX_WEAK_STRUCTURAL_ITEMS
 from agent.proactive.gate import LedgerStore, ProactiveGate, SessionLedger
-from agent.proactive.types import Candidate
+from agent.proactive.types import (
+    STRUCTURAL_TIER_DECLARED_ANCHOR,
+    STRUCTURAL_TIER_GOTCHA_MENTION,
+    STRUCTURAL_TIER_MENTION,
+    Candidate,
+)
 
 
-def _cand(kind, line, score, anchor, structural, state="active"):
+def _cand(kind, line, score, anchor, structural, state="active", structural_tier=None):
     return Candidate(
         kind=kind, line=line, score=score, anchor_id=anchor, is_structural=structural,
-        state=state,
+        state=state, structural_tier=structural_tier,
     )
 
 
 def _gate(**kw):
     defaults = dict(
-        min_similarity=0.35, max_items_per_event=3, max_chars_per_event=800, cooldown_items=30
+        min_similarity=0.35, max_items_per_event=3, max_chars_per_event=800, cooldown_items=30,
+        max_weak_structural_items=PROACTIVE_MAX_WEAK_STRUCTURAL_ITEMS,
     )
     defaults.update(kw)
     return ProactiveGate(**defaults)
@@ -223,3 +230,91 @@ def test_budget_evicted_candidate_state_not_carried_into_result():
     out = _gate(max_items_per_event=1).select(cands, session_id="")
     assert out.anchor_ids == ("note:1",)
     assert out.states == ("active",)
+
+
+# -- lever 3: max_weak_structural_items cap (UPG-PROXY-INJECT-PRECISION) ----
+# `structural_tier` is a property of the CANDIDATE (computed by the matcher
+# from note.kind / is_declared_anchor), never a read of query content — the
+# gate only counts it.
+
+
+
+def test_weak_structural_cap_limits_tier_c_items():
+    """With a budget of 5 items but a weak-item cap of 1, only the first
+    (highest-scoring) Tier-C ("mention") candidate is admitted -- the rest
+    are skipped, leaving room for whatever else clears the floor."""
+    cands = [
+        _cand("note_structural", f"weak {i}", 0.60 - i * 0.001, f"note:{i}", True,
+              structural_tier=STRUCTURAL_TIER_MENTION)
+        for i in range(5)
+    ]
+    out = _gate(max_items_per_event=5, max_weak_structural_items=1).select(
+        cands, session_id=""
+    )
+    assert out.item_count == 1
+    assert out.anchor_ids == ("note:0",)  # the single highest-scoring weak item
+
+
+def test_weak_structural_cap_does_not_limit_stronger_tiers():
+    """The cap only counts STRUCTURAL_TIER_MENTION candidates -- declared
+    anchors and gotcha mentions are unaffected regardless of count."""
+    cands = [
+        _cand("note_structural", "anchor a", 1.0, "note:1", True,
+              structural_tier=STRUCTURAL_TIER_DECLARED_ANCHOR),
+        _cand("note_structural", "anchor b", 1.0, "note:2", True,
+              structural_tier=STRUCTURAL_TIER_DECLARED_ANCHOR),
+        _cand("note_structural", "gotcha a", 0.9, "note:3", True,
+              structural_tier=STRUCTURAL_TIER_GOTCHA_MENTION),
+    ]
+    out = _gate(max_items_per_event=5, max_weak_structural_items=0).select(
+        cands, session_id=""
+    )
+    assert out.item_count == 3
+
+
+def test_weak_structural_cap_leaves_room_for_a_later_stronger_candidate():
+    """A capped Tier-C item's slot is not wasted: the budget loop continues
+    past it (rather than stopping), so a later, stronger candidate in
+    score-descending order still gets admitted."""
+    cands = [
+        _cand("note_structural", "weak 1", 0.60, "note:1", True,
+              structural_tier=STRUCTURAL_TIER_MENTION),
+        _cand("note_structural", "weak 2", 0.59, "note:2", True,
+              structural_tier=STRUCTURAL_TIER_MENTION),
+        _cand("note_semantic", "sem", 0.50, "note:3", False),
+    ]
+    out = _gate(max_items_per_event=5, max_weak_structural_items=1).select(
+        cands, session_id=""
+    )
+    assert out.anchor_ids == ("note:1", "note:3")  # note:2 skipped by the cap
+
+
+def test_weak_structural_cap_and_kind_filter_never_claim_in_turn_ledger():
+    """Ledger rule pin (UPG-PROXY-INJECT-PRECISION): an item dropped by
+    EITHER lever 1 (kind-eligibility -- simulated here as never becoming a
+    Candidate at all, matching _ServiceMatchSource.structural_notes()'s
+    filter-after-return contract) or lever 3 (the weak-item cap) must never
+    be claimed in the cross-channel TurnInjectionLedger, using the REAL
+    ledger from agent/trigger_engine.py -- not a stand-in."""
+    from agent.trigger_engine import TurnInjectionLedger
+
+    turn_ledger = TurnInjectionLedger()
+    # note:1 and note:2 are BOTH Tier-C ("mention"); the cap admits only one.
+    # note:99, standing in for a note lever 1 would have filtered out before
+    # a Candidate ever existed, is deliberately absent from `cands` — there
+    # is nothing lever 1 could claim, by construction (see
+    # app/service.py::_ServiceMatchSource.structural_notes()).
+    cands = [
+        _cand("note_structural", "weak 1", 0.60, "note:1", True,
+              structural_tier=STRUCTURAL_TIER_MENTION),
+        _cand("note_structural", "weak 2", 0.59, "note:2", True,
+              structural_tier=STRUCTURAL_TIER_MENTION),
+    ]
+    out = _gate(max_items_per_event=5, max_weak_structural_items=1).select(
+        cands, session_id="", turn_ledger=turn_ledger,
+    )
+    assert out.anchor_ids == ("note:1",)
+    assert turn_ledger.eligible(1) is False  # delivered: claimed
+    assert turn_ledger.eligible(2) is True   # capped by lever 3: NEVER claimed
+    assert turn_ledger.eligible(99) is True  # kind-filtered by lever 1 (never
+                                              # even a Candidate): NEVER claimed

@@ -27,6 +27,20 @@ PROVENANCE_RANK: dict[str, int] = {
 CANDIDATE_STATE_NOT_APPLICABLE = "n/a"
 
 
+# Structural-match evidence tiers (UPG-PROXY-INJECT-PRECISION). Populated only
+# on `kind="note_structural"` candidates (see matcher.py's
+# `_structural_note_candidate`); every other candidate leaves `Candidate.
+# structural_tier` at its default `None`. Each label names HOW a structural
+# match was found — a declared anchor, a content mention in a kind=gotcha
+# note, or a content mention in any other allowed kind — a property of the
+# match itself, never a read of query/window content. `STRUCTURAL_TIER_
+# MENTION` (Tier C, the weakest) is what the gate's per-event weak-item cap
+# (`max_weak_structural_items`) counts against.
+STRUCTURAL_TIER_DECLARED_ANCHOR = "declared_anchor"
+STRUCTURAL_TIER_GOTCHA_MENTION = "gotcha_mention"
+STRUCTURAL_TIER_MENTION = "mention"
+
+
 @dataclass(frozen=True)
 class Candidate:
     """One concrete thing that could be injected, already rendered.
@@ -39,9 +53,9 @@ class Candidate:
 
     kind: str            # note_structural | note_semantic | symbol_def | code_semantic
     line: str            # rendered, self-describing injected text
-    score: float         # 1.0 for exact structural; cosine/hybrid otherwise
+    score: float         # tiered for structural (see structural_tier); cosine/hybrid otherwise
     anchor_id: str       # stable dedup id, e.g. "note:12" / "chunk:foo.py:1-9"
-    is_structural: bool  # True => exact structural match (score 1.0); still
+    is_structural: bool  # True => a structural (path-anchored) match; still
                           # subject to the gate's similarity floor like any
                           # other candidate — see agent/proactive/gate.py
     state: str = "active"  # folded note-lifecycle state ("active" |
@@ -50,6 +64,13 @@ class Candidate:
                           # candidate (UPG-PROXY-AUDIT-DURABLE). Metadata
                           # carried through to the audit line only — never
                           # used to reorder or reweight the candidate itself.
+    structural_tier: str | None = None  # one of the STRUCTURAL_TIER_* labels
+                          # above for a structural candidate, None otherwise —
+                          # see agent/proactive/gate.py's weak-item cap.
+                          # Independent of `state`: the tier describes HOW the
+                          # match was found, the state describes what the note
+                          # currently IS — a revoked note keeps its tier and so
+                          # still competes for a slot as a deterrent.
 
     @property
     def provenance_rank(self) -> int:

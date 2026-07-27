@@ -2980,7 +2980,7 @@ class TestFireAndFormat:
         # channels this time.
         gate = ProactiveGate(
             min_similarity=0.35, max_items_per_event=3, max_chars_per_event=800,
-            cooldown_items=30,
+            cooldown_items=30, max_weak_structural_items=1,
         )
         proxy_candidate = Candidate(
             kind="note_structural", line="note about auth.py",
