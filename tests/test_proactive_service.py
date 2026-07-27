@@ -66,6 +66,18 @@ def test_status_exposes_proactive_enabled(tmp_path, monkeypatch):
     assert svc.status()["proactive_enabled"] is False
 
 
+def test_status_proactive_enabled_reflects_bind_gate(tmp_path, monkeypatch):
+    # UPG-PROXY-STATUS-TRUE-STATE: on a non-loopback bind proactive_context()
+    # refuses every channel unconditionally, so status must not report the
+    # bare config value (post-flip: True) where injection is in fact refused.
+    monkeypatch.delenv("VECTR_PROACTIVE", raising=False)
+    svc = _service(tmp_path, monkeypatch)
+    monkeypatch.setenv("VECTR_BIND_HOST", "0.0.0.0")
+    assert svc.status()["proactive_enabled"] is False
+    monkeypatch.setenv("VECTR_BIND_HOST", "127.0.0.1")
+    assert svc.status()["proactive_enabled"] is True
+
+
 def test_proactive_structural_note_injected(tmp_path, monkeypatch):
     svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
     nid = svc.remember("resolver.py holds the workspace lock; drops on scope exit", kind="gotcha")

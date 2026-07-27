@@ -1407,8 +1407,14 @@ class VectrService:
 
     @staticmethod
     def _proactive_master_enabled() -> bool:
-        from agent.proactive.settings import ProactiveSettings
-        return ProactiveSettings.from_env().enabled
+        """Effective ambient master opt-in as `/v1/status` should report it
+        (UPG-PROXY-STATUS-TRUE-STATE): the config flag ANDed with the
+        unconditional bind gate. On a non-loopback bind `proactive_context()`
+        refuses every channel regardless of config, so reporting the bare
+        config value there would claim injection is on where it is in fact
+        refused."""
+        from agent.proactive.settings import ProactiveSettings, proactive_bind_is_loopback
+        return ProactiveSettings.from_env().enabled and proactive_bind_is_loopback()
 
     def _symbol_graph_status(self) -> dict:
         """Symbol-graph build trust signals for `status` (UPG-8.7): whether the
