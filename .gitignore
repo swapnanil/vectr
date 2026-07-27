@@ -78,6 +78,12 @@ benchmarks/cpython/vectr_index.json
 .ipynb_checkpoints/
 *.ipynb
 
+# VS Code extension build (npm install + tsc + vsce package artifacts)
+node_modules/
+vscode-extension/out/
+vscode-extension/package-lock.json
+*.vsix
+
 # Distribution
 *.tar.gz
 *.zip

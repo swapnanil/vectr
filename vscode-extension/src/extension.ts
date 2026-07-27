@@ -82,14 +82,14 @@ async function startWorkspace(context: vscode.ExtensionContext, workspaceRoot: s
         return;
     }
 
-    const vectrBin = await findVectrBin();
-    if (!vectrBin) {
-        outputChannel.appendLine(`Vectr not found in PATH. Install: pip install vectr`);
+    const launcher = await findVectrBin();
+    if (!launcher) {
+        outputChannel.appendLine(vectrNotFoundMessage());
         setStatus('stopped');
         return;
     }
 
-    outputChannel.appendLine(`[${path.basename(workspaceRoot)}] Starting daemon...`);
+    outputChannel.appendLine(`[${path.basename(workspaceRoot)}] Starting daemon via ${launcher.label}...`);
     setStatus('indexing', preferredPort);
 
     const env: NodeJS.ProcessEnv = {
@@ -99,7 +99,7 @@ async function startWorkspace(context: vscode.ExtensionContext, workspaceRoot: s
         VECTR_EMBED_MODEL: embedModel,
     };
 
-    cp.spawn(vectrBin, ['start', '--path', workspaceRoot, '--port', String(preferredPort)], {
+    cp.spawn(launcher.command, [...launcher.args, 'start', '--path', workspaceRoot, '--port', String(preferredPort)], {
         env,
         detached: true,
         stdio: 'ignore',
@@ -284,15 +284,101 @@ function readWorkspacePort(workspaceRoot: string): number | null {
     return null;
 }
 
-async function findVectrBin(): Promise<string | null> {
-    const candidates = ['vectr', 'python3.14 -m vectr', 'python3 -m vectr', 'python -m vectr'];
-    for (const cmd of candidates) {
-        try {
-            cp.execSync(`${cmd} --help`, { stdio: 'ignore', timeout: 3000 });
-            return cmd.split(' ')[0];
-        } catch { /* try next */ }
+/** How to launch the vectr CLI: an executable plus the argv prefix it needs. */
+interface VectrLauncher {
+    command: string;
+    args: string[];
+    /** Human-readable form, for the output channel. */
+    label: string;
+}
+
+/** Descending numeric order, so `3.14` sorts ahead of `3.9`. */
+function compareVersionDirsDesc(a: string, b: string): number {
+    const parts = (name: string) => (name.match(/\d+/g) ?? []).map(Number);
+    const pa = parts(a);
+    const pb = parts(b);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const delta = (pb[i] ?? 0) - (pa[i] ?? 0);
+        if (delta !== 0) return delta;
     }
+    return 0;
+}
+
+/**
+ * Per-user script directories that `pip install --user vectr` writes to but
+ * that the PATH a GUI application inherits commonly omits. macOS framework
+ * builds use ~/Library/Python/<X.Y>/bin; Windows uses
+ * %APPDATA%\Python\Python<XY>\Scripts; ~/.local/bin covers Linux, pipx, and
+ * non-framework macOS interpreters.
+ */
+function userScriptDirs(): string[] {
+    const home = os.homedir();
+    const dirs: string[] = [];
+
+    const globVersioned = (base: string, pattern: RegExp, leaf: string) => {
+        let entries: string[];
+        try {
+            entries = fs.readdirSync(base);
+        } catch {
+            return; // base doesn't exist on this machine
+        }
+        for (const name of entries.filter(n => pattern.test(n)).sort(compareVersionDirsDesc)) {
+            dirs.push(path.join(base, name, leaf));
+        }
+    };
+
+    if (process.platform === 'darwin') {
+        globVersioned(path.join(home, 'Library', 'Python'), /^\d+\.\d+$/, 'bin');
+    }
+    if (process.platform === 'win32' && process.env.APPDATA) {
+        globVersioned(path.join(process.env.APPDATA, 'Python'), /^Python\d+$/, 'Scripts');
+    }
+
+    dirs.push(path.join(home, '.local', 'bin'));
+    return dirs;
+}
+
+function probeLauncher(command: string, args: string[]): boolean {
+    try {
+        cp.execFileSync(command, [...args, '--help'], { stdio: 'ignore', timeout: 5000 });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Locate the vectr CLI: PATH first, then the per-user script directories a
+ * GUI-inherited PATH tends to miss, then a `python -m vectr` interpreter
+ * fallback. Directory candidates are stat-checked before they are executed, so
+ * a machine with none of them costs no extra process spawns.
+ */
+async function findVectrBin(): Promise<VectrLauncher | null> {
+    if (probeLauncher('vectr', [])) {
+        return { command: 'vectr', args: [], label: 'vectr (PATH)' };
+    }
+
+    const exe = process.platform === 'win32' ? 'vectr.exe' : 'vectr';
+    for (const dir of userScriptDirs()) {
+        const candidate = path.join(dir, exe);
+        if (!fs.existsSync(candidate)) continue;
+        if (probeLauncher(candidate, [])) {
+            return { command: candidate, args: [], label: candidate };
+        }
+    }
+
+    for (const interpreter of ['python3.14', 'python3', 'python']) {
+        if (probeLauncher(interpreter, ['-m', 'vectr'])) {
+            return { command: interpreter, args: ['-m', 'vectr'], label: `${interpreter} -m vectr` };
+        }
+    }
+
     return null;
+}
+
+function vectrNotFoundMessage(): string {
+    const searched = ['PATH', ...userScriptDirs(), 'python -m vectr'].join(', ');
+    return `Vectr CLI not found. Searched: ${searched}. Install: pip install vectr`;
 }
 
 function isVectrAlive(port: number): Promise<boolean> {
