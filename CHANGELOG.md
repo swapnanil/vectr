@@ -1,5 +1,150 @@
 # Changelog
 
+## 1.6.0 — 2026-07-28
+
+Proactive context — surfacing the relevant working-memory note at a
+sanctioned delivery point instead of waiting to be asked — becomes the
+default on local instances, together with the precision, provenance, consent,
+and audit work that makes that default defensible. Also: write-time
+related-note and process-anchor offers on every note write, a
+compaction-boundary preservation surface, and a gitignore-matching fix that
+could silently exclude an entire workspace from the index.
+
+### Proactive context
+- `proactive.enabled` now defaults to **true**. It gates ambient delivery
+  channels — a hook surface that reads the transcript with no per-session
+  user action. The `vectr proxy` channel is exempt from the switch by launch
+  consent: starting the proxy and pointing an editor at it is itself the
+  opt-in for that channel. Proactive context is still refused outright on a
+  non-loopback (team / shared-instance) bind, independent of this key — the
+  bind check runs before any config or channel branch. Turn off with
+  `VECTR_PROACTIVE=0` or `proactive.enabled: false`.
+- Structural (exact file-path) matches no longer bypass the similarity floor.
+  They are scored in tiers instead: the note declares the file in its own
+  `anchors` (1.0), a `gotcha` mentions it (0.9), any other eligible kind
+  merely name-drops it (0.6). At most one weak-mention item is selected per
+  delivery, so low-confidence file mentions can no longer fill the item
+  budget ahead of a genuine semantic match. New config:
+  `proactive.structural_scores`, `proactive.max_weak_structural_items`.
+- The structural channel is restricted to kinds that state a durable fact
+  about a file (`proactive.structural_kinds`: gotcha, finding, decision,
+  operational, reference). `task` notes — a moment in time that happens to
+  name a file — are excluded, and the channel now over-fetches before
+  filtering so that exclusion cannot starve it
+  (`proactive.structural_overfetch_multiplier` / `_ceiling`).
+- Injected context carries a role-provenance envelope and a per-item
+  provenance marker, so a recalled note reads as recalled memory rather than
+  as an instruction from the current turn. `directive` notes are excluded
+  from the proxy channel by default
+  (`proactive.proxy.exclude_directive_notes`); session-start injection
+  delivers them through its own path and is unaffected.
+- A revoked note reaching the proactive matcher renders with the same
+  deterrent framing recall uses, and delivery fails closed when a note's
+  lifecycle state cannot be read rather than emitting the original content.
+- Cooldown identity is the proxy process, not a hash of the conversation's
+  first user message. One proxy serves one editor session, so every request
+  through it — subagent turns included — shares one cooldown ledger.
+  Previously each new first message minted a fresh ledger, and a note could
+  be re-injected seconds after its last emission.
+- Cooldown slots are charged on confirmed delivery, not on retrieval. The
+  proxy checks up front whether a request can carry an appended block at all
+  and skips retrieval entirely when it cannot, then confirms delivery with an
+  opaque token. A caller that passes no token keeps retrieval-time charging
+  exactly as before.
+- Audit split to match: `PROACTIVE_RETRIEVE` is written at selection,
+  `PROACTIVE_INJECT` only once the block is confirmed delivered — so the
+  injection count is an honest lower bound on what reached the model instead
+  of counting blocks that were never appended. `PROACTIVE_INJECT` lines now
+  also carry `chars=` and per-item `states=`, recording delivered size and
+  each item's lifecycle state.
+- `vectr status` / `GET /v1/status` report the **effective** proactive state
+  (the config flag ANDed with the bind gate) instead of the bare config
+  value, which on a non-loopback bind claimed injection was on where it was
+  in fact refused.
+- The proxy's counters distinguish `inject_skipped_not_appendable` — the
+  request could carry no block, so nothing was ever asked for — from the
+  general skipped count.
+
+### Working memory
+- `vectr_remember` returns write-time offers alongside the stored note id:
+  the nearest existing active notes by similarity, so a superseded one can be
+  corrected in the same turn, and — for an `operational` note written without
+  anchors — the process files actually present in the workspace it could be
+  anchored to. Both are additive; neither gates, rewrites, or reorders the
+  write, and similarity is closeness, never a contradiction verdict. Config:
+  `memory_write.related_notes`, `memory_write.proxy_anchor_suggestions`.
+  `POST /v1/remember` gains `related[]` (with each candidate's priority) and
+  `proxy_anchor_suggestions[]`.
+- New versioned proxy-anchor manifest (`agent/proxy_anchors.yaml`) mapping
+  process domains — how dependencies are pinned, how CI runs, how the app is
+  containerized, built, and deployed — to the ecosystem-standard files that
+  encode them. Presence is glob-detected only; no file content is read.
+- Drift on an anchored `operational` note now renders honestly: "changed
+  since — verify; <file> is a proxy for this process, last confirmed <date>",
+  rather than asserting the note is wrong. A changed process file means the
+  process *may* have changed; the judgment stays caller-side.
+- Stale-anchor flagging is keyed on a signature of the drifted anchors rather
+  than on the most recent lifecycle event of any kind. An unrelated event in
+  between no longer admits a duplicate audit row, and a genuinely new drift
+  of the same anchor is no longer permanently suppressed.
+- `recall_for_path()` matches on path boundaries instead of raw substrings —
+  a note about `gate.py` no longer matches when `regate.py` is touched — and
+  over-fetches candidates before that filter, so a true match can no longer
+  be dropped from a too-small candidate pool. New config block:
+  `memory_recall_for_path`.
+
+### Compaction boundary
+- New `GET /v1/boundary/precompact` and a PreCompact hook branch: on editors
+  with session hooks, vectr emits a short boundary-preservation nudge (plus
+  the count of arcs still awaiting distillation) as plain text before the
+  conversation is compacted, which the harness appends to its own compact
+  instructions. Emitted as plain text, never the JSON hook envelope other
+  events use. Config: `episodes.boundary_precompact_enabled` (default true),
+  `episodes.boundary_precompact_token_cap` (default 200).
+
+### Indexing
+- gitignore patterns are matched against the workspace-relative path, not the
+  absolute one. A directory-style entry such as `tmp/` previously matched
+  ancestor components of the workspace root itself, so a workspace checked
+  out under a matching prefix had every one of its files silently excluded
+  from the index. Path-scoped entries such as `docs/*` consequently now match
+  as gitignore intends. Fixed in both the initial scan and the file watcher.
+
+### Reliability
+- Working-memory note operations — remember, recall, forget, commit notes,
+  and proactive selection — dispatch off the request event loop, extending
+  the 1.5.0 vector-store fix to the notes collection. A slow store call no
+  longer stalls every other HTTP and MCP endpoint.
+- The proxy-anchor workspace walk is bounded (depth, directory budget, and
+  pruned dependency/build trees) and runs once per call instead of once per
+  recursive glob: ~600ms → ~22ms on a 3,600-directory tree. It also no longer
+  offers files from inside `node_modules/`, `.venv/`, or `target/`, which
+  encode a dependency's process rather than the workspace's own.
+
+### Editor extension
+- The extension now finds a CLI installed by `pip install --user`. After the
+  PATH probe fails it checks the per-user script directories a GUI
+  application's inherited PATH commonly omits — `~/Library/Python/<X.Y>/bin`
+  on macOS, `%APPDATA%\Python\Python<XY>\Scripts` on Windows, `~/.local/bin`
+  elsewhere — before falling back to `python -m vectr`. Candidates are
+  stat-checked before they are executed, so a machine with none of them costs
+  no extra process spawns.
+- The not-found message lists every location searched instead of claiming
+  only PATH was checked, and the output channel names which CLI was launched.
+- The `python -m vectr` fallback now spawns with its `-m vectr` arguments
+  intact; it previously reported success and then spawned the bare
+  interpreter with vectr's arguments.
+
+### Hygiene
+- Generated editor-guidance files list `vectr_distill`, `vectr_revoke`, and
+  `vectr_reinstate`, which shipped in 1.5.0 but were missing from the tool
+  tables.
+- The proxy-anchor manifest version is derived from the manifest file instead
+  of being duplicated in code, so the two cannot silently drift.
+- New injection-utility A/B harness under `benchmarks/` — scenario set,
+  mechanical scorer, and runner — with its non-vacuity check gated on
+  confirmed delivery rather than on retrieval alone.
+
 ## 1.5.0 — 2026-07-23
 
 Automatic episode capture with arc distillation, a note lifecycle with
