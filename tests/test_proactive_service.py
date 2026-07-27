@@ -223,6 +223,56 @@ def test_proactive_revoked_note_renders_deterrent_not_raw_content(tmp_path, monk
     assert "Do not re-derive" in revoked["context"]
 
 
+# -- structural-channel precision (UPG-PROXY-INJECT-PRECISION) --------------
+
+def test_proactive_task_kind_note_excluded_from_structural_channel(tmp_path, monkeypatch):
+    """Lever 1: `_ServiceMatchSource.structural_notes()` filters on
+    `note.kind` (a static, config-declared allowlist -- never query
+    content). A kind="task" note anchored to the exact window file is
+    excluded end to end, while a kind="gotcha" note anchored to the same
+    file still injects -- proving the filter is real, not vacuous."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    task_nid = svc.remember(
+        "still investigating the resolver.py retry path", kind="task",
+        anchors=["resolver.py"],
+    )
+    gotcha_nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit", kind="gotcha",
+        anchors=["resolver.py"],
+    )
+    out = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id="s1",
+    )
+    assert f"note:{gotcha_nid}" in out["anchor_ids"]
+    assert f"note:{task_nid}" not in out["anchor_ids"]
+
+
+def test_proactive_kind_filtered_note_never_claimed_in_turn_ledger(tmp_path, monkeypatch):
+    """Ledger rule pin, end to end through the real service +
+    TurnInjectionLedger (UPG-PROXY-INJECT-PRECISION ledger rule): a note
+    excluded by lever 1's kind filter never becomes a `Candidate`, so it is
+    never eligible to be claimed -- confirmed here against the actual
+    per-session ledger the proxy/hook surfaces share, not a stand-in."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    task_nid = svc.remember(
+        "still investigating the resolver.py retry path", kind="task",
+        anchors=["resolver.py"],
+    )
+    gotcha_nid = svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit", kind="gotcha",
+        anchors=["resolver.py"],
+    )
+    sid = "s-ledger-pin"
+    turn_ledger = svc._turn_ledger_for(sid)  # pre-allocate so proactive_context
+                                              # (lookup-only) can find it.
+    out = svc.proactive_context(
+        text="", file_paths=["/abs/resolver.py"], session_id=sid,
+    )
+    assert f"note:{gotcha_nid}" in out["anchor_ids"]
+    assert turn_ledger.eligible(gotcha_nid) is False  # delivered: claimed
+    assert turn_ledger.eligible(task_nid) is True      # kind-filtered: NEVER claimed
+
+
 # -- recall_scored (UPG-PRO-1) ----------------------------------------------
 
 def test_recall_scored_returns_scores(tmp_path, monkeypatch):
