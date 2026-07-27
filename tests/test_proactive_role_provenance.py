@@ -15,6 +15,12 @@ from __future__ import annotations
 import time
 from unittest.mock import patch
 
+from agent.config import (
+    PROACTIVE_MAX_WEAK_STRUCTURAL_ITEMS,
+    PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+    PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
+    PROACTIVE_STRUCTURAL_SCORE_MENTION,
+)
 from agent.proactive.gate import _ENVELOPE_CLOSE, _ENVELOPE_OPEN, ProactiveGate
 from agent.proactive.matcher import (
     ProactiveMatcher,
@@ -25,6 +31,16 @@ from agent.proactive.matcher import (
 from agent.proactive.request_window import append_context_block, cache_prefix_signature
 from agent.proactive.types import Candidate, ProactiveWindow
 from agent.working_context_store._types import WorkingNote
+
+# The three tiered structural scores (UPG-PROXY-INJECT-PRECISION), in the
+# positional order `_structural_note_candidate` declares them. Sourced from
+# config rather than literals so a default change cannot silently diverge
+# from what these tests exercise.
+_TIERS = (
+    PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+    PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
+    PROACTIVE_STRUCTURAL_SCORE_MENTION,
+)
 
 
 def _note(note_id, content, kind="finding", provenance="agent", title=""):
@@ -41,7 +57,8 @@ def _cand(kind, line, score, anchor, structural):
 
 def _gate(**kw):
     defaults = dict(
-        min_similarity=0.35, max_items_per_event=3, max_chars_per_event=800, cooldown_items=30
+        min_similarity=0.35, max_items_per_event=3, max_chars_per_event=800, cooldown_items=30,
+        max_weak_structural_items=PROACTIVE_MAX_WEAK_STRUCTURAL_ITEMS,
     )
     defaults.update(kw)
     return ProactiveGate(**defaults)
@@ -114,8 +131,8 @@ def test_provenance_label_defaults_to_weakest_when_missing_or_invalid():
 def test_structural_candidate_line_carries_provenance_marker():
     n_auto = _note(1, "note body", kind="finding", provenance="auto")
     n_human = _note(2, "note body", kind="finding", provenance="human")
-    line_auto = _structural_note_candidate(n_auto, "resolver.py", True, 800).line
-    line_human = _structural_note_candidate(n_human, "resolver.py", True, 800).line
+    line_auto = _structural_note_candidate(n_auto, "resolver.py", True, 800, *_TIERS).line
+    line_human = _structural_note_candidate(n_human, "resolver.py", True, 800, *_TIERS).line
     assert "(finding, auto, anchored to resolver.py)" in line_auto
     assert "(finding, human, anchored to resolver.py)" in line_human
     assert line_auto != line_human  # auto-provenance visibly distinct from human-endorsed
@@ -131,8 +148,8 @@ def test_semantic_candidate_line_carries_provenance_marker():
 
 def test_anchored_vs_mentions_still_distinguishable_with_provenance():
     n = _note(4, "resolver.py content mention", provenance="agent")
-    mention_line = _structural_note_candidate(n, "resolver.py", False, 800).line
-    anchored_line = _structural_note_candidate(n, "resolver.py", True, 800).line
+    mention_line = _structural_note_candidate(n, "resolver.py", False, 800, *_TIERS).line
+    anchored_line = _structural_note_candidate(n, "resolver.py", True, 800, *_TIERS).line
     assert "mentions resolver.py" in mention_line
     assert "anchored to" not in mention_line
     assert "anchored to resolver.py" in anchored_line
@@ -140,10 +157,29 @@ def test_anchored_vs_mentions_still_distinguishable_with_provenance():
 
 
 # -- (5) directive-kind notes excluded from the proxy channel by default ----
+#
+# Two independent mechanisms can keep a directive out of the structural
+# proxy channel, and they are deliberately NOT unified (see config.yaml's
+# structural_kinds block): `structural_kinds` omits directive in every
+# channel because a directive is not a fact about a file, while
+# proxy.exclude_directive_notes omits it from the proxy channel only,
+# because of the authority confusion this file is about. Both of the tests
+# below therefore widen structural_kinds to include directive, so the proxy
+# toggle is the only mechanism left that can decide the outcome -- otherwise
+# the exclusion test would pass even if the toggle did nothing, and the
+# flipped-on test could never pass at all. Their composition (and its
+# asymmetry: either one alone suppresses) is pinned in
+# tests/test_proactive_p1_composite.py.
+
+_STRUCTURAL_KINDS_WITH_DIRECTIVE = "gotcha,finding,decision,operational,reference,directive"
+
 
 def test_directive_note_excluded_from_proxy_channel_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("VECTR_PROACTIVE_PROXY_EXCLUDE_DIRECTIVE_NOTES", raising=False)
-    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    svc = _service(
+        tmp_path, monkeypatch, VECTR_PROACTIVE="1",
+        VECTR_PROACTIVE_STRUCTURAL_KINDS=_STRUCTURAL_KINDS_WITH_DIRECTIVE,
+    )
     nid = svc.remember(
         "resolver.py: always run the full test suite before committing",
         kind="directive", provenance="human",
@@ -158,6 +194,7 @@ def test_directive_note_injected_when_toggle_flipped_on(tmp_path, monkeypatch):
     svc = _service(
         tmp_path, monkeypatch, VECTR_PROACTIVE="1",
         VECTR_PROACTIVE_PROXY_EXCLUDE_DIRECTIVE_NOTES="0",
+        VECTR_PROACTIVE_STRUCTURAL_KINDS=_STRUCTURAL_KINDS_WITH_DIRECTIVE,
     )
     nid = svc.remember(
         "resolver.py: always run the full test suite before committing",
@@ -207,6 +244,9 @@ def test_directive_excluded_at_matcher_is_never_claimed_in_turn_ledger():
     matcher = ProactiveMatcher(
         _Source(), min_similarity=0.35, max_chars_per_event=800,
         structural_note=True, semantic_note=False, code_search=False,
+        structural_score_declared_anchor=PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+        structural_score_gotcha_mention=PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
+        structural_score_mention=PROACTIVE_STRUCTURAL_SCORE_MENTION,
         exclude_directive_notes=True,
     )
     window = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
@@ -242,6 +282,9 @@ def test_directive_not_excluded_when_toggle_off_is_claimed_normally():
     matcher = ProactiveMatcher(
         _Source(), min_similarity=0.35, max_chars_per_event=800,
         structural_note=True, semantic_note=False, code_search=False,
+        structural_score_declared_anchor=PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+        structural_score_gotcha_mention=PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
+        structural_score_mention=PROACTIVE_STRUCTURAL_SCORE_MENTION,
         exclude_directive_notes=False,
     )
     window = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
@@ -261,7 +304,7 @@ def test_revoked_note_deterrent_still_leads_through_new_envelope():
     state = {
         "state": "revoked", "reason": "wrong assumption", "actor": "agent", "ts": time.time(),
     }
-    cand = _structural_note_candidate(n, "resolver.py", True, 800, state)
+    cand = _structural_note_candidate(n, "resolver.py", True, 800, *_TIERS, state)
     assert "REVOKED" in cand.line
     assert cand.line.index("Do not re-derive") < cand.line.index("Previously believed")
 
