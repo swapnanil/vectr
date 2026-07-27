@@ -2500,13 +2500,31 @@ class VectrService:
 
         class _ServiceMatchSource:
             def structural_notes(self, paths):
+                # UPG-PROXY-INJECT-PRECISION lever 1 + 1b: the structural
+                # channel only ever admits notes whose `kind` is on the
+                # declared eligibility allowlist (a static NOTE PROPERTY,
+                # never a read of query/window content) — `task`/`directive`
+                # notes are excluded by default since they describe
+                # in-progress work or standing rules, not durable facts about
+                # this file. `recall_for_path` itself is untouched; this is a
+                # filter-after-return. Because the filter can only shrink the
+                # pool, the requested pool is over-fetched by a configured
+                # multiplier (capped by an absolute ceiling) so the filter
+                # cannot starve the channel down to fewer than
+                # `max_items_per_event` eligible notes when the path has a
+                # healthy mix of kinds.
+                pool_size = min(
+                    settings.max_items_per_event * settings.structural_overfetch_multiplier,
+                    settings.structural_overfetch_ceiling,
+                )
                 seen: dict[int, object] = {}
                 for p in paths:
                     try:
                         for note in service._context_store.recall_for_path(
-                            service._workspace_root, p, limit=settings.max_items_per_event * 2
+                            service._workspace_root, p, limit=pool_size
                         ):
-                            seen.setdefault(note.note_id, note)
+                            if note.kind in settings.structural_kinds:
+                                seen.setdefault(note.note_id, note)
                     except Exception:
                         continue
                 return list(seen.values())
@@ -2551,6 +2569,9 @@ class VectrService:
             semantic_note=settings.matcher_semantic_note,
             code_search=settings.matcher_code_search,
             note_limit=max(settings.max_items_per_event * 2, settings.max_items_per_event),
+            structural_score_declared_anchor=settings.structural_score_declared_anchor,
+            structural_score_gotcha_mention=settings.structural_score_gotcha_mention,
+            structural_score_mention=settings.structural_score_mention,
         )
         candidates = matcher.match(window)
         # UPG-PROXY-CROSS-CHANNEL-DEDUP: consult the SAME per-session
