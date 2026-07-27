@@ -144,12 +144,15 @@ def test_chars_field_equals_injected_context_length_for_two_item_counts(tmp_path
 
 # ---------------------------------------------------------------------------
 # 4. Budget observability: chars= never exceeds the configured budget plus
-#    the fixed envelope overhead (the header line + its separating newline —
-#    the only bytes the gate's own per-event char budget does not count).
+#    the fixed envelope overhead (the open/close provenance markers and their
+#    separating newlines — the only bytes the gate's own per-event char budget
+#    does not count). Computed from the gate's own constants rather than
+#    hardcoded, so retuning the envelope wording cannot silently invalidate
+#    the budget-adherence guarantee this asserts.
 # ---------------------------------------------------------------------------
 
 def test_chars_stays_within_configured_budget_plus_fixed_envelope(tmp_path, monkeypatch):
-    from agent.proactive.gate import _HEADER
+    from agent.proactive.gate import _ENVELOPE_CLOSE, _ENVELOPE_OPEN
 
     log_file = tmp_path / "audit.log"
     max_chars = 120
@@ -167,7 +170,8 @@ def test_chars_stays_within_configured_budget_plus_fixed_envelope(tmp_path, monk
     lines = _injection_lines(log_file)
     assert len(lines) == 1
     chars = int(_fields(lines[0])["chars"])
-    envelope = len(_HEADER) + 1  # header + its trailing newline before the body
+    # open marker + its trailing newline, plus the newline + close marker
+    envelope = len(_ENVELOPE_OPEN) + 1 + 1 + len(_ENVELOPE_CLOSE)
     assert chars == len(out["context"])
     assert chars <= max_chars + envelope, (
         f"chars={chars} exceeds configured budget {max_chars} + envelope {envelope}"

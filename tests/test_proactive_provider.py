@@ -93,7 +93,8 @@ def test_provider_constructed_via_wiring_has_timeout_below_budget():
         proxy_port=8785, proxy_upstream_base_url="https://api.anthropic.com",
         proxy_connect_timeout_s=10.0, proxy_read_timeout_s=600.0, proxy_inject=True,
         proxy_inject_budget_ms=750, proxy_inject_provider_timeout_fraction=0.8,
-        proxy_inject_provider_timeout_max_s=2.0, cache_enabled=False, cache_max_entries=2048,
+        proxy_inject_provider_timeout_max_s=2.0, proxy_exclude_directive_notes=True,
+        cache_enabled=False, cache_max_entries=2048,
         cache_ttl_seconds=0.0, cache_similarity_threshold=1.0, response_cache_enabled=False,
         response_cache_ttl_seconds=60.0, response_cache_max_entries=256,
     )

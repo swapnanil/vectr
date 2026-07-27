@@ -13,6 +13,15 @@ The honest shipped subset is:
   M4 code_semantic    — hybrid code search (opt-in; needs a built index)
 M2 (symbol-definition via locate) is defined by the design but deferred here;
 adding it is another matcher + threshold, not a content classifier.
+
+Every rendered note line also carries a provenance/trust marker (UPG-PROXY-
+INJECT-ROLE-PROVENANCE, `_provenance_label()` below) so a note that escapes
+the outer envelope (agent/proactive/gate.py) — truncation, a model that skims
+— still self-describes as recalled memory of a given trust class rather than
+reading as an instruction. `ProactiveMatcher` can additionally be told to
+drop `kind == "directive"` notes entirely before they ever become a
+`Candidate` (`exclude_directive_notes`) — see that flag's own docstring for
+why this belongs here rather than in the gate.
 """
 from __future__ import annotations
 
@@ -30,7 +39,7 @@ from agent.working_context_store._store import (
     _note_title,
     _path_boundary_match,
 )
-from agent.working_context_store._types import WorkingNote
+from agent.working_context_store._types import PROVENANCE_VALUES, WorkingNote
 
 
 @runtime_checkable
@@ -145,6 +154,23 @@ def _state_label(state: dict | None) -> str:
     return "active"
 
 
+def _provenance_label(note: WorkingNote) -> str:
+    """The trust/provenance marker for the injected line (UPG-PROXY-INJECT-
+    ROLE-PROVENANCE): `WorkingNote.provenance` is a structural note property
+    (human | agent | auto — bm2-design-skeleton.md §5), never conversation
+    content. Surfacing it lets an unreviewed auto-captured note read as
+    visibly weaker than an agent-recorded or human-endorsed one, even after
+    the note has left the outer envelope framing (agent/proactive/gate.py).
+
+    A missing or unrecognised value defaults to the WEAKEST label ("auto")
+    rather than the strongest — this must never fabricate a "human"-endorsed
+    claim for a note whose provenance field is absent or malformed."""
+    value = getattr(note, "provenance", None)
+    if value in PROVENANCE_VALUES:
+        return value
+    return "auto"
+
+
 def _structural_note_candidate(
     note: WorkingNote,
     anchor: str,
@@ -154,9 +180,12 @@ def _structural_note_candidate(
 ) -> Candidate:
     summary = _note_summary(note, state)
     kind_label = _kind_label(note, state)
+    provenance_label = _provenance_label(note)
     relation = "anchored to" if is_declared_anchor else "mentions"
     line = _cap(
-        f"note #{note.note_id} ({kind_label}, {relation} {anchor}): {summary}", max_chars
+        f"note #{note.note_id} ({kind_label}, {provenance_label}, {relation} {anchor}): "
+        f"{summary}",
+        max_chars,
     )
     return Candidate(
         kind="note_structural",
@@ -173,7 +202,10 @@ def _semantic_note_candidate(
 ) -> Candidate:
     summary = _note_summary(note, state)
     kind_label = _kind_label(note, state)
-    line = _cap(f"note #{note.note_id} ({kind_label}): {summary}", max_chars)
+    provenance_label = _provenance_label(note)
+    line = _cap(
+        f"note #{note.note_id} ({kind_label}, {provenance_label}): {summary}", max_chars
+    )
     return Candidate(
         kind="note_semantic",
         line=line,
@@ -222,6 +254,7 @@ class ProactiveMatcher:
         code_search: bool = False,
         note_limit: int = 10,
         code_limit: int = 5,
+        exclude_directive_notes: bool = False,
     ) -> None:
         self._source = source
         self._min_similarity = min_similarity
@@ -231,6 +264,16 @@ class ProactiveMatcher:
         self._code_search = code_search
         self._note_limit = note_limit
         self._code_limit = code_limit
+        # UPG-PROXY-INJECT-ROLE-PROVENANCE: a static per-channel policy flag
+        # (set by the caller from config, e.g. `proactive.proxy.
+        # exclude_directive_notes` — see app/service.py's ProactiveMatcher
+        # construction), never a runtime read of window/conversation content.
+        # When True, `match()` drops every kind=="directive" note BEFORE it
+        # is folded into a Candidate at all — filtering on `WorkingNote.kind`,
+        # a structural note property, is the allowed "config-declared
+        # quality prior on a PROPERTY" category of the no-query-heuristics
+        # rule, not a query-content classifier.
+        self._exclude_directive_notes = exclude_directive_notes
 
     def match(self, window: ProactiveWindow) -> list[Candidate]:
         candidates: list[Candidate] = []
@@ -242,6 +285,8 @@ class ProactiveMatcher:
                 structural_notes = self._source.structural_notes(window.file_paths)
             except Exception:
                 structural_notes = []
+            if self._exclude_directive_notes:
+                structural_notes = [n for n in structural_notes if n.kind != "directive"]
 
         # M3 — semantic note match: cosine recall above the similarity floor.
         semantic_scored: list[tuple[WorkingNote, float]] = []
@@ -252,6 +297,8 @@ class ProactiveMatcher:
                 )
             except Exception:
                 semantic_scored = []
+            if self._exclude_directive_notes:
+                semantic_scored = [(n, s) for (n, s) in semantic_scored if n.kind != "directive"]
 
         # UPG-PROXY-REVOKED-LEAK: fold lifecycle state for the UNION of every
         # note either matcher found, ONCE — never per-note, never per-matcher

@@ -87,7 +87,12 @@ class InjectionResult:
     item_count: int
     anchor_ids: tuple[str, ...]
     scores: tuple[float, ...]
-    states: tuple[str, ...] = ()  # positionally aligned with anchor_ids/scores
+    # Positionally aligned with anchor_ids/scores WHEN POPULATED (the gate
+    # builds all three from the same `selected` list, so they cannot drift).
+    # Empty means "lifecycle state not transported for this result" — never
+    # "no revoked items"; see agent/proactive/provider.py, which reconstructs
+    # a result from the daemon's `/v1/proactive` response and cannot know it.
+    states: tuple[str, ...] = ()
 
     @staticmethod
     def empty() -> "InjectionResult":

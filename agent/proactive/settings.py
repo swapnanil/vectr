@@ -88,6 +88,7 @@ class ProactiveSettings:
     proxy_inject_budget_ms: int
     proxy_inject_provider_timeout_fraction: float
     proxy_inject_provider_timeout_max_s: float
+    proxy_exclude_directive_notes: bool
 
     cache_enabled: bool
     cache_max_entries: int
@@ -146,6 +147,10 @@ class ProactiveSettings:
             proxy_inject_provider_timeout_max_s=_env_float(
                 "VECTR_PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_MAX_S",
                 _c.PROACTIVE_PROXY_INJECT_PROVIDER_TIMEOUT_MAX_S,
+            ),
+            proxy_exclude_directive_notes=_env_bool(
+                "VECTR_PROACTIVE_PROXY_EXCLUDE_DIRECTIVE_NOTES",
+                _c.PROACTIVE_PROXY_EXCLUDE_DIRECTIVE_NOTES,
             ),
             cache_enabled=_env_bool("VECTR_PROACTIVE_CACHE", _c.PROACTIVE_CACHE_ENABLED),
             cache_max_entries=_env_int(
