@@ -13,14 +13,24 @@ from agent.proactive.settings import (
 )
 
 
-def test_defaults_disabled(monkeypatch):
+def test_defaults(monkeypatch):
     for k in list(__import__("os").environ):
         if k.startswith("VECTR_PROACTIVE"):
             monkeypatch.delenv(k, raising=False)
     s = ProactiveSettings.from_env()
-    assert s.enabled is False
+    assert s.enabled is True  # UPG-PROXY-DEFAULT-ON-GATE
     assert s.proxy_inject is True
     assert s.cache_similarity_threshold == 1.0
+
+
+def test_config_layer_defaults_proactive_enabled_true():
+    # Pins the default independently of the env-override path above:
+    # agent/config.yaml's proactive.enabled (surfaced as
+    # agent.config.PROACTIVE_ENABLED) is the bundled default ProactiveSettings
+    # .from_env() falls back to when VECTR_PROACTIVE is unset.
+    from agent import config
+
+    assert config.PROACTIVE_ENABLED is True
 
 
 def test_env_overrides(monkeypatch):

@@ -1622,11 +1622,21 @@ proactive:
   # (product behaviour); deployment/runtime toggles live in env vars
   # (VECTR_PROACTIVE, VECTR_PROACTIVE_*), which override every value here.
   #
-  # Master opt-in. Off by default. Also requires a loopback bind: team /
-  # non-loopback (shared-instance) mode forces proactive OFF by construction
-  # (it reads the conversation, the most sensitive data on the machine — see
-  # _proactive_enabled in main.py). Never on without the user turning it on.
-  enabled: false
+  # Master opt-in. Defaults ON (UPG-PROXY-DEFAULT-ON-GATE). Gates AMBIENT
+  # (non-proxy) delivery channels only — a hook/trigger-engine surface that
+  # reads the transcript without any per-session user action. The proxy
+  # channel is exempt from this switch by launch consent: running `vectr
+  # proxy` and pointing an agent harness at it is itself the opt-in for that
+  # channel, so proxy injection was already happening before this default
+  # flipped (see `channel != "proxy"` in `proactive_context`). Also still
+  # requires a loopback bind regardless of this value: a non-loopback (team /
+  # shared-instance) bind refuses proactive context unconditionally at
+  # runtime via `proactive_bind_is_loopback()` in agent/proactive/settings.py,
+  # consulted by `proactive_context` BEFORE any config or channel branch (it
+  # reads the conversation, the most sensitive data on the machine),
+  # independent of this key. Turn off with `VECTR_PROACTIVE=0` or
+  # `proactive.enabled: false`.
+  enabled: true
 
   # Semantic floor for note injection (reuses the recall UPG-5.1 cutoff shape).
   # A candidate note whose cosine similarity to the assembled window is below
