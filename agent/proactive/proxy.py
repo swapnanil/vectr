@@ -17,6 +17,8 @@ Hard properties:
   * Cache-append discipline. Injected content is appended as the newest content;
     earlier messages are never mutated or reordered (see request_window).
   * Localhost-only, off by default, own opt-in.
+  * Cooldown session identity is the PROXY PROCESS, not the conversation
+    (UPG-PROXY-COOLDOWN-SESSION-IDENTITY). See `VectrProxy._instance_id` below.
 
 No real API call is ever made in tests: the upstream client and the injection
 provider are both injectable, so tests drive a local mock upstream.
@@ -30,6 +32,7 @@ import json
 import logging
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
@@ -125,32 +128,6 @@ def _forward_response_headers(headers) -> dict[str, str]:
     return out
 
 
-def _session_id(body: dict) -> str:
-    """Deterministic per-conversation id for dedup/cooldown: a hash of the first
-    user message's text (stable across the turns of one conversation). Structural
-    identity, not content classification. "" when none can be derived."""
-    try:
-        for msg in body.get("messages") or []:
-            if isinstance(msg, dict) and msg.get("role") == "user":
-                content = msg.get("content")
-                if isinstance(content, str):
-                    seed = content
-                elif isinstance(content, list):
-                    seed = " ".join(
-                        str(b.get("text") or "")
-                        for b in content
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    )
-                else:
-                    seed = ""
-                if seed.strip():
-                    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
-                break
-    except Exception:
-        return ""
-    return ""
-
-
 def _response_cache_key(path: str, header_sig: str, forward_bytes: bytes) -> str:
     h = hashlib.sha256()
     h.update(path.encode("utf-8"))
@@ -171,7 +148,33 @@ def _anthropic_error(status_code: int, message: str, err_type: str = "api_error"
 
 
 class VectrProxy:
-    """Holds proxy state and serves the ASGI handler."""
+    """Holds proxy state and serves the ASGI handler.
+
+    `_instance_id` is the cooldown/dedup session identity passed to the
+    injection provider (UPG-PROXY-COOLDOWN-SESSION-IDENTITY). It is minted
+    ONCE per process, not derived from conversation content: one `vectr
+    proxy` process serves one editor session, so every request through it —
+    including every subagent driving requests through the SAME proxy —
+    shares ONE cooldown ledger. That is exactly the identity a proxy client
+    needs: the previous per-first-user-message hash minted a fresh ledger on
+    every new first message (including every subagent turn), so a
+    high-precision note could be re-injected within seconds of its last
+    emission. A different editor window runs a different proxy process and
+    therefore gets its own, independent instance id — ledgers stay isolated
+    across windows exactly as before.
+
+    The `proxy-` prefix deliberately namespaces this id so it can never
+    collide with an editor-supplied hook session id — that keeps the
+    cross-channel turn-ledger lookup (`VectrService._existing_turn_ledger`)
+    a guaranteed miss on the proxy path, unchanged from before this fix (see
+    that method's docstring).
+
+    Accepted residual: a proxy restart mints a new instance id, so the
+    cooldown ledger for that process is lost across restarts. This is not
+    persisted by design — the ledger is a soft, in-memory noise filter, not
+    a durable record, and the alternative (persisting an identity to disk)
+    is out of scope here.
+    """
 
     def __init__(
         self,
@@ -188,6 +191,7 @@ class VectrProxy:
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self.metrics = ProxyMetrics()
+        self._instance_id = f"proxy-{uuid.uuid4().hex[:16]}"
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is not None:
@@ -242,12 +246,13 @@ class VectrProxy:
             logger.debug("proactive inject skipped: empty window")
             return forward_bytes, False
 
-        session = _session_id(body)
         budget_s = max(self._settings.proxy_inject_budget_ms, 1) / 1000.0
         started = time.monotonic()
         try:
             result = await asyncio.wait_for(
-                self._provider.inject(window, session_id=session, channel="proxy"),
+                self._provider.inject(
+                    window, session_id=self._instance_id, channel="proxy"
+                ),
                 timeout=budget_s,
             )
         except (asyncio.TimeoutError, Exception) as exc:
@@ -387,7 +392,14 @@ def build_proxy_app(
     )
 
     async def _health(_request: Request) -> Response:
-        return JSONResponse({"status": "ok", "proxy": True, "metrics": proxy.metrics.as_dict()})
+        return JSONResponse(
+            {
+                "status": "ok",
+                "proxy": True,
+                "instance_id": proxy._instance_id,
+                "metrics": proxy.metrics.as_dict(),
+            }
+        )
 
     async def _catch_all(request: Request) -> Response:
         return await proxy.handle(request)

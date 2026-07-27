@@ -85,3 +85,27 @@ def test_proactive_route_service_error_never_500(client, svc):
     resp = client.post("/v1/proactive", json={"text": "x"})
     assert resp.status_code == 200  # hook/proxy-facing: never errors the caller
     assert resp.json()["item_count"] == 0
+
+
+def test_proactive_route_backward_compat_session_id_omitted_or_legacy_shaped(client, svc):
+    """Backward compat (UPG-PROXY-COOLDOWN-SESSION-IDENTITY). `session_id`
+    stays an opaque string on the wire — this route never validates its
+    shape. An older proxy client sending a legacy sha256-hex-looking
+    session_id, or a caller omitting session_id entirely, both keep getting
+    a well-formed 200 response, never a validation error, never a crash."""
+    resp_omitted = client.post("/v1/proactive", json={"text": "how does the workspace lock work"})
+    assert resp_omitted.status_code == 200
+    data_omitted = resp_omitted.json()
+    assert set(data_omitted) >= {"context", "item_count", "anchor_ids", "scores", "processing_ms"}
+    _args, kwargs_omitted = svc.proactive_context.call_args
+    assert kwargs_omitted["session_id"] == ""  # ProactiveRequest.session_id default
+
+    legacy_sid = "a3f5c9e21b7d4f68"  # shaped like the old sha256(...)[:16] session id
+    resp_legacy = client.post("/v1/proactive", json={
+        "text": "how does the workspace lock work", "session_id": legacy_sid,
+    })
+    assert resp_legacy.status_code == 200
+    data_legacy = resp_legacy.json()
+    assert set(data_legacy) >= {"context", "item_count", "anchor_ids", "scores", "processing_ms"}
+    _args, kwargs_legacy = svc.proactive_context.call_args
+    assert kwargs_legacy["session_id"] == legacy_sid

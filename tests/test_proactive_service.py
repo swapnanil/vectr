@@ -173,13 +173,14 @@ def test_proxy_and_hook_channels_share_one_turn_ledger(tmp_path, monkeypatch):
 def test_proxy_call_with_unseen_session_id_does_not_allocate_turn_ledger(tmp_path, monkeypatch):
     """`proactive_context` must consult the shared TurnInjectionLedger
     LOOKUP-ONLY (`_existing_turn_ledger`), never allocate one
-    (`_turn_ledger_for`). The proxy channel's session_id (sha256 of the
-    first user message) is, today, disjoint from the editor-supplied
-    session id hook/trigger-engine surfaces use — if a proxy call allocated
-    a ledger no hook surface will ever look up, that churn would consume
-    slots in the EVICTION_MAX_TRACKED_SESSIONS-bounded `_turn_ledgers` LRU
-    for zero dedup benefit, risking eviction of a live editor session's real
-    ledger under heavy multi-subagent session churn."""
+    (`_turn_ledger_for`). The proxy channel's session_id (a per-proxy-
+    process instance id minted once by `VectrProxy.__init__`, see
+    UPG-PROXY-COOLDOWN-SESSION-IDENTITY) is, by construction, disjoint from
+    the editor-supplied session id hook/trigger-engine surfaces use — if a
+    proxy call allocated a ledger no hook surface will ever look up, that
+    churn would consume slots in the EVICTION_MAX_TRACKED_SESSIONS-bounded
+    `_turn_ledgers` LRU for zero dedup benefit, risking eviction of a live
+    editor session's real ledger under heavy multi-subagent session churn."""
     svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
     svc.remember("resolver.py holds the workspace lock; drops on scope exit", kind="gotcha")
     assert len(svc._turn_ledgers) == 0
@@ -189,6 +190,38 @@ def test_proxy_call_with_unseen_session_id_does_not_allocate_turn_ledger(tmp_pat
     )
     assert len(svc._turn_ledgers) == 0
     assert "never-seen-before" not in svc._turn_ledgers
+
+
+def test_proxy_instance_shaped_session_id_does_not_evict_editor_turn_ledger(tmp_path, monkeypatch):
+    """Turn-ledger non-regression (UPG-PROXY-COOLDOWN-SESSION-IDENTITY test
+    C). A proxy-channel call whose session_id is shaped exactly like
+    `VectrProxy._instance_id` (`proxy-<16 hex chars>`) must still hit the
+    LOOKUP-ONLY `_existing_turn_ledger` path, never `_turn_ledger_for`: no
+    new entry is allocated in `_turn_ledgers`, and a real editor-session
+    ledger allocated beforehand by a hook surface survives untouched (same
+    object, not just an equal one)."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    (tmp_path / "resolver.py").write_text("# lock resolver\n")
+    abs_path = str(tmp_path / "resolver.py")
+    svc.remember(
+        "resolver.py holds the workspace lock; drops on scope exit",
+        kind="gotcha", anchors=["resolver.py"],
+    )
+    editor_sid = "editor-session-abc"
+    svc.recall(file_path=abs_path, session_id=editor_sid, hook_event="PreToolUse")
+    assert editor_sid in svc._turn_ledgers
+    editor_ledger_before = svc._turn_ledgers[editor_sid]
+    len_before = len(svc._turn_ledgers)
+
+    proxy_sid = "proxy-" + "a" * 16  # shaped exactly like VectrProxy._instance_id
+    svc.proactive_context(
+        text="", file_paths=[abs_path], session_id=proxy_sid, channel="proxy",
+    )
+
+    assert len(svc._turn_ledgers) == len_before
+    assert proxy_sid not in svc._turn_ledgers
+    assert editor_sid in svc._turn_ledgers
+    assert svc._turn_ledgers[editor_sid] is editor_ledger_before
 
 
 def test_proactive_revoked_note_renders_deterrent_not_raw_content(tmp_path, monkeypatch):

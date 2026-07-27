@@ -16,9 +16,10 @@ import httpx
 import pytest
 
 from agent.proactive.cache import ResponseCache
+from agent.proactive.gate import LedgerStore, ProactiveGate
 from agent.proactive.proxy import build_proxy_app
 from agent.proactive.settings import ProactiveSettings
-from agent.proactive.types import InjectionResult
+from agent.proactive.types import Candidate, InjectionResult
 from tests._proactive_upstream import MockUpstream, full_sse_bytes, unreachable_client_factory
 
 _BASE = dict(
@@ -279,6 +280,156 @@ async def test_concurrent_requests_all_succeed():
         ])
     assert all(r.status_code == 200 for r in results)
     assert up.call_count == 10
+
+
+# -- cooldown session identity (UPG-PROXY-COOLDOWN-SESSION-IDENTITY) --------
+#
+# These drive REAL cooldown machinery (a real ProactiveGate over a real
+# shared LedgerStore), not a stub provider, so the assertions pin actual
+# injected content/anchor ids rather than the session_id string alone.
+
+
+def _lock_candidate(anchor_id="note:1"):
+    return Candidate(
+        kind="note_structural",
+        line="note #1 (gotcha, anchored to resolver.py): drops on scope exit",
+        score=1.0,
+        anchor_id=anchor_id,
+        is_structural=True,
+    )
+
+
+def _messages_body(text):
+    return {
+        "model": "claude-x",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": text}]}],
+    }
+
+
+class _GateBackedProvider:
+    """Wraps a REAL `ProactiveGate` (over a REAL, injectable `LedgerStore`)
+    so a test exercises actual cooldown/dedup logic end to end -- never a
+    stub that only records the session_id it was called with."""
+
+    def __init__(self, gate: ProactiveGate, candidates: list[Candidate]):
+        self._gate = gate
+        self._candidates = candidates
+        self.seen_session_ids: list[str] = []
+
+    async def inject(self, window, *, session_id, channel):
+        self.seen_session_ids.append(session_id)
+        return self._gate.select(self._candidates, session_id=session_id)
+
+
+async def test_cooldown_shared_across_different_first_messages_same_proxy_instance():
+    """Headline defect repro + fix pin. Two requests carrying DIFFERENT first
+    user messages through the SAME VectrProxy instance must share one
+    cooldown ledger: the second request must NOT re-inject the note the
+    first one just emitted. Pre-fix (session_id = sha256 of the first user
+    message), two different first messages produced two different cooldown
+    keys and the note injected twice; post-fix both share the proxy
+    instance's one stable identity and the second is suppressed."""
+    ledger_store = LedgerStore(cooldown_items=30)
+    gate = ProactiveGate(
+        min_similarity=0.0, max_items_per_event=3, max_chars_per_event=800,
+        cooldown_items=30, max_weak_structural_items=1, ledger_store=ledger_store,
+    )
+    provider = _GateBackedProvider(gate, [_lock_candidate()])
+    up = MockUpstream()
+    app = build_proxy_app(_settings(), injection_provider=provider, client_factory=up.client_factory())
+
+    await _drive(app, body=_messages_body("explain the lock"))
+    await _drive(app, body=_messages_body("totally different opening message entirely"))
+
+    assert up.call_count == 2
+    first_content = up.requests[0]["json"]["messages"][-1]["content"]
+    second_content = up.requests[1]["json"]["messages"][-1]["content"]
+
+    # First request: nothing seen yet for this identity -> the note injects.
+    assert len(first_content) == 2
+    assert "drops on scope exit" in first_content[-1]["text"]
+
+    # Second request, SAME proxy instance, DIFFERENT first user message:
+    # cooldown suppresses the repeat -- the fix pin. Forwarded unmodified.
+    assert second_content == [{"type": "text", "text": "totally different opening message entirely"}]
+
+    # Both requests carried the SAME session identity into the gate/ledger.
+    assert len(provider.seen_session_ids) == 2
+    assert provider.seen_session_ids[0] == provider.seen_session_ids[1]
+    assert provider.seen_session_ids[0] == app.state.proxy._instance_id
+    assert app.state.proxy._instance_id.startswith("proxy-")
+
+
+async def test_different_proxy_instances_get_independent_cooldown_ledgers():
+    """Inverse isolation. Two separately-constructed VectrProxy instances
+    sharing the same LedgerStore get DIFFERENT identities, hence
+    independent ledgers -- both inject the same note, even for the
+    byte-identical first message, because cooldown keys off the proxy
+    instance, never off message content."""
+    ledger_store = LedgerStore(cooldown_items=30)
+    gate = ProactiveGate(
+        min_similarity=0.0, max_items_per_event=3, max_chars_per_event=800,
+        cooldown_items=30, max_weak_structural_items=1, ledger_store=ledger_store,
+    )
+    candidate = _lock_candidate()
+
+    provider_a = _GateBackedProvider(gate, [candidate])
+    up_a = MockUpstream()
+    app_a = build_proxy_app(_settings(), injection_provider=provider_a, client_factory=up_a.client_factory())
+
+    provider_b = _GateBackedProvider(gate, [candidate])
+    up_b = MockUpstream()
+    app_b = build_proxy_app(_settings(), injection_provider=provider_b, client_factory=up_b.client_factory())
+
+    assert app_a.state.proxy._instance_id != app_b.state.proxy._instance_id
+
+    await _drive(app_a, body=_messages_body("explain the lock"))
+    await _drive(app_b, body=_messages_body("explain the lock"))  # identical text
+
+    content_a = up_a.requests[0]["json"]["messages"][-1]["content"]
+    content_b = up_b.requests[0]["json"]["messages"][-1]["content"]
+    assert "drops on scope exit" in content_a[-1]["text"]
+    assert "drops on scope exit" in content_b[-1]["text"]
+
+
+async def test_ledger_bound_under_one_stable_proxy_identity():
+    """Ledger bound under a stable key. Many distinct anchor ids injected
+    through ONE stable proxy identity -> LedgerStore holds exactly 1
+    session entry, and that session's ring stays capped at cooldown_items."""
+    cooldown_items = 5
+    ledger_store = LedgerStore(cooldown_items=cooldown_items)
+    gate = ProactiveGate(
+        min_similarity=0.0, max_items_per_event=1, max_chars_per_event=800,
+        cooldown_items=cooldown_items, max_weak_structural_items=1, ledger_store=ledger_store,
+    )
+
+    class _RotatingProvider:
+        """Returns a distinct, never-before-seen anchor id on every call, so
+        every call is eligible to inject and only the ledger's own capacity
+        bounds what gets retained."""
+
+        def __init__(self):
+            self.n = 0
+
+        async def inject(self, window, *, session_id, channel):
+            self.n += 1
+            candidate = Candidate(
+                kind="note_structural", line=f"note #{self.n}: distinct anchor",
+                score=1.0, anchor_id=f"note:{self.n}", is_structural=True,
+            )
+            return gate.select([candidate], session_id=session_id)
+
+    up = MockUpstream()
+    app = build_proxy_app(_settings(), injection_provider=_RotatingProvider(), client_factory=up.client_factory())
+
+    for i in range(20):
+        await _drive(app, body=_messages_body(f"message {i}"))
+
+    assert up.call_count == 20
+    assert len(ledger_store._ledgers) == 1
+    session_ledger = next(iter(ledger_store._ledgers.values()))
+    assert len(session_ledger._ring) == cooldown_items
 
 
 # -- startup banner (UPG-PROXY-HIDDEN-MASTER-SWITCH) -------------------------
