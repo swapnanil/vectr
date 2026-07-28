@@ -695,14 +695,14 @@ _S6_NAIVE = '''"""Ingest worker tuning knobs."""
 
 POOL_SIZE = 8
 BATCH_ROWS = 1000
-FLUSH_INTERVAL_S = 5
+LOG_EVERY_N_FLUSHES = 50
 '''
 
 _S6_NOTE_FOLLOWING = '''"""Ingest worker tuning knobs."""
 
 POOL_SIZE = 1
 BATCH_ROWS = 1000
-FLUSH_INTERVAL_S = 5
+LOG_EVERY_N_FLUSHES = 50
 '''
 
 
