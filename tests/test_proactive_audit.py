@@ -152,7 +152,12 @@ def test_chars_field_equals_injected_context_length_for_two_item_counts(tmp_path
 # ---------------------------------------------------------------------------
 
 def test_chars_stays_within_configured_budget_plus_fixed_envelope(tmp_path, monkeypatch):
-    from agent.proactive.gate import _ENVELOPE_CLOSE, _ENVELOPE_OPEN
+    from agent.proactive.gate import (
+        _ENVELOPE_CLOSE,
+        _ENVELOPE_OPEN,
+        _ENVELOPE_OPEN_AGENT,
+        _ENVELOPE_OPEN_HUMAN,
+    )
 
     log_file = tmp_path / "audit.log"
     max_chars = 120
@@ -162,6 +167,11 @@ def test_chars_stays_within_configured_budget_plus_fixed_envelope(tmp_path, monk
     )
     f = tmp_path / "pool.py"
     f.write_text("# pool\n")
+    # `remember()` defaults provenance="agent" (no explicit provenance passed
+    # here), so this note gets the agent-tier envelope open at injection time
+    # (UPG-PROXY-INJECT-ROLE-PROVENANCE) -- the budget check below uses the
+    # WORST CASE across all three tiers rather than hardcoding which one
+    # fires, so it stays a correct upper bound regardless of provenance.
     svc.remember("pool.py " + ("x" * 300), kind="gotcha", anchors=["pool.py"])
 
     out = svc.proactive_context(text="", file_paths=[str(f)], session_id="s1", channel="proxy")
@@ -170,8 +180,11 @@ def test_chars_stays_within_configured_budget_plus_fixed_envelope(tmp_path, monk
     lines = _injection_lines(log_file)
     assert len(lines) == 1
     chars = int(_fields(lines[0])["chars"])
-    # open marker + its trailing newline, plus the newline + close marker
-    envelope = len(_ENVELOPE_OPEN) + 1 + 1 + len(_ENVELOPE_CLOSE)
+    # open marker + its trailing newline, plus the newline + close marker;
+    # max() over every tier's open marker since which one applies depends on
+    # note provenance, not on this test's own choice.
+    widest_open = max(len(_ENVELOPE_OPEN), len(_ENVELOPE_OPEN_AGENT), len(_ENVELOPE_OPEN_HUMAN))
+    envelope = widest_open + 1 + 1 + len(_ENVELOPE_CLOSE)
     assert chars == len(out["context"])
     assert chars <= max_chars + envelope, (
         f"chars={chars} exceeds configured budget {max_chars} + envelope {envelope}"

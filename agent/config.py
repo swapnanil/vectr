@@ -1099,6 +1099,12 @@ PROACTIVE_MAX_CHARS_PER_EVENT: int = int(_pro_cfg["max_chars_per_event"])
 PROACTIVE_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION: float = float(
     _pro_cfg["body_truncation_min_boundary_fraction"]
 )
+_pro_envelope_cfg: dict[str, Any] = _pro_cfg["envelope"]
+PROACTIVE_ENVELOPE_OPEN_AUTO: str = str(_pro_envelope_cfg["open_auto"])
+PROACTIVE_ENVELOPE_OPEN_AGENT: str = str(_pro_envelope_cfg["open_agent"])
+PROACTIVE_ENVELOPE_OPEN_HUMAN: str = str(_pro_envelope_cfg["open_human"])
+PROACTIVE_ENVELOPE_CLOSE: str = str(_pro_envelope_cfg["close"])
+
 PROACTIVE_COOLDOWN_ITEMS: int = int(_pro_cfg["cooldown_items"])
 
 # UPG-PROXY-INJECT-PRECISION: structural (path-anchored) channel relevance

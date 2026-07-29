@@ -282,6 +282,11 @@ def _structural_note_candidate(
         # weaker tier would be inert (the gate never checks it there) but
         # confusing to read, so it is left None there deliberately.
         anchor_path=anchor_path if tier == STRUCTURAL_TIER_DECLARED_ANCHOR else None,
+        # UPG-PROXY-INJECT-ROLE-PROVENANCE: the same normalised label already
+        # baked into `line` above, also carried as a structured field so the
+        # gate can pick the whole block's envelope wording without parsing
+        # rendered text.
+        note_provenance=provenance_label,
     )
 
 
@@ -301,6 +306,7 @@ def _semantic_note_candidate(
         anchor_id=f"note:{note.note_id}",
         is_structural=False,
         state=_state_label(state),
+        note_provenance=provenance_label,  # see _structural_note_candidate above
     )
 
 

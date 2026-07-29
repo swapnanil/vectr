@@ -18,6 +18,17 @@ PROVENANCE_RANK: dict[str, int] = {
     "code_semantic": 2,
 }
 
+# Trust rank among `WorkingNote.provenance` values (UPG-PROXY-INJECT-ROLE-
+# PROVENANCE) — NOT the candidate-KIND tie-break above; this ranks the note
+# PROPERTY carried in `Candidate.note_provenance`. Lower is weaker. Matches
+# working_context_store's own promotion-direction ordering (`_store.py`'s
+# `promote()`: "auto" -> "agent" -> "human"). The gate uses this to pick the
+# weakest tier among every candidate actually selected for one delivery, so
+# a mixed-provenance block never overstates trust; a candidate with no
+# recorded provenance (unset, or a non-note candidate such as code_semantic)
+# looks itself up here via `.get(..., 0)` and lands at the weakest rank.
+NOTE_PROVENANCE_TRUST_RANK: dict[str, int] = {"auto": 0, "agent": 1, "human": 2}
+
 # The folded note-lifecycle state (UPG-MEMORY-STATE-MACHINE) a non-note
 # candidate carries — a code-search hit has no note to fold state for, and
 # rendering it as "active" would honestly mislabel it as an assertion under
@@ -82,6 +93,21 @@ class Candidate:
                           # rendered `line`'s anchor label is always the
                           # basename computed in matcher.py, independent of
                           # this field.
+    note_provenance: str | None = None  # `WorkingNote.provenance` (UPG-PROXY-
+                          # INJECT-ROLE-PROVENANCE), one of PROVENANCE_VALUES
+                          # ("human" | "agent" | "auto") for a note-backed
+                          # candidate; None for a non-note candidate
+                          # (code_semantic). Populated via matcher.py's
+                          # `_provenance_label()`, which already normalises a
+                          # missing/invalid value on the note itself down to
+                          # "auto" — so this field is never an unrecognised
+                          # string, only ever one of the three tiers or None.
+                          # Used ONLY by the gate to pick the envelope
+                          # wording for the whole packed block (the weakest
+                          # tier among every SELECTED candidate); never for
+                          # display — the per-line provenance marker in
+                          # `line` is independent of this field and always
+                          # present regardless of whether the gate reads it.
 
     @property
     def provenance_rank(self) -> int:
