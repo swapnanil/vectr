@@ -646,6 +646,110 @@ class TestCmdRestart:
         mock_stop.assert_not_called()
         mock_do_start.assert_called_once()
 
+    def test_restart_reuses_registered_port_over_preferred_when_they_differ(self, tmp_path):
+        """UPG-RESTART-PORT-WALK-BREAKS-MCP: `find_free_port`'s "reuse the
+        dead entry's previous port" step only works while the entry is still
+        present in the registry. `cmd_restart` used to call
+        `registry.unregister(ws_hash)` BEFORE `registry.find_free_port(...)`,
+        discarding that hint on every single restart — so a workspace
+        previously walked to a non-default port (here 8764, below the CLI's
+        default `preferred_port` of 8765) would never be found by the
+        upward-only forward scan and `find_free_port` would raise, even
+        though its own actual previous port was free the whole time.
+        """
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8764, 99999999)  # dead pid; previous port < preferred_port
+
+        def port_free(port: int) -> bool:
+            return port == 8764  # only the real previous port is free
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", side_effect=port_free), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws], port=8765))
+
+        mock_do_start.assert_called_once()
+        assert mock_do_start.call_args.args[1] == 8764
+
+    def test_restart_final_registry_state_unaffected_by_unregister_ordering(self, tmp_path):
+        """The explicit `registry.unregister(ws_hash)` call in `cmd_restart`
+        has no effect on final state either way — `_do_start`'s own
+        `InstanceRegistry().register(...)` overwrites the entry
+        unconditionally — so reordering it after `find_free_port` (the fix)
+        must not change what ends up registered once `_do_start` is real."""
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 11111)
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 22222
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=True), \
+             patch("subprocess.Popen", return_value=mock_proc), \
+             patch("builtins.open", MagicMock()):
+            m.cmd_restart(_make_args(paths=[ws], port=8765))
+
+        entry = reg.get(wh)
+        assert entry is not None
+        assert entry["pid"] == 22222
+
+
+# ---------------------------------------------------------------------------
+# _configured_mcp_ports / _warn_on_stale_mcp_configs
+# (UPG-RESTART-PORT-WALK-BREAKS-MCP part (d): never leave MCP failing opaquely)
+# ---------------------------------------------------------------------------
+
+class TestStaleMcpConfigWarning:
+    def test_configured_mcp_ports_reads_known_files(self, tmp_path):
+        m._write_workspace_config(str(tmp_path), 8999)
+        ports = m._configured_mcp_ports(str(tmp_path))
+        assert ports[".mcp.json"] == 8999
+        assert ports[".cursor/mcp.json"] == 8999
+        assert ports[".vscode/mcp.json"] == 8999
+        assert ports[".codex/config.toml"] == 8999
+        # Deliberately excluded: written asynchronously by the daemon
+        # subprocess, not by this (CLI) process — see the comment on
+        # `_IDE_MCP_CONFIG_FILES`.
+        assert ".claude/settings.json" not in ports
+
+    def test_configured_mcp_ports_empty_when_no_files(self, tmp_path):
+        assert m._configured_mcp_ports(str(tmp_path)) == {}
+
+    def test_warn_on_stale_mcp_configs_silent_when_consistent(self, tmp_path, capsys):
+        m._write_workspace_config(str(tmp_path), 8765)
+        capsys.readouterr()  # discard _write_workspace_config's own "Created ..." lines
+        m._warn_on_stale_mcp_configs(str(tmp_path), 8765)
+        assert capsys.readouterr().err == ""
+
+    def test_warn_on_stale_mcp_configs_prints_when_port_differs(self, tmp_path, capsys):
+        # Simulate the exact reported scenario: the daemon actually bound
+        # 8766, but the on-disk configs (written for a previous run, or a
+        # write that never happened) still say 8765.
+        m._write_workspace_config(str(tmp_path), 8765)
+        capsys.readouterr()  # discard _write_workspace_config's own "Created ..." lines
+        m._warn_on_stale_mcp_configs(str(tmp_path), 8766)
+
+        err = capsys.readouterr().err
+        assert "running on port 8766" in err
+        assert str(tmp_path / ".mcp.json") in err
+        assert "-> port 8765" in err
+
+    def test_warn_on_stale_mcp_configs_noop_when_nothing_written(self, tmp_path, capsys):
+        # --no-ide-config (or a fresh workspace): nothing to compare against,
+        # never a false warning.
+        m._warn_on_stale_mcp_configs(str(tmp_path), 8765)
+        assert capsys.readouterr().err == ""
+
 
 # ---------------------------------------------------------------------------
 # _write_workspace_config — port injection
