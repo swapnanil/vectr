@@ -300,6 +300,37 @@ hook-channel utility measurement taken through `claude -p` can be trusted until
 this is independently verified against an interactive session** — the two
 `valid: false` cells above are correctly excluded, not read as "hooks don't work".
 
+### Correction (same day, behavioral probe): `-p` DOES deliver — the transcript just doesn't render it
+
+The independent verification above happened the same day, and it falsified the
+conclusion: a behavioral probe (three hooks each emitting a unique canary token
+via the documented `hookSpecificOutput.additionalContext` envelope; `claude -p`
+asked to echo any such token it sees) came back with **all three tokens echoed
+verbatim** — `SessionStart`, `UserPromptSubmit`, AND `PreToolUse` context all
+reach the model in print mode. The section above drew the wrong conclusion from
+a true observation: `--output-format stream-json` transcripts do not RENDER
+`UserPromptSubmit`/`PreToolUse` hook output, so transcript inspection can
+neither confirm nor deny delivery for those hook types. `hook_non_vacuity()`'s
+transcript-content requirement therefore invalidates genuinely-delivered cells;
+until it is replaced with a per-cell canary check, hook-cell validity =
+`hook_injection_counts > 0` plus this standing mechanism proof.
+
+Re-read under the corrected rule, both hook-arm cells are VALID:
+
+| Scenario | delivery (daemon counts) | utility_hit |
+|---|---|---|
+| `generated_config` | UserPromptSubmit 1, PreToolUse 1 | **true** |
+| `flaky_test` | UserPromptSubmit 1, PreToolUse 1 | false |
+
+Read together with the post-fix proxy recheck below, this answers the
+channel-authority question this arm exists for: **channel parity, not channel
+authority.** `generated_config` hits on both channels; `flaky_test` nulls on
+both — and on the hook arm the agent even APPLIED the note's rounding fix
+(`fix_applied` passed) while still declining the note's uncorroborated `--core`
+runner prescription. The surviving null follows the uncorroborable content, not
+the delivery channel; the lever is corroborable/verifiable notes, not a
+different channel.
+
 ## Post-fix proxy recheck (2026-07-29, seed 0, 3 scenarios, W1+W2+W3 all landed)
 
 The four-arm table above was measured with UPG-PROXY-INJECT-TITLE-ONLY (full note
