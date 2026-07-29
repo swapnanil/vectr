@@ -727,3 +727,60 @@ def test_weak_prior_flags_a_clean_leg1_on_a_discovered_scenario(tmp_path):
     )
     assert erring_metrics["mistake_committed"] is True
     assert erring_metrics["weak_prior"] is False
+
+
+# ---------------------------------------------------------------------------
+# session_errored: an arm-agnostic, content-free prerequisite BELOW the per-arm
+# premise -- did the agent session run at all -- catching a CLI shape observed on
+# a live run: `result.subtype == "success"` with `is_error: true` and zero output
+# tokens (a session that errored out before producing any response, still tagged
+# "success" by the transcript's own `result` event). See run_leg.py's
+# `_abort_if_session_errored` for how this gate turns into a nonzero process exit.
+# ---------------------------------------------------------------------------
+
+
+def test_leg_non_vacuity_flags_session_errored_even_with_subtype_success():
+    events = _init_and_result_events(mcp_servers=[])  # arm "none" expects []
+    result = scorer.leg_non_vacuity(
+        arm="none", k=1, events=events, notes_count_at_start=0,
+        agent_returncode=1, is_error=True, output_tokens=0,
+    )
+    assert result["valid"] is False
+    assert result["non_vacuity"]["session_errored"] is True
+    assert "agent session errored" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_session_errored_fires_on_each_signal_independently():
+    events = _init_and_result_events(mcp_servers=[])
+
+    # is_error alone, everything else clean.
+    r1 = scorer.leg_non_vacuity(
+        arm="none", k=1, events=events, notes_count_at_start=0,
+        agent_returncode=0, is_error=True, output_tokens=50,
+    )
+    assert r1["non_vacuity"]["session_errored"] is True
+
+    # nonzero agent_returncode alone.
+    r2 = scorer.leg_non_vacuity(
+        arm="none", k=1, events=events, notes_count_at_start=0,
+        agent_returncode=1, is_error=False, output_tokens=50,
+    )
+    assert r2["non_vacuity"]["session_errored"] is True
+
+    # output_tokens == 0 alone (strict equality -- a present result event
+    # explicitly reporting zero, not a missing one).
+    r3 = scorer.leg_non_vacuity(
+        arm="none", k=1, events=events, notes_count_at_start=0,
+        agent_returncode=0, is_error=False, output_tokens=0,
+    )
+    assert r3["non_vacuity"]["session_errored"] is True
+
+
+def test_leg_non_vacuity_session_errored_absent_on_a_clean_session():
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="none", k=1, events=events, notes_count_at_start=0,
+        agent_returncode=0, is_error=False, output_tokens=50,
+    )
+    assert result["non_vacuity"]["session_errored"] is False
+    assert result["valid"] is True, result["invalid_reason"]

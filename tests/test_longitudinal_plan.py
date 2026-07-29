@@ -94,6 +94,26 @@ def _seed_shared_leg1(runs_dir: Path, scenario: str, seed: int = 0, *, usd: floa
     }))
 
 
+def _seed_invalid_shared_leg1(runs_dir: Path, scenario: str, seed: int = 0) -> None:
+    """A shared leg 1 whose directory has everything `run_leg.py`'s `snapshot()`
+    and `write()` still produce even on a session-level abort (Defect 2:
+    `score()`/`snapshot()`/`write()`/`report()` run unconditionally; only the exit
+    code changes) -- `leg1_id` and `result.json` exist on disk, but `valid` is
+    `false`. Used to pin Defect 3: this must never be trusted as a starting
+    snapshot on a later invocation.
+    """
+    d = runs_dir / "_shared" / "leg1" / f"{scenario}-s{seed}"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "leg1_id").write_text("hollowleg1id")
+    (d / "workspace.tar").write_bytes(b"HOLLOW")
+    (d / "result.json").write_text(json.dumps({
+        "end_state_manifest_sha256": "hollowmanifest",
+        "valid": False,
+        "invalid_reason": "agent session errored (is_error=True, agent_returncode=1, output_tokens=0)",
+        "cost": {"session_usd": 0.0},
+    }))
+
+
 def _fake_run_cmd_factory(*, usd: float = 0.24, valid: bool = True):
     """A `_run_cmd` stand-in for the live (non-dry-run, non-probe-only) leg path:
     writes a schema-shaped result.json under the leg dir named --leg-dir on the cmd
@@ -169,6 +189,66 @@ def test_t5_reuses_t1_and_t2_trajectory_identities_at_n_legs_4():
 def test_t0_has_no_trajectory_preset_and_is_planned_separately():
     with pytest.raises(ValueError):
         run_plan._tier_trajectories("T0", seed=0)
+
+
+# ---------------------------------------------------------------------------
+# --arms: filter a tier's own enumeration post-hoc, never change what a tier IS
+# ---------------------------------------------------------------------------
+
+
+def test_arms_filters_dry_run_plan_to_only_the_named_arm(tmp_path):
+    outcome = run_plan.plan_and_run(
+        "T1", _args(tmp_path, "T1", dry_run=True, arms="proxy")
+    )
+    traj_entries = [p for p in outcome["plan"] if p.get("trajectory_id")]
+    assert traj_entries  # sanity: --arms did not filter out everything
+    for spec in run_plan._tier_trajectories("T1", seed=0):
+        if spec.arm != "proxy":
+            assert not any(p["trajectory_id"] == spec.trajectory_id for p in traj_entries)
+
+
+def test_arms_filter_estimate_is_a_strict_subset_of_the_unfiltered_estimate(tmp_path):
+    unfiltered = run_plan.plan_and_run("T1", _args(tmp_path, "T1", dry_run=True))
+    filtered = run_plan.plan_and_run(
+        "T1", _args(tmp_path, "T1", dry_run=True, arms="proxy")
+    )
+    assert filtered["est_mean_usd"] < unfiltered["est_mean_usd"]
+    assert filtered["est_worst_usd"] < unfiltered["est_worst_usd"]
+
+
+def test_arms_absent_leaves_dry_run_estimates_byte_identical_to_before(tmp_path):
+    """No-flag --dry-run estimates must be unaffected by the --arms feature's
+    existence at all -- pinned against the SAME DESIGN.md 9 table values the
+    pre-existing headline tests above assert, so this is a regression guard against
+    --arms accidentally becoming non-additive.
+    """
+    t1 = run_plan.plan_and_run("T1", _args(tmp_path / "t1", "T1", dry_run=True))
+    assert (t1["est_mean_usd"], t1["est_worst_usd"]) == (2.62, 3.80)
+
+    _seed_shared_leg1(tmp_path / "t2", S1)
+    _seed_shared_leg1(tmp_path / "t2", S5)
+    t2 = run_plan.plan_and_run("T2", _args(tmp_path / "t2", "T2", dry_run=True))
+    assert (t2["est_mean_usd"], t2["est_worst_usd"]) == (1.92, 2.80)
+
+
+def test_arms_multi_value_comma_list(tmp_path):
+    outcome = run_plan.plan_and_run(
+        "T1", _args(tmp_path, "T1", dry_run=True, arms="none,proxy")
+    )
+    traj_entries = [p for p in outcome["plan"] if p.get("trajectory_id")]
+    arms_seen = {
+        spec.arm for spec in run_plan._tier_trajectories("T1", seed=0)
+        if any(p["trajectory_id"] == spec.trajectory_id for p in traj_entries)
+    }
+    assert arms_seen == {"none", "proxy"}  # T1's own arm set -- both survive the filter
+
+
+def test_arms_unknown_name_is_an_argparse_error(tmp_path, capsys):
+    ap = run_plan._build_argparser()
+    with pytest.raises(SystemExit):
+        ap.parse_args(["--tier", "T1", "--runs-dir", str(tmp_path), "--arms", "not-a-real-arm"])
+    err = capsys.readouterr().err
+    assert "not-a-real-arm" in err
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +497,97 @@ def test_hook_full_skip_recovers_once_a_valid_attestation_is_supplied_without_fo
     for spec in run_plan._tier_trajectories("T6", seed=0):
         state = json.loads((tmp_path / spec.trajectory_id / "state.json").read_text())
         assert all(leg["status"] == "done" for leg in state["legs"] if leg["k"] > 1)
+
+
+# ---------------------------------------------------------------------------
+# Defect 3 regression (feature/eval-t1-validity-fixes): a hollow/invalid shared
+# leg 1 must never be trusted as a starting snapshot -- neither within the same
+# invocation (already covered by the existing "failed(shared-leg1)" -> continue
+# path exercised indirectly above) nor, the actual gap, on a LATER invocation that
+# finds `leg1_id`/`result.json` already on disk with `valid: false` (Defect 2:
+# `run_leg.py`'s `snapshot()`/`write()` still run on a session-errored abort, only
+# the exit code changes -- so a hollow leg 1 leaves real files behind, not an
+# absent directory).
+# ---------------------------------------------------------------------------
+
+
+def test_shared_leg1_invalid_on_disk_is_never_trusted_and_retries(tmp_path):
+    _seed_invalid_shared_leg1(tmp_path, S1)
+    _seed_shared_leg1(tmp_path, S5)  # a normal valid one, unaffected by the bug
+
+    fake_legs = _fake_run_cmd_factory()
+
+    def fake(cmd: list[str], *, dry_run: bool, timeout_s: int = 1800):
+        if "--shared-leg1" in cmd:
+            out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "leg1_id").write_text("freshleg1id")
+            (out_dir / "workspace.tar").write_bytes(b"FRESH")
+            (out_dir / "result.json").write_text(json.dumps({
+                "end_state_manifest_sha256": "freshmanifest",
+                "valid": True,
+                "cost": {"session_usd": 0.35},
+            }))
+            return 0, "", ""
+        return fake_legs(cmd, dry_run=dry_run, timeout_s=timeout_s)
+
+    with mock.patch.object(run_plan, "_run_cmd", side_effect=fake):
+        run_plan.plan_and_run("T1", _args(tmp_path, "T1"))
+
+    leg1_dir_s1 = tmp_path / "_shared" / "leg1" / f"{S1}-s0"
+    # The hollow leg1 was superseded (renamed, never deleted) rather than trusted...
+    superseded = list(leg1_dir_s1.parent.glob(f"{S1}-s0.superseded-*"))
+    assert len(superseded) == 1
+    assert json.loads((superseded[0] / "result.json").read_text())["valid"] is False
+    # ...and a genuinely fresh leg 1 was run and written in its place.
+    assert (leg1_dir_s1 / "leg1_id").read_text() == "freshleg1id"
+    fresh_result = json.loads((leg1_dir_s1 / "result.json").read_text())
+    assert fresh_result["valid"] is True
+
+    # Every trajectory sharing (S1, seed 0) restored from the FRESH leg 1, not the
+    # hollow one, and proceeded past leg 1 into leg 2/3.
+    for spec in run_plan._tier_trajectories("T1", seed=0):
+        if spec.scenario != S1:
+            continue
+        state = json.loads((tmp_path / spec.trajectory_id / "state.json").read_text())
+        leg1 = next(leg for leg in state["legs"] if leg["k"] == 1)
+        assert leg1["status"] == "done"
+        assert leg1["end_state_manifest_sha256"] == "freshmanifest"
+        leg2 = next(leg for leg in state["legs"] if leg["k"] == 2)
+        assert leg2["status"] == "done"
+
+
+def test_shared_leg1_live_run_failure_is_never_cached_within_one_invocation(tmp_path):
+    """The same-invocation half of Defect 3: a live `--shared-leg1` subprocess that
+    exits nonzero (run_leg.py's new session-errored abort, Defect 2) must be
+    recorded as `failed`, never populate a usable cache entry, and every
+    trajectory sharing that (scenario, seed) must skip its k>=2 legs entirely
+    rather than chain off a leg 1 that never produced a trustworthy snapshot.
+    """
+    calls: list[list[str]] = []
+
+    def fake_shared_leg1_fails(cmd: list[str], *, dry_run: bool, timeout_s: int = 1800):
+        calls.append(list(cmd))
+        assert "--shared-leg1" in cmd
+        # run_leg.py's snapshot()/write() still ran before the abort in principle,
+        # but even a bare nonzero exit with no result.json at all (e.g. an earlier
+        # crash) must be treated identically -- never cached, never chained.
+        return 1, "", "ABORT: agent session errored"
+
+    with mock.patch.object(run_plan, "_run_cmd", side_effect=fake_shared_leg1_fails):
+        run_plan.plan_and_run("T1", _args(tmp_path, "T1"))
+
+    leg1_dir_s1 = tmp_path / "_shared" / "leg1" / f"{S1}-s0"
+    assert not (leg1_dir_s1 / "leg1_id").exists()
+    assert not (leg1_dir_s1 / "result.json").exists()
+    assert len(calls) == 2  # one shared-leg1 attempt per distinct scenario (S1, S5)
+
+    for spec in run_plan._tier_trajectories("T1", seed=0):
+        state = json.loads((tmp_path / spec.trajectory_id / "state.json").read_text())
+        leg1 = next(leg for leg in state["legs"] if leg["k"] == 1)
+        assert leg1["status"] == "pending"
+        leg2 = next(leg for leg in state["legs"] if leg["k"] == 2)
+        assert leg2["status"] == "pending"  # never even attempted
 
 
 # ---------------------------------------------------------------------------
