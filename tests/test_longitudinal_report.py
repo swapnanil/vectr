@@ -77,12 +77,14 @@ def _metrics(
 def _leg_record(
     *, scenario: str, arm: str, note_variant: str, seed: int, k: int,
     valid: bool = True, session_usd: float = 0.24, metrics: dict[str, Any] | None = None,
+    started_utc: str = "20260101T000000Z", leg_id: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "leg_id": f"stamp-{scenario}-{arm}-{note_variant}-s{seed}-k{k}",
+        "leg_id": leg_id if leg_id is not None else f"stamp-{scenario}-{arm}-{note_variant}-s{seed}-k{k}",
         "trajectory_id": f"{scenario}-{arm}-{note_variant}-s{seed}",
         "scenario": scenario, "arm": arm, "note_variant": note_variant, "seed": seed, "k": k,
         "valid": valid, "invalid_reason": "" if valid else "primary check failed",
+        "started_utc": started_utc,
         "metrics": metrics if metrics is not None else _metrics(),
         "cost": {"session_usd": session_usd},
     }
@@ -256,6 +258,167 @@ def test_cross_arm_delta_only_pairs_matching_k_present_in_both():
     assert delta[0]["k"] == 2
     assert delta[0]["rdc_delta_a_minus_x"]["turns_to_fact"] == 4
     assert delta[0]["session_usd_delta_a_minus_x"] == pytest.approx(0.18)
+
+
+# ---------------------------------------------------------------------------
+# duplicate-line dedup -- results.jsonl is append-only and `run_plan.py`'s
+# `_supersede()` only renames the trajectory DIRECTORY on a re-run, never touching
+# this file, so a re-run leaves a stale line behind carrying the same
+# (trajectory_id, k).
+# ---------------------------------------------------------------------------
+
+
+def test_select_authoritative_legs_picks_latest_started_utc_marks_rest_superseded():
+    """Three records share (trajectory_id, k=2): invalid+stale, valid+stale,
+    valid+current (mirrors the live evidence: an invalid attempt, a superseded
+    valid retry, then the current valid retry). Only the latest-started_utc record
+    is authoritative; the other two -- including the invalid one -- are superseded,
+    each exactly once.
+    """
+    invalid_stale = _leg_record(
+        scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=2,
+        valid=False, started_utc="20260101T210136Z", leg_id="stamp-a-k2",
+    )
+    valid_stale = _leg_record(
+        scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=2,
+        valid=True, started_utc="20260101T214428Z", leg_id="stamp-b-k2",
+        metrics=_metrics(turns_to_fact=99),
+    )
+    valid_current = _leg_record(
+        scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=2,
+        valid=True, started_utc="20260101T223222Z", leg_id="stamp-c-k2",
+        metrics=_metrics(turns_to_fact=5),
+    )
+    k3_only = _leg_record(
+        scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=3,
+        valid=True, started_utc="20260101T223507Z",
+    )
+    authoritative, superseded = report.select_authoritative_legs(
+        [invalid_stale, valid_stale, valid_current, k3_only]
+    )
+    assert authoritative == [valid_current, k3_only]
+    assert len(superseded) == 2
+    assert invalid_stale in superseded
+    assert valid_stale in superseded
+
+
+def test_select_authoritative_legs_ties_break_on_leg_id_deterministically():
+    r1 = _leg_record(
+        scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=2,
+        started_utc="20260101T210000Z", leg_id="aaa-k2",
+    )
+    r2 = _leg_record(
+        scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=2,
+        started_utc="20260101T210000Z", leg_id="zzz-k2",
+    )
+    authoritative, superseded = report.select_authoritative_legs([r1, r2])
+    assert authoritative == [r2]  # "zzz" > "aaa" lexicographically -- deterministic, not file order
+    assert superseded == [r1]
+
+
+def test_trajectory_report_surfaces_superseded_rows_without_double_counting_invalid():
+    """`trajectory_report` trusts `legs` is already authoritative-only; the extra
+    `superseded_legs` for the same trajectory must be surfaced (never silently
+    dropped) but never counted toward `invalid_count` or any aggregate -- and the
+    stale invalid line among them counts once, as superseded, not also as invalid.
+    """
+    legs = [
+        _leg_record(scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=2,
+                    started_utc="20260101T223222Z", metrics=_metrics(mistake_committed=False, turns_to_fact=5)),
+        _leg_record(scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=3,
+                    started_utc="20260101T223507Z", metrics=_metrics(mistake_committed=False)),
+    ]
+    superseded_legs = [
+        _leg_record(scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=2,
+                    valid=False, started_utc="20260101T210136Z", leg_id="stamp-a-k2"),
+        _leg_record(scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=2,
+                    valid=True, started_utc="20260101T214428Z", leg_id="stamp-b-k2",
+                    metrics=_metrics(turns_to_fact=99)),
+    ]
+    t = report.trajectory_report(
+        "release_via_ci-proxy-plain-s0", legs, None, "discovered", superseded_legs=superseded_legs
+    )
+
+    assert t["invalid_count"] == 0  # the stale invalid line is superseded, not invalid
+    assert t["superseded_count"] == 2
+    assert t["n_legs_counted"] == 2  # k=2 (current) + k=3 -- neither stale duplicate counts
+
+    superseded_rows = [r for r in t["legs"] if r.get("excluded_reason") == "superseded"]
+    assert len(superseded_rows) == 2
+    assert {r["k"] for r in superseded_rows} == {2}
+    counted_row_k2 = next(r for r in t["legs"] if r["k"] == 2 and r.get("excluded_reason") is None)
+    assert counted_row_k2["rdc"]["turns_to_fact"] == 5  # the stale 99 never contaminates the counted row
+
+
+def test_scenario_report_dedups_duplicate_lines_end_to_end(tmp_path):
+    """End-to-end reproduction of the live defect: results.jsonl carries three lines
+    for one (trajectory, k=2) -- invalid + stale-valid + current-valid -- on the
+    proxy arm, AND a stale duplicate at k=2 on the none-arm side too. Aggregates,
+    per_leg_rows' counted rows, and cross_arm_delta must all reflect ONLY the
+    current line on both sides -- exactly one counted k=2 row and one delta row per
+    matched k, not one per duplicate line.
+    """
+    records = [
+        # none arm: stale + current at k=2, current-only k=3
+        _leg_record(scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=2,
+                    started_utc="20260101T200000Z", leg_id="none-k2-stale",
+                    session_usd=0.99, metrics=_metrics(mistake_committed=True, turns_to_fact=50)),
+        _leg_record(scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=2,
+                    started_utc="20260101T210000Z", leg_id="none-k2-current",
+                    session_usd=0.30, metrics=_metrics(mistake_committed=True, turns_to_fact=6)),
+        _leg_record(scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=3,
+                    started_utc="20260101T211000Z", leg_id="none-k3",
+                    session_usd=0.30, metrics=_metrics(mistake_committed=True, turns_to_fact=6)),
+        # proxy arm: invalid-stale + valid-stale + valid-current at k=2, current-only k=3
+        _leg_record(scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=2,
+                    valid=False, started_utc="20260101T210136Z", leg_id="proxy-k2-invalid"),
+        _leg_record(scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=2,
+                    started_utc="20260101T214428Z", leg_id="proxy-k2-stale",
+                    session_usd=0.50, metrics=_metrics(mistake_committed=False, turns_to_fact=99)),
+        _leg_record(scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=2,
+                    started_utc="20260101T223222Z", leg_id="proxy-k2-current",
+                    session_usd=0.12, metrics=_metrics(mistake_committed=False, turns_to_fact=2)),
+        _leg_record(scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=3,
+                    started_utc="20260101T223507Z", leg_id="proxy-k3",
+                    session_usd=0.12, metrics=_metrics(mistake_committed=False, turns_to_fact=2)),
+    ]
+    _write_results_jsonl(tmp_path, records)
+
+    sc = report.scenario_report(tmp_path, "release_via_ci")
+    none_t = sc["trajectories"]["release_via_ci-none-none-s0"]
+    proxy_t = sc["trajectories"]["release_via_ci-proxy-plain-s0"]
+
+    assert none_t["n_legs_counted"] == 2
+    assert none_t["superseded_count"] == 1
+    assert none_t["invalid_count"] == 0
+
+    assert proxy_t["n_legs_counted"] == 2
+    assert proxy_t["superseded_count"] == 2  # invalid-stale AND valid-stale, both non-authoritative
+    assert proxy_t["invalid_count"] == 0  # the stale invalid line does not also count as invalid
+
+    counted_k2 = next(r for r in proxy_t["legs"] if r["k"] == 2 and r.get("excluded_reason") is None)
+    assert counted_k2["rdc"]["turns_to_fact"] == 2  # the current value, not the stale 99
+
+    delta = sc["cross_arm_delta_vs_none"]["release_via_ci-proxy-plain-s0"]
+    assert len(delta) == 2  # exactly one row per matched k (k=2, k=3) -- not one per stale duplicate
+    assert {d["k"] for d in delta} == {2, 3}
+    delta_k2 = next(d for d in delta if d["k"] == 2)
+    assert delta_k2["rdc_delta_a_minus_x"]["turns_to_fact"] == 4  # 6 (current none) - 2 (current proxy)
+
+
+def test_format_human_readable_marks_superseded_rows_distinctly(tmp_path):
+    records = [
+        _leg_record(scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=2,
+                    started_utc="20260101T200000Z", leg_id="none-k2-stale",
+                    metrics=_metrics(mistake_committed=True)),
+        _leg_record(scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=2,
+                    started_utc="20260101T210000Z", leg_id="none-k2-current",
+                    metrics=_metrics(mistake_committed=True)),
+    ]
+    _write_results_jsonl(tmp_path, records)
+    text = report.format_human_readable(report.build_report(tmp_path, scenarios=["release_via_ci"]))
+    assert "SUPERSEDED" in text
+    assert "superseded=1" in text
 
 
 # ---------------------------------------------------------------------------
