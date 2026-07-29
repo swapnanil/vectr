@@ -18,7 +18,18 @@ DESIGN.md 8's artifact tree exactly:
   (default)       A normal leg k>=2 (or a standalone k==1, useful for direct
                   debugging/probing without a driver) that reads/writes a single
                   trajectory's `<runs-dir>/<trajectory>/legs/<k>/` and appends its
-                  result to `<runs-dir>/results.jsonl`.
+                  result to `<runs-dir>/results.jsonl`. Per-leg ARTIFACTS
+                  (result.json, preflight.json, daemon/proxy logs) always live under
+                  that leg's own `legs/<k>/`, but the agent/daemon WORKSPACE is a
+                  separate, caller-supplied `--workspace-dir` -- see that flag's help
+                  text and `LegRunner._reset_workspace`. run_plan.py always passes
+                  the same `<trajectory>/workspace` for every k of one trajectory:
+                  vectr's working-memory store scopes notes by workspace path, so a
+                  note leg k plants must be registered under the same path leg k+1's
+                  fresh daemon queries, even though both legs already share one
+                  VECTR_DB_DIR/sqlite file via `--db-dir`. Reusing that path across
+                  legs is safe because `prepare()` wipes and re-materializes/restores
+                  it fresh on every leg (legs run serially, one at a time).
 
 Isolation and honesty rails mirror `injection_utility/run_harness.py` (one fresh
 VECTR_DB_DIR/daemon/proxy process per invocation; scratch ports >= 8899; verify
@@ -376,7 +387,24 @@ class LegRunner:
         )
 
         self.root = Path(args.out_dir if self.shared_leg1 else args.leg_dir).resolve()
-        self.workspace = self.root / "workspace"
+        # `self.workspace` is the agent/daemon workspace -- the directory `vectr
+        # start`/the spawned `claude -p` cwd/the drift manifest all operate on. It is
+        # DELIBERATELY NOT always `self.root / "workspace"`: vectr's working-memory
+        # store scopes notes by workspace PATH (not by db-dir alone), so a normal
+        # (non-shared-leg1) leg k+1 must register the SAME workspace path leg k used,
+        # or a note that leg k planted is invisible to leg k+1's fresh daemon even
+        # though both legs share one VECTR_DB_DIR/sqlite file. `--workspace-dir` lets
+        # a driver (run_plan.py) pass one trajectory-stable path
+        # (`<trajectory-dir>/workspace`) across every leg of that trajectory; a
+        # caller that omits it (standalone k==1 debugging, T0's single-shot probe
+        # cells, --shared-leg1) keeps the prior per-`self.root` default, which is
+        # correct there because those cases never chain a planted note across a
+        # workspace-path change.
+        self.workspace = (
+            Path(args.workspace_dir).resolve()
+            if (not self.shared_leg1 and getattr(args, "workspace_dir", None))
+            else self.root / "workspace"
+        )
         self.artifacts = self.root if self.shared_leg1 else (self.root / "artifacts")
         self.verify_dir = self.root / "verify"
         self.audit_log = self.artifacts / "audit.log"
@@ -451,6 +479,19 @@ class LegRunner:
 
     # -- setup --------------------------------------------------------------
 
+    def _reset_workspace(self) -> None:
+        """Wipe and recreate `self.workspace` before every leg's materialize/restore
+        step. Required now that `--workspace-dir` can make this path TRAJECTORY-
+        stable (reused across k=1..N, not a fresh never-before-seen directory per
+        leg): without a wipe, leg k+1's materialize/`_extract_tar` would layer onto
+        whatever leg k's agent left behind, so a file leg k's agent deleted (and
+        therefore absent from its restore-tar) would wrongly persist into leg k+1.
+        A no-op the first time any given workspace path is used (nothing to wipe).
+        """
+        if self.workspace.exists():
+            shutil.rmtree(self.workspace)
+        self.workspace.mkdir(parents=True, exist_ok=True)
+
     def prepare(self) -> None:
         if self.root.exists() and any(self.root.iterdir()) and not self.args.probe_only:
             raise SystemExit(
@@ -458,8 +499,9 @@ class LegRunner:
                 f"is the driver's job; it must not re-invoke run_leg.py for a leg "
                 f"whose result already exists (DESIGN.md 8)"
             )
-        for d in (self.workspace, self.artifacts, self.verify_dir):
+        for d in (self.artifacts, self.verify_dir):
             d.mkdir(parents=True, exist_ok=True)
+        self._reset_workspace()
 
         if self.k == 1 or (self.args.probe_only and not self.args.restore_tar):
             self.leg_start_baselines = scen.materialize(self.scenario, self.workspace)
@@ -918,12 +960,21 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--shared-leg1", action="store_true", help=(
         "Run leg 1 under arm-A conditions and write self-contained artifacts to "
         "--out-dir (DESIGN.md 5.2, 8). Mutually exclusive with --k/--arm/--leg-dir/"
-        "--trajectory-id/--db-dir/--note-variant/--plant-note."
+        "--workspace-dir/--trajectory-id/--db-dir/--note-variant/--plant-note."
     ))
     ap.add_argument("--out-dir", help="Output dir for --shared-leg1 mode.")
 
     ap.add_argument("--k", type=int, help="Leg number (>= 1) for normal mode.")
     ap.add_argument("--leg-dir", help="Output dir for a normal leg, e.g. <runs-dir>/<trajectory>/legs/<k>/.")
+    ap.add_argument("--workspace-dir", help=(
+        "Agent/daemon workspace directory. Pass the SAME path for every leg of one "
+        "trajectory (e.g. <runs-dir>/<trajectory>/workspace) so a note a leg plants "
+        "is registered under a workspace path a later leg's fresh daemon still "
+        "queries against -- vectr's working-memory store scopes notes by workspace "
+        "path, not by --db-dir alone. Defaults to <leg-dir>/workspace (per-leg) if "
+        "omitted, which is only correct for a single-shot leg that is never chained "
+        "with a later k of the same trajectory (e.g. T0's probe cells)."
+    ))
     ap.add_argument("--trajectory-id")
     ap.add_argument("--arm", choices=ARMS)
     ap.add_argument("--note-variant", choices=NOTE_VARIANTS, default="none")
@@ -972,6 +1023,7 @@ def _validate_args(ap: argparse.ArgumentParser, args: argparse.Namespace) -> Non
             ap.error("--out-dir is required with --shared-leg1")
         for flag, val in (
             ("--k", args.k), ("--arm", args.arm), ("--leg-dir", args.leg_dir),
+            ("--workspace-dir", args.workspace_dir),
             ("--trajectory-id", args.trajectory_id), ("--db-dir", args.db_dir),
             ("--restore-tar", args.restore_tar), ("--planted-note-id", args.planted_note_id),
             ("--planted-anchor", args.planted_anchor),

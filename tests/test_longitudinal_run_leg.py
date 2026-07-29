@@ -188,3 +188,86 @@ def test_leg_non_vacuity_session_errored_produces_the_reason_main_reads():
     assert record["non_vacuity"]["session_errored"] is True
     should_abort = (record.get("non_vacuity") or {}).get("session_errored")
     assert should_abort
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 4 (branch feature/eval-workspace-stable): --workspace-dir makes the
+# agent/daemon workspace trajectory-stable instead of nested under the per-leg
+# --leg-dir, so a note leg k plants is registered under the same workspace path
+# leg k+1's fresh daemon queries (vectr's working-memory store scopes notes by
+# workspace path, not by --db-dir alone -- see run_leg.py's module docstring and
+# `--workspace-dir` help text).
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_defaults_to_leg_dir_nested_when_workspace_dir_omitted(tmp_path):
+    """Unchanged pre-fix behavior for any caller that never passes
+    --workspace-dir (standalone k==1 debugging, T0's single-shot probe cells):
+    the workspace stays nested under this leg's own --leg-dir, exactly as before.
+    """
+    runner = _make_runner(tmp_path)
+    assert runner.workspace == runner.root / "workspace"
+    assert runner.workspace == (tmp_path / "leg" / "workspace")
+
+
+def test_workspace_dir_flag_overrides_to_a_trajectory_stable_path(tmp_path):
+    """The actual fix: an explicit --workspace-dir (what run_plan.py now always
+    passes for a normal leg) is used verbatim instead of the per-leg default, and
+    is independent of --leg-dir/--k entirely.
+    """
+    traj_workspace = tmp_path / "traj" / "workspace"
+    runner_k2 = _make_runner(
+        tmp_path, k=2, leg_dir=str(tmp_path / "traj" / "legs" / "2"),
+        workspace_dir=str(traj_workspace),
+    )
+    runner_k3 = _make_runner(
+        tmp_path, k=3, leg_dir=str(tmp_path / "traj" / "legs" / "3"),
+        workspace_dir=str(traj_workspace),
+    )
+    # Same workspace path for k=2 and k=3 of one trajectory (the invariant this
+    # whole fix exists to establish)...
+    assert runner_k2.workspace == runner_k3.workspace == traj_workspace
+    # ...while each leg's own artifacts stay per-leg, unaffected.
+    assert runner_k2.root != runner_k3.root
+    assert runner_k2.artifacts == tmp_path / "traj" / "legs" / "2" / "artifacts"
+    assert runner_k3.artifacts == tmp_path / "traj" / "legs" / "3" / "artifacts"
+
+
+def test_workspace_dir_rejected_with_shared_leg1():
+    ap = run_leg._build_argparser()
+    args = ap.parse_args([
+        "--shared-leg1", "--scenario", "bench_box_only", "--out-dir", "/tmp/x",
+        "--workspace-dir", "/tmp/y",
+    ])
+    with pytest.raises(SystemExit):
+        run_leg._validate_args(ap, args)
+
+
+def test_reset_workspace_wipes_stale_content_left_by_a_prior_leg(tmp_path):
+    """The other half of the fix: reusing one workspace path across legs is only
+    safe because `prepare()`'s `_reset_workspace()` wipes it first -- otherwise a
+    file an earlier leg's agent created (and that is absent from this leg's own
+    restore-tar / fresh materialize) would wrongly persist into a later leg.
+    """
+    runner = _make_runner(tmp_path, workspace_dir=str(tmp_path / "traj-workspace"))
+    runner.workspace.mkdir(parents=True)
+    stray = runner.workspace / "leftover_from_prior_leg.txt"
+    stray.write_text("should not survive")
+    assert stray.exists()
+
+    runner._reset_workspace()
+
+    assert runner.workspace.is_dir()
+    assert not stray.exists()
+    assert list(runner.workspace.iterdir()) == []
+
+
+def test_reset_workspace_is_a_no_op_the_first_time(tmp_path):
+    """A never-before-used workspace path (first leg of a trajectory) has nothing
+    to wipe -- must not raise on a directory that does not exist yet.
+    """
+    runner = _make_runner(tmp_path, k=1, workspace_dir=str(tmp_path / "brand-new"))
+    assert not runner.workspace.exists()
+    runner._reset_workspace()
+    assert runner.workspace.is_dir()
+    assert list(runner.workspace.iterdir()) == []
