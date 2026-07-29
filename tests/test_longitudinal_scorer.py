@@ -241,6 +241,73 @@ def test_verify_scripts_never_land_inside_the_workspace(tmp_path):
                 assert not any(p.name == Path(name).name for p in workspace.rglob("*"))
 
 
+def _is_path_identifier_char(ch: str) -> bool:
+    """Mirrors `agent.working_context_store._store._is_path_identifier_char`
+    conservatively: a char that extends a filename/identifier token."""
+    return ch.isalnum() or ch in ("_", "-")
+
+
+def _path_boundary_match(text: str, needle: str) -> bool:
+    """Mirrors `agent.working_context_store._store._path_boundary_match`
+    conservatively -- True if `needle` occurs in `text` at a genuine path
+    boundary, not merely as a substring of a longer identifier (e.g.
+    "gate.py" must not false-match inside "uv_regate.py")."""
+    if not needle:
+        return False
+    start = 0
+    while True:
+        idx = text.find(needle, start)
+        if idx == -1:
+            return False
+        before_ok = idx == 0 or not _is_path_identifier_char(text[idx - 1])
+        after_idx = idx + len(needle)
+        after_ok = after_idx >= len(text) or not _is_path_identifier_char(text[after_idx])
+        if before_ok and after_ok:
+            return True
+        start = idx + 1
+
+
+def _probe_file_structurally_reaches(probe_file: str, variant: "scen.NoteVariant") -> bool:
+    """True if `probe_file` would surface `variant` through the daemon's real
+    `recall_for_path()` rule: a path-boundary match of the probe file's
+    basename or full (workspace-relative) path in the note's content, or an
+    exact declared `anchors` entry -- see `NoteVariant`'s own docstring
+    invariant. `recall_for_path()` never consults `trigger_paths`
+    (UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL), so `trigger_paths` is
+    deliberately not consulted here either."""
+    if probe_file in variant.anchors:
+        return True
+    basename = probe_file.rsplit("/", 1)[-1]
+    return _path_boundary_match(variant.content, basename) or _path_boundary_match(
+        variant.content, probe_file
+    )
+
+
+def test_every_leg_probe_file_structurally_reaches_every_note_variant():
+    """Regression guard for the T0 probe-reachability class of authoring bug
+    (`run_leg.py`'s `_proactive_probe` turn 2 POSTs a leg's `probe_files` to
+    `/v1/proactive`, whose structural channel surfaces a note only via a path
+    mentioned in the note TEXT or a declared `anchors` entry, never via
+    `trigger_paths`): for every scenario, every leg, every note variant, at
+    least one of that leg's `probe_files` must structurally reach that
+    variant, or `run_plan.py --tier T0` ABORTs at that leg regardless of the
+    note's semantic content. Caught release_via_ci legs 2-4 (probe_files
+    named no path the fact sentence mentioned) and bench_box_only (probe_files
+    named only boxrun.sh, which the fact sentence never mentions) before this
+    test existed.
+    """
+    for slug, scenario in scen.SCENARIOS.items():
+        for i, leg in enumerate(scenario.legs, start=1):
+            for variant in scenario.note_variants:
+                assert any(
+                    _probe_file_structurally_reaches(pf, variant) for pf in leg.probe_files
+                ), (
+                    f"{slug} leg {i}/{variant.variant}: none of {leg.probe_files!r} is "
+                    f"mentioned (path-boundary) or anchored in the note content -- "
+                    f"structurally unreachable, T0 would ABORT here"
+                )
+
+
 # ---------------------------------------------------------------------------
 # arm-blindness of the outcome verdict (DESIGN.md 6.1/6.6)
 # ---------------------------------------------------------------------------
