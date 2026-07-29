@@ -150,6 +150,21 @@ class TestWriteGitPostCommitHookInstall:
         assert content.count("# vectr-start") == 1
         assert content.count("# vectr-end") == 1
 
+    def test_unwritable_hooks_dir_skips_and_discloses_instead_of_raising(self, tmp_path, capsys):
+        """A resolved hooks dir that cannot be created (e.g. a stale/bogus
+        repo-local `core.hooksPath` pointing outside this user's permissions)
+        must degrade the same way every other precondition failure in this
+        function does: skip with a disclosed stderr message, never propagate
+        an exception past this writer. `cmd_init --hooks` runs three
+        independent installers in sequence (Claude/Codex/git) — a failure in
+        the third one must not undo or crash past the first two succeeding."""
+        _init_git_repo(tmp_path)
+        with patch("main._git_hooks_dir", return_value=Path("/nonexistent-root/definitely/not/writable")):
+            m._write_git_post_commit_hook(str(tmp_path))  # must not raise
+        err = capsys.readouterr().err
+        assert "Skipped" in err
+        assert "post-commit" in err
+
     def test_linked_worktree_installs_into_shared_hooks_dir(self, tmp_path):
         main_repo = tmp_path / "main"
         main_repo.mkdir()
@@ -234,6 +249,20 @@ class TestCmdInitGitHookWiring:
         assert hook_path.exists()
         m.cmd_init(_make_args(path=str(tmp_path), reset_config=True))
         assert not hook_path.exists()
+
+    def test_init_hooks_git_writer_failure_does_not_undo_claude_codex_hooks(self, tmp_path):
+        """The three `--hooks` installers run in sequence (Claude, Codex, git
+        post-commit); the git one failing on an unwritable resolved hooks dir
+        must not crash `cmd_init` or take down the two that already
+        succeeded — a caller who only cares about editor-hook injection
+        (Claude/Codex) must still get it even on a machine with a broken
+        `core.hooksPath`."""
+        _init_git_repo(tmp_path)
+        with patch("main._get_daemon_mode", return_value=None), \
+             patch("main._git_hooks_dir", return_value=Path("/nonexistent-root/definitely/not/writable")):
+            m.cmd_init(_make_args(path=str(tmp_path), hooks=True, no_ide_config=True))  # must not raise
+        assert (tmp_path / ".claude" / "settings.json").exists()
+        assert (tmp_path / ".codex" / "hooks.json").exists()
 
     def test_init_hooks_search_only_mode_skips_git_hook_too(self, tmp_path):
         _init_git_repo(tmp_path)
