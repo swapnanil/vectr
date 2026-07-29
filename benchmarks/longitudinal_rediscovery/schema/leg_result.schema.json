@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vectr/benchmarks/longitudinal_rediscovery/leg_result.schema.json",
+  "title": "Longitudinal rediscovery — per-leg result",
+  "description": "Normative contract for <runs-dir>/<trajectory_id>/legs/<k>/artifacts/result.json. One leg = one `claude -p` session = one unit of spend. The report layer reads ONLY fields declared here. Semantics are specified in DESIGN.md; this file pins the shape.",
+  "type": "object",
+  "required": [
+    "leg_id", "trajectory_id", "scenario", "arm", "note_variant", "seed", "k",
+    "model", "started_utc", "origin", "valid", "invalid_reason", "non_vacuity",
+    "score", "metrics", "cost"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "leg_id": { "type": "string", "description": "<stamp>-<scenario>-<arm>-<variant>-s<seed>-k<k>" },
+    "trajectory_id": { "type": "string", "description": "<scenario>-<arm>-<variant>-s<seed>" },
+    "scenario": { "type": "string" },
+    "arm": { "enum": ["none", "mcp", "mcp-bare", "proxy", "hook-sessionstart", "hook-full"] },
+    "note_variant": { "enum": ["none", "plain", "provenance", "verifiable"] },
+    "seed": { "type": "integer" },
+    "k": { "type": "integer", "minimum": 1, "description": "Session index within the trajectory." },
+    "origin": { "enum": ["discovered", "told"] },
+    "model": { "type": "string" },
+    "started_utc": { "type": "string" },
+
+    "leg1_id": {
+      "type": ["string", "null"],
+      "description": "Content hash of the shared leg-1 tar this trajectory restored. Legs of different leg1_id generations are never mixed in a report."
+    },
+    "restored_manifest_ok": {
+      "type": ["boolean", "null"],
+      "description": "k>1 only: the restored workspace's sha256 manifest matched the one recorded when the previous leg ended."
+    },
+    "planted_note_id": { "type": ["integer", "null"] },
+    "planted_anchor": { "type": ["string", "null"], "description": "e.g. 'note:1'; matched by exact comma-split, so note:4 is never satisfied by note:41." },
+    "notes_in_store_at_start": { "type": ["integer", "null"] },
+
+    "valid": {
+      "type": "boolean",
+      "description": "The arm's premise was independently confirmed (DESIGN.md 4.1). valid:false ⇒ EXCLUDED from every number, and never read as 'memory did not help'."
+    },
+    "invalid_reason": { "type": "string" },
+    "trajectory_valid_through": {
+      "type": ["integer", "null"],
+      "description": "Set when this leg is invalid: state carries forward, so successor legs are excluded too."
+    },
+
+    "non_vacuity": {
+      "type": "object",
+      "description": "Retrieval and delivery are DIFFERENT questions and were observed to disagree; both are required.",
+      "additionalProperties": true,
+      "properties": {
+        "mcp_servers_observed": { "type": "array", "items": { "type": "object" }, "description": "From the transcript's system.init event." },
+        "mcp_servers_expected": { "type": "array", "items": { "type": "string" } },
+        "inject_events": { "type": ["integer", "null"] },
+        "planted_anchor_injections": { "type": ["integer", "null"] },
+        "audit_since_offset": { "type": ["integer", "null"], "description": "Bytes skipped: the harness's own preflight probes hit the same audit log." },
+        "proxy_injected": { "type": ["integer", "null"] },
+        "planted_note_retrieved": { "type": ["boolean", "null"] },
+        "planted_note_delivered": { "type": ["boolean", "null"] },
+        "retrieved_but_not_delivered": { "type": ["boolean", "null"] },
+        "hook_injection_counts": { "type": ["object", "null"] },
+        "planted_content_in_transcript": { "type": ["boolean", "null"] },
+        "recall_probe_returned_note": { "type": ["boolean", "null"], "description": "Arm B: daemon-side /v1/recall preflight with the leg prompt returned the planted note." },
+        "trail_text_delivered": { "type": ["boolean", "null"], "description": "T3 gate: the variant's provenance-trail text survived into the injected/recalled block." },
+        "planted_note_injected": { "type": ["boolean", "null"] }
+      }
+    },
+
+    "score": {
+      "type": "object",
+      "description": "Arm-blind outcome scoring. No LLM judges a run; nothing reads the agent's prose.",
+      "required": ["primary_check", "fact_used", "checks"],
+      "additionalProperties": true,
+      "properties": {
+        "primary_check": { "type": "string" },
+        "fact_used": { "type": "boolean", "description": "The primary check's verdict: an AllOf pairing an engagement half with a restraint half, so a dead run cannot score as a success." },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "passed", "detail"],
+            "properties": {
+              "name": { "type": "string" },
+              "passed": { "type": "boolean" },
+              "detail": { "type": "string" },
+              "sub_checks": { "type": "array", "items": { "type": "object" } }
+            }
+          }
+        },
+        "checks_passed": { "type": "integer" },
+        "checks_total": { "type": "integer" }
+      }
+    },
+
+    "metrics": {
+      "type": "object",
+      "description": "DESIGN.md 6.3-6.5. Prefix quantities are null when censored, and are NEVER imputed from session totals.",
+      "required": ["censored", "mistake_committed", "rediscovery_actions"],
+      "additionalProperties": true,
+      "properties": {
+        "acquisition_action_index": { "type": ["integer", "null"] },
+        "censored": { "type": "boolean" },
+        "censor_reason": { "type": ["string", "null"], "enum": ["fact never acquired", null] },
+
+        "turns_to_fact": { "type": ["integer", "null"] },
+        "tool_calls_to_fact": { "type": ["integer", "null"] },
+        "output_tokens_to_fact": { "type": ["integer", "null"] },
+        "billable_tokens_to_fact": {
+          "type": ["number", "null"],
+          "description": "Weighted TOKEN aggregate (input 1.0, cache_creation 1.25, cache_read 0.1, output 5.0 — Anthropic's published relative price ratios). Not a dollar figure."
+        },
+        "context_tokens_at_fact": {
+          "type": ["integer", "null"],
+          "description": "A STOCK: context size at the acquiring call. Input tokens are never summed across turns — the conversation is resent each call and a sum double-counts."
+        },
+        "usd_to_fact_alloc": { "type": ["number", "null"] },
+        "usd_to_fact_basis": { "type": ["string", "null"], "enum": ["billable_token_share", null], "description": "An allocation, labelled as one. The exact dollar figure is cost.session_usd." },
+
+        "mistake_committed": { "type": "boolean" },
+        "first_mistake_action_index": { "type": ["integer", "null"] },
+        "mistake_source": { "type": ["string", "null"], "enum": ["action", "file_state", "verify_script", null] },
+        "self_corrected": { "type": "boolean", "description": "Erred, then acquired. The cost was still paid, but 'wrong then right' and 'wrong and shipped' are different products." },
+        "mistake_before_acquisition": { "type": ["boolean", "null"] },
+
+        "rediscovery_actions": { "type": "integer", "description": "Defined even when censored — the sensitivity companion to turns_to_fact." },
+        "vectr_tool_calls": { "type": "integer", "description": "Arm B adoption: actions named mcp__vectr__*. An OUTCOME, never a validity gate." },
+        "anchor_checked": { "type": ["boolean", "null"], "description": "T3: any Read/Grep/Bash action naming the anchored file." },
+        "verify_command_ran": { "type": ["boolean", "null"], "description": "T3: a Bash action matching the variant's verify hint." },
+        "trail_chars": { "type": ["integer", "null"], "description": "T3: delivered size of the provenance trail. If the trail buys nothing it is pure token overhead." },
+        "weak_prior": { "type": ["boolean", "null"], "description": "k=1, DISCOVERED, arm A: leg 1 did not commit the error. Flags the scenario for replacement, not the result for reinterpretation." }
+      }
+    },
+
+    "cost": {
+      "type": "object",
+      "description": "Session-granularity and EXACT. Latency comes from the transcript's result event; harness wall time includes queueing and is never used.",
+      "additionalProperties": true,
+      "properties": {
+        "session_turns": { "type": ["integer", "null"] },
+        "session_usd": { "type": ["number", "null"] },
+        "session_duration_ms": { "type": ["integer", "null"] },
+        "session_duration_api_ms": { "type": ["integer", "null"] },
+        "input_tokens": { "type": ["integer", "null"] },
+        "output_tokens": { "type": ["integer", "null"] },
+        "cache_read_input_tokens": { "type": ["integer", "null"] },
+        "cache_creation_input_tokens": { "type": ["integer", "null"] },
+        "billable_tokens_session": { "type": ["number", "null"] },
+        "tool_calls": { "type": ["integer", "null"] },
+        "result_subtype": { "type": ["string", "null"] },
+        "is_error": { "type": ["boolean", "null"] },
+        "agent_wall_s": { "type": ["number", "null"], "description": "Recorded for debugging only. NEVER a reported latency figure." }
+      }
+    }
+  }
+}

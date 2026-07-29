@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vectr/benchmarks/longitudinal_rediscovery/trajectory_state.schema.json",
+  "title": "Longitudinal rediscovery — trajectory state",
+  "description": "Normative contract for <runs-dir>/<trajectory_id>/state.json. A trajectory is (scenario, arm, note_variant, seed) run over legs 1..N; it is the unit of resumability and the lifetime of one vectr store. The driver reads this file to decide what to run, so it is what makes 'completed cells are never re-run' true across invocations and across days.",
+  "type": "object",
+  "required": ["trajectory_id", "scenario", "arm", "note_variant", "seed", "n_legs", "db_dir", "legs"],
+  "additionalProperties": true,
+  "properties": {
+    "trajectory_id": { "type": "string", "description": "<scenario>-<arm>-<variant>-s<seed>. Appears in every path so no two trajectories can share state." },
+    "scenario": { "type": "string" },
+    "arm": { "enum": ["none", "mcp", "mcp-bare", "proxy", "hook-sessionstart", "hook-full"] },
+    "note_variant": { "enum": ["none", "plain", "provenance", "verifiable"] },
+    "seed": { "type": "integer" },
+    "n_legs": { "type": "integer", "minimum": 3 },
+    "model": { "type": "string" },
+    "created_utc": { "type": "string" },
+    "updated_utc": { "type": "string" },
+
+    "db_dir": {
+      "type": "string",
+      "description": "VECTR_DB_DIR for this trajectory. Created once and REUSED unchanged across legs 2..N — that persistence is the mechanism under test. Never shared with another trajectory."
+    },
+    "leg1_id": {
+      "type": ["string", "null"],
+      "description": "Content hash of the shared leg-1 tar restored at leg 2. --refresh-leg1 mints a new id; trajectories on an older id are stale by construction and the report says so rather than mixing generations."
+    },
+    "leg1_source": {
+      "type": ["string", "null"],
+      "description": "Path under <runs-dir>/_shared/leg1/. Leg 1 is run ONCE per (scenario, seed) and simultaneously IS arm A's leg 1 — at leg 1 the store is empty in every arm, so nothing distinguishes them (DESIGN.md 5.2)."
+    },
+    "planted_note_id": { "type": ["integer", "null"], "description": "Planted after leg 1; identical text across arms so any arm difference at k>1 is attributable to the delivery channel alone." },
+    "planted_anchor": { "type": ["string", "null"] },
+
+    "legs": {
+      "type": "array",
+      "description": "One entry per attempted leg, index k-1.",
+      "items": {
+        "type": "object",
+        "required": ["k", "status"],
+        "additionalProperties": true,
+        "properties": {
+          "k": { "type": "integer", "minimum": 1 },
+          "status": {
+            "enum": ["pending", "running", "done", "invalid", "failed", "skipped"],
+            "description": "'done' or 'invalid' both mean COMPLETED: the leg is never re-run without --force-leg. 'skipped' is an arm that was not eligible (e.g. hook-full without a verified attestation)."
+          },
+          "result_path": { "type": ["string", "null"] },
+          "end_state_tar": { "type": ["string", "null"] },
+          "end_state_manifest_sha256": { "type": ["string", "null"], "description": "Verified before the next leg starts; a mismatch aborts rather than silently running on drifted state." },
+          "usd": { "type": ["number", "null"] },
+          "valid": { "type": ["boolean", "null"] },
+          "started_utc": { "type": ["string", "null"] },
+          "finished_utc": { "type": ["string", "null"] }
+        }
+      }
+    },
+
+    "trajectory_valid_through": {
+      "type": ["integer", "null"],
+      "description": "Highest k such that legs 1..k are all valid. State carries forward, so an invalid leg contaminates its successors even if they individually pass their gates."
+    },
+    "spend_usd": { "type": ["number", "null"], "description": "Sum of completed legs' total_cost_usd. The --budget-usd guard refuses to START a leg once the remaining budget is below the tier's per-leg worst case." },
+    "tier": { "type": ["string", "null"], "description": "Tier that authorised this trajectory (T1..T7)." },
+    "hook_attestation": {
+      "type": ["object", "null"],
+      "description": "Required for arm hook-full: the sentinel's independent interactive verification that -p mode surfaces PreToolUse/UserPromptSubmit additionalContext. Absent or verified:false ⇒ the arm is SKIPPED, never run and never scored.",
+      "properties": {
+        "verified": { "type": "boolean" },
+        "date": { "type": "string" },
+        "method": { "type": "string" },
+        "claude_code_version": { "type": "string" }
+      }
+    },
+    "notes": { "type": ["string", "null"] }
+  }
+}
