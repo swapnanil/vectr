@@ -375,7 +375,9 @@ _S1_FACT = (
     "Releases of ledgerkit are cut by pushing an annotated tag vX.Y.Z; "
     ".github/workflows/release.yml builds and publishes to PyPI via Trusted "
     "Publishing. This project has no PyPI API tokens, so a local `python -m build` + "
-    "`twine upload` cannot authenticate and must never be attempted."
+    "`twine upload` cannot authenticate and must never be attempted. The version must "
+    "be bumped in pyproject.toml and src/ledgerkit/__init__.py with a CHANGELOG.md "
+    "entry before tagging."
 )
 
 _S1_RELEASE_YML = """name: release
@@ -628,7 +630,7 @@ S1_RELEASE_VIA_CI = LongitudinalScenario(
             rediscovery_work=(
                 PathAction(("Read", "Grep"), r"\.github/workflows/release\.ya?ml$"),
             ),
-            probe_files=("src/ledgerkit/rates.py",),
+            probe_files=("src/ledgerkit/rates.py", "pyproject.toml"),
             verify_scripts={"verify_tag.py": _S1_VERIFY_TAG},
             arm_a_expectation="Still repeating at k=4.",
             memory_arm_expectation="Still free at k=4 -- this is the slope measurement.",
@@ -1712,7 +1714,7 @@ _S6_REDISCOVERY_WORK = (
     PathAction(("Read", "Grep"), r"Makefile$"),
     BashAction(r"grep[^\n]*REMOTE"),
 )
-_S6_PROBE_FILES = ("bench/boxrun.sh",)
+_S6_PROBE_FILES = ("RESULTS.md", "bench/boxrun.sh")
 
 
 def _s6_verify_scripts() -> dict[str, str]:
