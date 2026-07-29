@@ -638,6 +638,9 @@ def leg_non_vacuity(
     planted_note_content: str | None = None,
     recall_probe_returned_note: bool | None = None,
     trail_text_delivered: bool | None = None,
+    agent_returncode: int | None = None,
+    is_error: bool | None = None,
+    output_tokens: int | None = None,
 ) -> dict[str, Any]:
     """DESIGN.md 4.1: was this leg's arm premise independently confirmed?
 
@@ -647,6 +650,15 @@ def leg_non_vacuity(
 
     `arm` is consulted ONLY here, never in `score_run`/`leg_metrics` -- the outcome
     verdict stays arm-blind; this function alone answers "did the channel fire?".
+
+    `agent_returncode`/`is_error`/`output_tokens` gate a prerequisite BELOW the
+    per-arm premise: did the agent session run at all. This is arm-agnostic and
+    content-free -- it reads only the session's own error/token fields (the
+    process return code, `result.is_error`, `result.usage.output_tokens`), never
+    transcript prose. An observed CLI shape this catches that the `result.subtype
+    != "success"` check above does not: `subtype: "success"` with `is_error: true`
+    and zero output tokens -- a session that errored out before producing any
+    response, still tagged "success" by the transcript's own `result` event.
     """
     if arm not in _EXPECTED_MCP_SERVERS:
         raise ValueError(f"unknown arm {arm!r}")
@@ -667,6 +679,19 @@ def leg_non_vacuity(
     if not result or result.get("subtype") != "success":
         reasons.append(f"result.subtype != 'success' (got {(result or {}).get('subtype')!r})")
 
+    # Session-level abort, checked for every arm (not gated by result.subtype above
+    # -- a session can carry subtype "success" while is_error is true and it never
+    # produced any output). `output_tokens == 0` is a strict equality, not falsy: a
+    # transcript with no `result` event at all leaves this None (already caught by
+    # the subtype check above), so this only fires for a `result` event that IS
+    # present and explicitly reports zero.
+    session_errored = bool(is_error) or (agent_returncode not in (None, 0)) or (output_tokens == 0)
+    if session_errored:
+        reasons.append(
+            f"agent session errored (is_error={is_error!r}, "
+            f"agent_returncode={agent_returncode!r}, output_tokens={output_tokens!r})"
+        )
+
     if k > 1 and restored_manifest_ok is False:
         reasons.append("restored snapshot manifest sha256 mismatch")
 
@@ -680,6 +705,7 @@ def leg_non_vacuity(
         "proxy_injected": proxy_injected,
         "notes_in_store_at_start": notes_count_at_start,
         "trail_text_delivered": trail_text_delivered,
+        "session_errored": session_errored,
     }
 
     if arm == "none":

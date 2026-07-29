@@ -34,7 +34,12 @@ Non-vacuity gates (DESIGN.md 4.1) are gathered here and handed to
 `scorer.leg_metrics`) never sees `arm` at all.
 
 Exit code: 0 whenever the leg ran to completion, INCLUDING an invalid or
-task-failing leg. Floors and verdicts belong to report.py's reader, never to this
+task-failing leg -- EXCEPT one specific case: `scorer.leg_non_vacuity`'s
+arm-agnostic session-level check (agent session errored / zero output tokens /
+nonzero process return code). That is a genuine abort, not a completed-but-invalid
+leg -- result.json still records it (valid=false, invalid_reason set) but this
+script exits nonzero so a driver (run_plan.py) never chains or caches its end
+state. Floors and verdicts otherwise belong to report.py's reader, never to this
 script.
 """
 from __future__ import annotations
@@ -565,6 +570,26 @@ class LegRunner:
         self.record["planted_note_id"] = nid
         self.record["planted_anchor"] = self.planted_anchor
 
+        # `notes_count_at_start` (set in start_daemon(), BEFORE this plant) is the
+        # scorer's non-vacuity premise counter for the memory arms
+        # (scorer.leg_non_vacuity's "notes_count_at_start is 0" checks) -- its
+        # documented premise is "note in store when the AGENT starts", and the
+        # agent starts AFTER this plant for every --plant-note leg. The pre-plant
+        # snapshot is therefore stale for this leg specifically; replace it with a
+        # fresh post-plant count so the recorded premise matches what the agent
+        # will actually see. The stale pre-plant value is preserved separately
+        # under a diagnostic key rather than discarded. A failed re-snapshot
+        # (daemon hiccup) falls back to keeping the pre-plant value rather than
+        # aborting the leg over a diagnostic read.
+        self.record["notes_in_store_pre_plant"] = self.notes_count_at_start
+        post_plant_status = _http_json(
+            "GET", f"http://127.0.0.1:{self.daemon_port}/v1/status", timeout=30
+        )
+        post_plant_count = post_plant_status.get("notes_count")
+        if isinstance(post_plant_count, int):
+            self.notes_count_at_start = post_plant_count
+            self.record["notes_in_store_at_start"] = post_plant_count
+
     def probe(self) -> None:
         """Daemon-side reachability probes (DESIGN.md 4.1, 7.3). Never touches the
         proxy -- see `_proactive_probe`'s docstring.
@@ -822,6 +847,9 @@ class LegRunner:
             planted_note_content=(variant.content if variant is not None else None),
             recall_probe_returned_note=self.recall_probe_returned_note,
             trail_text_delivered=self.trail_text_delivered,
+            agent_returncode=self.record.get("agent_returncode"),
+            is_error=cost.get("is_error"),
+            output_tokens=cost.get("output_tokens"),
         )
 
         self.record["score"] = run_score
@@ -1040,6 +1068,23 @@ def main() -> None:
     runner.snapshot()
     runner.write()
     runner.report()
+
+    _abort_if_session_errored(runner.record)
+
+
+def _abort_if_session_errored(record: dict[str, Any]) -> None:
+    """A genuine abort, not an ordinary invalid leg (module docstring's exit-code
+    contract): if `scorer.leg_non_vacuity`'s arm-agnostic `session_errored` gate
+    fired, the agent session itself errored or produced no output, so this leg's
+    result.json/snapshot describe a session that never ran meaningfully. A nonzero
+    exit here is what tells a driver (run_plan.py) to refuse to cache/chain this
+    leg's end state (`run_plan.py`'s `_ensure_shared_leg1` and its `rc != 0`
+    handling in the k-loop). Kept standalone (not inlined in `main()`) so it can be
+    exercised directly against a constructed record without spawning a real agent
+    session.
+    """
+    if (record.get("non_vacuity") or {}).get("session_errored"):
+        raise SystemExit(f"ABORT: {record.get('invalid_reason')}")
 
 
 if __name__ == "__main__":

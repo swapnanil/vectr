@@ -77,6 +77,10 @@ def _load_local_module(key: str, filename: str):
 
 
 scen = _load_local_module(_LONGITUDINAL_SCENARIOS_KEY, "scenarios.py")
+# `--arms` validates against run_leg.py's own ARMS tuple -- the single source of
+# truth for valid arm names -- rather than a second, driftable copy here.
+_run_leg_mod = _load_local_module("_vectr_eval_longitudinal_run_leg_module", "run_leg.py")
+ARMS = _run_leg_mod.ARMS
 
 TIERS = ("T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7")
 
@@ -358,19 +362,26 @@ def _ensure_shared_leg1(scenario: str, seed: int, *, runs_dir: Path, args: argpa
     leg1_id_path = leg1_dir / "leg1_id"
     if leg1_id_path.is_file() and not args.refresh_leg1:
         result = json.loads((leg1_dir / "result.json").read_text())
-        info = {
-            "dir": leg1_dir,
-            "leg1_id": leg1_id_path.read_text().strip(),
-            "workspace_tar": leg1_dir / "workspace.tar",
-            "manifest_sha256": result.get("end_state_manifest_sha256"),
-            "valid": result.get("valid"),
-            "usd": (result.get("cost") or {}).get("session_usd"),
-            "result_path": leg1_dir / "result.json",
-            "would_run": False,
-            "ran": False,
-        }
-        cache[key] = info
-        return info
+        if result.get("valid"):
+            info = {
+                "dir": leg1_dir,
+                "leg1_id": leg1_id_path.read_text().strip(),
+                "workspace_tar": leg1_dir / "workspace.tar",
+                "manifest_sha256": result.get("end_state_manifest_sha256"),
+                "valid": result.get("valid"),
+                "usd": (result.get("cost") or {}).get("session_usd"),
+                "result_path": leg1_dir / "result.json",
+                "would_run": False,
+                "ran": False,
+            }
+            cache[key] = info
+            return info
+        # An on-disk shared leg 1 exists but is invalid (e.g. run_leg.py's
+        # session-level non-vacuity abort, scorer.leg_non_vacuity's
+        # `session_errored` gate -- DESIGN.md 4.1) -- never treat an invalid leg1
+        # as a usable starting snapshot for any arm. Fall through; the live-run
+        # path below supersedes this stale directory before retrying, so a later
+        # invocation retries leg 1 rather than resuming past a hollow one.
 
     if args.dry_run:
         info = {
@@ -381,8 +392,14 @@ def _ensure_shared_leg1(scenario: str, seed: int, *, runs_dir: Path, args: argpa
         cache[key] = info
         return info
 
-    if args.refresh_leg1:
-        _supersede(leg1_dir)
+    # Anything left in leg1_dir at this point is stale: an explicit --refresh-leg1
+    # request, an invalid cached leg1 just detected above, or leftover partial
+    # content from a prior attempt that aborted before ever producing a leg1_id
+    # (e.g. run_leg.py exiting nonzero on a session-level abort). run_leg.py's own
+    # `prepare()` refuses to write into a directory that already has content, so
+    # this must be superseded before every live (re-)run, not only on an explicit
+    # refresh; `_supersede` is a no-op if the directory does not exist.
+    _supersede(leg1_dir)
 
     cmd = [
         sys.executable, str(_RUN_LEG), "--shared-leg1",
@@ -494,6 +511,13 @@ def plan_and_run(tier: str, args: argparse.Namespace) -> dict:
         return run_t0(runs_dir, args)
 
     specs = _tier_trajectories(tier, seed=args.seed)
+    # `--arms` filters the tier's OWN enumeration post-hoc; it never reaches
+    # `_tier_trajectories` and so never changes what a tier IS or the no-flag
+    # --dry-run estimates (getattr default handles callers -- e.g. `_args()` test
+    # helpers predating this flag -- that never set `args.arms` at all).
+    arms_filter = getattr(args, "arms", None)
+    if arms_filter:
+        specs = [s for s in specs if s.arm in arms_filter]
     leg1_cache: dict[tuple[str, int], dict] = {}
     announced_leg1: set[tuple[str, int]] = set()
     spend = 0.0
@@ -678,6 +702,20 @@ def plan_and_run(tier: str, args: argparse.Namespace) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _arms_list(value: str) -> tuple[str, ...]:
+    """`argparse` `type=` for `--arms`: a comma-separated arm-name list, validated
+    against `ARMS` (run_leg.py's own tuple) so an unknown arm name is rejected as a
+    normal argparse usage error rather than silently filtering everything out.
+    """
+    names = tuple(v.strip() for v in value.split(",") if v.strip())
+    unknown = [n for n in names if n not in ARMS]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown arm(s) {unknown!r}; valid arms are {list(ARMS)}"
+        )
+    return names
+
+
 def _build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tier", required=True, choices=TIERS)
@@ -709,6 +747,14 @@ def _build_argparser() -> argparse.ArgumentParser:
         "Path to a verified:true attestation JSON; required for any arm hook-full "
         "(D2) trajectory in this tier. Without it, those trajectories' legs are "
         "marked 'skipped' and run_leg.py is never invoked for them (DESIGN.md 4)."
+    ))
+    ap.add_argument("--arms", type=_arms_list, default=None, metavar="ARM[,ARM...]", help=(
+        "Filter this tier's enumerated trajectories to only the named arm(s), e.g. "
+        "'--arms hook-sessionstart' or '--arms none,proxy'. Applied AFTER the tier's "
+        "own trajectory enumeration -- never changes what a tier IS, and the no-flag "
+        "--dry-run estimates (DESIGN.md 9's table) are unaffected when this flag is "
+        "absent. Lets a budget-constrained run buy one arm of a tier without the "
+        "others. Unknown arm names are rejected. Valid arms: " + ", ".join(ARMS)
     ))
     ap.add_argument("--vectr-bin", default=shutil.which("vectr") or "vectr")
     ap.add_argument("--model", default="sonnet")
