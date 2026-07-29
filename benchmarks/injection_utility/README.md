@@ -222,6 +222,43 @@ triggers at all was injected for an `alpha.py` anchor (1 item). Scenario notes
 therefore name their anchor file in the note body, and `probe_file` must be a path
 the note text actually mentions.
 
+## Measured result (2026-07-29, seed 0, 7 trap scenarios + 4 intervention arms)
+
+Delivery is fixed and non-vacuous: every injection-ON cell confirmed `injected=1`
+with token-joined `PROACTIVE_RETRIEVE`/`PROACTIVE_INJECT` audit lines. On that valid
+base, the utility delta was **zero across four independent interventions**:
+
+| Arm | Injected block | Utility hits |
+|---|---|---|
+| Baseline | security envelope + title-only | 0/7 (controls also 0/7) |
+| Envelope A/B | neutral envelope + title-only | 0/2 |
+| Content tier | security envelope + full body | 0/2 |
+| Both | neutral envelope + full body | 0/2 |
+| Attribution | ownership framing + full body | 0/2 |
+
+Three separable causes, in increasing order of bindingness:
+
+1. **Title-only payload** — the proxy injects `_raw_summary()` = `note.title`
+   (fallback: first content line); the note body never crosses the wire.
+2. **One-turn visibility** — the block rides one outbound request, is never echoed
+   into the editor's local conversation state, and the cooldown then suppresses
+   re-injection; in 6 of 7 baseline cells the note was out of context before the
+   first mutating edit.
+3. **Model-side distrust of uncorroborated ambient context** — with the note on the
+   decision turn, full-body, and the skeptical envelope removed, the executor model
+   still declined to act on it, explicitly citing that the claim did not come from
+   the user and had no corroboration in the repo. By construction the trap scenarios
+   make the note the only source of truth, so this is the binding constraint, and no
+   envelope rewording addresses it.
+
+Injection also carried a consistent ~120 extra input tokens per cell and was not an
+efficiency win on this scenario class. Awareness (note-referencing markers in the
+transcript, absent from the workspace): 2/13 inject cells vs 0/5 controls.
+
+**Reading a cell**: `utility_hit=False` in a *valid* injection-ON cell means "the
+delivered note did not change behavior" — never "the note was not delivered". The
+non-vacuity rule above is what licenses that reading.
+
 ## Scorer tests
 
 `tests/test_injection_utility_scorer.py` (collected by the default pytest run;
