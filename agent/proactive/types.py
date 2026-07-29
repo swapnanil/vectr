@@ -18,6 +18,17 @@ PROVENANCE_RANK: dict[str, int] = {
     "code_semantic": 2,
 }
 
+# Trust rank among `WorkingNote.provenance` values (UPG-PROXY-INJECT-ROLE-
+# PROVENANCE) — NOT the candidate-KIND tie-break above; this ranks the note
+# PROPERTY carried in `Candidate.note_provenance`. Lower is weaker. Matches
+# working_context_store's own promotion-direction ordering (`_store.py`'s
+# `promote()`: "auto" -> "agent" -> "human"). The gate uses this to pick the
+# weakest tier among every candidate actually selected for one delivery, so
+# a mixed-provenance block never overstates trust; a candidate with no
+# recorded provenance (unset, or a non-note candidate such as code_semantic)
+# looks itself up here via `.get(..., 0)` and lands at the weakest rank.
+NOTE_PROVENANCE_TRUST_RANK: dict[str, int] = {"auto": 0, "agent": 1, "human": 2}
+
 # The folded note-lifecycle state (UPG-MEMORY-STATE-MACHINE) a non-note
 # candidate carries — a code-search hit has no note to fold state for, and
 # rendering it as "active" would honestly mislabel it as an assertion under
@@ -71,6 +82,32 @@ class Candidate:
                           # match was found, the state describes what the note
                           # currently IS — a revoked note keeps its tier and so
                           # still competes for a slot as a deterrent.
+    anchor_path: str | None = None  # the exact `ProactiveWindow.file_paths`
+                          # entry a STRUCTURAL_TIER_DECLARED_ANCHOR candidate
+                          # matched (UPG-PROXY-INJECT-SINGLE-TURN); None for
+                          # every other candidate, including weaker structural
+                          # tiers. Used ONLY by the gate's event-anchored
+                          # retirement (agent/proactive/gate.py's `select()`)
+                          # to test membership against a request's
+                          # `edited_file_paths` — never for display; the
+                          # rendered `line`'s anchor label is always the
+                          # basename computed in matcher.py, independent of
+                          # this field.
+    note_provenance: str | None = None  # `WorkingNote.provenance` (UPG-PROXY-
+                          # INJECT-ROLE-PROVENANCE), one of PROVENANCE_VALUES
+                          # ("human" | "agent" | "auto") for a note-backed
+                          # candidate; None for a non-note candidate
+                          # (code_semantic). Populated via matcher.py's
+                          # `_provenance_label()`, which already normalises a
+                          # missing/invalid value on the note itself down to
+                          # "auto" — so this field is never an unrecognised
+                          # string, only ever one of the three tiers or None.
+                          # Used ONLY by the gate to pick the envelope
+                          # wording for the whole packed block (the weakest
+                          # tier among every SELECTED candidate); never for
+                          # display — the per-line provenance marker in
+                          # `line` is independent of this field and always
+                          # present regardless of whether the gate reads it.
 
     @property
     def provenance_rank(self) -> int:
@@ -90,6 +127,18 @@ class ProactiveWindow:
     text: str = ""
     file_paths: list[str] = field(default_factory=list)
     symbols: list[str] = field(default_factory=list)
+    # UPG-PROXY-INJECT-SINGLE-TURN: the subset of `file_paths` this request's
+    # tool traffic actually EDITED (Edit/Write/MultiEdit/apply_patch — the
+    # same tool-name set `agent/hook_cli.py`'s `_build_episode_payload` and
+    # `main.py`'s PreToolUse hook group already use to distinguish an edit
+    # call from a read/search one), never merely mentioned or read. A subset
+    # of `file_paths` by construction — every edit-tool call also carries a
+    # `file_path` extracted into `file_paths` by the same pass. Drives the
+    # gate's event-anchored retirement for declared-anchor structural
+    # candidates (agent/proactive/gate.py's `select()`); it plays no role in
+    # matching itself, only in whether an already-matched anchored note
+    # retires afterward.
+    edited_file_paths: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         return not (self.text.strip() or self.file_paths or self.symbols)
@@ -123,6 +172,17 @@ class InjectionResult:
     # selection (the default, and what every non-proxy channel does) or the
     # daemon predates deferred charging.
     delivery_token: str = ""
+    # UPG-PROXY-INJECT-SINGLE-TURN: the subset of `anchor_ids` selected THIS
+    # delivery that must NOT be written into the cross-turn cooldown ledger
+    # even once delivery is confirmed — a declared-anchor structural
+    # candidate whose anchored file was matched but not yet EDITED this
+    # request (`Candidate.anchor_path` absent from the window's
+    # `edited_file_paths`). Such a note stays eligible for the very same
+    # anchor_id on a later request instead of retiring after one delivery.
+    # Always a subset of `anchor_ids`; empty for every ordinary
+    # (non-event-anchored) result, which is charged in full exactly as
+    # before this field existed.
+    unretired_anchor_ids: tuple[str, ...] = ()
 
     @staticmethod
     def empty() -> "InjectionResult":

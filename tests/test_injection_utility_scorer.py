@@ -509,6 +509,88 @@ def test_non_vacuity_ignores_unrelated_audit_events(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# hook_non_vacuity -- the `--arm hook` channel has no proxy and no
+# PROACTIVE_INJECT audit line; retrieval comes from the daemon's own
+# `hook_injection_counts` and delivery from the planted note's text actually
+# appearing in the recorded transcript (UPG-PROXY-INJECT-HOOK-ARM).
+# ---------------------------------------------------------------------------
+
+
+def test_hook_non_vacuity_requires_both_retrieval_and_delivery(tmp_path):
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": {"content": "the planted fact"}}) + "\n"
+    )
+    nv = scorer.hook_non_vacuity(
+        hook_injection_counts={"UserPromptSubmit": 1},
+        transcript_path=transcript,
+        planted_note_content="the planted fact",
+    )
+    assert nv["hook_fired"] is True
+    assert nv["planted_content_in_transcript"] is True
+    assert nv["planted_note_injected"] is True
+    assert nv["retrieved_but_not_delivered"] is False
+
+
+def test_hook_non_vacuity_zero_counts_is_vacuous_even_with_matching_text(tmp_path):
+    """A zero-count daemon means no hook actually fired -- text matching the
+    note appearing in the transcript some other way (e.g. the agent typing it
+    out unprompted) must not be read as delivery."""
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": {"content": "the planted fact"}}) + "\n"
+    )
+    nv = scorer.hook_non_vacuity(
+        hook_injection_counts={"SessionStart": 0, "UserPromptSubmit": 0},
+        transcript_path=transcript,
+        planted_note_content="the planted fact",
+    )
+    assert nv["hook_fired"] is False
+    assert nv["planted_note_injected"] is False
+
+
+def test_hook_non_vacuity_retrieved_but_not_delivered(tmp_path):
+    """The daemon counted a delivery but the note's text never made it into
+    the transcript -- the hook-channel analogue of `retrieved_but_not_delivered`
+    on the proxy path (see `non_vacuity`'s docstring)."""
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": {"content": "unrelated turn"}}) + "\n"
+    )
+    nv = scorer.hook_non_vacuity(
+        hook_injection_counts={"UserPromptSubmit": 1},
+        transcript_path=transcript,
+        planted_note_content="the planted fact",
+    )
+    assert nv["hook_fired"] is True
+    assert nv["planted_content_in_transcript"] is False
+    assert nv["planted_note_injected"] is False
+    assert nv["retrieved_but_not_delivered"] is True
+
+
+def test_hook_non_vacuity_missing_transcript_is_not_a_silent_pass(tmp_path):
+    nv = scorer.hook_non_vacuity(
+        hook_injection_counts={"UserPromptSubmit": 1},
+        transcript_path=tmp_path / "absent.jsonl",
+        planted_note_content="the planted fact",
+    )
+    assert nv["planted_content_in_transcript"] is False
+    assert nv["planted_note_injected"] is False
+
+
+def test_hook_non_vacuity_empty_counts_dict(tmp_path):
+    """`None`/`{}` (the daemon status field can be absent) degrades to
+    vacuous, never an error."""
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("")
+    nv = scorer.hook_non_vacuity(
+        hook_injection_counts={}, transcript_path=transcript, planted_note_content="x",
+    )
+    assert nv["hook_fired"] is False
+    assert nv["planted_note_injected"] is False
+
+
+# ---------------------------------------------------------------------------
 # the scorer must be arm-blind
 # ---------------------------------------------------------------------------
 

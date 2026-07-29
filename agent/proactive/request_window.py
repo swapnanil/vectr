@@ -25,6 +25,12 @@ from agent.proactive.types import ProactiveWindow
 _FILE_PATH_KEYS = ("file_path", "path", "notebook_path")
 # Tool-input keys whose value, when a bare identifier token, names a symbol.
 _SYMBOL_KEYS = ("name", "symbol", "query", "pattern")
+# Tool names that WRITE to a file, as opposed to merely reading/searching one
+# (UPG-PROXY-INJECT-SINGLE-TURN). The same canonical set `agent/hook_cli.py`'s
+# `_build_episode_payload` and `main.py`'s PreToolUse/PostToolUse hook groups
+# already key episode capture on — reused verbatim here rather than a second,
+# independently-drifting list.
+_EDIT_TOOL_NAMES = ("Edit", "Write", "MultiEdit", "apply_patch")
 
 
 def _is_identifier(token: str) -> bool:
@@ -91,6 +97,7 @@ def assemble_window(
     fragments: list[str] = []
     file_paths: list[str] = []
     symbols: list[str] = []
+    edited_file_paths: list[str] = []
 
     for msg in recent:
         if not isinstance(msg, dict):
@@ -114,13 +121,25 @@ def assemble_window(
                 name = str(block.get("name") or "")
                 if name:
                     fragments.append(f"tool:{name}")
-                _extract_anchors(block.get("input") or {}, file_paths, symbols)
+                tool_input = block.get("input") or {}
+                _extract_anchors(tool_input, file_paths, symbols)
+                # UPG-PROXY-INJECT-SINGLE-TURN: path-only, mirroring
+                # `_build_episode_payload`'s own edit-tool handling — the
+                # edit tools' `tool_input` carries a `file_path` key only,
+                # never `path`/`notebook_path`.
+                if name in _EDIT_TOOL_NAMES and isinstance(tool_input, dict):
+                    edited = tool_input.get("file_path")
+                    if isinstance(edited, str) and edited.strip() and edited not in edited_file_paths:
+                        edited_file_paths.append(edited)
 
     text = "\n".join(fragments).strip()
     # Keep the most recent tail within the character budget (recency matters most).
     if max_chars > 0 and len(text) > max_chars:
         text = text[-max_chars:]
-    return ProactiveWindow(text=text, file_paths=file_paths, symbols=symbols)
+    return ProactiveWindow(
+        text=text, file_paths=file_paths, symbols=symbols,
+        edited_file_paths=edited_file_paths,
+    )
 
 
 # ---------------------------------------------------------------------------

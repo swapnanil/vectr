@@ -152,7 +152,12 @@ def test_all_three_fixes_compose_in_one_injection(tmp_path, monkeypatch):
       revoked deterrent    (P0 anti-memory contract, still intact)
       chars= / states=     (AUDIT-DURABLE)
     """
-    from agent.proactive.gate import _ENVELOPE_CLOSE, _ENVELOPE_OPEN
+    # `remember()` defaults provenance="agent" for every note below (none
+    # passes an explicit provenance), so the packed block gets the
+    # agent-tier envelope open (UPG-PROXY-INJECT-ROLE-PROVENANCE) rather
+    # than the auto-tier `_ENVELOPE_OPEN` -- see
+    # test_proactive_role_provenance.py for the tiering logic itself.
+    from agent.proactive.gate import _ENVELOPE_CLOSE, _ENVELOPE_OPEN_AGENT
 
     log_file = tmp_path / "audit.log"
     svc = _service(
@@ -186,7 +191,7 @@ def test_all_three_fixes_compose_in_one_injection(tmp_path, monkeypatch):
     ctx = out["context"]
 
     # ROLE-PROVENANCE: the block is enveloped on both sides.
-    assert ctx.startswith(_ENVELOPE_OPEN)
+    assert ctx.startswith(_ENVELOPE_OPEN_AGENT)
     assert ctx.rstrip().endswith(_ENVELOPE_CLOSE)
 
     # ROLE-PROVENANCE + INJECT-PRECISION: imperative-shaped and

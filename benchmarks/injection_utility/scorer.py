@@ -403,3 +403,45 @@ def non_vacuity(
         "total_chars_injected": sum(int(e.get("chars") or 0) for e in events),
         "events": events,
     }
+
+
+def hook_non_vacuity(
+    *,
+    hook_injection_counts: dict[str, Any],
+    transcript_path: Path,
+    planted_note_content: str,
+) -> dict[str, Any]:
+    """Did the planted note reach the model through the HOOK channel
+    (`--arm hook`)? The hook arm has no proxy and no `PROACTIVE_INJECT` audit
+    line to read (see `non_vacuity` above); the two independent sources here
+    play the same retrieval/delivery roles with hook-native evidence:
+
+    * `hook_injection_counts`, read from the scratch daemon's own
+      `/v1/status` just before teardown, proves RETRIEVAL -- some hook call
+      (SessionStart/UserPromptSubmit/PreToolUse) returned non-empty notes
+      text during this run. Each cell's daemon serves a fresh, single-note
+      `VECTR_DB_DIR`, so any nonzero count is retrieval of the one note this
+      cell planted.
+    * The planted note's own CONTENT appearing verbatim in the recorded
+      transcript proves DELIVERY -- the hook's `additionalContext` actually
+      entered the conversation the model saw, not just the daemon's
+      response to the hook subprocess.
+
+    Retrieval without delivery is possible here too (the hook-channel
+    analogue of `retrieved_but_not_delivered` above): the daemon could serve
+    the note while the editor harness fails to thread `additionalContext`
+    into the session for some reason. Both sources must agree for the cell
+    to count.
+    """
+    hook_fired = any(int(v or 0) > 0 for v in (hook_injection_counts or {}).values())
+    transcript_text = ""
+    if transcript_path.exists():
+        transcript_text = transcript_path.read_text(encoding="utf-8", errors="replace")
+    delivered = bool(planted_note_content) and planted_note_content in transcript_text
+    return {
+        "hook_injection_counts": dict(hook_injection_counts or {}),
+        "hook_fired": hook_fired,
+        "planted_content_in_transcript": delivered,
+        "planted_note_injected": bool(hook_fired and delivered),
+        "retrieved_but_not_delivered": bool(hook_fired and not delivered),
+    }

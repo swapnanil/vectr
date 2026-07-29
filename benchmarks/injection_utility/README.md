@@ -259,6 +259,75 @@ transcript, absent from the workspace): 2/13 inject cells vs 0/5 controls.
 delivered note did not change behavior" — never "the note was not delivered". The
 non-vacuity rule above is what licenses that reading.
 
+## Hook-channel arm (2026-07-29, seed 0, 2 trap scenarios)
+
+`--arm hook` (`write_hooks`/`hook_non_vacuity`) delivers the same planted note
+through a fundamentally different path than the arms above: no proxy, no
+`ANTHROPIC_BASE_URL` interception at all. Instead `vectr init --hooks` installs
+the ordinary Claude Code hook entries (`SessionStart`, `UserPromptSubmit`,
+`PreToolUse`, ...), the same ones a real user's workspace gets, and the note
+reaches the agent (if it reaches it) as hook-fired `additionalContext` — the
+delivery channel this eval's own `CLAUDE.md`-style guidance assumes is available.
+
+Two `generated_config`/`flaky_test` cells were run. Both came back `valid: false`
+with an identical, decisive shape:
+
+- **Retrieval confirmed** — the scratch daemon's `hook_injection_counts` (read via
+  `GET /v1/status`) showed `PreToolUse: 1` and `UserPromptSubmit: 1` per cell: the
+  installed hooks fired as subprocesses and vectr returned non-empty content for
+  both.
+- **Delivery unconfirmed** — the planted note's content never appears anywhere in
+  the agent's `--output-format stream-json` transcript for either hook type. A full
+  transcript audit of one cell found only two `hook_started`/`hook_response` system
+  entries, both for `SessionStart` (one of them a pre-existing, unrelated
+  `GitKrakenCLI` hook on the test machine); `PreToolUse` and `UserPromptSubmit`
+  produced **no transcript entry of any kind** — not a `hookSpecificOutput` system
+  entry, not text embedded in the next `user` turn, nowhere. The agent's own
+  reasoning in that transcript shows it re-derived the note's core fact (that
+  `config/limits.conf` is generated) by reading `tools/gen_limits.py` directly, not
+  from any injected hint.
+
+This points at the harness's own `claude -p` (non-interactive/print) invocation,
+not at vectr: `vectr hook pre-tool-use`/`vectr hook user-prompt-submit` emit the
+documented `{"hookSpecificOutput": {...}}` JSON on stdout with exit 0 (confirmed
+independently by hand — see the `hook_injection_counts` mechanism in
+`app/service.py`), and the CLI *does* execute them (the daemon-side counters prove
+it), but `-p` mode does not appear to surface `PreToolUse`/`UserPromptSubmit`
+hook output back into the model's context, or even into its own transcript
+telemetry, the way `SessionStart` output is surfaced. This is an editor-CLI
+behavior in headless/print mode, outside vectr's control, and it means **no
+hook-channel utility measurement taken through `claude -p` can be trusted until
+this is independently verified against an interactive session** — the two
+`valid: false` cells above are correctly excluded, not read as "hooks don't work".
+
+## Post-fix proxy recheck (2026-07-29, seed 0, 3 scenarios, W1+W2+W3 all landed)
+
+The four-arm table above was measured with UPG-PROXY-INJECT-TITLE-ONLY (full note
+body, not just title), UPG-PROXY-INJECT-SINGLE-TURN (JIT delivery on the decision
+turn), and the provenance-tiered envelope all landed together on this branch — the
+"Attribution" row in that table was a `--envpatch`-monkeypatched simulation of the
+last of those three; this recheck is the first non-simulated measurement with all
+three actually in effect.
+
+| Scenario | valid | utility_hit |
+|---|---|---|
+| `generated_config` | true | true |
+| `flaky_test` | true | **false** |
+| `superseded_api` | true | true |
+
+Non-vacuity is now 3/3 (up from the prior table's already-100%-valid baseline —
+delivery was never the open question; see the three causes above). Utility is
+2/3 — a real, non-simulated result above the prior table's 0/N floor across every
+row, but `flaky_test` still reproduces the exact null the prior "Model-side
+distrust" cause describes: delivery confirmed (`PROACTIVE_INJECT` with the
+planted anchor, `injected=1` in the proxy's own metrics), yet the agent ran the
+flaky command anyway rather than the corroborated `--core` alternative. Three
+cells is too small a sample to call the model-distrust cause resolved; it reads as
+partially mitigated on scenarios where the injected fact is corroborated by the
+workspace itself (`generated_config`, `superseded_api` both let the agent confirm
+the claim by reading a second file) and still binding where the note is the *only*
+source of truth for a nondeterministic outcome (`flaky_test`).
+
 ## Scorer tests
 
 `tests/test_injection_utility_scorer.py` (collected by the default pytest run;
@@ -269,4 +338,8 @@ hand-built note-following fixture that must score differently on the primary che
 plus the read-before-verify ordering guard, the "saying the command is not running
 it" case, exact anchor matching, the arm-blindness signature, that verify scripts
 never land inside the workspace, and that no planted note contains the literal answer
-to its own task.
+to its own task. `hook_non_vacuity()` gets its own parallel coverage: retrieval and
+delivery must both be present for `planted_note_injected=True`, zero
+`hook_injection_counts` is vacuous even when the transcript happens to contain
+matching text, a retrieved-but-undelivered note is distinguished from full delivery,
+and a missing transcript file degrades to "not injected" rather than raising.

@@ -1196,10 +1196,18 @@ def _write_git_post_commit_hook(workspace: str) -> None:
     duplicating it.
 
     Skips silently, with a disclosed stderr message (never an error), when
-    `workspace` is not a git working tree, or when a pre-existing foreign
+    `workspace` is not a git working tree, when a pre-existing foreign
     `post-commit` hook's interpreter is not POSIX-shell-compatible
     (`_shell_shebang_compatible`) — vectr's block would not run correctly
-    appended under e.g. a Python or PowerShell hook.
+    appended under e.g. a Python or PowerShell hook — or when the resolved
+    hooks directory is not writable (e.g. a stale/misconfigured repo-local
+    `core.hooksPath` pointing at a path this user has no permission to
+    create — `git rev-parse --git-path hooks` answers truthfully from git's
+    own config, so an unwritable answer is an environment condition to
+    report, not a vectr defect to raise past this function). This writer is
+    the third of three independent hook installers `cmd_init --hooks` runs
+    in sequence; a failure here must never take down the two that already
+    succeeded.
     """
     hooks_dir = _git_hooks_dir(workspace)
     if hooks_dir is None:
@@ -1209,36 +1217,46 @@ def _write_git_post_commit_hook(workspace: str) -> None:
         )
         return
 
-    hook_path = hooks_dir / "post-commit"
-    if not hook_path.exists():
-        hooks_dir.mkdir(parents=True, exist_ok=True)
-        hook_path.write_text(f"#!/bin/sh\n{_GIT_POST_COMMIT_BLOCK}", encoding="utf-8")
+    try:
+        hook_path = hooks_dir / "post-commit"
+        if not hook_path.exists():
+            hooks_dir.mkdir(parents=True, exist_ok=True)
+            hook_path.write_text(f"#!/bin/sh\n{_GIT_POST_COMMIT_BLOCK}", encoding="utf-8")
+            hook_path.chmod(hook_path.stat().st_mode | 0o111)
+            print(f"  Created {hook_path}", file=sys.stderr)
+            return
+
+        existing = hook_path.read_text(encoding="utf-8")
+        if _GIT_HOOK_BLOCK_START not in existing:
+            first_line = existing.splitlines()[0] if existing.splitlines() else ""
+            if not _shell_shebang_compatible(first_line):
+                print(
+                    f"  Skipped {hook_path}: existing hook's interpreter is not a "
+                    "POSIX shell vectr's post-commit block can run under. Add "
+                    "`vectr hook post-commit </dev/null >/dev/null 2>&1 &` to it "
+                    "by hand if you want commit provenance capture.",
+                    file=sys.stderr,
+                )
+                return
+            new_content = f"{existing.rstrip()}\n\n{_GIT_POST_COMMIT_BLOCK}"
+        else:
+            stripped = _GIT_HOOK_BLOCK_RE.sub("", existing).rstrip()
+            new_content = f"{stripped}\n\n{_GIT_POST_COMMIT_BLOCK}" if stripped else f"#!/bin/sh\n{_GIT_POST_COMMIT_BLOCK}"
+            if new_content == existing:
+                return
+
+        hook_path.write_text(new_content, encoding="utf-8")
         hook_path.chmod(hook_path.stat().st_mode | 0o111)
-        print(f"  Created {hook_path}", file=sys.stderr)
-        return
-
-    existing = hook_path.read_text(encoding="utf-8")
-    if _GIT_HOOK_BLOCK_START not in existing:
-        first_line = existing.splitlines()[0] if existing.splitlines() else ""
-        if not _shell_shebang_compatible(first_line):
-            print(
-                f"  Skipped {hook_path}: existing hook's interpreter is not a "
-                "POSIX shell vectr's post-commit block can run under. Add "
-                "`vectr hook post-commit </dev/null >/dev/null 2>&1 &` to it "
-                "by hand if you want commit provenance capture.",
-                file=sys.stderr,
-            )
-            return
-        new_content = f"{existing.rstrip()}\n\n{_GIT_POST_COMMIT_BLOCK}"
-    else:
-        stripped = _GIT_HOOK_BLOCK_RE.sub("", existing).rstrip()
-        new_content = f"{stripped}\n\n{_GIT_POST_COMMIT_BLOCK}" if stripped else f"#!/bin/sh\n{_GIT_POST_COMMIT_BLOCK}"
-        if new_content == existing:
-            return
-
-    hook_path.write_text(new_content, encoding="utf-8")
-    hook_path.chmod(hook_path.stat().st_mode | 0o111)
-    print(f"  Updated vectr block in {hook_path}", file=sys.stderr)
+        print(f"  Updated vectr block in {hook_path}", file=sys.stderr)
+    except OSError as exc:
+        print(
+            f"  Skipped git post-commit hook: could not write to {hooks_dir} "
+            f"({exc}). This repo's `git config core.hooksPath` may point "
+            "somewhere unwritable — fix that value directly, or install the "
+            "hook by hand: `vectr hook post-commit </dev/null >/dev/null "
+            "2>&1 &`.",
+            file=sys.stderr,
+        )
 
 
 def _remove_git_post_commit_hook(workspace: str) -> None:

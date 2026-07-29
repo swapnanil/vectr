@@ -112,6 +112,16 @@ def _read_tool_use(path: str) -> dict:
     return {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": path}}
 
 
+def _edit_tool_use(path: str) -> dict:
+    """An Edit-shaped tool call (UPG-PROXY-INJECT-SINGLE-TURN) — as opposed to
+    `_read_tool_use`, this is one of the genuine edit-tool names
+    `assemble_window()` tracks into `ProactiveWindow.edited_file_paths`."""
+    return {
+        "type": "tool_use", "id": "toolu_2", "name": "Edit",
+        "input": {"file_path": path, "old_string": "x", "new_string": "y"},
+    }
+
+
 def _first_request(path: str) -> dict:
     """The captured FIRST request of a session: roles are ['user', 'system'],
     and the trailing harness `system` message carries the LAST cache
@@ -134,15 +144,22 @@ def _first_request(path: str) -> dict:
     }
 
 
-def _followup_request(path: str, n: int) -> dict:
+def _followup_request(path: str, n: int, *, edited: bool = False) -> dict:
     """A captured FOLLOW-UP request: the trailing message IS a user turn and
-    carries the last cache breakpoint on its own final block."""
+    carries the last cache breakpoint on its own final block.
+
+    `edited=True` (UPG-PROXY-INJECT-SINGLE-TURN, default False so every
+    other existing use of this helper is unchanged) swaps the assistant's
+    tool call for an Edit-type one, so `assemble_window()` reports this
+    request's window as having actually edited `path` — the signal a
+    declared-anchor note's event-anchored retirement waits for."""
+    action = _edit_tool_use(path) if edited else _read_tool_use(path)
     return {
         "model": "claude-x",
         "max_tokens": 100,
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": "why does the lock drop early"}]},
-            {"role": "assistant", "content": [_read_tool_use(path)]},
+            {"role": "assistant", "content": [action]},
             {"role": "user", "content": [
                 {"type": "text", "text": f"follow-up {n}"},
                 _read_tool_use(path),
@@ -186,7 +203,16 @@ async def test_four_request_replay_delivers_on_first_appendable_request(anchored
     """End-to-end through the real proxy, the real provider, the real
     `/v1/proactive` route and a real service: the note that the pre-fix build
     burned on the unappendable first request is instead DELIVERED on the second,
-    and is then correctly suppressed for the rest of the process."""
+    and is then correctly suppressed for the rest of the process.
+
+    Follow-up #2 is the one that also EDITS the anchored file
+    (UPG-PROXY-INJECT-SINGLE-TURN: event-anchored retirement replaces the
+    fixed cooldown for a declared-anchor note) — the same request that
+    delivers it is the one that retires it, so requests #3/#4 (read-only)
+    still see it suppressed, exactly as before that feature existed. A
+    read-only follow-up alone would no longer retire the note (see
+    test_declared_anchor_note_survives_reads_and_retires_on_edit in
+    tests/test_proactive_service.py for that half of the contract)."""
     svc, path = anchored
     up = MockUpstream()
     async with _daemon_client(svc) as client:
@@ -196,7 +222,8 @@ async def test_four_request_replay_delivers_on_first_appendable_request(anchored
         )
         await _post(app, _first_request(path))
         for n in (2, 3, 4):
-            await _post(app, _mark_last_block_cached(_followup_request(path, n)))
+            edited = n == 2
+            await _post(app, _mark_last_block_cached(_followup_request(path, n, edited=edited)))
 
     assert up.call_count == 4, "every request must reach upstream (fail-open)"
     seen = _forwarded_texts(up)
@@ -323,25 +350,38 @@ async def test_mutation_without_the_appendability_precheck_the_retrieval_is_wast
 async def test_mutation_charging_at_retrieval_burns_the_note(anchored):
     """Half (b). `defer_charge=False` is the pre-fix behaviour: the note is
     charged the moment it is retrieved, delivered or not — so the very next
-    request for the same file gets nothing."""
+    request for the same file gets nothing.
+
+    `edited_file_paths=[path]` on both calls (UPG-PROXY-INJECT-SINGLE-TURN):
+    this note is declared-anchored, so it would otherwise be exempted from
+    cooldown charging until its file is edited — an orthogonal feature to the
+    one under test here. Supplying the edit signal isolates charge-at-
+    retrieval mechanics exactly as this test intends."""
     svc, path = anchored
     first = svc.proactive_context(
-        text="", file_paths=[path], session_id="s1", channel="proxy", defer_charge=False,
+        text="", file_paths=[path], edited_file_paths=[path],
+        session_id="s1", channel="proxy", defer_charge=False,
     )
     assert first["item_count"] == 1
     assert "delivery_token" not in first, "no token when the charge already happened"
     second = svc.proactive_context(
-        text="", file_paths=[path], session_id="s1", channel="proxy", defer_charge=False,
+        text="", file_paths=[path], edited_file_paths=[path],
+        session_id="s1", channel="proxy", defer_charge=False,
     )
     assert second["item_count"] == 0, "pre-fix: burned at retrieval"
 
 
 async def test_deferred_charge_lands_only_on_confirm(anchored):
     """Half (b), the fixed path. Retrieval alone does not charge; the note stays
-    available until a token comes back, and is suppressed immediately after."""
+    available until a token comes back, and is suppressed immediately after.
+
+    `edited_file_paths=[path]` (UPG-PROXY-INJECT-SINGLE-TURN, see the sibling
+    mutation test above for why): keeps this test isolated to deferred-charge
+    mechanics rather than event-anchored retirement."""
     svc, path = anchored
     first = svc.proactive_context(
-        text="", file_paths=[path], session_id="s1", channel="proxy", defer_charge=True,
+        text="", file_paths=[path], edited_file_paths=[path],
+        session_id="s1", channel="proxy", defer_charge=True,
     )
     assert first["item_count"] == 1
     assert first["charge_deferred"] is True
@@ -350,14 +390,15 @@ async def test_deferred_charge_lands_only_on_confirm(anchored):
 
     # Unconfirmed: still selectable (the slot was never spent).
     again = svc.proactive_context(
-        text="", file_paths=[path], session_id="s1", channel="proxy", defer_charge=True,
+        text="", file_paths=[path], edited_file_paths=[path],
+        session_id="s1", channel="proxy", defer_charge=True,
     )
     assert again["item_count"] == 1
 
     # Confirm the FIRST delivery; the charge is applied before this call's own
     # selection, so the note is already suppressed by the time the gate looks.
     after = svc.proactive_context(
-        text="", file_paths=[path], session_id="s1", channel="proxy",
+        text="", file_paths=[path], edited_file_paths=[path], session_id="s1", channel="proxy",
         defer_charge=True, confirm_token=token,
     )
     assert after["item_count"] == 0, "confirmed delivery must charge before selection"
@@ -394,13 +435,23 @@ async def test_proxy_path_never_allocates_a_turn_ledger_including_confirm(anchor
 async def test_old_caller_against_new_daemon_keeps_charging_at_retrieval(anchored):
     """A caller that never sends `defer_charge` (the hook/trigger-engine
     channel) must be byte-identical to before: charged at retrieval, no token,
-    no pending entry."""
+    no pending entry.
+
+    `edited_file_paths=[path]` (UPG-PROXY-INJECT-SINGLE-TURN, see the mutation
+    tests above): this note is declared-anchored, so it would otherwise stay
+    eligible until its file is edited — an orthogonal feature. Supplying the
+    edit signal keeps this test's subject exactly what its docstring says:
+    charge-at-retrieval backward compatibility."""
     svc, path = anchored
-    out = svc.proactive_context(text="", file_paths=[path], session_id="h1", channel="hook")
+    out = svc.proactive_context(
+        text="", file_paths=[path], edited_file_paths=[path], session_id="h1", channel="hook",
+    )
     assert out["item_count"] == 1
     assert set(out) == {"context", "item_count", "anchor_ids", "scores"}
     assert svc._proactive_pending == {}
-    repeat = svc.proactive_context(text="", file_paths=[path], session_id="h1", channel="hook")
+    repeat = svc.proactive_context(
+        text="", file_paths=[path], edited_file_paths=[path], session_id="h1", channel="hook",
+    )
     assert repeat["item_count"] == 0, "the hook channel's cooldown semantics are unchanged"
 
 

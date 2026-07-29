@@ -97,6 +97,7 @@ class DaemonInjectionProvider:
                     "text": window.text,
                     "file_paths": window.file_paths,
                     "symbols": window.symbols,
+                    "edited_file_paths": window.edited_file_paths,
                     "session_id": session_id,
                     "channel": channel,
                     "defer_charge": True,

@@ -2488,6 +2488,7 @@ class VectrService:
         text: str = "",
         file_paths: list[str] | None = None,
         symbols: list[str] | None = None,
+        edited_file_paths: list[str] | None = None,
         session_id: str = "",
         channel: str = "proxy",
         structural_only: bool = False,
@@ -2564,6 +2565,7 @@ class VectrService:
             text=text or "",
             file_paths=list(file_paths or []),
             symbols=list(symbols or []),
+            edited_file_paths=list(edited_file_paths or []),
         )
         if window.is_empty():
             return empty
@@ -2688,6 +2690,7 @@ class VectrService:
             # Deferred callers charge on confirmed delivery instead; the gate's
             # cooldown/turn-ledger READS are unaffected either way.
             record=not defer_charge,
+            edited_file_paths=frozenset(window.edited_file_paths),
         )
         out = {
             "context": result.context,
@@ -2737,6 +2740,11 @@ class VectrService:
             "item_count": result.item_count,
             "chars": len(result.context),
             "states": tuple(result.states),
+            # UPG-PROXY-INJECT-SINGLE-TURN: carried through so confirm-time
+            # charging (below) can honor the SAME event-anchored exemption
+            # the gate already decided at selection, instead of charging
+            # every anchor in full once delivery is confirmed.
+            "unretired_anchor_ids": tuple(result.unretired_anchor_ids),
         }
         with self._proactive_pending_lock:
             self._proactive_pending[token] = entry
@@ -2773,8 +2781,16 @@ class VectrService:
 
         session_id = entry["session_id"]
         anchor_ids = entry["anchor_ids"]
-        if session_id and self._proactive_ledger is not None and anchor_ids:
-            self._proactive_ledger.record(session_id, anchor_ids)
+        # UPG-PROXY-INJECT-SINGLE-TURN: exclude anchors the gate already
+        # decided, at selection time, must stay eligible rather than retire
+        # (a declared-anchor note whose file was matched but not yet edited
+        # THAT request) — this confirms delivery of the whole block without
+        # spending those anchors' cooldown slots. A later request whose
+        # window shows the same file actually edited charges them normally.
+        unretired = set(entry.get("unretired_anchor_ids") or ())
+        chargeable_ids = tuple(aid for aid in anchor_ids if aid not in unretired)
+        if session_id and self._proactive_ledger is not None and chargeable_ids:
+            self._proactive_ledger.record(session_id, chargeable_ids)
         # Cross-channel turn dedup: claim here rather than at selection, so the
         # claim marks a real delivery. LOOKUP-ONLY, exactly as on the selection
         # path — `_existing_turn_ledger`, never `_turn_ledger_for` — so the
@@ -2782,6 +2798,11 @@ class VectrService:
         # ledger entry and evict a live editor session's real one. Today this
         # is a guaranteed miss on the proxy path; it starts deduping for free
         # if session identity is ever unified.
+        # UPG-PROXY-INJECT-SINGLE-TURN: unlike `_proactive_ledger` above, the
+        # turn ledger claims EVERY delivered anchor (not just `chargeable_ids`)
+        # — it is a same-turn, cross-surface dedup that resets every turn
+        # regardless, so an unretired item still needs claiming to suppress a
+        # hook surface delivering the same note again this same turn.
         turn_ledger = self._existing_turn_ledger(session_id)
         if turn_ledger is not None:
             from agent.proactive.gate import _note_id_from_anchor
