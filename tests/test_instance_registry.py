@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import socket
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -219,6 +221,59 @@ def test_find_free_port_raises_when_none_available(registry):
             registry.find_free_port("newworkspace0", 8765)
 
 
+def test_find_free_port_retries_previous_port_before_walking_forward(registry):
+    """UPG-RESTART-PORT-WALK-BREAKS-MCP: the previous port can still be
+    mid-teardown for a couple of probes right after a `vectr stop` even with
+    the SO_REUSEADDR-aware probe (agent/instance_registry.py's
+    `_port_is_free`) — reuse must retry a bounded number of times before
+    giving up and walking to a different port, not bail on the first miss."""
+    registry.register("aaa000000000", "/project/a", 8900, 99999)
+
+    calls: list[int] = []
+
+    def port_free(port: int) -> bool:
+        calls.append(port)
+        # 8900 looks busy for the first two probes, then clears.
+        if port == 8900:
+            return calls.count(8900) >= 3
+        return False
+
+    with patch("agent.instance_registry._is_pid_alive", return_value=False), \
+         patch("agent.instance_registry._port_is_free", side_effect=port_free), \
+         patch("agent.instance_registry.time.sleep") as mock_sleep:
+        port = registry.find_free_port("aaa000000000", 8765)
+
+    assert port == 8900  # reused, never walked to 8766+
+    assert calls.count(8900) == 3
+    assert mock_sleep.call_count == 2  # slept between the 3 attempts, not after the last
+
+
+def test_find_free_port_retry_is_bounded_by_config(registry):
+    """After INSTANCE_REGISTRY_PORT_REUSE_RETRY_ATTEMPTS failed reuse probes,
+    give up on the previous port and fall through to the forward scan —
+    reuse must not retry forever."""
+    # Sourced from agent.config directly (not agent.instance_registry): the
+    # module imports this lazily inside find_free_port() to keep it off the
+    # agent.hook_cli fast-dispatch import path (see the comment there).
+    from agent.config import INSTANCE_REGISTRY_PORT_REUSE_RETRY_ATTEMPTS
+
+    registry.register("aaa000000000", "/project/a", 8900, 99999)
+
+    calls: list[int] = []
+
+    def port_free(port: int) -> bool:
+        calls.append(port)
+        return port == 8766  # 8900 never frees up; 8766 (forward scan) does
+
+    with patch("agent.instance_registry._is_pid_alive", return_value=False), \
+         patch("agent.instance_registry._port_is_free", side_effect=port_free), \
+         patch("agent.instance_registry.time.sleep"):
+        port = registry.find_free_port("aaa000000000", 8765)
+
+    assert port == 8766
+    assert calls.count(8900) == INSTANCE_REGISTRY_PORT_REUSE_RETRY_ATTEMPTS
+
+
 # ---------------------------------------------------------------------------
 # _is_pid_alive / _port_is_free (module-level helpers)
 # ---------------------------------------------------------------------------
@@ -253,3 +308,57 @@ def test_port_is_free_false_when_port_is_held():
         held.listen(1)
         held_port = held.getsockname()[1]
         assert _port_is_free(held_port) is False
+
+
+def _put_port_in_time_wait(port_hint: int = 0) -> int:
+    """Drive a real 127.0.0.1 TCP port into the OS's post-close linger state
+    the way an HTTP daemon actually does: accept a connection, exchange data,
+    then close from the server side first. Returns the port. Uses `port_hint`
+    (default 0 = kernel-assigned ephemeral) so callers never hardcode a port
+    that could collide with a live daemon."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port_hint))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def _client() -> None:
+        c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        c.connect(("127.0.0.1", port))
+        c.send(b"hi")
+        time.sleep(0.2)
+        c.close()
+
+    t = threading.Thread(target=_client)
+    t.start()
+    conn, _addr = srv.accept()
+    conn.recv(2)
+    conn.close()  # server side closes first -> this port lands in TIME_WAIT
+    t.join()
+    srv.close()
+    time.sleep(0.05)
+    return port
+
+
+def test_port_is_free_true_for_time_wait_port():
+    """UPG-RESTART-PORT-WALK-BREAKS-MCP: a port whose listener just closed an
+    established connection sits in TIME_WAIT for the OS's linger window —
+    without SO_REUSEADDR on the probe socket, `_port_is_free` used to report
+    this as busy even though the only kind of bind vectr's own daemon ever
+    performs (uvicorn, which always sets SO_REUSEADDR) would succeed on it
+    immediately. This is a real socket dance, not a mock: it reproduces the
+    exact kernel state a `vectr stop` + `start` a moment later hits."""
+    port = _put_port_in_time_wait()
+    assert _port_is_free(port) is True
+
+
+def test_find_free_port_reuses_time_wait_port_end_to_end(registry):
+    """End-to-end (real registry + real TIME_WAIT socket, no mocking of
+    `_port_is_free`): a dead entry's previous port, currently in TIME_WAIT,
+    must be reused rather than walked past."""
+    port = _put_port_in_time_wait()
+    registry.register("aaa000000000", "/project/a", port, 99999999)  # dead pid
+
+    got = registry.find_free_port("aaa000000000", port)
+
+    assert got == port
