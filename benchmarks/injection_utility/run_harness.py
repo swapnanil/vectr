@@ -170,7 +170,7 @@ def _stop_daemon(vectr_bin: str, workspace: Path, port: int, env: dict[str, str]
     return _hard_stop_port(port)
 
 
-def _spawn_env_for_agent(base_url: str) -> dict[str, str]:
+def _spawn_env_for_agent(base_url: str | None) -> dict[str, str]:
     """Env for the spawned eval agent.
 
     Every CLAUDE*/ANTHROPIC* var is stripped first so the spawned session looks
@@ -179,10 +179,16 @@ def _spawn_env_for_agent(base_url: str) -> dict[str, str]:
     otherwise flip the child into nested-session behavior no real user hits).
     `ANTHROPIC_BASE_URL` is then set back, deliberately, to route the agent
     through the proxy under test. OAuth still resolves via the keychain.
+
+    `base_url=None` (the hook arm only -- see `--arm hook`) leaves it unset:
+    that arm has no proxy on the request path at all, vectr's only channel
+    into the session is the hooks installed by `Cell.write_hooks`, and the
+    agent talks to the real Anthropic endpoint directly.
     """
     env = {k: v for k, v in os.environ.items()
            if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))}
-    env["ANTHROPIC_BASE_URL"] = base_url
+    if base_url is not None:
+        env["ANTHROPIC_BASE_URL"] = base_url
     return env
 
 
@@ -422,6 +428,42 @@ class Cell:
         self.record["proxy_instance_id"] = health.get("instance_id")
         self.record["proxy_command"] = " ".join(cmd)
 
+    def write_hooks(self) -> None:
+        """Install Claude Code hook entries for the hook-channel arm (`--arm
+        hook`) -- the harness-injection alternative to the proxy under test
+        in the other two arms.
+
+        Runs AFTER `start_daemon()`: `vectr init --hooks` reads the live
+        daemon's mode (search-only vs not) by looking up the entry
+        `start_daemon` just wrote into the shared `InstanceRegistry`, so the
+        daemon must already be registered and serving. `--no-ide-config`
+        keeps the isolation identical to the other two arms' honesty rail
+        (see the module docstring): hooks alone reach the agent, no
+        CLAUDE.md / .mcp.json is written, and `run_agent` still passes
+        `--strict-mcp-config`, so the agent has no MCP tool access in any
+        arm -- the ONLY difference this arm introduces is the delivery
+        channel for vectr's injected context (hook-fired `additionalContext`
+        instead of a proxy-appended request block).
+        """
+        cmd = [
+            self.vectr, "init", "--path", str(self.workspace),
+            "--hooks", "--no-ide-config",
+        ]
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60, env=self._daemon_env()
+        )
+        out = f"{proc.stdout}\n{proc.stderr}"
+        (self.artifacts / "init-hooks.txt").write_text(
+            f"$ {' '.join(cmd)}\nrc={proc.returncode}\n\n{out}"
+        )
+        settings_path = self.workspace / ".claude" / "settings.json"
+        if proc.returncode != 0 or not settings_path.exists():
+            raise SystemExit(
+                f"ABORT: `vectr init --hooks` did not produce {settings_path} "
+                f"(rc={proc.returncode}); see {self.artifacts / 'init-hooks.txt'}"
+            )
+        self.record["hooks_settings_path"] = str(settings_path)
+
     # -- the measured run ------------------------------------------------
 
     def run_agent(self) -> None:
@@ -438,11 +480,16 @@ class Cell:
             "--strict-mcp-config",
         ]
         transcript = self.artifacts / "transcript.jsonl"
+        # The hook arm has no proxy on the request path -- see
+        # `_spawn_env_for_agent`'s docstring and `write_hooks` above.
+        base_url = (
+            None if self.arm == "hook" else f"http://127.0.0.1:{self.proxy_port}"
+        )
         started = time.time()
         with transcript.open("w") as out:
             proc = subprocess.Popen(
                 cmd, cwd=str(self.workspace), stdout=out, stderr=subprocess.PIPE,
-                text=True, env=_spawn_env_for_agent(f"http://127.0.0.1:{self.proxy_port}"),
+                text=True, env=_spawn_env_for_agent(base_url),
             )
             try:
                 _, stderr = proc.communicate(timeout=self.args.timeout_s)
@@ -457,23 +504,37 @@ class Cell:
     # -- teardown + scoring ----------------------------------------------
 
     def capture_and_teardown(self) -> None:
-        health = _http_json(
-            "GET", f"http://127.0.0.1:{self.proxy_port}/__vectr_proxy/health", timeout=10
-        )
-        (self.artifacts / "proxy-health.json").write_text(json.dumps(health, indent=2))
-        self.record["proxy_metrics"] = health.get("metrics")
+        if self.arm == "hook":
+            # No proxy ran in this arm (see `write_hooks`/`run_agent`) -- the
+            # retrieval-side signal instead comes from the scratch daemon's
+            # own in-process hook injection counters, read here (via
+            # `/v1/status`) before the daemon is stopped below.
+            status = _http_json(
+                "GET", f"http://127.0.0.1:{self.daemon_port}/v1/status", timeout=10
+            )
+            (self.artifacts / "daemon-status-final.json").write_text(
+                json.dumps(status, indent=2)
+            )
+            self.record["hook_injection_counts"] = status.get("hook_injection_counts")
+        else:
+            health = _http_json(
+                "GET", f"http://127.0.0.1:{self.proxy_port}/__vectr_proxy/health", timeout=10
+            )
+            (self.artifacts / "proxy-health.json").write_text(json.dumps(health, indent=2))
+            self.record["proxy_metrics"] = health.get("metrics")
 
-        if self.proxy_proc is not None:
-            self.proxy_proc.terminate()
+            if self.proxy_proc is not None:
+                self.proxy_proc.terminate()
+                try:
+                    self.proxy_proc.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    self.proxy_proc.kill()
             try:
-                self.proxy_proc.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                self.proxy_proc.kill()
-        try:
-            self._proxy_stderr.close()
-        except Exception:
-            pass
-        self.record["proxy_hard_killed"] = _hard_stop_port(self.proxy_port)
+                self._proxy_stderr.close()
+            except Exception:
+                pass
+            self.record["proxy_hard_killed"] = _hard_stop_port(self.proxy_port)
+
         self.record["daemon_hard_killed"] = _stop_daemon(
             self.vectr, self.workspace, self.daemon_port, self._daemon_env()
         )
@@ -489,6 +550,25 @@ class Cell:
             verify_dir=self.verify_dir,
         )
         self.record["score"] = result
+
+        if self.arm == "hook":
+            nv = scorer.hook_non_vacuity(
+                hook_injection_counts=self.record.get("hook_injection_counts") or {},
+                transcript_path=self.artifacts / "transcript.jsonl",
+                planted_note_content=self.scenario.note.content,
+            )
+            self.record["non_vacuity"] = nv
+            valid = bool(nv["planted_note_injected"])
+            reason = "" if valid else (
+                "arm hook ran but either the daemon never counted a non-empty "
+                "hook delivery (hook_injection_counts all zero) or the planted "
+                "note's own text never appears in the transcript -- the hook "
+                "channel did not deliver this note, so the cell is VACUOUS: "
+                "exclude it, do not read it as 'the note did not help'"
+            )
+            self.record["valid"] = valid
+            self.record["invalid_reason"] = reason
+            return
 
         proxy_injected = (self.record.get("proxy_metrics") or {}).get("injected")
         nv = scorer.non_vacuity(
@@ -552,12 +632,18 @@ class Cell:
                   f"planted={t2['planted_present']}")
         nv = r.get("non_vacuity", {})
         print()
-        print("  NON-VACUITY (post-preflight bytes only; retrieval AND delivery):")
-        print(f"    PROACTIVE_INJECT events        : {nv.get('inject_events')}")
-        print(f"    events carrying planted anchor : {nv.get('planted_anchor_injections')}")
-        print(f"    chars retrieved (all events)   : {nv.get('total_chars_injected')}")
-        print(f"    RETRIEVED (daemon audit)       : {nv.get('planted_note_retrieved')}")
-        print(f"    DELIVERED (proxy injected>0)   : {nv.get('planted_note_delivered')}")
+        if r["arm"] == "hook":
+            print("  NON-VACUITY (hook channel; retrieval AND delivery):")
+            print(f"    hook_injection_counts (retrieval) : {nv.get('hook_injection_counts')}")
+            print(f"    RETRIEVED (any hook fired)        : {nv.get('hook_fired')}")
+            print(f"    DELIVERED (note text in transcript): {nv.get('planted_content_in_transcript')}")
+        else:
+            print("  NON-VACUITY (post-preflight bytes only; retrieval AND delivery):")
+            print(f"    PROACTIVE_INJECT events        : {nv.get('inject_events')}")
+            print(f"    events carrying planted anchor : {nv.get('planted_anchor_injections')}")
+            print(f"    chars retrieved (all events)   : {nv.get('total_chars_injected')}")
+            print(f"    RETRIEVED (daemon audit)       : {nv.get('planted_note_retrieved')}")
+            print(f"    DELIVERED (proxy injected>0)   : {nv.get('planted_note_delivered')}")
         if nv.get("retrieved_but_not_delivered"):
             print("    ** retrieved but NEVER appended to a request — model never saw it **")
         print(f"    proxy metrics                  : {r.get('proxy_metrics')}")
@@ -580,7 +666,16 @@ class Cell:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scenario", required=True, choices=sorted(scen.SCENARIOS))
-    ap.add_argument("--arm", required=True, choices=["inject", "no-inject"])
+    ap.add_argument(
+        "--arm", required=True, choices=["inject", "no-inject", "hook"],
+        help="'inject'/'no-inject' route the agent through the scratch proxy "
+             "(see the module docstring's 'The A/B'). 'hook' uses no proxy at "
+             "all: `vectr init --hooks` installs Claude Code hook entries in "
+             "the scratch workspace so the SAME planted note reaches the "
+             "agent through hook-fired additionalContext instead of a "
+             "proxy-appended request block -- the decisive delivery-channel "
+             "comparison (see write_hooks/run_agent/hook_non_vacuity).",
+    )
     ap.add_argument("--runs-dir", required=True,
                     help="Directory for run artifacts. MUST be outside any indexed vectr "
                          "workspace so a live daemon never re-indexes scratch runs.")
@@ -632,7 +727,10 @@ def main() -> None:
         cell.start_daemon()
         cell.plant_note()
         cell.probe()
-        cell.start_proxy()
+        if args.arm == "hook":
+            cell.write_hooks()
+        else:
+            cell.start_proxy()
         cell.run_agent()
     finally:
         try:
