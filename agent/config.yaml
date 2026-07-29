@@ -1669,6 +1669,19 @@ proactive:
   max_items_per_event: 3
   max_chars_per_event: 800
 
+  # UPG-PROXY-INJECT-TITLE-ONLY: word/sentence-boundary floor for injected-line
+  # truncation. Once a candidate line carries a note's BODY (not just its short
+  # title), hitting max_chars_per_event's cap is the routine case, not the rare
+  # one — a bare character cut there regularly lands mid-word or mid-sentence,
+  # which reads as corrupted output. The truncator backs off to the nearest
+  # sentence boundary ('. ') within budget, then the nearest word boundary
+  # (' '), before falling back to a hard character cut — but only when that
+  # boundary still keeps at least this fraction of the allowed budget; backing
+  # off further than that would throw away most of the content chasing a nicer
+  # cut point, which is worse than a hard cut. 0.5 = never give up more than
+  # half the budget for a cleaner truncation point.
+  body_truncation_min_boundary_fraction: 0.5
+
   # Dedup / cooldown ledger size: the last N injected anchor ids per session are
   # suppressed, so the same note is not re-injected turn after turn.
   cooldown_items: 30

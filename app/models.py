@@ -564,6 +564,7 @@ class ProactiveRequest(BaseModel):
     text: str = Field(default="", description="Assembled recent-conversation text (the semantic query)")
     file_paths: list[str] = Field(default_factory=list, description="Deterministic file-path anchors from tool traffic")
     symbols: list[str] = Field(default_factory=list, description="Deterministic symbol anchors from tool traffic")
+    edited_file_paths: list[str] = Field(default_factory=list, description="Subset of file_paths a genuine edit-type tool call (Edit/Write/MultiEdit/apply_patch) touched this request, not merely read or mentioned (UPG-PROXY-INJECT-SINGLE-TURN) — drives event-anchored retirement of declared-anchor structural notes")
     session_id: str = Field(default="", description="Per-conversation id for dedup/cooldown")
     channel: str = Field(default="proxy", description="Delivery channel label (e.g. 'proxy'); used for per-channel policy + metrics")
     structural_only: bool = Field(default=False, description="Emit only exact structural matches (a static per-channel policy, not a content decision)")

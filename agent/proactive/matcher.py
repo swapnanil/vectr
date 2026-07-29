@@ -28,6 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from agent.config import PROACTIVE_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION
 from agent.proactive.types import (
     CANDIDATE_STATE_NOT_APPLICABLE,
     STRUCTURAL_TIER_DECLARED_ANCHOR,
@@ -79,21 +80,80 @@ def _one_line(text: str) -> str:
 
 
 def _cap(text: str, max_chars: int) -> str:
+    """Collapse TEXT to one line and cap it to at most MAX_CHARS.
+
+    UPG-PROXY-INJECT-TITLE-ONLY: once a candidate line carries a note's BODY
+    rather than just its short title (`_raw_summary()` below), hitting this
+    cap is the routine case, not the rare one — a bare character cut there
+    regularly lands mid-word or mid-sentence ("...without verificat…"),
+    which reads as corrupted output rather than an intentionally shortened
+    summary. The cut backs off to the nearest SENTENCE boundary (". ")
+    within the allowed budget when one exists there; failing that, to the
+    nearest WORD boundary (" "); failing that (a single token longer than
+    the whole budget), a hard character cut — the same fallback shape
+    `_revoked_summary()`'s own `rpartition(". ")` split already uses
+    elsewhere in this module, applied here to truncation instead of clause
+    reordering. A boundary is only used when it still keeps at least
+    `PROACTIVE_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION` (config.yaml
+    `proactive.body_truncation_min_boundary_fraction`) of the budget —
+    backing off further than that would throw away most of the content
+    chasing a nicer cut point, which is worse than a hard cut. Every
+    truncated result ends in an ellipsis so the caller can tell content was
+    cut, exactly as before this change."""
     text = _one_line(text)
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     if max_chars == 1:
         return "…"
-    return text[: max_chars - 1].rstrip() + "…"
+    budget = max_chars - 1
+    window = text[:budget]
+    min_boundary = max(1, int(budget * PROACTIVE_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION))
+
+    sentence_boundary = window.rfind(". ")
+    if sentence_boundary >= min_boundary:
+        return window[: sentence_boundary + 1] + "…"
+
+    word_boundary = window.rfind(" ")
+    if word_boundary >= min_boundary:
+        return window[:word_boundary].rstrip() + "…"
+
+    return window.rstrip() + "…"
 
 
 def _raw_summary(note: WorkingNote) -> str:
-    if note.title and note.title.strip():
-        return note.title.strip()
-    for line in note.content.splitlines():
-        if line.strip():
-            return line.strip()
-    return ""
+    """The candidate line's raw summary text (UPG-PROXY-INJECT-TITLE-ONLY):
+    the note's BODY, not just its title. Before this, a note with a title
+    injected ONLY that title — its actual guidance (a caveat, a fix, a
+    "do not do X" reason) lived in `content` and never crossed the wire,
+    which measurement (LANE-UTILITY-2, injection_utility benchmark) showed
+    produced a title-shaped, actionless injected line for every real note
+    that had one.
+
+    `title` and `content` are distinct stored fields (a short index-tier
+    LABEL vs. the BODY — see `WorkingNote`'s own field comments), so this
+    joins both rather than picking one:
+
+      - no title: the body alone (unchanged from before for the common
+        vectr_remember() call that never passes a title).
+      - a title that is already a prefix of the (whitespace-normalised)
+        body: the body alone — `remember()`'s own title FALLBACK derives a
+        title from the first content line when the caller omits one, so
+        this is the common case where prepending the title back would just
+        duplicate the opening words verbatim.
+      - otherwise: "{title}: {body}" — the label orients the reader before
+        the detail.
+
+    The combined text is NOT truncated here — `_cap()` truncates the fully
+    assembled candidate line (kind/provenance/anchor prefix + this summary)
+    to the caller's budget in one place, once, at a sentence/word boundary
+    rather than mid-word."""
+    body = _one_line(note.content or "")
+    title = note.title.strip() if note.title else ""
+    if not title:
+        return body
+    if not body or body.startswith(title):
+        return body or title
+    return f"{title}: {body}"
 
 
 def _revoked_summary(note: WorkingNote, state: dict) -> str:
@@ -183,6 +243,7 @@ def _structural_note_candidate(
     score_gotcha_mention: float,
     score_mention: float,
     state: dict | None = None,
+    anchor_path: str | None = None,
 ) -> Candidate:
     summary = _note_summary(note, state)
     kind_label = _kind_label(note, state)
@@ -214,6 +275,13 @@ def _structural_note_candidate(
         is_structural=True,
         state=_state_label(state),
         structural_tier=tier,
+        # UPG-PROXY-INJECT-SINGLE-TURN: only carried for the strongest tier —
+        # the gate's event-anchored retirement (agent/proactive/gate.py's
+        # `select()`) only ever reads this for a
+        # STRUCTURAL_TIER_DECLARED_ANCHOR candidate; populating it for a
+        # weaker tier would be inert (the gate never checks it there) but
+        # confusing to read, so it is left None there deliberately.
+        anchor_path=anchor_path if tier == STRUCTURAL_TIER_DECLARED_ANCHOR else None,
     )
 
 
@@ -375,7 +443,10 @@ class ProactiveMatcher:
                     # active fact.
                     continue
                 found = _first_anchor(note, anchors)
-                anchor, is_declared_anchor = found if found is not None else ("file", True)
+                if found is not None:
+                    anchor_path, anchor, is_declared_anchor = found
+                else:
+                    anchor_path, anchor, is_declared_anchor = None, "file", True
                 candidates.append(
                     _structural_note_candidate(
                         note, anchor, is_declared_anchor, self._max_chars,
@@ -383,6 +454,7 @@ class ProactiveMatcher:
                         self._structural_score_gotcha_mention,
                         self._structural_score_mention,
                         state,
+                        anchor_path,
                     )
                 )
 
@@ -407,8 +479,10 @@ class ProactiveMatcher:
         return candidates
 
 
-def _first_anchor(note: WorkingNote, anchors: dict[str, str]) -> tuple[str, bool] | None:
-    """Return (label, is_declared_anchor) for the display anchor of the
+def _first_anchor(
+    note: WorkingNote, anchors: dict[str, str]
+) -> tuple[str, str, bool] | None:
+    """Return (window_file_path, display_label, is_declared_anchor) for the
     first window file this note is actually about.
 
     UPG-PROXY-SUBSTRING-ANCHOR/2b: the note's DECLARED `anchors` column is
@@ -418,13 +492,20 @@ def _first_anchor(note: WorkingNote, anchors: dict[str, str]) -> tuple[str, bool
     using the SAME `_path_boundary_match()` rule `recall_for_path()` uses
     (shared, not forked) — the caller must render that case as "mentions
     X", a materially weaker provenance claim than "anchored to X". Returns
-    None when the note is about none of the window's files."""
+    None when the note is about none of the window's files.
+
+    The window file path (`anchors` dict's key, not its basename value) is
+    returned alongside the display label so `match()` can carry it onto the
+    STRUCTURAL_TIER_DECLARED_ANCHOR `Candidate.anchor_path` (UPG-PROXY-
+    INJECT-SINGLE-TURN) — the gate needs the exact path to test membership
+    against a request's `edited_file_paths`; the basename alone is not
+    enough to do that safely."""
     declared = {a[0] for a in (note.anchors or []) if a}
-    for _path, base in anchors.items():
-        if base and (base in declared or _path in declared):
-            return base, True
+    for path, base in anchors.items():
+        if base and (base in declared or path in declared):
+            return path, base, True
     content = note.content or ""
-    for _path, base in anchors.items():
+    for path, base in anchors.items():
         if base and _path_boundary_match(content, base):
-            return base, False
+            return path, base, False
     return None

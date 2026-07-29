@@ -14,7 +14,12 @@ import threading
 from collections import OrderedDict, deque
 from typing import Protocol, runtime_checkable
 
-from agent.proactive.types import STRUCTURAL_TIER_MENTION, Candidate, InjectionResult
+from agent.proactive.types import (
+    STRUCTURAL_TIER_DECLARED_ANCHOR,
+    STRUCTURAL_TIER_MENTION,
+    Candidate,
+    InjectionResult,
+)
 
 # Envelope wrapped around every packed injection block (UPG-PROXY-INJECT-
 # ROLE-PROVENANCE). The proxy channel appends this block onto the newest
@@ -161,6 +166,7 @@ class ProactiveGate:
         structural_only: bool = False,
         turn_ledger: TurnLedger | None = None,
         record: bool = True,
+        edited_file_paths: frozenset[str] = frozenset(),
     ) -> InjectionResult:
         """Deterministically pick and pack the items to inject.
 
@@ -198,6 +204,34 @@ class ProactiveGate:
         same turn will not re-inject it either — a note matched here but
         evicted for budget is deliberately left unclaimed, mirroring
         `WorkingContextStore.fire_and_format()`'s own turn-ledger contract.
+
+        `edited_file_paths` (UPG-PROXY-INJECT-SINGLE-TURN) is this request's
+        `ProactiveWindow.edited_file_paths` — the subset of the window's file
+        paths a genuine edit-type tool call touched, as opposed to merely
+        being read or mentioned. It governs EVENT-ANCHORED RETIREMENT, an
+        exception to `record`'s plain "charge every selected item" rule that
+        applies to exactly one case: a selected candidate whose
+        `structural_tier` is `STRUCTURAL_TIER_DECLARED_ANCHOR` (a note's own
+        declared anchor, the strongest structural evidence — the same
+        evidence the hook channel's default pre-edit trigger bundle is built
+        from, see `agent.trigger_engine.default_bundle_for_kind`) and whose
+        `anchor_path` is NOT among `edited_file_paths` is delivered this
+        turn same as any other selected item, but is EXCLUDED from the
+        cooldown/turn-ledger write-back below — it stays eligible and may be
+        selected again on a later request that still matches it, instead of
+        retiring after one delivery (UPG-PROXY-INJECT-SINGLE-TURN's "too
+        early, then evicted" failure: a note anchored to a file the agent has
+        only read so far is not yet done being useful). The moment a request
+        DOES show that file being edited, the same candidate is charged
+        (retired) exactly like any other selected item. Every other
+        candidate — every non-anchor structural tier, every semantic hit,
+        every candidate whose `anchor_path` is unset — is charged on
+        selection precisely as before this parameter existed; this is a pure
+        narrowing of `record`'s scope, never a new class of unbounded
+        delivery. `InjectionResult.unretired_anchor_ids` names exactly the
+        anchor ids this call exempted, so a caller charging on a LATER
+        confirmed-delivery (the proxy's deferred-charge path) can honor the
+        same exemption instead of re-charging in full at confirm time.
         """
         if self._max_items == 0 or self._max_chars == 0:
             return InjectionResult.empty()
@@ -276,13 +310,34 @@ class ProactiveGate:
         if not selected:
             return InjectionResult.empty()
 
+        # UPG-PROXY-INJECT-SINGLE-TURN: event-anchored retirement (see
+        # `edited_file_paths` in the docstring) — a declared-anchor
+        # structural candidate whose own anchor path was not just edited
+        # this request is exempted from the write-backs below, however
+        # `record` reads, so it stays eligible for a later request instead
+        # of retiring after this one delivery.
+        unretired = [
+            c for c in selected
+            if c.structural_tier == STRUCTURAL_TIER_DECLARED_ANCHOR
+            and c.anchor_path is not None
+            and c.anchor_path not in edited_file_paths
+        ]
+        unretired_ids = {c.anchor_id for c in unretired}
+        chargeable = [c for c in selected if c.anchor_id not in unretired_ids]
+
         # Charge (see `record` in the docstring): skipped wholesale when the
         # caller will charge later on confirmed delivery. Both write-backs move
         # together — charging one ledger but not the other would leave the two
-        # dedup surfaces disagreeing about what has been emitted.
+        # dedup surfaces disagreeing about what has been emitted. The
+        # event-anchored exemption above applies ONLY to this cross-TURN
+        # cooldown `_ledger` — `turn_ledger` is a same-turn, cross-SURFACE
+        # dedup that resets every turn regardless (see its own docstring),
+        # so an unretired item is still claimed there: it WAS delivered this
+        # turn, and a hook surface seeing the same note in the same turn
+        # must still be suppressed, exactly as for any other delivered item.
         if record:
-            if session_id:
-                self._ledger.record(session_id, [c.anchor_id for c in selected])
+            if session_id and chargeable:
+                self._ledger.record(session_id, [c.anchor_id for c in chargeable])
             if turn_ledger is not None:
                 for c in selected:
                     note_id = _note_id_from_anchor(c.anchor_id)
@@ -297,4 +352,5 @@ class ProactiveGate:
             anchor_ids=tuple(c.anchor_id for c in selected),
             scores=tuple(round(c.score, 4) for c in selected),
             states=tuple(c.state for c in selected),
+            unretired_anchor_ids=tuple(c.anchor_id for c in unretired),
         )

@@ -87,6 +87,28 @@ def test_proactive_route_service_error_never_500(client, svc):
     assert resp.json()["item_count"] == 0
 
 
+def test_proactive_route_threads_edited_file_paths_to_service(client, svc):
+    """UPG-PROXY-INJECT-SINGLE-TURN: `edited_file_paths` is a new, optional
+    request field -- round-trips to the service call unmodified when
+    present, and defaults to the model's own default (empty list) when
+    omitted, never a validation error."""
+    resp = client.post("/v1/proactive", json={
+        "text": "how does the workspace lock work",
+        "file_paths": ["/x/resolver.py"],
+        "edited_file_paths": ["/x/resolver.py"],
+        "session_id": "s1",
+        "channel": "proxy",
+    })
+    assert resp.status_code == 200
+    _args, kwargs = svc.proactive_context.call_args
+    assert kwargs["edited_file_paths"] == ["/x/resolver.py"]
+
+    resp_omitted = client.post("/v1/proactive", json={"text": "x", "file_paths": ["/x/resolver.py"]})
+    assert resp_omitted.status_code == 200
+    _args, kwargs_omitted = svc.proactive_context.call_args
+    assert kwargs_omitted["edited_file_paths"] == []
+
+
 def test_proactive_route_backward_compat_session_id_omitted_or_legacy_shaped(client, svc):
     """Backward compat (UPG-PROXY-COOLDOWN-SESSION-IDENTITY). `session_id`
     stays an opaque string on the wire — this route never validates its

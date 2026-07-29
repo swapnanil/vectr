@@ -80,6 +80,49 @@ def test_assemble_window_bounds_and_malformed():
     assert len(w.text) <= 500
 
 
+# -- edit-vs-read tool distinction (UPG-PROXY-INJECT-SINGLE-TURN) -----------
+
+def test_edit_tool_call_populates_edited_file_paths():
+    body = {"messages": [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a.py"}},
+            {"type": "tool_use", "id": "t2", "name": "Edit", "input": {"file_path": "b.py"}},
+        ]},
+        {"role": "user", "content": "ok"},
+    ]}
+    w = assemble_window(body)
+    # Every tool_use with a file_path key still lands in file_paths (matching
+    # unchanged), but only the genuine edit-type call lands in
+    # edited_file_paths.
+    assert w.file_paths == ["a.py", "b.py"]
+    assert w.edited_file_paths == ["b.py"]
+
+
+def test_read_only_window_never_populates_edited_file_paths():
+    body = {"messages": [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a.py"}},
+            {"type": "tool_use", "id": "t2", "name": "Grep", "input": {"path": "b.py", "pattern": "x"}},
+        ]},
+        {"role": "user", "content": "ok"},
+    ]}
+    w = assemble_window(body)
+    assert w.file_paths == ["a.py", "b.py"]
+    assert w.edited_file_paths == []
+
+
+def test_write_multiedit_apply_patch_all_count_as_edits():
+    for tool_name in ("Write", "MultiEdit", "apply_patch"):
+        body = {"messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": tool_name, "input": {"file_path": "x.py"}},
+            ]},
+            {"role": "user", "content": "ok"},
+        ]}
+        w = assemble_window(body)
+        assert w.edited_file_paths == ["x.py"], tool_name
+
+
 def test_include_thinking_flag():
     body = {"messages": [
         {"role": "assistant", "content": [{"type": "thinking", "thinking": "secret reasoning"}]},

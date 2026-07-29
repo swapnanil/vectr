@@ -1096,6 +1096,9 @@ PROACTIVE_ENABLED: bool = bool(_pro_cfg["enabled"])
 PROACTIVE_MIN_SIMILARITY: float = float(_pro_cfg["min_similarity"])
 PROACTIVE_MAX_ITEMS_PER_EVENT: int = int(_pro_cfg["max_items_per_event"])
 PROACTIVE_MAX_CHARS_PER_EVENT: int = int(_pro_cfg["max_chars_per_event"])
+PROACTIVE_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION: float = float(
+    _pro_cfg["body_truncation_min_boundary_fraction"]
+)
 PROACTIVE_COOLDOWN_ITEMS: int = int(_pro_cfg["cooldown_items"])
 
 # UPG-PROXY-INJECT-PRECISION: structural (path-anchored) channel relevance

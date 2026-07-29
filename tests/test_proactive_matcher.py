@@ -121,6 +121,34 @@ def test_structural_note_declared_anchor_says_anchored_to():
     assert c.structural_tier == STRUCTURAL_TIER_DECLARED_ANCHOR
 
 
+def test_declared_anchor_candidate_carries_the_window_file_path():
+    """UPG-PROXY-INJECT-SINGLE-TURN: a STRUCTURAL_TIER_DECLARED_ANCHOR
+    candidate carries the exact `window.file_paths` entry it matched on
+    `Candidate.anchor_path` -- the FULL path, not the basename `_first_anchor`
+    uses for display -- so the gate can test it against a later request's
+    `edited_file_paths` for event-anchored retirement."""
+    n = _note(13, "the backoff cap here needs tuning")
+    n.anchors = [["resolver.py", None]]
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 1
+    assert cands[0].anchor_path == "/abs/resolver.py"
+
+
+def test_weaker_structural_tiers_never_carry_anchor_path():
+    """A content-mention match (no declared anchor), on either a gotcha or
+    a plain note, leaves `anchor_path` unset -- event-anchored retirement
+    is scoped to declared-anchor evidence only (see gate.py's `select()`)."""
+    plain = _note(14, "gotcha: resolver.py lock drops on scope exit")
+    gotcha = _note(15, "resolver.py: the retry timeout is 30 seconds", kind="gotcha")
+    src = _Source(structural=[plain, gotcha])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 2
+    assert all(c.anchor_path is None for c in cands)
+
+
 def test_structural_note_gotcha_mention_is_middle_tier():
     """UPG-PROXY-INJECT-PRECISION lever 2: a content-mention match (no
     declared anchor) on a kind="gotcha" note is Tier B -- stronger than a
@@ -459,3 +487,121 @@ class TestCandidateStateCarriage:
         code_cands = [c for c in cands if c.kind == "code_semantic"]
         assert len(code_cands) == 1
         assert code_cands[0].state == CANDIDATE_STATE_NOT_APPLICABLE
+
+
+# -- UPG-PROXY-INJECT-TITLE-ONLY: the injected line must carry the note's
+# BODY, not just its title -- the root cause LANE-UTILITY-2 measured behind
+# the 0/7 proxy-injection utility null (a titled note injected only its
+# title; the actual guidance in `content` never crossed the wire).
+
+class TestBodyInclusion:
+    def test_titled_note_injects_body_not_just_title(self):
+        n = _note(
+            60,
+            "must not be used by new code, whatever the README says; "
+            "ship events one at a time instead",
+            title="Acme send_batch drops events behind our gzipping proxy (ACME-8891)",
+        )
+        src = _Source(structural=[n])
+        w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+        cands = _matcher(src, semantic_note=False, code_search=False, max_chars_per_event=800).match(w)
+        assert len(cands) == 1
+        line = cands[0].line
+        # The title still orients the reader...
+        assert "Acme send_batch drops events behind our gzipping proxy" in line
+        # ...but the actual guidance (previously dropped entirely) is present.
+        assert "ship events one at a time instead" in line
+
+    def test_untitled_note_still_injects_its_body_unchanged(self):
+        """Non-vacuity / regression guard: a note with no title (the common
+        vectr_remember() call) behaved correctly before this fix and must
+        keep doing so -- this path is untouched."""
+        n = _note(61, "resolver.py holds the workspace lock; drops on scope exit")
+        src = _Source(structural=[n])
+        w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+        cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+        assert len(cands) == 1
+        assert "resolver.py holds the workspace lock; drops on scope exit" in cands[0].line
+
+    def test_title_that_duplicates_the_content_opening_is_not_repeated(self):
+        """`remember()`'s own title FALLBACK derives an empty title from the
+        first content line -- so a note whose title is a verbatim prefix of
+        its body (the common shape once callers start passing an explicit
+        title) must not render as "title: title body...", just the body."""
+        n = _note(
+            62, "the retry limit in widget.py is 3, not 5 as the README claims",
+            title="the retry limit in widget.py is 3, not 5 as the README claims",
+        )
+        src = _Source(structural=[n])
+        w = ProactiveWindow(text="", file_paths=["/abs/widget.py"], symbols=[])
+        cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+        assert len(cands) == 1
+        line = cands[0].line
+        assert line.count("retry limit in widget.py is 3") == 1
+
+    def test_semantic_channel_also_carries_body(self):
+        n = _note(
+            63, "verify the ticket before trusting this — measured wrong twice before",
+            title="rate limit is per-key not per-ip",
+        )
+        src = _Source(semantic=[(n, 0.9)])
+        w = ProactiveWindow(text="what is the rate limit keyed on")
+        cands = _matcher(src, structural_note=False, code_search=False).match(w)
+        assert len(cands) == 1
+        assert "verify the ticket before trusting this" in cands[0].line
+
+    def test_long_body_truncates_at_a_word_boundary_not_mid_word(self):
+        """A budget too small for the full body must not chop mid-word --
+        UPG-PROXY-INJECT-TITLE-ONLY's truncate-whole-note requirement."""
+        long_body = (
+            "the connection pool must be sized to the upstream service's own "
+            "concurrency limit or requests silently queue forever without any "
+            "visible error in the logs"
+        )
+        n = _note(64, long_body)
+        src = _Source(structural=[n])
+        w = ProactiveWindow(text="", file_paths=["/abs/pool.py"], symbols=[])
+        cands = _matcher(
+            src, semantic_note=False, code_search=False, max_chars_per_event=70,
+        ).match(w)
+        assert len(cands) == 1
+        line = cands[0].line
+        assert line.endswith("…")
+        before_ellipsis = line[:-1].rstrip()
+        # The character immediately before the ellipsis ends a whole word
+        # (or sentence) -- never a bare fragment like "concurrenc".
+        assert before_ellipsis[-1] not in (" ",)
+        last_word = before_ellipsis.rsplit(" ", 1)[-1].rstrip(".")
+        assert long_body.split() and any(
+            w.startswith(last_word) or last_word == w for w in long_body.split()
+        ), f"truncation produced a mid-word fragment: {last_word!r}"
+
+    def test_revoked_deterrent_rendering_is_unaffected_by_body_inclusion(self):
+        """W1 scope guard: the revoked-note deterrent path (_revoked_summary)
+        must render exactly as before -- it never calls _raw_summary at all,
+        so title/body joining must not leak into it."""
+        n = _note(65, "the retry timeout is 30 seconds", kind="gotcha",
+                   title="retry timeout gotcha")
+        states = {65: {"state": "revoked", "reason": "wrong", "actor": "agent",
+                       "ts": time.time()}}
+        src = _StatefulSource(structural=[n], states=states)
+        w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+        cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+        assert len(cands) == 1
+        line = cands[0].line
+        assert "REVOKED" in line
+        assert "Do not re-derive" in line
+        assert line.index("Do not re-derive") < line.index("Previously believed")
+
+    def test_provenance_label_still_present_alongside_body(self):
+        """Regression guard: provenance labels (auto/agent/human) must
+        survive body inclusion unchanged."""
+        n = _note(66, "the cache ttl is 300 seconds not 60", title="cache ttl")
+        n.provenance = "human"
+        n.anchors = [["cache.py", None]]
+        src = _Source(structural=[n])
+        w = ProactiveWindow(text="", file_paths=["/abs/cache.py"], symbols=[])
+        cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+        assert len(cands) == 1
+        assert "(finding, human, anchored to cache.py)" in cands[0].line
+        assert "the cache ttl is 300 seconds not 60" in cands[0].line

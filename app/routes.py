@@ -571,6 +571,7 @@ async def proactive(body: ProactiveRequest, request: Request) -> ProactiveRespon
             text=body.text,
             file_paths=body.file_paths,
             symbols=body.symbols,
+            edited_file_paths=body.edited_file_paths,
             session_id=body.session_id,
             channel=body.channel,
             structural_only=body.structural_only,

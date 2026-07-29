@@ -11,10 +11,11 @@ from agent.proactive.types import (
 )
 
 
-def _cand(kind, line, score, anchor, structural, state="active", structural_tier=None):
+def _cand(kind, line, score, anchor, structural, state="active", structural_tier=None,
+          anchor_path=None):
     return Candidate(
         kind=kind, line=line, score=score, anchor_id=anchor, is_structural=structural,
-        state=state, structural_tier=structural_tier,
+        state=state, structural_tier=structural_tier, anchor_path=anchor_path,
     )
 
 
@@ -316,5 +317,107 @@ def test_weak_structural_cap_and_kind_filter_never_claim_in_turn_ledger():
     assert out.anchor_ids == ("note:1",)
     assert turn_ledger.eligible(1) is False  # delivered: claimed
     assert turn_ledger.eligible(2) is True   # capped by lever 3: NEVER claimed
+
+
+# -- UPG-PROXY-INJECT-SINGLE-TURN: event-anchored retirement ----------------
+#
+# A declared-anchor structural candidate (the strongest tier) is delivered
+# every request its anchor path keeps matching, but only RETIRES from the
+# cross-turn cooldown ledger once a request's `edited_file_paths` shows its
+# own anchor path was genuinely edited — not merely read/mentioned. This is
+# the mechanism behind the fix: a note anchored to a file the agent has only
+# read so far stays eligible to resurface right up to the edit decision,
+# instead of retiring after its first (possibly premature) delivery.
+
+def test_declared_anchor_note_stays_eligible_across_calls_until_its_file_is_edited():
+    gate = _gate()
+    cand = [_cand("note_structural", "gotcha for resolver.py", 1.0, "note:7", True,
+                   structural_tier=STRUCTURAL_TIER_DECLARED_ANCHOR,
+                   anchor_path="resolver.py")]
+
+    # Delivered on the first call; the file was only matched, not edited.
+    first = gate.select(list(cand), session_id="sess")
+    assert first.item_count == 1
+    assert first.unretired_anchor_ids == ("note:7",)
+
+    # A SECOND request that still only reads resolver.py: delivered AGAIN —
+    # the plain SessionLedger cooldown that would normally suppress a repeat
+    # (see test_dedup_cooldown_suppresses_repeat above) does not apply here.
+    second = gate.select(list(cand), session_id="sess")
+    assert second.item_count == 1
+    assert second.unretired_anchor_ids == ("note:7",)
+
+    # A THIRD request whose window shows resolver.py actually being edited:
+    # delivered one final time, and now retires.
+    third = gate.select(
+        list(cand), session_id="sess", edited_file_paths=frozenset({"resolver.py"}),
+    )
+    assert third.item_count == 1
+    assert third.unretired_anchor_ids == ()  # charged this time
+
+    # A FOURTH request, identical to the others: now suppressed by the
+    # ordinary cooldown ledger, exactly like any other retired item.
+    fourth = gate.select(list(cand), session_id="sess")
+    assert fourth.item_count == 0
+
+
+def test_declared_anchor_note_retires_immediately_when_its_own_file_is_already_edited():
+    gate = _gate()
+    cand = [_cand("note_structural", "gotcha", 1.0, "note:8", True,
+                   structural_tier=STRUCTURAL_TIER_DECLARED_ANCHOR,
+                   anchor_path="resolver.py")]
+    first = gate.select(
+        list(cand), session_id="sess", edited_file_paths=frozenset({"resolver.py"}),
+    )
+    assert first.item_count == 1
+    assert first.unretired_anchor_ids == ()
+    second = gate.select(list(cand), session_id="sess")
+    assert second.item_count == 0  # already retired on the first (edit) call
+
+
+def test_event_anchored_retirement_is_scoped_to_declared_anchor_tier_only():
+    """A weaker structural tier (gotcha-mention / mention) is unaffected even
+    when it happens to carry an `anchor_path` -- the gate only exempts
+    STRUCTURAL_TIER_DECLARED_ANCHOR from charging, matching the same
+    evidence tier the hook channel's own pre-edit trigger bundle is built
+    from (agent.trigger_engine.default_bundle_for_kind)."""
+    gate = _gate()
+    cand = [_cand("note_structural", "weak mention", 0.6, "note:9", True,
+                   structural_tier=STRUCTURAL_TIER_MENTION, anchor_path="resolver.py")]
+    first = gate.select(list(cand), session_id="sess")
+    assert first.item_count == 1
+    assert first.unretired_anchor_ids == ()  # charged normally, tier-scoped exemption skipped
+    second = gate.select(list(cand), session_id="sess")
+    assert second.item_count == 0  # ordinary cooldown suppresses the repeat
+
+
+def test_declared_anchor_note_without_anchor_path_charges_normally():
+    """Backward-compat guard: a hand-built declared-anchor candidate that
+    never sets `anchor_path` (every pre-existing test/caller in this file)
+    keeps the plain charge-on-delivery behaviour -- event-anchored
+    retirement only activates when `anchor_path` is populated."""
+    gate = _gate()
+    cand = [_cand("note_structural", "no anchor_path set", 1.0, "note:10", True,
+                   structural_tier=STRUCTURAL_TIER_DECLARED_ANCHOR)]
+    first = gate.select(list(cand), session_id="sess")
+    assert first.unretired_anchor_ids == ()
+    second = gate.select(list(cand), session_id="sess")
+    assert second.item_count == 0
+
+
+def test_event_anchored_exempt_item_still_claimed_in_turn_ledger_same_turn():
+    """The per-turn cross-channel dedup ledger is unaffected by event-anchored
+    retirement: an unretired item WAS delivered this turn, so it must still
+    be claimed there to suppress a hook surface delivering the same note
+    again in the same turn (UPG-PROXY-CROSS-CHANNEL-DEDUP stays additive)."""
+    from agent.trigger_engine import TurnInjectionLedger
+
+    turn_ledger = TurnInjectionLedger()
+    cand = [_cand("note_structural", "gotcha", 1.0, "note:11", True,
+                   structural_tier=STRUCTURAL_TIER_DECLARED_ANCHOR,
+                   anchor_path="resolver.py")]
+    out = _gate().select(list(cand), session_id="sess", turn_ledger=turn_ledger)
+    assert out.unretired_anchor_ids == ("note:11",)
+    assert turn_ledger.eligible(11) is False  # still claimed this turn
     assert turn_ledger.eligible(99) is True  # kind-filtered by lever 1 (never
                                               # even a Candidate): NEVER claimed

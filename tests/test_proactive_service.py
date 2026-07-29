@@ -106,6 +106,42 @@ def test_proactive_dedup_cooldown_across_calls(tmp_path, monkeypatch):
     assert second["item_count"] == 0  # cooldown suppresses the repeat
 
 
+def test_proactive_declared_anchor_note_survives_reads_and_retires_on_edit(tmp_path, monkeypatch):
+    """UPG-PROXY-INJECT-SINGLE-TURN end to end: a declared-anchor note keeps
+    resurfacing across requests that only READ its anchored file (unlike
+    test_proactive_dedup_cooldown_across_calls's plain content-mention note,
+    which retires after one delivery), and only retires once a request's
+    `edited_file_paths` shows the file actually being edited.
+
+    Writes a real file under the workspace (same pattern as
+    test_proxy_and_hook_channels_share_one_turn_ledger) so the note's
+    declared anchor "resolver.py" resolves to the request's absolute path
+    via `_path_trigger_candidates()`'s workspace-relative form -- an
+    anchor recorded exactly this way is `recall_for_path`'s strongest
+    signal (`_anchors_exact_match`), independent of the note's prose."""
+    svc = _service(tmp_path, monkeypatch, VECTR_PROACTIVE="1")
+    (tmp_path / "resolver.py").write_text("# lock resolver\n")
+    abs_path = str(tmp_path / "resolver.py")
+    nid = svc.remember(
+        "the retry limit here is 3, do not raise it without checking the caller",
+        kind="gotcha", anchors=["resolver.py"],
+    )
+    read_only = dict(file_paths=[abs_path], session_id="sess")
+
+    first = svc.proactive_context(**read_only)
+    second = svc.proactive_context(**read_only)
+    assert first["item_count"] == 1 and f"note:{nid}" in first["anchor_ids"]
+    assert second["item_count"] == 1 and f"note:{nid}" in second["anchor_ids"]
+
+    edited = svc.proactive_context(
+        file_paths=[abs_path], edited_file_paths=[abs_path], session_id="sess",
+    )
+    assert edited["item_count"] == 1 and f"note:{nid}" in edited["anchor_ids"]
+
+    after_edit = svc.proactive_context(**read_only)
+    assert after_edit["item_count"] == 0  # retired: the decision already happened
+
+
 # -- loopback bind enforcement (UPG-PROXY-LOOPBACK-BYPASS) ------------------
 
 def test_proactive_refuses_non_loopback_bind_on_proxy_channel(tmp_path, monkeypatch):
