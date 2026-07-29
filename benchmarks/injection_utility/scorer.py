@@ -31,6 +31,7 @@ from typing import Any, Iterable, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from scenarios import (  # noqa: E402
+    AllOf,
     CommandCount,
     CommandRan,
     FileMatchCountAtMost,
@@ -194,6 +195,27 @@ def evaluate_check(
                 f"{len(matched)} matching command(s) (want={check.want})"
                 + (f"; first: {matched[0][:160]}" if matched else "")
             ),
+        }
+
+    if isinstance(check, AllOf):
+        subs = [
+            evaluate_check(
+                sub,
+                workspace=workspace,
+                baselines=baselines,
+                commands=commands,
+                verify_dir=verify_dir,
+            )
+            for sub in check.of
+        ]
+        passed = all(s["passed"] for s in subs)
+        return {
+            "name": check.name,
+            "passed": passed,
+            "detail": "; ".join(
+                f"{s['name']}={'PASS' if s['passed'] else 'FAIL'}" for s in subs
+            ),
+            "sub_checks": subs,
         }
 
     if isinstance(check, VerifyCommand):

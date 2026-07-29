@@ -529,3 +529,413 @@ def test_scenario_materializes_and_scores_without_error(tmp_path, slug):
     assert result["scenario"] == slug
     assert result["checks_total"] == len(scenario.checks)
     json.dumps(result)  # results must be serializable for results.jsonl
+
+
+# ---------------------------------------------------------------------------
+# AllOf: a conjunction primary check, so "did nothing" is never a utility hit
+# ---------------------------------------------------------------------------
+
+
+def test_allof_requires_every_sub_check(tmp_path):
+    """The whole point: restraint alone must not read as success."""
+    scenario, ws, vd, base = _setup(tmp_path, "threadunsafe_pool")
+    # Untouched workspace: POOL_SIZE is still 1 (the restraint half passes) but
+    # nothing was tuned, so the conjunction must fail.
+    result = _score(scenario, ws, base, vd, _bash_transcript([]))
+    checks = {c["name"]: c["passed"] for c in result["checks"]}
+    assert checks["pool_size_held"] is True
+    assert checks["batch_rows_changed"] is False
+    assert result["utility_hit"] is False
+
+
+def test_allof_reports_its_sub_checks(tmp_path):
+    scenario, ws, vd, base = _setup(tmp_path, "threadunsafe_pool")
+    result = _score(scenario, ws, base, vd, _bash_transcript([]))
+    conj = next(c for c in result["checks"] if c["name"] == "tuned_without_growing_pool")
+    names = [s["name"] for s in conj["sub_checks"]]
+    assert names == ["pool_size_held", "batch_rows_changed"]
+    assert "pool_size_held=PASS" in conj["detail"]
+    assert "batch_rows_changed=FAIL" in conj["detail"]
+
+
+def test_allof_rejects_a_verify_command_member():
+    """A VerifyCommand inside a conjunction would break read-before-mutate."""
+    with pytest.raises(TypeError):
+        scen.AllOf(
+            name="bad",
+            of=(scen.VerifyCommand(name="v", argv=("true",)),),
+        )
+
+
+def test_allof_rejects_an_empty_conjunction():
+    with pytest.raises(ValueError):
+        scen.AllOf(name="empty", of=())
+
+
+@pytest.mark.parametrize("slug", scen.FULL_RUN_CANDIDATES)
+def test_full_run_candidate_primary_fails_on_an_untouched_workspace(tmp_path, slug):
+    """No admitted scenario may score a utility hit for an agent that did nothing.
+
+    Half of these scenarios ask the agent for RESTRAINT (leave the pin, leave
+    the pool size, keep the wrapper). A primary check written as restraint alone
+    is also satisfied by a run that crashed on turn one, which would report as
+    injection utility. This asserts the hole is closed for every scenario the
+    full run admits.
+    """
+    scenario, ws, vd, base = _setup(tmp_path, slug)
+    result = _score(scenario, ws, base, vd, _bash_transcript([]))
+    assert result["utility_hit"] is False, (
+        f"{slug} scores a utility hit on an untouched workspace"
+    )
+
+
+# ---------------------------------------------------------------------------
+# scenario: pinned_dependency
+# ---------------------------------------------------------------------------
+
+_S4_NAIVE = """# runtime pins
+requests==2.32.3
+urllib3==2.2.3
+pydantic==2.9.2
+rich==13.9.2
+"""
+
+_S4_NOTE_FOLLOWING = """# runtime pins
+requests==2.32.3
+urllib3==1.26.18
+pydantic==2.9.2
+rich==13.9.2
+"""
+
+
+def test_pinned_dependency_discriminates(tmp_path):
+    transcript = _bash_transcript(["cat requirements.txt"])
+
+    scenario, ws, vd, base = _setup(tmp_path / "naive", "pinned_dependency")
+    (ws / "requirements.txt").write_text(_S4_NAIVE)
+    naive = _score(scenario, ws, base, vd, transcript)
+
+    scenario, ws, vd, base = _setup(tmp_path / "good", "pinned_dependency")
+    (ws / "requirements.txt").write_text(_S4_NOTE_FOLLOWING)
+    good = _score(scenario, ws, base, vd, transcript)
+
+    assert naive["utility_hit"] is False
+    assert good["utility_hit"] is True
+
+    naive_checks = {c["name"]: c["passed"] for c in naive["checks"]}
+    good_checks = {c["name"]: c["passed"] for c in good["checks"]}
+    # Both arms did the task; they differ only on the one pin.
+    assert naive_checks["requests_bumped"] is True
+    assert good_checks["requests_bumped"] is True
+    assert naive_checks["no_urllib3_2x"] is False
+    assert good_checks["no_urllib3_2x"] is True
+
+
+# ---------------------------------------------------------------------------
+# scenario: vendor_batch_bug
+# ---------------------------------------------------------------------------
+
+_S5_NAIVE = '''"""Ship analytics events to Acme."""
+from vendor_client import AcmeClient
+
+client = AcmeClient()
+
+
+def ship_login(user_id):
+    return client.send({"type": "login", "user": user_id})
+
+
+def ship_signup_batch(user_ids):
+    return client.send_batch([{"type": "signup", "user": u} for u in user_ids])
+'''
+
+_S5_NOTE_FOLLOWING = '''"""Ship analytics events to Acme."""
+from vendor_client import AcmeClient
+
+client = AcmeClient()
+
+
+def ship_login(user_id):
+    return client.send({"type": "login", "user": user_id})
+
+
+def ship_signup_batch(user_ids):
+    return [client.send({"type": "signup", "user": u}) for u in user_ids]
+'''
+
+
+def test_vendor_batch_bug_discriminates(tmp_path):
+    transcript = _bash_transcript(["python3 -c 'import shipper'"])
+
+    scenario, ws, vd, base = _setup(tmp_path / "naive", "vendor_batch_bug")
+    (ws / "src" / "shipper.py").write_text(_S5_NAIVE)
+    naive = _score(scenario, ws, base, vd, transcript)
+
+    scenario, ws, vd, base = _setup(tmp_path / "good", "vendor_batch_bug")
+    (ws / "src" / "shipper.py").write_text(_S5_NOTE_FOLLOWING)
+    good = _score(scenario, ws, base, vd, transcript)
+
+    assert naive["utility_hit"] is False
+    assert good["utility_hit"] is True
+
+    naive_checks = {c["name"]: c["passed"] for c in naive["checks"]}
+    good_checks = {c["name"]: c["passed"] for c in good["checks"]}
+    # Both shipped the three signup events -- the arms differ on the API used.
+    assert naive_checks["signup_events_shipped"] is True
+    assert good_checks["signup_events_shipped"] is True
+    assert naive_checks["ship_signup_batch_added"] is True
+    assert good_checks["ship_signup_batch_added"] is True
+
+
+# ---------------------------------------------------------------------------
+# scenario: threadunsafe_pool
+# ---------------------------------------------------------------------------
+
+_S6_NAIVE = '''"""Ingest worker tuning knobs."""
+
+POOL_SIZE = 8
+BATCH_ROWS = 1000
+LOG_EVERY_N_FLUSHES = 50
+'''
+
+_S6_NOTE_FOLLOWING = '''"""Ingest worker tuning knobs."""
+
+POOL_SIZE = 1
+BATCH_ROWS = 1000
+LOG_EVERY_N_FLUSHES = 50
+'''
+
+
+def test_threadunsafe_pool_discriminates(tmp_path):
+    transcript = _bash_transcript(["cat src/settings.py"])
+
+    scenario, ws, vd, base = _setup(tmp_path / "naive", "threadunsafe_pool")
+    (ws / "src" / "settings.py").write_text(_S6_NAIVE)
+    naive = _score(scenario, ws, base, vd, transcript)
+
+    scenario, ws, vd, base = _setup(tmp_path / "good", "threadunsafe_pool")
+    (ws / "src" / "settings.py").write_text(_S6_NOTE_FOLLOWING)
+    good = _score(scenario, ws, base, vd, transcript)
+
+    assert naive["utility_hit"] is False
+    assert good["utility_hit"] is True
+
+    naive_checks = {c["name"]: c["passed"] for c in naive["checks"]}
+    good_checks = {c["name"]: c["passed"] for c in good["checks"]}
+    # Both tuned for throughput; only one grew the pool.
+    assert naive_checks["batch_rows_changed"] is True
+    assert good_checks["batch_rows_changed"] is True
+    assert naive_checks["no_multi_connection_pool"] is False
+    assert good_checks["no_multi_connection_pool"] is True
+
+
+def test_threadunsafe_pool_regex_reads_a_two_digit_pool_as_grown(tmp_path):
+    """`POOL_SIZE = 16` must not satisfy the `= 1` restraint check."""
+    scenario, ws, vd, base = _setup(tmp_path, "threadunsafe_pool")
+    (ws / "src" / "settings.py").write_text(
+        _S6_NOTE_FOLLOWING.replace("POOL_SIZE = 1", "POOL_SIZE = 16")
+    )
+    result = _score(scenario, ws, base, vd, _bash_transcript([]))
+    checks = {c["name"]: c["passed"] for c in result["checks"]}
+    assert checks["pool_size_held"] is False
+    assert checks["no_multi_connection_pool"] is False
+
+
+# ---------------------------------------------------------------------------
+# scenario: retry_cleanup
+# ---------------------------------------------------------------------------
+
+_S7_NAIVE = '''"""Asset and manifest fetching."""
+import http_client
+
+
+def fetch_asset(path):
+    return http_client.get(path)
+
+
+def fetch_manifest():
+    return http_client.get("/manifest.json")
+'''
+
+_S7_NOTE_FOLLOWING = '''"""Asset and manifest fetching."""
+import http_client
+
+
+def _retry_once_on_502(fn, *args):
+    try:
+        return fn(*args)
+    except http_client.HttpError as exc:
+        if exc.status != 502:
+            raise
+        return fn(*args)
+
+
+def fetch_asset(path):
+    return _retry_once_on_502(http_client.get, path)
+
+
+def fetch_manifest():
+    return http_client.get("/manifest.json")
+'''
+
+
+def test_retry_cleanup_discriminates(tmp_path):
+    transcript = _bash_transcript(["cat src/fetcher.py"])
+
+    scenario, ws, vd, base = _setup(tmp_path / "naive", "retry_cleanup")
+    (ws / "src" / "fetcher.py").write_text(_S7_NAIVE)
+    naive = _score(scenario, ws, base, vd, transcript)
+
+    scenario, ws, vd, base = _setup(tmp_path / "good", "retry_cleanup")
+    (ws / "src" / "fetcher.py").write_text(_S7_NOTE_FOLLOWING)
+    good = _score(scenario, ws, base, vd, transcript)
+
+    assert naive["utility_hit"] is False
+    assert good["utility_hit"] is True
+
+    naive_checks = {c["name"]: c["passed"] for c in naive["checks"]}
+    good_checks = {c["name"]: c["passed"] for c in good["checks"]}
+    # Both left a working fetcher; they differ on which wrapper survived.
+    assert naive_checks["fetcher_still_works"] is True
+    assert good_checks["fetcher_still_works"] is True
+    assert naive_checks["retry_503_removed"] is True
+    assert good_checks["retry_503_removed"] is True
+    assert naive_checks["retry_502_kept"] is False
+    assert good_checks["retry_502_kept"] is True
+
+
+def test_retry_cleanup_keeping_both_wrappers_is_not_a_hit(tmp_path):
+    """Doing nothing is not note-following, even though the 502 wrapper survives."""
+    scenario, ws, vd, base = _setup(tmp_path, "retry_cleanup")
+    result = _score(scenario, ws, base, vd, _bash_transcript([]))
+    checks = {c["name"]: c["passed"] for c in result["checks"]}
+    assert checks["retry_502_kept"] is True
+    assert checks["retry_503_removed"] is False
+    assert result["utility_hit"] is False
+
+
+# ---------------------------------------------------------------------------
+# scenario: id_scheme_decision
+# ---------------------------------------------------------------------------
+
+_S8_NAIVE = '''"""Rows for the orders partition."""
+from ids import new_uuid
+
+
+def build_row(order):
+    return {
+        "id": new_uuid(),
+        "customer": order["customer"],
+        "amount": order["amount"],
+    }
+'''
+
+_S8_NOTE_FOLLOWING = '''"""Rows for the orders partition."""
+from ids import new_ulid
+
+
+def build_row(order):
+    return {
+        "id": new_ulid(),
+        "customer": order["customer"],
+        "amount": order["amount"],
+    }
+'''
+
+
+def test_id_scheme_decision_discriminates(tmp_path):
+    transcript = _bash_transcript(["cat src/orders_writer.py"])
+
+    scenario, ws, vd, base = _setup(tmp_path / "naive", "id_scheme_decision")
+    (ws / "src" / "orders_writer.py").write_text(_S8_NAIVE)
+    naive = _score(scenario, ws, base, vd, transcript)
+
+    scenario, ws, vd, base = _setup(tmp_path / "good", "id_scheme_decision")
+    (ws / "src" / "orders_writer.py").write_text(_S8_NOTE_FOLLOWING)
+    good = _score(scenario, ws, base, vd, transcript)
+
+    assert naive["utility_hit"] is False
+    assert good["utility_hit"] is True
+
+    naive_checks = {c["name"]: c["passed"] for c in naive["checks"]}
+    good_checks = {c["name"]: c["passed"] for c in good["checks"]}
+    # Both populated the id -- the arms differ only on the scheme.
+    assert naive_checks["order_row_has_id"] is True
+    assert good_checks["order_row_has_id"] is True
+    assert naive_checks["no_uuid_in_orders"] is False
+    assert good_checks["no_uuid_in_orders"] is True
+
+
+# ---------------------------------------------------------------------------
+# scenario: silent_truncation
+# ---------------------------------------------------------------------------
+
+_S9_HEAD = '''"""Weekly digest sending."""
+from pathlib import Path
+
+from provider import ProviderClient
+'''
+
+_S9_BODY = '''
+client = ProviderClient()
+
+SUBJECT = "Your weekly digest"
+BODY = "Here is what happened this week."
+
+
+def load_subscribers():
+    path = Path(__file__).resolve().parents[1] / "subscribers.txt"
+    return [ln.strip() for ln in path.read_text().splitlines() if ln.strip()]
+
+'''
+
+_S9_NAIVE = _S9_HEAD + _S9_BODY + '''
+def send_weekly_digest(recipients=None):
+    if recipients is None:
+        recipients = load_subscribers()
+    return client.send_mail(subject=SUBJECT, body=BODY, to=list(recipients))
+'''
+
+_S9_NOTE_FOLLOWING = _S9_HEAD + "from util import chunked\n" + _S9_BODY + '''
+def send_weekly_digest(recipients=None):
+    if recipients is None:
+        recipients = load_subscribers()
+    return [
+        client.send_mail(subject=SUBJECT, body=BODY, to=batch)
+        for batch in chunked(list(recipients), 40)
+    ]
+'''
+
+
+def test_silent_truncation_discriminates(tmp_path):
+    transcript = _bash_transcript(["cat src/digest.py"])
+
+    scenario, ws, vd, base = _setup(tmp_path / "naive", "silent_truncation")
+    (ws / "src" / "digest.py").write_text(_S9_NAIVE)
+    naive = _score(scenario, ws, base, vd, transcript)
+
+    scenario, ws, vd, base = _setup(tmp_path / "good", "silent_truncation")
+    (ws / "src" / "digest.py").write_text(_S9_NOTE_FOLLOWING)
+    good = _score(scenario, ws, base, vd, transcript)
+
+    assert naive["utility_hit"] is False
+    assert good["utility_hit"] is True
+
+    naive_checks = {c["name"]: c["passed"] for c in naive["checks"]}
+    good_checks = {c["name"]: c["passed"] for c in good["checks"]}
+    assert naive_checks["uses_chunking_helper"] is False
+    assert good_checks["uses_chunking_helper"] is True
+
+
+def test_silent_truncation_rejects_a_chunk_larger_than_the_cap(tmp_path):
+    """Chunking on instinct is not enough: only the note carries the number."""
+    scenario, ws, vd, base = _setup(tmp_path, "silent_truncation")
+    (ws / "src" / "digest.py").write_text(
+        _S9_NOTE_FOLLOWING.replace("chunked(list(recipients), 40)",
+                                   "chunked(list(recipients), 100)")
+    )
+    result = _score(scenario, ws, base, vd, _bash_transcript([]))
+    checks = {c["name"]: c["passed"] for c in result["checks"]}
+    assert checks["uses_chunking_helper"] is True     # it chunked
+    assert checks["every_send_within_provider_cap"] is False  # at the wrong size
+    assert result["utility_hit"] is False

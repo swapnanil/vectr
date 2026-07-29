@@ -197,7 +197,8 @@ class Cell:
         self.scenario = scen.get(args.scenario)
         self.arm = args.arm
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        self.run_id = f"{stamp}-{self.scenario.slug}-{self.arm}"
+        self.seed = getattr(args, "seed", 0)
+        self.run_id = f"{stamp}-{self.scenario.slug}-{self.arm}-s{self.seed}"
         self.root = Path(args.runs_dir).resolve() / self.run_id
         self.workspace = self.root / "workspace"
         self.db_dir = self.root / "db"
@@ -216,6 +217,7 @@ class Cell:
             "scenario": self.scenario.slug,
             "utility_class": self.scenario.utility_class,
             "arm": self.arm,
+            "seed": self.seed,
             "model": args.model,
             "started_utc": stamp,
         }
@@ -583,6 +585,12 @@ def main() -> None:
                     help="Directory for run artifacts. MUST be outside any indexed vectr "
                          "workspace so a live daemon never re-indexes scratch runs.")
     ap.add_argument("--model", default="sonnet")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="Replicate label for this cell. Nothing about the run is "
+                         "seeded -- a 'seed' here is simply a fresh repetition with "
+                         "every input held constant, which is the only handle on the "
+                         "agent's own nondeterminism. It appears in the run id and in "
+                         "result.json so replicates can be grouped.")
     ap.add_argument("--daemon-port", type=int, default=DEFAULT_DAEMON_PORT)
     ap.add_argument("--proxy-port", type=int, default=DEFAULT_PROXY_PORT)
     ap.add_argument("--max-turns", type=int, default=30)
