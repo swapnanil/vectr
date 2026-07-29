@@ -37,6 +37,14 @@ every number it produces:
     has every RDC component `null` and is excluded from RDC means, never imputed
     from the session total -- counted (`censored_count`) but not averaged in.
 
+A third exclusion rule this module adds itself (results.jsonl is append-only and a
+re-run leaves the old line behind -- see `select_authoritative_legs`): at most one
+record per (trajectory_id, k) is authoritative (latest `started_utc`); every other
+record for that same cell is EXCLUDED as `superseded` -- counted (`superseded_count`)
+and listed, but never entering an aggregate, `per_leg_rows`'s counted rows, or
+`cross_arm_delta`. A record that is both stale and `valid:false` counts once, as
+superseded, not twice.
+
 RDC(1) reference resolution (6.4): DISCOVERED scenarios use the shared leg-1
 result's own `metrics` vector (`rdc_reference:"shared_leg1"`); TOLD scenarios use an
 all-zero reference (`rdc_reference:"told_prompt"`, per 6.4's "RDC(1) = 0 by
@@ -117,6 +125,43 @@ def group_by_trajectory(records: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
+def select_authoritative_legs(records: list[dict]) -> tuple[list[dict], list[dict]]:
+    """`results.jsonl` is append-only across invocations (run_leg.py `write()`), but
+    `run_plan.py`'s `_supersede()` only renames a stale leg/trajectory DIRECTORY
+    before a re-run -- it never touches this file. A re-run therefore leaves the
+    old line behind, so more than one record can share the same (trajectory_id, k).
+
+    Selects exactly ONE authoritative record per (trajectory_id, k): the one with
+    the latest `started_utc` (leg_result.schema.json requires `started_utc` on
+    every record, and it sorts correctly as a string -- run_leg.py stamps it
+    `YYYYMMDDTHHMMSSZ`, fixed-width and zero-padded). The most recently STARTED
+    attempt for a given cell is the current one -- verified against a live
+    superseded case where the trajectory's own state.json `legs[k-1].started_utc`
+    matches the max-started_utc line for that k in results.jsonl, not whichever
+    line happens to be last in the file. Ties (identical started_utc, i.e. same
+    second) break on `leg_id` so selection is fully deterministic without relying
+    on file order.
+
+    Returns `(authoritative, superseded)`. A stale record's own `valid` flag does
+    not matter to its own supersession: it is superseded exactly once, never also
+    counted invalid -- one line does not carry two exclusion reasons.
+    """
+    groups: dict[tuple[str, int], list[dict]] = {}
+    for r in records:
+        groups.setdefault((r["trajectory_id"], r["k"]), []).append(r)
+
+    authoritative: list[dict] = []
+    superseded: list[dict] = []
+    for group in groups.values():
+        if len(group) == 1:
+            authoritative.append(group[0])
+            continue
+        ranked = sorted(group, key=lambda r: (r.get("started_utc") or "", r.get("leg_id") or ""))
+        authoritative.append(ranked[-1])
+        superseded.extend(ranked[:-1])
+    return authoritative, superseded
+
+
 # ---------------------------------------------------------------------------
 # RDC (6.4)
 # ---------------------------------------------------------------------------
@@ -190,8 +235,18 @@ def mistake_rate_aggregate(
 
 
 def trajectory_report(
-    trajectory_id: str, legs: list[dict], leg1_record: dict | None, scenario_origin: str
+    trajectory_id: str, legs: list[dict], leg1_record: dict | None, scenario_origin: str,
+    superseded_legs: list[dict] | None = None,
 ) -> dict[str, Any]:
+    """`legs` must already be authoritative-only (one record per k -- see
+    `select_authoritative_legs`); every downstream number here (RDC, mistake rates,
+    n_legs_counted) is computed from `legs` alone. `superseded_legs` are stale
+    duplicate lines for this same trajectory, surfaced (never silently dropped) as
+    `excluded_reason: "superseded"` rows alongside the existing `invalid` rows, and
+    counted in `superseded_count` -- but they never enter any aggregate or
+    `cross_arm_delta` (those only look at rows carrying an `"rdc"` key, which
+    excluded rows never have).
+    """
     rdc_1, rdc_reference = leg1_rdc_reference(scenario_origin, leg1_record)
     leg1_mistake_committed = None
     if leg1_record is not None:
@@ -236,6 +291,18 @@ def trajectory_report(
             # full toward the mistake metrics".
             per_k_committed[k] = mistake_committed
 
+    superseded_legs = superseded_legs or []
+    for rec in superseded_legs:
+        per_leg_rows.append({
+            "k": rec["k"], "valid": rec.get("valid"), "excluded_reason": "superseded",
+            "started_utc": rec.get("started_utc"),
+        })
+    superseded_count = len(superseded_legs)
+    # Keep the row for a given k first (the authoritative/invalid outcome), then
+    # any superseded duplicates for that same k oldest-first -- so the report reads
+    # top-to-bottom as "what counts, then what it superseded", never file order.
+    per_leg_rows.sort(key=lambda r: (r["k"], r.get("excluded_reason") == "superseded", r.get("started_utc") or ""))
+
     rates = mistake_rate_aggregate(per_k_committed, leg1_mistake_committed)
     scenario = legs[0]["scenario"] if legs else None
     arm = legs[0]["arm"] if legs else None
@@ -254,6 +321,7 @@ def trajectory_report(
         "legs": per_leg_rows,
         "censored_count": censored_count,
         "invalid_count": invalid_count,
+        "superseded_count": superseded_count,
         **rates,
     }
 
@@ -297,11 +365,16 @@ def scenario_report(runs_dir: Path, scenario_slug: str, *, seed: int | None = No
         r for r in load_results_jsonl(runs_dir)
         if r.get("scenario") == scenario_slug and (seed is None or r.get("seed") == seed)
     ]
+    authoritative, superseded = select_authoritative_legs(records)
+    superseded_by_trajectory = group_by_trajectory(superseded)
     trajectories: dict[str, dict[str, Any]] = {}
-    for traj_id, legs in group_by_trajectory(records).items():
+    for traj_id, legs in group_by_trajectory(authoritative).items():
         traj_seed = legs[0]["seed"]
         leg1_record = load_leg1_reference(runs_dir, scenario_slug, traj_seed)
-        trajectories[traj_id] = trajectory_report(traj_id, legs, leg1_record, scenario.origin)
+        trajectories[traj_id] = trajectory_report(
+            traj_id, legs, leg1_record, scenario.origin,
+            superseded_legs=superseded_by_trajectory.get(traj_id, []),
+        )
 
     # Cross-arm deltas: every memory-arm trajectory against arm "none" at the same
     # seed (6.4: "matched (scenario, k, seed)").
@@ -343,9 +416,12 @@ def format_human_readable(report: dict[str, Any]) -> str:
                 f"mistake_rate_post={t['mistake_rate_post']}  "
                 f"mistake_repetition_rate={t['mistake_repetition_rate']}  "
                 f"(censored={t['censored_count']}, invalid={t['invalid_count']}, "
-                f"n_counted={t['n_legs_counted']})"
+                f"superseded={t['superseded_count']}, n_counted={t['n_legs_counted']})"
             )
             for row in t["legs"]:
+                if row.get("excluded_reason") == "superseded":
+                    lines.append(f"      k={row['k']}  SUPERSEDED (started={row.get('started_utc')})")
+                    continue
                 if row.get("excluded_reason"):
                     lines.append(f"      k={row['k']}  EXCLUDED ({row['excluded_reason']})")
                     continue
