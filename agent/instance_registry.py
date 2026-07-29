@@ -32,7 +32,23 @@ def _is_pid_alive(pid: int) -> bool:
 
 
 def _port_is_free(port: int) -> bool:
+    """True if `port` can be bound on 127.0.0.1 right now.
+
+    Sets SO_REUSEADDR on the probe socket before binding — this mirrors
+    exactly what uvicorn itself does when it later binds vectr's real listen
+    socket (uvicorn.config.Config.bind_socket always sets SO_REUSEADDR).
+    Without it, a port whose previous listener just exited reads as "busy"
+    for the OS's TIME_WAIT linger window (tens of seconds) even though the
+    only kind of bind vectr's own daemon ever performs — a fresh
+    SO_REUSEADDR bind — would succeed immediately. `vectr stop` followed by
+    `start`/`restart` a moment later sits squarely inside that window on
+    every run, so without this the probe misreports the just-released port
+    as busy and `find_free_port` below walks to the next port instead of
+    reusing it, leaving already-written MCP configs pointing at the wrong
+    port with no error naming the cause (UPG-RESTART-PORT-WALK-BREAKS-MCP).
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
             return True
@@ -108,17 +124,40 @@ class InstanceRegistry:
 
         1. If ws_hash has a live entry → return its port (caller detects no-op).
         2. If ws_hash has a dead entry → try to reuse its previous port first
-           (avoids rewriting .mcp.json).
+           (avoids rewriting .mcp.json), with a short bounded retry
+           (UPG-RESTART-PORT-WALK-BREAKS-MCP): the port a daemon just
+           released can still refuse an immediate rebind for a brief OS
+           linger window even through the SO_REUSEADDR-aware `_port_is_free`
+           probe above, and a `vectr stop` + `start`/`restart` a moment
+           later sits inside that window on every run — retrying absorbs it
+           instead of immediately walking to a different port.
         3. Scan from preferred_port upward until a free port binds (up to 100 tries).
         """
+        # Imported lazily (not at module top level): `agent.hook_cli` imports
+        # `InstanceRegistry` on every `vectr hook <event>` subprocess dispatch
+        # (SessionStart/UserPromptSubmit/PreToolUse/PreCompact — see
+        # UPG-HOOK-SUBPROCESS-IMPORT-TAX / tests/test_hook_import_cost.py)
+        # but only ever calls `.get(...)`, never `find_free_port`. A
+        # module-level `from agent.config import ...` here would force
+        # `agent.config`'s full ~40-section YAML load onto that hot path for
+        # every hook invocation even though it's only needed by `start`/
+        # `restart`, which already pay for `agent.config` elsewhere.
+        from agent.config import (
+            INSTANCE_REGISTRY_PORT_REUSE_RETRY_ATTEMPTS,
+            INSTANCE_REGISTRY_PORT_REUSE_RETRY_DELAY_S,
+        )
+
         entry = self._read().get(ws_hash)
 
         if entry is not None:
             pid, port = entry["pid"], entry["port"]
             if _is_pid_alive(pid):
                 return port  # caller should treat as no-op
-            if _port_is_free(port):
-                return port
+            for attempt in range(INSTANCE_REGISTRY_PORT_REUSE_RETRY_ATTEMPTS):
+                if _port_is_free(port):
+                    return port
+                if attempt < INSTANCE_REGISTRY_PORT_REUSE_RETRY_ATTEMPTS - 1:
+                    time.sleep(INSTANCE_REGISTRY_PORT_REUSE_RETRY_DELAY_S)
 
         for offset in range(100):
             candidate = preferred_port + offset

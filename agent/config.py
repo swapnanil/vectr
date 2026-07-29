@@ -819,6 +819,19 @@ SYMBOL_GRAPH_QUALIFIED_NEARMISS_CANDIDATE_CAP: int = int(
 )
 
 # ---------------------------------------------------------------------------
+# Instance registry — daemon port allocation (UPG-RESTART-PORT-WALK-BREAKS-MCP)
+# ---------------------------------------------------------------------------
+
+_instance_registry_cfg: dict[str, Any] = _cfg["instance_registry"]
+
+INSTANCE_REGISTRY_PORT_REUSE_RETRY_ATTEMPTS: int = int(
+    _instance_registry_cfg["port_reuse_retry_attempts"]
+)
+INSTANCE_REGISTRY_PORT_REUSE_RETRY_DELAY_S: float = float(
+    _instance_registry_cfg["port_reuse_retry_delay_s"]
+)
+
+# ---------------------------------------------------------------------------
 # CLI daemon-readiness poll (UPG-CLI-START-READY-RACE)
 # ---------------------------------------------------------------------------
 

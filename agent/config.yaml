@@ -1227,6 +1227,19 @@ symbol_graph:
     # cheap and the ranking deterministic.
     candidate_pool_cap: 50
 
+instance_registry:
+  # UPG-RESTART-PORT-WALK-BREAKS-MCP: `find_free_port` prefers reusing a
+  # just-stopped daemon's previous port over walking to a new one (so
+  # already-written .mcp.json/.cursor/.claude configs never go stale on a
+  # routine restart). A port a listener just closed can still refuse an
+  # immediate rebind for a brief OS-level linger window even with the
+  # SO_REUSEADDR-aware free-port probe (agent/instance_registry.py's
+  # `_port_is_free`) — these two bound the retry that absorbs that race
+  # before giving up and walking upward.
+  port_reuse_retry_attempts: 3
+  # Delay between reuse attempts, in seconds.
+  port_reuse_retry_delay_s: 0.1
+
 cli:
   # UPG-CLI-START-READY-RACE: `vectr start`/`restart` spawn the daemon as a
   # detached background process and used to print a success block

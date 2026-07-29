@@ -676,6 +676,80 @@ def _write_workspace_config(workspace: str, port: int, *, search_only: bool = Fa
     _ensure_enable_all_project_mcp_servers(root)
 
 
+# Editor MCP config files `_write_workspace_config` above writes SYNCHRONOUSLY
+# in this (CLI) process, relative to a workspace root — kept in one place so
+# the stale-config check below stays in sync with the writers.
+#
+# Deliberately excludes `.claude/settings.json`: that file's vectr MCP entry
+# is written by the daemon SUBPROCESS itself (`integrations.vscode_bridge.
+# configure_claude_code`), asynchronously, near the end of its phase-2
+# startup (after the embedding model loads) — well after `_do_start` below
+# returns. Checking it here, synchronously, would false-positive on almost
+# every start (the daemon just hasn't gotten to it yet), which would train
+# users to ignore the warning. Its port instead self-heals once the daemon's
+# write runs, now that `configure_claude_code`'s merge always syncs vectr's
+# own managed keys (see `_merge_json_file`'s `owned_keys` in vscode_bridge.py).
+_IDE_MCP_CONFIG_FILES: tuple[str, ...] = (
+    ".mcp.json",
+    ".cursor/mcp.json",
+    ".vscode/mcp.json",
+    ".codex/config.toml",
+)
+
+_MCP_URL_PORT_RE = re.compile(r"localhost:(\d+)/mcp")
+
+
+def _configured_mcp_ports(workspace: str) -> dict[str, int]:
+    """Port each known editor MCP config file under `workspace` currently
+    points vectr's own entry at, keyed by path relative to `workspace`. Files
+    that don't exist, or whose contents don't contain a recognizable vectr
+    MCP URL, are omitted — never guessed."""
+    found: dict[str, int] = {}
+    root = Path(workspace)
+    for rel in _IDE_MCP_CONFIG_FILES:
+        path = root / rel
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        match = _MCP_URL_PORT_RE.search(text)
+        if match:
+            found[rel] = int(match.group(1))
+    return found
+
+
+def _warn_on_stale_mcp_configs(workspace: str, port: int) -> None:
+    """Loud, explicit warning (UPG-RESTART-PORT-WALK-BREAKS-MCP) when any
+    editor MCP config file under `workspace` still points at a port other
+    than the one vectr actually just bound — e.g. IDE config writes were
+    disabled for this workspace (`--no-ide-config`), or a write failed after
+    a previous run. Never silent: an AI code editor reading a stale port
+    gets a dead MCP connection with nothing in vectr's own output naming the
+    cause, which is exactly the failure mode this exists to prevent."""
+    stale = {
+        rel: configured_port
+        for rel, configured_port in _configured_mcp_ports(workspace).items()
+        if configured_port != port
+    }
+    if not stale:
+        return
+    print(
+        f"Warning: vectr is running on port {port}, but the following editor "
+        f"MCP config file(s) still point at a different port. The editor's "
+        f"vectr connection will fail until these are reconciled:",
+        file=sys.stderr,
+    )
+    for rel, configured_port in sorted(stale.items()):
+        print(f"  {Path(workspace) / rel} -> port {configured_port}", file=sys.stderr)
+    print(
+        "  Reconcile with: vectr start (rewrites these files to the running "
+        "port) — or, if you passed --no-ide-config, edit them by hand.",
+        file=sys.stderr,
+    )
+
+
 def _ensure_enable_all_project_mcp_servers(root: Path) -> None:
     """Merge `enableAllProjectMcpServers: true` into .claude/settings.json,
     preserving any existing keys. Shared by the local and remote config writers."""
@@ -1719,6 +1793,8 @@ def cmd_start(args: argparse.Namespace) -> None:
         print(f"  Workspace : {workspace}", file=sys.stderr)
         print(f"  Port      : {port}", file=sys.stderr)
         print(f"  MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
+        for root in roots:
+            _warn_on_stale_mcp_configs(root, port)
         return
 
     port = registry.find_free_port(ws_hash, preferred_port)
@@ -1732,6 +1808,8 @@ def cmd_start(args: argparse.Namespace) -> None:
         code_workspace_file=_code_workspace_file_arg(args), host=host,
         no_ide_config=getattr(args, "no_ide_config", False),
     )
+    for root in roots:
+        _warn_on_stale_mcp_configs(root, port)
 
 
 def cmd_proxy(args: argparse.Namespace) -> None:
@@ -2895,9 +2973,18 @@ def cmd_restart(args: argparse.Namespace) -> None:
         pid = entry["pid"]
         print(f"Stopping PID {pid}...", file=sys.stderr)
         _stop_server(pid)
-        registry.unregister(ws_hash)
 
+    # UPG-RESTART-PORT-WALK-BREAKS-MCP: `find_free_port` must run BEFORE the
+    # entry is unregistered — its "reuse the previous port" step (step 2)
+    # only fires when a dead registry entry is still present. Unregistering
+    # first (the old order here) erased that hint on every restart, so a
+    # restart always fell through to scanning upward from `preferred_port`
+    # instead of reusing the workspace's actual previous port — which then
+    # only happened to work when `preferred_port` matched that port exactly.
+    # `_do_start` below re-registers this ws_hash unconditionally, so the
+    # explicit unregister() has no effect on final state either way.
     port = registry.find_free_port(ws_hash, preferred_port)
+    registry.unregister(ws_hash)
     for root in roots:
         _maybe_write_workspace_config(root, port, args, search_only=search_only)
     _do_start(
@@ -2906,6 +2993,8 @@ def cmd_restart(args: argparse.Namespace) -> None:
         code_workspace_file=_code_workspace_file_arg(args), host=host,
         no_ide_config=getattr(args, "no_ide_config", False),
     )
+    for root in roots:
+        _warn_on_stale_mcp_configs(root, port)
 
 
 def cmd_forget(args: argparse.Namespace) -> None:
