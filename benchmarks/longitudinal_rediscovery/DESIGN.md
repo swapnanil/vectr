@@ -410,21 +410,26 @@ writes are listed in `ignore_paths` and excluded from workspace-state comparison
 An optional `--arm mcp-bare` (tools, no guidance) is defined but not tiered; it is a
 floor, and a prior eval already observed zero vectr calls even *with* guidance.
 
-**Arm D1 vs D2 — the conditionality, resolved.** Note #595 established that `claude -p`
-does not surface `PreToolUse` / `UserPromptSubmit` hook `additionalContext` to the
-model; `SessionStart` is confirmed working. In a multi-session eval that distinction is
-not a limitation, it is a gift: **every leg is a fresh `claude -p`, so SessionStart
-fires at the start of every session — which is exactly the product behaviour vectr
-promises ("notes auto-injected at session start").** Therefore:
+**Arm D1 vs D2.** A 2026-07-29 behavioral canary probe (three hooks emitting unique
+tokens via `additionalContext`; the `-p` agent asked to echo them) confirmed that
+`claude -p` delivers **all three** hook events to the model — `SessionStart`,
+`UserPromptSubmit`, and `PreToolUse`. The earlier conclusion that only `SessionStart`
+worked was a transcript-rendering artifact: `--output-format stream-json` transcripts
+render only `SessionStart` `additionalContext`, so transcript inspection is the wrong
+delivery-confirmation method for the other two events. D1's status therefore rests on
+product realism, not on a delivery gap: **every leg is a fresh `claude -p`, so
+SessionStart fires at the start of every session — which is exactly the product
+behaviour vectr promises ("notes auto-injected at session start").**
 
-- **D1 (`hook-sessionstart`) is UNCONDITIONAL.** It uses only the confirmed-working
-  event and is the most product-realistic multi-session channel in the whole matrix.
-- **D2 (`hook-full`) is CONDITIONAL** on the sentinel's independent interactive
-  verification. The runner refuses `--arm hook-full` unless
-  `--hook-attestation <path>` names a JSON file containing
-  `{"verified": true, "date": "...", "method": "...", "claude_code_version": "..."}`.
-  Missing or `verified:false` ⇒ the arm is **SKIPPED**, never run and never scored.
-  Mechanical conditionality, not a footnote.
+- **D1 (`hook-sessionstart`) is UNCONDITIONAL.** SessionStart is the most
+  product-realistic multi-session channel in the whole matrix.
+- **D2 (`hook-full`) keeps a mechanical freshness gate.** Hook delivery in `-p` mode is
+  a Claude Code implementation detail that can change between versions, so the runner
+  refuses `--arm hook-full` unless `--hook-attestation <path>` names a JSON file
+  containing `{"verified": true, "date": "...", "method": "...",
+  "claude_code_version": "..."}`. Missing or `verified:false` ⇒ the arm is **SKIPPED**,
+  never run and never scored. A valid attestation exists from the 2026-07-29 probe and
+  can be re-minted in minutes with the same canary method.
 
 ### 4.1 Per-arm non-vacuity gates
 
@@ -438,7 +443,7 @@ A leg counts only if the arm's premise is independently confirmed. Any failure �
 | **A** | `notes_count == 0` at leg start (GET `/v1/status`); zero post-offset `PROACTIVE_INJECT` events; proxy `injected == 0`; `mcp_servers == []` |
 | **B** | `notes_count >= 1`; `mcp_servers == [{"name":"vectr","status":"connected"}]`; the vectr tool names appear in `init.tools`; a daemon-side `/v1/recall` preflight with the leg prompt returns the planted note; proxy `injected == 0`. **Whether the agent calls recall is the measured outcome, not a gate.** |
 | **C** | `notes_count >= 1`; planted anchor present in a post-offset `PROACTIVE_INJECT` line (exact comma-split match); proxy `injected > 0` |
-| **D1/D2** | `notes_count >= 1`; daemon `hook_injection_counts` nonzero for the expected event(s); the planted note's content appears verbatim in the transcript (`hook_non_vacuity`); proxy `injected == 0` |
+| **D1/D2** | `notes_count >= 1`; daemon `hook_injection_counts` nonzero for the expected event(s); proxy `injected == 0`. For **D1**, additionally: the planted note's content appears verbatim in the transcript — valid because stream-json renders `SessionStart` `additionalContext`. For **D2**'s `UserPromptSubmit`/`PreToolUse` events, transcript content is **never** consulted (the transcript does not render them — the trap-harness scorer's transcript-content rule is the known bug UPG-IU-HOOK-NONVACUITY-CANARY); delivery rests on `hook_injection_counts` plus the attestation's canary method |
 | **T3 variants** | the variant's provenance-trail text appears in the probe's returned context (§7.3) |
 
 Audit events are counted only from a byte offset taken **after** the preflight probes
