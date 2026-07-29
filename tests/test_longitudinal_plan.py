@@ -675,3 +675,113 @@ def test_state_json_validates_against_its_schema_when_a_leg_is_invalid(tmp_path)
         assert leg2["status"] == "invalid"
         assert leg3["status"] == "skipped"
         assert state["trajectory_valid_through"] == 1
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 4 (branch feature/eval-workspace-stable): every leg of one trajectory
+# gets the SAME --workspace-dir, so a note leg 2 plants is registered under the
+# workspace path leg 3's fresh daemon still queries against (vectr's
+# working-memory store scopes notes by workspace path, not by --db-dir alone --
+# every leg already shared one --db-dir; that alone was not enough).
+# ---------------------------------------------------------------------------
+
+
+def test_leg_cmd_workspace_dir_is_trajectory_stable_across_k(tmp_path):
+    args = _args(tmp_path, "T1")
+    traj_dir = tmp_path / "release_via_ci-proxy-plain-s0"
+    prior = {"tar": traj_dir / "legs" / "1" / "workspace.tar", "manifest_sha256": "m1"}
+    spec = run_plan.TrajectorySpec("release_via_ci", "proxy", "plain", 0, 3)
+
+    cmd2 = run_plan._leg_cmd(spec, 2, prior=prior, traj_dir=traj_dir, planted_anchor=None, args=args)
+    cmd3 = run_plan._leg_cmd(spec, 3, prior=prior, traj_dir=traj_dir, planted_anchor="note:1", args=args)
+
+    ws2 = cmd2[cmd2.index("--workspace-dir") + 1]
+    ws3 = cmd3[cmd3.index("--workspace-dir") + 1]
+    assert ws2 == ws3 == str(traj_dir / "workspace")
+    # ...and each leg keeps its OWN --leg-dir (artifacts stay per-leg).
+    assert cmd2[cmd2.index("--leg-dir") + 1] == str(traj_dir / "legs" / "2")
+    assert cmd3[cmd3.index("--leg-dir") + 1] == str(traj_dir / "legs" / "3")
+
+
+def test_leg_cmd_workspace_dir_is_trajectory_unique(tmp_path):
+    args = _args(tmp_path, "T1")
+    spec = run_plan.TrajectorySpec("release_via_ci", "proxy", "plain", 0, 3)
+    traj_a = tmp_path / "release_via_ci-proxy-plain-s0"
+    traj_b = tmp_path / "release_via_ci-none-none-s0"
+    prior = {"tar": traj_a / "legs" / "1" / "workspace.tar", "manifest_sha256": "m1"}
+
+    cmd_a = run_plan._leg_cmd(spec, 2, prior=prior, traj_dir=traj_a, planted_anchor=None, args=args)
+    cmd_b = run_plan._leg_cmd(spec, 2, prior=prior, traj_dir=traj_b, planted_anchor=None, args=args)
+
+    ws_a = cmd_a[cmd_a.index("--workspace-dir") + 1]
+    ws_b = cmd_b[cmd_b.index("--workspace-dir") + 1]
+    assert ws_a != ws_b
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 4 continued: a leg previously recorded "failed" (run_leg.py's own
+# session-level abort -- module docstring's exit-code contract) must be retried
+# on a later invocation, its stale leg dir superseded first (same pattern as
+# --force-leg / the shared-leg1 stale-cache guard) rather than trusted or stuck
+# forever re-aborting on run_leg.py's own "output dir already has content" guard.
+# ---------------------------------------------------------------------------
+
+
+def test_failed_leg_is_retried_with_old_dir_superseded(tmp_path):
+    _seed_shared_leg1(tmp_path, S1)
+    _seed_shared_leg1(tmp_path, S5)
+    traj_id = "release_via_ci-proxy-plain-s0"
+    traj_dir = tmp_path / traj_id
+    leg2_dir = traj_dir / "legs" / "2"
+    (leg2_dir / "artifacts").mkdir(parents=True)
+    marker = leg2_dir / "artifacts" / "MARKER.txt"
+    marker.write_text("stale from aborted attempt")
+
+    state = run_plan._init_state(run_plan.TrajectorySpec("release_via_ci", "proxy", "plain", 0, 3))
+    state["legs"][1].update(status="failed")  # k=2
+    (traj_dir / "state.json").write_text(json.dumps(state))
+
+    fake = _fake_run_cmd_factory()
+    with mock.patch.object(run_plan, "_run_cmd", side_effect=fake):
+        run_plan.plan_and_run("T1", _args(tmp_path, "T1"))
+
+    superseded = list((traj_dir / "legs").glob("2.superseded-*"))
+    assert len(superseded) == 1
+    assert (superseded[0] / "artifacts" / "MARKER.txt").read_text() == "stale from aborted attempt"
+
+    leg2_calls = [
+        c for c in fake.calls
+        if "--leg-dir" in c and c[c.index("--leg-dir") + 1] == str(leg2_dir)
+    ]
+    assert len(leg2_calls) == 1  # retried exactly once, never left permanently stuck
+
+    new_state = json.loads((traj_dir / "state.json").read_text())
+    leg2 = next(leg for leg in new_state["legs"] if leg["k"] == 2)
+    leg3 = next(leg for leg in new_state["legs"] if leg["k"] == 3)
+    assert leg2["status"] == "done"  # retry succeeded, not left as "failed"
+    assert leg3["status"] == "done"  # chained past the retried leg, not skipped
+
+
+def test_failed_leg_dry_run_does_not_supersede_or_touch_disk(tmp_path):
+    """Mirrors the --force-leg dry-run guarantee: reporting a failed leg as
+    re-runnable must never mutate disk during --dry-run.
+    """
+    _seed_shared_leg1(tmp_path, S1)
+    _seed_shared_leg1(tmp_path, S5)
+    traj_id = "release_via_ci-proxy-plain-s0"
+    traj_dir = tmp_path / traj_id
+    leg2_dir = traj_dir / "legs" / "2"
+    (leg2_dir / "artifacts").mkdir(parents=True)
+    marker = leg2_dir / "artifacts" / "MARKER.txt"
+    marker.write_text("stale from aborted attempt")
+
+    state = run_plan._init_state(run_plan.TrajectorySpec("release_via_ci", "proxy", "plain", 0, 3))
+    state["legs"][1].update(status="failed")
+    (traj_dir / "state.json").write_text(json.dumps(state))
+
+    before = set(tmp_path.rglob("*"))
+    run_plan.plan_and_run("T1", _args(tmp_path, "T1", dry_run=True))
+    after = set(tmp_path.rglob("*"))
+
+    assert after == before
+    assert marker.read_text() == "stale from aborted attempt"

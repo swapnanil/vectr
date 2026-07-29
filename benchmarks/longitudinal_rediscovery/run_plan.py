@@ -437,6 +437,18 @@ def _ensure_shared_leg1(scenario: str, seed: int, *, runs_dir: Path, args: argpa
 # ---------------------------------------------------------------------------
 
 
+def _trajectory_workspace_dir(traj_dir: Path) -> Path:
+    """One agent/daemon workspace path per trajectory, identical for every k -- see
+    run_leg.py's `--workspace-dir` help text: vectr's working-memory store scopes
+    notes by workspace path, so a note leg 2 plants must be registered under the
+    same path leg 3+'s fresh daemon queries, even though every leg of one
+    trajectory already shares one `--db-dir` (sqlite file). `run_leg.py`'s
+    `prepare()` wipes and re-materializes/restores this directory fresh on every
+    leg, so reusing the path across serial legs is safe.
+    """
+    return traj_dir / "workspace"
+
+
 def _leg_cmd(
     spec: TrajectorySpec, k: int, *, prior: dict, traj_dir: Path,
     planted_anchor: str | None, args: argparse.Namespace,
@@ -446,6 +458,7 @@ def _leg_cmd(
         sys.executable, str(_RUN_LEG),
         "--scenario", spec.scenario, "--seed", str(spec.seed), "--k", str(k),
         "--leg-dir", str(leg_dir), "--trajectory-id", spec.trajectory_id,
+        "--workspace-dir", str(_trajectory_workspace_dir(traj_dir)),
         "--arm", spec.arm, "--db-dir", str(traj_dir / "db"),
         "--restore-tar", str(prior["tar"]), "--restore-manifest-sha256", str(prior["manifest_sha256"]),
         "--vectr-bin", args.vectr_bin, "--model", args.model,
@@ -617,7 +630,18 @@ def plan_and_run(tier: str, args: argparse.Namespace) -> dict:
                 continue
 
             leg_dir = traj_dir / "legs" / str(k)
-            if forced:
+            # A leg previously recorded "failed" (run_leg.py's subprocess exited
+            # nonzero -- a genuine session-level abort, DESIGN.md module docstring's
+            # exit-code contract) must be RETRIED on a later invocation, not trusted
+            # (it never completed) and not left permanently stuck: its own leg_dir
+            # may already have on-disk content from the aborted attempt (run_leg.py's
+            # score()/snapshot()/write() still run before the abort in the
+            # session-errored case), and run_leg.py's own `prepare()` refuses to
+            # write into a directory that already has content -- so without
+            # superseding first, every retry would immediately re-abort the same
+            # way. Same `_supersede` (rename, never delete) pattern as an explicit
+            # --force-leg and the shared-leg1 stale-cache guard.
+            if forced or leg_entry["status"] == "failed":
                 _supersede(leg_dir)
                 for k2 in range(k, spec.n_legs + 1):
                     _leg_entry(state, k2)["status"] = "pending"
