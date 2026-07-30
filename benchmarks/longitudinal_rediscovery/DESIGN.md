@@ -772,6 +772,7 @@ nothing it is pure token overhead).
     legs/<k>/
       workspace/                      restored at leg start, snapshotted at leg end
       artifacts/  result.json transcript.jsonl audit.log preflight.json
+                  hook-preflight.json (arms D1/D2 only)
                   scenario.json baselines.json proxy-health.json
                   daemon-status.json daemon-status-final.json agent.stderr
       verify/                         materialized AFTER the agent exits
@@ -794,6 +795,18 @@ to *start* a leg once the remaining budget is below the tier's per-leg worst cas
 `--probe-only` runs the whole setup — materialize, plant, probe, tear down — and spawns
 no agent: **zero quota**, and the only way a new scenario is allowed to reach a paid
 tier (§9, T0).
+
+**Hook mechanism preflight (D1/D2 only, zero quota).** Before the paid `claude -p`
+session, `run_leg.py` executes the workspace's own configured SessionStart hook
+command exactly as `claude` would (same cwd, same env as the spawned agent, a
+synthetic Claude Code SessionStart stdin payload) and asserts both (i) this leg's own
+scratch daemon shows a `hook_injection_counts` increment and (ii) the hook's stdout
+carries the planted note's content verbatim. Either failing aborts the leg before any
+spend, same "fix the scenario, not the score" contract as the daemon-side reachability
+probe above (`--allow-hook-unreachable` records it anyway). This also structurally
+catches instance mis-resolution: if the hook resolves (via the global
+`~/.vectr/instances.json` registry) to a daemon other than this leg's own, the
+daemon-side counter never moves and the preflight aborts.
 
 ---
 

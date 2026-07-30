@@ -19,7 +19,7 @@ DESIGN.md 8's artifact tree exactly:
                   debugging/probing without a driver) that reads/writes a single
                   trajectory's `<runs-dir>/<trajectory>/legs/<k>/` and appends its
                   result to `<runs-dir>/results.jsonl`. Per-leg ARTIFACTS
-                  (result.json, preflight.json, daemon/proxy logs) always live under
+                  (result.json, preflight.json, hook-preflight.json, daemon/proxy logs) always live under
                   that leg's own `legs/<k>/`, but the agent/daemon WORKSPACE is a
                   separate, caller-supplied `--workspace-dir` -- see that flag's help
                   text and `LegRunner._reset_workspace`. run_plan.py always passes
@@ -52,6 +52,16 @@ leg -- result.json still records it (valid=false, invalid_reason set) but this
 script exits nonzero so a driver (run_plan.py) never chains or caches its end
 state. Floors and verdicts otherwise belong to report.py's reader, never to this
 script.
+
+Two zero-cost preflight checks run BEFORE the paid `claude -p` session and abort
+(nonzero exit, same "fix the scenario, not the score" contract as the exit-code
+paragraph above) rather than spend money on a leg that cannot test what it claims
+to: `LegRunner.probe()` (every memory arm, daemon-side `/v1/proactive`
+reachability) and `LegRunner.hook_preflight()` (arms "hook-sessionstart"/
+"hook-full" only, executes the workspace's own configured SessionStart hook
+command exactly as `claude` would and asserts both daemon-side
+`hook_injection_counts` evidence and planted-content-in-stdout evidence -- see its
+own docstring).
 """
 from __future__ import annotations
 
@@ -236,6 +246,68 @@ def _spawn_env_for_agent(base_url: str) -> dict[str, str]:
            if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))}
     env["ANTHROPIC_BASE_URL"] = base_url
     return env
+
+
+def _run_hook_command(
+    command: str, *, cwd: str, stdin: str, env: dict[str, str], timeout: float = 60.0,
+) -> tuple[int | None, str, str, bool]:
+    """Thin, mockable seam around the actual hook-command subprocess spawn --
+    `LegRunner.hook_preflight()`'s tests patch THIS (not `subprocess.run` itself),
+    mirroring how `_http_json` is the one patchable seam for every daemon call in
+    this file. `command` is the exact `command` string `.claude/settings.json`'s
+    SessionStart hook group carries (main.py writes a bare shell command, e.g.
+    "vectr hook session-start"), so `shell=True` -- the same way Claude Code's own
+    hook runner would exec it, not our own argv-splitting guess. Returns
+    (returncode, stdout, stderr, timed_out); returncode is None only on timeout.
+    """
+    try:
+        proc = subprocess.run(
+            command, shell=True, cwd=cwd, input=stdin,
+            capture_output=True, text=True, timeout=timeout, env=env,
+        )
+        return proc.returncode, proc.stdout, proc.stderr, False
+    except subprocess.TimeoutExpired as exc:
+        stderr = (exc.stderr or "") + f"\n[hook_preflight] timed out after {timeout:.0f}s"
+        return None, (exc.stdout or ""), stderr, True
+
+
+# `vectr hook <event>`'s own instance-resolution registry (agent/instance_registry.py):
+# a global, machine-wide `{workspace_hash(dir): {port, ...}}` map, walked from the
+# hook's cwd up through parents until a hit. Read directly here (not imported --
+# see the module docstring's rationale for duplicating run_harness.py helpers rather
+# than importing product internals: this file must give identical answers regardless
+# of which worktree's Python happens to run it, and an editable install's finder maps
+# `import agent.*` to ONE fixed checkout path irrespective of caller worktree) purely
+# as a DIAGNOSTIC on preflight failure -- never a pass/fail gate itself. The gate is
+# the daemon-side hook_injection_counts delta below, which already catches a wrong
+# resolution structurally (the count never moves on THIS leg's own daemon); this just
+# names the culprit port when it does, instead of leaving it a mystery in the artifact.
+_VECTR_INSTANCE_REGISTRY_PATH = Path.home() / ".vectr" / "instances.json"
+
+
+def _workspace_hash(path: str) -> str:
+    """Mirrors `agent.instance_registry.workspace_hash` (sha256(path)[:12]) --
+    reimplemented locally rather than imported; see `_VECTR_INSTANCE_REGISTRY_PATH`.
+    """
+    return hashlib.sha256(path.encode()).hexdigest()[:12]
+
+
+def _registry_port_for(cwd: Path) -> int | None:
+    """Best-effort: which port would `vectr hook <event>` resolve for `cwd` per the
+    global instance registry, walking `cwd` then its parents (same order as
+    `agent.instance_registry`'s own resolution) until a hit. None on any read/parse
+    failure or no match -- diagnostic only, see module comment above.
+    """
+    try:
+        data = json.loads(_VECTR_INSTANCE_REGISTRY_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    here = cwd.resolve()
+    for d in (here, *here.parents):
+        entry = data.get(_workspace_hash(str(d)))
+        if entry is not None:
+            return entry.get("port")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +837,162 @@ class LegRunner:
             self.record["hooks_pruned_to"] = ["SessionStart"]
         self.record["hooks_settings_path"] = str(settings_path)
 
+    def _agent_cwd(self) -> Path:
+        """The cwd both the spawned `claude` process (`run_agent()`) and the
+        synthetic hook invocation (`hook_preflight()`) use -- one function so the
+        two can never drift apart (the hook preflight's whole point is to prove
+        the mechanism under the SAME conditions the real agent session will see).
+        """
+        return self.workspace if self.scenario.agent_cwd == "." else self.workspace / self.scenario.agent_cwd
+
+    def _session_start_hook_command(self) -> str:
+        """The `command` string `.claude/settings.json`'s SessionStart hook group
+        carries -- `write_hooks()` must have already run. `vectr init --hooks`
+        (main.py's `_install_hook_group`) always writes exactly one vectr-managed
+        entry per event, so the first command found is the only one there is.
+        """
+        settings_path = self.workspace / ".claude" / "settings.json"
+        if not settings_path.is_file():
+            raise SystemExit(
+                f"ABORT: hook preflight found no {settings_path} -- write_hooks() "
+                f"must run before hook_preflight()"
+            )
+        data = json.loads(settings_path.read_text())
+        groups = (data.get("hooks") or {}).get("SessionStart") or []
+        commands = [
+            h.get("command")
+            for group in groups
+            for h in (group.get("hooks") or [])
+            if isinstance(h, dict) and h.get("command")
+        ]
+        if not commands:
+            raise SystemExit(
+                f"ABORT: {settings_path} has no SessionStart hook command -- "
+                f"write_hooks() should have installed one for arm {self.arm!r}"
+            )
+        return commands[0]
+
+    def hook_preflight(self) -> None:
+        """Zero-cost SessionStart hook mechanism preflight -- the hook-arm analogue
+        of `probe()`'s daemon-side reachability check, run BEFORE the paid
+        `claude -p` session for arms "hook-sessionstart"/"hook-full" (mirrors
+        `probe()`'s "fix the scenario, not the score" contract exactly).
+
+        Executes the workspace's OWN configured SessionStart hook command exactly
+        as `claude` would invoke it: same cwd (`_agent_cwd()`), same env as the
+        spawned agent subprocess (`_spawn_env_for_agent`), and a synthetic Claude
+        Code SessionStart hook stdin payload carrying every field
+        `agent/hook_cli.py`'s "session-start" branch reads (`cwd`, `session_id`,
+        `source`) plus the schema fields Claude Code's own hook input always
+        includes (`transcript_path`, `hook_event_name`) for realism.
+
+        Asserts BOTH:
+          (i) daemon-side evidence: THIS leg's own scratch daemon
+              (`self.daemon_port` -- never any other daemon on the box) shows its
+              `/v1/status` `hook_injection_counts["SessionStart"]` counter
+              increment across the call. This is what structurally catches
+              instance mis-resolution too -- if the hook command resolves (via the
+              global `~/.vectr/instances.json` registry) to a DIFFERENT daemon
+              than this leg's own, the counter on THIS daemon never moves and the
+              preflight aborts, exactly as it should.
+          (ii) content evidence: the hook's own stdout carries the planted note's
+              content verbatim inside its `hookSpecificOutput.additionalContext`
+              envelope (a raw substring check -- the same check
+              `scorer.leg_non_vacuity` already applies post-hoc to the real
+              transcript for arm "hook-sessionstart"; here it is applied pre-hoc to
+              the hook's own output, before any money is spent).
+
+        Either failing aborts (nonzero exit) unless `--allow-hook-unreachable` is
+        passed. Full detail (resolved command, stdout/stderr, before/after
+        counters, registry diagnostic) is written to `hook-preflight.json`
+        regardless of outcome.
+
+        This can only ever prove the MECHANISM works using the harness's own
+        env/PATH (registry resolution, hook stdin parsing, delivery content) -- it
+        cannot prove `claude` itself trusts this project's `.claude/settings.json`
+        from a fresh/untrusted directory when IT spawns the hook subprocess; that
+        is a loading-layer question `run_agent()`'s `--settings` flag addresses,
+        not provable here without spending a real `claude -p` session.
+        """
+        if self.arm not in ("hook-sessionstart", "hook-full"):
+            return
+        if not (self.note_id is not None or self.planted_anchor):
+            return  # nothing planted on this leg yet -- nothing to preflight
+
+        command = self._session_start_hook_command()
+        cwd = self._agent_cwd()
+        variant = self._find_note_variant()
+
+        before = _http_json("GET", f"http://127.0.0.1:{self.daemon_port}/v1/status", timeout=10)
+        before_counts = dict(before.get("hook_injection_counts") or {})
+
+        stdin_payload = json.dumps({
+            "session_id": f"hookpreflight-{self.scenario.slug}-k{self.k}",
+            "transcript_path": str(self._out("hook-preflight-transcript.jsonl")),
+            "cwd": str(cwd),
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+        })
+
+        base_url = f"http://127.0.0.1:{self.proxy_port}"
+        started = time.time()
+        rc, stdout, stderr, timed_out = _run_hook_command(
+            command, cwd=str(cwd), stdin=stdin_payload,
+            env=_spawn_env_for_agent(base_url), timeout=60.0,
+        )
+        elapsed = round(time.time() - started, 3)
+
+        after = _http_json("GET", f"http://127.0.0.1:{self.daemon_port}/v1/status", timeout=10)
+        after_counts = dict(after.get("hook_injection_counts") or {})
+        delta = int(after_counts.get("SessionStart", 0) or 0) - int(before_counts.get("SessionStart", 0) or 0)
+        daemon_evidence = delta > 0
+
+        stdout_has_content = bool(variant.content) and (variant.content in (stdout or ""))
+
+        registry_port = _registry_port_for(cwd)
+
+        result = {
+            "command": command,
+            "cwd": str(cwd),
+            "rc": rc,
+            "timed_out": timed_out,
+            "elapsed_s": elapsed,
+            "stdout": stdout,
+            "stderr": stderr,
+            "hook_injection_counts_before": before_counts,
+            "hook_injection_counts_after": after_counts,
+            "session_start_delta": delta,
+            "daemon_evidence": daemon_evidence,
+            "stdout_has_planted_content": stdout_has_content,
+            "leg_daemon_port": self.daemon_port,
+            "registry_resolved_port": registry_port,
+            "registry_port_matches_leg_daemon": (
+                (registry_port == self.daemon_port) if registry_port is not None else None
+            ),
+        }
+        preflight_path = self._out("hook-preflight.json")
+        preflight_path.write_text(json.dumps(result, indent=2))
+        self.record["hook_preflight"] = result
+
+        ok = daemon_evidence and stdout_has_content
+        if not ok and not self.args.allow_hook_unreachable:
+            mismatch = ""
+            if registry_port is not None and registry_port != self.daemon_port:
+                mismatch = (
+                    f"; the instance registry resolves this cwd to port "
+                    f"{registry_port}, not this leg's own daemon port "
+                    f"{self.daemon_port} -- likely instance mis-resolution"
+                )
+            raise SystemExit(
+                "ABORT: SessionStart hook preflight failed on this leg's own "
+                f"scratch daemon (port {self.daemon_port}): daemon_evidence="
+                f"{daemon_evidence} (hook_injection_counts['SessionStart'] delta="
+                f"{delta}) stdout_has_planted_content={stdout_has_content}{mismatch}. "
+                "This leg cannot test its hook channel -- fix the scenario (not "
+                "the score); re-run with --allow-hook-unreachable to record it "
+                f"anyway. See {preflight_path}."
+            )
+
     def _mcp_config_path(self) -> Path | None:
         """Path to pass via `--mcp-config` for the two MCP arms, else None (no
         config file at all; `--strict-mcp-config` alone then yields zero servers).
@@ -797,7 +1025,7 @@ class LegRunner:
 
     def run_agent(self) -> None:
         claude = shutil.which("claude") or "claude"
-        cwd = self.workspace if self.scenario.agent_cwd == "." else self.workspace / self.scenario.agent_cwd
+        cwd = self._agent_cwd()
         cmd = [
             claude, "-p", self.leg_spec.prompt,
             "--output-format", "stream-json", "--verbose",
@@ -806,6 +1034,16 @@ class LegRunner:
             "--dangerously-skip-permissions",
             "--strict-mcp-config",
         ]
+        if self.arm in ("hook-sessionstart", "hook-full"):
+            # Headless `claude -p` loading PROJECT-level `.claude/settings.json`
+            # hooks depends on directory trust, which a freshly-materialized
+            # scratch workspace never has (`--dangerously-skip-permissions` skips
+            # tool-call approval, not directory trust). `--settings` loads the
+            # file explicitly regardless of trust state, so hook delivery no
+            # longer depends on it. Defensive/additive: `write_hooks()` already
+            # ran by the time this executes (main()'s call order), so
+            # hooks_settings_path is always set for these two arms.
+            cmd += ["--settings", self.record["hooks_settings_path"]]
         mcp_config = self._mcp_config_path()
         if mcp_config is not None:
             cmd += ["--mcp-config", str(mcp_config)]
@@ -1007,6 +1245,11 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--allow-unreachable", action="store_true", help=(
         "Record a leg even when the planted note fails both daemon-side preflight probes."
     ))
+    ap.add_argument("--allow-hook-unreachable", action="store_true", help=(
+        "Record a leg even when hook_preflight() cannot prove the SessionStart "
+        "hook mechanism delivers the planted note on this leg's own scratch "
+        "daemon (arms hook-sessionstart/hook-full only)."
+    ))
     ap.add_argument("--probe-only", action="store_true", help=(
         "ZERO-QUOTA: materialize/restore, start the daemon, optionally plant, run "
         "the daemon-side probes, tear down, print a summary. Spawns no agent, writes "
@@ -1107,6 +1350,7 @@ def main() -> None:
         runner.start_proxy()
         if runner.arm in ("hook-sessionstart", "hook-full"):
             runner.write_hooks()
+            runner.hook_preflight()
         runner.run_agent()
     finally:
         try:

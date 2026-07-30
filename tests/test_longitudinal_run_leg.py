@@ -17,6 +17,7 @@ the exit-on-session-error behavior is exercised directly against a constructed
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -271,3 +272,264 @@ def test_reset_workspace_is_a_no_op_the_first_time(tmp_path):
     runner._reset_workspace()
     assert runner.workspace.is_dir()
     assert list(runner.workspace.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 6 (branch feature/eval-hook-preflight): zero-cost SessionStart hook
+# mechanism preflight, run before the paid `claude -p` session for arms
+# hook-sessionstart/hook-full. None of these tests spawn a real daemon or hook
+# subprocess: `_http_json` (daemon calls) and `_run_hook_command` (the hook
+# subprocess spawn) are the two module-level seams, both monkeypatched here --
+# the exact same pattern the existing plant_note() tests above use for `_http_json`.
+# ---------------------------------------------------------------------------
+
+
+def _make_hook_runner(tmp_path: Path, *, arm: str = "hook-sessionstart", **overrides) -> "run_leg.LegRunner":
+    overrides.setdefault("planted_note_id", 7)
+    overrides.setdefault("planted_anchor", "note:7")
+    runner = _make_runner(tmp_path, arm=arm, **overrides)
+    runner.workspace.mkdir(parents=True, exist_ok=True)
+    runner.artifacts.mkdir(parents=True, exist_ok=True)
+    settings_path = runner.workspace / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "startup|resume|clear|compact",
+                "hooks": [{"type": "command", "command": "fake-vectr-hook session-start"}],
+            }],
+        },
+    }))
+    runner.record["hooks_settings_path"] = str(settings_path)
+    return runner
+
+
+def _note_content(runner: "run_leg.LegRunner") -> str:
+    return runner._find_note_variant().content
+
+
+def test_hook_preflight_noop_for_non_hook_arms(tmp_path, monkeypatch):
+    """arm "proxy" (or "none"/"mcp"/"mcp-bare") must be completely unaffected --
+    no daemon call, no hook subprocess spawn, no record mutation.
+    """
+    runner = _make_runner(tmp_path)  # default arm="proxy" per _make_runner
+    assert runner.arm == "proxy"
+
+    def fail_http(*a, **k):
+        raise AssertionError("hook_preflight must not touch the daemon for a non-hook arm")
+
+    def fail_run(*a, **k):
+        raise AssertionError("hook_preflight must not spawn a hook subprocess for a non-hook arm")
+
+    monkeypatch.setattr(run_leg, "_http_json", fail_http)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fail_run)
+
+    runner.hook_preflight()  # must return immediately, no exception
+
+    assert "hook_preflight" not in runner.record
+
+
+def test_hook_preflight_noop_when_nothing_planted(tmp_path, monkeypatch):
+    """A hook arm with no planted note yet (e.g. leg 1) has nothing to preflight."""
+    runner = _make_hook_runner(tmp_path, planted_note_id=None, planted_anchor=None)
+    assert runner.note_id is None and runner.planted_anchor is None
+
+    def fail_http(*a, **k):
+        raise AssertionError("must not touch the daemon with nothing planted")
+
+    monkeypatch.setattr(run_leg, "_http_json", fail_http)
+    runner.hook_preflight()
+    assert "hook_preflight" not in runner.record
+
+
+def test_hook_preflight_success_records_evidence_and_does_not_abort(tmp_path, monkeypatch):
+    runner = _make_hook_runner(tmp_path)
+    content = _note_content(runner)
+
+    status_calls = {"n": 0}
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        assert url.startswith(f"http://127.0.0.1:{runner.daemon_port}/")
+        assert method == "GET" and url.endswith("/v1/status")
+        status_calls["n"] += 1
+        # Before the hook call: 0 injections; after: 1 -- a real delta.
+        count = 0 if status_calls["n"] == 1 else 1
+        return {"hook_injection_counts": {"SessionStart": count}}
+
+    def fake_run_hook_command(command, *, cwd, stdin, env, timeout=60.0):
+        assert command == "fake-vectr-hook session-start"
+        assert cwd == str(runner.workspace)
+        payload = json.loads(stdin)
+        assert payload["cwd"] == str(runner.workspace)
+        assert payload["hook_event_name"] == "SessionStart"
+        stdout = json.dumps({
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": content}
+        })
+        return 0, stdout, "", False
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fake_run_hook_command)
+
+    runner.hook_preflight()  # must not raise
+
+    hp = runner.record["hook_preflight"]
+    assert hp["daemon_evidence"] is True
+    assert hp["session_start_delta"] == 1
+    assert hp["stdout_has_planted_content"] is True
+    assert hp["command"] == "fake-vectr-hook session-start"
+    assert (runner.artifacts / "hook-preflight.json").is_file()
+
+
+def test_hook_preflight_aborts_when_daemon_evidence_missing(tmp_path, monkeypatch):
+    """The hook subprocess reports success and echoes the right content, but this
+    leg's own scratch daemon never sees hook_injection_counts move -- the exact
+    live symptom this preflight exists to catch pre-spend (DEFECT 6).
+    """
+    runner = _make_hook_runner(tmp_path)
+    content = _note_content(runner)
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        # Same (zero) count before and after -- no daemon-side evidence.
+        return {"hook_injection_counts": {}}
+
+    def fake_run_hook_command(command, *, cwd, stdin, env, timeout=60.0):
+        stdout = json.dumps({
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": content}
+        })
+        return 0, stdout, "", False
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fake_run_hook_command)
+
+    with pytest.raises(SystemExit) as excinfo:
+        runner.hook_preflight()
+    msg = str(excinfo.value)
+    assert "daemon_evidence=False" in msg
+    assert "fix the scenario" in msg
+    # The artifact is still written even on abort, for post-mortem.
+    hp = runner.record["hook_preflight"]
+    assert hp["daemon_evidence"] is False
+    assert hp["stdout_has_planted_content"] is True
+
+
+def test_hook_preflight_aborts_when_stdout_content_missing(tmp_path, monkeypatch):
+    """Daemon-side evidence is real (the count moves), but the hook's own stdout
+    never carried the planted note's content -- e.g. a kind/trigger-eligibility
+    gap where the delivery mechanism fires but returns empty/unrelated text.
+    """
+    runner = _make_hook_runner(tmp_path)
+
+    status_calls = {"n": 0}
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        status_calls["n"] += 1
+        count = 0 if status_calls["n"] == 1 else 1
+        return {"hook_injection_counts": {"SessionStart": count}}
+
+    def fake_run_hook_command(command, *, cwd, stdin, env, timeout=60.0):
+        return 0, "", "", False  # empty stdout -- e.g. a silently-ineligible note
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fake_run_hook_command)
+
+    with pytest.raises(SystemExit) as excinfo:
+        runner.hook_preflight()
+    msg = str(excinfo.value)
+    assert "stdout_has_planted_content=False" in msg
+    hp = runner.record["hook_preflight"]
+    assert hp["daemon_evidence"] is True
+    assert hp["stdout_has_planted_content"] is False
+
+
+def test_hook_preflight_wrong_daemon_resolution_abort_names_the_culprit_port(tmp_path, monkeypatch):
+    """Instance mis-resolution (the hook command resolves, via the global
+    ~/.vectr/instances.json registry, to a DIFFERENT daemon than this leg's own
+    scratch port) is caught by the SAME daemon_evidence assertion (the count never
+    moves on THIS leg's own daemon) -- this test additionally checks the registry
+    diagnostic names the wrong port in the abort message instead of leaving it a
+    mystery.
+    """
+    runner = _make_hook_runner(tmp_path)
+    content = _note_content(runner)
+    other_port = runner.daemon_port + 1
+
+    registry_path = tmp_path / "instances.json"
+    registry_path.write_text(json.dumps({
+        run_leg._workspace_hash(str(runner.workspace.resolve())): {"port": other_port},
+    }))
+    monkeypatch.setattr(run_leg, "_VECTR_INSTANCE_REGISTRY_PATH", registry_path)
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        # This leg's own daemon never sees the increment (the hook actually
+        # talked to `other_port`, simulated here simply as "no evidence").
+        return {"hook_injection_counts": {}}
+
+    def fake_run_hook_command(command, *, cwd, stdin, env, timeout=60.0):
+        stdout = json.dumps({
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": content}
+        })
+        return 0, stdout, "", False
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fake_run_hook_command)
+
+    with pytest.raises(SystemExit) as excinfo:
+        runner.hook_preflight()
+    msg = str(excinfo.value)
+    assert f"port {other_port}" in msg
+    assert "mis-resolution" in msg
+    hp = runner.record["hook_preflight"]
+    assert hp["registry_resolved_port"] == other_port
+    assert hp["registry_port_matches_leg_daemon"] is False
+
+
+def test_hook_preflight_allow_hook_unreachable_bypasses_abort(tmp_path, monkeypatch):
+    runner = _make_hook_runner(tmp_path, allow_hook_unreachable=True)
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        return {"hook_injection_counts": {}}
+
+    def fake_run_hook_command(command, *, cwd, stdin, env, timeout=60.0):
+        return 0, "", "", False
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fake_run_hook_command)
+
+    runner.hook_preflight()  # must not raise despite both assertions failing
+
+    hp = runner.record["hook_preflight"]
+    assert hp["daemon_evidence"] is False
+    assert hp["stdout_has_planted_content"] is False
+
+
+def test_run_agent_passes_settings_for_hook_arms_only(tmp_path, monkeypatch):
+    """`--settings <hooks_settings_path>` is added to the spawned `claude` argv
+    for arms hook-sessionstart/hook-full (so headless hook loading no longer
+    depends on directory trust), and left out for every other arm.
+    """
+    captured = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(run_leg.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(run_leg.shutil, "which", lambda name: "/usr/bin/claude" if name == "claude" else None)
+
+    hook_runner = _make_hook_runner(tmp_path)
+    hook_runner.run_agent()
+    assert "--settings" in captured["cmd"]
+    idx = captured["cmd"].index("--settings")
+    assert captured["cmd"][idx + 1] == hook_runner.record["hooks_settings_path"]
+
+    proxy_runner = _make_runner(tmp_path)  # arm="proxy"
+    proxy_runner.workspace.mkdir(parents=True, exist_ok=True)
+    proxy_runner.artifacts.mkdir(parents=True, exist_ok=True)
+    proxy_runner.run_agent()
+    assert "--settings" not in captured["cmd"]
