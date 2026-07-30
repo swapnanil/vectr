@@ -254,7 +254,7 @@ stale_artifact_read, truth_source_read, verify_scripts, pre_registered_expectati
 
 ---
 
-### A1 `retired_flag_api` — RECOVERABLE, pressure MEDIUM (the headline scenario)
+### A1 `retired_flag_api` — RECOVERABLE, pressure MEDIUM (originally proposed headline; §16.1 resolved A4 as the reported headline)
 
 **Workspace** `quillstream/` (git repo, one initial commit):
 
@@ -1145,3 +1145,59 @@ anything that seems to is a defect in this document and comes back to the design
    paid cells (T1 and beyond) serialize behind the longitudinal harness's own tiers, as
    already stated in §13's quota-discipline paragraph.** This is confirmatory of what
    §13 already says, not a change to it.
+
+## 17. Dated pre-data amendment (sentinel, 2026-07-30) — cognitive-science grounding
+
+**Status: applied at the Tier-0 build-lane gate, before any paid cell has run
+(spend on this design to date: $0).** Zero Tier-1+ cells existed when this section
+landed, so these are legitimate pre-registrations, not post-hoc adjustments. Source:
+the RESEARCH-COGSCI lane's literature review (`tmp/deterrent-cognitive-science.md`,
+2026-07-30 — human memory-correction literature plus the LLM ironic-rebound
+literature). When `decision_rule.json` is built (deferred from Tier 0), it must
+encode R1–R3 below verbatim.
+
+**R1 — the §10 revocation-reason ladder becomes directional.** Pre-registered
+expectation: the `bare` deterrent performs **≤ ARM-REPLACE**, with a **step** (not
+linear) improvement at the `corrective` rung. Grounds: the testing-effect literature
+(Metcalfe) locates the corrective power in the elaborated explanation — vectr's
+`reason` field is the load-bearing element, not the warning flag itself. A bare
+"previously believed, do not re-derive" is a warning without an alternative and is
+expected to lose; the ladder's interesting contrast is `bare` vs `corrective`, not
+deterrent-vs-replace averaged over reasons.
+
+**R2 — rebound-signature metric (free, derived).** Add `rebound_signature :=
+backflow_shipped AND NOT stale_read` to §7's per-leg derived fields: shipping the old
+fact *without having read any stale artifact* is the fingerprint of ironic rebound
+(the injected mention of F_old itself re-activating it — arXiv:2511.12381), as
+opposed to honest re-derivation from a stale source. **Scope caveat, pre-registered:**
+this metric is structurally neutralized on A4 (UNRECOVERABLE — there is no stale
+artifact to read, so every backflow trivially satisfies `NOT stale_read`); it is
+therefore only interpretable on A1/A2/A3 cells, and any rebound claim in the report
+must cite A1 cells specifically.
+
+**R3 — §8.1's DETERRENT prediction is corrected as under-claiming.** The original
+DETERRENT→NEITHER expectation describes a deterrent-*only* note; the shipped
+ARM-DETERRENT carries the corrective replacement (F_new) alongside the warning. Per
+Ecker/Lewandowsky/Tang 2010, warning + alternative is the theoretically *complete*
+correction — the added content is the active ingredient, not a volume confound —
+which **inverts §5.3's "the deterrent starts at a disadvantage" framing**.
+Pre-registered: ARM-DETERRENT's CORRECT-rate **≥ ARM-REPLACE's**, and on T7/CHAIN a
+**growing** deterrent advantage across legs (Butler/Fazio/Marsh 2011: corrected
+errors return over delay; Metcalfe/Miele 2014: prior testing blocks the return — the
+strongest human-side argument for proactive re-injection over passive audit
+visibility). The restatement-of-the-myth worry is discharged by the modern
+literature (Ecker/Hogan/Lewandowsky 2017: myth-repeating corrections are *more*
+effective; the familiarity-backfire effect is not robust — Debunking Handbook 2020).
+Where the deterrent can genuinely lose is the LLM-side ironic-rebound channel
+(arXiv:2511.12381: rebound intensifies with long semantic distractors; Xie ICLR
+2024: coherence beats truth) — which R2 exists to detect. No literature consulted
+predicts ARM-DEL wins.
+
+**A4-headline interaction (consequence of §16.1 + §16.8).** With A4 as the reported
+headline, the revocation `reason` is **headline-critical**: A4's process gap
+(hand-edits silently overwritten) is exactly the content only the reason text
+carries, so if the reason is truncated in delivery, "warning + alternative" degrades
+to the weakest-case "warning only" and R3's prediction is untestable on the headline
+cell. **T0-4 (corrective-reason truncation survival) is therefore a scientific gate,
+not delivery plumbing** — a tier that cannot pass T0-4 must switch off A4 as
+headline, not merely shorten reasons (strengthens §13's existing T0-4 rule).
