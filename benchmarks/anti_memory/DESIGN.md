@@ -1055,9 +1055,21 @@ anything that seems to is a defect in this document and comes back to the design
    mechanism-specific prediction is strongest but where the floor is uninformative by
    construction. Same money either way. Which headlines?
 
+   **RESOLVED (user, 2026-07-30): A4 (`handwritten_notes`) headlines the reported
+   narrative.** Scenario order across tiers is A4 → A1 → A2 → A3. This overrides this
+   section's own literal text above, which names A1 the headline. The frozen decision
+   rule in §8 is unaffected: it still runs its G0/G1/G2 arithmetic on A1's (
+   `retired_flag_api`'s) `B_X` counts, per §13's own literal T1 tier spec — the
+   resolution changes which scenario's narrative leads the report, not which scenario
+   the pre-registered rule is computed on. Implemented in `scenarios.py`'s
+   `SCENARIO_ORDER`, `HEADLINE_SCENARIO`, and `DECISION_RULE_SCENARIO`.
+
 2. **R at headline.** R=3 gives three binary observations per arm and the whole verdict
    rests on them; R=4 costs $0.96 more and makes a 3-of-4 margin available. The design
    is written for R=3 with one pre-priced escalation to R=6. Accept, or start at R=4?
+
+   **RESOLVED (user, 2026-07-30): R=3 confirmed, with the pre-priced escalation to R=6
+   as already specified in §8.** No change to the design.
 
 3. **Content parity between ARM-DETERRENT and ARM-REPLACE.** ARM-DETERRENT carries the
    `F_new` note *and* the deterrent, because that is what shipped `contradicts=`
@@ -1066,6 +1078,11 @@ anything that seems to is a defect in this document and comes back to the design
    tests a configuration the product never ships. **Recommendation: keep `F_new` in both
    (shipped behaviour) and buy T5's placebo only if there is an effect to explain.**
    Confirm?
+
+   **RESOLVED (user, 2026-07-30): confirmed as recommended.** ARM-DETERRENT keeps
+   `F_new` plus the deterrent (shipped `contradicts=` behaviour); the length-matched
+   placebo (§5.6, T5) remains conditional on T1 showing ARM-DETERRENT losing to
+   ARM-REPLACE. No change to the design.
 
 4. **Product ablation flag: not proposed.** ARM-AUDIT needs no product change (§5.5).
    The *only* cell that would require one is a rendering-isolation arm — "a revoked note
@@ -1076,14 +1093,26 @@ anything that seems to is a defect in this document and comes back to the design
    review treats that coupling as a safety property), so a result about it would not be
    a result about vectr. Confirm, or should it be filed as an OPEN product task?
 
+   **RESOLVED (user, 2026-07-30): the rendering-isolation flag is NOT built.** The
+   sentinel files it separately as UPG-DETERRENT-TITLE-ONLY for product-side
+   consideration; this eval's coder lane makes no product code change for it and none
+   is made in this implementation.
+
 5. **Null publication.** §8.2 commits to writing up a REFUTED verdict as a result. Does
    the user want that, and under what framing — a standalone negative, or folded into
    the C4 paper's apparatus section? This determines whether T2-T8 have any value after
    a REFUTED T1.
 
+   **RESOLVED (user, 2026-07-30): no pre-commitment now; learning-first.** The framing
+   question is deferred to whenever a T1 verdict actually exists rather than decided in
+   the abstract. No change to the design or to T0's scope.
+
 6. **Budget.** T0+T1 is $2.88 mean / $4.20 worst. Does paper two share paper one's $6
    standing ceiling (leaving roughly $2.40 of headroom after the first paper's T1), get
    its own ceiling, or run tier-by-tier with no standing authorisation?
+
+   **RESOLVED (user, 2026-07-30): paid tiers run under the sentinel's own soft ceiling
+   (~$10), approved tier by tier per §13.** Irrelevant to T0, which is $0.
 
 7. **A shipped-behaviour question surfaced by the code read.** The deterrent quotes only
    the note's `title` (≤80 chars) and the `reason` is its only unbounded field, which on
@@ -1093,13 +1122,26 @@ anything that seems to is a defect in this document and comes back to the design
    the reason should be truncation-protected the way the do-not-re-derive clause already
    is)? This is a product question this eval surfaced, not an eval blocker.
 
+   **RESOLVED (user, 2026-07-30): filed as UPG-DETERRENT-TITLE-ONLY, owned by the
+   sentinel, tracked separately from this eval.** This coder lane makes no product code
+   change for it.
+
 8. **Recontamination as observation or manipulation.** `recontamination_write` is
    recorded for free from the tool-use stream, closing the second arm of backflow (the
    agent writes the falsified fact back into memory). Promoting it to a manipulation
    would mean letting agents write notes, which reintroduces the write-half variance
    §6.3 excludes. **Recommendation: keep it an observation in v1.** Confirm?
 
+   **RESOLVED (user, 2026-07-30): confirmed as recommended.** `recontamination_write`
+   stays an observation-only field in v1; no manipulation is added. No change to the
+   design.
+
 9. **Sequencing.** This design is complete and unblocked, but its live cells serialize
    behind the first paper's T0 → T1 on budget and quota. Does the sentinel want T0
    (which is $0 and proves the ablation) run immediately on merge, or held until the
    first paper's T1 lands?
+
+   **RESOLVED (user, 2026-07-30): build and run T0 now (it is $0 and blocks nothing);
+   paid cells (T1 and beyond) serialize behind the longitudinal harness's own tiers, as
+   already stated in §13's quota-discipline paragraph.** This is confirmatory of what
+   §13 already says, not a change to it.
