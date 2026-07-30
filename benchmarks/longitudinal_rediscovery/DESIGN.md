@@ -808,6 +808,28 @@ catches instance mis-resolution: if the hook resolves (via the global
 `~/.vectr/instances.json` registry) to a daemon other than this leg's own, the
 daemon-side counter never moves and the preflight aborts.
 
+**Hook-channel delivery metadata (D1/D2 only).** Note-kind and trigger eligibility
+for the SessionStart/PreToolUse hook channels are **plant-time delivery
+configuration**, distinct from the note's advisory text: `NoteVariant.content`/
+`title` in `scenarios.py` are byte-identical across every arm (channel parity —
+what varies is only how the memory layer is configured to deliver the same
+advisory). `run_leg.py`'s `plant_note()` sends every variant's own
+`trigger_paths` as explicit path-only triggers, which — because an explicit
+`triggers` list on a note fully replaces (never merges with) its `kind`'s default
+trigger bundle — never fire on the SessionStart/boot delivery path (no
+`file_path` is ever supplied there, so a path-bearing trigger cannot match,
+independent of `kind`). For arms `hook-sessionstart`/`hook-full` only,
+`LegRunner._apply_hook_delivery_metadata()` appends an explicit
+`{"event": "session-start"}` trigger to the same list (restoring eligibility)
+and switches `kind` from `gotcha` to `directive` — not because the trigger fix
+alone was insufficient to fire, but because `gotcha`'s per-kind injection token
+budget (100 tokens) is smaller than every scenario's real full-text render
+(101–181 tokens measured across all 16 variants), so a fired gotcha-kind note
+would still silently degrade to its index-tier, title-only line; `directive`'s
+400-token budget clears every case. Non-hook arms (`none`/`mcp`/`mcp-bare`/
+`proxy`) are unaffected — this is a no-op for them, and `scenarios.py`'s 16
+`NoteVariant` sites are never edited.
+
 ---
 
 ## 9. Tiered run plan

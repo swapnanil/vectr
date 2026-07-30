@@ -533,3 +533,155 @@ def test_run_agent_passes_settings_for_hook_arms_only(tmp_path, monkeypatch):
     proxy_runner.artifacts.mkdir(parents=True, exist_ok=True)
     proxy_runner.run_agent()
     assert "--settings" not in captured["cmd"]
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 6 follow-up: plant-time hook-channel delivery metadata
+# (`LegRunner._apply_hook_delivery_metadata()`). `plant_note()` always sends
+# an EXPLICIT `triggers` list (every `NoteVariant.trigger_paths` is
+# non-empty), which per `trigger_engine.effective_triggers()`'s
+# replace-not-merge contract means the note's `kind` default trigger bundle
+# never applies -- and the explicit list is PATH-only, which
+# `trigger_engine._trigger_matches()` can never match at SessionStart/boot
+# (no `file_path` is ever supplied there, so a path-bearing trigger
+# deterministically fails). `_apply_hook_delivery_metadata()` closes this for
+# arms "hook-sessionstart"/"hook-full" only by (1) appending an explicit
+# `{"event": "session-start"}` trigger and (2) switching `kind` to
+# "directive" (gotcha's 100-token per-kind injection cap is smaller than
+# every scenario's real full-block render — 101-181 tokens measured directly
+# against the shipped renderer — so a gotcha-kind hook note would always
+# degrade to its index-tier, title-only line; directive's 400-token cap is
+# not). Both empirically verified live against a scratch daemon (real
+# `vectr hook session-start` + `vectr hook pre-tool-use`) before being
+# encoded here — see the coder-lane report for this follow-up.
+# ---------------------------------------------------------------------------
+
+
+def _trigger_is_session_start_eligible(trigger: dict) -> bool:
+    """Conservative, LOCAL mirror of `agent/trigger_engine.py`'s real
+    `_trigger_matches()` conjunction check, specialized to the SessionStart/
+    boot lifecycle moment — the same pattern
+    `test_longitudinal_scorer.py::_probe_file_structurally_reaches` uses to
+    mirror `recall_for_path()` rather than importing the product module (so
+    this test stays a $0, offline, no-daemon structural check).
+
+    At boot (`app/service.py::_recall_impl`'s `boot` branch ->
+    `WorkingContextStore.fire_and_format(events=["session-start"], ...)`), no
+    file_path/query/command/resolved-symbols context is ever supplied
+    (nothing is being edited, run, or searched yet) — so the real
+    `_trigger_matches()` structurally rejects any trigger declaring 'path',
+    'symbol', 'semantic', or 'command' (each of those axes requires
+    call-time context absent at boot), and accepts only a trigger whose
+    'event' is unset or literally "session-start". `validate_trigger()`
+    requires at least one axis, so a trigger meeting this rule always has
+    `event == "session-start"` with no other axis set.
+    """
+    return (
+        trigger.get("path") is None
+        and trigger.get("symbol") is None
+        and not trigger.get("semantic")
+        and trigger.get("command") is None
+        and trigger.get("event") == "session-start"
+    )
+
+
+def _hook_plant_payload(variant: "scen.NoteVariant") -> dict:
+    """The subset of `plant_note()`'s payload construction that
+    `_apply_hook_delivery_metadata()` reads/mutates (`triggers`, `kind`) —
+    built the identical way `plant_note()` itself builds it, so this test
+    exercises the real transformation, not a re-description of it."""
+    payload: dict = {"kind": variant.kind}
+    if variant.trigger_paths:
+        payload["triggers"] = [{"path": p} for p in variant.trigger_paths]
+    return payload
+
+
+def test_every_note_variant_is_session_start_eligible_for_hook_arms(tmp_path):
+    """Regression guard for DEFECT 6 (a live hook-sessionstart leg came back
+    INVALID with `hook_injection_counts: {}`, no planted content delivered):
+    the hook-arm analogue of
+    `test_longitudinal_scorer.py::test_every_leg_probe_file_structurally_reaches_every_note_variant`.
+    For every scenario, every note variant, both hook arms: the `triggers`
+    list `_apply_hook_delivery_metadata()` produces must contain at least one
+    session-start-eligible trigger (per the real trigger engine's own
+    matching rule, mirrored above), and `kind` must be a kind whose per-kind
+    injection budget the real content actually fits — asserted here as
+    "directive", not "gotcha", for the reason documented on
+    `_apply_hook_delivery_metadata()` itself. No daemon, no network call:
+    pure structural evaluation over `scenarios.py`'s real data — the $0 test
+    that would have caught DEFECT 6 before any `claude -p` spend.
+    """
+    for arm in ("hook-sessionstart", "hook-full"):
+        runner = _make_runner(tmp_path, arm=arm)
+        for slug, scenario in scen.SCENARIOS.items():
+            for variant in scenario.note_variants:
+                payload = _hook_plant_payload(variant)
+                runner._apply_hook_delivery_metadata(payload)
+                triggers = payload.get("triggers") or []
+                assert any(_trigger_is_session_start_eligible(t) for t in triggers), (
+                    f"arm={arm} {slug}/{variant.variant}: no session-start-eligible "
+                    f"trigger in {triggers!r} — the SessionStart hook channel would "
+                    f"silently deliver nothing for this note (DEFECT 6)"
+                )
+                assert payload["kind"] == "directive", (
+                    f"arm={arm} {slug}/{variant.variant}: hook-arm kind is "
+                    f"{payload['kind']!r}, not 'directive' — gotcha's 100-token "
+                    f"per-kind injection cap is smaller than every scenario's "
+                    f"real full-block render (101-181 tokens measured), so "
+                    f"content would silently degrade to its index-tier, "
+                    f"title-only line regardless of trigger eligibility"
+                )
+
+
+def test_apply_hook_delivery_metadata_is_a_noop_for_non_hook_arms(tmp_path):
+    """Channel parity (DESIGN.md 8): every arm OTHER than hook-sessionstart/
+    hook-full must be byte-for-byte unaffected by
+    `_apply_hook_delivery_metadata()` — the advisory text and its delivery
+    metadata are identical to today's shape for `none`/`mcp`/`mcp-bare`/
+    `proxy`."""
+    for arm in ("none", "mcp", "mcp-bare", "proxy"):
+        runner = _make_runner(tmp_path, arm=arm)
+        payload = {"kind": "gotcha", "triggers": [{"path": "**/foo.py"}]}
+        before = json.loads(json.dumps(payload))
+        runner._apply_hook_delivery_metadata(payload)
+        assert payload == before
+
+
+def test_plant_note_sends_directive_kind_and_session_start_trigger_for_hook_arms(tmp_path, monkeypatch):
+    """End-to-end through `plant_note()` itself (not just the metadata helper
+    in isolation): the real POST /v1/remember payload for a hook arm carries
+    `kind="directive"` and a `{"event": "session-start"}` trigger alongside
+    the scenario's own path triggers; a non-hook arm's payload is unchanged
+    from before this follow-up (still `kind="gotcha"`, path-only triggers).
+    """
+    captured = {}
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/remember"):
+            captured["payload"] = payload
+            return {"note_id": 7}
+        if method == "GET" and url.endswith("/v1/status"):
+            return {"notes_count": 1}
+        raise AssertionError(f"unexpected call: {method} {url}")
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+
+    hook_runner = _make_runner(tmp_path, arm="hook-sessionstart")
+    hook_runner.notes_count_at_start = 0
+    hook_runner.record["notes_in_store_at_start"] = 0
+    hook_runner.plant_note()
+    hook_payload = captured["payload"]
+    assert hook_payload["kind"] == "directive"
+    assert {"event": "session-start"} in hook_payload["triggers"]
+    assert any("path" in t for t in hook_payload["triggers"]), (
+        "the pre-existing path-anchored triggers must survive alongside the "
+        "added session-start trigger (OR composition), not be replaced"
+    )
+
+    proxy_runner = _make_runner(tmp_path, arm="proxy")
+    proxy_runner.notes_count_at_start = 0
+    proxy_runner.record["notes_in_store_at_start"] = 0
+    proxy_runner.plant_note()
+    proxy_payload = captured["payload"]
+    assert proxy_payload["kind"] == "gotcha"
+    assert {"event": "session-start"} not in proxy_payload["triggers"]

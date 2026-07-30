@@ -659,6 +659,103 @@ class LegRunner:
         self.notes_count_at_start = status.get("notes_count")
         self.record["notes_in_store_at_start"] = self.notes_count_at_start
 
+    def _apply_hook_delivery_metadata(self, payload: dict[str, Any]) -> None:
+        """Arm-conditional DELIVERY METADATA, applied at plant time only --
+        DESIGN.md section 8. `variant.content`/`title` (the advisory text) is
+        never touched here or anywhere else in `plant_note()`: channel parity
+        across arms means every arm plants the byte-identical advisory; only
+        HOW the memory layer is configured to deliver it varies per channel.
+
+        PROBLEM 1 -- eligibility (DEFECT 6: a live hook-sessionstart leg came
+        back INVALID with `hook_injection_counts: {}`, no planted content
+        delivered). Root cause, empirically verified against a scratch daemon
+        with `agent/trigger_engine.py` read in full: every scenario's
+        `NoteVariant.trigger_paths` is non-empty, so `plant_note()` above
+        always sends an EXPLICIT `triggers` list -- which, per
+        `trigger_engine.effective_triggers()`'s replace-not-merge contract,
+        means the note's `kind` default trigger bundle
+        (`default_bundle_for_kind()`) never even applies here; kind alone is
+        irrelevant to eligibility once `triggers` is explicit. The explicit
+        list this harness sends is PATH-only (`{"path": glob}` per entry, no
+        `event` key). `trigger_engine._trigger_matches()` requires a
+        path-bearing trigger to have a non-empty `path_candidates` tuple to
+        ever match -- and the SessionStart/boot delivery path
+        (`app/service.py::_recall_impl`'s `boot` branch ->
+        `WorkingContextStore.fire_and_format(events=["session-start"], ...)`)
+        never supplies a `file_path` (there is no file being edited at boot),
+        so `path_candidates` is `None` there. A path-only trigger therefore
+        structurally can never fire at session-start, independent of `kind`.
+        Fix: for the two arms that deliver via the real SessionStart hook
+        (`hook-sessionstart`, `hook-full`), append one additional trigger
+        entry, `{"event": "session-start"}`, to the SAME explicit `triggers`
+        list already being sent. `evaluate_note()` composes a note's trigger
+        list with OR semantics (first matching trigger in the list wins), so
+        this purely ADDS session-start eligibility without touching the
+        pre-existing path-anchor triggers the pre-edit/PreToolUse channel
+        already relies on -- verified live against a scratch daemon
+        (`vectr hook pre-tool-use` on a matching file_path still fires the
+        SAME note that now also fires on `vectr hook session-start`). This
+        alone (implementation option 1 of the 2 offered, `kind` left at
+        "gotcha") IS honored by the shipped trigger engine -- the candidate
+        finding "declared session-start triggers inert on the hook channel"
+        is FALSIFIED, evidence in this commit's report.
+
+        PROBLEM 2 -- content budget, found while verifying PROBLEM 1's fix
+        end-to-end (a second, independent defect tripped over while
+        implementing, per this repo's own "bugs found while building are
+        product tasks" rule -- reported as a candidate UPG item, not silently
+        routed around). `agent/trigger_engine.py`'s two-tier injection pack
+        (`pack_injection()`) caps a fired note's FULL-text render at
+        `MEMORY_TRIGGER_PER_KIND_TOKEN_CAP[kind]` before it will render in
+        full; kind "gotcha" is capped at 100 tokens (`agent/config.yaml`).
+        Computed directly against the shipped renderer
+        (`agent.working_context_store._store._format_full_block`) for all 16
+        `NoteVariant` sites in `scenarios.py`: EVERY one's full-block render
+        is 101-181 tokens -- over the gotcha cap in every case, with no
+        exception. A gotcha-kind hook delivery therefore ALWAYS degrades to
+        its index-tier one-liner (title only, no fact content) for this
+        entire scenario corpus -- so `hook_preflight()`'s (and
+        `scorer.leg_non_vacuity`'s, scorer.py's arm `hook-sessionstart`
+        branch) literal `planted_note_content in transcript` check can never
+        pass for a gotcha-kind hook note here, independent of PROBLEM 1's
+        fix. Fix: also switch `kind` to "directive" for the SAME two hook
+        arms -- `MEMORY_TRIGGER_PER_KIND_TOKEN_CAP["directive"]` is 400,
+        comfortably above every scenario's 101-181 token render, and
+        "directive" is (like "gotcha") one of `FULL_TEXT_KINDS`, so nothing
+        about the rendering FORMAT changes, only the budget headroom. Kind
+        alone would not restore eligibility (an explicit `triggers` list
+        still overrides the kind default per PROBLEM 1's finding), so this is
+        applied ALONGSIDE, not instead of, the appended session-start
+        trigger. Both fixes verified together against a live scratch daemon:
+        `vectr hook session-start` returns `hook_injection_counts["SessionStart"]`
+        incrementing AND the literal fact content (not just the title) inside
+        `hookSpecificOutput.additionalContext`, for `bench_box_only`'s real
+        "plain" variant content, unmodified.
+
+        This is implementation option 2 of the 2 offered by the brief, but
+        for a DIFFERENT reason than the brief's own fallback condition
+        anticipated (trigger inertness, which PROBLEM 1's evidence
+        falsifies) -- the real reason is PROBLEM 2's content-budget cap,
+        which only "kind=directive" (not any triggers-list change) can clear
+        for this corpus.
+
+        Both changes are scoped to `self.arm`, a harness configuration value
+        the caller (this script's own `--arm` flag) already resolved before
+        planting -- not query/note content -- so neither touches the
+        no-query-heuristics boundary (`agent/trigger_engine.py`'s own module
+        docstring: "Nothing in this module ever reads a user prompt or query
+        string"). `scenarios.py`'s 16 `NoteVariant` sites are deliberately
+        left unedited; this is plant-time channel configuration only.
+
+        Non-hook arms (`none`, `mcp`, `mcp-bare`, `proxy`) are byte-for-byte
+        unaffected -- this function is a no-op for them."""
+        if self.arm not in ("hook-sessionstart", "hook-full"):
+            return
+        triggers = list(payload.get("triggers") or [])
+        triggers.append({"event": "session-start"})
+        payload["triggers"] = triggers
+        payload["kind"] = "directive"
+
     def plant_note(self) -> None:
         variant = self._find_note_variant()
         payload: dict[str, Any] = {
@@ -673,6 +770,7 @@ class LegRunner:
             payload["triggers"] = [{"path": p} for p in variant.trigger_paths]
         if variant.anchors:
             payload["anchors"] = list(variant.anchors)
+        self._apply_hook_delivery_metadata(payload)
         out = _http_json(
             "POST", f"http://127.0.0.1:{self.daemon_port}/v1/remember", payload, timeout=60
         )
