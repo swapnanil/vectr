@@ -667,6 +667,7 @@ class LegRunner:
             "primary_check": self.leg_spec.primary_check,
             "checks": [repr(c) for c in self.leg_spec.checks],
             "is_forcing_leg": self.leg_spec.is_forcing_leg,
+            "critical_residue_paths": list(self.scenario.critical_residue_paths),
         }, indent=2))
 
     def _restore_and_verify(self) -> None:
@@ -689,6 +690,40 @@ class LegRunner:
                 f"debugging"
             )
         self.leg_start_baselines = baselines
+        self._apply_critical_residue_reset()
+
+    def _apply_critical_residue_reset(self) -> None:
+        """DEFECT 10 (direction 1, user decision 2026-07-30; DESIGN.md 6.5): restore
+        this scenario's declared `critical_residue_paths` to their scenario-seed
+        content before this leg's agent starts.
+
+        Runs only from `_restore_and_verify` (i.e. only at k>=2 -- k==1 already
+        starts from the seed via `scen.materialize`), and only AFTER the manifest
+        integrity check above, so the DEFECT-9-adjacent tar-fidelity verification
+        still covers the raw, un-reset restore; this reset is a deliberate,
+        scenario-authored transformation layered on top of an already-verified-
+        intact restore, never a correction to a corrupted one.
+
+        Every path NOT declared here keeps its natural cross-leg residue untouched
+        (DESIGN.md 2.2) -- a real multi-session workspace carries its own history
+        forward, and resetting more than a scenario explicitly declares would defeat
+        the point of a longitudinal eval. `leg_start_baselines` is recomputed after
+        the reset (not left as the raw-restore baselines set above) so
+        `baselines.json` and every `FileUnchanged`/`FileMutated` check reflect the
+        state the agent actually sees, per `scorer.py::evaluate_check`'s documented
+        contract that baselines are always this leg's true start-of-leg state.
+        """
+        if not self.scenario.critical_residue_paths:
+            return
+        for rel in self.scenario.critical_residue_paths:
+            seed_content = self.scenario.files[rel]  # __post_init__ guarantees presence
+            target = self.workspace / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(seed_content, encoding="utf-8")
+        self.leg_start_baselines = _sha256_tree(
+            self.workspace, extra_ignore=self._extra_ignore_paths()
+        )
+        self.record["critical_residue_reset_paths"] = list(self.scenario.critical_residue_paths)
 
     def start_daemon(self) -> None:
         if _port_pids(self.daemon_port):

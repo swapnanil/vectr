@@ -28,12 +28,15 @@ primitive that aggregate will read: `weak_prior` (`test_weak_prior_flags_a_clean
 """
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import inspect
 import json
 import sys
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 BENCH_DIR = Path(__file__).resolve().parents[1] / "benchmarks" / "longitudinal_rediscovery"
 
@@ -240,6 +243,82 @@ def test_verify_scripts_never_land_inside_the_workspace(tmp_path):
             for name in leg.verify_scripts:
                 assert not (workspace / name).exists()
                 assert not any(p.name == Path(name).name for p in workspace.rglob("*"))
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 10 (direction 1, user decision 2026-07-30; DESIGN.md 6.5): per-leg reset
+# of scenario-declared `critical_residue_paths`.
+# ---------------------------------------------------------------------------
+
+
+def test_critical_residue_paths_entry_must_have_a_matching_files_seed():
+    """`LongitudinalScenario.__post_init__` refuses a declared reset path with no
+    `files` seed to restore FROM -- `run_leg.py`'s `_apply_critical_residue_reset`
+    trusts this invariant instead of re-checking it at run time (KeyError would be
+    the alternative, much later and far from the authoring mistake).
+    """
+    real = scen.SCENARIOS["deploy_reverted_by_reconciler"]
+    with pytest.raises(ValueError, match="critical_residue_paths"):
+        dataclasses.replace(real, critical_residue_paths=("deploy/queue.yaml", "no/such/file.txt"))
+
+
+def test_no_scenario_declares_critical_residue_paths_by_accident():
+    """Every scenario OTHER than S5 was audited (coder-defect10 report) and found
+    not to need a reset: S1-S4 each target a distinct value/artifact per leg (no
+    leg's check can be pre-satisfied by an earlier leg's own residue), and S6's
+    legs 1-3 each target a distinct algorithm. This is a deliberate allow-list, not
+    an oversight -- a future scenario that DOES need one must add itself here.
+    """
+    declared = {slug: s.critical_residue_paths for slug, s in scen.SCENARIOS.items() if s.critical_residue_paths}
+    assert declared == {"deploy_reverted_by_reconciler": ("deploy/queue.yaml",)}
+
+
+def test_s5_queue_gained_staging_entry_is_uniform_minimum_one_across_every_leg():
+    """Post-fix: every leg's engagement half is a flat minimum=1 (not the old
+    cumulative 1/2/3/4) -- coherent only because `deploy/queue.yaml` is reset to
+    its zero-staging-entry seed at every k>=2 leg's start (`critical_residue_paths`),
+    so ANY staging entry present at leg-end was necessarily added THIS leg.
+    """
+    s5 = scen.SCENARIOS["deploy_reverted_by_reconciler"]
+    for i, leg in enumerate(s5.legs, start=1):
+        allof = leg.checks[0]
+        sub = next(c for c in allof.of if c.name == "queue_gained_staging_entry")
+        assert sub.minimum == 1, f"leg {i}: expected uniform minimum=1, got {sub.minimum}"
+
+
+def test_s5_check_measures_this_legs_own_addition_not_leg1_residue(tmp_path):
+    """Mechanical proof of the check-semantics fix, via the real `evaluate_check`:
+    starting from the scenario seed (what every k>=2 leg sees after
+    `_apply_critical_residue_reset`), the engagement half fails until THIS leg adds
+    its own entry, and passes as soon as it does -- for every leg, not just leg 1.
+    Was previously only true for leg 1 (legs 2-4 needed 2/3/4 CUMULATIVE entries,
+    so leg 1's leftover alone already satisfied leg 2's old check).
+    """
+    s5 = scen.SCENARIOS["deploy_reverted_by_reconciler"]
+    for i, leg in enumerate(s5.legs, start=1):
+        workspace = tmp_path / f"leg{i}"
+        baselines = scen.materialize(s5, workspace)
+        verify_dir = tmp_path / f"verify{i}"
+
+        # Seed only (post-reset leg-start state, or leg 1's own untouched start):
+        # the engagement half must fail -- nothing this leg did yet.
+        pre = scorer.evaluate_check(
+            leg.checks[0], workspace=workspace, baselines=baselines, commands=(), verify_dir=verify_dir,
+        )
+        engagement_pre = next(s for s in pre["sub_checks"] if s["name"] == "queue_gained_staging_entry")
+        assert engagement_pre["passed"] is False, f"leg {i}: seed alone must not satisfy the check"
+
+        # This leg's own compliant addition (append, never edit in place, per the
+        # seed file's own header comment) -- must now satisfy it.
+        _write(
+            workspace, "deploy/queue.yaml",
+            s5.files["deploy/queue.yaml"] + '- date: "2026-07-20"\n  target: staging\n  ref: HEAD\n',
+        )
+        post = scorer.evaluate_check(
+            leg.checks[0], workspace=workspace, baselines=baselines, commands=(), verify_dir=verify_dir,
+        )
+        engagement_post = next(s for s in post["sub_checks"] if s["name"] == "queue_gained_staging_entry")
+        assert engagement_post["passed"] is True, f"leg {i}: own addition must satisfy the check"
 
 
 def _is_path_identifier_char(ch: str) -> bool:
