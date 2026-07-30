@@ -698,6 +698,29 @@ invented after the fact.
 substrate §6.3 are **not** used: re-discovery cost is not this design's question. Only
 `session_usd` is carried, for budget accounting.
 
+**`backflow_signature`/`correct_check` command patterns are matched at genuine
+command-execution positions, not anywhere in a Bash command string (DEFECT 9,
+ported — UPG-ANTIMEM-EXEC-ANCHOR).** This scorer carried its own unanchored
+`re.search`-based `BashAction`/`CommandRan` matching, independent of the
+longitudinal substrate's DEFECT 9 fix (§6.5 there). Live false-positive
+instance: A3 `noop_make_target`'s `backflow_signature` targets `BashAction(r"make\s+seed\b")`,
+but both `README.md` and `CONTRIBUTING.md`'s fixture content contain the
+literal phrase "make seed" (`F_old` teaches it) — a read-only
+`grep -rn "make seed" .` matched the signature without the agent ever running
+`make seed`; the same class affected `correct_check`'s
+`CommandRan("loaded_regions_via_fixtures", r"tools/fixtures\s+load\s+regions")`.
+Fixed the same way as the substrate: `exec_anchor=True` on the affected
+signature declarations, matched via `_matches_at_exec_position` (duplicated,
+not imported, in this eval's own `scorer.py` — see that function's own
+section comment for why duplication, not import, is this codebase's
+established convention here). Every `BashAction`/`CommandRan` use across all
+four scenarios was re-audited: `backflow_signature` and `correct_check`
+command patterns (§4, A3) are anchored; `stale_artifact_read`/`truth_source_read`
+(`stale_read`/`truth_read` above) are deliberately left unanchored, in-line
+comments in `scenarios.py` documenting why per signature — their semantic is
+lookup/engagement ("did the agent look at X"), the same class the substrate's
+own `rediscovery_work` patterns are, never anchored either.
+
 ### 7.4 Rates, censoring, and what is never imputed
 
 ```
