@@ -450,6 +450,19 @@ Audit events are counted only from a byte offset taken **after** the preflight p
 settle — the offset idiom from `parse_injection_events`, for the same reason (the
 harness's own probes hit the same audit log).
 
+**Pre-spend reachability probe is channel-matched per arm (DEFECT 7).** Before this
+table's post-hoc gates ever run, `run_leg.py`'s `probe()` independently checks — before
+any `claude -p` spend — that the planted note is actually retrievable, aborting the leg
+if not (§8, "Reachability probe (all memory arms, zero quota)"). Arms B/C query the
+daemon's proactive/proxy channel (`/v1/proactive`); arms D1/D2 plant a `kind="directive"`
+note (§8's hook-channel delivery metadata paragraph) to fit the SessionStart channel's
+content budget, and `proactive.structural_kinds`/`proactive.proxy.exclude_directive_notes`
+(agent/config.yaml) both deliberately exclude "directive" from the proactive/proxy
+channel — so D1/D2 judge reachability against the SessionStart channel itself
+(`boot=True, hook_event="SessionStart"` against `/v1/recall`), not the proactive one. This
+mirrors the same channel split as this table's own D1/D2 row (`hook_injection_counts`,
+not `PROACTIVE_INJECT`) one layer earlier, before any spend.
+
 **Trajectory validity.** State carries forward, so a bad leg contaminates its
 successors. If leg *k* is invalid, record `trajectory_valid_through = k-1`; legs > *k*
 are excluded even if they individually pass their gates.
