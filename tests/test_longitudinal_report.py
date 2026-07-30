@@ -479,6 +479,85 @@ def test_build_report_covers_only_requested_scenarios(tmp_path):
     assert set(scoped) == {"release_via_ci", "bench_box_only"}
 
 
+# ---------------------------------------------------------------------------
+# DEFECT 9: contradictions surfaced in trajectory_report rows, and the
+# `rescored=True` filename plumbing rescore.py's output relies on.
+# ---------------------------------------------------------------------------
+
+
+def test_trajectory_report_row_surfaces_contradictions_from_score():
+    rec = _leg_record(scenario="deploy_reverted_by_reconciler", arm="none", note_variant="none", seed=0, k=2)
+    rec["score"] = {
+        "contradictions": [
+            {
+                "kind": "mistake_action_without_state_mutation",
+                "mistake_state_check": "deploy_state_untouched",
+                "detail": "action-stream and file-state evidence disagree",
+            }
+        ]
+    }
+    t = report.trajectory_report("traj", [rec], None, "told")
+    row = next(r for r in t["legs"] if r["k"] == 2)
+    assert row["contradictions"][0]["kind"] == "mistake_action_without_state_mutation"
+
+
+def test_trajectory_report_row_contradictions_defaults_to_empty_list():
+    """Every existing fixture in this file omits `score` entirely -- must not KeyError."""
+    rec = _leg_record(scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=2)
+    assert "score" not in rec
+    t = report.trajectory_report("traj", [rec], None, "discovered")
+    row = next(r for r in t["legs"] if r["k"] == 2)
+    assert row["contradictions"] == []
+
+
+def test_format_human_readable_prints_contradiction_lines(tmp_path):
+    rec = _leg_record(scenario="deploy_reverted_by_reconciler", arm="none", note_variant="none", seed=0, k=2)
+    rec["score"] = {
+        "contradictions": [
+            {"kind": "mistake_action_without_state_mutation", "detail": "disagreement detail text"}
+        ]
+    }
+    _write_results_jsonl(tmp_path, [rec])
+    text = report.format_human_readable(report.build_report(tmp_path, scenarios=["deploy_reverted_by_reconciler"]))
+    assert "CONTRADICTION" in text
+    assert "disagreement detail text" in text
+
+
+def test_build_report_rescored_reads_rescored_filenames_not_originals(tmp_path):
+    """`rescore.py` writes `results.rescored.jsonl` / `result.rescored.json` as NEW
+    sibling files, never touching the originals -- `build_report(rescored=True)`
+    must read exclusively from those siblings.
+    """
+    _write_leg1(tmp_path, "release_via_ci", 0, mistake_committed=True)
+    original = _leg_record(
+        scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=2,
+        metrics=_metrics(mistake_committed=True),
+    )
+    _write_results_jsonl(tmp_path, [original])
+
+    rescored_leg1_dir = tmp_path / "_shared" / "leg1" / "release_via_ci-s0"
+    (rescored_leg1_dir / "result.rescored.json").write_text(
+        json.dumps(_leg1_result(mistake_committed=False))
+    )
+    rescored_record = _leg_record(
+        scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=2,
+        metrics=_metrics(mistake_committed=False),
+    )
+    (tmp_path / "results.rescored.jsonl").write_text(json.dumps(rescored_record) + "\n")
+
+    before = report.build_report(tmp_path, scenarios=["release_via_ci"], rescored=False)
+    after = report.build_report(tmp_path, scenarios=["release_via_ci"], rescored=True)
+
+    before_traj = before["release_via_ci"]["trajectories"]["release_via_ci-none-none-s0"]
+    after_traj = after["release_via_ci"]["trajectories"]["release_via_ci-none-none-s0"]
+    before_k2 = next(r for r in before_traj["legs"] if r["k"] == 2)
+    after_k2 = next(r for r in after_traj["legs"] if r["k"] == 2)
+    assert before_k2["mistake_committed"] is True
+    assert after_k2["mistake_committed"] is False
+    assert before_traj["leg1_mistake_committed"] is True
+    assert after_traj["leg1_mistake_committed"] is False
+
+
 def test_format_human_readable_smoke(tmp_path):
     _write_leg1(tmp_path, "release_via_ci", 0, mistake_committed=True)
     _write_results_jsonl(tmp_path, [

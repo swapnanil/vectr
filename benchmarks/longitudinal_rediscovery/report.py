@@ -97,8 +97,12 @@ RDC_COMPONENTS = (
 # ---------------------------------------------------------------------------
 
 
-def load_results_jsonl(runs_dir: Path) -> list[dict]:
-    path = Path(runs_dir) / "results.jsonl"
+def load_results_jsonl(runs_dir: Path, filename: str = "results.jsonl") -> list[dict]:
+    """`filename` defaults to `run_leg.py write()`'s own aggregate file; pass
+    `"results.rescored.jsonl"` (see `rescore.py`) to build the identical report over
+    rescored records instead, without duplicating any of the logic below.
+    """
+    path = Path(runs_dir) / filename
     if not path.is_file():
         return []
     records = []
@@ -109,8 +113,14 @@ def load_results_jsonl(runs_dir: Path) -> list[dict]:
     return records
 
 
-def load_leg1_reference(runs_dir: Path, scenario: str, seed: int) -> dict | None:
-    path = Path(runs_dir) / "_shared" / "leg1" / f"{scenario}-s{seed}" / "result.json"
+def load_leg1_reference(
+    runs_dir: Path, scenario: str, seed: int, filename: str = "result.json"
+) -> dict | None:
+    """`filename` defaults to the original per-leg record; pass
+    `"result.rescored.json"` to read the rescored sibling `rescore.py` writes next
+    to it instead (originals are never mutated -- see that module's docstring).
+    """
+    path = Path(runs_dir) / "_shared" / "leg1" / f"{scenario}-s{seed}" / filename
     if not path.is_file():
         return None
     return json.loads(path.read_text())
@@ -280,6 +290,7 @@ def trajectory_report(
             "rdc": rdc_k,
             "rdc_ratio": rdc_ratio(rdc_k, rdc_1),
             "session_usd": (rec.get("cost") or {}).get("session_usd"),
+            "contradictions": (rec.get("score") or {}).get("contradictions") or [],
         }
         per_leg_rows.append(row)
 
@@ -359,10 +370,17 @@ def cross_arm_delta(arm_a_report: dict, arm_x_report: dict) -> list[dict[str, An
 # ---------------------------------------------------------------------------
 
 
-def scenario_report(runs_dir: Path, scenario_slug: str, *, seed: int | None = None) -> dict[str, Any]:
+def scenario_report(
+    runs_dir: Path,
+    scenario_slug: str,
+    *,
+    seed: int | None = None,
+    results_filename: str = "results.jsonl",
+    leg1_filename: str = "result.json",
+) -> dict[str, Any]:
     scenario = scen.SCENARIOS[scenario_slug]
     records = [
-        r for r in load_results_jsonl(runs_dir)
+        r for r in load_results_jsonl(runs_dir, results_filename)
         if r.get("scenario") == scenario_slug and (seed is None or r.get("seed") == seed)
     ]
     authoritative, superseded = select_authoritative_legs(records)
@@ -370,7 +388,7 @@ def scenario_report(runs_dir: Path, scenario_slug: str, *, seed: int | None = No
     trajectories: dict[str, dict[str, Any]] = {}
     for traj_id, legs in group_by_trajectory(authoritative).items():
         traj_seed = legs[0]["seed"]
-        leg1_record = load_leg1_reference(runs_dir, scenario_slug, traj_seed)
+        leg1_record = load_leg1_reference(runs_dir, scenario_slug, traj_seed, leg1_filename)
         trajectories[traj_id] = trajectory_report(
             traj_id, legs, leg1_record, scenario.origin,
             superseded_legs=superseded_by_trajectory.get(traj_id, []),
@@ -395,9 +413,22 @@ def scenario_report(runs_dir: Path, scenario_slug: str, *, seed: int | None = No
     }
 
 
-def build_report(runs_dir: Path, scenarios: list[str] | None = None) -> dict[str, Any]:
+def build_report(
+    runs_dir: Path, scenarios: list[str] | None = None, *, rescored: bool = False
+) -> dict[str, Any]:
+    """`rescored=True` reads `results.rescored.jsonl` / `result.rescored.json`
+    (see `rescore.py`) instead of the originals -- same report shape, sourced from
+    the re-scored records without mutating anything `run_leg.py` wrote.
+    """
     slugs = scenarios if scenarios is not None else sorted(scen.SCENARIOS)
-    return {slug: scenario_report(runs_dir, slug) for slug in slugs}
+    results_filename = "results.rescored.jsonl" if rescored else "results.jsonl"
+    leg1_filename = "result.rescored.json" if rescored else "result.json"
+    return {
+        slug: scenario_report(
+            runs_dir, slug, results_filename=results_filename, leg1_filename=leg1_filename
+        )
+        for slug in slugs
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +461,11 @@ def format_human_readable(report: dict[str, Any]) -> str:
                     f"censored={row['censored']}  turns_to_fact={row['rdc'].get('turns_to_fact')}  "
                     f"usd={row['session_usd']}"
                 )
+                # Loud, never silently folded into mistake_committed (DEFECT 9): a
+                # contradiction means the action-stream signature and the file-state
+                # evidence for this leg's mistake disagree.
+                for c in row.get("contradictions") or []:
+                    lines.append(f"      k={row['k']}  CONTRADICTION: {c['kind']} -- {c['detail']}")
         for traj_id, delta_rows in sc["cross_arm_delta_vs_none"].items():
             lines.append(f"  delta (none - {traj_id}):")
             for d in delta_rows:
@@ -447,13 +483,17 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--runs-dir", required=True)
     ap.add_argument("--scenario", action="append", default=None, help="Restrict to one or more scenario slugs; default all six.")
     ap.add_argument("--human", action="store_true", help="Print a readable table instead of JSON.")
+    ap.add_argument(
+        "--rescored", action="store_true",
+        help="Read results.rescored.jsonl / result.rescored.json (rescore.py output) instead of the originals.",
+    )
     return ap
 
 
 def main() -> None:
     ap = _build_argparser()
     args = ap.parse_args()
-    report = build_report(Path(args.runs_dir), scenarios=args.scenario)
+    report = build_report(Path(args.runs_dir), scenarios=args.scenario, rescored=args.rescored)
     if args.human:
         print(format_human_readable(report))
     else:

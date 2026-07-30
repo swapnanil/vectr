@@ -87,11 +87,20 @@ class FileUnchanged:
 
 @dataclass(frozen=True)
 class CommandRan:
-    """True when `pattern` searches ANY Bash tool_use `command` in the transcript."""
+    """True when `pattern` searches ANY Bash tool_use `command` in the transcript.
+
+    `exec_anchor=True` (DEFECT 9, longitudinal_rediscovery) restricts the search to
+    genuine command-execution positions in each command string -- see scorer.py's
+    `_matches_at_exec_position` in whichever harness consumes this primitive. Default
+    False preserves the original anywhere-in-string `re.search` behavior unchanged for
+    every existing caller (`injection_utility` and `anti_memory` scenarios never set
+    this field).
+    """
 
     name: str
     pattern: str
     want: bool = True
+    exec_anchor: bool = False
 
 
 @dataclass(frozen=True)

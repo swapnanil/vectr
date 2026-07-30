@@ -160,6 +160,79 @@ def _path_values(input_: Mapping[str, Any]) -> list[str]:
     return [str(input_[k]) for k in _PATH_INPUT_KEYS if input_.get(k) is not None]
 
 
+# ---------------------------------------------------------------------------
+# Exec-position anchoring (DEFECT 9)
+#
+# A plain `re.search` finds `pattern` ANYWHERE in a Bash `command` string, so
+# `cat deploy.sh` or `grep -n foo deploy.sh` -- both read-only -- match a
+# mistake_signature written to detect `./deploy.sh` just as readily as an actual
+# `./deploy.sh staging` invocation. That collapses "the agent ran X" and "the agent's
+# command MENTIONED X" into the same verdict, which is wrong whenever a signature's
+# declared semantic is the former (DESIGN.md 6.2's BashAction/CommandRan primitives,
+# `exec_anchor=True`). Anchoring instead requires the pattern to match starting at a
+# genuine command-EXECUTION position: the start of the string, or immediately after
+# a shell command separator (`;`, `&&`, `||`, `|`, `&`, or a newline), optionally
+# through one or more interpreter/exec-wrapper tokens a real shell allows to precede
+# the invoked program (`env`, one or more `VAR=value` assignments, `sh`/`bash`/`zsh`/
+# `exec`, `timeout N`, `caffeinate -flags`).
+# ---------------------------------------------------------------------------
+
+_EXEC_PREFIX_TOKEN = re.compile(
+    r"""
+    \s*
+    (?:
+        [A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)\s+   # one VAR=value assignment
+      | env\s+                                              # env (itself often followed
+                                                              # by more VAR= tokens, looped)
+      | (?:sh|bash|zsh|exec)\s+                              # interpreter / exec keyword
+      | timeout\s+\S+\s+                                     # timeout N
+      | caffeinate(?:\s+-\S+)*\s+                            # caffeinate [-flags]
+    )?
+    """,
+    re.VERBOSE,
+)
+
+_EXEC_BOUNDARY = re.compile(r"\A|[;&|\n]")
+
+
+def _strip_exec_prefixes(command: str) -> str:
+    """Repeatedly strip leading whitespace and interpreter/exec-wrapper tokens off the
+    FRONT of `command` so a pattern lands on the actually-invoked program, not its
+    wrapper or the whitespace a shell allows around a command separator. A real shell
+    allows wrapper tokens to chain in any order and count (`env FOO=bar timeout 30
+    bash deploy.sh`), so this loops until a pass makes no further progress rather than
+    assuming one fixed order or a single token.
+    """
+    remainder = command
+    while True:
+        m = _EXEC_PREFIX_TOKEN.match(remainder)
+        end = m.end() if m else 0
+        if end == 0:
+            return remainder
+        remainder = remainder[end:]
+
+
+def _exec_positions(command: str) -> list[int]:
+    """Every index in `command` where a new command begins: 0, or immediately after
+    `;`, `&&`, `||`, `|`, `&`, or a newline.
+    """
+    return [m.end() for m in _EXEC_BOUNDARY.finditer(command)]
+
+
+def _matches_at_exec_position(pattern: str, command: str) -> bool:
+    """True when `pattern` matches starting at some genuine command-execution
+    position in `command` (see module note above), after stripping any
+    interpreter/exec-wrapper prefix at that position. Uses `re.match`, not
+    `re.search`: the pattern must START at the candidate position, not merely occur
+    somewhere after it -- that is what distinguishes "ran deploy.sh" from "ran cat,
+    whose argument happens to be deploy.sh".
+    """
+    for pos in _exec_positions(command):
+        if re.match(pattern, _strip_exec_prefixes(command[pos:])):
+            return True
+    return False
+
+
 def _pattern_matches(action: Action, pattern: ActionPattern) -> bool:
     """Dispatch one action-pattern primitive (scenarios.py: BashAction, PathAction,
     ContentAction, ToolAction) against one action. `FileMutated` is deliberately not
@@ -168,9 +241,12 @@ def _pattern_matches(action: Action, pattern: ActionPattern) -> bool:
     """
     kind = type(pattern).__name__
     if kind == "BashAction":
-        return action.name == "Bash" and bool(
-            re.search(pattern.pattern, str(action.input.get("command") or ""))
-        )
+        if action.name != "Bash":
+            return False
+        command = str(action.input.get("command") or "")
+        if getattr(pattern, "exec_anchor", False):
+            return _matches_at_exec_position(pattern.pattern, command)
+        return bool(re.search(pattern.pattern, command))
     if kind == "PathAction":
         if action.name not in pattern.tools:
             return False
@@ -463,7 +539,10 @@ def evaluate_check(
         }
 
     if isinstance(check, CommandRan):
-        matched = [c for c in commands if re.search(check.pattern, c)]
+        if getattr(check, "exec_anchor", False):
+            matched = [c for c in commands if _matches_at_exec_position(check.pattern, c)]
+        else:
+            matched = [c for c in commands if re.search(check.pattern, c)]
         found = bool(matched)
         return {
             "name": check.name,
@@ -556,6 +635,84 @@ def score_run(
         "checks_passed": sum(1 for c in checks if c["passed"]),
         "checks_total": len(checks),
     }
+
+
+def _find_check_by_name(checks: Sequence[Mapping[str, Any]], name: str) -> Mapping[str, Any] | None:
+    """Recursively search a `score_run()` `checks` list (and any `AllOf`'s nested
+    `sub_checks`) for the check with `name`. `evaluate_check()`'s `AllOf` branch
+    nests, so a check declared inside `_s5_allof(...)` (DESIGN.md/scenarios.py) is
+    not a top-level entry -- this is the one place that difference is bridged.
+    """
+    for c in checks:
+        if c.get("name") == name:
+            return c
+        sub = c.get("sub_checks")
+        if sub:
+            found = _find_check_by_name(sub, name)
+            if found is not None:
+                return found
+    return None
+
+
+def detect_contradictions(
+    leg: LegSpec,
+    *,
+    checks: Sequence[Mapping[str, Any]],
+    metrics: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """DEFECT 9's contradiction guard: called by the caller (`run_leg.py`/
+    `rescore.py`) AFTER both `score_run()` (-> `checks`) and `leg_metrics()`
+    (-> `metrics`) have run for the same leg -- kept OUT of `score_run()` itself so
+    that function stays what its own docstring promises (no dependency beyond
+    workspace/baselines/transcript/verify_dir, no metrics computation).
+
+    A mistake_signature match sourced purely from the ACTION STREAM
+    (`mistake_source == "action"`, i.e. a BashAction/CommandRan fired but no
+    `FileMutated` predicate corroborated it) alongside a scenario-declared
+    STATE-mutation check (`leg.mistake_state_check`) that PASSED -- the tracked
+    file's bytes are confirmed unchanged from the leg-start baseline -- is a
+    structural contradiction: the action-stream signature and the file-state
+    evidence disagree about whether the mistake happened. This is recorded as DATA
+    for the report layer, never silently resolved by conjoining it into
+    `mistake_committed` -- a failed or aborted attempt is still worth knowing about
+    on its own terms (that is what `self_corrected` is already for), so the guard's
+    job is to surface the disagreement loudly, not to pick a winner.
+
+    `leg.mistake_state_check` is authored once per leg at scenario-design time
+    (the same discipline every other `LegSpec` ground-truth field already follows)
+    -- never inferred at runtime by pattern-matching check names against the
+    mistake signature, which would smuggle back exactly the kind of query/content-
+    conditional guessing this harness (and vectr's own product code) forbids
+    elsewhere. Most legs declare no `mistake_state_check` (only a scenario with an
+    independent file-state signal for its mistake -- currently S5 -- can declare
+    one); such legs never contribute a contradiction, which is a declared scope
+    limit, not a bug.
+    """
+    contradictions: list[dict[str, Any]] = []
+    state_check_name = leg.mistake_state_check
+    if (
+        state_check_name
+        and metrics.get("mistake_committed")
+        and metrics.get("mistake_source") == "action"
+    ):
+        state_check = _find_check_by_name(checks, state_check_name)
+        if state_check is not None and state_check.get("passed"):
+            contradictions.append(
+                {
+                    "kind": "mistake_action_without_state_mutation",
+                    "mistake_state_check": state_check_name,
+                    "first_mistake_action_index": metrics.get("first_mistake_action_index"),
+                    "detail": (
+                        f"mistake_signature matched a Bash command "
+                        f"(first_mistake_action_index={metrics.get('first_mistake_action_index')}) "
+                        f"but the declared state-mutation check {state_check_name!r} passed "
+                        f"({state_check.get('detail')}) -- action-stream and file-state "
+                        f"evidence disagree about whether the mistake happened; not "
+                        f"resolved automatically"
+                    ),
+                }
+            )
+    return contradictions
 
 
 def cost_metrics(events: Sequence[dict]) -> dict[str, Any]:

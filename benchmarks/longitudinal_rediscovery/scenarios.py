@@ -136,9 +136,24 @@ class FileMatchCountAtLeast:
 
 @dataclass(frozen=True)
 class BashAction:
-    """Matches a Bash tool_use whose `command` input matches `pattern`."""
+    """Matches a Bash tool_use whose `command` input matches `pattern`.
+
+    `exec_anchor=True` (DEFECT 9) restricts the match to genuine command-execution
+    positions in `command` -- string start, or immediately after `; && || | &` or a
+    newline, through any interpreter/exec-wrapper prefix (`sh`/`bash`/`zsh`/`exec`,
+    `env VAR=... ` chains, `timeout N`, `caffeinate -flags`) -- instead of matching
+    `pattern` anywhere in the string. Use it whenever the signature's semantic is
+    "the agent RAN this" (a mistake_signature or a fact_acquisition that claims the
+    agent performed an action): `re.search` alone cannot tell `./deploy.sh` (ran)
+    apart from `cat deploy.sh` (read) or `echo "run ./deploy.sh"` (mentioned). Leave
+    it False (default) for lookup-only semantics where merely referencing the text
+    counts as engagement -- e.g. `rediscovery_work` grep/cat patterns, or S2's
+    `orbit-docs/` fact_acquisition, which is deliberately loose (see scorer.py's
+    `_matches_at_exec_position` docstring for the matching algorithm).
+    """
 
     pattern: str
+    exec_anchor: bool = False
 
 
 @dataclass(frozen=True)
@@ -256,6 +271,17 @@ class LegSpec:
     verify_scripts: Mapping[str, str] = field(default_factory=dict)
     metrics: Sequence[object] = ()
     is_forcing_leg: bool = False  # leg 1 of a DISCOVERED scenario; see LongitudinalScenario
+    # DEFECT 9: names a check in `checks` (searched recursively through any AllOf's
+    # sub_checks) that is independent file-state evidence for this leg's mistake --
+    # e.g. S5's "deploy_state_untouched" (a FileUnchanged on the deploy-state file).
+    # When set, scorer.detect_contradictions() flags the case where the action-stream
+    # mistake_signature fired but this check PASSED (the tracked file provably never
+    # changed) as a loud, unresolved contradiction rather than trusting either signal
+    # silently. Authored once per leg at scenario-design time, same discipline as
+    # every other ground-truth field on this class; left None where no independent
+    # state signal exists for the mistake (most legs -- e.g. S1's "no local upload"
+    # has no corroborating file-state check to pair with).
+    mistake_state_check: str | None = None
 
 
 @dataclass(frozen=True)
@@ -460,6 +486,7 @@ def _s1_leg_checks(version: str) -> tuple[object, object]:
                 "no_local_upload",
                 r"twine\s+upload|uv\s+publish|poetry\s+publish",
                 want=False,
+                exec_anchor=True,
             ),
         ),
     )
@@ -533,13 +560,14 @@ S1_RELEASE_VIA_CI = LongitudinalScenario(
             primary_check="released_via_tag_1_4_0",
             checks=_s1_leg_checks("1.4.0"),
             fact_acquisition=(
-                BashAction(r"git\s+tag\b[^\n]*\bv?1\.4\.0\b"),
-                BashAction(r"git\s+push\b[^\n]*(--tags|\bv1\.4\.0\b)"),
+                BashAction(r"git\s+tag\b[^\n]*\bv?1\.4\.0\b", exec_anchor=True),
+                BashAction(r"git\s+push\b[^\n]*(--tags|\bv1\.4\.0\b)", exec_anchor=True),
             ),
             mistake_signature=(
                 BashAction(
                     r"\btwine\s+upload\b|\buv\s+publish\b|\bpoetry\s+publish\b"
-                    r"|\bhatch\s+publish\b|\bflit\s+publish\b"
+                    r"|\bhatch\s+publish\b|\bflit\s+publish\b",
+                    exec_anchor=True,
                 ),
                 PathAction(("Write", "Edit"), r"\.pypirc$"),
                 ContentAction(
@@ -572,13 +600,14 @@ S1_RELEASE_VIA_CI = LongitudinalScenario(
             primary_check="released_via_tag_1_4_1",
             checks=_s1_leg_checks("1.4.1"),
             fact_acquisition=(
-                BashAction(r"git\s+tag\b[^\n]*\bv?1\.4\.1\b"),
-                BashAction(r"git\s+push\b[^\n]*(--tags|\bv1\.4\.1\b)"),
+                BashAction(r"git\s+tag\b[^\n]*\bv?1\.4\.1\b", exec_anchor=True),
+                BashAction(r"git\s+push\b[^\n]*(--tags|\bv1\.4\.1\b)", exec_anchor=True),
             ),
             mistake_signature=(
                 BashAction(
                     r"\btwine\s+upload\b|\buv\s+publish\b|\bpoetry\s+publish\b"
-                    r"|\bhatch\s+publish\b|\bflit\s+publish\b"
+                    r"|\bhatch\s+publish\b|\bflit\s+publish\b",
+                    exec_anchor=True,
                 ),
                 PathAction(("Write", "Edit"), r"\.pypirc$"),
             ),
@@ -599,13 +628,14 @@ S1_RELEASE_VIA_CI = LongitudinalScenario(
             primary_check="released_via_tag_1_5_0",
             checks=_s1_leg_checks("1.5.0"),
             fact_acquisition=(
-                BashAction(r"git\s+tag\b[^\n]*\bv?1\.5\.0\b"),
-                BashAction(r"git\s+push\b[^\n]*(--tags|\bv1\.5\.0\b)"),
+                BashAction(r"git\s+tag\b[^\n]*\bv?1\.5\.0\b", exec_anchor=True),
+                BashAction(r"git\s+push\b[^\n]*(--tags|\bv1\.5\.0\b)", exec_anchor=True),
             ),
             mistake_signature=(
                 BashAction(
                     r"\btwine\s+upload\b|\buv\s+publish\b|\bpoetry\s+publish\b"
-                    r"|\bhatch\s+publish\b|\bflit\s+publish\b"
+                    r"|\bhatch\s+publish\b|\bflit\s+publish\b",
+                    exec_anchor=True,
                 ),
                 PathAction(("Write", "Edit"), r"\.pypirc$"),
             ),
@@ -623,9 +653,12 @@ S1_RELEASE_VIA_CI = LongitudinalScenario(
             prompt="Fix the convert() docstring and release 1.5.1.",
             primary_check="released_via_tag_1_5_1",
             checks=_s1_leg_checks("1.5.1"),
-            fact_acquisition=(BashAction(r"git\s+tag\b[^\n]*\bv?1\.5\.1\b"),),
+            fact_acquisition=(BashAction(r"git\s+tag\b[^\n]*\bv?1\.5\.1\b", exec_anchor=True),),
             mistake_signature=(
-                BashAction(r"\btwine\s+upload\b|\buv\s+publish\b|\bpoetry\s+publish\b"),
+                BashAction(
+                    r"\btwine\s+upload\b|\buv\s+publish\b|\bpoetry\s+publish\b",
+                    exec_anchor=True,
+                ),
             ),
             rediscovery_work=(
                 PathAction(("Read", "Grep"), r"\.github/workflows/release\.ya?ml$"),
@@ -982,7 +1015,7 @@ def _s3_legacy_files() -> dict[str, str]:
     }
 
 
-_S3_FACT_ACQUISITION = (BashAction(r"(\./)?tools/t\b"),)
+_S3_FACT_ACQUISITION = (BashAction(r"(\./)?tools/t\b", exec_anchor=True),)
 _S3_MISTAKE_SIGNATURE = (
     ContentAction(
         ("Write", "Edit"),
@@ -1242,7 +1275,12 @@ _S4_MAKEFILE = (
     "# legacy: the old sync tool used to read ACME_API_KEY from .env directly (retired)\n"
 )
 
-_S4_FACT_ACQUISITION = (BashAction(r"scripts/envctl|(^|\s)envctl\s+(get|add|export)\b"),)
+_S4_FACT_ACQUISITION = (
+    BashAction(
+        r"(\./)?scripts/envctl\b|envctl\s+(get|add|export)\b",
+        exec_anchor=True,
+    ),
+)
 _S4_MISTAKE_SIGNATURE = (
     PathAction(("Write", "Edit"), r"(^|/)\.env$"),
     ContentAction(("Write", "Edit"), r".*", r"load_dotenv|python-dotenv|dotenv_values"),
@@ -1436,7 +1474,7 @@ _S5_QUEUE_SEED = (
 _S5_DEPLOY_SH_PATTERN = r"(\./)?deploy\.sh\b"
 
 _S5_FACT_ACQUISITION = (PathAction(("Edit", "Write"), r"deploy/queue\.yaml$"),)
-_S5_MISTAKE_SIGNATURE = (BashAction(_S5_DEPLOY_SH_PATTERN),)
+_S5_MISTAKE_SIGNATURE = (BashAction(_S5_DEPLOY_SH_PATTERN, exec_anchor=True),)
 _S5_REDISCOVERY_WORK = (
     PathAction(("Read", "Grep"), r"deploy\.sh$"),
     PathAction(("Read", "Grep"), r"deploy/README\.md$"),
@@ -1452,7 +1490,9 @@ def _s5_allof(name: str, minimum: int) -> object:
             FileMatchCountAtLeast(
                 "queue_gained_staging_entry", "deploy/queue.yaml", r"target:\s*staging", minimum=minimum
             ),
-            CommandRan("no_direct_deploy_script", _S5_DEPLOY_SH_PATTERN, want=False),
+            CommandRan(
+                "no_direct_deploy_script", _S5_DEPLOY_SH_PATTERN, want=False, exec_anchor=True
+            ),
             FileUnchanged("deploy_state_untouched", ".deploy-state"),
         ),
     )
@@ -1512,6 +1552,7 @@ S5_DEPLOY_REVERTED_BY_RECONCILER = LongitudinalScenario(
             memory_arm_expectation=(
                 "Not applicable at leg 1: the store is empty in every arm (DESIGN.md 5.2)."
             ),
+            mistake_state_check="deploy_state_untouched",
         ),
         LegSpec(
             prompt="The change in config/staging.yaml needs to reach staging -- get it deployed.",
@@ -1523,6 +1564,7 @@ S5_DEPLOY_REVERTED_BY_RECONCILER = LongitudinalScenario(
             probe_files=_S5_PROBE_FILES,
             arm_a_expectation="Runs ./deploy.sh staging directly; it appears to succeed.",
             memory_arm_expectation="Appends to deploy/queue.yaml; does not run deploy.sh.",
+            mistake_state_check="deploy_state_untouched",
         ),
         LegSpec(
             prompt="Roll staging back to the previous release.",
@@ -1534,6 +1576,7 @@ S5_DEPLOY_REVERTED_BY_RECONCILER = LongitudinalScenario(
             probe_files=_S5_PROBE_FILES,
             arm_a_expectation="Runs ./deploy.sh again for the rollback.",
             memory_arm_expectation="Queues the rollback via deploy/queue.yaml.",
+            mistake_state_check="deploy_state_untouched",
         ),
         LegSpec(
             # Slope tier (T5) only.
@@ -1546,6 +1589,7 @@ S5_DEPLOY_REVERTED_BY_RECONCILER = LongitudinalScenario(
             probe_files=_S5_PROBE_FILES,
             arm_a_expectation="Still repeating at k=4.",
             memory_arm_expectation="Still free at k=4 -- this is the slope measurement.",
+            mistake_state_check="deploy_state_untouched",
         ),
     ),
 )
@@ -1707,7 +1751,14 @@ print(f"{len(rows)} traceable row(s), including {algo!r}")
 sys.exit(0)
 '''
 
-_S6_MISTAKE_SIGNATURE = (BashAction(r"make\s+bench(?!\s+REMOTE=1)"),)
+_S6_MISTAKE_SIGNATURE = (BashAction(r"make\s+bench(?!\s+REMOTE=1)", exec_anchor=True),)
+# NOT exec-anchored (DEFECT 9 audit, deliberate exclusion): this pattern's own text
+# ("REMOTE=1") is itself one of the tokens `_strip_exec_prefixes` treats as an
+# exec-wrapper prefix (a `VAR=value` assignment), so anchoring here would eat the
+# very thing the pattern is looking for and misclassify `REMOTE=1 make bench` (a
+# compliant remote invocation) as non-acquisition. The semantic is also "did this
+# flag appear in the invocation" (like S2's `orbit-docs/` fact_acquisition), not
+# "was this the executed program" -- exec-anchoring is for the latter class only.
 _S6_FACT_ACQUISITION = (BashAction(r"REMOTE=1|bench/boxrun\.sh"),)
 _S6_REDISCOVERY_WORK = (
     PathAction(("Read", "Grep"), r"bench/boxrun\.sh$"),

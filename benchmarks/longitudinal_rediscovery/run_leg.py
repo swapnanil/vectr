@@ -1350,6 +1350,9 @@ class LegRunner:
         metrics.update(
             scorer.t3_metrics(variant, fact_sentence=self.scenario.fact_sentence, actions=actions)
         )
+        run_score["contradictions"] = scorer.detect_contradictions(
+            self.leg_spec, checks=run_score["checks"], metrics=metrics
+        )
 
         nv = scorer.leg_non_vacuity(
             arm=self.arm, k=self.k, events=events,

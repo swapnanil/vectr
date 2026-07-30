@@ -716,6 +716,49 @@ An agent that errs and then self-corrects still counts as `mistake_committed` �
 cost was paid — but `self_corrected` is recorded, because "wrong then right" and "wrong
 and shipped" are different products.
 
+**Mistake/acquisition signatures are matched at genuine command-execution positions,
+not anywhere in a Bash command string (DEFECT 9).** `BashAction`'s `pattern` (S1/S3/S4/S5's
+`mistake_signature`/`fact_acquisition`, and the trap harness's `CommandRan`) was matched
+with an unanchored `re.search` against the whole command string, so a read-only mention —
+`cat deploy.sh`, `grep -n foo deploy.sh`, `less deploy.sh` — satisfied the same pattern as
+a genuine execution (`./deploy.sh`, `bash deploy.sh`). Live evidence from the 2026-07-29
+campaign (`/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/`): every S5 leg scored
+`mistake_committed=true` also scored `deploy_state_untouched=PASS` (the deploy.sh-mutated
+file's sha256 unchanged from the leg's own start-of-leg baseline) — the scorer's own two
+checks contradicted each other in every affected leg, and no leg in the whole campaign
+ever actually ran `deploy.sh`. Fixed by `exec_anchor=True` on the signature declaration
+(`BashAction(pattern, exec_anchor=True)` — a property of the individual signature, not
+global matching behavior; the trap harness's `CommandRan` carries the same field), matched
+via `re.match` at each command's genuine execution boundary (`_matches_at_exec_position`,
+`scorer.py`) after stripping leading whitespace and interpreter/env-assignment prefixes
+(`env FOO=bar`, `timeout 30`, `sh -c`, `FOO=bar BAZ=qux`) so `./deploy.sh`, `bash deploy.sh`,
+and a chained `cd x && ./deploy.sh` still match while `cat`/`grep`/`less`/`stat`/`echo`
+mentions do not. Every S1/S3/S4/S5/S6 `mistake_signature`/`fact_acquisition` `BashAction`
+and the trap harness's `CommandRan` uses were re-audited for the same class and anchored
+where the semantic is "the agent performed the action"; one deliberate exception is
+documented in-line in `scenarios.py` (a signature whose own text makes anchoring provably
+unnecessary — see the DEFECT 9 audit comment there, not repeated here). A **contradiction
+guard** (`scorer.detect_contradictions`) now runs alongside every leg's score: when a
+mistake signature fires but the scenario's own state-mutation sub-check (a leg's
+`mistake_state_check`, e.g. S5's `deploy_state_untouched`) shows no mutation, the leg's
+`score.contradictions` carries a machine-readable `mistake_action_without_state_mutation`
+entry, surfaced by `report.py`'s human-readable output — loud, never silently resolved one
+way or the other, because a contradiction is itself evidence the signature (or the
+state check) needs authoring attention, not something the harness should guess through.
+`benchmarks/longitudinal_rediscovery/rescore.py` re-scores every preserved leg's
+`transcript.jsonl`/`baselines.json`/end-of-leg workspace snapshot against today's scorer
+at $0 (no agent, no daemon, no new spend), writing `result.rescored.json` beside each
+untouched original — re-run over the 2026-07-29 campaign, every TOLD S5 leg's
+`mistake_committed` flips `true → false` and `mistake_repetition_rate` becomes `null`
+throughout (no leg 1 committed the error post-fix, so "repetition" is undefined); the
+DISCOVERED scenario's (S1) metrics are byte-identical before and after, as expected for a
+fix that only touches Bash-command-string matching. Cross-reference, not addressed here:
+the trajectory-root `workspace/` directory's cross-leg residue behavior (DEFECT 10) is a
+separate, still-open design question about what a k>=2 leg's *own* end-of-leg snapshot
+should be built from; DEFECT 9's fix and `rescore.py`'s re-scoring both operate on each
+leg's already-preserved `end-state.tar`/`workspace/` snapshot as-is and take no position on
+that question.
+
 ### 6.6 Outcome check
 
 Independently of the two cost metrics, each leg keeps the trap harness's
