@@ -479,6 +479,8 @@ def _leg_cmd(
         cmd.append("--probe-only")
     if args.allow_unreachable:
         cmd.append("--allow-unreachable")
+    if args.allow_hook_unreachable:
+        cmd.append("--allow-hook-unreachable")
     if args.allow_manifest_mismatch:
         cmd.append("--allow-manifest-mismatch")
     return cmd
@@ -787,6 +789,11 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--daemon-port", type=int, default=8899)
     ap.add_argument("--proxy-port", type=int, default=8900)
     ap.add_argument("--allow-unreachable", action="store_true")
+    ap.add_argument("--allow-hook-unreachable", action="store_true", help=(
+        "Pass-through to run_leg.py: record a hook-arm leg even when its "
+        "SessionStart hook preflight cannot prove the delivery mechanism works "
+        "on that leg's own scratch daemon (arms hook-sessionstart/hook-full only)."
+    ))
     ap.add_argument("--allow-manifest-mismatch", action="store_true")
     return ap
 

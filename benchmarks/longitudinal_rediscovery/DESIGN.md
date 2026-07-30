@@ -772,6 +772,7 @@ nothing it is pure token overhead).
     legs/<k>/
       workspace/                      restored at leg start, snapshotted at leg end
       artifacts/  result.json transcript.jsonl audit.log preflight.json
+                  hook-preflight.json (arms D1/D2 only)
                   scenario.json baselines.json proxy-health.json
                   daemon-status.json daemon-status-final.json agent.stderr
       verify/                         materialized AFTER the agent exits
@@ -794,6 +795,40 @@ to *start* a leg once the remaining budget is below the tier's per-leg worst cas
 `--probe-only` runs the whole setup — materialize, plant, probe, tear down — and spawns
 no agent: **zero quota**, and the only way a new scenario is allowed to reach a paid
 tier (§9, T0).
+
+**Hook mechanism preflight (D1/D2 only, zero quota).** Before the paid `claude -p`
+session, `run_leg.py` executes the workspace's own configured SessionStart hook
+command exactly as `claude` would (same cwd, same env as the spawned agent, a
+synthetic Claude Code SessionStart stdin payload) and asserts both (i) this leg's own
+scratch daemon shows a `hook_injection_counts` increment and (ii) the hook's stdout
+carries the planted note's content verbatim. Either failing aborts the leg before any
+spend, same "fix the scenario, not the score" contract as the daemon-side reachability
+probe above (`--allow-hook-unreachable` records it anyway). This also structurally
+catches instance mis-resolution: if the hook resolves (via the global
+`~/.vectr/instances.json` registry) to a daemon other than this leg's own, the
+daemon-side counter never moves and the preflight aborts.
+
+**Hook-channel delivery metadata (D1/D2 only).** Note-kind and trigger eligibility
+for the SessionStart/PreToolUse hook channels are **plant-time delivery
+configuration**, distinct from the note's advisory text: `NoteVariant.content`/
+`title` in `scenarios.py` are byte-identical across every arm (channel parity —
+what varies is only how the memory layer is configured to deliver the same
+advisory). `run_leg.py`'s `plant_note()` sends every variant's own
+`trigger_paths` as explicit path-only triggers, which — because an explicit
+`triggers` list on a note fully replaces (never merges with) its `kind`'s default
+trigger bundle — never fire on the SessionStart/boot delivery path (no
+`file_path` is ever supplied there, so a path-bearing trigger cannot match,
+independent of `kind`). For arms `hook-sessionstart`/`hook-full` only,
+`LegRunner._apply_hook_delivery_metadata()` appends an explicit
+`{"event": "session-start"}` trigger to the same list (restoring eligibility)
+and switches `kind` from `gotcha` to `directive` — not because the trigger fix
+alone was insufficient to fire, but because `gotcha`'s per-kind injection token
+budget (100 tokens) is smaller than every scenario's real full-text render
+(101–181 tokens measured across all 16 variants), so a fired gotcha-kind note
+would still silently degrade to its index-tier, title-only line; `directive`'s
+400-token budget clears every case. Non-hook arms (`none`/`mcp`/`mcp-bare`/
+`proxy`) are unaffected — this is a no-op for them, and `scenarios.py`'s 16
+`NoteVariant` sites are never edited.
 
 ---
 
