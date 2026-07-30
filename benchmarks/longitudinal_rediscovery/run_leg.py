@@ -375,6 +375,50 @@ def _scrub_ide_config_marker(workspace: Path) -> None:
     (workspace / ".vectr" / "ide_config").unlink(missing_ok=True)
 
 
+def _collapse_ws(text: str) -> str:
+    """Whitespace-normalize for delivery-containment checks (DEFECT 8): every
+    channel that renders a note into injected/hook context collapses it to one
+    line first (`agent/proactive/matcher.py::_one_line`, `" ".join(text.split())`
+    -- deliberate product behavior, confirmed by the anti-memory lane; reimplemented
+    locally rather than imported, for the same worktree-path-pinning reason as
+    `_workspace_hash` above). A `NoteVariant.content`/trail string is authored text
+    and may legitimately contain internal newlines (e.g. a multi-line provenance
+    trail); a literal `x in y` substring check against the ORIGINAL (un-collapsed)
+    string is then structurally false even when delivery succeeded. Every site in
+    this file (and `scorer.py`) that asserts "was this content delivered" via `in`
+    must normalize BOTH sides with this helper first, not just the delivered side --
+    otherwise the check depends on the accident that today's variant strings happen
+    to be single-line.
+    """
+    return " ".join(text.split())
+
+
+def _content_delivered_in_json_text(content: str, raw_text: str) -> bool:
+    """`_collapse_ws`-based containment check for a haystack that is (or
+    embeds) JSON-serialized text -- `hook_preflight()`'s raw subprocess
+    stdout (`agent/hook_cli.py::_emit_hook_context` does `print(json.dumps({
+    "hookSpecificOutput": {..., "additionalContext": text}}))`) and
+    `scorer.leg_non_vacuity`'s raw stream-json transcript file both embed
+    the delivered note text as the VALUE of a JSON string field, so an
+    internal newline in the source content is JSON-escaped there to the two
+    literal characters `\\n` -- whitespace-collapsing the raw haystack alone
+    (`_collapse_ws`) cannot match that back to the source content's real
+    newline, since `\\` and `n` are not whitespace. This checks the content
+    against the haystack in BOTH its literal form (a haystack that embeds it
+    unescaped, e.g. non-JSON transcript prose) and its JSON-string-escaped
+    form (`json.dumps(content)[1:-1]`, i.e. what `content` renders as once
+    placed inside a JSON string), collapsing whitespace on both sides of
+    each comparison exactly like `_collapse_ws` does elsewhere in this file.
+    """
+    if not content:
+        return False
+    collapsed_haystack = _collapse_ws(raw_text)
+    if _collapse_ws(content) in collapsed_haystack:
+        return True
+    escaped = json.dumps(content)[1:-1]
+    return _collapse_ws(escaped) in collapsed_haystack
+
+
 def _proactive_probe(
     daemon_port: int, leg: "scen.LegSpec", workspace: Path, session_prefix: str,
 ) -> tuple[dict, dict]:
@@ -413,9 +457,12 @@ def _session_start_probe(daemon_port: int, session_id: str) -> str:
     `_proactive_probe`'s own daemon-only shape.
 
     Returns the raw notes text exactly as the daemon renders it into the real
-    hook's `additionalContext` envelope, so a caller can apply the identical
-    raw-substring content check `hook_preflight()` already applies to that
-    envelope (`variant.content in notes_text`).
+    hook's `additionalContext` envelope -- already JSON-decoded by `_http_json`
+    (this is a `/v1/recall` REST response field, not the hook subprocess's own
+    JSON-encoded stdout), so a caller compares it with `_collapse_ws` on both
+    sides (DEFECT 8), not `_content_delivered_in_json_text` (that one is for
+    `hook_preflight()`'s raw stdout / `scorer.py`'s raw transcript file, where
+    the content is still JSON-escaped in the haystack).
     """
     out = _http_json(
         "POST", f"http://127.0.0.1:{daemon_port}/v1/recall",
@@ -893,7 +940,7 @@ class LegRunner:
                     self.daemon_port, f"longprobe-{self.scenario.slug}-k{self.k}-sessionstart",
                 )
                 session_start_reachable = bool(variant.content) and (
-                    variant.content in session_start_notes
+                    _collapse_ws(variant.content) in _collapse_ws(session_start_notes)
                 )
                 preflight["session_start_channel"] = {
                     "reachable": session_start_reachable,
@@ -913,9 +960,15 @@ class LegRunner:
 
             if variant.variant in ("provenance", "verifiable"):
                 trail_text = variant.content.replace(self.scenario.fact_sentence, "", 1).strip()
+                # DEFECT 8: normalize BOTH sides -- delivery collapses whitespace
+                # (_collapse_ws docstring above), so an authored trail with an
+                # internal newline (e.g. S1-verifiable's provenance sentence) must
+                # be collapsed identically before the containment check, or a
+                # multi-line trail false-negatives even when delivery succeeded.
+                trail_text_collapsed = _collapse_ws(trail_text)
                 found = bool(trail_text) and (
-                    trail_text in (turn1.get("context") or "")
-                    or trail_text in (turn2.get("context") or "")
+                    trail_text_collapsed in _collapse_ws(turn1.get("context") or "")
+                    or trail_text_collapsed in _collapse_ws(turn2.get("context") or "")
                 )
                 self.trail_text_delivered = found
                 self.record["trail_text_delivered"] = found
@@ -1070,11 +1123,15 @@ class LegRunner:
               than this leg's own, the counter on THIS daemon never moves and the
               preflight aborts, exactly as it should.
           (ii) content evidence: the hook's own stdout carries the planted note's
-              content verbatim inside its `hookSpecificOutput.additionalContext`
-              envelope (a raw substring check -- the same check
-              `scorer.leg_non_vacuity` already applies post-hoc to the real
-              transcript for arm "hook-sessionstart"; here it is applied pre-hoc to
-              the hook's own output, before any money is spent).
+              content inside its `hookSpecificOutput.additionalContext` envelope
+              (`_content_delivered_in_json_text`, DEFECT 8 -- whitespace-
+              normalized AND JSON-escape-aware, since stdout is the raw
+              `print(json.dumps(...))` output, not the decoded field value; a
+              multi-line variant's internal newline is JSON-escaped there --
+              the same check `scorer.leg_non_vacuity` already applies post-hoc
+              to the real transcript for arm "hook-sessionstart"; here it is
+              applied pre-hoc to the hook's own output, before any money is
+              spent).
 
         Either failing aborts (nonzero exit) unless `--allow-hook-unreachable` is
         passed. Full detail (resolved command, stdout/stderr, before/after
@@ -1121,7 +1178,12 @@ class LegRunner:
         delta = int(after_counts.get("SessionStart", 0) or 0) - int(before_counts.get("SessionStart", 0) or 0)
         daemon_evidence = delta > 0
 
-        stdout_has_content = bool(variant.content) and (variant.content in (stdout or ""))
+        # DEFECT 8: stdout is the hook subprocess's raw JSON-encoded print
+        # output (`_emit_hook_context`), not the decoded `additionalContext`
+        # text -- a literal or merely whitespace-collapsed containment check
+        # false-negatives on a content string with an internal newline (JSON-
+        # escaped to `\n` in stdout). See `_content_delivered_in_json_text`.
+        stdout_has_content = _content_delivered_in_json_text(variant.content, stdout or "")
 
         registry_port = _registry_port_for(cwd)
 

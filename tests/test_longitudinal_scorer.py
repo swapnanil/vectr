@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -691,6 +692,86 @@ def test_leg_non_vacuity_mcp_bare_accepts_connected_vectr_server():
     )
     assert result["valid"] is True, result["invalid_reason"]
     assert result["non_vacuity"]["vectr_tools_in_init"] is True
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 8: hook-sessionstart's D1 transcript-content check (leg_non_vacuity's
+# `arm == "hook-sessionstart"` branch) reads a raw `--output-format stream-json`
+# transcript file. The planted note's content, once delivered through a
+# SessionStart hook's `hookSpecificOutput.additionalContext` field
+# (`agent/hook_cli.py::_emit_hook_context` -> `print(json.dumps({...}))`), is
+# JSON-string-escaped in that raw text: a real internal newline in a multi-line
+# NoteVariant (e.g. `release_via_ci`'s "verifiable" trail, which genuinely
+# contains one -- see `scenarios.py`) becomes the two literal characters `\n`,
+# which is not whitespace and survives untouched by a plain
+# whitespace-collapse. A literal OR whitespace-collapsed-only `in` check
+# false-negatives here even though the hook genuinely fired; this pins
+# `scorer.py`'s `_content_delivered_in_json_text` (mirrors `run_leg.py`'s
+# helper of the same name, duplicated per this file's no-cross-import
+# convention) against that exact shape, plus the genuinely-absent case.
+# ---------------------------------------------------------------------------
+
+
+def _release_via_ci_verifiable_content() -> str:
+    scenario = scen.get("release_via_ci")
+    variant = next(v for v in scenario.note_variants if v.variant == "verifiable")
+    assert "\n" in variant.content, "fixture sanity: this variant's content must be multi-line"
+    return variant.content
+
+
+def _stream_json_transcript_line(content: str) -> str:
+    """One `hookSpecificOutput` JSON line shaped exactly like
+    `agent/hook_cli.py::_emit_hook_context`'s stdout, as it would appear
+    embedded in a `--output-format stream-json` transcript."""
+    return json.dumps(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": f"# Triggered Memory (1 fired)\n\n[7] [DIRECTIVE]\n  {content}",
+            }
+        }
+    )
+
+
+def test_leg_non_vacuity_hook_sessionstart_recognizes_multiline_content_json_escaped_in_transcript(tmp_path):
+    content = _release_via_ci_verifiable_content()
+    assert content not in _stream_json_transcript_line(content), (
+        "fixture sanity: the literal content must NOT appear unescaped in the "
+        "raw JSON line -- otherwise this test doesn't exercise the escaping bug"
+    )
+
+    transcript_path = tmp_path / "transcript.jsonl"
+    transcript_path.write_text(_stream_json_transcript_line(content) + "\n", encoding="utf-8")
+
+    events = _init_and_result_events(mcp_servers=[])  # hook-sessionstart expects []
+    result = scorer.leg_non_vacuity(
+        arm="hook-sessionstart", k=1, events=events, notes_count_at_start=1,
+        hook_injection_counts={"SessionStart": 1},
+        transcript_path=transcript_path,
+        planted_note_content=content,
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+    assert result["non_vacuity"]["planted_content_in_transcript"] is True
+
+
+def test_leg_non_vacuity_hook_sessionstart_content_genuinely_absent_still_invalid(tmp_path):
+    content = _release_via_ci_verifiable_content()
+
+    transcript_path = tmp_path / "transcript.jsonl"
+    transcript_path.write_text(
+        _stream_json_transcript_line("totally unrelated note content") + "\n", encoding="utf-8"
+    )
+
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="hook-sessionstart", k=1, events=events, notes_count_at_start=1,
+        hook_injection_counts={"SessionStart": 1},
+        transcript_path=transcript_path,
+        planted_note_content=content,
+    )
+    assert result["valid"] is False
+    assert result["non_vacuity"]["planted_content_in_transcript"] is False
+    assert "not found in transcript" in result["invalid_reason"]
 
 
 # ---------------------------------------------------------------------------

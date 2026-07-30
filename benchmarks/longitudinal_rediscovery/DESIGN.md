@@ -443,7 +443,7 @@ A leg counts only if the arm's premise is independently confirmed. Any failure �
 | **A** | `notes_count == 0` at leg start (GET `/v1/status`); zero post-offset `PROACTIVE_INJECT` events; proxy `injected == 0`; `mcp_servers == []` |
 | **B** | `notes_count >= 1`; `mcp_servers == [{"name":"vectr","status":"connected"}]`; the vectr tool names appear in `init.tools`; a daemon-side `/v1/recall` preflight with the leg prompt returns the planted note; proxy `injected == 0`. **Whether the agent calls recall is the measured outcome, not a gate.** |
 | **C** | `notes_count >= 1`; planted anchor present in a post-offset `PROACTIVE_INJECT` line (exact comma-split match); proxy `injected > 0` |
-| **D1/D2** | `notes_count >= 1`; daemon `hook_injection_counts` nonzero for the expected event(s); proxy `injected == 0`. For **D1**, additionally: the planted note's content appears verbatim in the transcript — valid because stream-json renders `SessionStart` `additionalContext`. For **D2**'s `UserPromptSubmit`/`PreToolUse` events, transcript content is **never** consulted (the transcript does not render them — the trap-harness scorer's transcript-content rule is the known bug UPG-IU-HOOK-NONVACUITY-CANARY); delivery rests on `hook_injection_counts` plus the attestation's canary method |
+| **D1/D2** | `notes_count >= 1`; daemon `hook_injection_counts` nonzero for the expected event(s); proxy `injected == 0`. For **D1**, additionally: the planted note's content is found in the transcript (whitespace-normalized and JSON-escape-aware, DEFECT 8 — see below) — valid because stream-json renders `SessionStart` `additionalContext`. For **D2**'s `UserPromptSubmit`/`PreToolUse` events, transcript content is **never** consulted (the transcript does not render them — the trap-harness scorer's transcript-content rule is the known bug UPG-IU-HOOK-NONVACUITY-CANARY); delivery rests on `hook_injection_counts` plus the attestation's canary method |
 | **T3 variants** | the variant's provenance-trail text appears in the probe's returned context (§7.3) |
 
 Audit events are counted only from a byte offset taken **after** the preflight probes
@@ -462,6 +462,34 @@ channel — so D1/D2 judge reachability against the SessionStart channel itself
 (`boot=True, hook_event="SessionStart"` against `/v1/recall`), not the proactive one. This
 mirrors the same channel split as this table's own D1/D2 row (`hook_injection_counts`,
 not `PROACTIVE_INJECT`) one layer earlier, before any spend.
+
+**Delivery-containment checks are whitespace-normalized, and JSON-escape-aware where
+the haystack is raw JSON text (DEFECT 8).** Every channel that renders a note into
+injected/hook context collapses it to one line first — `agent/proactive/matcher.py`'s
+`_one_line()` (`" ".join(text.split())`) is deliberate product behavior, confirmed by
+the anti-memory lane, not a bug to "fix" here. A `NoteVariant.content`/provenance-trail
+string, however, is authored text and may legitimately contain internal newlines (e.g.
+`release_via_ci`'s "verifiable" trail: a sentence, then a newline, then a `Verify: grep
+...` line). A literal `x in y` containment check against the delivered text is then
+structurally false even when delivery succeeded, because the harness compares an
+un-collapsed authored string against a collapsed rendering of it. Every site in this
+harness that asserts "was this content delivered" now collapses **both** sides before
+comparing, rather than relying on the accident that today's variant strings happen to
+be single-line: `run_leg.py`'s `probe()` (the `session_start_channel` reachability check
+and the T3 trail-text check, §7.3 — both compare against already-JSON-decoded REST
+response text, so plain whitespace-collapse suffices) and, one layer deeper,
+`run_leg.py`'s `hook_preflight()` and `scorer.py`'s D1 transcript check (both compare
+against **raw** text that itself embeds a JSON-encoded string field —
+`_emit_hook_context`'s `print(json.dumps({"hookSpecificOutput": {...,
+"additionalContext": text}}))` — where a real newline in the source content survives
+JSON-escaped as the two literal characters `\n`, which whitespace-collapse alone cannot
+reverse; these two sites additionally compare against the content's JSON-string-escaped
+form, both sides collapsed). `run_leg.py` and `scorer.py` each carry their own copy of
+this compound check (`_content_delivered_in_json_text`) rather than importing one
+another's — the two files never import each other's internals (each is loaded
+independently, and `run_leg.py` runs as a fresh subprocess per leg rather than an
+in-process import), the same reason `_workspace_hash` and other small helpers are
+duplicated rather than shared.
 
 **Trajectory validity.** State carries forward, so a bad leg contaminates its
 successors. If leg *k* is invalid, record `trajectory_valid_through = k-1`; legs > *k*

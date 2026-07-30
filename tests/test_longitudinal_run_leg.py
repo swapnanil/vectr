@@ -827,3 +827,149 @@ def test_probe_non_hook_arm_succeeds_via_proactive_channel_unchanged(tmp_path, m
     runner.probe()  # must not raise
     assert runner.record["planted_note_reachable_preflight"] is True
     assert runner.record["preflight"]["reachable_channel"] == "proactive"
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 8: whitespace-normalized (and, where the haystack is raw JSON text,
+# JSON-escape-aware) delivery-containment checks.
+#
+# Live T2 symptom: `release_via_ci-proxy-verifiable-s0` k2 (arm "proxy") came
+# back invalid with "T3: variant's provenance-trail text absent from probe's
+# returned context", even though `preflight.json` showed `planted_present=
+# true` -- the note WAS delivered. Root cause: the S1-verifiable NoteVariant's
+# trail has an internal newline (mirrored here by `bench_box_only`'s real
+# "provenance" variant, which also has one -- `_S6_FACT + "\nEstablished
+# ..."`), but the proactive/hook delivery channels collapse ALL whitespace on
+# every injected note (`agent/proactive/matcher.py::_one_line`, deliberate
+# product behavior -- do not "fix" the product). `probe()`'s old trail check
+# did a literal `trail_text in context` against the UN-collapsed trail, which
+# is structurally False for any multi-line trail regardless of delivery.
+#
+# `hook_preflight()`'s stdout check and `scorer.leg_non_vacuity`'s D1
+# transcript check have a COMPOUND version of the same symptom: their
+# haystack is raw JSON text (`print(json.dumps({"hookSpecificOutput": {...,
+# "additionalContext": text}}))` / a stream-json transcript file), so a real
+# newline in the source content is JSON-escaped there to the two literal
+# characters `\n` -- whitespace-collapsing the haystack alone cannot match
+# that back to a real newline, since `\` and `n` are not whitespace.
+# `_content_delivered_in_json_text` checks both the collapsed literal form
+# and the collapsed JSON-string-escaped form of the content.
+# ---------------------------------------------------------------------------
+
+
+def test_collapse_ws_matches_agent_proactive_matcher_one_line_semantics():
+    """`_collapse_ws` must mirror `agent/proactive/matcher.py::_one_line`
+    (`" ".join(text.split())`) exactly -- same collapsing of runs of any
+    whitespace (space, tab, newline) to a single space, leading/trailing
+    stripped."""
+    multiline = "  Established 2026-07-12\n(no API token exists for this\tproject).  "
+    assert run_leg._collapse_ws(multiline) == (
+        "Established 2026-07-12 (no API token exists for this project)."
+    )
+
+
+def test_probe_trail_text_delivered_true_for_multiline_trail_via_whitespace_collapse(tmp_path, monkeypatch):
+    """Reproduces the live T3 failure directly (`release_via_ci-proxy-verifiable-s0`
+    k2): `release_via_ci`'s real 'verifiable' NoteVariant content has an internal
+    newline in its trail (between the "...project)." sentence and the "Verify:
+    grep..." line -- survives `.replace(fact_sentence, "", 1).strip()` because it
+    sits strictly between two authored segments, not at a boundary `.strip()`
+    would remove). The proactive channel delivers it whitespace-collapsed (as the
+    product always does); this must be recognized as delivered. Was red under the
+    pre-DEFECT-8 code (`trail_text in context` against the un-collapsed trail)."""
+    runner = _make_hook_runner(tmp_path, arm="proxy", scenario="release_via_ci", note_variant="verifiable")
+    variant = runner._find_note_variant()
+    trail_text = variant.content.replace(runner.scenario.fact_sentence, "", 1).strip()
+    assert "\n" in trail_text, "fixture sanity: this variant's trail must be multi-line"
+    delivered_context = run_leg._collapse_ws(trail_text)  # exactly what the channel delivers
+
+    def fake(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/proactive"):
+            return {"item_count": 1, "context": delivered_context, "anchor_ids": ["note:7"]}
+        raise AssertionError(f"unexpected call: {method} {url}")
+
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
+    runner.probe()  # must not raise (anchor present -> reachable)
+    assert runner.trail_text_delivered is True
+    assert runner.record["trail_text_delivered"] is True
+
+
+def test_probe_trail_text_delivered_false_when_genuinely_absent(tmp_path, monkeypatch):
+    """A multi-line trail that truly never appears in either probe turn's
+    context must still read as not-delivered -- whitespace normalization
+    must not manufacture a false positive."""
+    runner = _make_hook_runner(tmp_path, arm="proxy", scenario="release_via_ci", note_variant="verifiable")
+
+    def fake(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/proactive"):
+            # anchor present (so probe() doesn't abort on reachability) but the
+            # rendered context text is unrelated to the trail
+            return {"item_count": 1, "context": "totally unrelated context text", "anchor_ids": ["note:7"]}
+        raise AssertionError(f"unexpected call: {method} {url}")
+
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
+    runner.probe()  # must not raise -- reachable via anchor; trail delivery is a separate diagnostic
+    assert runner.trail_text_delivered is False
+    assert runner.record["trail_text_delivered"] is False
+
+
+def test_content_delivered_in_json_text_matches_multiline_content_json_escaped_in_stdout():
+    """Unit-level proof of `_content_delivered_in_json_text` against exactly
+    the shape `agent/hook_cli.py::_emit_hook_context` produces
+    (`print(json.dumps({"hookSpecificOutput": {..., "additionalContext":
+    text}}))`): a real newline in `content` is JSON-escaped to `\\n` in
+    `stdout`, so plain (even whitespace-collapsed) containment fails, but
+    this helper must still find it."""
+    content = (
+        "Established 2026-07-12 (no API token exists for this project).\n"
+        'Verify: grep -n "id-token" .github/workflows/release.yml'
+    )
+    stdout = json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": f"# Triggered Memory (1 fired)\n\n[7] [DIRECTIVE]\n  {content}",
+        }
+    })
+    # sanity: the bug this helper fixes is real for this fixture
+    assert content not in stdout
+    assert run_leg._collapse_ws(content) not in run_leg._collapse_ws(stdout)
+    assert run_leg._content_delivered_in_json_text(content, stdout) is True
+    assert run_leg._content_delivered_in_json_text("never delivered anywhere", stdout) is False
+    assert run_leg._content_delivered_in_json_text("", stdout) is False
+
+
+def test_hook_preflight_stdout_content_check_matches_multiline_note_json_escaped(tmp_path, monkeypatch):
+    """End-to-end (within `hook_preflight()`) version of the unit test above:
+    a multi-line planted note's content, JSON-escaped inside the hook
+    subprocess's real stdout shape, must be recognized as delivered and must
+    not abort the preflight."""
+    runner = _make_hook_runner(tmp_path, arm="hook-sessionstart", scenario="release_via_ci", note_variant="verifiable")
+    content = _note_content(runner)
+    assert "\n" in content, "fixture sanity: this variant's content must be multi-line"
+
+    status_calls = {"n": 0}
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        status_calls["n"] += 1
+        count = 0 if status_calls["n"] == 1 else 1
+        return {"hook_injection_counts": {"SessionStart": count}}
+
+    def fake_run_hook_command(command, *, cwd, stdin, env, timeout=60.0):
+        stdout = json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": f"# Triggered Memory (1 fired)\n\n[7] [DIRECTIVE]\n  {content}",
+            }
+        })
+        return 0, stdout, "", False
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fake_run_hook_command)
+
+    runner.hook_preflight()  # must not raise
+
+    hp = runner.record["hook_preflight"]
+    assert hp["daemon_evidence"] is True
+    assert hp["stdout_has_planted_content"] is True
