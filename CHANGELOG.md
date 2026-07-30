@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.7.0 — 2026-07-29
+
+Proactive delivery becomes worth reading: an injected item now carries the
+note's actual guidance instead of just its label, a file-anchored note
+retires when its file is actually edited rather than on a timer, and the
+framing envelope scales with note provenance. Also: `vectr stop` followed by
+`start`/`restart` keeps the workspace's previous port so already-written
+editor MCP configs stay valid, and `vectr init --hooks` survives an
+unwritable git hooks directory.
+
+### Proactive context
+- Injected items now carry the note's **body**, not just its title. A titled
+  note previously delivered only the title, leaving the actual guidance —
+  the caveat, the fix, the "do not do X" reason — in `content` and never on
+  the wire. Rendering is now `title: body` (the title is skipped when empty
+  or when it is already a prefix of the body), and character-budget
+  truncation backs off to a sentence or word boundary before resorting to a
+  hard cut.
+- **Event-anchored retirement** for file-anchored matches. A note delivered
+  because the request touched its declared anchor file used to enter a fixed
+  cooldown whether or not the agent had acted on it yet — measured as "too
+  early, then evicted" in six of seven benchmark cells. Such a note now
+  stays eligible for re-delivery while its file is merely being read, and
+  retires the first time a request's window shows the file actually edited.
+- The injection envelope's opening clause now scales with **note
+  provenance**: the weakest provenance among the notes selected for one
+  delivery (auto < agent < human) picks the wording, so an unreviewed
+  auto-capture is introduced more skeptically than a rule a human wrote. The
+  shared no-authority / verify-before-relying clause is identical across all
+  tiers, since provenance is a caller-declared field, not a verified
+  identity claim. Wording is configurable via `proactive.envelope` in
+  `config.yaml`.
+
+### Reliability
+- `vectr stop` followed by `start` or `restart` now reuses the workspace's
+  previous port instead of walking to a new one that already-written editor
+  MCP config files don't point at. The port-free probe now treats a socket
+  in TCP `TIME_WAIT` — the state every `vectr stop` leaves behind — as
+  reusable, with a short bounded retry
+  (`instance_registry.port_reuse_retry_attempts` /
+  `port_reuse_retry_delay_s`), and `restart` no longer erases the registry
+  entry the reuse step depends on before consulting it.
+- Editor config writes now always sync vectr's **own** MCP server entry to
+  the current port, while continuing to never overwrite user-added keys.
+  Previously the merge-only-add rule kept the file pointing at the old port
+  after a port change. After `start`/`restart`, vectr also prints an
+  explicit warning naming any known editor config file under the workspace
+  that still points at a different port, instead of leaving the editor's
+  MCP connection to fail silently.
+- `vectr init --hooks` no longer aborts when the git hooks directory is
+  unwritable (for example a stale or misconfigured `core.hooksPath`): the
+  git post-commit writer skips with a disclosed message like every other
+  precondition failure in that path, and the editor hook installers that
+  already succeeded stay in place.
+
+### Research artifacts
+- Injection-utility benchmark: six trap scenarios whose correct answer
+  exists only in working memory rather than the workspace, an A/B analysis
+  pipeline (arm hit rates, inject-vs-control efficiency, note-awareness
+  scoring), and a hook-channel arm so proxy-versus-hook delivery is measured
+  rather than assumed. The first seed-0 measured run is recorded, including
+  a delivery-side finding: in the agent CLI's non-interactive print mode,
+  prompt-time hook injections do not render into the machine-readable
+  transcript (session-start injections do), so hook-channel utility must be
+  verified against an interactive session.
+
 ## 1.6.0 — 2026-07-28
 
 Proactive context — surfacing the relevant working-memory note at a

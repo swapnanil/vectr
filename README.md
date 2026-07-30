@@ -11,10 +11,10 @@
 [![CI](https://github.com/swapnanil/vectr/actions/workflows/ci.yml/badge.svg)](https://github.com/swapnanil/vectr/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version 1.6.0](https://img.shields.io/badge/version-1.6.0-blue.svg)](CHANGELOG.md)
+[![Version 1.7.0](https://img.shields.io/badge/version-1.7.0-blue.svg)](CHANGELOG.md)
 [![MCP: 19 tools](https://img.shields.io/badge/MCP-19%20tools-blue.svg)](#19-mcp-tools)
 
-Version 1.6.0 · Last updated 2026-07-28 · [CHANGELOG](CHANGELOG.md)
+Version 1.7.0 · Last updated 2026-07-30 · [CHANGELOG](CHANGELOG.md)
 
 ## In 30 seconds
 
@@ -376,9 +376,9 @@ Everything below is **opt in**. Enabling nothing changes nothing.
 
 ---
 
-## Proactive context (experimental, off by default)
+## Proactive context (experimental, localhost only)
 
-Pull-based recall means the agent has to ask. **Proactive context** extends deterministic delivery to hosts without session hooks, by sitting on the wire instead. It is **experimental**, **off by default**, and **localhost only**.
+Pull-based recall means the agent has to ask. **Proactive context** extends deterministic delivery to hosts without session hooks, by sitting on the wire instead. It is **experimental** and **localhost only**. Since 1.6.0 proactive delivery is **on by default** on local instances (`proactive.enabled`; turn off with `VECTR_PROACTIVE=0`). The wire channel below is governed by launch consent instead of that switch: starting the proxy and pointing your agent at it is the opt-in, and stopping it or unsetting the base URL is the opt-out.
 
 The `vectr proxy` command runs a small local proxy between your agent and the model API:
 
@@ -390,7 +390,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:8785   # point your agent at it
 What it does and does not do, plainly:
 
 - **Transparent by default.** It forwards every request to the real API, and streaming responses and tool calls pass through byte for byte. Your **API key is forwarded untouched and never stored or logged.**
-- **Deterministic injection, when enabled.** With `VECTR_PROACTIVE=1` and the workspace daemon running, it appends matched working-memory notes to the request *after* the last prompt-cache breakpoint, so your prompt cache is never invalidated. Triggering is a similarity threshold plus exact structural matches, never keyword guessing, with a strict per-request budget so a hint only lands when it is worth the tokens.
+- **Deterministic injection.** With the workspace daemon running, it appends matched working-memory notes to the request *after* the last prompt-cache breakpoint, so your prompt cache is never invalidated. Triggering is a similarity threshold plus exact structural matches, never keyword guessing, with a strict per-request budget so a hint only lands when it is worth the tokens.
 - **Fail open.** If the intelligence layer is slow or errors, your request goes through unchanged. **To bypass the proxy entirely, unset the base URL:** `unset ANTHROPIC_BASE_URL`. The proxy is on the request path, so if it is down, unset the variable to talk to the API directly.
 - **Solo and localhost only.** It reads your conversation to compute context, so it refuses any non-loopback bind and is mutually exclusive with team mode.
 - **Caveats on a non-first-party base URL,** per the host's own documentation: MCP tool search is disabled unless `ENABLE_TOOL_SEARCH=true` and the proxy forwards tool-reference blocks, and Remote Control is disabled on a non-`api.anthropic.com` base URL.
