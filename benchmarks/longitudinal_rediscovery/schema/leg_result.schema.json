@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "vectr/benchmarks/longitudinal_rediscovery/leg_result.schema.json",
   "title": "Longitudinal rediscovery — per-leg result",
-  "description": "Normative contract for <runs-dir>/<trajectory_id>/legs/<k>/artifacts/result.json. One leg = one `claude -p` session = one unit of spend. The report layer reads ONLY fields declared here. Semantics are specified in DESIGN.md; this file pins the shape.",
+  "description": "Normative contract for <runs-dir>/<run-dir>/legs/<k>/artifacts/result.json, where <run-dir> is an opaque, hash-derived directory name as of UPG-EVAL-PATH-SLUG-LEAK (run_plan.py's resolve_traj_dir; state.json's own top-level description has the full rationale) -- never the literal trajectory_id, so the path an agent's own cwd is built from cannot leak its scenario/arm/note_variant. `leg_id`/`trajectory_id` below remain CONTENT fields only (harness-internal bookkeeping and report.py's grouping key); neither is ever written into a path or surfaced to the agent. One leg = one `claude -p` session = one unit of spend. The report layer reads ONLY fields declared here. Semantics are specified in DESIGN.md; this file pins the shape.",
   "type": "object",
   "required": [
     "leg_id", "trajectory_id", "scenario", "arm", "note_variant", "seed", "k",

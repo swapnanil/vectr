@@ -95,6 +95,9 @@ __all__ = [
     "get",
     "materialize",
     "materialize_verifiers",
+    "SYNTHETIC_GIT_USER_NAME",
+    "SYNTHETIC_GIT_USER_EMAIL",
+    "pin_synthetic_git_identity",
 ]
 
 
@@ -365,6 +368,38 @@ class LongitudinalScenario:
 # ---------------------------------------------------------------------------
 
 
+# DEFECT 11 PII hygiene (user decision 2026-07-31): every leg workspace's git
+# identity is pinned to this synthetic pair so an agent's own `git commit` can
+# never surface the operator's real name/email -- neither via this repo's
+# LOCAL config (`pin_synthetic_git_identity` below) nor via env fallback
+# (run_leg.py's `_spawn_env_for_agent` sets GIT_AUTHOR_*/GIT_COMMITTER_* to the
+# same pair, which is the layer that also covers a git repo the agent inits
+# itself mid-session, with no local config yet). `example.com` is IANA-reserved
+# for documentation (RFC 2606) -- never a real, deliverable mailbox.
+SYNTHETIC_GIT_USER_NAME = "Mary Doe"
+SYNTHETIC_GIT_USER_EMAIL = "mary.doe@example.com"
+
+
+def pin_synthetic_git_identity(repo: Path) -> None:
+    """Set REPO-LOCAL `user.name`/`user.email` to the synthetic identity above.
+
+    A no-op when `repo` is not a git worktree (`.git` absent) -- most scenarios
+    are not `git_init` at all, and this must never fail (or create) a repo that
+    isn't already there. Called once here, at the end of `materialize()` (leg
+    1's own git_init branch below already runs `-c user.email=.../-c
+    user.name=...` for the harness's OWN initial commit, but those `-c` flags
+    are scoped to that one invocation and do not persist into `.git/config` for
+    the AGENT's later commits -- this call is what actually pins it), and again
+    by `run_leg.py` after every k>=2 restore (`LegRunner.prepare()`), so a
+    trajectory can never end up mid-run with a repo whose local config reverted
+    to unset (and therefore to the operator's global identity).
+    """
+    if not (repo / ".git").is_dir():
+        return
+    subprocess.run(["git", "config", "user.name", SYNTHETIC_GIT_USER_NAME], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.email", SYNTHETIC_GIT_USER_EMAIL], cwd=str(repo), check=True)
+
+
 def materialize(scenario: LongitudinalScenario, workspace: Path) -> dict[str, str]:
     """Write the scenario's starting workspace and return {relpath: sha256}.
 
@@ -399,6 +434,7 @@ def materialize(scenario: LongitudinalScenario, workspace: Path) -> dict[str, st
             cwd=str(repo),
             check=True,
         )
+        pin_synthetic_git_identity(repo)
     return baselines
 
 

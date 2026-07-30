@@ -484,7 +484,8 @@ def test_hook_full_skip_recovers_once_a_valid_attestation_is_supplied_without_fo
         run_plan.plan_and_run("T6", _args(tmp_path, "T6"))
     assert fake.calls == []
     for spec in run_plan._tier_trajectories("T6", seed=0):
-        state = json.loads((tmp_path / spec.trajectory_id / "state.json").read_text())
+        traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+        state = json.loads((traj_dir / "state.json").read_text())
         assert all(leg["status"] == "skipped" for leg in state["legs"] if leg["k"] > 1)
 
     # Second: same runs-dir, now with a valid attestation and NO --force-leg -- the
@@ -495,7 +496,8 @@ def test_hook_full_skip_recovers_once_a_valid_attestation_is_supplied_without_fo
         run_plan.plan_and_run("T6", _args(tmp_path, "T6", hook_attestation=str(attestation)))
     assert len(fake.calls) > 0
     for spec in run_plan._tier_trajectories("T6", seed=0):
-        state = json.loads((tmp_path / spec.trajectory_id / "state.json").read_text())
+        traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+        state = json.loads((traj_dir / "state.json").read_text())
         assert all(leg["status"] == "done" for leg in state["legs"] if leg["k"] > 1)
 
 
@@ -549,7 +551,8 @@ def test_shared_leg1_invalid_on_disk_is_never_trusted_and_retries(tmp_path):
     for spec in run_plan._tier_trajectories("T1", seed=0):
         if spec.scenario != S1:
             continue
-        state = json.loads((tmp_path / spec.trajectory_id / "state.json").read_text())
+        traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+        state = json.loads((traj_dir / "state.json").read_text())
         leg1 = next(leg for leg in state["legs"] if leg["k"] == 1)
         assert leg1["status"] == "done"
         assert leg1["end_state_manifest_sha256"] == "freshmanifest"
@@ -583,7 +586,8 @@ def test_shared_leg1_live_run_failure_is_never_cached_within_one_invocation(tmp_
     assert len(calls) == 2  # one shared-leg1 attempt per distinct scenario (S1, S5)
 
     for spec in run_plan._tier_trajectories("T1", seed=0):
-        state = json.loads((tmp_path / spec.trajectory_id / "state.json").read_text())
+        traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+        state = json.loads((traj_dir / "state.json").read_text())
         leg1 = next(leg for leg in state["legs"] if leg["k"] == 1)
         assert leg1["status"] == "pending"
         leg2 = next(leg for leg in state["legs"] if leg["k"] == 2)
@@ -636,7 +640,8 @@ def test_per_trajectory_spend_usd_is_isolated_from_other_trajectories(tmp_path):
     # Every T1 trajectory has the same shape: cached leg1 ($0.35) + leg2 + leg3
     # ($0.24 each) = $0.83, regardless of processing order within this invocation.
     for spec in run_plan._tier_trajectories("T1", seed=0):
-        state = json.loads((tmp_path / spec.trajectory_id / "state.json").read_text())
+        traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+        state = json.loads((traj_dir / "state.json").read_text())
         assert state["spend_usd"] == pytest.approx(0.83)
 
     # The invocation-level total (a distinct, intentionally cross-trajectory figure
@@ -656,7 +661,8 @@ def test_state_json_validates_against_its_schema_after_a_live_run(tmp_path):
     with mock.patch.object(run_plan, "_run_cmd", side_effect=fake):
         run_plan.plan_and_run("T1", _args(tmp_path, "T1"))
     for spec in run_plan._tier_trajectories("T1", seed=0):
-        state = json.loads((tmp_path / spec.trajectory_id / "state.json").read_text())
+        traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+        state = json.loads((traj_dir / "state.json").read_text())
         jsonschema.validate(state, STATE_SCHEMA)
 
 
@@ -667,7 +673,8 @@ def test_state_json_validates_against_its_schema_when_a_leg_is_invalid(tmp_path)
     with mock.patch.object(run_plan, "_run_cmd", side_effect=fake):
         run_plan.plan_and_run("T1", _args(tmp_path, "T1"))
     for spec in run_plan._tier_trajectories("T1", seed=0):
-        state = json.loads((tmp_path / spec.trajectory_id / "state.json").read_text())
+        traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+        state = json.loads((traj_dir / "state.json").read_text())
         jsonschema.validate(state, STATE_SCHEMA)
         # An invalid leg 2 must skip leg 3 rather than silently running on top of it.
         leg2 = next(leg for leg in state["legs"] if leg["k"] == 2)
@@ -785,3 +792,123 @@ def test_failed_leg_dry_run_does_not_supersede_or_touch_disk(tmp_path):
 
     assert after == before
     assert marker.read_text() == "stale from aborted attempt"
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 11 / UPG-EVAL-PATH-SLUG-LEAK: on-disk trajectory directories (which
+# become the agent's own `cwd` via run_leg.py's `_agent_cwd()`) must not embed
+# the scenario slug, arm, or note-variant -- an agent reading its own `pwd`
+# must not be able to infer which scenario/condition it is in. Old campaigns
+# already on disk under the literal slug name are never renamed, so both
+# `resolve_traj_dir` and `_shared_leg1_dir` must keep resolving THOSE unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_traj_dir_is_opaque_for_a_fresh_s5_told_trajectory(tmp_path):
+    """A fresh (never-before-seen) trajectory on S5 -- the headline TOLD scenario
+    the leak was diagnosed against (note #683: S5 none-arm k2 has zero
+    "reconciler" mentions in workspace files, yet the agent reasoned about
+    reconciler behavior straight from its cwd) -- must resolve to a directory
+    name containing none of the scenario slug, arm, or note-variant tokens.
+    """
+    spec = run_plan.TrajectorySpec(S5, "proxy", "provenance", 0, 3)
+    traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+
+    assert not (tmp_path / spec.trajectory_id).exists()  # nothing legacy to reuse
+    assert S5 not in traj_dir.name
+    assert "proxy" not in traj_dir.name
+    assert "provenance" not in traj_dir.name
+    assert traj_dir.parent == tmp_path
+    assert traj_dir.name.startswith("run-")
+
+    # The mapping this opaque name replaces is still recorded, harness-side only,
+    # in state.json's own trajectory_id field -- never in the path itself.
+    state = run_plan._init_state(spec)
+    assert state["trajectory_id"] == spec.trajectory_id == f"{S5}-proxy-provenance-s0"
+
+
+def test_resolve_traj_dir_is_deterministic_and_collision_free_across_specs(tmp_path):
+    """Same id -> same dir (so a resumed invocation finds its own prior work);
+    different ids -> different dirs (so two trajectories never collide)."""
+    spec_a = run_plan.TrajectorySpec(S5, "proxy", "provenance", 0, 3)
+    spec_b = run_plan.TrajectorySpec(S5, "proxy", "provenance", 1, 3)  # seed differs
+    assert run_plan.resolve_traj_dir(tmp_path, spec_a.trajectory_id) == run_plan.resolve_traj_dir(tmp_path, spec_a.trajectory_id)
+    assert run_plan.resolve_traj_dir(tmp_path, spec_a.trajectory_id) != run_plan.resolve_traj_dir(tmp_path, spec_b.trajectory_id)
+
+
+def test_shared_leg1_dir_is_opaque_for_a_fresh_pair(tmp_path):
+    """Leg 1 (k=1, always arm "none") is a real agent session too -- DESIGN.md
+    5.2 -- so its shared workspace path is subject to the same fix."""
+    d = run_plan._shared_leg1_dir(tmp_path, S5, 0)
+    assert S5 not in d.name
+    assert not (tmp_path / "_shared" / "leg1" / f"{S5}-s0").exists()
+    assert d.parent == tmp_path / "_shared" / "leg1"
+
+
+def test_resolve_traj_dir_reuses_an_existing_legacy_slug_named_directory(tmp_path):
+    """Backward compatibility: a directory from a campaign run before this fix
+    (literal `<scenario>-<arm>-<variant>-s<seed>` name) is reused as-is, never
+    renamed or duplicated under a new opaque name."""
+    spec = run_plan.TrajectorySpec(S5, "proxy", "provenance", 0, 3)
+    legacy_dir = tmp_path / spec.trajectory_id
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "state.json").write_text(json.dumps(run_plan._init_state(spec)))
+
+    resolved = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+
+    assert resolved == legacy_dir
+    assert resolved.name == spec.trajectory_id
+
+
+def test_shared_leg1_dir_reuses_an_existing_legacy_slug_named_directory(tmp_path):
+    d = tmp_path / "_shared" / "leg1" / f"{S5}-s0"
+    d.mkdir(parents=True)
+    assert run_plan._shared_leg1_dir(tmp_path, S5, 0) == d
+
+
+def test_plan_and_run_live_writes_state_under_the_new_opaque_dir_and_records_run_dir(tmp_path):
+    """End-to-end (mocked subprocess) proof that a genuinely fresh trajectory's
+    on-disk artifacts land under the opaque name, while `state.json` (harness-
+    side only, never read by the agent) still records the full trajectory_id
+    mapping plus the resolved directory name for debuggability."""
+    _seed_shared_leg1(tmp_path, S1)
+    _seed_shared_leg1(tmp_path, S5)
+    fake = _fake_run_cmd_factory()
+    with mock.patch.object(run_plan, "_run_cmd", side_effect=fake):
+        run_plan.plan_and_run("T1", _args(tmp_path, "T1"))
+
+    for spec in run_plan._tier_trajectories("T1", seed=0):
+        assert not (tmp_path / spec.trajectory_id).exists()  # never the legacy name
+        traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+        assert traj_dir.name.startswith("run-")
+        state = json.loads((traj_dir / "state.json").read_text())
+        assert state["trajectory_id"] == spec.trajectory_id
+        assert state["run_dir"] == traj_dir.name
+
+
+def test_report_and_rescore_style_discovery_finds_trajectories_under_both_layouts(tmp_path):
+    """report.py/rescore.py discover trajectories structurally (`runs_dir.
+    iterdir()` + JSON content reads), never by parsing the directory-name
+    string -- this pins that contract so a future change to either resolver
+    cannot silently break the report/rescore read path without a test noticing.
+    A campaign with one OLD-layout and one NEW-layout trajectory directory
+    side by side (the real state of a runs-dir once this fix ships) must
+    surface both via a plain directory walk keyed on state.json's own field.
+    """
+    old_spec = run_plan.TrajectorySpec(S1, "none", "none", 0, 3)
+    old_dir = tmp_path / old_spec.trajectory_id
+    old_dir.mkdir(parents=True)
+    (old_dir / "state.json").write_text(json.dumps(run_plan._init_state(old_spec)))
+
+    new_spec = run_plan.TrajectorySpec(S5, "proxy", "provenance", 0, 3)
+    new_dir = run_plan.resolve_traj_dir(tmp_path, new_spec.trajectory_id)
+    new_dir.mkdir(parents=True)
+    (new_dir / "state.json").write_text(json.dumps(run_plan._init_state(new_spec)))
+
+    discovered = {}
+    for child in tmp_path.iterdir():
+        state_path = child / "state.json"
+        if state_path.is_file():
+            discovered[json.loads(state_path.read_text())["trajectory_id"]] = child
+
+    assert discovered == {old_spec.trajectory_id: old_dir, new_spec.trajectory_id: new_dir}
