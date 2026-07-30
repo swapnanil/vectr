@@ -32,6 +32,18 @@ below), which would make every `isinstance()` check here silently return
 False. Duplicating ~150 lines of pure-function pattern-matching logic is the
 safe side of that tradeoff, and is the same choice `longitudinal_rediscovery/
 scorer.py` itself makes relative to `injection_utility/scorer.py`.
+
+**DEFECT 9 (exec-position anchoring, ported -- UPG-ANTIMEM-EXEC-ANCHOR):**
+`_pattern_matches`'s `BashAction` branch and `evaluate_check`'s `CommandRan`
+branch honor `pattern.exec_anchor`/`check.exec_anchor` exactly as the
+longitudinal substrate's own `_matches_at_exec_position` does -- a signature
+whose semantic is "the agent RAN this" (`backflow_signature`, a `correct_check`
+command pattern) must match at a genuine command-execution position, not
+anywhere in the command string, or a read-only mention (`grep -rn "make seed"
+.`) scores identically to a real invocation. See `_matches_at_exec_position`'s
+own section comment below for the full algorithm (duplicated, not imported,
+from the same-named longitudinal function, for the same module-identity reason
+as everything else duplicated in this docstring).
 """
 
 from __future__ import annotations
@@ -175,6 +187,82 @@ def _path_values(input_: Mapping[str, Any]) -> list[str]:
     return [str(input_[k]) for k in _PATH_INPUT_KEYS if input_.get(k) is not None]
 
 
+# ---------------------------------------------------------------------------
+# Exec-position anchoring (DEFECT 9, ported for this harness --
+# UPG-ANTIMEM-EXEC-ANCHOR). `_strip_exec_prefixes`/`_exec_positions`/
+# `_matches_at_exec_position` are DUPLICATED, not imported, from
+# `longitudinal_rediscovery/scorer.py` (the DEFECT 9 originals -- same
+# algorithm, byte-identical regexes) for the same reason this module's own
+# docstring already gives for every other duplicated primitive here:
+# importing would bind these functions to the LONGITUDINAL harness's
+# `scenarios.py` module object while this harness's own `BashAction`/
+# `CommandRan` instances come from a different module object loaded under
+# `ANTIMEM_SCENARIOS_KEY`. See the longitudinal original's section comment
+# for the full semantic writeup this port reuses verbatim: a plain
+# `re.search` finds a pattern ANYWHERE in a Bash `command` string, so a
+# read-only mention (`cat deploy.sh`, `grep -n foo deploy.sh`) satisfies a
+# signature written to detect an actual invocation (`./deploy.sh`) just as
+# readily as the real thing. Anchoring instead requires the pattern to match
+# starting at a genuine command-EXECUTION position: the start of the
+# string, or immediately after a shell command separator (`;`, `&&`, `||`,
+# `|`, `&`, or a newline), optionally through one or more interpreter/
+# exec-wrapper tokens a real shell allows to precede the invoked program
+# (`env`, one or more `VAR=value` assignments, `sh`/`bash`/`zsh`/`exec`,
+# `timeout N`, `caffeinate -flags`).
+# ---------------------------------------------------------------------------
+
+_EXEC_PREFIX_TOKEN = re.compile(
+    r"""
+    \s*
+    (?:
+        [A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)\s+   # one VAR=value assignment
+      | env\s+                                              # env (itself often followed
+                                                              # by more VAR= tokens, looped)
+      | (?:sh|bash|zsh|exec)\s+                              # interpreter / exec keyword
+      | timeout\s+\S+\s+                                     # timeout N
+      | caffeinate(?:\s+-\S+)*\s+                            # caffeinate [-flags]
+    )?
+    """,
+    re.VERBOSE,
+)
+
+_EXEC_BOUNDARY = re.compile(r"\A|[;&|\n]")
+
+
+def _strip_exec_prefixes(command: str) -> str:
+    """Repeatedly strip leading whitespace and interpreter/exec-wrapper tokens off
+    the FRONT of `command` so a pattern lands on the actually-invoked program, not
+    its wrapper (`env FOO=bar timeout 30 bash deploy.sh`) -- loops until a pass
+    makes no further progress rather than assuming one fixed order or count.
+    """
+    remainder = command
+    while True:
+        m = _EXEC_PREFIX_TOKEN.match(remainder)
+        end = m.end() if m else 0
+        if end == 0:
+            return remainder
+        remainder = remainder[end:]
+
+
+def _exec_positions(command: str) -> list[int]:
+    """Every index in `command` where a new command begins: 0, or immediately
+    after `;`, `&&`, `||`, `|`, `&`, or a newline.
+    """
+    return [m.end() for m in _EXEC_BOUNDARY.finditer(command)]
+
+
+def _matches_at_exec_position(pattern: str, command: str) -> bool:
+    """True when `pattern` matches starting at some genuine command-execution
+    position in `command`, after stripping any interpreter/exec-wrapper prefix at
+    that position. Uses `re.match`, not `re.search`: the pattern must START at the
+    candidate position, not merely occur somewhere after it.
+    """
+    for pos in _exec_positions(command):
+        if re.match(pattern, _strip_exec_prefixes(command[pos:])):
+            return True
+    return False
+
+
 def _pattern_matches(action: Action, pattern: ActionPattern) -> bool:
     """Dispatch one action-pattern primitive (BashAction, PathAction, ContentAction,
     ToolAction) against one action, by `type(pattern).__name__` rather than
@@ -187,9 +275,12 @@ def _pattern_matches(action: Action, pattern: ActionPattern) -> bool:
     """
     kind = type(pattern).__name__
     if kind == "BashAction":
-        return action.name == "Bash" and bool(
-            re.search(pattern.pattern, str(action.input.get("command") or ""))
-        )
+        if action.name != "Bash":
+            return False
+        command = str(action.input.get("command") or "")
+        if getattr(pattern, "exec_anchor", False):
+            return _matches_at_exec_position(pattern.pattern, command)
+        return bool(re.search(pattern.pattern, command))
     if kind == "PathAction":
         if action.name not in pattern.tools:
             return False
@@ -313,7 +404,10 @@ def evaluate_check(
         }
 
     if isinstance(check, CommandRan):
-        matched = [c for c in commands if re.search(check.pattern, c)]
+        if getattr(check, "exec_anchor", False):
+            matched = [c for c in commands if _matches_at_exec_position(check.pattern, c)]
+        else:
+            matched = [c for c in commands if re.search(check.pattern, c)]
         found = bool(matched)
         return {
             "name": check.name,

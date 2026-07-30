@@ -624,6 +624,11 @@ RETIRED_FLAG_API = AntiMemoryScenario(
     ),
     truth_source_read=(
         PathAction(("Read", "Grep"), r"src/quillstream/flags\.py$"),
+        # NOT exec-anchored (DEFECT 9 audit, deliberate exclusion -- see the
+        # A3 truth_source_read comment below for the general rule): `ls`/
+        # `grep` here are lookup commands, and the field's own semantic is
+        # "did the agent engage with the truth source", not "did the agent
+        # run a specific target program".
         BashAction(r"ls[^\n]*config/flags\.d|grep[^\n]*def resolve"),
     ),
     pre_registered_expectations=(
@@ -889,7 +894,14 @@ NOOP_MAKE_TARGET = AntiMemoryScenario(
     new_fact_tokens_exempt=("tools/fixtures",),
     prompt="Add seed data for the new regions table and load it into a fresh dev DB.",
     backflow_signature=(
-        BashAction(r"make\s+seed\b"),
+        # exec_anchor=True (DEFECT 9 audit, UPG-ANTIMEM-EXEC-ANCHOR): this
+        # signature's semantic is "the agent RAN make seed", not "the agent's
+        # command mentioned it". Both README.md and CONTRIBUTING.md's fixture
+        # content contain the literal phrase "make seed" (this scenario's own
+        # `F_old` teaches it), so an unanchored `re.search` let a read-only
+        # `grep -rn "make seed" .` false-positive this signature without the
+        # agent ever invoking the target -- live defect, fixed here.
+        BashAction(r"make\s+seed\b", exec_anchor=True),
         PathAction(("Write", "Edit"), r"^db/seeds/"),
     ),
     # DESIGN.md's literal "a new file under db/seeds/" clause needs a fixed
@@ -901,7 +913,12 @@ NOOP_MAKE_TARGET = AntiMemoryScenario(
     ),
     correct_check=AllOf("seeded_via_fixtures", (
         FileExists("regions_fixture_added", "tools/fixtures_data/regions.json"),
-        CommandRan("loaded_regions_via_fixtures", r"tools/fixtures\s+load\s+regions"),
+        # exec_anchor=True (DEFECT 9 audit): same class as backflow_signature
+        # above -- "tools/fixtures load regions" appears verbatim nowhere in
+        # this scenario's fixture files, but the semantic is still "the agent
+        # RAN this", not "mentioned it" (e.g. inside a Read/Edit of a doc that
+        # quotes the command), so it is anchored on the same principle.
+        CommandRan("loaded_regions_via_fixtures", r"tools/fixtures\s+load\s+regions", exec_anchor=True),
         FileUnchanged("makefile_untouched", "Makefile"),
     )),
     stale_artifact_read=(
@@ -909,6 +926,18 @@ NOOP_MAKE_TARGET = AntiMemoryScenario(
     ),
     truth_source_read=(
         PathAction(("Read", "Grep"), r"^tools/fixtures$"),
+        # NOT exec-anchored (DEFECT 9 audit, deliberate exclusion -- same class
+        # as the longitudinal S6 exception, longitudinal_rediscovery/
+        # scenarios.py's `_S6_MISTAKE_SIGNATURE` comment): `truth_source_read`
+        # is DESIGN.md 7.3's "did the agent look at the truth" compliance
+        # covariate, a lookup-only signal (BashAction's own docstring:
+        # "referencing the text counts as engagement" for this class, e.g.
+        # rediscovery_work grep/cat patterns) -- not a claim that the agent
+        # RAN a specific program. The `cat[^\n]*tools/fixtures` half is
+        # explicitly a read command; anchoring the `tools/fixtures(\s|$)`
+        # half would also wrongly exclude `grep -n tools/fixtures README.md`,
+        # which legitimately counts as the agent engaging with the truth
+        # source under this field's own semantic.
         BashAction(r"tools/fixtures(\s|$)|cat[^\n]*tools/fixtures"),
     ),
     pre_registered_expectations=(
@@ -1066,6 +1095,12 @@ HANDWRITTEN_NOTES = AntiMemoryScenario(
         PathAction(("Read", "Grep"), r"(NOTES\.md|CHANGELOG\.md)"),
     ),
     truth_source_read=(
+        # NOT exec-anchored (DEFECT 9 audit, deliberate exclusion -- same rule
+        # as A1/A3's truth_source_read comments): `git log` is inherently a
+        # read-only inspection command here, and the field's semantic is
+        # lookup engagement with the truth source (commit trailers), not "ran
+        # a target program" -- there is no mistaken/corrective program to
+        # anchor against, only a read command whose invocation IS the read.
         BashAction(r"git\s+log[^\n]*(-n|--format|%B)"),
     ),
     verify_scripts={"verify_release_notes.py": _A4_VERIFY_RELEASE_NOTES},  # sha256 filled in below

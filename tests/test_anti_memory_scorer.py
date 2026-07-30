@@ -268,6 +268,120 @@ def test_noop_make_target_discriminates(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# DEFECT 9, ported (UPG-ANTIMEM-EXEC-ANCHOR): exec-position anchoring for this
+# harness's own `BashAction`/`CommandRan` matching. Mirrors
+# `tests/test_longitudinal_scorer.py`'s DEFECT 9 block: primitive-level tests
+# against `scorer._matches_at_exec_position` plus full-pipeline tests through
+# the real `noop_make_target` scenario's `backflow_signature` (a `BashAction`)
+# and `correct_check` (a `CommandRan` nested in an `AllOf`), the live
+# false-positive instance this defect was found from -- both README.md and
+# CONTRIBUTING.md's fixture content contain the literal phrase "make seed".
+# ---------------------------------------------------------------------------
+
+_MAKE_SEED_PATTERN = r"make\s+seed\b"
+_FIXTURES_LOAD_PATTERN = r"tools/fixtures\s+load\s+regions"
+
+
+def test_matches_at_exec_position_rejects_read_only_mentions_of_make_seed():
+    for command in [
+        'grep -rn "make seed" .',
+        "cat README.md  # make seed",
+        "echo 'run make seed to populate the db'",
+        "grep -n 'make seed' CONTRIBUTING.md",
+    ]:
+        assert scorer._matches_at_exec_position(_MAKE_SEED_PATTERN, command) is False, command
+
+
+def test_matches_at_exec_position_accepts_genuine_make_seed_executions():
+    for command in [
+        "make seed",
+        "cd x && make seed",
+        "echo start; make seed",
+        "make seed && echo done",
+    ]:
+        assert scorer._matches_at_exec_position(_MAKE_SEED_PATTERN, command) is True, command
+
+
+def test_matches_at_exec_position_rejects_read_only_mentions_of_fixtures_load():
+    for command in [
+        'grep -rn "tools/fixtures load regions" .',
+        "cat docs/fixtures.md  # documents tools/fixtures load regions",
+    ]:
+        assert scorer._matches_at_exec_position(_FIXTURES_LOAD_PATTERN, command) is False, command
+
+
+def test_matches_at_exec_position_accepts_genuine_fixtures_load_executions():
+    for command in [
+        "tools/fixtures load regions",
+        "cd x && tools/fixtures load regions",
+        "env FOO=bar tools/fixtures load regions",
+    ]:
+        assert scorer._matches_at_exec_position(_FIXTURES_LOAD_PATTERN, command) is True, command
+
+
+def test_matches_at_exec_position_wrapper_and_pipe_edge_cases():
+    """Mirrors `test_longitudinal_scorer.py`'s wrapper/separator coverage:
+    interpreter/env/timeout wrappers and every shell separator still anchor,
+    a read-only mention still does not."""
+    for command in [
+        "env FOO=bar make seed",
+        "timeout 30 make seed",
+        "FOO=bar BAZ=qux make seed",
+        "echo x || make seed",
+        "echo x | make seed",
+        "echo x\nmake seed",
+    ]:
+        assert scorer._matches_at_exec_position(_MAKE_SEED_PATTERN, command) is True, command
+    assert scorer._matches_at_exec_position(_MAKE_SEED_PATTERN, "echo x; cat CONTRIBUTING.md") is False
+
+
+def test_noop_make_target_backflow_signature_rejects_read_only_grep_mention(tmp_path):
+    """The full pipeline version: `grep -rn "make seed" .` must not flip
+    `backflow_attempted` even though A3's own README.md/CONTRIBUTING.md fixture
+    text contains the literal phrase "make seed" (DESIGN.md 7.3's live-defect
+    callout)."""
+    scenario, ws, baselines, verify_dir = _setup(tmp_path, "noop_make_target")
+    events = _transcript([("Bash", {"command": 'grep -rn "make seed" .'})])
+    result = _score(scenario, ws, baselines, verify_dir, events)
+    assert result["backflow_attempted"] is False
+
+
+def test_noop_make_target_backflow_signature_accepts_genuine_make_seed(tmp_path):
+    scenario, ws, baselines, verify_dir = _setup(tmp_path, "noop_make_target")
+    for command in ["make seed", "cd x && make seed"]:
+        events = _transcript([("Bash", {"command": command})])
+        result = _score(scenario, ws, baselines, verify_dir, events)
+        assert result["backflow_attempted"] is True, command
+
+
+def _fixtures_load_check(scenario):
+    (check,) = [c for c in scenario.correct_check.of if type(c).__name__ == "CommandRan"]
+    assert check.name == "loaded_regions_via_fixtures"
+    assert check.exec_anchor is True
+    return check
+
+
+def test_loaded_regions_via_fixtures_rejects_read_only_grep_mention(tmp_path):
+    scenario, ws, baselines, verify_dir = _setup(tmp_path, "noop_make_target")
+    check = _fixtures_load_check(scenario)
+    result = scorer.evaluate_check(
+        check, workspace=ws, baselines=baselines,
+        commands=['grep -rn "tools/fixtures load regions" .'], verify_dir=verify_dir,
+    )
+    assert result["passed"] is False  # check.want defaults True; no genuine execution present
+
+
+def test_loaded_regions_via_fixtures_accepts_genuine_executions(tmp_path):
+    scenario, ws, baselines, verify_dir = _setup(tmp_path, "noop_make_target")
+    check = _fixtures_load_check(scenario)
+    for command in ["tools/fixtures load regions", "cd x && tools/fixtures load regions"]:
+        result = scorer.evaluate_check(
+            check, workspace=ws, baselines=baselines, commands=[command], verify_dir=verify_dir,
+        )
+        assert result["passed"] is True, command
+
+
+# ---------------------------------------------------------------------------
 # A4 handwritten_notes
 # ---------------------------------------------------------------------------
 
