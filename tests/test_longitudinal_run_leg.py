@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -47,6 +48,11 @@ def _load_local_module(key: str, filename: str):
 
 scen = _load_local_module(_LONGITUDINAL_SCENARIOS_KEY, "scenarios.py")
 run_leg = _load_local_module("_vectr_eval_longitudinal_run_leg_test", "run_leg.py")
+# Same key test_longitudinal_plan.py uses for run_plan.py -- not load-bearing here
+# (these tests only call run_plan's pure path-resolution helpers), but keeping one
+# converged module object per file avoids a second, independent import of a
+# same-named module in the shared collision-safe registry.
+run_plan = _load_local_module("_vectr_eval_longitudinal_run_plan_test", "run_plan.py")
 
 
 def _make_runner(tmp_path: Path, **overrides) -> "run_leg.LegRunner":
@@ -1124,3 +1130,164 @@ def test_critical_residue_reset_is_a_noop_for_a_scenario_with_no_declared_paths(
 
     assert runner.leg_start_baselines == before
     assert "critical_residue_reset_paths" not in runner.record
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 11 / UPG-EVAL-PATH-SLUG-LEAK: the agent-visible cwd -- and the
+# SessionStart hook's own synthetic session-init stdin payload, which
+# `hook_preflight()` builds from that same cwd -- must never surface the
+# scenario slug, arm, or note-variant. `run_agent()`'s real `claude -p`
+# subprocess and `hook_preflight()`'s synthetic check both use `_agent_cwd()`
+# ("one function so the two can never drift apart" -- its own docstring), so
+# pinning this one property covers both routes at once. `run_plan.py` mints
+# the opaque `--workspace-dir` this pins; these tests exercise the LegRunner
+# side of that same fix using the exact resolver it now calls.
+# ---------------------------------------------------------------------------
+
+
+def test_agent_cwd_carries_no_scenario_arm_or_variant_tokens_for_a_fresh_s5_trajectory(tmp_path):
+    spec = run_plan.TrajectorySpec("deploy_reverted_by_reconciler", "proxy", "provenance", 0, 3)
+    traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+    workspace_dir = run_plan._trajectory_workspace_dir(traj_dir)
+
+    runner = _make_runner(
+        tmp_path, scenario="deploy_reverted_by_reconciler", arm="proxy",
+        note_variant="provenance", workspace_dir=str(workspace_dir),
+    )
+    cwd_str = str(runner._agent_cwd())
+
+    assert "deploy_reverted_by_reconciler" not in cwd_str
+    assert "reconciler" not in cwd_str
+    assert "provenance" not in cwd_str
+    # "proxy" is a common-enough fragment that it is checked as its own path
+    # COMPONENT, not merely a substring, to keep this assertion precise.
+    assert "proxy" not in Path(cwd_str).parts
+
+
+def test_hook_preflight_session_init_payload_carries_no_scenario_or_arm_tokens(tmp_path, monkeypatch):
+    """The synthetic SessionStart hook stdin payload `hook_preflight()` builds
+    (`cwd`, mirroring exactly what a real Claude Code SessionStart hook
+    invocation receives) is built directly from `_agent_cwd()` -- this pins the
+    same property at the actual call site, not just the helper above.
+    """
+    spec = run_plan.TrajectorySpec("deploy_reverted_by_reconciler", "proxy", "provenance", 0, 3)
+    traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+    workspace_dir = run_plan._trajectory_workspace_dir(traj_dir)
+
+    runner = _make_hook_runner(
+        tmp_path, scenario="deploy_reverted_by_reconciler",
+        note_variant="provenance", workspace_dir=str(workspace_dir),
+    )
+    content = _note_content(runner)
+    captured: dict = {}
+    status_calls = {"n": 0}
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        status_calls["n"] += 1
+        # Before the hook call: 0 injections; after: 1 -- a real delta, matching
+        # the daemon-evidence pattern the existing hook_preflight tests use.
+        count = 0 if status_calls["n"] == 1 else 1
+        return {"hook_injection_counts": {"SessionStart": count}}
+
+    def fake_run_hook_command(command, *, cwd, stdin, env, timeout=60.0):
+        captured["cwd"] = cwd
+        captured["stdin"] = json.loads(stdin)
+        stdout = json.dumps({
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": content}
+        })
+        return 0, stdout, "", False
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fake_run_hook_command)
+
+    runner.hook_preflight()
+
+    assert "deploy_reverted_by_reconciler" not in captured["cwd"]
+    assert "deploy_reverted_by_reconciler" not in captured["stdin"]["cwd"]
+    assert "provenance" not in captured["stdin"]["cwd"]
+    assert captured["stdin"]["cwd"] == captured["cwd"] == str(runner._agent_cwd())
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 11 PII hygiene (user decision 2026-07-31): every leg workspace's git
+# identity must be pinned to a synthetic pair so an agent's own `git commit`
+# can never surface the operator's real name/email. Root cause: `materialize()`'s
+# initial commit uses EPHEMERAL `-c user.email=.../-c user.name=...` flags,
+# which do not persist into `.git/config` -- so without this fix, the agent's
+# own later commits fell through to the operator's real global ~/.gitconfig.
+# ---------------------------------------------------------------------------
+
+
+def _git_config_get(repo: Path, key: str) -> str:
+    return subprocess.run(
+        ["git", "config", "--get", key], cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def test_materialize_pins_synthetic_git_identity_for_a_git_init_scenario(tmp_path):
+    s1 = scen.SCENARIOS["release_via_ci"]
+    ws = tmp_path / "ws"
+    scen.materialize(s1, ws)
+
+    assert scen.SYNTHETIC_GIT_USER_NAME == "Mary Doe"
+    assert scen.SYNTHETIC_GIT_USER_EMAIL == "mary.doe@example.com"
+    assert _git_config_get(ws, "user.name") == scen.SYNTHETIC_GIT_USER_NAME
+    assert _git_config_get(ws, "user.email") == scen.SYNTHETIC_GIT_USER_EMAIL
+
+
+def test_pin_synthetic_git_identity_is_a_noop_for_a_non_git_scenario(tmp_path):
+    """Most scenarios never `git_init` at all -- must not create a repo that
+    isn't already there, and must not raise."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    scen.pin_synthetic_git_identity(ws)  # must not raise
+    assert not (ws / ".git").exists()
+
+
+def test_prepare_pins_synthetic_git_identity_on_restore_for_k_ge_2(tmp_path):
+    """The k==1 `materialize()` path pins it internally (previous test); this
+    pins the OTHER half -- `LegRunner.prepare()`'s uniform call after
+    `_restore_and_verify()` -- so a trajectory can never end up mid-run with a
+    repo whose local config reverted away from the synthetic identity on a
+    later leg, regardless of what the tar being restored happens to carry.
+    """
+    s1 = scen.SCENARIOS["release_via_ci"]
+    leg1_ws = tmp_path / "leg1-end-state"
+    scen.materialize(s1, leg1_ws)
+    # Simulate drift (e.g. an agent action) between leg 1's end state and this
+    # leg's restore -- prepare() must re-pin regardless of what k=1 left behind.
+    subprocess.run(["git", "config", "user.name", "someone else"], cwd=str(leg1_ws), check=True)
+
+    baselines = run_leg._sha256_tree(leg1_ws)
+    manifest_hash = run_leg._write_manifest(baselines, tmp_path / "leg1-manifest.sha256")
+    tar_path = tmp_path / "leg1-end-state.tar"
+    run_leg._make_tar(leg1_ws, tar_path)
+
+    runner = _make_runner(
+        tmp_path, scenario="release_via_ci", k=2,
+        restore_tar=str(tar_path), restore_manifest_sha256=manifest_hash,
+    )
+    runner.prepare()
+
+    assert _git_config_get(runner._agent_cwd(), "user.name") == scen.SYNTHETIC_GIT_USER_NAME
+    assert _git_config_get(runner._agent_cwd(), "user.email") == scen.SYNTHETIC_GIT_USER_EMAIL
+
+
+def test_spawn_env_for_agent_strips_and_resets_git_identity_env_vars(monkeypatch):
+    """The env-var layer of the same defense: GIT_AUTHOR_*/GIT_COMMITTER_* take
+    precedence over BOTH repo-local and global git config, so this is what
+    covers a git repo the agent inits itself mid-session, with no local config
+    pinned yet."""
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Real Operator")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "real.operator@example.org")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Real Operator")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "real.operator@example.org")
+
+    env = run_leg._spawn_env_for_agent("http://127.0.0.1:1234")
+
+    assert env["GIT_AUTHOR_NAME"] == scen.SYNTHETIC_GIT_USER_NAME
+    assert env["GIT_AUTHOR_EMAIL"] == scen.SYNTHETIC_GIT_USER_EMAIL
+    assert env["GIT_COMMITTER_NAME"] == scen.SYNTHETIC_GIT_USER_NAME
+    assert env["GIT_COMMITTER_EMAIL"] == scen.SYNTHETIC_GIT_USER_EMAIL
+    assert "Real Operator" not in env.values()
+    assert "real.operator@example.org" not in env.values()

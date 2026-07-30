@@ -45,6 +45,7 @@ without touching later legs. `--dry-run` and `--probe-only` never invoke a live 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -115,8 +116,59 @@ class TrajectorySpec:
     @property
     def trajectory_id(self) -> str:
         # leg_result.schema.json / trajectory_state.schema.json: "<scenario>-<arm>-
-        # <variant>-s<seed>".
+        # <variant>-s<seed>". This remains a CONTENT identifier (recorded in
+        # state.json / result.json / results.jsonl) -- DEFECT 11 stops it from
+        # also being the on-disk directory name, since the agent's own cwd is
+        # derived from that directory (see resolve_traj_dir below).
         return f"{self.scenario}-{self.arm}-{self.note_variant}-s{self.seed}"
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 11 / UPG-EVAL-PATH-SLUG-LEAK: opaque on-disk directory names.
+#
+# `trajectory_id` (and the pre-fix `_shared_leg1_dir`) used to double as a literal
+# path component under a real agent's `cwd` (run_leg.py's `_agent_cwd()`, used by
+# BOTH the live `claude -p` subprocess and `hook_preflight()`'s synthetic check) --
+# so an agent could read its own scenario, arm, and note-variant straight off its
+# shell prompt/`pwd`, independent of anything planted in workspace files. That
+# invalidates the "uncorroborable fact" premise the TOLD scenarios depend on.
+#
+# The fix hashes the same content identifier into a short, semantically empty
+# directory name; the mapping lives only in harness-side metadata the agent never
+# reads (state.json's own `trajectory_id` field, scenario.json). Old campaigns
+# already on disk under the literal slug name are read-only history -- per-run
+# artifacts are never renamed -- so every caller that turns an id into a path
+# checks for that legacy directory FIRST and only mints a new opaque name when it
+# is genuinely absent. This is a structural, file-existence check (not a query- or
+# content-conditional heuristic): the input is a harness-generated id, never
+# agent/user text, and the check is "does this literal directory already exist",
+# not "does this string contain word X".
+# ---------------------------------------------------------------------------
+
+
+def _opaque_run_dir_name(label: str) -> str:
+    """Deterministic, non-reversible-by-inspection directory name for `label` (a
+    `trajectory_id` or shared-leg1 `<scenario>-s<seed>` key). SHA-256 rather than a
+    weaker hash because the input space (scenario x arm x variant x seed) is small
+    enough that a reversible/guessable hash would leak nearly as much as the plain
+    slug; 16 hex chars (64 bits) is ample to avoid collisions at this run's scale
+    while staying short enough to be a readable path component.
+    """
+    return "run-" + hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
+
+
+def resolve_traj_dir(runs_dir: Path, trajectory_id: str) -> Path:
+    """Map a `trajectory_id` to its on-disk directory: reuse the legacy
+    slug-named directory if one already exists (backward compatibility for every
+    campaign run before this fix -- report.py/rescore.py/this module all resolve
+    the same way, so old and new layouts coexist under one `--runs-dir`), else
+    mint a fresh opaque name so the id is never itself an agent-visible path
+    component.
+    """
+    legacy = runs_dir / trajectory_id
+    if legacy.is_dir():
+        return legacy
+    return runs_dir / _opaque_run_dir_name(trajectory_id)
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +398,19 @@ def _supersede(path: Path) -> None:
 
 
 def _shared_leg1_dir(runs_dir: Path, scenario: str, seed: int) -> Path:
-    return runs_dir / "_shared" / "leg1" / f"{scenario}-s{seed}"
+    # Leg 1 (k=1, always arm "none" -- the store is empty in every arm at leg 1,
+    # DESIGN.md 5.2) is a real agent session too, so its workspace path is subject
+    # to the same DEFECT 11 fix as `resolve_traj_dir` above: reuse the legacy
+    # `<scenario>-s<seed>` directory if a prior campaign already created it, else
+    # mint an opaque name. Kept as its own function (rather than routed through
+    # resolve_traj_dir) because its legacy directory lives under `_shared/leg1/`,
+    # not directly under `runs_dir`.
+    shared_root = runs_dir / "_shared" / "leg1"
+    label = f"{scenario}-s{seed}"
+    legacy = shared_root / label
+    if legacy.is_dir():
+        return legacy
+    return shared_root / _opaque_run_dir_name(label)
 
 
 def _ensure_shared_leg1(scenario: str, seed: int, *, runs_dir: Path, args: argparse.Namespace, cache: dict) -> dict:
@@ -539,9 +603,13 @@ def plan_and_run(tier: str, args: argparse.Namespace) -> dict:
     plan: list[dict] = []
 
     for spec in specs:
-        traj_dir = runs_dir / spec.trajectory_id
+        traj_dir = resolve_traj_dir(runs_dir, spec.trajectory_id)
         state = _load_or_init_state(traj_dir, spec)
         state["tier"] = tier
+        # Harness-side only (schema's additionalProperties: true) -- the on-disk
+        # directory name itself, kept for debuggability now that it is no longer
+        # derivable by eye from `trajectory_id` alone. Never read by the agent.
+        state["run_dir"] = traj_dir.name
 
         if spec.arm == "hook-full":
             att = _read_valid_attestation(args.hook_attestation)

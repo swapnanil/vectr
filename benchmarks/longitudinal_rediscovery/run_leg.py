@@ -241,10 +241,23 @@ def _spawn_env_for_agent(base_url: str) -> dict[str, str]:
     first so the child looks like a fresh user invocation rather than a nested
     session of the harness's own; ANTHROPIC_BASE_URL is set back to route through
     the scratch proxy. OAuth still resolves via the keychain.
+
+    DEFECT 11 PII hygiene (user decision 2026-07-31): every GIT_AUTHOR_*/
+    GIT_COMMITTER_* var inherited from the operator's own shell is also
+    stripped and re-set to `scenarios.SYNTHETIC_GIT_USER_NAME/EMAIL`. Git's own
+    env vars take precedence over BOTH repo-local and global config, so this is
+    the layer that covers a git repo the agent inits fresh mid-session (no
+    local config pinned yet) -- `scenarios.pin_synthetic_git_identity` is the
+    repo-config half of this same defense, applied at materialize/restore time.
     """
     env = {k: v for k, v in os.environ.items()
-           if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))}
+           if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC")
+                   or k.startswith("GIT_AUTHOR_") or k.startswith("GIT_COMMITTER_"))}
     env["ANTHROPIC_BASE_URL"] = base_url
+    env["GIT_AUTHOR_NAME"] = scen.SYNTHETIC_GIT_USER_NAME
+    env["GIT_AUTHOR_EMAIL"] = scen.SYNTHETIC_GIT_USER_EMAIL
+    env["GIT_COMMITTER_NAME"] = scen.SYNTHETIC_GIT_USER_NAME
+    env["GIT_COMMITTER_EMAIL"] = scen.SYNTHETIC_GIT_USER_EMAIL
     return env
 
 
@@ -656,6 +669,13 @@ class LegRunner:
             self.db_dir.mkdir(parents=True, exist_ok=True)
 
         _scrub_ide_config_marker(self.workspace)
+        # DEFECT 11 PII hygiene: pin the synthetic git identity uniformly for
+        # every k, not just the k==1 materialize() branch above (which already
+        # pins it internally) -- a k>=2 leg's `_restore_and_verify` extracts a
+        # tar rather than calling `materialize()`, so this is the only place
+        # that covers both branches with one call. Idempotent (re-setting the
+        # same config values); a no-op for a non-git scenario.
+        scen.pin_synthetic_git_identity(self._agent_cwd())
         self._out("baselines.json").write_text(json.dumps(self.leg_start_baselines, indent=2))
         self._out("scenario.json").write_text(json.dumps({
             "slug": self.scenario.slug,

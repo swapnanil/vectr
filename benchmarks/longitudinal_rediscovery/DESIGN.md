@@ -525,7 +525,11 @@ This is the largest frugality lever in the design — it removes 3 of every 4 le
 — and it is also a validity improvement: every arm starts leg 2 from a byte-identical
 workspace, so no arm difference at leg ≥ 2 can be attributed to leg-1 variance.
 
-Stored at `<runs-dir>/_shared/leg1/<scenario>-s<seed>/`:
+Stored at `<runs-dir>/_shared/leg1/<run-dir>/`, where `<run-dir>` is an opaque,
+hash-derived name (`run_plan.py`'s `_shared_leg1_dir`/`_opaque_run_dir_name`) rather
+than the literal `<scenario>-s<seed>` — see 5.4's contamination-prevention note for why
+(UPG-EVAL-PATH-SLUG-LEAK). A pre-fix campaign's existing `<scenario>-s<seed>`-named
+directory is reused as-is rather than renamed. Contents:
 `workspace.tar` (the full tree, including `.git`), `manifest.sha256`, `baselines.json`,
 `transcript.jsonl`, `result.json`, `leg1_id` (a content hash of the tar). Every
 trajectory records the `leg1_id` it restored. `--refresh-leg1` re-runs it and mints a
@@ -567,13 +571,32 @@ note names.
 - `--runs-dir` must be outside any indexed vectr workspace.
 - Cells run **one at a time**. Indexing plus two daemons plus a proxy in parallel is
   what the "one instance at a time" rule exists for.
+- Every workspace's git identity is pinned to a synthetic pair (`scenarios.py`'s
+  `pin_synthetic_git_identity`, repo-local `git config`) at materialization and again at
+  every leg's restore, and the agent subprocess's `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env
+  vars are stripped and reset to the same pair (`run_leg.py`'s `_spawn_env_for_agent`).
+  Otherwise an agent's own `git commit` falls through to the operator's real global
+  `~/.gitconfig`, and the operator's name/email end up baked into a scenario's git log —
+  a real leak this harness had until UPG-EVAL-PATH-SLUG-LEAK's PII-hygiene fix.
 
 **Contamination prevention across arms/variants/seeds.** Trajectory id
-`<scenario>-<arm>-<variant>-s<seed>` appears in the DB dir path, the workspace path, the
-runs dir, and the result records. Nothing is shared except the read-only leg-1 tar.
-Verify scripts are materialized **outside** the workspace, after the agent exits
-(otherwise the no-memory arm could read the answer). A test asserts that no scenario
-file and no leg-≥2 prompt contains any `fact_token`.
+`<scenario>-<arm>-<variant>-s<seed>` is unique per trajectory and appears in the result
+records (`state.json`, `results.jsonl`), so nothing on the metrics side is shared across
+cells. Nothing on the workspace side is shared either, except the read-only leg-1 tar.
+As of UPG-EVAL-PATH-SLUG-LEAK the trajectory id is *not* used verbatim as the on-disk
+directory name any more: the DB dir, the workspace path, and the run dir under
+`<runs-dir>` are all named from an opaque hash of the trajectory id
+(`run_plan.py`'s `resolve_traj_dir`), so an agent's own `cwd` cannot read its scenario,
+arm, or note variant off its own filesystem path — a real failure mode this harness
+originally had (S5's told-scenario agent inferring "this environment is explicitly
+testing reconciler behavior" from a slug-named cwd with zero corroborating file
+content). The mapping from opaque dir back to trajectory id lives only in
+`state.json`'s `run_dir`/`trajectory_id` fields and `results.jsonl`, which the agent
+never reads. Pre-fix campaigns' slug-named directories are left in place unchanged
+(never renamed) and continue to resolve correctly. Verify scripts are materialized
+**outside** the workspace, after the agent exits (otherwise the no-memory arm could
+read the answer). A test asserts that no scenario file and no leg-≥2 prompt contains
+any `fact_token`.
 
 ---
 
@@ -878,9 +901,9 @@ nothing it is pure token overhead).
 
 ```
 <runs-dir>/
-  _shared/leg1/<scenario>-s<seed>/    workspace.tar manifest.sha256 baselines.json
-                                      transcript.jsonl result.json leg1_id
-  <scenario>-<arm>-<variant>-s<seed>/
+  _shared/leg1/<run-dir>/              workspace.tar manifest.sha256 baselines.json
+                                        transcript.jsonl result.json leg1_id
+  <run-dir>/
     state.json                        trajectory state (schema/trajectory_state.schema.json)
     db/                               VECTR_DB_DIR, reused across legs
     legs/<k>/
@@ -893,6 +916,15 @@ nothing it is pure token overhead).
       end-state.tar + manifest.sha256
   results.jsonl                       one line per leg, appended
 ```
+
+As of UPG-EVAL-PATH-SLUG-LEAK, `<run-dir>` is an opaque, hash-derived name
+(`run-<16 hex chars>`, `run_plan.py`'s `resolve_traj_dir` / `_shared_leg1_dir`) rather
+than the literal `<scenario>-<arm>-<variant>-s<seed>` / `<scenario>-s<seed>` — the
+directory an agent's own `cwd` resolves under must not spell out its scenario, arm, or
+note variant. `state.json`'s `trajectory_id` field still records the full mapping, and
+`run_dir` records which directory holds it, for harness-side tooling only. A directory
+already on disk under the old literal-slug name (a pre-fix campaign) is reused as-is,
+never renamed — `resolve_traj_dir` checks for the legacy directory first.
 
 `schema/leg_result.schema.json` and `schema/trajectory_state.schema.json` in this
 directory are the normative contracts; the report layer reads only those fields.
