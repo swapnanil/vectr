@@ -685,3 +685,145 @@ def test_plant_note_sends_directive_kind_and_session_start_trigger_for_hook_arms
     proxy_payload = captured["payload"]
     assert proxy_payload["kind"] == "gotcha"
     assert {"event": "session-start"} not in proxy_payload["triggers"]
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 7: `probe()`'s reachability ABORT criterion must be arm-aware. A live
+# T2 re-run aborted at $0 -- both hook-sessionstart k2 legs failed
+# `probe()` (not `hook_preflight()`, which runs later and already proves
+# session-start delivery works) with "the planted note is not retrievable on
+# EITHER daemon-side probe". Root cause: `_apply_hook_delivery_metadata()`
+# (DEFECT 6 follow-up) plants hook-arm notes with kind="directive" to fit the
+# content-injection budget, but agent/config.yaml's `proactive.
+# structural_kinds` omits "directive" and `proactive.proxy.
+# exclude_directive_notes` independently excludes it too -- so
+# `_proactive_probe`'s channel (`/v1/proactive`, channel="proxy") can never
+# see a directive-kind note, regardless of whether the SessionStart channel
+# the hook arm actually tests can. `probe()` now judges hook-arm reachability
+# against `_session_start_probe()` (a direct `boot=True, hook_event=
+# "SessionStart"` `/v1/recall` call -- the same payload shape
+# `agent/hook_cli.py::run_hook`'s "session-start" branch sends) instead, while
+# still recording `_proactive_probe`'s result as a diagnostic-only value.
+# Non-hook arms are unaffected: `_proactive_probe` remains their sole
+# reachability channel, unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _fake_http_json_for_probe(*, proactive_anchor_present: bool, session_start_notes: str | None):
+    """Builds a `_http_json` stand-in that dispatches on URL suffix, returning
+    REAL-shaped `/v1/proactive` and `/v1/recall` (boot) responses -- never the
+    `[]`/`{}` placeholder pattern the coder brief's mock-fidelity rule forbids.
+    `session_start_notes=None` means the daemon's boot recall returned nothing
+    (an empty string, exactly `_recall_impl`'s own boot branch on a fresh/
+    ineligible workspace)."""
+
+    def fake(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/proactive"):
+            anchor_ids = ["note:7"] if proactive_anchor_present else []
+            return {"item_count": len(anchor_ids), "context": "", "anchor_ids": anchor_ids}
+        if method == "POST" and url.endswith("/v1/recall"):
+            assert payload.get("boot") is True and payload.get("hook_event") == "SessionStart", (
+                f"probe()'s session-start channel call must send the exact "
+                f"agent/hook_cli.py::run_hook 'session-start' branch payload shape, "
+                f"got {payload!r}"
+            )
+            return {"notes": session_start_notes or ""}
+        raise AssertionError(f"unexpected call in probe(): {method} {url}")
+
+    return fake
+
+
+def test_probe_hook_arm_judges_reachability_via_session_start_channel_not_proactive(tmp_path, monkeypatch):
+    """Reproduces DEFECT 7's fix: the proactive channel is empty (exactly what
+    a directive-kind note structurally produces) but the session-start channel
+    carries the planted content -- `probe()` must NOT abort, and must record
+    which channel it actually judged."""
+    runner = _make_hook_runner(tmp_path, arm="hook-sessionstart")
+    content = _note_content(runner)
+    monkeypatch.setattr(
+        run_leg, "_http_json",
+        _fake_http_json_for_probe(proactive_anchor_present=False, session_start_notes=content),
+    )
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
+    runner.probe()  # must not raise
+    assert runner.record["planted_note_reachable_preflight"] is True
+    preflight = runner.record["preflight"]
+    assert preflight["reachable_channel"] == "session_start"
+    assert preflight["proactive_probe_diagnostic_only"] is True
+    assert preflight["session_start_channel"]["reachable"] is True
+    # the proactive result is still recorded (diagnostic), just not authoritative
+    assert preflight["turn1_text_only"]["planted_present"] is False
+    assert preflight["turn2_with_file_anchor"]["planted_present"] is False
+
+
+def test_probe_hook_arm_aborts_when_session_start_channel_empty_even_if_proactive_present(tmp_path, monkeypatch):
+    """The inverse: proactive channel WOULD pass (anchor present there), but
+    the session-start channel -- the one this arm actually ships through --
+    is empty. `probe()` must still abort: proactive presence is not a
+    substitute for session-start reachability on a hook arm."""
+    runner = _make_hook_runner(tmp_path, arm="hook-full")
+    monkeypatch.setattr(
+        run_leg, "_http_json",
+        _fake_http_json_for_probe(proactive_anchor_present=True, session_start_notes=None),
+    )
+    with pytest.raises(SystemExit, match=r"SessionStart channel"):
+        runner.probe()
+    assert runner.record["planted_note_reachable_preflight"] is False
+    assert runner.record["preflight"]["reachable_channel"] == "session_start"
+
+
+def test_probe_hook_arm_allow_unreachable_bypasses_session_start_abort(tmp_path, monkeypatch):
+    runner = _make_hook_runner(tmp_path, arm="hook-sessionstart", allow_unreachable=True)
+    monkeypatch.setattr(
+        run_leg, "_http_json",
+        _fake_http_json_for_probe(proactive_anchor_present=False, session_start_notes=None),
+    )
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
+    runner.probe()  # must not raise
+    assert runner.record["planted_note_reachable_preflight"] is False
+
+
+def test_probe_non_hook_arm_still_uses_proactive_channel_unchanged(tmp_path, monkeypatch):
+    """Byte-for-byte parity guard: a non-hook arm's abort message and
+    reachability source must be identical to pre-DEFECT-7 behavior, and it
+    must never call the session-start `/v1/recall` boot path."""
+    runner = _make_hook_runner(tmp_path, arm="proxy")  # non-hook arm
+
+    def fake(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/proactive"):
+            return {"item_count": 0, "context": "", "anchor_ids": []}
+        raise AssertionError(
+            f"non-hook arm probe() must never call {method} {url} -- only "
+            f"/v1/proactive, unchanged from before DEFECT 7"
+        )
+
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    with pytest.raises(SystemExit) as exc_info:
+        runner.probe()
+    assert str(exc_info.value) == (
+        "ABORT: the planted note is not retrievable on EITHER daemon-side "
+        "probe, so this leg cannot test its memory channel. Fix the "
+        "scenario (not the score); re-run with --allow-unreachable to "
+        "record it anyway."
+    )
+    assert runner.record["preflight"]["reachable_channel"] == "proactive"
+    assert runner.record["preflight"]["proactive_probe_diagnostic_only"] is False
+
+
+def test_probe_non_hook_arm_succeeds_via_proactive_channel_unchanged(tmp_path, monkeypatch):
+    runner = _make_hook_runner(tmp_path, arm="mcp")  # non-hook memory arm
+
+    def fake(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/proactive"):
+            return {"item_count": 1, "context": "", "anchor_ids": ["note:7"]}
+        if method == "POST" and url.endswith("/v1/recall"):
+            # arm "mcp"'s own separate query-shaped recall probe (unrelated to
+            # DEFECT 7 -- pre-existing behavior for arms "mcp"/"mcp-bare")
+            return {"notes": "[#7] some note"}
+        raise AssertionError(f"unexpected call: {method} {url}")
+
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
+    runner.probe()  # must not raise
+    assert runner.record["planted_note_reachable_preflight"] is True
+    assert runner.record["preflight"]["reachable_channel"] == "proactive"

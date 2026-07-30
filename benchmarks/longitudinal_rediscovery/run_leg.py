@@ -400,6 +400,31 @@ def _proactive_probe(
     return turn1, turn2
 
 
+def _session_start_probe(daemon_port: int, session_id: str) -> str:
+    """Daemon-side SessionStart-channel reachability check (DEFECT 7): a direct
+    `/v1/recall` POST carrying the exact `{"boot": True, "hook_event":
+    "SessionStart"}` payload `agent/hook_cli.py::run_hook`'s own "session-start"
+    branch sends on a real (non-compaction) SessionStart -- so this reaches the
+    identical `VectrService._recall_impl` boot branch a real hook invocation
+    reaches. Channel-true and zero-LLM-cost, and unlike `LegRunner.
+    hook_preflight()`'s subprocess-based check, this needs neither
+    `write_hooks()` (no `.claude/settings.json` yet -- `probe()` runs first) nor
+    a real hook command round trip; it is a pure daemon call, mirroring
+    `_proactive_probe`'s own daemon-only shape.
+
+    Returns the raw notes text exactly as the daemon renders it into the real
+    hook's `additionalContext` envelope, so a caller can apply the identical
+    raw-substring content check `hook_preflight()` already applies to that
+    envelope (`variant.content in notes_text`).
+    """
+    out = _http_json(
+        "POST", f"http://127.0.0.1:{daemon_port}/v1/recall",
+        {"boot": True, "hook_event": "SessionStart", "session_id": session_id},
+        timeout=60,
+    )
+    return out.get("notes") or ""
+
+
 def _enforce_hook_attestation(arm: str, attestation_path: str | None) -> dict | None:
     """DESIGN.md 4: arm `hook-full` (D2) is SKIPPED, never run/scored, without a
     fresh canary attestation -- D2's UserPromptSubmit/PreToolUse additionalContext
@@ -805,6 +830,35 @@ class LegRunner:
     def probe(self) -> None:
         """Daemon-side reachability probes (DESIGN.md 4.1, 7.3). Never touches the
         proxy -- see `_proactive_probe`'s docstring.
+
+        The reachability ABORT criterion is arm-aware (DEFECT 7). `_proactive_probe`
+        below queries the daemon's proactive/proxy channel (`/v1/proactive`,
+        `channel="proxy"`) -- but for arms "hook-sessionstart"/"hook-full",
+        `plant_note()` plants the note with `kind="directive"`
+        (`_apply_hook_delivery_metadata`, required to fit the SessionStart
+        channel's per-kind content-injection budget -- see that method's
+        docstring). `agent/config.yaml`'s `proactive.structural_kinds` omits
+        "directive" outright, and `proactive.proxy.exclude_directive_notes`
+        independently excludes it from this channel too (a SEPARATE toggle, for
+        a different reason -- authority confusion from injecting an imperative
+        into a live user turn -- see that key's own docstring). A directive-kind
+        note is therefore structurally unable to ever appear in
+        `_proactive_probe`'s result, regardless of whether the SessionStart
+        channel it actually ships through can see it -- querying the wrong
+        channel as the reachability gate aborted a live T2 run at $0 even
+        though `hook_preflight()` (run later, once hooks are installed) already
+        proves session-start delivery works end to end for the same note.
+        `_proactive_probe` is still ALWAYS queried and recorded here (a
+        diagnostic-only value for hook arms -- `preflight["proactive_probe_
+        diagnostic_only"]` marks this), but hook arms judge reachability
+        against the SAME channel their leg actually tests: `_session_start_probe`
+        below issues the identical `boot=True, hook_event="SessionStart"`
+        `/v1/recall` payload `agent/hook_cli.py::run_hook`'s own "session-start"
+        branch sends, directly against the daemon -- channel-true and
+        zero-LLM-cost, and it does not require `write_hooks()` to have run yet
+        (this method runs before hooks are installed -- see `main()`'s call
+        order). Non-hook arms are completely unaffected: `_proactive_probe`
+        remains their sole, unchanged reachability channel and abort criterion.
         """
         memory_arm = self.arm != "none"
         if memory_arm and (self.note_id is not None or self.planted_anchor):
@@ -827,15 +881,36 @@ class LegRunner:
                     "planted_present": anchor in (turn2.get("anchor_ids") or []),
                 },
             }
-            self._out("preflight.json").write_text(json.dumps(preflight, indent=2))
-            self.record["preflight"] = preflight
-            reachable = (
+            proactive_reachable = (
                 preflight["turn1_text_only"]["planted_present"]
                 or preflight["turn2_with_file_anchor"]["planted_present"]
             )
-            self.record["planted_note_reachable_preflight"] = reachable
 
             variant = self._find_note_variant()
+            is_hook_arm = self.arm in ("hook-sessionstart", "hook-full")
+            if is_hook_arm:
+                session_start_notes = _session_start_probe(
+                    self.daemon_port, f"longprobe-{self.scenario.slug}-k{self.k}-sessionstart",
+                )
+                session_start_reachable = bool(variant.content) and (
+                    variant.content in session_start_notes
+                )
+                preflight["session_start_channel"] = {
+                    "reachable": session_start_reachable,
+                    "notes_chars": len(session_start_notes),
+                }
+                preflight["proactive_probe_diagnostic_only"] = True
+                preflight["reachable_channel"] = "session_start"
+                reachable = session_start_reachable
+            else:
+                preflight["proactive_probe_diagnostic_only"] = False
+                preflight["reachable_channel"] = "proactive"
+                reachable = proactive_reachable
+
+            self._out("preflight.json").write_text(json.dumps(preflight, indent=2))
+            self.record["preflight"] = preflight
+            self.record["planted_note_reachable_preflight"] = reachable
+
             if variant.variant in ("provenance", "verifiable"):
                 trail_text = variant.content.replace(self.scenario.fact_sentence, "", 1).strip()
                 found = bool(trail_text) and (
@@ -856,11 +931,12 @@ class LegRunner:
                 self.record["recall_probe_returned_note"] = returned
 
             if not reachable and not self.args.allow_unreachable:
+                channel = "the SessionStart channel" if is_hook_arm else "EITHER daemon-side probe"
                 raise SystemExit(
-                    "ABORT: the planted note is not retrievable on EITHER daemon-side "
-                    "probe, so this leg cannot test its memory channel. Fix the "
-                    "scenario (not the score); re-run with --allow-unreachable to "
-                    "record it anyway."
+                    f"ABORT: the planted note is not retrievable on {channel}, so "
+                    "this leg cannot test its memory channel. Fix the scenario "
+                    "(not the score); re-run with --allow-unreachable to record "
+                    "it anyway."
                 )
 
         # Everything written up to here is this leg's own preflight traffic; wait
