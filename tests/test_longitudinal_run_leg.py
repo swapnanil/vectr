@@ -16,6 +16,7 @@ the exit-on-session-error behavior is exercised directly against a constructed
 """
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
 import sys
@@ -973,3 +974,153 @@ def test_hook_preflight_stdout_content_check_matches_multiline_note_json_escaped
     hp = runner.record["hook_preflight"]
     assert hp["daemon_evidence"] is True
     assert hp["stdout_has_planted_content"] is True
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 10 (direction 1, user decision 2026-07-30; DESIGN.md 6.5): legs k=1..3 of
+# a trajectory share one persistent workspace, so a scenario-critical artifact one
+# leg's compliant task completes (e.g. S5's `deploy/queue.yaml` staging entry) can
+# make a LATER leg's own check vacuous -- every arm already sees the entry present
+# and the check can no longer tell "this leg complied" from "leg k-1 already did".
+# `LegRunner._apply_critical_residue_reset()` restores exactly the paths a scenario
+# declares in `critical_residue_paths` to their scenario-seed content, at the start
+# of every k>=2 leg, AFTER `_restore_and_verify`'s manifest integrity check (so
+# DEFECT 9-adjacent tar-fidelity verification is unaffected) and before the agent
+# runs. Every other file -- declared or not -- keeps its natural cross-leg residue.
+# ---------------------------------------------------------------------------
+
+
+def _s5_leg1_end_state_tar(tmp_path: Path) -> tuple[Path, str]:
+    """Builds a restore-tar simulating S5's REAL leg-1 end state: the scenario seed
+    plus leg 1's own compliant addition to `deploy/queue.yaml` (its
+    fact_acquisition target) -- exactly the residue DEFECT 10 exists to neutralize
+    -- plus a mutation to `deploy/README.md`, a file no leg ever legitimately
+    writes but which this fixture perturbs anyway to prove the reset touches ONLY
+    the declared path, not "everything under deploy/". Returns (tar_path,
+    manifest_sha256), computed the identical way `LegRunner.snapshot()` computes a
+    real leg's own end-state manifest.
+    """
+    s5 = scen.SCENARIOS["deploy_reverted_by_reconciler"]
+    leg1_ws = tmp_path / "leg1-end-state"
+    scen.materialize(s5, leg1_ws)
+
+    queue = leg1_ws / "deploy/queue.yaml"
+    queue.write_text(
+        queue.read_text(encoding="utf-8") + '- date: "2026-07-16"\n  target: staging\n  ref: HEAD\n',
+        encoding="utf-8",
+    )
+    readme = leg1_ws / "deploy/README.md"
+    readme.write_text(
+        readme.read_text(encoding="utf-8") + "Also see the release-bot runbook.\n", encoding="utf-8"
+    )
+
+    baselines = run_leg._sha256_tree(leg1_ws)
+    manifest_hash = run_leg._write_manifest(baselines, tmp_path / "leg1-manifest.sha256")
+    tar_path = tmp_path / "leg1-end-state.tar"
+    run_leg._make_tar(leg1_ws, tar_path)
+    return tar_path, manifest_hash
+
+
+def test_restore_and_verify_resets_declared_path_leaves_undeclared_residue_untouched(tmp_path):
+    """The core acceptance case: reconstructs the k=2 leg-start state from a
+    faithful leg-1 end-state tar and shows the fix -- `deploy/queue.yaml` (declared)
+    comes back to the scenario seed, while `deploy/README.md` (real, un-declared
+    residue) keeps leg 1's edit untouched.
+    """
+    tar_path, manifest_hash = _s5_leg1_end_state_tar(tmp_path)
+    runner = _make_runner(
+        tmp_path,
+        scenario="deploy_reverted_by_reconciler",
+        restore_tar=str(tar_path),
+        restore_manifest_sha256=manifest_hash,
+    )
+    runner.artifacts.mkdir(parents=True, exist_ok=True)
+    s5 = scen.SCENARIOS["deploy_reverted_by_reconciler"]
+
+    # Sanity: before the fix runs, the extracted tar really does carry leg 1's
+    # residue (i.e. the fixture reproduces the pre-fix symptom) -- proven directly
+    # against a plain extract further down via the no-op comparison test.
+    runner._restore_and_verify()
+
+    queue_content = (runner.workspace / "deploy/queue.yaml").read_text(encoding="utf-8")
+    assert queue_content == s5.files["deploy/queue.yaml"], (
+        "declared critical_residue_paths entry must be restored to scenario seed, "
+        "not left carrying leg 1's staging entry"
+    )
+    readme_content = (runner.workspace / "deploy/README.md").read_text(encoding="utf-8")
+    assert "Also see the release-bot runbook." in readme_content, (
+        "non-declared residue must persist untouched -- only declared paths reset"
+    )
+
+    # leg_start_baselines (and therefore baselines.json / every FileUnchanged /
+    # FileMutated check this leg runs) reflect the POST-reset tree, not the raw
+    # restore -- scorer.py's evaluate_check contract (baselines are always this
+    # leg's true start-of-leg state).
+    recomputed = run_leg._sha256_tree(runner.workspace, extra_ignore=runner._extra_ignore_paths())
+    assert runner.leg_start_baselines == recomputed
+    assert runner.record["critical_residue_reset_paths"] == ["deploy/queue.yaml"]
+
+
+def test_apply_critical_residue_reset_is_a_noop_when_scenario_declares_no_paths(tmp_path):
+    """Reproduces the pre-fix symptom directly: a scenario shaped like S5 was
+    BEFORE this fix (no `critical_residue_paths` declared) leaves leg 1's residue
+    in place at leg 2's start -- `_apply_critical_residue_reset` is a true
+    structural no-op when nothing is declared, not special-cased to S5's slug.
+    """
+    tar_path, manifest_hash = _s5_leg1_end_state_tar(tmp_path)
+    runner = _make_runner(
+        tmp_path,
+        scenario="deploy_reverted_by_reconciler",
+        restore_tar=str(tar_path),
+        restore_manifest_sha256=manifest_hash,
+    )
+    runner.artifacts.mkdir(parents=True, exist_ok=True)
+    runner.scenario = dataclasses.replace(runner.scenario, critical_residue_paths=())
+
+    runner._restore_and_verify()
+
+    content = (runner.workspace / "deploy/queue.yaml").read_text(encoding="utf-8")
+    assert "target: staging" in content, (
+        "pre-fix bug reproduced: leg 1's staging entry is still present at leg 2's "
+        "start when nothing is declared for reset"
+    )
+    assert "critical_residue_reset_paths" not in runner.record
+
+
+def test_critical_residue_reset_runs_after_manifest_integrity_check_not_before(tmp_path):
+    """Ordering guarantee: a genuinely drifted restore (manifest mismatch) still
+    aborts, exactly as before this fix -- the reset must never mask real tar
+    corruption/drift by running ahead of the integrity check.
+    """
+    tar_path, _correct_hash = _s5_leg1_end_state_tar(tmp_path)
+    runner = _make_runner(
+        tmp_path,
+        scenario="deploy_reverted_by_reconciler",
+        restore_tar=str(tar_path),
+        restore_manifest_sha256="0" * 64,  # deliberately wrong
+    )
+    runner.artifacts.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(SystemExit, match="manifest mismatch"):
+        runner._restore_and_verify()
+    # The abort fires before any reset bookkeeping is recorded.
+    assert "critical_residue_reset_paths" not in runner.record
+
+
+def test_critical_residue_reset_is_a_noop_for_a_scenario_with_no_declared_paths(tmp_path):
+    """Cross-scenario parity: a scenario that legitimately declares nothing (e.g.
+    `bench_box_only`, per the coder-defect10 audit) is completely unaffected by
+    this mechanism -- `_apply_critical_residue_reset` must not raise or mutate
+    anything when `critical_residue_paths` is empty.
+    """
+    scenario = scen.SCENARIOS["bench_box_only"]
+    assert scenario.critical_residue_paths == ()
+    runner = _make_runner(tmp_path, k=1)
+    runner.workspace.mkdir(parents=True, exist_ok=True)
+    runner.artifacts.mkdir(parents=True, exist_ok=True)
+    before = dict(runner.leg_start_baselines)
+
+    runner._apply_critical_residue_reset()
+
+    assert runner.leg_start_baselines == before
+    assert "critical_residue_reset_paths" not in runner.record

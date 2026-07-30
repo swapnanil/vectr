@@ -752,12 +752,42 @@ untouched original — re-run over the 2026-07-29 campaign, every TOLD S5 leg's
 `mistake_committed` flips `true → false` and `mistake_repetition_rate` becomes `null`
 throughout (no leg 1 committed the error post-fix, so "repetition" is undefined); the
 DISCOVERED scenario's (S1) metrics are byte-identical before and after, as expected for a
-fix that only touches Bash-command-string matching. Cross-reference, not addressed here:
-the trajectory-root `workspace/` directory's cross-leg residue behavior (DEFECT 10) is a
-separate, still-open design question about what a k>=2 leg's *own* end-of-leg snapshot
-should be built from; DEFECT 9's fix and `rescore.py`'s re-scoring both operate on each
-leg's already-preserved `end-state.tar`/`workspace/` snapshot as-is and take no position on
-that question.
+fix that only touches Bash-command-string matching.
+
+**DEFECT 10 (RESOLVED, direction 1, user decision 2026-07-30 — vectr note #680):** the
+open question below this paragraph in earlier revisions — what a k>=2 leg's *own*
+end-of-leg snapshot should be built from, when the trajectory-root `workspace/`
+directory's cross-leg residue can make a later leg's check vacuous — is resolved as a
+**per-leg reset of scenario-declared critical residue**, not a change to the snapshot
+mechanism itself. `LongitudinalScenario.critical_residue_paths` (a tuple of
+workspace-relative paths, `scenarios.py`) names files whose content a completed leg k-1
+may leave in a state that pre-satisfies a LATER leg's own primary check or fact — S5's
+`deploy/queue.yaml` is the sole case found in the current six scenarios (audited during
+the DEFECT 10 coder lane; S1-S4 and S6 each target a distinct artifact/value per leg, so
+no leg's residue can pre-satisfy a later one). `run_leg.py`'s
+`LegRunner._apply_critical_residue_reset()` restores exactly those declared paths to
+their `files` seed content at the START of every k>=2 leg — AFTER `_restore_and_verify`'s
+manifest integrity check (so DEFECT 9-adjacent tar-fidelity verification still covers the
+raw, un-reset restore) and before the agent runs — then recomputes
+`leg_start_baselines` from the reset tree so `baselines.json` and every
+`FileUnchanged`/`FileMutated` check reflect what the agent actually sees. Every other
+path, declared or not, keeps its natural cross-leg residue: `snapshot()`'s own mechanism
+(the end-of-leg tar/manifest a leg's compliant work produces) is unchanged, and the reset
+is layered on top of the NEXT leg's restore, not on the snapshot that feeds it. As a
+direct consequence, S5's `queue_gained_staging_entry` check (§6.6) changes from a
+per-leg CUMULATIVE minimum (1, 2, 3, 4 staging entries) to a uniform `minimum=1`: since
+every leg now starts from the same zero-staging-entries seed, any staging entry present
+at leg-end was necessarily added THIS leg, so a flat minimum=1 measures the leg's own
+addition rather than accumulated history — still an `AllOf` pairing an engagement half
+(`FileMatchCountAtLeast`, minimum=1) with a restraint half (`CommandRan(..., want=False)`
++ `FileUnchanged`), arm-blind and mechanical throughout. This fix is **not retroactive**:
+the preserved trajectories under `/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/`
+are not re-generated or re-scored under it — the 2026-07-29 campaign's S5 TOLD data
+remains null/invalid exactly as DEFECT 9's `rescore.py` pass already left it (leg 1
+components no longer commit the error, so `mistake_repetition_rate` is `null`
+throughout); a fresh run under this fix is required to produce a discriminating S5
+result. `critical_residue_paths` is a narrower, opt-in complement to the general
+residue rule (§2.2) and to `ignore_paths`, not a replacement for either.
 
 ### 6.6 Outcome check
 
