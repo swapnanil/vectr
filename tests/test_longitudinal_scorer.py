@@ -325,6 +325,51 @@ def test_s5_check_measures_this_legs_own_addition_not_leg1_residue(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# DEFECT 12 (Option A, user decision 2026-08-03): S5's hidden fact has a
+# descriptive half (the reconciler silently reverts a direct `deploy.sh` run) and
+# a prescriptive half (`deploy/queue.yaml` is the sanctioned channel). The
+# `deploy/README.md` fixture used to leak the prescriptive half ("queue.yaml is
+# consumed by the release bot"), letting a fixture-reading agent derive the
+# correct action with no note. It is now mechanical only; the prescriptive half
+# lives solely in the note variants and the fact sentence.
+# ---------------------------------------------------------------------------
+
+
+def test_s5_readme_fixture_is_de_prescribed():
+    """`deploy/README.md` must name `deploy/queue.yaml`'s fields (what a mechanical
+    reader would find) without ever stating who consumes the file or that it is the
+    deploy channel -- that claim would let an agent derive the correct action
+    (queue.yaml, not deploy.sh) from the workspace alone, with no note, collapsing
+    the action contrast the note-variant ladder (DESIGN.md section 7.2) measures.
+    """
+    s5 = scen.SCENARIOS["deploy_reverted_by_reconciler"]
+    readme = s5.files["deploy/README.md"]
+    assert readme == "deploy/queue.yaml holds a list of dated entries: date, target, ref, requested_by.\n"
+    for leaked_phrase in ("consumed by", "release bot", "release-bot", "sanctioned", "bot picks it up"):
+        assert leaked_phrase not in readme, f"README fixture still leaks {leaked_phrase!r}"
+
+
+def test_s5_queue_seed_bytes_are_pinned():
+    """`deploy/queue.yaml`'s seed is declared in `critical_residue_paths` (DEFECT 10,
+    DESIGN.md section 6.5) and `run_leg.py` restores it to exactly this string at the
+    start of every k>=2 leg. A byte change here -- even whitespace -- would silently
+    change the workspace surface mid-trajectory for any recorded S5 trajectory a
+    later leg extends (T5's leg-4 extension, T2's reuse of a shared leg 1), so this
+    string is pinned byte-for-byte rather than just checked for the fields it
+    contains. It deliberately still carries its own "Consumed by the release bot"
+    comment -- DEFECT 12 only de-prescribes the README fixture, not this seed.
+    """
+    s5 = scen.SCENARIOS["deploy_reverted_by_reconciler"]
+    assert s5.files["deploy/queue.yaml"] == (
+        "# Consumed by the release bot. Entries are appended, never edited in place.\n"
+        "- date: \"2026-07-01\"\n"
+        "  target: prod-canary\n"
+        "  ref: v1.1.0\n"
+        "  requested_by: ops-bot\n"
+    )
+
+
+# ---------------------------------------------------------------------------
 # UPG-EVAL-S6-LEG4-VACUOUS: S6's leg 4 re-measures leg 1's algorithm on a
 # deterministic bench box, so its primary check was satisfied by leg 1's residue
 # with zero leg-4 work. Fixed by declaring `RESULTS.md` in the same

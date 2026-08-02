@@ -325,10 +325,12 @@ placeholders, no loader reads it), `.env.example`, `scripts/envctl` (executable;
 **Workspace** `pilot/`: `deploy.sh` (executable; prints progress, exits 0, writes
 `.deploy-state` — *appears to work*), `deploy/queue.yaml` (a list of dated entries with
 `target`/`ref`/`requested_by`; reads as a passive log, is in fact the input),
-`deploy/README.md` (one line: "queue.yaml is consumed by the release bot" — no mention
-of reverting), `config/staging.yaml`, `src/pilot/*`, neutral `CLAUDE.md`.
+`deploy/README.md` (one line naming `deploy/queue.yaml`'s fields — mechanical only,
+never who reads the file or that it is the deploy channel, as of DEFECT 12 below),
+`config/staging.yaml`, `src/pilot/*`, neutral `CLAUDE.md`.
 
-Nothing in the workspace states the fact. That is the point.
+Nothing in the workspace states the fact. That is the point — see "Fixture surface
+re-baseline (DEFECT 12)" below for the period in which this was not quite true.
 
 **Fact sentence** (delivered in prompt 1, then never again)
 
@@ -378,6 +380,45 @@ OR `BashAction(r"make\s+bench(?!\s+REMOTE)")` followed by a RESULTS.md mutation
 (recorded as `mistake_committed` only via the traceability script, so a local
 sanity-run that is *not* pasted is not punished). `fact_acquisition`:
 `BashAction(r"REMOTE=1|bench/boxrun\.sh")`. Note variants: `plain`, `provenance`.
+
+---
+
+### Fixture surface re-baseline (DEFECT 12)
+
+S5's hidden fact has two halves: descriptive (the reconciler silently reverts a direct
+`deploy.sh` run) and prescriptive (`deploy/queue.yaml` is the sanctioned channel). Before
+this commit, `deploy/README.md` read `"queue.yaml is consumed by the release bot."` — a
+fixture-reading agent could derive the correct action (use `queue.yaml`, not `deploy.sh`)
+from the workspace alone, with no note, weakening the action contrast the note-variant
+ladder (§7.2) exists to measure. Only the descriptive half was ever truly unrecorded.
+
+**From this commit `deploy/README.md` is mechanical only**: it names `deploy/queue.yaml`'s
+fields (`date`, `target`, `ref`, `requested_by`) and says nothing about who reads the file
+or that it is the way to deploy. The prescriptive half now lives only in the note variants
+(`plain`, `provenance`) and the fact sentence delivered in prompt 1. `deploy/queue.yaml`'s
+seed bytes (`_S5_QUEUE_SEED`) are unchanged, including its own in-file comment — that
+string is declared in `critical_residue_paths` and restored verbatim at every k>=2 leg
+start (§6.5, DEFECT 10), so editing it would silently change the workspace surface
+mid-trajectory for any recorded S5 trajectory a later leg extends.
+
+**The fixture surface is re-baselined at this commit, not retroactively rewritten.** A
+trajectory's surface is fixed at its leg-1 materialization and held uniform across all its
+legs (legs ≥2 restore from that trajectory's own prior snapshots — except the declared
+`critical_residue_paths`, which `run_leg.py::_apply_critical_residue_reset` rewrites to the
+*current* `scenarios.py` seed string at every leg start; uniformity for extended pre-fix
+trajectories therefore also rests on those seed strings never changing, which is why
+`_S5_QUEUE_SEED` is pinned byte-for-byte): every trajectory whose leg 1 was recorded before this commit — including T5's
+leg-4 extension of a pre-fix trajectory and T2's reuse of a pre-fix shared leg 1 — stays on
+the pre-fix surface (fixture-leaked prescriptive half) for all its legs. Only a fresh leg-1
+materialization from this commit on gets the de-prescribed surface; T7's seed-1-and-later
+S5 cells are the first to run on it. No recorded artifact is rewritten, regenerated,
+deleted, or rescored by this fix — this is a fixture-authoring change, not a scoring change,
+so `rescore.py` has nothing to do here. Any cross-boundary comparison of S5 cells (e.g. a
+future aggregate mixing T1/T2's pre-fix data with T7's post-fix data) must state which side
+of this boundary each cell came from; the pre-fix surface is already disclosed in the
+campaign record via this section, so it needs no further caveat, only citation. T7's S5 half
+is therefore a replication **plus** the first fixed-surface data — T7's S1 half remains a
+pure replication, since S1 (DISCOVERED) has no fixture-prescription question.
 
 ---
 
@@ -1059,6 +1100,7 @@ Nothing in the design requires an unbroken 5-hour window.
 | Prior strength assumed | it is measured: `mistake_committed(1)` in arm A; `weak_prior:true` flags a scenario for replacement |
 | Arm B has extra files (vectr's guidance) | every scenario ships a neutral `CLAUDE.md` so all arms have one; vectr-written files are in `ignore_paths` |
 | Agent nondeterminism dwarfs the effect | the effect sizes targeted are large (a mistake repeated vs not); cost figures are never a pass/fail signal, exactly as in the trap harness |
+| S5 fixture leaked its prescriptive half pre-DEFECT-12 | "Fixture surface re-baseline (DEFECT 12)" above (end of §3); trajectories are uniform pre- or post-fix per their own leg-1 date, never mixed within one trajectory |
 
 **Pre-registered expectations** (recorded per leg before any run, so a surprise is
 visibly a surprise): arm A repeats the mistake in ≥50% of legs *k>1* on DISCOVERED
