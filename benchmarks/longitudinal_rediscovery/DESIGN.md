@@ -403,8 +403,11 @@ mid-trajectory for any recorded S5 trajectory a later leg extends.
 
 **The fixture surface is re-baselined at this commit, not retroactively rewritten.** A
 trajectory's surface is fixed at its leg-1 materialization and held uniform across all its
-legs (legs ≥2 restore from that trajectory's own prior snapshots, never from `scenarios.py`
-directly): every trajectory whose leg 1 was recorded before this commit — including T5's
+legs (legs ≥2 restore from that trajectory's own prior snapshots — except the declared
+`critical_residue_paths`, which `run_leg.py::_apply_critical_residue_reset` rewrites to the
+*current* `scenarios.py` seed string at every leg start; uniformity for extended pre-fix
+trajectories therefore also rests on those seed strings never changing, which is why
+`_S5_QUEUE_SEED` is pinned byte-for-byte): every trajectory whose leg 1 was recorded before this commit — including T5's
 leg-4 extension of a pre-fix trajectory and T2's reuse of a pre-fix shared leg 1 — stays on
 the pre-fix surface (fixture-leaked prescriptive half) for all its legs. Only a fresh leg-1
 materialization from this commit on gets the de-prescribed surface; T7's seed-1-and-later
