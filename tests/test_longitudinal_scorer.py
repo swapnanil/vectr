@@ -345,8 +345,13 @@ def test_s5_readme_fixture_is_de_prescribed():
     s5 = scen.SCENARIOS["deploy_reverted_by_reconciler"]
     readme = s5.files["deploy/README.md"]
     assert readme == "deploy/queue.yaml holds a list of dated entries: date, target, ref, requested_by.\n"
+    queue_seed = s5.files["deploy/queue.yaml"]
     for leaked_phrase in ("consumed by", "release bot", "release-bot", "sanctioned", "bot picks it up"):
         assert leaked_phrase not in readme, f"README fixture still leaks {leaked_phrase!r}"
+        assert leaked_phrase.lower() not in queue_seed.lower(), (
+            f"queue seed still leaks {leaked_phrase!r} -- the prescriptive half must "
+            "live only in the note variants and the fact sentence"
+        )
 
 
 def test_s5_queue_seed_bytes_are_pinned():
@@ -356,12 +361,14 @@ def test_s5_queue_seed_bytes_are_pinned():
     change the workspace surface mid-trajectory for any recorded S5 trajectory a
     later leg extends (T5's leg-4 extension, T2's reuse of a shared leg 1), so this
     string is pinned byte-for-byte rather than just checked for the fields it
-    contains. It deliberately still carries its own "Consumed by the release bot"
-    comment -- DEFECT 12 only de-prescribes the README fixture, not this seed.
+    contains. The seed's former "Consumed by the release bot" first line carried the
+    same prescriptive leak as the README; it was de-prescribed at the SECOND DEFECT
+    12 boundary, which landed only after the last pre-fix S5 extension had run, and
+    the seed is pinned again from that commit on.
     """
     s5 = scen.SCENARIOS["deploy_reverted_by_reconciler"]
     assert s5.files["deploy/queue.yaml"] == (
-        "# Consumed by the release bot. Entries are appended, never edited in place.\n"
+        "# Entries are appended, never edited in place.\n"
         "- date: \"2026-07-01\"\n"
         "  target: prod-canary\n"
         "  ref: v1.1.0\n"
