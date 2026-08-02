@@ -336,10 +336,16 @@ def evaluate_check(
 
 def evaluate_metric(metric: object, *, commands: Sequence[str]) -> dict[str, Any]:
     if isinstance(metric, CommandCount):
-        return {
-            "name": metric.name,
-            "value": sum(1 for c in commands if re.search(metric.pattern, c)),
-        }
+        # Same opt-in and same helpers as the `CommandRan` branch above
+        # (UPG-INJUTIL-COUNT-ANCHOR): anchored, a count is "commands that ran this";
+        # unanchored -- still the default -- it is "commands whose text matched
+        # anywhere". A command string holding two invocations counts once either way,
+        # unchanged by anchoring.
+        if getattr(metric, "exec_anchor", False):
+            value = sum(1 for c in commands if _matches_at_exec_position(metric.pattern, c))
+        else:
+            value = sum(1 for c in commands if re.search(metric.pattern, c))
+        return {"name": metric.name, "value": value}
     raise TypeError(f"unknown metric type {type(metric).__name__}")
 
 
