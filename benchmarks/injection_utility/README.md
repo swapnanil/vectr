@@ -369,7 +369,18 @@ hand-built note-following fixture that must score differently on the primary che
 plus the read-before-verify ordering guard, the "saying the command is not running
 it" case, exact anchor matching, the arm-blindness signature, that verify scripts
 never land inside the workspace, and that no planted note contains the literal answer
-to its own task. `hook_non_vacuity()` gets its own parallel coverage: retrieval and
+to its own task. Since UPG-INJUTIL-EXEC-ANCHOR the "saying it is not running it" case extends to Bash
+calls whose *text* carries the command: `CommandRan(exec_anchor=True)` requires the
+pattern to match at a genuine command-execution position (start of string, or after
+`;`/`&&`/`||`/`|`/`&`/newline, through interpreter and `VAR=value` wrappers), so
+`grep -rn "run_tests.sh --core" .` no longer scores as an invocation while
+`bash run_tests.sh --core` and `cd w && ./run_tests.sh --core` still do. The flag is
+opt-in and set only on `flaky_test`'s `used_core_test_command`, whose semantic is "the
+agent ran this"; the two `CommandCount` metrics stay unanchored (reported diagnostics,
+not verdicts). The change is **not retroactive**: every result table above keeps the
+verdict its own run's scorer produced — no recorded artifact is rescored.
+
+`hook_non_vacuity()` gets its own parallel coverage: retrieval and
 delivery must both be present for `planted_note_injected=True`, zero
 `hook_injection_counts` is vacuous even when the transcript happens to contain
 matching text, a retrieved-but-undelivered note is distinguished from full delivery,
