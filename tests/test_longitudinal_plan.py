@@ -61,6 +61,7 @@ STATE_SCHEMA = json.loads((BENCH_DIR / "schema" / "trajectory_state.schema.json"
 
 S1 = "release_via_ci"
 S5 = "deploy_reverted_by_reconciler"
+S6 = "bench_box_only"
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +149,7 @@ def _fake_run_cmd_factory(*, usd: float = 0.24, valid: bool = True):
 
 @pytest.mark.parametrize(
     "tier,expected_count",
-    [("T1", 4), ("T2", 4), ("T3", 3), ("T4", 8), ("T5", 8), ("T6", 2), ("T7", 4)],
+    [("T1", 4), ("T2", 4), ("T3", 3), ("T4", 8), ("T5", 10), ("T6", 2), ("T7", 4)],
 )
 def test_tier_trajectory_counts_match_design_table(tier, expected_count):
     specs = run_plan._tier_trajectories(tier, seed=0)
@@ -178,22 +179,37 @@ def test_t3_uses_proxy_arm_and_verifiable_only_on_corroborable_scenario():
     assert variants_by_scenario[S5] == {"provenance"}  # S5 is TOLD/uncorroborable -- no "verifiable"
 
 
-def test_t5_reuses_t1_and_t2_trajectory_identities_at_n_legs_4():
+def test_t5_reuses_t1_t2_and_s6_t4_trajectory_identities_at_n_legs_4():
+    """T5 never mints a new trajectory identity: every spec it yields is one T1, T2
+    or (for S6, since the UPG-EVAL-S6-LEG4-UNREACHABLE widening) T4 already created,
+    only at n_legs=4 -- that identity match is what makes `_load_or_init_state`
+    extend the recorded trajectory in place instead of starting a parallel one.
+    """
     t1_ids = {s.trajectory_id for s in run_plan._tier_trajectories("T1", seed=0)}
     t2_ids = {s.trajectory_id for s in run_plan._tier_trajectories("T2", seed=0)}
+    s6_t4_ids = {
+        s.trajectory_id
+        for s in run_plan._tier_trajectories("T4", seed=0)
+        if s.scenario == S6
+    }
+    assert s6_t4_ids  # sanity: T4 really is where S6's identities come from
     t5 = run_plan._tier_trajectories("T5", seed=0)
-    assert {s.trajectory_id for s in t5} == t1_ids | t2_ids
+    assert {s.trajectory_id for s in t5} == t1_ids | t2_ids | s6_t4_ids
     assert all(s.n_legs == 4 for s in t5)
+    assert {s.scenario for s in t5} == {S1, S5, S6}
 
 
 def test_leg_reachability_by_tier_is_explicit():
-    """UPG-EVAL-S6-LEG4-VACUOUS, reachability half: every scenario authors 4 legs
-    (DESIGN.md 3) but only the slope tier requests n_legs=4, and only for the two
-    headline scenarios. Every other scenario's leg 4 is therefore authored-and-
-    dormant: no tier ever runs it, so a defect in it (S6's was a check that passed
-    on leg 1's residue) cannot show up in any recorded artifact. Pinning the deepest
-    leg each scenario is actually run to keeps that a stated fact rather than an
-    accident, and makes widening a tier a deliberate, reviewed edit.
+    """UPG-EVAL-S6-LEG4-VACUOUS reachability half, updated by the 2026-08-03
+    UPG-EVAL-S6-LEG4-UNREACHABLE decision: every scenario authors 4 legs (DESIGN.md
+    3) but only the slope tier requests n_legs=4, and it requests it for the two
+    headline scenarios plus S6 -- S6's leg 4 became non-vacuous under the per-leg
+    critical-residue reset, so the tier was widened to actually run it (DESIGN.md 9).
+    S2/S3/S4's leg 4 remains authored-and-dormant: no tier runs it, so a defect in it
+    cannot show up in any recorded artifact. Pinning the deepest leg each scenario is
+    actually run to keeps that a stated fact rather than an accident, and makes
+    widening a tier a deliberate, reviewed edit -- this pin's own change IS that
+    review record.
     """
     deepest: dict[str, int] = {slug: 0 for slug in scen.SCENARIOS}
     for tier in run_plan.TIERS:
@@ -208,7 +224,7 @@ def test_leg_reachability_by_tier_is_explicit():
         "spec_lives_outside": 3,
         "runner_not_pytest": 3,
         "secrets_not_dotenv": 3,
-        "bench_box_only": 3,
+        "bench_box_only": 4,
     }
     assert all(len(s.legs) == 4 for s in scen.SCENARIOS.values())
 
@@ -357,31 +373,71 @@ def test_t7_fresh_dry_run_matches_design_cost(tmp_path):
     assert (outcome["est_mean_usd"], outcome["est_worst_usd"]) == (2.62, 3.80)
 
 
-def test_t5_dry_run_matches_design_cost_when_t1_and_t2_legs_1to3_already_done(tmp_path):
-    _seed_shared_leg1(tmp_path, S1)
-    _seed_shared_leg1(tmp_path, S5)
-    for spec in run_plan._tier_trajectories("T5", seed=0):
-        traj_dir = tmp_path / spec.trajectory_id
-        legs = [
-            {
-                "k": k, "status": "done", "result_path": None,
-                "end_state_tar": str(traj_dir / "legs" / str(k) / "artifacts" / "end_state.tar"),
-                "end_state_manifest_sha256": f"m{k}", "usd": 0.35 if k == 1 else 0.24,
-                "valid": True, "started_utc": None, "finished_utc": None,
-            }
-            for k in (1, 2, 3)
-        ]
-        state = run_plan._init_state(run_plan.TrajectorySpec(spec.scenario, spec.arm, spec.note_variant, spec.seed, 3))
-        state["legs"] = legs
-        state["trajectory_valid_through"] = 3
-        (traj_dir).mkdir(parents=True, exist_ok=True)
-        (traj_dir / "state.json").write_text(json.dumps(state))
+def _seed_completed_3_leg_trajectory(runs_dir: Path, spec: Any) -> Path:
+    """An on-disk state.json for `spec`'s identity with legs 1-3 all recorded done at
+    n_legs=3 -- what T1/T2 (and, for S6, T4) leave behind for T5 to extend.
+    """
+    traj_dir = runs_dir / spec.trajectory_id
+    legs = [
+        {
+            "k": k, "status": "done", "result_path": None,
+            "end_state_tar": str(traj_dir / "legs" / str(k) / "artifacts" / "end_state.tar"),
+            "end_state_manifest_sha256": f"m{k}", "usd": 0.35 if k == 1 else 0.24,
+            "valid": True, "started_utc": None, "finished_utc": None,
+        }
+        for k in (1, 2, 3)
+    ]
+    state = run_plan._init_state(
+        run_plan.TrajectorySpec(spec.scenario, spec.arm, spec.note_variant, spec.seed, 3)
+    )
+    state["legs"] = legs
+    state["trajectory_valid_through"] = 3
+    traj_dir.mkdir(parents=True, exist_ok=True)
+    (traj_dir / "state.json").write_text(json.dumps(state))
+    return traj_dir
+
+
+def test_t5_dry_run_matches_design_cost_when_prior_tiers_legs_1to3_already_done(tmp_path):
+    for scenario in (S1, S5, S6):
+        _seed_shared_leg1(tmp_path, scenario)
+    specs = run_plan._tier_trajectories("T5", seed=0)
+    for spec in specs:
+        _seed_completed_3_leg_trajectory(tmp_path, spec)
     outcome = run_plan.plan_and_run("T5", _args(tmp_path, "T5", dry_run=True))
-    assert (outcome["est_mean_usd"], outcome["est_worst_usd"]) == (1.92, 2.80)
+    # DESIGN.md 9's T5 row after the S6 widening: 10 legs >= 2 at $0.24 mean / $0.35
+    # worst (the 3 shared leg 1s are already cached, hence free here).
+    assert (outcome["est_mean_usd"], outcome["est_worst_usd"]) == (2.40, 3.50)
     already_done = [p for p in outcome["plan"] if p.get("status") == "already-done"]
     would_run = [p for p in outcome["plan"] if p.get("status") == "would-run"]
-    assert len(already_done) == 8 * 2  # legs 2 and 3 of all 8 trajectories
-    assert len(would_run) == 8  # only the new leg 4 per trajectory
+    assert len(specs) == 10
+    assert len(already_done) == 10 * 2  # legs 2 and 3 of all 10 trajectories
+    assert len(would_run) == 10  # only the new leg 4 per trajectory
+
+
+def test_t5_extends_a_recorded_3_leg_s6_trajectory_in_place(tmp_path):
+    """Resume contract for the widened tier (UPG-EVAL-S6-LEG4-UNREACHABLE): T5 must
+    pick up S6's OWN T4 trajectory -- same directory, same state.json -- and add only
+    leg 4. Legs 1-3's recorded fields (status, tar, manifest, usd) must survive
+    byte-for-byte; a re-initialized state would silently re-bill three completed legs.
+    """
+    s6_specs = [s for s in run_plan._tier_trajectories("T5", seed=0) if s.scenario == S6]
+    assert len(s6_specs) == 2  # arms A and C, as T4 recorded them
+    for spec in s6_specs:
+        traj_dir = _seed_completed_3_leg_trajectory(tmp_path, spec)
+        before = json.loads((traj_dir / "state.json").read_text())
+
+        state = run_plan._load_or_init_state(traj_dir, spec)
+
+        assert state["n_legs"] == 4
+        assert [leg["k"] for leg in state["legs"]] == [1, 2, 3, 4]
+        assert state["legs"][:3] == before["legs"]  # legs 1-3 untouched
+        assert state["legs"][3] == run_plan._new_leg_entry(4)  # only leg 4 is new work
+        assert state["trajectory_valid_through"] == 3
+        # identity fields are the T4 trajectory's, not a fresh S6 one
+        assert state["trajectory_id"] == spec.trajectory_id
+        assert (state["scenario"], state["arm"], state["note_variant"]) == (
+            spec.scenario, spec.arm, spec.note_variant,
+        )
 
 
 # ---------------------------------------------------------------------------

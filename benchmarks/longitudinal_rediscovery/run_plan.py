@@ -240,19 +240,30 @@ def _d2_trajectories(seed: int, n_legs: int) -> list[TrajectorySpec]:
 
 
 def _slope_trajectories(seed: int) -> list[TrajectorySpec]:
-    """T5: leg 4 on every T1 + T2 trajectory -- does the saving persist past N=3?
-    Reuses the exact trajectory identities T1/T2 already created; requesting n_legs=4
-    against a trajectory whose state.json still has n_legs=3 extends it in place
-    (`_load_or_init_state` appends the missing leg entries rather than
-    reinitializing) -- legs 1..3 are untouched, only leg 4 is new work.
+    """T5: leg 4 on every T1 + T2 trajectory, plus S6's two T4 trajectories -- does
+    the saving persist past N=3? Reuses the exact trajectory identities T1/T2/T4
+    already created (the S6 pair is filtered out of `_scenario_breadth_trajectories`
+    rather than re-spelled here, so its arm/variant pairs cannot drift from the
+    trajectories T4 recorded); requesting n_legs=4 against a trajectory whose
+    state.json still has n_legs=3 extends it in place (`_load_or_init_state` appends
+    the missing leg entries rather than reinitializing) -- legs 1..3 are untouched,
+    only leg 4 is new work.
 
-    Reachability consequence (UPG-EVAL-S6-LEG4-VACUOUS): this is the ONLY tier that
-    requests n_legs=4, and it requests it for S1 and S5 only. Every other scenario
-    authors a leg 4 per DESIGN.md 3 that no tier runs -- dormant, not deleted.
+    Reachability consequence (UPG-EVAL-S6-LEG4-UNREACHABLE): this is the ONLY tier
+    that requests n_legs=4, and it now requests it for S1, S5 AND S6. S6's leg 4 was
+    dormant while the tier covered the headline pair alone; it became non-vacuous
+    under the UPG-EVAL-S6-LEG4-VACUOUS per-leg residue reset, and the 2026-08-03
+    widening decision (DESIGN.md 9) makes it reachable so that fix is exercised by a
+    tier rather than only by unit tests. S2, S3 and S4 still author a leg 4 per
+    DESIGN.md 3 that no tier runs -- dormant, not deleted.
     `tests/test_longitudinal_plan.py::test_leg_reachability_by_tier_is_explicit`
     pins the per-scenario maximum so widening this tier is a visible decision.
     """
-    return _headline_trajectories(seed, 4) + _channel_breadth_trajectories(seed, 4)
+    return (
+        _headline_trajectories(seed, 4)
+        + _channel_breadth_trajectories(seed, 4)
+        + [s for s in _scenario_breadth_trajectories(seed, 4) if s.scenario == _S6_BENCH_BOX_ONLY]
+    )
 
 
 def _tier_trajectories(tier: str, *, seed: int) -> list[TrajectorySpec]:
@@ -363,7 +374,7 @@ def _load_or_init_state(traj_dir: Path, spec: TrajectorySpec) -> dict:
     if not path.is_file():
         return _init_state(spec)
     state = json.loads(path.read_text())
-    # T5 extends an existing T1/T2 trajectory from n_legs=3 to 4 -- append the newly
+    # T5 extends an existing T1/T2/T4 trajectory from n_legs=3 to 4 -- append the newly
     # requested leg entries rather than discarding recorded legs 1..3 (DESIGN.md 9 T5).
     existing_ks = {leg["k"] for leg in state["legs"]}
     for k in range(1, spec.n_legs + 1):

@@ -410,6 +410,83 @@ def test_exec_anchor_respects_want_false(tmp_path):
     assert invocation["passed"] is False
 
 
+# ---------------------------------------------------------------------------
+# UPG-INJUTIL-COUNT-ANCHOR: the same opt-in on the reported CommandCount metrics.
+#
+# `flaky_runner_invocations` / `core_runner_invocations` are named for invocations but
+# counted any-position regex hits, so a `grep` for the runner inflated them. Both are
+# now `exec_anchor=True`; the series is re-baselined at that commit (README) and no
+# recorded artifact is rescored.
+# ---------------------------------------------------------------------------
+
+
+def _flaky_metrics(tmp_path: Path, commands: list[str]) -> dict[str, int]:
+    scenario, ws, vd, base = _setup(tmp_path, "flaky_test")
+    _s3_fix(ws)
+    result = _score(scenario, ws, base, vd, _bash_transcript(commands))
+    return {m["name"]: m["value"] for m in result["metrics"]}
+
+
+@pytest.mark.parametrize("command", _READ_ONLY_MENTIONS)
+def test_reading_the_runner_does_not_count_as_an_invocation(tmp_path, command):
+    metrics = _flaky_metrics(tmp_path, [command])
+    assert metrics["core_runner_invocations"] == 0, f"read-only command counted: {command!r}"
+    assert metrics["flaky_runner_invocations"] == 0, f"read-only command counted: {command!r}"
+
+
+@pytest.mark.parametrize("command", _REAL_INVOCATIONS)
+def test_real_core_invocations_are_still_counted(tmp_path, command):
+    """Anchoring must not cost recall on the metrics either: every shell form that
+    genuinely runs the deterministic runner still increments the core count, and none
+    of them leaks into the flaky count.
+    """
+    metrics = _flaky_metrics(tmp_path, [command])
+    assert metrics["core_runner_invocations"] == 1, f"real invocation missed: {command!r}"
+    assert metrics["flaky_runner_invocations"] == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["./run_tests.sh", "  ./run_tests.sh", "bash run_tests.sh", "cd /w && ./run_tests.sh"],
+)
+def test_real_flaky_invocations_are_still_counted(tmp_path, command):
+    metrics = _flaky_metrics(tmp_path, [command])
+    assert metrics["flaky_runner_invocations"] == 1, f"real invocation missed: {command!r}"
+    assert metrics["core_runner_invocations"] == 0
+
+
+def test_anchored_metrics_separate_a_mention_from_a_run_in_one_transcript(tmp_path):
+    """The re-baseline in one assertion: an agent that greps for the runner twice and
+    then runs it once records ONE invocation, where the pre-anchor definition recorded
+    three.
+    """
+    commands = [
+        'grep -rn "run_tests.sh --core" .',
+        'echo "verify with ./run_tests.sh --core"',
+        "./run_tests.sh --core",
+    ]
+    metrics = _flaky_metrics(tmp_path, commands)
+    assert metrics["core_runner_invocations"] == 1
+
+    unanchored = scen.CommandCount(
+        name="core_runner_invocations_pre_anchor", pattern=r"run_tests\.sh\s+--core"
+    )
+    pre_anchor = scorer.evaluate_metric(unanchored, commands=commands)
+    assert pre_anchor["value"] == 3  # what the old definition recorded
+
+
+def test_command_count_exec_anchor_is_opt_in_and_defaults_to_search_anywhere():
+    """Default-off behavior is byte-identical to before the flag existed, so any
+    metric that has not opted in keeps its recorded meaning.
+    """
+    metric = scen.CommandCount(name="mentions", pattern=r"run_tests\.sh\s+--core")
+    assert metric.exec_anchor is False
+    commands = ['grep -n "run_tests.sh --core" README.md', "./run_tests.sh --core"]
+    assert scorer.evaluate_metric(metric, commands=commands) == {
+        "name": "mentions", "value": 2,
+    }
+
+
 def test_exec_anchoring_matches_the_longitudinal_harness_behaviorally():
     """Drift guard for the deliberate duplication: `_strip_exec_prefixes`,
     `_exec_positions` and `_matches_at_exec_position` are copied per harness (each

@@ -1721,12 +1721,12 @@ S5_DEPLOY_REVERTED_BY_RECONCILER = LongitudinalScenario(
 #     fact under test constrains ("never paste laptop numbers"); staleness is a
 #     different sin and this scenario does not claim to measure it.
 #
-# Leg 4 REACHABILITY: no tier currently runs it. `run_plan._slope_trajectories` (T5,
-# the only n_legs=4 tier) extends the T1+T2 trajectories, which are S1 and S5 only;
-# S6 appears solely in T4 (`_scenario_breadth_trajectories`, n_legs=3). Leg 4 is
-# authored per DESIGN.md 3 and dormant until a tier requests it -- adding S6 to the
-# slope tier is a tier-definition (cost-model) decision for the design lane, not a
-# scenario-authoring one, so it is deliberately not made here.
+# Leg 4 REACHABILITY: reachable since the 2026-08-03 widening decision
+# (UPG-EVAL-S6-LEG4-UNREACHABLE, DESIGN.md 9). `run_plan._slope_trajectories` (T5, the
+# only n_legs=4 tier) extends the T1+T2 trajectories AND S6's own two T4 trajectories,
+# so the residue reset above is exercised by a tier rather than only by unit tests.
+# Before that decision S6 appeared solely in T4 (`_scenario_breadth_trajectories`,
+# n_legs=3) and this leg was authored-but-dormant; S2/S3/S4's leg 4 still is.
 # ---------------------------------------------------------------------------
 
 _S6_FACT = (
@@ -1991,10 +1991,10 @@ S6_BENCH_BOX_ONLY = LongitudinalScenario(
             memory_arm_expectation="Uses REMOTE=1; the saving should not decay with k.",
         ),
         LegSpec(
-            # Slope tier (T5) only -- and NOT reachable from any tier as currently
-            # defined (see the reachability note in this scenario's header comment).
-            # Its check repeats leg 1's argv verbatim, which is only non-vacuous
-            # because `critical_residue_paths` resets RESULTS.md at every k>=2 start.
+            # Slope tier (T5) only -- reachable since T5 was widened to cover S6 (see
+            # the reachability note in this scenario's header comment). Its check
+            # repeats leg 1's argv verbatim, which is only non-vacuous because
+            # `critical_residue_paths` resets RESULTS.md at every k>=2 start.
             prompt="Re-measure radix_sort after the bucket-count change.",
             primary_check="results_traceable_radix_sort_leg4",
             checks=(
