@@ -1236,7 +1236,7 @@ class TestCheckVersionSkew:
         err = capsys.readouterr().err
         lines = [l for l in err.splitlines() if l.strip()]
         assert len(lines) == 1
-        assert "daemon on port 8765 is running older code" in lines[0]
+        assert "daemon on port 8765 is running different code" in lines[0]
         assert "1.0.0+old0000" in lines[0]
         assert "1.0.0+local1" in lines[0]
         assert "vectr restart" in lines[0]
@@ -1292,6 +1292,108 @@ class TestCheckVersionSkew:
         with patch("main.compute_version_stamp", return_value="1.0.0+abc1234"):
             m._check_version_skew(8765, daemon_status={"version_stamp": "1.0.0+abc1234"})
         assert capsys.readouterr().err == ""
+
+
+class TestVersionSkewKeysOnGitSha:
+    """UPG-VERSION-SKEW-FALSE-POSITIVE: code identity is the git sha, not the
+    packaged version string. The live false positive was 'daemon on port 8765
+    is running older code (1.7.0+6925d4c vs 1.6.0+6925d4c)' — same sha (so the
+    daemon was running exactly this code), and its version was the NEWER one;
+    the CLI's 1.6.0 came from stale editable-install dist metadata.
+    """
+
+    def test_same_sha_different_version_prefix_never_claims_older_code(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.6.0+6925d4c"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.7.0+6925d4c"})
+        err = capsys.readouterr().err
+        assert "older code" not in err
+        assert "different code" not in err
+
+    def test_same_sha_different_version_prefix_says_metadata_mismatch(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.6.0+6925d4c"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.7.0+6925d4c"})
+        lines = [l for l in capsys.readouterr().err.splitlines() if l.strip()]
+        assert len(lines) == 1
+        assert "version metadata mismatch" in lines[0]
+        assert "6925d4c" in lines[0]
+
+    def test_same_sha_does_not_advise_a_restart(self, capsys):
+        """Nothing to remediate: the daemon is already running this code."""
+        with patch("main.compute_version_stamp", return_value="1.6.0+6925d4c"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.7.0+6925d4c",
+                "mode": "memory-only",
+                "workspace_root": "/project/a",
+            })
+        assert "vectr restart" not in capsys.readouterr().err
+
+    def test_different_sha_same_version_prefix_warns(self, capsys):
+        """The case the banner exists for — a stale daemon whose packaged
+        version happens not to have been bumped."""
+        with patch("main.compute_version_stamp", return_value="1.7.0+bbbbbbb"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.7.0+aaaaaaa", "workspace_root": "/project/a",
+            })
+        err = capsys.readouterr().err
+        assert "running different code" in err
+        assert "vectr restart /project/a" in err
+
+    def test_abbreviated_sha_of_the_same_revision_is_not_a_mismatch(self, capsys):
+        """Short-sha length is a git setting, not a code difference: one
+        abbreviation being a prefix of the other means the same revision."""
+        with patch("main.compute_version_stamp", return_value="1.7.0+6925d4c8a"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.7.0+6925d4c"})
+        assert capsys.readouterr().err == ""
+
+    def test_no_sha_on_either_side_falls_back_to_version_comparison(self, capsys):
+        """Installed-from-wheel daemon and CLI (no git checkout on either
+        side): the packaged version is the only identity available, so a
+        difference still warns — worded as a version difference, never as
+        'older', which a lexical compare cannot establish."""
+        with patch("main.compute_version_stamp", return_value="1.7.0"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.6.0", "workspace_root": "/project/a",
+            })
+        err = capsys.readouterr().err
+        assert "running a different version" in err
+        assert "older" not in err
+        assert "vectr restart /project/a" in err
+
+    def test_sha_on_one_side_only_with_equal_versions_is_silent(self, capsys):
+        """A daemon started from an installed copy reports no sha while a CLI
+        run from the checkout does. Code identity is then unknowable — with
+        matching versions, saying anything would be a guess."""
+        with patch("main.compute_version_stamp", return_value="1.7.0+6925d4c"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.7.0"})
+        assert capsys.readouterr().err == ""
+
+    def test_sha_on_one_side_only_with_different_versions_warns(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.7.0+6925d4c"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.6.0", "workspace_root": "/project/a",
+            })
+        err = capsys.readouterr().err
+        assert "running a different version" in err
+        assert "vectr restart /project/a" in err
+
+    def test_local_version_segment_before_the_sha_is_handled(self, capsys):
+        """`compute_version_stamp` appends '+<sha>' to whatever the packaging
+        metadata says, so a version that already carries a PEP 440 local
+        segment yields two '+' — the sha is the LAST component."""
+        assert m._stamp_parts("1.7.0+dirty+6925d4c") == ("1.7.0+dirty", "6925d4c")
+        with patch("main.compute_version_stamp", return_value="1.6.0+dirty+6925d4c"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.7.0+dirty+6925d4c"})
+        assert "different code" not in capsys.readouterr().err
+
+    def test_empty_sha_component_is_treated_as_absent(self, capsys):
+        """A malformed stamp ending in '+' must not compare equal to another
+        malformed one as if both named the same revision."""
+        assert m._stamp_parts("1.7.0+") == ("1.7.0", None)
+        with patch("main.compute_version_stamp", return_value="1.6.0+"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.7.0+", "workspace_root": "/project/a",
+            })
+        assert "running a different version" in capsys.readouterr().err
 
     def test_daemon_stamp_missing_prints_nothing(self, capsys):
         with patch("main.compute_version_stamp", return_value="1.0.0+abc1234"):

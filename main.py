@@ -415,10 +415,74 @@ def _handle_daemon_call_error(exc: Exception, port: int) -> None:
     raise exc
 
 
+def _stamp_parts(stamp: str) -> tuple[str, str | None]:
+    """Split a version stamp into `(packaged-version, git-sha | None)`.
+
+    `compute_version_stamp` builds the stamp by appending `+<short-sha>` to
+    whatever the packaging metadata reports, and that metadata may already
+    carry its own PEP 440 local segment (`1.7.0+dirty`) — so the sha is the
+    part after the LAST `+`, never the first. A stamp with no `+`, or with an
+    empty trailing component, has no sha: code identity is simply unknown,
+    which is not the same as "no revision".
+    """
+    version, sep, sha = stamp.rpartition("+")
+    if not sep:
+        return stamp, None
+    if not sha:
+        return version, None
+    return version, sha
+
+
+def _same_revision(daemon_sha: str, local_sha: str) -> bool:
+    """True when two git short shas name the same commit. Short-sha LENGTH is
+    a per-repo/per-git-version setting (`core.abbrev`, and git widens it as a
+    repo grows), so the same revision can legitimately print as `6925d4c` on
+    one side and `6925d4c8a` on the other. Both are abbreviations of one
+    40-hex id, so a prefix relation is the correct identity test — and git
+    only ever emits an abbreviation that is unambiguous in the repo."""
+    return daemon_sha.startswith(local_sha) or local_sha.startswith(daemon_sha)
+
+
+def _version_skew_verdict(daemon_stamp: str, local_stamp: str) -> str | None:
+    """Classify a daemon/CLI stamp pair as `None` (nothing to report),
+    `"code"` (different revisions), `"version"` (no revision to compare, and
+    the packaged versions differ) or `"metadata"` (same revision, different
+    packaged version).
+
+    UPG-VERSION-SKEW-FALSE-POSITIVE: the decision keys on the git sha,
+    because the sha is what identifies the code and the version prefix does
+    not. The live false positive was a daemon reporting `1.7.0+6925d4c`
+    against a CLI reporting `1.6.0+6925d4c`, announced as "running older
+    code": same sha (so the daemon was running exactly the code the CLI was
+    invoked from) and, if anything, the NEWER version — the CLI's `1.6.0`
+    was stale editable-install dist metadata that `pyproject.toml` had
+    already moved past. Two independent lessons encoded here: a version
+    prefix can be stale while the code is current, and "older" is not
+    something a lexical comparison of two version strings can establish at
+    all, so the wording never claims it.
+    """
+    if daemon_stamp == local_stamp:
+        return None
+    daemon_version, daemon_sha = _stamp_parts(daemon_stamp)
+    local_version, local_sha = _stamp_parts(local_stamp)
+    if daemon_sha and local_sha:
+        if not _same_revision(daemon_sha, local_sha):
+            return "code"
+        # Same revision: whatever else differs, it is not the code. Only a
+        # genuine disagreement between the two packaged version strings is
+        # worth a word — differing sha ABBREVIATION lengths are not.
+        return "metadata" if daemon_version != local_version else None
+    # At least one side isn't running from a git checkout (installed copy),
+    # so there is no revision to compare. The packaged version is then the
+    # only identity available — and for a wheel install it is a real one.
+    # Equal versions with only one sha present says nothing either way.
+    return "version" if daemon_version != local_version else None
+
+
 def _check_version_skew(port: int, daemon_status: dict | None = None) -> None:
-    """Warn once, to stderr, when the daemon on `port` is running older code
-    than this CLI invocation (UPG-CLI-DAEMON-VERSION-SKEW). This is the ONE
-    shared choke point every daemon-talking subcommand calls — the
+    """Warn once, to stderr, when the daemon on `port` is running code that
+    differs from this CLI invocation's (UPG-CLI-DAEMON-VERSION-SKEW). This is
+    the ONE shared choke point every daemon-talking subcommand calls — the
     comparison logic itself is never copy-pasted per subcommand.
 
     Never blocks or fails the calling command: any probe failure (daemon
@@ -439,10 +503,29 @@ def _check_version_skew(port: int, daemon_status: dict | None = None) -> None:
             daemon_status = resp.json()
         daemon_stamp = daemon_status.get("version_stamp")
         local_stamp = compute_version_stamp()
-        if not daemon_stamp or not local_stamp or daemon_stamp == local_stamp:
+        if not daemon_stamp or not local_stamp:
             return
+        verdict = _version_skew_verdict(daemon_stamp, local_stamp)
+        if verdict is None:
+            return
+        if verdict == "metadata":
+            # Same revision on both sides — the daemon IS running this code,
+            # so there is nothing to restart and nothing to fix in vectr;
+            # only the two dist-metadata version strings disagree (a stale
+            # editable install being the usual cause). Reported rather than
+            # hidden, because the mismatch is real and confusing wherever
+            # either version is displayed.
+            print(
+                f"vectr: version metadata mismatch with the daemon on port {port} "
+                f"({daemon_stamp} vs {local_stamp}) — same code revision "
+                f"{_stamp_parts(daemon_stamp)[1]}, no restart needed "
+                f"(reinstall to refresh this CLI's version metadata)",
+                file=sys.stderr,
+            )
+            return
+        difference = "different code" if verdict == "code" else "a different version"
         print(
-            f"vectr: daemon on port {port} is running older code "
+            f"vectr: daemon on port {port} is running {difference} "
             f"({daemon_stamp} vs {local_stamp}) — run "
             f"'{_restart_command(daemon_status)}'",
             file=sys.stderr,
