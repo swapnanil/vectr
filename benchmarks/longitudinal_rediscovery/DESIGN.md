@@ -818,14 +818,16 @@ result. `critical_residue_paths` is a narrower, opt-in complement to the general
 residue rule (§2.2) and to `ignore_paths`, not a replacement for either.
 
 S6's `RESULTS.md` entry is non-retroactive on the same terms, and no recorded artifact
-is affected in any case: the slope tier (§9 T5) extends the T1+T2 trajectories, which
-are S1 and S5 only, so **no tier as defined runs S6's leg 4** — every scenario authors
-four legs per §3, but only the two headline scenarios are ever run past leg 3. S6's
-leg-4 defect was therefore latent, not present in any campaign output. Widening T5 to
-cover S6 is a cost-model decision for this document (§9), deliberately not taken as
-part of the scenario-authoring fix;
+is affected in any case: at the time of that fix the slope tier (§9 T5) extended the
+T1+T2 trajectories, which are S1 and S5 only, so **no tier as then defined ran S6's leg
+4** — every scenario authors four legs per §3, but only the two headline scenarios were
+ever run past leg 3. S6's leg-4 defect was therefore latent, not present in any campaign
+output, and remains absent from every artifact recorded before this document's §9
+widening. That widening has since been taken as its own cost-model decision
+(UPG-EVAL-S6-LEG4-UNREACHABLE, 2026-08-03): **T5 now also extends S6's two T4
+trajectories**, so the reset above is exercised by a tier and not only by unit tests.
 `tests/test_longitudinal_plan.py::test_leg_reachability_by_tier_is_explicit` pins the
-current per-scenario depth so the choice stays visible.
+per-scenario depth so the choice — then and now — stays visible.
 
 ### 6.6 Outcome check
 
@@ -1006,12 +1008,26 @@ sessions are longer). Each tier is approved separately by the sentinel.
 | **T2** channel breadth | D1 (SessionStart) + B (guided MCP) on the same 2 scenarios; leg 1 reused free | 8 | $1.92 | $2.80 |
 | **T3** verifiable notes | `provenance` on S1+S5 (Q2 + control), `verifiable` on S1 (Q1) | 6 | $1.44 | $2.10 |
 | **T4** scenario breadth | S2, S3, S4, S6 × arms {A, C} | 20 | $5.24 | $7.60 |
-| **T5** slope | leg 4 on every T1+T2 trajectory — does the saving persist? | 8 | $1.92 | $2.80 |
+| **T5** slope | leg 4 on every T1+T2 trajectory **and on S6's two T4 trajectories** — does the saving persist? | 10 | $2.40 | $3.50 |
 | **T6** D2 *(conditional)* | full hook set, only with a `verified:true` attestation | 4 | $0.96 | $1.40 |
 | **T7** replication | seed 1 of T1 | 10 | $2.62 | $3.80 |
 
 Cumulative: **T0+T1 = $2.62 mean / $3.80 worst** (the headline tier, comfortably inside
-the <$5 constraint on its own); through T4 $11.22 / $16.30; through T7 $16.72 / $23.70.
+the <$5 constraint on its own); through T4 $11.22 / $16.30; through T7 $17.20 / $25.00.
+(Through-T7 moves by +$0.48 mean / +$0.70 worst for T5's two added S6 legs. Both totals
+are now the exact sums of the rows above; the previous worst-case figure of $23.70 was
+$0.60 below its own row sum even before this change.)
+
+**T5 scope (widened 2026-08-03, UPG-EVAL-S6-LEG4-UNREACHABLE).** T5 originally extended
+the T1+T2 trajectories only — S1 and S5 — so **no tier ran S6's leg 4**, and §6.5's
+`critical_residue_paths` fix (the thing that makes that leg non-vacuous at all) was
+exercised by unit tests but by no campaign cell. T5 now also extends S6's own two T4
+trajectories (arms A and C, `bench_box_only`), reusing those exact trajectory
+identities: legs 1–3 are already recorded, so the widening buys **2 legs, +$0.48 mean /
++$0.70 worst**, on the same per-leg basis as every other row. S2/S3/S4 still author a
+leg 4 that no tier runs; `tests/test_longitudinal_plan.py::
+test_leg_reachability_by_tier_is_explicit` pins the per-scenario deepest leg, so any
+further widening is again a visible, reviewed edit.
 
 **Ordering rationale.** T1 buys the whole claim at the smallest price: one DISCOVERED
 scenario where re-discovery cost is the point, one TOLD scenario where mistake
@@ -1037,7 +1053,7 @@ Nothing in the design requires an unbroken 5-hour window.
 |---|---|
 | Path dependence: leg *k-1* residue teaches leg *k* | §2.2 residue rule at authoring time; per-*k* reporting so decay in arm A is visible |
 | Canonical (oracle) note ⇒ upper bound | stated as a scope limit (§5.3); EVAL-WRITE-HALF is the follow-on |
-| N=3 is a short "longitudinal" | T5 adds leg 4 on headline trajectories and reports the slope |
+| N=3 is a short "longitudinal" | T5 adds leg 4 on the headline trajectories and on S6, and reports the slope |
 | Single seed at headline | T7 replicates; until then, per-cell results are reported raw, never as means |
 | Small synthetic workspaces never compact | acknowledged: this measures session-boundary survival only, and therefore **understates** the channel |
 | Prior strength assumed | it is measured: `mistake_committed(1)` in arm A; `weak_prior:true` flags a scenario for replacement |
