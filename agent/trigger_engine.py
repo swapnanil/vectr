@@ -54,7 +54,12 @@ from agent.config import (
     MEMORY_TRIGGER_PER_TURN_TOKEN_CAP,
     MEMORY_TRIGGER_PRIORITY_RANK,
 )
-from agent.working_context_store._types import DEFAULT_SCOPE, EVENT_VALUES, WorkingNote
+from agent.working_context_store._types import (
+    DEFAULT_SCOPE,
+    EVENT_VALUES,
+    USER_STATED_PROVENANCE,
+    WorkingNote,
+)
 
 # Kinds that inject full-text (design doc §3 two-tier budget); every other
 # kind injects its index-tier one-liner. Not config.yaml: this is the kind
@@ -713,6 +718,12 @@ class TurnInjectionLedger:
 # injected block's framing is deterministic on provenance+kind alone.
 _HUMAN_DIRECTIVE_FRAME = "DIRECTIVE (standing rule from the user — follow it): "
 _HUMAN_FRAME = "Recorded by the user: "
+# UPG-MEM-PROVENANCE-USER-STATED: one frame for every kind, deliberately. The
+# unhedged imperative stays reserved for human provenance — this class says
+# what is machine-checkable and nothing more (a verbatim excerpt of the user's
+# words is bound to this note's content) and lets the reader draw the
+# conclusion, rather than asserting endorsement nobody verified.
+_USER_STATED_FRAME = "User-stated (verbatim excerpt bound, transcribed by an AI session): "
 _AGENT_FRAME = "Memory to verify (recorded by an AI session, not human-endorsed): "
 _AUTO_FRAME = "Auto-captured (weakest confidence, no reviewing judgment applied — verify before relying on this): "
 
@@ -720,11 +731,14 @@ _AUTO_FRAME = "Auto-captured (weakest confidence, no reviewing judgment applied 
 def frame_prefix(provenance: str, kind: str) -> str:
     """The imperative/hedged framing prefix for one injected memory block.
     Only human-provenance directives ever render as an unhedged imperative;
-    agent-provenance is framed as memory to verify; auto-provenance carries
-    the weakest framing (bm2-design-skeleton.md §5). Immutable per note —
-    this is a pure function of the note's own stored (provenance, kind)."""
+    user-stated provenance names its bound verbatim excerpt; agent-provenance
+    is framed as memory to verify; auto-provenance carries the weakest framing
+    (bm2-design-skeleton.md §5). Immutable per note — this is a pure function
+    of the note's own stored (provenance, kind)."""
     if provenance == "human":
         return _HUMAN_DIRECTIVE_FRAME if kind == "directive" else _HUMAN_FRAME
+    if provenance == USER_STATED_PROVENANCE:
+        return _USER_STATED_FRAME
     if provenance == "auto":
         return _AUTO_FRAME
     return _AGENT_FRAME  # "agent" (default) and any unrecognised value

@@ -308,17 +308,17 @@ def client_real_memory(tmp_path):
 
     def _remember(content, tags=None, priority="medium", session_id=None, kind="finding", title="",
                   agent="", triggers=None, provenance="agent", scope=None, anchors=None,
-                  supersedes=None, contradicts=None):
+                  supersedes=None, contradicts=None, user_quote=None):
         return real_store.remember(
             ws, content, tags, priority, session_id, kind=kind, title=title, author_id=agent,
             triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
-            supersedes=supersedes, contradicts=contradicts,
+            supersedes=supersedes, contradicts=contradicts, user_quote=user_quote,
         )
 
     def _remember_with_extras(content, tags=None, priority="medium", session_id=None,
                                kind="finding", title="", agent="", triggers=None,
                                provenance="agent", scope=None, anchors=None,
-                               supersedes=None, contradicts=None):
+                               supersedes=None, contradicts=None, user_quote=None):
         """Mirrors VectrService.remember_with_extras's own gating (app/
         service.py) against this fixture's real store, so /v1/remember
         REST tests routed through this fixture get a REAL RememberOutcome
@@ -338,7 +338,7 @@ def client_real_memory(tmp_path):
         )
         note_id = _remember(
             content, tags, priority, session_id, kind, title, agent, triggers,
-            provenance, scope, anchors, supersedes, contradicts,
+            provenance, scope, anchors, supersedes, contradicts, user_quote,
         )
         related = []
         if MEMORY_WRITE_RELATED_ENABLED:

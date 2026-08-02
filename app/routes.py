@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 import agent.config as config
 from agent.chroma_dispatch import dispatch_chroma_async
+from agent.working_context_store import bind_user_quote
 
 from app.models import (
     ArcRecord,
@@ -358,6 +359,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
             anchors=body.anchors,
             supersedes=body.supersedes,
             contradicts=body.contradicts,
+            user_quote=body.user_quote,
         )
     except ValueError as exc:
         # TRIGGER-ENGINE wave 1: malformed triggers, an unrecognised
@@ -367,6 +369,14 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         # not exist — all caller input errors, never a server fault.
         raise HTTPException(status_code=422, detail={"error": "invalid_memory_object", "detail": str(exc)})
     note_id = outcome.note_id
+    # UPG-MEM-PROVENANCE-USER-STATED: a user_quote that did not bind never
+    # fails the write — it is discarded and the caller is told why, in the
+    # same response, recomputed with the same pure function the store used
+    # (no second write path, no stored rejection state).
+    quote_suffix = ""
+    if body.user_quote:
+        _bound, reason = bind_user_quote(body.content, body.user_quote)
+        quote_suffix = f" {reason}" if reason else " Bound the user_quote: provenance='user-stated'."
     distilled = None
     if body.distilled_from:
         # Distillation write-back: the note write
@@ -379,7 +389,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         # CLI-form hint (UPG-CLI-RECALL-HINT): this route is the CLI's `vectr
         # remember`, not the MCP tool — the MCP dispatch builds its own
         # separate confirmation text in `vectr_remember(note_id=N)` form.
-        message=f"Stored note #{note_id}. Recall with: vectr recall --id {note_id}",
+        message=f"Stored note #{note_id}. Recall with: vectr recall --id {note_id}{quote_suffix}",
         processing_ms=int((time.monotonic() - t0) * 1000),
         distilled=distilled,
         related=[RelatedNoteModel(**r) for r in outcome.related],

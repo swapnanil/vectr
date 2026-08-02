@@ -396,6 +396,19 @@ _MEMORY_WRITE_TOOLS = [
                     "default": "agent",
                     "enum": ["agent", "auto"],
                 },
+                "user_quote": {
+                    "type": "string",
+                    "description": (
+                        "Optional: when this note transcribes something the USER said, the "
+                        "user's own words, verbatim. Bound only if that exact text also "
+                        "appears inside `content` (whitespace-insensitive substring check); "
+                        "a bound quote stores the note as provenance='user-stated' so it "
+                        "resurfaces as the user's statement rather than your own recollection. "
+                        "Paraphrase, or words the user did not actually write, will not bind "
+                        "— the note is stored as an ordinary 'agent' note and the reason is "
+                        "returned. Never fails the write."
+                    ),
+                },
                 "scope": {
                     "type": "string",
                     "description": (

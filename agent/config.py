@@ -1221,6 +1221,9 @@ MEMORY_WRITE_RELATED_ENABLED: bool = bool(_related_notes_cfg["enabled"])
 MEMORY_WRITE_RELATED_LIMIT: int = int(_related_notes_cfg["limit"])
 MEMORY_WRITE_RELATED_MIN_SIMILARITY: float = float(_related_notes_cfg["min_similarity"])
 
+_user_quote_cfg: dict[str, Any] = _mem_write_cfg["user_quote"]
+MEMORY_WRITE_USER_QUOTE_MIN_CHARS: int = int(_user_quote_cfg["min_chars"])
+
 _proxy_suggest_cfg: dict[str, Any] = _mem_write_cfg["proxy_anchor_suggestions"]
 MEMORY_WRITE_PROXY_SUGGEST_ENABLED: bool = bool(_proxy_suggest_cfg["enabled"])
 MEMORY_WRITE_PROXY_SUGGEST_LIMIT: int = int(_proxy_suggest_cfg["limit"])

@@ -27,7 +27,18 @@ PROVENANCE_RANK: dict[str, int] = {
 # a mixed-provenance block never overstates trust; a candidate with no
 # recorded provenance (unset, or a non-note candidate such as code_semantic)
 # looks itself up here via `.get(..., 0)` and lands at the weakest rank.
-NOTE_PROVENANCE_TRUST_RANK: dict[str, int] = {"auto": 0, "agent": 1, "human": 2}
+#
+# "user-stated" (UPG-MEM-PROVENANCE-USER-STATED) ranks WITH "agent", not above
+# it, matching `_types.PROMOTION_RANK`: the envelope describes who authored
+# the text arriving on the wire, and that is still an AI session transcribing
+# the user, so the agent-tier envelope is the honest one. Ranking it at
+# "human" would let a bound excerpt select the strongest envelope for the
+# whole block; leaving it unlisted would drag a mixed block down to the
+# weakest one. It is listed explicitly rather than left to `.get(..., 0)` for
+# exactly that reason.
+NOTE_PROVENANCE_TRUST_RANK: dict[str, int] = {
+    "auto": 0, "agent": 1, "user-stated": 1, "human": 2,
+}
 
 # The folded note-lifecycle state (UPG-MEMORY-STATE-MACHINE) a non-note
 # candidate carries — a code-search hit has no note to fold state for, and

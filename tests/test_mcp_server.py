@@ -1250,7 +1250,7 @@ class TestRelativePathRender:
 # for the write-time resolution itself).
 _DEFAULT_TRIGGER_PARAMS = dict(
     triggers=None, provenance="agent", scope=None, anchors=None, supersedes=None,
-    contradicts=None, session_id=None,
+    contradicts=None, session_id=None, user_quote=None,
 )
 
 
@@ -1407,7 +1407,7 @@ class TestVectrRemember:
             kind="gotcha", title="", agent="",
             triggers=[{"path": "src/auth.py", "event": "pre-edit"}],
             provenance="auto", scope="repo", anchors=["src/auth.py"], supersedes=None,
-            contradicts=None, session_id=None,
+            contradicts=None, session_id=None, user_quote=None,
         )
 
     def test_remember_passes_supersedes_as_int(self) -> None:
@@ -1417,7 +1417,7 @@ class TestVectrRemember:
             content="corrected finding", tags=None, priority="medium",
             kind="finding", title="", agent="",
             triggers=None, provenance="agent", scope=None, anchors=None, supersedes=7,
-            contradicts=None, session_id=None,
+            contradicts=None, session_id=None, user_quote=None,
         )
 
     def test_remember_non_integer_supersedes_returns_error(self) -> None:
@@ -1437,7 +1437,7 @@ class TestVectrRemember:
             content="the API actually returns a dict", tags=None, priority="medium",
             kind="finding", title="", agent="",
             triggers=None, provenance="agent", scope=None, anchors=None, supersedes=None,
-            contradicts=7, session_id=None,
+            contradicts=7, session_id=None, user_quote=None,
         )
 
     def test_remember_non_integer_contradicts_returns_error(self) -> None:

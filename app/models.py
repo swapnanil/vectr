@@ -263,6 +263,10 @@ _VALID_KINDS = ("directive", "task", "gotcha", "finding", "reference", "decision
 # module's existing convention for _VALID_KINDS above (the REST/MCP request
 # schema validates independently of the store's own internal validation).
 _SCOPE_VALUES = ("workspace", "repo", "path-subtree", "branch", "session")
+# The promotion ladder (mirrors _types.PROMOTION_LADDER, strongest last),
+# used by PromoteRequest's `to` below. Deliberately does NOT include
+# "user-stated": that class is derived at write time from a bound verbatim
+# user excerpt (UPG-MEM-PROVENANCE-USER-STATED), never a promotion target.
 _PROVENANCE_VALUES = ("human", "agent", "auto")
 # TRIGGER-ENGINE wave 2a — mirrors
 # agent.working_context_store._types.EVENT_VALUES, same local-tuple
@@ -357,6 +361,20 @@ class RememberRequest(BaseModel):
             "the target, always actor='agent', reason=f'contradicted by "
             "#<this note id>'. Rejected if the target does not exist in "
             "this workspace."
+        ),
+    )
+    user_quote: str = Field(
+        default="",
+        description=(
+            "Optional verbatim excerpt of the user turn this note "
+            "transcribes (UPG-MEM-PROVENANCE-USER-STATED). Bound only if it "
+            "is genuinely quoted inside `content` (whitespace-normalized "
+            "substring — a deterministic string check, never semantic); a "
+            "bound excerpt stores the note as provenance='user-stated', a "
+            "class between 'human' and 'agent'. An excerpt that does not "
+            "bind is discarded, the note is stored at its ordinary "
+            "provenance, and the reason is appended to the response message "
+            "— never an error."
         ),
     )
     distilled_from: list[int] | None = Field(
