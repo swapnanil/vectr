@@ -164,6 +164,15 @@ class TestStatusModeFieldSearchOnly:
         status = svc.status()
         assert status["mode"] == "search-only"
 
+    def test_cli_mode_label_matches_the_service_status_vocabulary(self, tmp_path, monkeypatch):
+        """UPG-RESTART-DROPS-MODE drift guard: `main._mode_name` is what the
+        instance registry stores and the staleness banner prints, and it has
+        to keep meaning the same thing as the daemon's own `status()["mode"]`.
+        """
+        import main
+        svc = _make_service(tmp_path, monkeypatch, search_only=True)
+        assert main._mode_name(memory_only=False, search_only=True) == svc.status()["mode"]
+
     def test_search_only_notes_count_is_zero(self, tmp_path, monkeypatch):
         svc = _make_service(tmp_path, monkeypatch, search_only=True)
         status = svc.status()

@@ -164,6 +164,21 @@ class TestStatusModeField:
         status = svc.status()
         assert status["mode"] == "memory-only"
 
+    def test_cli_mode_labels_match_the_service_status_vocabulary(self, tmp_path, monkeypatch):
+        """UPG-RESTART-DROPS-MODE drift guard: `main._mode_name` is what the
+        instance registry stores and the staleness banner prints, and it has
+        to keep meaning the same thing as the daemon's own `status()["mode"]`.
+        """
+        import main
+        mem_ws = tmp_path / "mem"
+        mem_ws.mkdir()
+        mem = _make_service(mem_ws, monkeypatch, memory_only=True)
+        assert main._mode_name(memory_only=True, search_only=False) == mem.status()["mode"]
+        full_ws = tmp_path / "full"
+        full_ws.mkdir()
+        full = _make_service(full_ws, monkeypatch, memory_only=False)
+        assert main._mode_name(memory_only=False, search_only=False) == full.status()["mode"]
+
 
 # ---------------------------------------------------------------------------
 # Memory tools work in memory-only mode (remember/recall round-trip)

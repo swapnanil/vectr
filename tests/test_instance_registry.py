@@ -100,6 +100,25 @@ def test_register_stores_extra_roots_and_code_workspace_file(registry):
     assert entry["code_workspace_file"] == "/project/proj.code-workspace"
 
 
+def test_register_defaults_mode_and_host(registry):
+    """UPG-RESTART-DROPS-MODE: a plain register records the plain launch —
+    full mode on the loopback bind — so `restart` inherits something truthful
+    even from an entry written by a caller that names neither."""
+    registry.register("abc123456789", "/project/a", 8765, 12345)
+    entry = registry.get("abc123456789")
+    assert entry["mode"] == "full"
+    assert entry["host"] == "127.0.0.1"
+
+
+def test_register_stores_mode_and_host(registry):
+    registry.register(
+        "abc123456789", "/project/a", 8765, 12345, mode="memory-only", host="0.0.0.0",
+    )
+    entry = registry.get("abc123456789")
+    assert entry["mode"] == "memory-only"
+    assert entry["host"] == "0.0.0.0"
+
+
 def test_register_overwrites_existing_entry(registry):
     registry.register("abc123456789", "/project/a", 8765, 100)
     registry.register("abc123456789", "/project/a", 8766, 200)

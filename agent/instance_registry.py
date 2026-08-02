@@ -98,6 +98,8 @@ class InstanceRegistry:
         pid: int,
         extra_roots: list[str] | None = None,
         code_workspace_file: str | None = None,
+        mode: str = "full",
+        host: str = "127.0.0.1",
     ) -> None:
         data = self._read()
         data[ws_hash] = {
@@ -111,6 +113,16 @@ class InstanceRegistry:
             # saw (UPG-CLI-STATUS-MODE).
             "extra_roots": extra_roots or [],
             "code_workspace_file": code_workspace_file,
+            # UPG-RESTART-DROPS-MODE: the launch configuration a later
+            # `restart` has to reproduce. Before this, mode and bind host
+            # existed only in the launching argv, so restarting a
+            # `--memory-only` daemon silently brought it back in FULL mode
+            # (indexing + watcher) unless the operator remembered the flag —
+            # which the CLI's own staleness banner never told them to pass.
+            # `mode` uses the same vocabulary the daemon reports in
+            # `/v1/status` ("full" | "memory-only" | "search-only").
+            "mode": mode,
+            "host": host,
         }
         self._write(data)
 
