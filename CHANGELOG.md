@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.8.0 - 2026-08-03
+
+A restart now means "the same daemon again", version staleness is decided by
+the code revision rather than the version string, and a note that transcribes
+a direct user statement can now prove it.
+
+### CLI
+- `vectr restart <workspace>` inherits the recorded mode (full, memory-only,
+  or search-only) and bind host of the instance it replaces. Explicit
+  `--memory-only`/`--search-only` still win, and a new `--full` flag exits an
+  inherited reduced mode on purpose. Previously a memory-only daemon came
+  back in full mode (indexing and file watcher on) unless the flag was
+  re-passed, and the staleness banner recommended exactly the bare command
+  that caused the flip; the banner now prints the mode-complete command.
+- The version-staleness warning keys on the git revision, not the version
+  string. Same revision with differing packaged versions reports a "version
+  metadata mismatch ... no restart needed" (the usual cause is a stale
+  editable install). "Older" is never claimed from a lexical version compare,
+  and abbreviated revision ids of the same commit are not a mismatch.
+
+### Working memory
+- New derived provenance class `user-stated` for notes that transcribe a
+  direct user statement. A write may attach a `user_quote`; the store binds
+  it only when the excerpt appears verbatim in the note content
+  (whitespace-insensitive, case-sensitive, minimum 12 characters: a
+  deterministic string check, never a semantic one). A bound note renders
+  with its own recall frame naming the verbatim excerpt; an excerpt that
+  fails the check is discarded and the note stays in the ordinary
+  agent-recorded class, with the reason surfaced in the write response. The
+  class cannot be claimed directly, only earned by the check. Available over
+  MCP and REST.
+
 ## 1.7.0 — 2026-07-29
 
 Proactive delivery becomes worth reading: an injected item now carries the
