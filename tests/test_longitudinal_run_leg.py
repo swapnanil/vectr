@@ -1115,13 +1115,13 @@ def test_critical_residue_reset_runs_after_manifest_integrity_check_not_before(t
 
 def test_critical_residue_reset_is_a_noop_for_a_scenario_with_no_declared_paths(tmp_path):
     """Cross-scenario parity: a scenario that legitimately declares nothing (e.g.
-    `bench_box_only`, per the coder-defect10 audit) is completely unaffected by
-    this mechanism -- `_apply_critical_residue_reset` must not raise or mutate
-    anything when `critical_residue_paths` is empty.
+    `release_via_ci` -- every leg targets a distinct release artifact) is completely
+    unaffected by this mechanism -- `_apply_critical_residue_reset` must not raise or
+    mutate anything when `critical_residue_paths` is empty.
     """
-    scenario = scen.SCENARIOS["bench_box_only"]
+    scenario = scen.SCENARIOS["release_via_ci"]
     assert scenario.critical_residue_paths == ()
-    runner = _make_runner(tmp_path, k=1)
+    runner = _make_runner(tmp_path, scenario="release_via_ci", k=1)
     runner.workspace.mkdir(parents=True, exist_ok=True)
     runner.artifacts.mkdir(parents=True, exist_ok=True)
     before = dict(runner.leg_start_baselines)

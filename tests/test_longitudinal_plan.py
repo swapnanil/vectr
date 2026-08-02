@@ -186,6 +186,33 @@ def test_t5_reuses_t1_and_t2_trajectory_identities_at_n_legs_4():
     assert all(s.n_legs == 4 for s in t5)
 
 
+def test_leg_reachability_by_tier_is_explicit():
+    """UPG-EVAL-S6-LEG4-VACUOUS, reachability half: every scenario authors 4 legs
+    (DESIGN.md 3) but only the slope tier requests n_legs=4, and only for the two
+    headline scenarios. Every other scenario's leg 4 is therefore authored-and-
+    dormant: no tier ever runs it, so a defect in it (S6's was a check that passed
+    on leg 1's residue) cannot show up in any recorded artifact. Pinning the deepest
+    leg each scenario is actually run to keeps that a stated fact rather than an
+    accident, and makes widening a tier a deliberate, reviewed edit.
+    """
+    deepest: dict[str, int] = {slug: 0 for slug in scen.SCENARIOS}
+    for tier in run_plan.TIERS:
+        if tier == "T0":  # planned separately; no trajectory preset
+            continue
+        for spec in run_plan._tier_trajectories(tier, seed=0):
+            deepest[spec.scenario] = max(deepest[spec.scenario], spec.n_legs)
+
+    assert deepest == {
+        "release_via_ci": 4,
+        "deploy_reverted_by_reconciler": 4,
+        "spec_lives_outside": 3,
+        "runner_not_pytest": 3,
+        "secrets_not_dotenv": 3,
+        "bench_box_only": 3,
+    }
+    assert all(len(s.legs) == 4 for s in scen.SCENARIOS.values())
+
+
 def test_t0_has_no_trajectory_preset_and_is_planned_separately():
     with pytest.raises(ValueError):
         run_plan._tier_trajectories("T0", seed=0)

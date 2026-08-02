@@ -245,6 +245,12 @@ def _slope_trajectories(seed: int) -> list[TrajectorySpec]:
     against a trajectory whose state.json still has n_legs=3 extends it in place
     (`_load_or_init_state` appends the missing leg entries rather than
     reinitializing) -- legs 1..3 are untouched, only leg 4 is new work.
+
+    Reachability consequence (UPG-EVAL-S6-LEG4-VACUOUS): this is the ONLY tier that
+    requests n_legs=4, and it requests it for S1 and S5 only. Every other scenario
+    authors a leg 4 per DESIGN.md 3 that no tier runs -- dormant, not deleted.
+    `tests/test_longitudinal_plan.py::test_leg_reachability_by_tier_is_explicit`
+    pins the per-scenario maximum so widening this tier is a visible decision.
     """
     return _headline_trajectories(seed, 4) + _channel_breadth_trajectories(seed, 4)
 
