@@ -51,11 +51,22 @@ from agent.working_context_store._types import (
     DEFAULT_PROVENANCE,
     DEFAULT_SCOPE,
     EVENT_VALUES,
+    PROMOTION_LADDER,
+    PROMOTION_RANK,
     PROVENANCE_VALUES,
     SCOPE_VALUES,
+    USER_STATED_PROVENANCE,
     VALID_KINDS,
     SnapshotEntry,
     WorkingNote,
+)
+
+# Verbatim user-excerpt binding (UPG-MEM-PROVENANCE-USER-STATED)
+from agent.working_context_store._user_quote import (
+    USER_QUOTE_NOT_CONTAINED,
+    USER_QUOTE_TOO_SHORT,
+    bind_user_quote,
+    normalize_for_binding,
 )
 
 # Encryption helpers
@@ -99,6 +110,14 @@ __all__ = [
     "DEFAULT_PROVENANCE",
     "SnapshotEntry",
     "WorkingNote",
+    # Verbatim user-excerpt binding (UPG-MEM-PROVENANCE-USER-STATED)
+    "USER_STATED_PROVENANCE",
+    "PROMOTION_LADDER",
+    "PROMOTION_RANK",
+    "USER_QUOTE_NOT_CONTAINED",
+    "USER_QUOTE_TOO_SHORT",
+    "bind_user_quote",
+    "normalize_for_binding",
     # Encryption
     "_FILE_PATH_RE",
     "_NoteEncryptor",

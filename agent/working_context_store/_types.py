@@ -96,15 +96,40 @@ KIND_DEFAULT_SCOPES: dict[str, str] = {
     "operational": "repo",
 }
 
-# PROVENANCE_VALUES: trust/endorsement class (bm2-design-skeleton.md §5).
-# "human" = a person recorded or endorsed this; only imperative directive
-# framing is ever allowed for it. "agent" (default for vectr_remember) = an AI
-# session recorded this; rendered as memory-to-verify. "auto" = captured by a
-# mechanism with no reviewing judgment; weakest framing, and never allowed on
-# kind="directive" (rejected at write time — an unreviewed standing rule is a
-# contradiction in terms).
-PROVENANCE_VALUES: tuple[str, ...] = ("human", "agent", "auto")
+# PROVENANCE_VALUES: trust/endorsement class (bm2-design-skeleton.md §5),
+# strongest first. "human" = a person recorded or endorsed this; only
+# imperative directive framing is ever allowed for it. "user-stated" =
+# transcribed by an AI session from a direct user statement, with a verbatim
+# excerpt of that statement MECHANICALLY bound to the note's content (see
+# _user_quote.py) — never settable by a caller, only derived at write time by
+# that deterministic check, so it is evidence rather than self-attestation.
+# "agent" (default for vectr_remember) = an AI session recorded this; rendered
+# as memory-to-verify. "auto" = captured by a mechanism with no reviewing
+# judgment; weakest framing, and never allowed on kind="directive" (rejected
+# at write time — an unreviewed standing rule is a contradiction in terms).
+USER_STATED_PROVENANCE = "user-stated"
+PROVENANCE_VALUES: tuple[str, ...] = ("human", USER_STATED_PROVENANCE, "agent", "auto")
 DEFAULT_PROVENANCE = "agent"
+
+# The ladder `promote()` walks, weakest first — deliberately NOT
+# PROVENANCE_VALUES reversed any more (UPG-MEM-PROVENANCE-USER-STATED):
+# "user-stated" is DERIVED from a bound verbatim excerpt at write time, so it
+# is not a promotion target. Allowing promote(to="user-stated") would hand
+# back by self-attestation exactly the class the binding check exists to make
+# machine-checkable. The ladder's steps are unchanged from before that class
+# existed.
+PROMOTION_LADDER: tuple[str, ...] = ("auto", "agent", "human")
+# Rank of each stored provenance ON that ladder. "user-stated" ranks with the
+# class it replaces at write time ("agent"), which leaves "human" as its one
+# legal single step — a person endorsing a transcribed statement — and keeps
+# promote() from treating an off-ladder value as rank 0 (which would let an
+# "auto -> agent" promotion silently DEMOTE a user-stated note).
+PROMOTION_RANK: dict[str, int] = {
+    "auto": 0,
+    "agent": 1,
+    USER_STATED_PROVENANCE: 1,
+    "human": 2,
+}
 
 
 @dataclass
@@ -130,7 +155,8 @@ class WorkingNote:
     title: str = ""                    # short label for index-tier display (UPG-RECALL-HIERARCHY)
     # Trigger engine wave 1 (TRIGGER-ENGINE) — additive memory-object fields.
     triggers: list[dict] = None        # type: ignore[assignment]  # explicit P/E/T trigger overrides; [] = use the kind's default bundle
-    provenance: str = DEFAULT_PROVENANCE  # human | agent | auto (bm2-design-skeleton.md §5)
+    provenance: str = DEFAULT_PROVENANCE  # human | user-stated | agent | auto (bm2-design-skeleton.md §5)
+    user_quote: str = ""               # verbatim user-turn excerpt bound to `content` at write time (UPG-MEM-PROVENANCE-USER-STATED); "" unless provenance == USER_STATED_PROVENANCE
     scope: str = DEFAULT_SCOPE            # workspace | repo | path-subtree | branch | session
     anchors: list[list[str]] = None    # type: ignore[assignment]  # [[path, content_hash_at_write_or_None], ...]
     supersedes: int | None = None      # note_id THIS note explicitly tombstones at write time

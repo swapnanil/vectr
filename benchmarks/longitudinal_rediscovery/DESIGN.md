@@ -784,10 +784,15 @@ directory's cross-leg residue can make a later leg's check vacuous — is resolv
 **per-leg reset of scenario-declared critical residue**, not a change to the snapshot
 mechanism itself. `LongitudinalScenario.critical_residue_paths` (a tuple of
 workspace-relative paths, `scenarios.py`) names files whose content a completed leg k-1
-may leave in a state that pre-satisfies a LATER leg's own primary check or fact — S5's
-`deploy/queue.yaml` is the sole case found in the current six scenarios (audited during
-the DEFECT 10 coder lane; S1-S4 and S6 each target a distinct artifact/value per leg, so
-no leg's residue can pre-satisfy a later one). `run_leg.py`'s
+may leave in a state that pre-satisfies a LATER leg's own primary check or fact — two
+cases exist in the current six scenarios: S5's `deploy/queue.yaml` (every leg deploys to
+the same target) and S6's `RESULTS.md` (UPG-EVAL-S6-LEG4-VACUOUS: §3's session 4
+re-measures session 1's algorithm and `boxrun.sh` is deterministic, so a compliant leg 4
+reproduces leg 1's end state byte-for-byte and the traceability script exits 0 on leg 1's
+row alone — the DEFECT 10 coder lane's audit examined legs 1-3 only and recorded S6 as
+needing no reset, which was wrong at leg 4). S1-S4 each target a distinct
+artifact/value per leg, so no leg's residue can pre-satisfy a later one there.
+`run_leg.py`'s
 `LegRunner._apply_critical_residue_reset()` restores exactly those declared paths to
 their `files` seed content at the START of every k>=2 leg — AFTER `_restore_and_verify`'s
 manifest integrity check (so DEFECT 9-adjacent tar-fidelity verification still covers the
@@ -811,6 +816,16 @@ components no longer commit the error, so `mistake_repetition_rate` is `null`
 throughout); a fresh run under this fix is required to produce a discriminating S5
 result. `critical_residue_paths` is a narrower, opt-in complement to the general
 residue rule (§2.2) and to `ignore_paths`, not a replacement for either.
+
+S6's `RESULTS.md` entry is non-retroactive on the same terms, and no recorded artifact
+is affected in any case: the slope tier (§9 T5) extends the T1+T2 trajectories, which
+are S1 and S5 only, so **no tier as defined runs S6's leg 4** — every scenario authors
+four legs per §3, but only the two headline scenarios are ever run past leg 3. S6's
+leg-4 defect was therefore latent, not present in any campaign output. Widening T5 to
+cover S6 is a cost-model decision for this document (§9), deliberately not taken as
+part of the scenario-authoring fix;
+`tests/test_longitudinal_plan.py::test_leg_reachability_by_tier_is_explicit` pins the
+current per-scenario depth so the choice stays visible.
 
 ### 6.6 Outcome check
 

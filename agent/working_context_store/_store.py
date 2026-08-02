@@ -24,12 +24,16 @@ from agent.working_context_store._types import (
     DEFAULT_PROVENANCE,
     DEFAULT_SCOPE,
     KIND_DEFAULT_SCOPES,
+    PROMOTION_LADDER,
+    PROMOTION_RANK,
     PROVENANCE_VALUES,
     SCOPE_VALUES,
+    USER_STATED_PROVENANCE,
     VALID_KINDS,
     SnapshotEntry,
     WorkingNote,
 )
+from agent.working_context_store._user_quote import bind_user_quote
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +91,16 @@ def _actor_for_provenance(provenance: str) -> str:
     says who stands behind it. provenance='auto' ("captured by a mechanism
     with no reviewing judgment") maps to actor='system', the same reserved
     class `check_staleness()`'s `stale_flagged` events use for the one
-    other non-judgment transition; 'human'/'agent' map onto themselves."""
-    return "system" if provenance == "auto" else provenance
+    other non-judgment transition; 'human'/'agent' map onto themselves.
+    provenance='user-stated' maps to actor='agent': the excerpt bound to the
+    note is the user's, but the act of writing it was an AI session's, and
+    NOTE_EVENT_ACTORS records who performed the transition, never whose words
+    it carries."""
+    if provenance == "auto":
+        return "system"
+    if provenance == USER_STATED_PROVENANCE:
+        return "agent"
+    return provenance
 
 
 def _actor_for_promotion(to: str) -> str:
@@ -957,6 +969,14 @@ class WorkingContextStore:
                 # when scope=="branch"; "" for every other scope, for notes
                 # written before this wave, or when git is unavailable.
                 "branch":                "TEXT NOT NULL DEFAULT ''",
+                # UPG-MEM-PROVENANCE-USER-STATED: the verbatim user-turn
+                # excerpt bound to this note's content at write time. Non-empty
+                # ONLY on a note whose provenance is 'user-stated' — an excerpt
+                # that failed the binding check is never stored, so this column
+                # can never hold an unverified "the user said this". Encrypted
+                # alongside content/title when encryption is on (it is by
+                # construction a substring of content).
+                "user_quote":            "TEXT NOT NULL DEFAULT ''",
             }
             for col, typedef in p4_cols.items():
                 if col not in existing_cols:
@@ -988,6 +1008,7 @@ class WorkingContextStore:
         anchors: list[str] | None = None,
         supersedes: int | None = None,
         contradicts: int | None = None,
+        user_quote: str | None = None,
     ) -> int:
         """Store a working note. Returns the note_id.
 
@@ -1010,10 +1031,30 @@ class WorkingContextStore:
         Omitted/empty means "use this kind's default bundle at evaluation
         time" — evaluation-time, never baked into storage.
 
-        `provenance`: one of PROVENANCE_VALUES ("human"|"agent"|"auto").
-        Raises ValueError if not one of those, OR if provenance="auto" and
-        kind="directive" — an unreviewed standing rule is a contradiction in
-        terms and is rejected outright rather than silently downgraded.
+        `provenance`: "human", "agent" or "auto". Raises ValueError if not one
+        of those, OR if the EFFECTIVE provenance (see `user_quote` below) is
+        "auto" and kind="directive" — an unreviewed standing rule is a
+        contradiction in terms and is rejected outright rather than silently
+        downgraded. "user-stated" is also in PROVENANCE_VALUES but is rejected
+        here when passed directly: it is derived from a bound `user_quote`,
+        never declared, so that the class always means a machine-verified
+        binding rather than a writer's own claim about itself.
+
+        `user_quote` (UPG-MEM-PROVENANCE-USER-STATED): a verbatim excerpt of
+        the user turn this note transcribes. Bound by
+        `_user_quote.bind_user_quote()` — a whitespace-normalized substring
+        check against `content`, deterministic and never semantic. When it
+        binds, the note's provenance becomes "user-stated" (a class between
+        "human" and "agent": the words are the user's, the transcription is an
+        AI session's) and the excerpt is stored on the note. When it does NOT
+        bind — too short, or not actually quoted in `content` — the write
+        still succeeds, unchanged, at its ordinary provenance, and the excerpt
+        is DISCARDED rather than persisted, so the store never holds an
+        unverified "the user said this". The rejection reason is not raised
+        here (a failed binding is not a failed write); a surface recomputes it
+        with the same pure function to tell the caller why. A binding never
+        overrides provenance="human" — a person's own endorsement already
+        outranks a transcription.
 
         `scope`: one of SCOPE_VALUES, or None (the default) to mean OMITTED.
         An explicitly passed scope — including the literal string
@@ -1101,8 +1142,26 @@ class WorkingContextStore:
         if kind not in VALID_KINDS:
             kind = DEFAULT_KIND
 
+        # UPG-MEM-PROVENANCE-USER-STATED: the derived class is not declarable.
+        # Checked BEFORE the membership test below (it is a member — it is a
+        # legal STORED value, just never a legal INPUT one) so the message
+        # names the actual rule instead of listing the vocabulary.
+        if provenance == USER_STATED_PROVENANCE:
+            raise ValueError(
+                f"provenance='{USER_STATED_PROVENANCE}' cannot be set directly — it is "
+                "derived at write time from a user_quote that is verifiably quoted in "
+                "this note's content. Pass user_quote='<the user's own words>' instead."
+            )
         if provenance not in PROVENANCE_VALUES:
             raise ValueError(f"provenance must be one of: {', '.join(PROVENANCE_VALUES)}")
+        # Resolve the binding BEFORE the auto/directive guard below, so both
+        # that guard and every write below see the note's EFFECTIVE class: a
+        # standing rule carrying the user's own bound words is exactly the
+        # reviewed directive the guard exists to require, not the unreviewed
+        # one it exists to reject.
+        bound_quote, _ = bind_user_quote(content, user_quote)
+        if bound_quote and provenance != "human":
+            provenance = USER_STATED_PROVENANCE
         if provenance == "auto" and kind == "directive":
             raise ValueError(
                 "provenance='auto' is not allowed on kind='directive' — an "
@@ -1154,15 +1213,19 @@ class WorkingContextStore:
                 if stripped:
                     title = stripped[:80]
                     break
-        # Encrypt BOTH content and the (possibly content-derived) title: the
-        # default title is the first content line, so a plaintext title column
-        # would leak the very text encryption is meant to protect.
+        # Encrypt content, the (possibly content-derived) title, and any bound
+        # user_quote: the default title is the first content line and a bound
+        # quote is by construction a substring of content, so a plaintext
+        # column for either would leak the very text encryption is meant to
+        # protect.
         if self._encryptor:
             stored_content = self._encryptor.encrypt(content)
             stored_title = self._encryptor.encrypt(title)
+            stored_user_quote = self._encryptor.encrypt(bound_quote) if bound_quote else ""
         else:
             stored_content = content
             stored_title = title
+            stored_user_quote = bound_quote
 
         with self._conn() as conn:
             # supersedes (TRIGGER-ENGINE): validate the target BEFORE insert so
@@ -1227,12 +1290,14 @@ class WorkingContextStore:
                                    last_accessed, session_id, decay_score,
                                    author_id, author_trust_score, valid_from,
                                    valid_until, code_hash, title,
-                                   triggers, provenance, scope, anchors, supersedes, branch)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   triggers, provenance, scope, anchors, supersedes, branch,
+                                   user_quote)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (workspace, stored_content, tags_json, priority, kind, now, now, session_id,
                  author_id, now, code_hash, stored_title,
-                 triggers_json, provenance, scope, anchors_json, supersedes, branch_value),
+                 triggers_json, provenance, scope, anchors_json, supersedes, branch_value,
+                 stored_user_quote),
             )
             note_id = cur.lastrowid
 
@@ -1341,17 +1406,21 @@ class WorkingContextStore:
         Returns True if promoted, False if the note does not exist. Raises
         ValueError if `to` is not a valid single-step promotion from the
         note's current provenance.
+
+        UPG-MEM-PROVENANCE-USER-STATED: "user-stated" is not a promotion
+        TARGET (it is derived from a bound verbatim excerpt at write time —
+        promoting into it would restore by self-attestation the class the
+        binding check exists to make machine-checkable), but it is a valid
+        SOURCE ranked with "agent" (PROMOTION_RANK), so a user-stated note's
+        one legal step stays "human" — a person endorsing a transcription.
         """
         note = self.get_note(workspace, note_id)
         if note is None:
             return False
-        order = PROVENANCE_VALUES[::-1]  # ("auto", "agent", "human") — promotion direction
-        try:
-            current_rank = order.index(note.provenance)
-        except ValueError:
-            current_rank = 0
-        if to not in PROVENANCE_VALUES:
-            raise ValueError(f"'to' must be one of: {', '.join(PROVENANCE_VALUES)}")
+        order = PROMOTION_LADDER  # ("auto", "agent", "human") — promotion direction
+        current_rank = PROMOTION_RANK.get(note.provenance, 0)
+        if to not in order:
+            raise ValueError(f"'to' must be one of: {', '.join(order)}")
         to_rank = order.index(to)
         if to_rank != current_rank + 1:
             raise ValueError(
@@ -3218,11 +3287,14 @@ class WorkingContextStore:
         content = row["content"]
         keys = row.keys()
         title = row["title"] if "title" in keys else ""
+        user_quote = row["user_quote"] if "user_quote" in keys else ""
         if self._encryptor:
             content = self._encryptor.decrypt(content)
             # Tolerant decrypt: titles written before title-encryption (or before
             # encryption was enabled at all) are returned unchanged.
             title = self._encryptor.decrypt(title)
+            if user_quote:
+                user_quote = self._encryptor.decrypt(user_quote)
         return WorkingNote(
             note_id=row["note_id"],
             workspace=row["workspace"],
@@ -3252,6 +3324,8 @@ class WorkingContextStore:
             superseded_by_note_id=row["superseded_by_note_id"] if "superseded_by_note_id" in keys else None,
             last_fired=row["last_fired"] if "last_fired" in keys else None,
             branch=row["branch"] if "branch" in keys and row["branch"] else "",
+            # UPG-MEM-PROVENANCE-USER-STATED — guarded for pre-migration DBs.
+            user_quote=user_quote or "",
         )
 
     def format_notes_for_llm(

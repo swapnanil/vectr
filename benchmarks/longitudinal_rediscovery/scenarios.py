@@ -1697,6 +1697,36 @@ S5_DEPLOY_REVERTED_BY_RECONCILER = LongitudinalScenario(
 # RESULTS.md. The full traceability question is still answered exactly, but by the
 # `primary_check`/`fact_used` verdict (a `VerifyCommand`, which CAN read a script's
 # exit code), not by `mistake_committed`. See the coder-lane report for this task.
+#
+# UPG-EVAL-S6-LEG4-VACUOUS (DEFECT 10 direction 1, DESIGN.md 6.5): legs 1-3 each
+# target a DISTINCT algorithm (radix, merge, tim), but DESIGN.md 3's session 4 --
+# "Re-measure radix_sort after the bucket-count change." -- re-targets leg 1's
+# algorithm, and `boxrun.sh` is deterministic by construction (radix_sort => 182 on
+# every box run). A compliant leg 4 therefore reproduces leg 1's end state
+# byte-for-byte, so NO check over the final workspace can separate "re-measured on
+# the box" from "did nothing": leg 1's residue alone exits the traceability script 0.
+# The leg-start state is the only lever left, so `RESULTS.md` is declared in
+# `critical_residue_paths` -- `run_leg.py` restores it to `_S6_RESULTS_MD` (the two
+# pre-existing remote-box rows, whose result JSONs are seeded in `files`) at the START
+# of every k>=2 leg, so each leg's own primary check is satisfied only by a row that
+# leg wrote itself. Consequences, both deliberate:
+#   * legs 2 and 3 also start from the seed table rather than the accumulated one. No
+#     leg's check depends on accumulation -- each names its own algorithm, and the
+#     script's cross-row traceability scan then covers exactly this leg's additions
+#     instead of also re-failing a later leg for an earlier leg's untraceable paste
+#     (which the earlier leg's own `primary_check`/`mistake_committed` already record).
+#   * `bench/results/remote-*.json` files a leg writes are NOT reset (only `files`
+#     seeds can be), so a leg-4 agent could re-paste the box's own previously recorded
+#     182 without re-running it. That is still a bench-box number, which is what the
+#     fact under test constrains ("never paste laptop numbers"); staleness is a
+#     different sin and this scenario does not claim to measure it.
+#
+# Leg 4 REACHABILITY: no tier currently runs it. `run_plan._slope_trajectories` (T5,
+# the only n_legs=4 tier) extends the T1+T2 trajectories, which are S1 and S5 only;
+# S6 appears solely in T4 (`_scenario_breadth_trajectories`, n_legs=3). Leg 4 is
+# authored per DESIGN.md 3 and dormant until a tier requests it -- adding S6 to the
+# slope tier is a tier-definition (cost-model) decision for the design lane, not a
+# scenario-authoring one, so it is deliberately not made here.
 # ---------------------------------------------------------------------------
 
 _S6_FACT = (
@@ -1866,6 +1896,10 @@ S6_BENCH_BOX_ONLY = LongitudinalScenario(
     fact_sentence=_S6_FACT,
     fact_tokens=("3-8x noisier", "rejected in review"),
     executable=("bench/boxrun.sh",),
+    # See the UPG-EVAL-S6-LEG4-VACUOUS block above: leg 4 re-measures leg 1's
+    # algorithm and the bench box is deterministic, so without this reset leg 4's
+    # primary check is pre-satisfied by leg 1's row.
+    critical_residue_paths=("RESULTS.md",),
     files={
         "src/swiftsort/__init__.py": '"""swiftsort."""\n',
         "src/swiftsort/merge.py": _S6_MERGE,
@@ -1957,7 +1991,10 @@ S6_BENCH_BOX_ONLY = LongitudinalScenario(
             memory_arm_expectation="Uses REMOTE=1; the saving should not decay with k.",
         ),
         LegSpec(
-            # Slope tier (T5) only.
+            # Slope tier (T5) only -- and NOT reachable from any tier as currently
+            # defined (see the reachability note in this scenario's header comment).
+            # Its check repeats leg 1's argv verbatim, which is only non-vacuous
+            # because `critical_residue_paths` resets RESULTS.md at every k>=2 start.
             prompt="Re-measure radix_sort after the bucket-count change.",
             primary_check="results_traceable_radix_sort_leg4",
             checks=(

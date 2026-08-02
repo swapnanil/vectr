@@ -19,6 +19,7 @@ from agent.config import (
 )
 from agent.chroma_dispatch import dispatch_chroma_sync
 from agent.render_paths import workspace_relpath
+from agent.working_context_store import USER_STATED_PROVENANCE, bind_user_quote
 
 
 def _service_ws_root(service) -> str:
@@ -651,6 +652,15 @@ def handle_tools_call(
         # passed through verbatim.
         scope = arguments.get("scope") or None
         anchors = arguments.get("anchors") or None
+        # UPG-MEM-PROVENANCE-USER-STATED: a verbatim excerpt of the user turn
+        # this note transcribes. Unlike `provenance` just above, this is NOT a
+        # trust claim the caller can assert — the store binds it only when the
+        # excerpt is verifiably quoted in `content`, so what an agent supplies
+        # here is evidence, checkable by machine, rather than self-attestation.
+        # A non-string (or an unbindable) value never fails the write.
+        user_quote = arguments.get("user_quote") or None
+        if user_quote is not None and not isinstance(user_quote, str):
+            return _mcp_error("user_quote must be a string")
         supersedes = arguments.get("supersedes")
         if supersedes is not None:
             try:
@@ -673,6 +683,7 @@ def handle_tools_call(
                 content=content, tags=tags, priority=priority, kind=kind, title=title, agent=agent,
                 triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
                 supersedes=supersedes, contradicts=contradicts, session_id=session_id,
+                user_quote=user_quote,
             )
         except ValueError as exc:
             # Malformed triggers, an unrecognised provenance/scope, a
@@ -752,6 +763,19 @@ def handle_tools_call(
                 parts.append(f"first line: {first_line}")
             if parts:
                 echo = "\n  Stored — " + " · ".join(parts)
+        # UPG-MEM-PROVENANCE-USER-STATED: report what the binding check
+        # decided, in the same response as the write. A failed bind is not a
+        # failed write (the note is stored at its ordinary provenance), so the
+        # reason has to be surfaced here or the caller would silently believe
+        # it recorded a user statement. Recomputed with the same pure function
+        # the store used — no rejection state is persisted anywhere.
+        quote_suffix = ""
+        if user_quote:
+            _bound_quote, quote_reason = bind_user_quote(content, user_quote)
+            quote_suffix = (
+                f"\n  {quote_reason}" if quote_reason
+                else f"\n  user_quote bound — stored as provenance='{USER_STATED_PROVENANCE}'."
+            )
         # Write-time related-notes offer (agent/working_context_store/_related.py):
         # nearest-by-similarity only, never a contradiction verdict — the caller
         # LLM judges whether one is now stale. Empty unless `outcome.related` is
@@ -782,7 +806,7 @@ def handle_tools_call(
                 "changed, never that the note is wrong."
             )
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}{distill_suffix}{related_suffix}{proxy_suffix}"}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}{quote_suffix}{distill_suffix}{related_suffix}{proxy_suffix}"}],
             "isError": False,
         }
 

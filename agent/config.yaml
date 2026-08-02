@@ -1617,6 +1617,21 @@ memory_write:
     # never for correctness (that judgment always stays caller-side).
     min_similarity: 0.75
 
+  user_quote:
+    # UPG-MEM-PROVENANCE-USER-STATED: a note may carry a verbatim excerpt of
+    # the user turn it transcribes. The store binds it only when the excerpt
+    # is genuinely quoted inside the note's own content (whitespace-normalized
+    # substring — a deterministic string check, never a semantic one), and
+    # only a bound excerpt earns the `user-stated` provenance class.
+    # Minimum length, in whitespace-normalized characters, an excerpt must
+    # reach to be bindable. Without a floor a trivial excerpt ("ok", "a")
+    # would be a substring of almost any content, so the check would confirm
+    # nothing while still upgrading the note's trust class — the floor is what
+    # keeps "bound" evidential rather than automatic. Raise it to demand more
+    # of the user's actual wording; there is no value at which an excerpt is
+    # accepted without being contained.
+    min_chars: 12
+
   proxy_anchor_suggestions:
     # Surfaces which protocol-level proxy-anchor files (agent/
     # proxy_anchors.yaml — dependency lockfiles, CI configs, container/

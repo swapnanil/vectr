@@ -1619,6 +1619,7 @@ class VectrService:
         anchors: list[str] | None = None,
         supersedes: int | None = None,
         contradicts: int | None = None,
+        user_quote: str | None = None,
     ) -> int:
         """`agent` (UPG-SUBAGENT-MEMORY): optional caller-declared identifier
         for the agent/subagent authoring this note (e.g. "coder-2") — never
@@ -1641,6 +1642,14 @@ class VectrService:
         `WorkingContextStore.remember()`'s docstring for the exact
         `revoked` event this appends to the target.
 
+        `user_quote` (UPG-MEM-PROVENANCE-USER-STATED): a verbatim excerpt of
+        the user turn this note transcribes, passed straight through. The
+        store binds it with a deterministic substring check and, only on a
+        successful bind, stores the note at provenance="user-stated"; a
+        failed bind never fails the write. No validation here — the store
+        stays the single source of truth for that rule, like every parameter
+        above.
+
         `scope`: None (the default) means OMITTED — the store resolves it to
         this note's kind's default scope at write time
         (UPG-TRIGGER-SCOPE-KIND-DEFAULTS). An explicitly passed scope,
@@ -1661,6 +1670,7 @@ class VectrService:
             anchors=anchors,
             supersedes=supersedes,
             contradicts=contradicts,
+            user_quote=user_quote,
         )
         self._bump_notes_epoch()
         return note_id
@@ -1680,6 +1690,7 @@ class VectrService:
         anchors: list[str] | None = None,
         supersedes: int | None = None,
         contradicts: int | None = None,
+        user_quote: str | None = None,
     ) -> RememberOutcome:
         """Same parameters and same write as `remember()`, plus two
         strictly-additive write-time offers for the caller LLM — never a
@@ -1721,6 +1732,7 @@ class VectrService:
             anchors=anchors,
             supersedes=supersedes,
             contradicts=contradicts,
+            user_quote=user_quote,
         )
 
         related: list[RelatedNote] = []

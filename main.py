@@ -48,6 +48,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -79,6 +80,26 @@ load_dotenv()
 # so migration can clean them up.
 _LEGACY_PID_FILE = Path.home() / ".vectr" / "vectr.pid"
 _LEGACY_PORT_FILE = Path.home() / ".vectr" / "vectr.port"
+
+# The daemon's operating-mode vocabulary — protocol labels, not tunables:
+# these are the exact strings `VectrService.status()` publishes in its "mode"
+# field (app/service.py), so the CLI's mode lines, the instance-registry
+# record (UPG-RESTART-DROPS-MODE) and the staleness banner's remediation
+# command all speak the same language as the daemon they describe. Pinned
+# against the service's real output by tests/test_memory_only_mode.py and
+# tests/test_search_only_mode.py so the two sides cannot drift apart.
+MODE_FULL = "full"
+MODE_MEMORY_ONLY = "memory-only"
+MODE_SEARCH_ONLY = "search-only"
+
+# The CLI flag that re-selects each mode explicitly on `restart`, keyed by the
+# mode label above — used both to override an inherited mode and to print a
+# mode-complete restart command in the staleness banner.
+MODE_RESTART_FLAG = {
+    MODE_FULL: "--full",
+    MODE_MEMORY_ONLY: "--memory-only",
+    MODE_SEARCH_ONLY: "--search-only",
+}
 
 # Per-turn recall hook tuning (UPG-9.5). Small N + a relevance floor keep the
 # UserPromptSubmit injection tight: only notes genuinely related to the prompt,
@@ -394,10 +415,74 @@ def _handle_daemon_call_error(exc: Exception, port: int) -> None:
     raise exc
 
 
+def _stamp_parts(stamp: str) -> tuple[str, str | None]:
+    """Split a version stamp into `(packaged-version, git-sha | None)`.
+
+    `compute_version_stamp` builds the stamp by appending `+<short-sha>` to
+    whatever the packaging metadata reports, and that metadata may already
+    carry its own PEP 440 local segment (`1.7.0+dirty`) — so the sha is the
+    part after the LAST `+`, never the first. A stamp with no `+`, or with an
+    empty trailing component, has no sha: code identity is simply unknown,
+    which is not the same as "no revision".
+    """
+    version, sep, sha = stamp.rpartition("+")
+    if not sep:
+        return stamp, None
+    if not sha:
+        return version, None
+    return version, sha
+
+
+def _same_revision(daemon_sha: str, local_sha: str) -> bool:
+    """True when two git short shas name the same commit. Short-sha LENGTH is
+    a per-repo/per-git-version setting (`core.abbrev`, and git widens it as a
+    repo grows), so the same revision can legitimately print as `6925d4c` on
+    one side and `6925d4c8a` on the other. Both are abbreviations of one
+    40-hex id, so a prefix relation is the correct identity test — and git
+    only ever emits an abbreviation that is unambiguous in the repo."""
+    return daemon_sha.startswith(local_sha) or local_sha.startswith(daemon_sha)
+
+
+def _version_skew_verdict(daemon_stamp: str, local_stamp: str) -> str | None:
+    """Classify a daemon/CLI stamp pair as `None` (nothing to report),
+    `"code"` (different revisions), `"version"` (no revision to compare, and
+    the packaged versions differ) or `"metadata"` (same revision, different
+    packaged version).
+
+    UPG-VERSION-SKEW-FALSE-POSITIVE: the decision keys on the git sha,
+    because the sha is what identifies the code and the version prefix does
+    not. The live false positive was a daemon reporting `1.7.0+6925d4c`
+    against a CLI reporting `1.6.0+6925d4c`, announced as "running older
+    code": same sha (so the daemon was running exactly the code the CLI was
+    invoked from) and, if anything, the NEWER version — the CLI's `1.6.0`
+    was stale editable-install dist metadata that `pyproject.toml` had
+    already moved past. Two independent lessons encoded here: a version
+    prefix can be stale while the code is current, and "older" is not
+    something a lexical comparison of two version strings can establish at
+    all, so the wording never claims it.
+    """
+    if daemon_stamp == local_stamp:
+        return None
+    daemon_version, daemon_sha = _stamp_parts(daemon_stamp)
+    local_version, local_sha = _stamp_parts(local_stamp)
+    if daemon_sha and local_sha:
+        if not _same_revision(daemon_sha, local_sha):
+            return "code"
+        # Same revision: whatever else differs, it is not the code. Only a
+        # genuine disagreement between the two packaged version strings is
+        # worth a word — differing sha ABBREVIATION lengths are not.
+        return "metadata" if daemon_version != local_version else None
+    # At least one side isn't running from a git checkout (installed copy),
+    # so there is no revision to compare. The packaged version is then the
+    # only identity available — and for a wheel install it is a real one.
+    # Equal versions with only one sha present says nothing either way.
+    return "version" if daemon_version != local_version else None
+
+
 def _check_version_skew(port: int, daemon_status: dict | None = None) -> None:
-    """Warn once, to stderr, when the daemon on `port` is running older code
-    than this CLI invocation (UPG-CLI-DAEMON-VERSION-SKEW). This is the ONE
-    shared choke point every daemon-talking subcommand calls — the
+    """Warn once, to stderr, when the daemon on `port` is running code that
+    differs from this CLI invocation's (UPG-CLI-DAEMON-VERSION-SKEW). This is
+    the ONE shared choke point every daemon-talking subcommand calls — the
     comparison logic itself is never copy-pasted per subcommand.
 
     Never blocks or fails the calling command: any probe failure (daemon
@@ -418,15 +503,57 @@ def _check_version_skew(port: int, daemon_status: dict | None = None) -> None:
             daemon_status = resp.json()
         daemon_stamp = daemon_status.get("version_stamp")
         local_stamp = compute_version_stamp()
-        if not daemon_stamp or not local_stamp or daemon_stamp == local_stamp:
+        if not daemon_stamp or not local_stamp:
             return
+        verdict = _version_skew_verdict(daemon_stamp, local_stamp)
+        if verdict is None:
+            return
+        if verdict == "metadata":
+            # Same revision on both sides — the daemon IS running this code,
+            # so there is nothing to restart and nothing to fix in vectr;
+            # only the two dist-metadata version strings disagree (a stale
+            # editable install being the usual cause). Reported rather than
+            # hidden, because the mismatch is real and confusing wherever
+            # either version is displayed.
+            print(
+                f"vectr: version metadata mismatch with the daemon on port {port} "
+                f"({daemon_stamp} vs {local_stamp}) — same code revision "
+                f"{_stamp_parts(daemon_stamp)[1]}, no restart needed "
+                f"(reinstall to refresh this CLI's version metadata)",
+                file=sys.stderr,
+            )
+            return
+        difference = "different code" if verdict == "code" else "a different version"
         print(
-            f"vectr: daemon on port {port} is running older code "
-            f"({daemon_stamp} vs {local_stamp}) — run 'vectr restart <workspace>'",
+            f"vectr: daemon on port {port} is running {difference} "
+            f"({daemon_stamp} vs {local_stamp}) — run "
+            f"'{_restart_command(daemon_status)}'",
             file=sys.stderr,
         )
     except Exception:
         return
+
+
+def _restart_command(daemon_status: dict) -> str:
+    """The exact `vectr restart` invocation that brings THIS daemon back the
+    way it is running now — workspace path plus, for a non-full daemon, its
+    mode flag (UPG-RESTART-DROPS-MODE).
+
+    The remediation text is the whole point of the banner, so it must not be
+    the one thing that changes the daemon's mode: before `restart` inherited
+    the recorded mode, following this advice on a memory-only instance turned
+    full indexing + the file watcher back on. The flag is printed even now
+    that inheritance exists, because it is also correct when the previous
+    instance's registry record is gone (pruned, or a fresh machine).
+    """
+    workspace = daemon_status.get("workspace_root")
+    mode = daemon_status.get("mode", MODE_FULL)
+    # A daemon too old to report its workspace leaves the original
+    # fill-in-the-blank placeholder, which must stay unquoted to read as one.
+    parts = ["vectr", "restart", shlex.quote(workspace) if workspace else "<workspace>"]
+    if mode in (MODE_MEMORY_ONLY, MODE_SEARCH_ONLY):
+        parts.append(MODE_RESTART_FLAG[mode])
+    return " ".join(parts)
 
 
 def _is_server_alive(port: int, timeout: float = 2.0) -> tuple[bool, str | None]:
@@ -1566,6 +1693,30 @@ def _enforce_bind_auth(host: str) -> None:
     sys.exit(1)
 
 
+def _mode_name(memory_only: bool, search_only: bool) -> str:
+    """The daemon's operating mode as one label, in the same vocabulary the
+    daemon itself reports in `/v1/status` ("full" | "memory-only" |
+    "search-only") — one spelling shared by the registry record, the CLI's
+    mode lines, and the staleness banner's remediation command."""
+    if memory_only:
+        return MODE_MEMORY_ONLY
+    if search_only:
+        return MODE_SEARCH_ONLY
+    return MODE_FULL
+
+
+def _effective_mode_flags(memory_only: bool, search_only: bool) -> tuple[bool, bool]:
+    """`(memory_only, search_only)` as `VectrService` will resolve them —
+    the given flags OR'd with the VECTR_MEMORY_ONLY / VECTR_SEARCH_ONLY
+    environment variables (app/service.py does exactly this at construction).
+    Both-set is rejected here for the same reason the service rejects it."""
+    memory_only = memory_only or os.getenv("VECTR_MEMORY_ONLY", "") == "1"
+    search_only = search_only or os.getenv("VECTR_SEARCH_ONLY", "") == "1"
+    if memory_only and search_only:
+        raise ValueError("Cannot start vectr in both --memory-only and --search-only mode simultaneously")
+    return memory_only, search_only
+
+
 def _do_start(
     workspace: str,
     port: int,
@@ -1580,6 +1731,15 @@ def _do_start(
 ) -> None:
     if memory_only and search_only:
         raise ValueError("Cannot start vectr in both --memory-only and --search-only mode simultaneously")
+
+    # UPG-RESTART-DROPS-MODE: resolve the mode the daemon will ACTUALLY run in
+    # before anything records or reports it. `VectrService.__init__` ORs the
+    # constructor flags with VECTR_MEMORY_ONLY/VECTR_SEARCH_ONLY (which this
+    # process passes through in `env` below), so a daemon launched with the
+    # env var and no flag runs memory-only while the flag says otherwise —
+    # resolving it the same way here keeps the registry record, the printed
+    # mode line, and the daemon's own `/v1/status` mode in agreement.
+    memory_only, search_only = _effective_mode_flags(memory_only, search_only)
 
     from agent.fs_permissions import secure_dir
     secure_dir(Path.home() / ".vectr")
@@ -1634,6 +1794,9 @@ def _do_start(
     InstanceRegistry().register(
         ws_hash, workspace, port, proc.pid,
         extra_roots=extra_roots, code_workspace_file=code_workspace_file,
+        # UPG-RESTART-DROPS-MODE: record the launch configuration `restart`
+        # must reproduce, alongside the port it already reuses.
+        mode=_mode_name(memory_only, search_only), host=host,
     )
     mode_tag = " [memory-only]" if memory_only else (" [search-only]" if search_only else "")
 
@@ -2966,15 +3129,44 @@ def _resolve_stop_workspace(args: argparse.Namespace) -> str:
     return str(Path(args.path).resolve())
 
 
+def _resolve_restart_mode(
+    entry: dict | None, memory_only: bool, search_only: bool, full: bool,
+) -> tuple[bool, bool, str | None]:
+    """`(memory_only, search_only, inherited_mode)` for a `restart`.
+
+    UPG-RESTART-DROPS-MODE: `restart` means "the same daemon again", so when
+    the caller names no mode it reproduces the mode recorded for the previous
+    instance instead of silently falling back to full mode. Explicit flags
+    always win — `--memory-only` / `--search-only` select their mode, and
+    `--full` is the way back out of an inherited one (without it a workspace
+    once started memory-only could never be restarted into full mode).
+    `inherited_mode` is the label that was inherited, or None when the caller
+    was explicit / there was nothing to inherit — the caller announces it so
+    the mode change is never invisible.
+    """
+    if memory_only or search_only or full:
+        return memory_only, search_only, None
+    recorded = (entry or {}).get("mode")
+    if recorded == MODE_MEMORY_ONLY:
+        return True, False, MODE_MEMORY_ONLY
+    if recorded == MODE_SEARCH_ONLY:
+        return False, True, MODE_SEARCH_ONLY
+    return False, False, None
+
+
 def cmd_restart(args: argparse.Namespace) -> None:
     memory_only = getattr(args, "memory_only", False)
     search_only = getattr(args, "search_only", False)
+    full = getattr(args, "full", False)
     if memory_only and search_only:
         print("Error: --memory-only and --search-only are mutually exclusive.", file=sys.stderr)
         sys.exit(1)
-
-    host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
-    _enforce_bind_auth(host)
+    if full and (memory_only or search_only):
+        print(
+            "Error: --full cannot be combined with --memory-only/--search-only.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     roots = _resolve_workspace_roots(args)
     workspace = roots[0]
@@ -2987,6 +3179,26 @@ def cmd_restart(args: argparse.Namespace) -> None:
 
     registry = InstanceRegistry()
     entry = registry.get(ws_hash)
+
+    # Mode and bind host are inherited from the recorded previous instance for
+    # the same reason its port already is (UPG-RESTART-PORT-WALK-BREAKS-MCP):
+    # a restart that quietly changes how the daemon runs breaks whatever was
+    # relying on the old configuration. Resolved before `_enforce_bind_auth`
+    # so an inherited non-loopback bind is authenticated exactly like an
+    # explicitly-passed one.
+    memory_only, search_only, inherited_mode = _resolve_restart_mode(
+        entry, memory_only, search_only, full,
+    )
+    if inherited_mode:
+        print(
+            f"Restarting in {inherited_mode} mode (inherited from the previous "
+            f"instance for this workspace). Pass "
+            f"{MODE_RESTART_FLAG[MODE_FULL]} to restart in full mode instead.",
+            file=sys.stderr,
+        )
+    host = getattr(args, "host", None) or (entry or {}).get("host") or "127.0.0.1"
+    _enforce_bind_auth(host)
+
     if entry is not None:
         pid = entry["pid"]
         print(f"Stopping PID {pid}...", file=sys.stderr)
@@ -3459,8 +3671,15 @@ def main() -> None:
 
     p_restart = sub.add_parser(
         "restart",
-        help="Stop and restart the daemon for a workspace",
-        description=_IDE_CONFIG_WRITES_DISCLOSURE,
+        help="Stop and restart the daemon for a workspace, reusing its "
+             "recorded mode/port/bind address unless flags override them",
+        description=(
+            "Restart reproduces the configuration of the instance it is "
+            "replacing — mode (full / --memory-only / --search-only), port, "
+            "and bind address — so restarting never silently changes how the "
+            "daemon runs. Pass a mode flag (or --full) to change it.\n\n"
+            + _IDE_CONFIG_WRITES_DISCLOSURE
+        ),
     )
     p_restart.add_argument(
         "workspace", nargs="?", default=None,
@@ -3469,9 +3688,14 @@ def main() -> None:
     p_restart.add_argument("--path", action="append", dest="paths", metavar="DIR")
     p_restart.add_argument("--port", type=int, default=_default_port)
     p_restart.add_argument(
-        "--host", default="127.0.0.1",
-        help="Bind address for the daemon (default 127.0.0.1). Non-loopback "
-             "binds require VECTR_API_KEY (see vectr start --host).",
+        # Default None (not "127.0.0.1") so `cmd_restart` can tell "the caller
+        # asked for this bind" from "the caller said nothing", and only
+        # inherit the previous instance's host in the second case
+        # (UPG-RESTART-DROPS-MODE).
+        "--host", default=None,
+        help="Bind address for the daemon. Defaults to the bind address of "
+             "the instance being restarted, or 127.0.0.1 if there is none. "
+             "Non-loopback binds require VECTR_API_KEY (see vectr start --host).",
     )
     p_restart.add_argument(
         "--memory-only",
@@ -3486,6 +3710,16 @@ def main() -> None:
         default=False,
         dest="search_only",
         help="Restart in search-only mode (no working-memory layer; see vectr start --search-only).",
+    )
+    p_restart.add_argument(
+        "--full",
+        action="store_true",
+        default=False,
+        dest="full",
+        help="Restart in full mode (indexing + watcher + working memory), "
+             "discarding the mode of the instance being restarted. Without any "
+             "mode flag, restart reproduces that instance's mode — a "
+             "--memory-only daemon comes back memory-only.",
     )
     p_restart.add_argument(
         "--no-ide-config",

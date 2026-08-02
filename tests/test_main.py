@@ -675,6 +675,217 @@ class TestCmdRestart:
         mock_do_start.assert_called_once()
         assert mock_do_start.call_args.args[1] == 8764
 
+    def test_restart_inherits_memory_only_mode_from_running_instance(self, tmp_path):
+        """UPG-RESTART-DROPS-MODE: a `--memory-only` daemon must come back
+        memory-only when restarted with no mode flag. Before this fix the
+        mode lived only in the launcher's argv, so the CLI's own staleness
+        banner ("run 'vectr restart <workspace>'") silently flipped a
+        memory-only instance into full indexing.
+        """
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        mock_proc = MagicMock()
+        mock_proc.pid = 4242
+
+        # Start memory-only for real (mocked subprocess) so the registry entry
+        # is written by the product code path, not hand-forged by the test.
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=True), \
+             patch("subprocess.Popen", return_value=mock_proc), \
+             patch("builtins.open", MagicMock()):
+            m._do_start(ws, 8765, wh, memory_only=True)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws], port=8765))
+
+        assert mock_do_start.call_args.kwargs["memory_only"] is True
+        assert mock_do_start.call_args.kwargs["search_only"] is False
+
+    def test_restart_inherits_search_only_mode_from_running_instance(self, tmp_path):
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, mode="search-only")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws], port=8765))
+
+        assert mock_do_start.call_args.kwargs["search_only"] is True
+        assert mock_do_start.call_args.kwargs["memory_only"] is False
+
+    def test_restart_explicit_search_only_overrides_inherited_memory_only(self, tmp_path):
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, mode="memory-only")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws], port=8765, search_only=True))
+
+        assert mock_do_start.call_args.kwargs["search_only"] is True
+        assert mock_do_start.call_args.kwargs["memory_only"] is False
+
+    def test_restart_explicit_memory_only_still_wins_on_full_instance(self, tmp_path):
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, mode="full")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws], port=8765, memory_only=True))
+
+        assert mock_do_start.call_args.kwargs["memory_only"] is True
+
+    def test_restart_full_flag_clears_inherited_mode(self, tmp_path):
+        """`--full` is the explicit way out of an inherited mode — without it,
+        a workspace that was ever started memory-only could never be restarted
+        back into full mode."""
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, mode="memory-only")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws], port=8765, full=True))
+
+        assert mock_do_start.call_args.kwargs["memory_only"] is False
+        assert mock_do_start.call_args.kwargs["search_only"] is False
+
+    def test_restart_inherits_bind_host_from_running_instance(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VECTR_API_KEY", "k")  # non-loopback bind requires one
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, host="0.0.0.0")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws], port=8765))
+
+        assert mock_do_start.call_args.kwargs["host"] == "0.0.0.0"
+
+    def test_restart_explicit_host_overrides_inherited_host(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VECTR_API_KEY", "k")
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, host="0.0.0.0")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws], port=8765, host="127.0.0.1"))
+
+        assert mock_do_start.call_args.kwargs["host"] == "127.0.0.1"
+
+    def test_restart_without_prior_entry_defaults_to_full_mode(self, tmp_path):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=["/project/a"], port=8765))
+
+        assert mock_do_start.call_args.kwargs["memory_only"] is False
+        assert mock_do_start.call_args.kwargs["search_only"] is False
+        assert mock_do_start.call_args.kwargs["host"] == "127.0.0.1"
+
+    def test_restart_tolerates_legacy_registry_entry_without_mode_or_host(self, tmp_path):
+        """Entries written by an older vectr have no mode/host keys at all —
+        restart must fall back to full mode on loopback, not raise."""
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        registry_path = tmp_path / "instances.json"
+        registry_path.write_text(json.dumps({
+            wh: {"workspace": ws, "port": 8765, "pid": 12345,
+                 "started_at": "2026-01-01T00:00:00Z"},
+        }))
+        reg = InstanceRegistry(registry_path=registry_path)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws], port=8765))
+
+        assert mock_do_start.call_args.kwargs["memory_only"] is False
+        assert mock_do_start.call_args.kwargs["search_only"] is False
+        assert mock_do_start.call_args.kwargs["host"] == "127.0.0.1"
+
+    def test_restart_mode_inheritance_announced_on_stderr(self, tmp_path, capsys):
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, mode="memory-only")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start"):
+            m.cmd_restart(_make_args(paths=[ws], port=8765))
+
+        err = capsys.readouterr().err
+        assert "memory-only" in err
+        assert "--full" in err
+
+    def test_restart_search_only_inheritance_reaches_ide_config_writer(self, tmp_path):
+        """The inherited mode must also drive the IDE config written on
+        restart — a search-only instance advertises a different tool set."""
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, mode="search-only")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config") as mock_write, \
+             patch("main._do_start"):
+            m.cmd_restart(_make_args(paths=[ws], port=8765))
+
+        assert mock_write.call_args.kwargs["search_only"] is True
+
     def test_restart_final_registry_state_unaffected_by_unregister_ordering(self, tmp_path):
         """The explicit `registry.unregister(ws_hash)` call in `cmd_restart`
         has no effect on final state either way — `_do_start`'s own
@@ -1025,15 +1236,164 @@ class TestCheckVersionSkew:
         err = capsys.readouterr().err
         lines = [l for l in err.splitlines() if l.strip()]
         assert len(lines) == 1
-        assert "daemon on port 8765 is running older code" in lines[0]
+        assert "daemon on port 8765 is running different code" in lines[0]
         assert "1.0.0+old0000" in lines[0]
         assert "1.0.0+local1" in lines[0]
         assert "vectr restart" in lines[0]
+
+    def test_remediation_command_carries_the_memory_only_flag(self, capsys):
+        """UPG-RESTART-DROPS-MODE: the banner's own advice must not be the
+        thing that flips a memory-only daemon into full indexing."""
+        with patch("main.compute_version_stamp", return_value="1.0.0+local1"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.0.0+old0000",
+                "mode": "memory-only",
+                "workspace_root": "/project/a",
+            })
+        line = capsys.readouterr().err.strip()
+        assert "vectr restart /project/a --memory-only" in line
+
+    def test_remediation_command_carries_the_search_only_flag(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.0.0+local1"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.0.0+old0000",
+                "mode": "search-only",
+                "workspace_root": "/project/a",
+            })
+        assert "vectr restart /project/a --search-only" in capsys.readouterr().err
+
+    def test_remediation_command_has_no_mode_flag_for_a_full_daemon(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.0.0+local1"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.0.0+old0000",
+                "mode": "full",
+                "workspace_root": "/project/a",
+            })
+        err = capsys.readouterr().err
+        assert "vectr restart /project/a" in err
+        assert "--memory-only" not in err
+        assert "--search-only" not in err
+
+    def test_remediation_command_quotes_a_workspace_path_with_spaces(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.0.0+local1"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.0.0+old0000",
+                "mode": "memory-only",
+                "workspace_root": "/project/my code",
+            })
+        assert "'/project/my code' --memory-only" in capsys.readouterr().err
+
+    def test_remediation_command_falls_back_when_workspace_unknown(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.0.0+local1"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.0.0+old0000"})
+        assert "vectr restart <workspace>" in capsys.readouterr().err
 
     def test_matching_stamps_print_nothing(self, capsys):
         with patch("main.compute_version_stamp", return_value="1.0.0+abc1234"):
             m._check_version_skew(8765, daemon_status={"version_stamp": "1.0.0+abc1234"})
         assert capsys.readouterr().err == ""
+
+
+class TestVersionSkewKeysOnGitSha:
+    """UPG-VERSION-SKEW-FALSE-POSITIVE: code identity is the git sha, not the
+    packaged version string. The live false positive was 'daemon on port 8765
+    is running older code (1.7.0+6925d4c vs 1.6.0+6925d4c)' — same sha (so the
+    daemon was running exactly this code), and its version was the NEWER one;
+    the CLI's 1.6.0 came from stale editable-install dist metadata.
+    """
+
+    def test_same_sha_different_version_prefix_never_claims_older_code(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.6.0+6925d4c"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.7.0+6925d4c"})
+        err = capsys.readouterr().err
+        assert "older code" not in err
+        assert "different code" not in err
+
+    def test_same_sha_different_version_prefix_says_metadata_mismatch(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.6.0+6925d4c"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.7.0+6925d4c"})
+        lines = [l for l in capsys.readouterr().err.splitlines() if l.strip()]
+        assert len(lines) == 1
+        assert "version metadata mismatch" in lines[0]
+        assert "6925d4c" in lines[0]
+
+    def test_same_sha_does_not_advise_a_restart(self, capsys):
+        """Nothing to remediate: the daemon is already running this code."""
+        with patch("main.compute_version_stamp", return_value="1.6.0+6925d4c"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.7.0+6925d4c",
+                "mode": "memory-only",
+                "workspace_root": "/project/a",
+            })
+        assert "vectr restart" not in capsys.readouterr().err
+
+    def test_different_sha_same_version_prefix_warns(self, capsys):
+        """The case the banner exists for — a stale daemon whose packaged
+        version happens not to have been bumped."""
+        with patch("main.compute_version_stamp", return_value="1.7.0+bbbbbbb"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.7.0+aaaaaaa", "workspace_root": "/project/a",
+            })
+        err = capsys.readouterr().err
+        assert "running different code" in err
+        assert "vectr restart /project/a" in err
+
+    def test_abbreviated_sha_of_the_same_revision_is_not_a_mismatch(self, capsys):
+        """Short-sha length is a git setting, not a code difference: one
+        abbreviation being a prefix of the other means the same revision."""
+        with patch("main.compute_version_stamp", return_value="1.7.0+6925d4c8a"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.7.0+6925d4c"})
+        assert capsys.readouterr().err == ""
+
+    def test_no_sha_on_either_side_falls_back_to_version_comparison(self, capsys):
+        """Installed-from-wheel daemon and CLI (no git checkout on either
+        side): the packaged version is the only identity available, so a
+        difference still warns — worded as a version difference, never as
+        'older', which a lexical compare cannot establish."""
+        with patch("main.compute_version_stamp", return_value="1.7.0"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.6.0", "workspace_root": "/project/a",
+            })
+        err = capsys.readouterr().err
+        assert "running a different version" in err
+        assert "older" not in err
+        assert "vectr restart /project/a" in err
+
+    def test_sha_on_one_side_only_with_equal_versions_is_silent(self, capsys):
+        """A daemon started from an installed copy reports no sha while a CLI
+        run from the checkout does. Code identity is then unknowable — with
+        matching versions, saying anything would be a guess."""
+        with patch("main.compute_version_stamp", return_value="1.7.0+6925d4c"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.7.0"})
+        assert capsys.readouterr().err == ""
+
+    def test_sha_on_one_side_only_with_different_versions_warns(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.7.0+6925d4c"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.6.0", "workspace_root": "/project/a",
+            })
+        err = capsys.readouterr().err
+        assert "running a different version" in err
+        assert "vectr restart /project/a" in err
+
+    def test_local_version_segment_before_the_sha_is_handled(self, capsys):
+        """`compute_version_stamp` appends '+<sha>' to whatever the packaging
+        metadata says, so a version that already carries a PEP 440 local
+        segment yields two '+' — the sha is the LAST component."""
+        assert m._stamp_parts("1.7.0+dirty+6925d4c") == ("1.7.0+dirty", "6925d4c")
+        with patch("main.compute_version_stamp", return_value="1.6.0+dirty+6925d4c"):
+            m._check_version_skew(8765, daemon_status={"version_stamp": "1.7.0+dirty+6925d4c"})
+        assert "different code" not in capsys.readouterr().err
+
+    def test_empty_sha_component_is_treated_as_absent(self, capsys):
+        """A malformed stamp ending in '+' must not compare equal to another
+        malformed one as if both named the same revision."""
+        assert m._stamp_parts("1.7.0+") == ("1.7.0", None)
+        with patch("main.compute_version_stamp", return_value="1.6.0+"):
+            m._check_version_skew(8765, daemon_status={
+                "version_stamp": "1.7.0+", "workspace_root": "/project/a",
+            })
+        assert "running a different version" in capsys.readouterr().err
 
     def test_daemon_stamp_missing_prints_nothing(self, capsys):
         with patch("main.compute_version_stamp", return_value="1.0.0+abc1234"):
