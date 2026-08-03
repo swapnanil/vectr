@@ -585,6 +585,37 @@ def test_hook_full_skip_recovers_once_a_valid_attestation_is_supplied_without_fo
 
 
 # ---------------------------------------------------------------------------
+# arm "hook-userpromptsubmit" (D2', DESIGN.md 4, user decision 2026-08-03): the
+# attestation gate in `plan_and_run` is scoped by exact string equality to
+# `spec.arm == "hook-full"` -- unlike D2, this arm requires no attestation at
+# all (UserPromptSubmit is independently canary-verified to fire and deliver
+# headless). No tier currently enumerates this arm, so this monkeypatches
+# `_tier_trajectories` (the single seam `plan_and_run` reads trajectory specs
+# through) to inject one, the same isolation `_fake_run_cmd_factory`-based
+# tests above already rely on for `_run_cmd`.
+# ---------------------------------------------------------------------------
+
+
+def test_hook_userpromptsubmit_requires_no_attestation(tmp_path):
+    _seed_shared_leg1(tmp_path, S6)
+    spec = run_plan.TrajectorySpec(
+        scenario=S6, arm="hook-userpromptsubmit", note_variant="plain", seed=0, n_legs=3
+    )
+    with mock.patch.object(run_plan, "_tier_trajectories", return_value=[spec]):
+        # dry_run=True and no --hook-attestation flag at all -- if this arm were
+        # (incorrectly) gated like hook-full, plan_and_run would mark every leg
+        # "skipped(no-attestation)" without ever reaching the per-leg dry-run branch.
+        outcome = run_plan.plan_and_run("T6", _args(tmp_path, "T6", dry_run=True))
+
+    statuses = {p["status"] for p in outcome["plan"]}
+    assert "skipped(no-attestation)" not in statuses
+    assert any(p.get("status") == "would-run" for p in outcome["plan"])
+
+    traj_dir = run_plan.resolve_traj_dir(tmp_path, spec.trajectory_id)
+    assert not traj_dir.exists(), "dry-run must still leave zero trace on disk for this arm too"
+
+
+# ---------------------------------------------------------------------------
 # Defect 3 regression (feature/eval-t1-validity-fixes): a hollow/invalid shared
 # leg 1 must never be trusted as a starting snapshot -- neither within the same
 # invocation (already covered by the existing "failed(shared-leg1)" -> continue

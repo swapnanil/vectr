@@ -767,6 +767,7 @@ _EXPECTED_MCP_SERVERS: dict[str, list[dict[str, str]]] = {
     "proxy": [],
     "hook-sessionstart": [],
     "hook-full": [],
+    "hook-userpromptsubmit": [],
 }
 
 # Adapted from the trap harness's `parse_injection_events`
@@ -877,6 +878,7 @@ def leg_non_vacuity(
     proxy_injected: int | None = None,
     planted_anchor: str | None = None,
     hook_injection_counts: Mapping[str, Any] | None = None,
+    user_prompt_submit_injection_delta: int | None = None,
     transcript_path: Path | None = None,
     planted_note_content: str | None = None,
     note_id: int | None = None,
@@ -924,6 +926,24 @@ def leg_non_vacuity(
          (`_content_delivered_in_json_text` against the raw transcript) AND,
          when `note_id` is given, the literal `"[#<note_id>]"` marker present
          in that same raw text.
+
+    Arm "hook-userpromptsubmit" (D2's UserPromptSubmit-only variant,
+    DESIGN.md 4): a THIRD evidence-hierarchy case, distinct from both
+    "mcp"/"mcp-bare" above and "hook-sessionstart"/"hook-full" below.
+    UserPromptSubmit's `additionalContext` never renders into a `claude -p
+    --output-format stream-json` transcript either (the same
+    UPG-IU-HOOK-NONVACUITY-CANARY bug D2's own branch below documents), so
+    transcript content is deliberately never consulted for this arm -- unlike
+    "hook-sessionstart"/"hook-full", which still read the CUMULATIVE
+    `hook_injection_counts` dict, this arm's evidence is a single explicit
+    `user_prompt_submit_injection_delta` int the caller (`run_leg.py::
+    run_agent`) captures by snapshotting the daemon's `/v1/status` counter
+    immediately before and after THIS leg's own agent subprocess (never the
+    whole leg's cumulative count, which would also include this leg's own
+    preflight traffic). A flat counter (`delta` is `None` or `< 1`) means the
+    hook never fired for this leg and the leg is invalid; no attestation is
+    required for this arm (unlike "hook-full") because UserPromptSubmit is
+    independently canary-verified to fire and deliver headless.
 
     `agent_returncode`/`is_error`/`output_tokens` gate a prerequisite BELOW the
     per-arm premise: did the agent session run at all. This is arm-agnostic and
@@ -1087,7 +1107,7 @@ def leg_non_vacuity(
         if not proxy_injected:
             reasons.append("proxy injected == 0 for arm 'proxy'")
 
-    else:  # hook-sessionstart / hook-full
+    elif arm in ("hook-sessionstart", "hook-full"):
         if not notes_count_at_start:
             reasons.append(f"notes_count_at_start is 0 for arm {arm!r}")
         counts = dict(hook_injection_counts or {})
@@ -1120,6 +1140,31 @@ def leg_non_vacuity(
             # method alone (DESIGN.md 4.1). Transcript content is deliberately never
             # consulted for this arm.
             nv["planted_content_in_transcript"] = None
+
+    else:  # hook-userpromptsubmit -- see this function's own docstring
+        if not notes_count_at_start:
+            reasons.append(f"notes_count_at_start is 0 for arm {arm!r}")
+        delta = user_prompt_submit_injection_delta
+        nv["user_prompt_submit_injection_delta"] = delta
+        hook_fired = delta is not None and int(delta) >= 1
+        if not hook_fired:
+            reasons.append(
+                f"user_prompt_submit_injection_delta={delta!r} for arm {arm!r} -- "
+                "the daemon's UserPromptSubmit hook counter did not increment "
+                "across this leg's own agent session (flat counter -> the hook "
+                "never fired)"
+            )
+        if proxy_injected:
+            reasons.append(f"proxy injected={proxy_injected} for arm {arm!r}")
+        # DEFECT 13-style evidence hierarchy, D2 precedent (see the
+        # "hook-sessionstart"/"hook-full" branch's own D2 comment above):
+        # UserPromptSubmit's additionalContext never renders in a stream-json
+        # transcript either (same UPG-IU-HOOK-NONVACUITY-CANARY bug), so
+        # transcript content is deliberately never consulted here -- delivery
+        # rests solely on the before/after hook_injection_counts delta
+        # run_leg.py::run_agent captures bracketing the agent session
+        # (DESIGN.md 4.1).
+        nv["planted_content_in_transcript"] = None
 
     if trail_text_delivered is False:
         reasons.append("T3: variant's provenance-trail text absent from probe's returned context")

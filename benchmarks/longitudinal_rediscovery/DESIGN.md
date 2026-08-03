@@ -450,6 +450,7 @@ with *proxy transparency*.
 | C | `proxy` | proxy injection | inject ON | none | none | note planted after leg 1 |
 | D1 | `hook-sessionstart` | SessionStart hook `additionalContext` | `--no-inject` | none | SessionStart only | note planted after leg 1 |
 | D2 | `hook-full` | full hook set | `--no-inject` | none | all vectr hooks | note planted after leg 1 |
+| D2' | `hook-userpromptsubmit` | UserPromptSubmit hook `additionalContext` (per-prompt semantic recall) | `--no-inject` | none | UserPromptSubmit only | note planted after leg 1 |
 
 **Arm B detail.** `--strict-mcp-config --mcp-config <cell>/mcp.json` where `mcp.json` is
 exactly vectr's own template with the scratch port:
@@ -485,6 +486,36 @@ behaviour vectr promises ("notes auto-injected at session start").**
   never run and never scored. A valid attestation exists from the 2026-07-29 probe and
   can be re-minted in minutes with the same canary method.
 
+**`hook-userpromptsubmit` (D2', a UserPromptSubmit-only variant of D2) is
+UNCONDITIONAL, like D1 — user decision, 2026-08-03.** A subsequent canary
+probe (real `Read`/`Bash` tool calls inside a headless `claude -p` session,
+`hook_injection_counts` captured before/after) found `PreToolUse` to be
+**version-dependent**: on Claude Code 2.1.220, the daemon's `PreToolUse`
+counter stayed flat (1→1) across genuine tool calls, while `SessionStart`
+(1→2→3) and `UserPromptSubmit` (0→1→2) both incremented headless, and a
+direct CLI invocation (`vectr hook pre-tool-use`) still fires and counts —
+so the mechanism itself works, but `claude -p` does not reliably invoke it
+on this version. `hook-full`'s existing attestation gate already exists for
+exactly this kind of version drift and stays exactly as it was (unchanged,
+still gating on `PreToolUse` alongside the other events). Rather than
+interactively re-attesting `hook-full` each time Claude Code's headless
+hook-invocation behavior shifts, or leaving D2 entirely parked pending a
+fix, the chosen third option isolates the one channel independently proven
+to both fire and deliver headless on the current version — `UserPromptSubmit`
+— as its own arm, with no `SessionStart` and no `PreToolUse` hook wired at
+all. This also has genuine product-realism value beyond working around the
+version gap: it isolates the *per-prompt semantic-recall* injection path
+(`VectrService._recall_impl`'s ordinary ranked `recall()` call, made on
+every prompt submission) as its own measurement, distinct from D1's
+once-per-session boot injection over the same store — the two exercise
+different parts of the same working-memory system. UserPromptSubmit's
+`additionalContext` still never renders into a `stream-json` transcript
+(the same rendering gap the D1/D2 row below documents for
+`UserPromptSubmit`/`PreToolUse`), so this arm's own non-vacuity gate (§4.1)
+never consults transcript content either — firing/delivery evidence is
+daemon-side `hook_injection_counts['UserPromptSubmit']` deltas only, never
+a transcript grep for hook content.
+
 ### 4.1 Per-arm non-vacuity gates
 
 A leg counts only if the arm's premise is independently confirmed. Any failure ⇒
@@ -498,6 +529,7 @@ A leg counts only if the arm's premise is independently confirmed. Any failure �
 | **B** | `notes_count >= 1`; an MCP server named `"vectr"` present in `mcp_servers` with status `"connected"` (or the transitional `"pending"`, provisionally accepted — DEFECT 13); vectr-tool evidence from ANY of `mcp__vectr__*` in `init.tools` (legacy shape), a real `tool_use`/`tool_result` pair for an `mcp__vectr__*` tool in the transcript, or the harness's own pre-session `/mcp` handshake probe; the polled daemon-side `/v1/recall` preflight either returns the planted note, or (if it doesn't) the transcript itself shows in-session delivery evidence; proxy `injected == 0`. **Whether the agent calls recall is the measured outcome, not a gate.** |
 | **C** | `notes_count >= 1`; planted anchor present in a post-offset `PROACTIVE_INJECT` line (exact comma-split match); proxy `injected > 0` |
 | **D1/D2** | `notes_count >= 1`; daemon `hook_injection_counts` nonzero for the expected event(s); proxy `injected == 0`. For **D1**, additionally: the planted note's content is found in the transcript (whitespace-normalized and JSON-escape-aware, DEFECT 8 — see below) — valid because stream-json renders `SessionStart` `additionalContext`. For **D2**'s `UserPromptSubmit`/`PreToolUse` events, transcript content is **never** consulted (the transcript does not render them — the trap-harness scorer's transcript-content rule is the known bug UPG-IU-HOOK-NONVACUITY-CANARY); delivery rests on `hook_injection_counts` plus the attestation's canary method |
+| **D2'** (`hook-userpromptsubmit`) | `notes_count >= 1`; proxy `injected == 0`; a `user_prompt_submit_injection_delta >= 1` — the daemon's `hook_injection_counts['UserPromptSubmit']` counter captured immediately before and after THIS leg's own agent session (`run_leg.py::run_agent`, never the whole leg's cumulative count). No attestation required (UserPromptSubmit is independently canary-verified to fire and deliver headless — see §4's rationale paragraph). Transcript content is **never** consulted, same reason as D2's row above |
 | **T3 variants** | the variant's provenance-trail text appears in the probe's returned context (§7.3) |
 
 Audit events are counted only from a byte offset taken **after** the preflight probes
@@ -516,6 +548,17 @@ channel — so D1/D2 judge reachability against the SessionStart channel itself
 (`boot=True, hook_event="SessionStart"` against `/v1/recall`), not the proactive one. This
 mirrors the same channel split as this table's own D1/D2 row (`hook_injection_counts`,
 not `PROACTIVE_INJECT`) one layer earlier, before any spend.
+
+Arm D2' (`hook-userpromptsubmit`) is a third case: `plant_note()` does **not** force it
+to `kind="directive"` (it delivers via `_recall_impl`'s ordinary ranked `recall()` pass,
+un-gated by note kind or trigger config — every planted note is naturally eligible
+there, unlike SessionStart's boot-only call), and `/v1/proactive` is not its reachability
+channel either — every non-`proxy` arm passes `--no-inject` to the scratch proxy, so even
+a non-directive note visible to `/v1/proactive` in principle never actually ships through
+that channel for this arm during the real session. `_user_prompt_submit_probe` issues the
+identical `{"query": <leg prompt>, "hook_event": "UserPromptSubmit", "events":
+["prompt-submit"]}` `/v1/recall` payload a real hook invocation sends, judging
+reachability against the channel this arm actually exercises.
 
 **Delivery-containment checks are whitespace-normalized, and JSON-escape-aware where
 the haystack is raw JSON text (DEFECT 8).** Every channel that renders a note into
@@ -1088,7 +1131,12 @@ budget (100 tokens) is smaller than every scenario's real full-text render
 would still silently degrade to its index-tier, title-only line; `directive`'s
 400-token budget clears every case. Non-hook arms (`none`/`mcp`/`mcp-bare`/
 `proxy`) are unaffected — this is a no-op for them, and `scenarios.py`'s 16
-`NoteVariant` sites are never edited.
+`NoteVariant` sites are never edited. Arm `hook-userpromptsubmit` is ALSO a
+no-op here despite being a hook arm: it delivers via `_recall_impl`'s
+ordinary ranked `recall()` pass (§4's rationale paragraph), which is never
+trigger-gated and never kind-budget-capped the way the SessionStart boot
+branch is, so the planted note ships with its scenario-authored `kind`/
+`triggers` unmodified for this arm.
 
 ---
 
