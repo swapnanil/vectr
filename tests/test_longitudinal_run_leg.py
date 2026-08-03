@@ -791,43 +791,57 @@ def test_probe_hook_arm_allow_unreachable_bypasses_session_start_abort(tmp_path,
 
 
 def test_probe_non_hook_arm_still_uses_proactive_channel_unchanged(tmp_path, monkeypatch):
-    """Byte-for-byte parity guard: a non-hook arm's abort message and
-    reachability source must be identical to pre-DEFECT-7 behavior, and it
-    must never call the session-start `/v1/recall` boot path."""
+    """UPG-EVAL-PLANT-DISPLACEMENT: a non-hook arm's reachability gate is now
+    a direct by-id `/v1/recall` integrity check, not the proactive channel's
+    ranking -- see DESIGN.md 4.1's "Pre-spend reachability is a by-id
+    integrity check" paragraph. This exercises the genuine-absence case (the
+    daemon reports the note missing by id): it must still abort, with the
+    new by-id abort message and `reachable_channel == "by_id"`."""
     runner = _make_hook_runner(tmp_path, arm="proxy")  # non-hook arm
 
     def fake(method, url, payload=None, timeout=30):
         if method == "POST" and url.endswith("/v1/proactive"):
             return {"item_count": 0, "context": "", "anchor_ids": []}
-        raise AssertionError(
-            f"non-hook arm probe() must never call {method} {url} -- only "
-            f"/v1/proactive, unchanged from before DEFECT 7"
-        )
+        if method == "POST" and url.endswith("/v1/recall"):
+            assert payload.get("note_id") == 7
+            return {"notes": "Note #7 not found."}
+        raise AssertionError(f"unexpected call in probe(): {method} {url}")
 
     monkeypatch.setattr(run_leg, "_http_json", fake)
     with pytest.raises(SystemExit) as exc_info:
         runner.probe()
     assert str(exc_info.value) == (
-        "ABORT: the planted note is not retrievable on EITHER daemon-side "
-        "probe, so this leg cannot test its memory channel. Fix the "
-        "scenario (not the score); re-run with --allow-unreachable to "
-        "record it anyway."
+        "ABORT: the planted note is absent or content-corrupt in the "
+        "daemon's store (by-id /v1/recall integrity check failed), so "
+        "this leg cannot test its memory channel. Fix the scenario "
+        "(not the score); re-run with --allow-unreachable to record "
+        "it anyway."
     )
-    assert runner.record["preflight"]["reachable_channel"] == "proactive"
+    assert runner.record["preflight"]["reachable_channel"] == "by_id"
     assert runner.record["preflight"]["proactive_probe_diagnostic_only"] is False
+    assert runner.record["channel_delivery"] == "unreachable"
 
 
 def test_probe_non_hook_arm_succeeds_via_proactive_channel_unchanged(tmp_path, monkeypatch):
+    """UPG-EVAL-PLANT-DISPLACEMENT: the by-id integrity check is now the gate
+    (`reachable_channel == "by_id"`); the proactive channel delivering the
+    anchor at the default budget records `channel_delivery ==
+    "delivered_default"` as a diagnostic, not the gate itself."""
     runner = _make_hook_runner(tmp_path, arm="mcp")  # non-hook memory arm
+    content = _note_content(runner)
 
     def fake(method, url, payload=None, timeout=30):
         if method == "POST" and url.endswith("/v1/proactive"):
             return {"item_count": 1, "context": "", "anchor_ids": ["note:7"]}
         if method == "POST" and url.endswith("/v1/recall"):
-            # arm "mcp"'s own separate query-shaped recall probe (unrelated to
-            # DEFECT 7 -- pre-existing behavior for arms "mcp"/"mcp-bare")
-            return {"notes": "[#7] some note"}
-        raise AssertionError(f"unexpected call: {method} {url}")
+            if payload.get("note_id") == 7:
+                # the new by-id integrity probe (UPG-EVAL-PLANT-DISPLACEMENT)
+                return {"notes": f"[7] [HIGH] [agent]  (0m ago)\n{content}"}
+            if "query" in payload:
+                # arm "mcp"'s own separate query-shaped recall probe (unrelated to
+                # DEFECT 7 -- pre-existing behavior for arms "mcp"/"mcp-bare")
+                return {"notes": "[#7] some note"}
+        raise AssertionError(f"unexpected call: {method} {url} {payload!r}")
 
     def fake_with_headers(method, url, payload=None, *, timeout=30.0, extra_headers=None):
         # DEFECT 13: `probe()` now also runs a pre-session MCP handshake
@@ -845,9 +859,128 @@ def test_probe_non_hook_arm_succeeds_via_proactive_channel_unchanged(tmp_path, m
     monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
     runner.probe()  # must not raise
     assert runner.record["planted_note_reachable_preflight"] is True
-    assert runner.record["preflight"]["reachable_channel"] == "proactive"
+    assert runner.record["preflight"]["reachable_channel"] == "by_id"
+    assert runner.record["channel_delivery"] == "delivered_default"
     assert runner.record["mcp_handshake_ok"] is True
     assert runner.record["mcp_handshake_tools"] == 1
+
+
+# ---------------------------------------------------------------------------
+# UPG-EVAL-PLANT-DISPLACEMENT (2026-08-03 ruling, DESIGN.md 4.1): a live k>=2
+# leg aborted pre-spend because the agent's OWN note from a prior leg (an
+# anchored, kind="gotcha", priority="high" note) legitimately outranked the
+# unanchored planted directive at the proactive channel's default item
+# budget. That ranking is the product working as intended -- so `probe()`
+# now gates non-hook memory arms on a direct by-id `/v1/recall` integrity
+# check (`_note_by_id_probe`), and treats "present but outranked" as a
+# measured property of the run (`channel_delivery="displaced"`, no abort),
+# reserving ABORT for genuine absence/corruption or transport-level failure.
+# ---------------------------------------------------------------------------
+
+
+def test_probe_displacement_records_rank_and_runs_without_abort(tmp_path, monkeypatch):
+    """(a) Displacement path: the by-id integrity check passes, but the
+    planted note (note:7) is absent from the proactive channel's
+    default-budget response (turn1/turn2) because a stronger agent-authored
+    note (note:2, kind=gotcha, priority=high, anchored) outranks it. The
+    cooldown-ledger rank probe must find the planted note at rank 2, and the
+    leg must RUN -- no abort -- recording the new displacement fields."""
+    runner = _make_hook_runner(tmp_path, arm="proxy")
+    runner.notes_count_at_start = 2  # cap = min(2, 10) = 2 rank-probe rounds available
+    content = _note_content(runner)
+
+    rankprobe_round = {"n": 0}
+
+    def fake(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/proactive"):
+            session_id = (payload or {}).get("session_id", "")
+            if session_id.endswith("-turn1") or session_id.endswith("-turn2"):
+                # default budget (items=1): the displacing note wins the only
+                # slot, the planted note is absent
+                return {
+                    "item_count": 1,
+                    "context": "note #2 (gotcha, agent, anchored to app/foo.py): a strong note",
+                    "anchor_ids": ["note:2"],
+                }
+            if session_id.endswith("-rankprobe"):
+                rankprobe_round["n"] += 1
+                if rankprobe_round["n"] == 1:
+                    # round 1: same displacing note (not yet cooldown-suppressed
+                    # on this synthetic session)
+                    return {
+                        "item_count": 1,
+                        "context": "note #2 (gotcha, agent, anchored to app/foo.py): a strong note",
+                        "anchor_ids": ["note:2"],
+                    }
+                # round 2: note:2 is now cooldown-suppressed for this session_id
+                # (the product's own cooldown ledger), so the planted note surfaces
+                return {
+                    "item_count": 1,
+                    "context": "note #7 (gotcha, agent): the planted note",
+                    "anchor_ids": ["note:7"],
+                }
+            raise AssertionError(f"unexpected /v1/proactive session_id: {session_id!r}")
+        if method == "POST" and url.endswith("/v1/recall"):
+            if payload.get("note_id") == 7:
+                return {"notes": f"[7] [MEDIUM] [agent]  (0m ago)\n{content}"}
+            if payload.get("note_id") == 2:
+                return {"notes": "[2] [HIGH] [GOTCHA] [agent]  (0m ago)\na strong note"}
+        raise AssertionError(f"unexpected call: {method} {url} {payload!r}")
+
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
+    runner.probe()  # must NOT raise -- displacement is not an abort
+
+    assert runner.record["planted_note_reachable_preflight"] is True
+    assert runner.record["channel_delivery"] == "displaced"
+    assert runner.record["delivered_at_default"] is False
+    assert runner.record["planted_rank"] == 2
+    assert runner.record["displaced_by"] == [
+        {"note_id": 2, "kind": "gotcha", "priority": "high", "anchored": True},
+    ]
+    assert runner.record["preflight"]["rank_probe"]["rank"] == 2
+
+
+def test_probe_content_corrupt_by_id_still_aborts(tmp_path, monkeypatch):
+    """(b) Genuine-unreachability case: the note exists at that id but its
+    content does not match what was planted (content-corrupt) -- this must
+    still ABORT, distinct from the accepted "displaced" case above."""
+    runner = _make_hook_runner(tmp_path, arm="proxy")
+
+    def fake(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/proactive"):
+            return {"item_count": 0, "context": "", "anchor_ids": []}
+        if method == "POST" and url.endswith("/v1/recall") and payload.get("note_id") == 7:
+            return {"notes": "[7] [MEDIUM] [agent]  (0m ago)\nsome unrelated content that was never planted"}
+        raise AssertionError(f"unexpected call: {method} {url} {payload!r}")
+
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    with pytest.raises(SystemExit) as exc_info:
+        runner.probe()
+    assert "absent or content-corrupt" in str(exc_info.value)
+    assert runner.record["preflight"]["by_id_probe"]["exists"] is True
+    assert runner.record["preflight"]["by_id_probe"]["content_matches"] is False
+    assert runner.record["channel_delivery"] == "unreachable"
+    assert runner.record["planted_note_reachable_preflight"] is False
+
+
+def test_probe_infra_unreachable_aborts_with_infra_message(tmp_path, monkeypatch):
+    """(c) Every probe path fails at the transport level (daemon unreachable /
+    embedder never warms) -- must abort with the infra_unreachable message,
+    distinct from the by-id-absent message in (b) above."""
+    runner = _make_hook_runner(tmp_path, arm="proxy")
+
+    def fake(method, url, payload=None, timeout=30):
+        # a transport-level failure shape for every call, matching
+        # `_transport_ok`'s own definition (any of "_error"/"_http_error"/"_raw")
+        return {"_error": "URLError: [Errno 61] Connection refused"}
+
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    with pytest.raises(SystemExit) as exc_info:
+        runner.probe()
+    assert "infra unreachable" in str(exc_info.value)
+    assert runner.record["preflight"]["infra_unreachable"] is True
+    assert runner.record["channel_delivery"] == "unreachable"
 
 
 # ---------------------------------------------------------------------------
@@ -975,11 +1108,17 @@ def test_poll_recall_probe_note_id_none_returns_none_never_true(monkeypatch):
 
 def test_probe_mcp_arm_aborts_when_mcp_handshake_fails(tmp_path, monkeypatch):
     runner = _make_hook_runner(tmp_path, arm="mcp-bare")
+    content = _note_content(runner)
 
     def fake(method, url, payload=None, timeout=30):
         if method == "POST" and url.endswith("/v1/proactive"):
             return {"item_count": 1, "context": "", "anchor_ids": ["note:7"]}
-        raise AssertionError(f"unexpected call: {method} {url}")
+        if method == "POST" and url.endswith("/v1/recall") and payload.get("note_id") == 7:
+            # by-id integrity probe (UPG-EVAL-PLANT-DISPLACEMENT) runs before
+            # the handshake check this test exercises, and must pass so the
+            # handshake abort -- not a by-id abort -- is what's observed here.
+            return {"notes": f"[7] [HIGH] [agent]  (0m ago)\n{content}"}
+        raise AssertionError(f"unexpected call: {method} {url} {payload!r}")
 
     monkeypatch.setattr(run_leg, "_http_json", fake)
     monkeypatch.setattr(
@@ -997,11 +1136,14 @@ def test_probe_mcp_arm_aborts_when_mcp_handshake_fails(tmp_path, monkeypatch):
 
 def test_probe_mcp_arm_allow_unreachable_bypasses_handshake_abort(tmp_path, monkeypatch):
     runner = _make_hook_runner(tmp_path, arm="mcp", allow_unreachable=True)
+    content = _note_content(runner)
 
     def fake(method, url, payload=None, timeout=30):
         if method == "POST" and url.endswith("/v1/proactive"):
             return {"item_count": 1, "context": "", "anchor_ids": ["note:7"]}
-        raise AssertionError(f"unexpected call: {method} {url}")
+        if method == "POST" and url.endswith("/v1/recall") and payload.get("note_id") == 7:
+            return {"notes": f"[7] [HIGH] [agent]  (0m ago)\n{content}"}
+        raise AssertionError(f"unexpected call: {method} {url} {payload!r}")
 
     monkeypatch.setattr(run_leg, "_http_json", fake)
     monkeypatch.setattr(
@@ -1077,7 +1219,10 @@ def test_probe_trail_text_delivered_true_for_multiline_trail_via_whitespace_coll
     def fake(method, url, payload=None, timeout=30):
         if method == "POST" and url.endswith("/v1/proactive"):
             return {"item_count": 1, "context": delivered_context, "anchor_ids": ["note:7"]}
-        raise AssertionError(f"unexpected call: {method} {url}")
+        if method == "POST" and url.endswith("/v1/recall") and payload.get("note_id") == 7:
+            # by-id integrity probe (UPG-EVAL-PLANT-DISPLACEMENT)
+            return {"notes": f"[7] [HIGH] [agent]  (0m ago)\n{variant.content}"}
+        raise AssertionError(f"unexpected call: {method} {url} {payload!r}")
 
     monkeypatch.setattr(run_leg, "_http_json", fake)
     monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
@@ -1091,13 +1236,17 @@ def test_probe_trail_text_delivered_false_when_genuinely_absent(tmp_path, monkey
     context must still read as not-delivered -- whitespace normalization
     must not manufacture a false positive."""
     runner = _make_hook_runner(tmp_path, arm="proxy", scenario="release_via_ci", note_variant="verifiable")
+    content = _note_content(runner)
 
     def fake(method, url, payload=None, timeout=30):
         if method == "POST" and url.endswith("/v1/proactive"):
             # anchor present (so probe() doesn't abort on reachability) but the
             # rendered context text is unrelated to the trail
             return {"item_count": 1, "context": "totally unrelated context text", "anchor_ids": ["note:7"]}
-        raise AssertionError(f"unexpected call: {method} {url}")
+        if method == "POST" and url.endswith("/v1/recall") and payload.get("note_id") == 7:
+            # by-id integrity probe (UPG-EVAL-PLANT-DISPLACEMENT)
+            return {"notes": f"[7] [HIGH] [agent]  (0m ago)\n{content}"}
+        raise AssertionError(f"unexpected call: {method} {url} {payload!r}")
 
     monkeypatch.setattr(run_leg, "_http_json", fake)
     monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)

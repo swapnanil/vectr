@@ -979,6 +979,81 @@ def test_leg_non_vacuity_exact_anchor_match_not_prefix(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# UPG-EVAL-PLANT-DISPLACEMENT (DESIGN.md 4.1): arm "proxy"'s planted-anchor-
+# injection expectation (exercised immediately above) is exempted when
+# `run_leg.py`'s preflight recorded `channel_delivery="displaced"` -- the
+# planted note passed a direct by-id integrity check but was outranked by a
+# stronger note at the proactive channel's default budget, so the channel
+# genuinely not delivering it this leg is an already-accepted, measured
+# property of the run, not grounds to invalidate it a second time here.
+# ---------------------------------------------------------------------------
+
+
+def test_leg_non_vacuity_proxy_displaced_channel_delivery_is_valid_despite_no_hits(tmp_path):
+    """A leg annotated channel_delivery="displaced" by run_leg.py's preflight
+    is exempted from the planted-anchor-injection expectation -- the same
+    contention observed at preflight is expected to persist into the real
+    session, so re-invalidating it here would just move the same false abort
+    one step later."""
+    audit_log = tmp_path / "audit.log"
+    events = _init_and_result_events(mcp_servers=[])
+    audit_log.write_text("", encoding="utf-8")  # no PROACTIVE_INJECT line for note:7 at all
+
+    result = scorer.leg_non_vacuity(
+        arm="proxy", k=2, events=events, notes_count_at_start=2,
+        audit_log=audit_log, proxy_injected=1, planted_anchor="note:7",
+        channel_delivery="displaced",
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+    assert result["non_vacuity"]["planted_note_retrieved"] is False
+    assert result["non_vacuity"]["channel_delivery"] == "displaced"
+
+
+def test_leg_non_vacuity_proxy_without_displaced_annotation_still_invalid_on_no_hits(tmp_path):
+    """Regression guard: the exemption is scoped to channel_delivery==
+    "displaced" only -- a leg with no hits and no (or a different)
+    channel_delivery value must still be invalid, exactly as before this
+    fix."""
+    audit_log = tmp_path / "audit.log"
+    events = _init_and_result_events(mcp_servers=[])
+    audit_log.write_text("", encoding="utf-8")
+
+    result = scorer.leg_non_vacuity(
+        arm="proxy", k=2, events=events, notes_count_at_start=2,
+        audit_log=audit_log, proxy_injected=1, planted_anchor="note:7",
+        channel_delivery=None,
+    )
+    assert result["valid"] is False
+    assert "planted anchor" in result["invalid_reason"]
+
+    result2 = scorer.leg_non_vacuity(
+        arm="proxy", k=2, events=events, notes_count_at_start=2,
+        audit_log=audit_log, proxy_injected=1, planted_anchor="note:7",
+        channel_delivery="delivered_default",
+    )
+    assert result2["valid"] is False
+    assert "planted anchor" in result2["invalid_reason"]
+
+
+def test_leg_non_vacuity_channel_delivery_param_not_consumed_by_mcp_arm_branch(tmp_path):
+    """DEFECT 13 non-regression: `channel_delivery` is a UPG-EVAL-PLANT-
+    DISPLACEMENT parameter read ONLY by arm "proxy" (DESIGN.md 4.1) -- arms
+    "mcp"/"mcp-bare" must produce an identical verdict whether or not it is
+    passed, since their evidence-hierarchy gate never reads it."""
+    events = _mcp_transcript_events(status="pending")
+    transcript_path = _write_transcript(tmp_path, events)
+    kwargs = dict(
+        arm="mcp", k=2, events=events, notes_count_at_start=1, proxy_injected=0,
+        note_id=7, transcript_path=transcript_path,
+        recall_probe_returned_note=False,
+    )
+    without = scorer.leg_non_vacuity(**kwargs)
+    with_displaced = scorer.leg_non_vacuity(**kwargs, channel_delivery="displaced")
+    assert without["valid"] is with_displaced["valid"] is False
+    assert without["invalid_reason"] == with_displaced["invalid_reason"]
+
+
+# ---------------------------------------------------------------------------
 # mcp-bare guard: held to the same vectr-server-present bar as mcp, not the
 # empty-servers bar every other tool-less arm gets (fix landed in scorer.py's
 # leg_non_vacuity arm branch; this pins it against regressing). A "connected"
