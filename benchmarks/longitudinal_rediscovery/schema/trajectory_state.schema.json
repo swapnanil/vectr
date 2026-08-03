@@ -10,7 +10,7 @@
     "trajectory_id": { "type": "string", "description": "<scenario>-<arm>-<variant>-s<seed>. A CONTENT identifier only as of UPG-EVAL-PATH-SLUG-LEAK -- the on-disk directory is instead an opaque hash of this string (see 'run_dir' below and this schema's own top-level description) so the agent's own cwd never leaks it; still guaranteed unique per trajectory." },
     "run_dir": { "type": "string", "description": "Basename of the directory this state.json actually lives in, kept for debuggability now that it is no longer derivable by eye from trajectory_id. Either 'run-<16 hex chars>' (opaque, UPG-EVAL-PATH-SLUG-LEAK) or a legacy trajectory_id-named directory carried over from a pre-fix campaign. Harness-side only -- never read by the agent." },
     "scenario": { "type": "string" },
-    "arm": { "enum": ["none", "mcp", "mcp-bare", "proxy", "hook-sessionstart", "hook-full"] },
+    "arm": { "enum": ["none", "mcp", "mcp-bare", "proxy", "hook-sessionstart", "hook-full", "hook-userpromptsubmit"] },
     "note_variant": { "enum": ["none", "plain", "provenance", "verifiable"] },
     "seed": { "type": "integer" },
     "n_legs": { "type": "integer", "minimum": 3 },

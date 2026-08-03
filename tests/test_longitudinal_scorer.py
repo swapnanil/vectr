@@ -1310,6 +1310,71 @@ def test_leg_non_vacuity_hook_sessionstart_content_genuinely_absent_still_invali
 
 
 # ---------------------------------------------------------------------------
+# arm "hook-userpromptsubmit" (D2', a UserPromptSubmit-only variant of D2 --
+# DESIGN.md 4, user decision 2026-08-03): unlike "hook-sessionstart"/
+# "hook-full" above, this arm's non-vacuity gate is a single explicit
+# `user_prompt_submit_injection_delta` int (captured by run_leg.py::run_agent
+# bracketing THIS leg's own agent subprocess with two `/v1/status` reads, NOT
+# the cumulative `hook_injection_counts` dict) -- a flat/absent delta means
+# the hook never fired for this leg. Transcript content is deliberately never
+# consulted for this arm (same UPG-IU-HOOK-NONVACUITY-CANARY rendering gap as
+# D2's own branch), so `planted_content_in_transcript` must stay None
+# regardless of what -- if anything -- a transcript_path/planted_note_content
+# argument would otherwise suggest.
+# ---------------------------------------------------------------------------
+
+
+def test_leg_non_vacuity_usps_valid_when_counter_incremented():
+    events = _init_and_result_events(mcp_servers=[])  # hook-userpromptsubmit expects []
+    result = scorer.leg_non_vacuity(
+        arm="hook-userpromptsubmit", k=2, events=events, notes_count_at_start=1,
+        user_prompt_submit_injection_delta=2,
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+    assert result["non_vacuity"]["user_prompt_submit_injection_delta"] == 2
+    assert result["non_vacuity"]["planted_content_in_transcript"] is None
+
+
+def test_leg_non_vacuity_usps_invalid_when_counter_flat():
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="hook-userpromptsubmit", k=2, events=events, notes_count_at_start=1,
+        user_prompt_submit_injection_delta=0,
+    )
+    assert result["valid"] is False
+    assert "user_prompt_submit_injection_delta=0" in result["invalid_reason"]
+    assert "never fired" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_usps_invalid_when_delta_missing():
+    """The caller failing to capture the counter at all (e.g. a `/v1/status`
+    error mid-leg) must fail closed, not be silently treated as "no evidence
+    needed"."""
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="hook-userpromptsubmit", k=2, events=events, notes_count_at_start=1,
+        user_prompt_submit_injection_delta=None,
+    )
+    assert result["valid"] is False
+    assert "user_prompt_submit_injection_delta=None" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_usps_ignores_transcript_content_entirely():
+    """Even if a transcript_path/planted_note_content pair is supplied (as a
+    caller might pass uniformly across arms), this arm's branch must never
+    read them -- delivery rests solely on the counter delta."""
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="hook-userpromptsubmit", k=2, events=events, notes_count_at_start=1,
+        user_prompt_submit_injection_delta=1,
+        transcript_path=None,
+        planted_note_content="this text is never checked for this arm",
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+    assert result["non_vacuity"]["planted_content_in_transcript"] is None
+
+
+# ---------------------------------------------------------------------------
 # weak_prior: the leg-level signal report.py's mistake_repetition_rate
 # aggregation (DESIGN.md 6.5, not yet implemented) will read
 # ---------------------------------------------------------------------------

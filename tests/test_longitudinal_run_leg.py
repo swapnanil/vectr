@@ -336,6 +336,30 @@ def test_hook_preflight_noop_for_non_hook_arms(tmp_path, monkeypatch):
     assert "hook_preflight" not in runner.record
 
 
+def test_hook_preflight_noop_for_hook_userpromptsubmit_arm(tmp_path, monkeypatch):
+    """arm "hook-userpromptsubmit" IS a hook arm, but `hook_preflight()` stays
+    scoped exactly to ("hook-sessionstart", "hook-full") -- it is a
+    SessionStart-specific mechanism check (synthesizes a SessionStart hook
+    stdin payload and greps its stdout). The new arm's own firing/delivery
+    evidence comes from `run_agent()`'s before/after
+    `hook_injection_counts['UserPromptSubmit']` delta instead (DESIGN.md 4.1),
+    never from this method."""
+    runner = _make_hook_runner(tmp_path, arm="hook-userpromptsubmit")
+
+    def fail_http(*a, **k):
+        raise AssertionError("hook_preflight must not touch the daemon for arm hook-userpromptsubmit")
+
+    def fail_run(*a, **k):
+        raise AssertionError("hook_preflight must not spawn a hook subprocess for arm hook-userpromptsubmit")
+
+    monkeypatch.setattr(run_leg, "_http_json", fail_http)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fail_run)
+
+    runner.hook_preflight()  # must return immediately, no exception
+
+    assert "hook_preflight" not in runner.record
+
+
 def test_hook_preflight_noop_when_nothing_planted(tmp_path, monkeypatch):
     """A hook arm with no planted note yet (e.g. leg 1) has nothing to preflight."""
     runner = _make_hook_runner(tmp_path, planted_note_id=None, planted_anchor=None)
@@ -511,8 +535,9 @@ def test_hook_preflight_allow_hook_unreachable_bypasses_abort(tmp_path, monkeypa
 
 def test_run_agent_passes_settings_for_hook_arms_only(tmp_path, monkeypatch):
     """`--settings <hooks_settings_path>` is added to the spawned `claude` argv
-    for arms hook-sessionstart/hook-full (so headless hook loading no longer
-    depends on directory trust), and left out for every other arm.
+    for arms hook-sessionstart/hook-full/hook-userpromptsubmit (so headless
+    hook loading no longer depends on directory trust), and left out for
+    every other arm.
     """
     captured = {}
 
@@ -535,11 +560,216 @@ def test_run_agent_passes_settings_for_hook_arms_only(tmp_path, monkeypatch):
     idx = captured["cmd"].index("--settings")
     assert captured["cmd"][idx + 1] == hook_runner.record["hooks_settings_path"]
 
+    usps_runner = _make_hook_runner(tmp_path, arm="hook-userpromptsubmit")
+    usps_runner.run_agent()
+    assert "--settings" in captured["cmd"]
+    idx = captured["cmd"].index("--settings")
+    assert captured["cmd"][idx + 1] == usps_runner.record["hooks_settings_path"]
+
     proxy_runner = _make_runner(tmp_path)  # arm="proxy"
     proxy_runner.workspace.mkdir(parents=True, exist_ok=True)
     proxy_runner.artifacts.mkdir(parents=True, exist_ok=True)
     proxy_runner.run_agent()
     assert "--settings" not in captured["cmd"]
+
+
+def test_run_agent_captures_user_prompt_submit_injection_delta_for_usps_arm(tmp_path, monkeypatch):
+    """DESIGN.md 4.1 / task item 3: arm "hook-userpromptsubmit" has no
+    SessionStart or PreToolUse hook to preflight, and its additionalContext
+    never renders into the stream-json transcript, so `run_agent()` itself
+    must bracket the spawned agent subprocess with two `/v1/status` GETs and
+    record the `hook_injection_counts['UserPromptSubmit']` delta -- the sole
+    firing/delivery evidence `scorer.leg_non_vacuity` uses for this arm.
+    """
+    status_responses = iter([
+        {"hook_injection_counts": {"UserPromptSubmit": 3}},   # before
+        {"hook_injection_counts": {"UserPromptSubmit": 5}},   # after
+    ])
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        assert method == "GET" and url.endswith("/v1/status")
+        return next(status_responses)
+
+    class _FakeProc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg.subprocess, "Popen", lambda cmd, **kwargs: _FakeProc())
+    monkeypatch.setattr(run_leg.shutil, "which", lambda name: "/usr/bin/claude" if name == "claude" else None)
+
+    runner = _make_hook_runner(tmp_path, arm="hook-userpromptsubmit")
+    runner.run_agent()
+
+    assert runner.record["user_prompt_submit_injection_count_before"] == 3
+    assert runner.record["user_prompt_submit_injection_count_after"] == 5
+    assert runner.record["user_prompt_submit_injection_delta"] == 2
+
+
+def test_run_agent_flat_counter_yields_zero_delta_for_usps_arm(tmp_path, monkeypatch):
+    """The counter never moving (the hook did not fire this leg) must record
+    a delta of 0, not raise or silently omit the field -- `scorer.
+    leg_non_vacuity` treats < 1 as invalid."""
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        return {"hook_injection_counts": {"UserPromptSubmit": 4}}
+
+    class _FakeProc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg.subprocess, "Popen", lambda cmd, **kwargs: _FakeProc())
+    monkeypatch.setattr(run_leg.shutil, "which", lambda name: "/usr/bin/claude" if name == "claude" else None)
+
+    runner = _make_hook_runner(tmp_path, arm="hook-userpromptsubmit")
+    runner.run_agent()
+
+    assert runner.record["user_prompt_submit_injection_delta"] == 0
+
+
+def test_run_agent_does_not_capture_usps_delta_for_other_arms(tmp_path, monkeypatch):
+    """Zero behavior change for every other arm: `run_agent()` must not touch
+    `/v1/status` at all (not even for hook-sessionstart/hook-full, whose own
+    diagnostic snapshot happens later in `capture_and_teardown()`, not here),
+    and must never write the USPS delta keys into `self.record`."""
+
+    def fail_http(*a, **k):
+        raise AssertionError("run_agent() must not call /v1/status for a non-usps arm")
+
+    class _FakeProc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    monkeypatch.setattr(run_leg, "_http_json", fail_http)
+    monkeypatch.setattr(run_leg.subprocess, "Popen", lambda cmd, **kwargs: _FakeProc())
+    monkeypatch.setattr(run_leg.shutil, "which", lambda name: "/usr/bin/claude" if name == "claude" else None)
+
+    for arm in ("hook-sessionstart", "hook-full"):
+        runner = _make_hook_runner(tmp_path, arm=arm)
+        runner.run_agent()
+        assert "user_prompt_submit_injection_delta" not in runner.record
+
+    proxy_runner = _make_runner(tmp_path)  # arm="proxy"
+    proxy_runner.workspace.mkdir(parents=True, exist_ok=True)
+    proxy_runner.artifacts.mkdir(parents=True, exist_ok=True)
+    proxy_runner.run_agent()
+    assert "user_prompt_submit_injection_delta" not in proxy_runner.record
+
+
+# ---------------------------------------------------------------------------
+# write_hooks(): `vectr init --hooks` (main.py's `_write_claude_hooks`) always
+# writes all six hook groups; write_hooks() then prunes `.claude/settings.json`
+# down to the single group the arm actually needs. Fixture below mirrors the
+# real six-group shape main.py produces (matchers/commands taken from
+# main.py::_write_claude_hooks) so the prune logic is exercised against a
+# realistic pre-prune file, not a synthetic one-group stand-in.
+# ---------------------------------------------------------------------------
+
+_FULL_SIX_GROUP_HOOKS = {
+    "SessionStart": [{
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [{"type": "command", "command": "vectr hook session-start"}],
+    }],
+    "UserPromptSubmit": [{
+        "hooks": [{"type": "command", "command": "vectr hook user-prompt-submit"}],
+    }],
+    "PreToolUse": [{
+        "matcher": "Edit|Write|Read|Bash",
+        "hooks": [{"type": "command", "command": "vectr hook pre-tool-use"}],
+    }],
+    "PostToolUse": [{
+        "matcher": "Bash|Edit|Write|MultiEdit",
+        "hooks": [{"type": "command", "command": "vectr hook post-tool-use"}],
+    }],
+    "PostToolUseFailure": [{
+        "matcher": "Bash|Edit|Write|MultiEdit",
+        "hooks": [{"type": "command", "command": "vectr hook post-tool-use"}],
+    }],
+    "PreCompact": [{
+        "matcher": "manual|auto",
+        "hooks": [{"type": "command", "command": "vectr hook pre-compact"}],
+    }],
+}
+
+
+def _fake_vectr_init_hooks_run(monkeypatch, tmp_path):
+    """Monkeypatches `run_leg.subprocess.run` (the `vectr init --hooks` spawn
+    inside `write_hooks()`) so it writes a realistic full six-group
+    `.claude/settings.json`, exactly as `vectr init --hooks --no-ide-config`
+    would, without actually invoking the CLI."""
+
+    def fake_run(cmd, **kwargs):
+        assert "--hooks" in cmd
+        path_idx = cmd.index("--path")
+        workspace = Path(cmd[path_idx + 1])
+        settings_dir = workspace / ".claude"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"hooks": _FULL_SIX_GROUP_HOOKS}, indent=2)
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout="wrote hooks\n", stderr="")
+
+    monkeypatch.setattr(run_leg.subprocess, "run", fake_run)
+
+
+def test_write_hooks_prunes_to_user_prompt_submit_only_for_usps_arm(tmp_path, monkeypatch):
+    """Task item 1/6: arm "hook-userpromptsubmit" gets a settings.json whose
+    hooks dict has ONLY the "UserPromptSubmit" key -- no SessionStart hook, no
+    PreToolUse hook, wired at all."""
+    _fake_vectr_init_hooks_run(monkeypatch, tmp_path)
+    runner = _make_runner(tmp_path, arm="hook-userpromptsubmit")
+    runner.workspace.mkdir(parents=True, exist_ok=True)
+    runner.artifacts.mkdir(parents=True, exist_ok=True)
+
+    runner.write_hooks()
+
+    settings_path = runner.workspace / ".claude" / "settings.json"
+    data = json.loads(settings_path.read_text())
+    assert list(data["hooks"].keys()) == ["UserPromptSubmit"]
+    assert runner.record["hooks_pruned_to"] == ["UserPromptSubmit"]
+    assert runner.record["hooks_settings_path"] == str(settings_path)
+
+
+def test_write_hooks_prunes_to_session_start_only_for_hook_sessionstart_arm(tmp_path, monkeypatch):
+    """Companion coverage for the pre-existing D1 pruning path -- there was no
+    test for write_hooks() at all before the hook-userpromptsubmit arm was
+    added (a pre-existing gap in this file), so this closes it for D1 too."""
+    _fake_vectr_init_hooks_run(monkeypatch, tmp_path)
+    runner = _make_runner(tmp_path, arm="hook-sessionstart")
+    runner.workspace.mkdir(parents=True, exist_ok=True)
+    runner.artifacts.mkdir(parents=True, exist_ok=True)
+
+    runner.write_hooks()
+
+    settings_path = runner.workspace / ".claude" / "settings.json"
+    data = json.loads(settings_path.read_text())
+    assert list(data["hooks"].keys()) == ["SessionStart"]
+    assert runner.record["hooks_pruned_to"] == ["SessionStart"]
+
+
+def test_write_hooks_does_not_prune_for_hook_full_arm(tmp_path, monkeypatch):
+    """arm "hook-full" needs the whole set (SessionStart + PreToolUse +
+    UserPromptSubmit, attestation-gated) -- write_hooks() must leave every
+    group `vectr init --hooks` produced untouched and must not set
+    `hooks_pruned_to` at all."""
+    _fake_vectr_init_hooks_run(monkeypatch, tmp_path)
+    runner = _make_runner(tmp_path, arm="hook-full")
+    runner.workspace.mkdir(parents=True, exist_ok=True)
+    runner.artifacts.mkdir(parents=True, exist_ok=True)
+
+    runner.write_hooks()
+
+    settings_path = runner.workspace / ".claude" / "settings.json"
+    data = json.loads(settings_path.read_text())
+    assert set(data["hooks"].keys()) == set(_FULL_SIX_GROUP_HOOKS.keys())
+    assert "hooks_pruned_to" not in runner.record
 
 
 # ---------------------------------------------------------------------------
@@ -645,8 +875,13 @@ def test_apply_hook_delivery_metadata_is_a_noop_for_non_hook_arms(tmp_path):
     hook-full must be byte-for-byte unaffected by
     `_apply_hook_delivery_metadata()` — the advisory text and its delivery
     metadata are identical to today's shape for `none`/`mcp`/`mcp-bare`/
-    `proxy`."""
-    for arm in ("none", "mcp", "mcp-bare", "proxy"):
+    `proxy`. `hook-userpromptsubmit` is included here too even though it IS a
+    hook arm: it delivers via `_recall_impl`'s ordinary ranked `recall()`
+    pass, never trigger-gated or kind-budget-capped the way SessionStart's
+    boot branch is, so it needs neither the appended trigger nor the
+    widened content budget (DESIGN.md 8's own hook-channel delivery
+    metadata paragraph)."""
+    for arm in ("none", "mcp", "mcp-bare", "proxy", "hook-userpromptsubmit"):
         runner = _make_runner(tmp_path, arm=arm)
         payload = {"kind": "gotcha", "triggers": [{"path": "**/foo.py"}]}
         before = json.loads(json.dumps(payload))
@@ -981,6 +1216,83 @@ def test_probe_infra_unreachable_aborts_with_infra_message(tmp_path, monkeypatch
     assert "infra unreachable" in str(exc_info.value)
     assert runner.record["preflight"]["infra_unreachable"] is True
     assert runner.record["channel_delivery"] == "unreachable"
+
+
+# ---------------------------------------------------------------------------
+# Arm "hook-userpromptsubmit" (D2', DESIGN.md 4, user decision 2026-08-03):
+# same DEFECT-7 channel-matched reachability pattern as hook-sessionstart/
+# hook-full above, but against the UserPromptSubmit channel instead of the
+# SessionStart boot channel -- `_user_prompt_submit_probe()` sends the exact
+# `{"query": ..., "hook_event": "UserPromptSubmit", "events":
+# ["prompt-submit"]}` payload `agent/hook_cli.py::run_hook`'s own
+# "user-prompt-submit" branch sends. Never `_proactive_probe`: every non-
+# "proxy" arm passes `--no-inject` to the scratch proxy (`start_proxy()`),
+# so a note visible to `/v1/proactive` in principle never actually ships
+# through that channel during this arm's real session either.
+# ---------------------------------------------------------------------------
+
+
+def _fake_http_json_for_usps_probe(*, proactive_anchor_present: bool, user_prompt_submit_notes: str | None):
+    """`_fake_http_json_for_probe`'s counterpart for arm "hook-userpromptsubmit":
+    dispatches the same `/v1/proactive` shape, but asserts the `/v1/recall`
+    call carries `hook_event="UserPromptSubmit"` + `events=["prompt-submit"]`
+    (never `boot=True`) -- the payload shape unique to this arm's channel."""
+
+    def fake(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/proactive"):
+            anchor_ids = ["note:7"] if proactive_anchor_present else []
+            return {"item_count": len(anchor_ids), "context": "", "anchor_ids": anchor_ids}
+        if method == "POST" and url.endswith("/v1/recall"):
+            assert (
+                payload.get("hook_event") == "UserPromptSubmit"
+                and payload.get("events") == ["prompt-submit"]
+                and "query" in payload
+                and payload.get("boot") is not True
+            ), (
+                f"probe()'s user-prompt-submit channel call must send the exact "
+                f"agent/hook_cli.py::run_hook 'user-prompt-submit' branch payload "
+                f"shape, got {payload!r}"
+            )
+            return {"notes": user_prompt_submit_notes or ""}
+        raise AssertionError(f"unexpected call in probe(): {method} {url}")
+
+    return fake
+
+
+def test_probe_usps_hook_arm_judges_reachability_via_user_prompt_submit_channel_not_proactive(tmp_path, monkeypatch):
+    """The proactive channel is empty but the user-prompt-submit channel
+    carries the planted content -- `probe()` must NOT abort, and must record
+    that it judged the user_prompt_submit channel, not proactive."""
+    runner = _make_hook_runner(tmp_path, arm="hook-userpromptsubmit")
+    content = _note_content(runner)
+    monkeypatch.setattr(
+        run_leg, "_http_json",
+        _fake_http_json_for_usps_probe(proactive_anchor_present=False, user_prompt_submit_notes=content),
+    )
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
+    runner.probe()  # must not raise
+    assert runner.record["planted_note_reachable_preflight"] is True
+    preflight = runner.record["preflight"]
+    assert preflight["reachable_channel"] == "user_prompt_submit"
+    assert preflight["proactive_probe_diagnostic_only"] is True
+    assert preflight["user_prompt_submit_channel"]["reachable"] is True
+    assert preflight["turn1_text_only"]["planted_present"] is False
+    assert preflight["turn2_with_file_anchor"]["planted_present"] is False
+
+
+def test_probe_usps_hook_arm_aborts_when_user_prompt_submit_channel_empty_even_if_proactive_present(tmp_path, monkeypatch):
+    """The inverse: proactive channel WOULD pass, but the user-prompt-submit
+    channel -- the one this arm actually ships through -- is empty. `probe()`
+    must still abort, naming the UserPromptSubmit channel."""
+    runner = _make_hook_runner(tmp_path, arm="hook-userpromptsubmit")
+    monkeypatch.setattr(
+        run_leg, "_http_json",
+        _fake_http_json_for_usps_probe(proactive_anchor_present=True, user_prompt_submit_notes=None),
+    )
+    with pytest.raises(SystemExit, match=r"UserPromptSubmit channel"):
+        runner.probe()
+    assert runner.record["planted_note_reachable_preflight"] is False
+    assert runner.record["preflight"]["reachable_channel"] == "user_prompt_submit"
 
 
 # ---------------------------------------------------------------------------

@@ -112,7 +112,7 @@ DEFAULT_DAEMON_PORT = 8899
 DEFAULT_PROXY_PORT = 8900
 
 # Must match leg_result.schema.json's `arm` / `note_variant` enums exactly.
-ARMS = ("none", "mcp", "mcp-bare", "proxy", "hook-sessionstart", "hook-full")
+ARMS = ("none", "mcp", "mcp-bare", "proxy", "hook-sessionstart", "hook-full", "hook-userpromptsubmit")
 NOTE_VARIANTS = ("none", "plain", "provenance", "verifiable")
 
 # Vectr/IDE-owned paths excluded from the drift-verification manifest and from
@@ -799,6 +799,37 @@ def _session_start_probe(daemon_port: int, session_id: str) -> str:
     return out.get("notes") or ""
 
 
+def _user_prompt_submit_probe(daemon_port: int, session_id: str, query: str) -> str:
+    """Daemon-side UserPromptSubmit-channel reachability check (DEFECT 7,
+    arm "hook-userpromptsubmit" -- the same pattern `_session_start_probe`
+    above uses for "hook-sessionstart"/"hook-full"): a direct `/v1/recall`
+    POST carrying the exact `{"query": ..., "hook_event": "UserPromptSubmit",
+    "events": ["prompt-submit"]}` payload `agent/hook_cli.py::run_hook`'s own
+    "user-prompt-submit" branch sends on a real prompt submission -- so this
+    reaches the identical `VectrService._recall_impl` generic-query branch (a
+    trigger-fired pass plus an ordinary ranked `recall()` pass, neither gated
+    by note kind) a real hook invocation reaches. Channel-true and
+    zero-LLM-cost, and like `_session_start_probe` it is a pure daemon call
+    needing neither `write_hooks()` nor a real hook subprocess round trip.
+
+    Returns the raw notes text exactly as the daemon renders it -- a caller
+    compares it with `_collapse_ws` on both sides (DEFECT 8), same as
+    `_session_start_probe`'s own contract. This is a pre-spend daemon HTTP
+    response, never a `claude -p` transcript, so it is unaffected by
+    UPG-IU-HOOK-NONVACUITY-CANARY (that bug is about content never rendering
+    into a *stream-json transcript*, not about this direct `/v1/recall` call).
+    """
+    out = _http_json(
+        "POST", f"http://127.0.0.1:{daemon_port}/v1/recall",
+        {
+            "query": query, "hook_event": "UserPromptSubmit",
+            "events": ["prompt-submit"], "session_id": session_id,
+        },
+        timeout=60,
+    )
+    return out.get("notes") or ""
+
+
 def _enforce_hook_attestation(arm: str, attestation_path: str | None) -> dict | None:
     """DESIGN.md 4: arm `hook-full` (D2) is SKIPPED, never run/scored, without a
     fresh canary attestation -- D2's UserPromptSubmit/PreToolUse additionalContext
@@ -1201,7 +1232,15 @@ class LegRunner:
         left unedited; this is plant-time channel configuration only.
 
         Non-hook arms (`none`, `mcp`, `mcp-bare`, `proxy`) are byte-for-byte
-        unaffected -- this function is a no-op for them."""
+        unaffected -- this function is a no-op for them. Arm
+        "hook-userpromptsubmit" is ALSO a no-op here, despite being a hook
+        arm: it delivers via `_recall_impl`'s ordinary ranked `recall()` call
+        (the ungated ranked-recall pass every UserPromptSubmit request also
+        makes, independent of trigger config or note kind -- see
+        `probe()`'s docstring), not the SessionStart boot branch PROBLEM 1
+        fixes eligibility for, so it needs neither the appended trigger nor
+        the widened content budget: the planted note ships with its
+        scenario-authored `kind`/`triggers`, unmodified, for this arm."""
         if self.arm not in ("hook-sessionstart", "hook-full"):
             return
         triggers = list(payload.get("triggers") or [])
@@ -1318,11 +1357,36 @@ class LegRunner:
         or the embedder never comes up within the polling window
         (`preflight["infra_unreachable"] = True`, checked via `_transport_ok`
         on the by-id probe AND both proactive-probe turns). Hook arms are
-        completely unaffected by any of this: they already judge
-        reachability against the SessionStart channel (immediately below,
-        unchanged), which a directive-kind note is structurally excluded
+        unaffected by any of this: each judges reachability against its own
+        channel-true probe (SessionStart immediately below; the
+        UserPromptSubmit probe for arm "hook-userpromptsubmit"). For the
+        SessionStart arms a directive-kind note is structurally excluded
         from the proactive channel's ranking in the first place, so this
-        specific displacement cannot occur there.
+        specific displacement cannot occur there. The UserPromptSubmit probe
+        DOES check planted content in an ordinary ranked `/v1/recall`
+        response, so at high k an agent-note-rich store could in principle
+        displace the planted note out of the recall window -- if a USPS leg
+        ever aborts on that probe at k>=2, extend this same displacement
+        tolerance to that channel before spending, rather than raising the
+        recall limit.
+
+        Arm "hook-userpromptsubmit" is a THIRD case, distinct from both:
+        `plant_note()` does NOT force it to `kind="directive"` (see
+        `_apply_hook_delivery_metadata`'s own arm check, unchanged), because
+        this arm tests the per-prompt semantic-recall path (`VectrService.
+        _recall_impl`'s ordinary ranked `recall()` call, un-gated by note kind
+        or trigger config -- every planted note is naturally eligible there,
+        unlike SessionStart's boot-only call). It still never uses
+        `_proactive_probe` as its abort criterion, because `start_proxy()`
+        passes `--no-inject` for every arm except "proxy" -- so even a
+        non-directive note visible to `/v1/proactive` in principle never
+        actually ships through that channel during the real session for this
+        arm either. `_user_prompt_submit_probe` below issues the identical
+        `{"query": ..., "hook_event": "UserPromptSubmit", "events":
+        ["prompt-submit"]}` `/v1/recall` payload `agent/hook_cli.py::
+        run_hook`'s own "user-prompt-submit" branch sends, using the leg's own
+        prompt as the query -- channel-true for the semantic-recall path this
+        arm actually exercises.
         """
         memory_arm = self.arm != "none"
         if memory_arm and (self.note_id is not None or self.planted_anchor):
@@ -1351,8 +1415,10 @@ class LegRunner:
                 or preflight["turn2_with_file_anchor"]["planted_present"]
             )
 
-            is_hook_arm = self.arm in ("hook-sessionstart", "hook-full")
-            if is_hook_arm:
+            is_session_start_hook_arm = self.arm in ("hook-sessionstart", "hook-full")
+            is_usps_hook_arm = self.arm == "hook-userpromptsubmit"
+            is_hook_arm = is_session_start_hook_arm or is_usps_hook_arm
+            if is_session_start_hook_arm:
                 session_start_notes = _session_start_probe(
                     self.daemon_port, f"longprobe-{self.scenario.slug}-k{self.k}-sessionstart",
                 )
@@ -1366,6 +1432,22 @@ class LegRunner:
                 preflight["proactive_probe_diagnostic_only"] = True
                 preflight["reachable_channel"] = "session_start"
                 reachable = session_start_reachable
+            elif is_usps_hook_arm:
+                user_prompt_submit_notes = _user_prompt_submit_probe(
+                    self.daemon_port,
+                    f"longprobe-{self.scenario.slug}-k{self.k}-userpromptsubmit",
+                    self.leg_spec.prompt,
+                )
+                user_prompt_submit_reachable = bool(variant.content) and (
+                    _collapse_ws(variant.content) in _collapse_ws(user_prompt_submit_notes)
+                )
+                preflight["user_prompt_submit_channel"] = {
+                    "reachable": user_prompt_submit_reachable,
+                    "notes_chars": len(user_prompt_submit_notes),
+                }
+                preflight["proactive_probe_diagnostic_only"] = True
+                preflight["reachable_channel"] = "user_prompt_submit"
+                reachable = user_prompt_submit_reachable
             else:
                 preflight["proactive_probe_diagnostic_only"] = False
                 preflight["reachable_channel"] = "by_id"
@@ -1453,12 +1535,16 @@ class LegRunner:
                 self.record["recall_probe_elapsed_s"] = recall_probe["elapsed_s"]
 
             if not reachable and not self.args.allow_unreachable:
-                if is_hook_arm:
+                if is_session_start_hook_arm or is_usps_hook_arm:
+                    channel = (
+                        "the SessionStart channel" if is_session_start_hook_arm
+                        else "the UserPromptSubmit channel"
+                    )
                     raise SystemExit(
-                        "ABORT: the planted note is not retrievable on the "
-                        "SessionStart channel, so this leg cannot test its memory "
-                        "channel. Fix the scenario (not the score); re-run with "
-                        "--allow-unreachable to record it anyway."
+                        f"ABORT: the planted note is not retrievable on {channel}, "
+                        "so this leg cannot test its memory channel. Fix the "
+                        "scenario (not the score); re-run with --allow-unreachable "
+                        "to record it anyway."
                     )
                 if preflight.get("infra_unreachable"):
                     raise SystemExit(
@@ -1518,13 +1604,17 @@ class LegRunner:
         self.record["proxy_command"] = " ".join(cmd)
 
     def write_hooks(self) -> None:
-        """Install Claude Code hook entries for arms "hook-sessionstart"/"hook-full".
+        """Install Claude Code hook entries for arms "hook-sessionstart"/
+        "hook-full"/"hook-userpromptsubmit".
 
         `vectr init --hooks` has no CLI-level granularity to install a single hook
         group (main.py's `_write_claude_hooks` always writes all six events) --
         for "hook-sessionstart" (D1), the full set is installed and then this
         method deletes every `.claude/settings.json` hook key except
-        "SessionStart" directly. This is a scratch-workspace harness artifact
+        "SessionStart" directly; for "hook-userpromptsubmit" it prunes to
+        "UserPromptSubmit" instead, the same way -- isolating the per-prompt
+        semantic-recall channel as its own arm, with no SessionStart and no
+        PreToolUse hook wired at all. This is a scratch-workspace harness artifact
         edit, the same category as arm "mcp-bare"'s hand-built mcp.json -- not a
         product-code change and not a workaround for a vectr defect.
         """
@@ -1538,15 +1628,20 @@ class LegRunner:
                 f"ABORT: `vectr init --hooks` did not produce {settings_path} "
                 f"(rc={proc.returncode}); see {self._out('init-hooks.txt')}"
             )
+        prune_to: str | None = None
         if self.arm == "hook-sessionstart":
+            prune_to = "SessionStart"
+        elif self.arm == "hook-userpromptsubmit":
+            prune_to = "UserPromptSubmit"
+        if prune_to is not None:
             data = json.loads(settings_path.read_text())
             hooks = data.get("hooks") or {}
             for event in list(hooks):
-                if event != "SessionStart":
+                if event != prune_to:
                     del hooks[event]
             data["hooks"] = hooks
             settings_path.write_text(json.dumps(data, indent=2))
-            self.record["hooks_pruned_to"] = ["SessionStart"]
+            self.record["hooks_pruned_to"] = [prune_to]
         self.record["hooks_settings_path"] = str(settings_path)
 
     def _agent_cwd(self) -> Path:
@@ -1755,7 +1850,7 @@ class LegRunner:
             "--dangerously-skip-permissions",
             "--strict-mcp-config",
         ]
-        if self.arm in ("hook-sessionstart", "hook-full"):
+        if self.arm in ("hook-sessionstart", "hook-full", "hook-userpromptsubmit"):
             # Headless `claude -p` loading PROJECT-level `.claude/settings.json`
             # hooks depends on directory trust, which a freshly-materialized
             # scratch workspace never has (`--dangerously-skip-permissions` skips
@@ -1763,13 +1858,31 @@ class LegRunner:
             # file explicitly regardless of trust state, so hook delivery no
             # longer depends on it. Defensive/additive: `write_hooks()` already
             # ran by the time this executes (main()'s call order), so
-            # hooks_settings_path is always set for these two arms.
+            # hooks_settings_path is always set for these three arms.
             cmd += ["--settings", self.record["hooks_settings_path"]]
         mcp_config = self._mcp_config_path()
         if mcp_config is not None:
             cmd += ["--mcp-config", str(mcp_config)]
         transcript = self._out("transcript.jsonl")
         base_url = f"http://127.0.0.1:{self.proxy_port}"
+
+        # DEFECT 7/DESIGN.md 4.1 style: arm "hook-userpromptsubmit" has no
+        # SessionStart or PreToolUse hook wired at all, and its
+        # additionalContext never renders into the stream-json transcript
+        # (UPG-IU-HOOK-NONVACUITY-CANARY) -- so, unlike D1's
+        # `hook_preflight()` (a synthetic pre-spend hook invocation),
+        # firing/delivery evidence for this arm can only come from the real
+        # agent session's own effect on the daemon's cumulative
+        # `hook_injection_counts["UserPromptSubmit"]` counter. Capture it
+        # immediately before and after THIS subprocess (not the whole leg --
+        # `capture_and_teardown()`'s later snapshot would also include this
+        # leg's own preflight traffic) and record the delta for
+        # `scorer.leg_non_vacuity` (never transcript content for this arm).
+        usps_count_before: int | None = None
+        if self.arm == "hook-userpromptsubmit":
+            before = _http_json("GET", f"http://127.0.0.1:{self.daemon_port}/v1/status", timeout=10)
+            usps_count_before = int((before.get("hook_injection_counts") or {}).get("UserPromptSubmit", 0) or 0)
+
         started = time.time()
         with transcript.open("w") as out:
             proc = subprocess.Popen(
@@ -1786,10 +1899,17 @@ class LegRunner:
         self.record["agent_returncode"] = proc.returncode
         self.record["agent_wall_s"] = round(time.time() - started, 1)
 
+        if self.arm == "hook-userpromptsubmit":
+            after = _http_json("GET", f"http://127.0.0.1:{self.daemon_port}/v1/status", timeout=10)
+            usps_count_after = int((after.get("hook_injection_counts") or {}).get("UserPromptSubmit", 0) or 0)
+            self.record["user_prompt_submit_injection_count_before"] = usps_count_before
+            self.record["user_prompt_submit_injection_count_after"] = usps_count_after
+            self.record["user_prompt_submit_injection_delta"] = usps_count_after - (usps_count_before or 0)
+
     # -- teardown + scoring ------------------------------------------------
 
     def capture_and_teardown(self) -> None:
-        if self.arm in ("hook-sessionstart", "hook-full"):
+        if self.arm in ("hook-sessionstart", "hook-full", "hook-userpromptsubmit"):
             status = _http_json("GET", f"http://127.0.0.1:{self.daemon_port}/v1/status", timeout=10)
             self._out("daemon-status-final.json").write_text(json.dumps(status, indent=2))
             self.record["hook_injection_counts"] = status.get("hook_injection_counts")
@@ -1847,6 +1967,7 @@ class LegRunner:
             proxy_injected=(self.record.get("proxy_metrics") or {}).get("injected"),
             planted_anchor=self.planted_anchor,
             hook_injection_counts=self.record.get("hook_injection_counts"),
+            user_prompt_submit_injection_delta=self.record.get("user_prompt_submit_injection_delta"),
             transcript_path=self._out("transcript.jsonl"),
             planted_note_content=(variant.content if variant is not None else None),
             note_id=self.note_id,
@@ -2081,8 +2202,9 @@ def main() -> None:
             runner.plant_note()
         runner.probe()
         runner.start_proxy()
-        if runner.arm in ("hook-sessionstart", "hook-full"):
+        if runner.arm in ("hook-sessionstart", "hook-full", "hook-userpromptsubmit"):
             runner.write_hooks()
+        if runner.arm in ("hook-sessionstart", "hook-full"):
             runner.hook_preflight()
         runner.run_agent()
     finally:
