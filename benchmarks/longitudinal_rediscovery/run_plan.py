@@ -532,7 +532,8 @@ def _trajectory_workspace_dir(traj_dir: Path) -> Path:
 
 def _leg_cmd(
     spec: TrajectorySpec, k: int, *, prior: dict, traj_dir: Path,
-    planted_anchor: str | None, args: argparse.Namespace,
+    planted_anchor: str | None, planted_note_id: int | None,
+    args: argparse.Namespace,
 ) -> list[str]:
     leg_dir = traj_dir / "legs" / str(k)
     cmd = [
@@ -552,6 +553,12 @@ def _leg_cmd(
             cmd.append("--plant-note")
         elif planted_anchor:
             cmd += ["--planted-anchor", planted_anchor]
+            # UPG-EVAL-K2PLUS-NOTEID-UNLOADED: state.json records the note id
+            # the k=2 plant created; without it run_leg's by-id integrity gate
+            # (UPG-EVAL-PLANT-DISPLACEMENT) and DEFECT 13's [#N]-marker recall
+            # probe both run id-blind at k>=3.
+            if planted_note_id is not None:
+                cmd += ["--planted-note-id", str(planted_note_id)]
     if spec.arm == "hook-full":
         if not args.hook_attestation:
             raise ValueError("hook-full leg requested without --hook-attestation")
@@ -691,6 +698,7 @@ def plan_and_run(tier: str, args: argparse.Namespace) -> dict:
 
         prior = {"tar": leg1["workspace_tar"], "manifest_sha256": leg1.get("manifest_sha256")}
         planted_anchor = state.get("planted_anchor")
+        planted_note_id = state.get("planted_note_id")
 
         for k in range(2, spec.n_legs + 1):
             leg_entry = _leg_entry(state, k)
@@ -744,7 +752,11 @@ def plan_and_run(tier: str, args: argparse.Namespace) -> dict:
                     _save_state(traj_dir, state)
                     return {"tier": tier, "plan": plan, "spend_usd": round(spend, 2), "budget_exhausted": True}
 
-            cmd = _leg_cmd(spec, k, prior=prior, traj_dir=traj_dir, planted_anchor=planted_anchor, args=args)
+            cmd = _leg_cmd(
+                spec, k, prior=prior, traj_dir=traj_dir,
+                planted_anchor=planted_anchor, planted_note_id=planted_note_id,
+                args=args,
+            )
             leg_entry["status"] = "running"
             leg_entry["started_utc"] = _utc_stamp()
             _save_state(traj_dir, state)
@@ -777,6 +789,7 @@ def plan_and_run(tier: str, args: argparse.Namespace) -> dict:
                 state["planted_note_id"] = result.get("planted_note_id")
                 state["planted_anchor"] = result.get("planted_anchor")
                 planted_anchor = state["planted_anchor"]
+                planted_note_id = state["planted_note_id"]
 
             if not result.get("valid"):
                 state["trajectory_valid_through"] = k - 1

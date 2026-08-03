@@ -813,8 +813,8 @@ def test_leg_cmd_workspace_dir_is_trajectory_stable_across_k(tmp_path):
     prior = {"tar": traj_dir / "legs" / "1" / "workspace.tar", "manifest_sha256": "m1"}
     spec = run_plan.TrajectorySpec("release_via_ci", "proxy", "plain", 0, 3)
 
-    cmd2 = run_plan._leg_cmd(spec, 2, prior=prior, traj_dir=traj_dir, planted_anchor=None, args=args)
-    cmd3 = run_plan._leg_cmd(spec, 3, prior=prior, traj_dir=traj_dir, planted_anchor="note:1", args=args)
+    cmd2 = run_plan._leg_cmd(spec, 2, prior=prior, traj_dir=traj_dir, planted_anchor=None, planted_note_id=None, args=args)
+    cmd3 = run_plan._leg_cmd(spec, 3, prior=prior, traj_dir=traj_dir, planted_anchor="note:1", planted_note_id=1, args=args)
 
     ws2 = cmd2[cmd2.index("--workspace-dir") + 1]
     ws3 = cmd3[cmd3.index("--workspace-dir") + 1]
@@ -822,6 +822,11 @@ def test_leg_cmd_workspace_dir_is_trajectory_stable_across_k(tmp_path):
     # ...and each leg keeps its OWN --leg-dir (artifacts stay per-leg).
     assert cmd2[cmd2.index("--leg-dir") + 1] == str(traj_dir / "legs" / "2")
     assert cmd3[cmd3.index("--leg-dir") + 1] == str(traj_dir / "legs" / "3")
+    # UPG-EVAL-K2PLUS-NOTEID-UNLOADED: k=2 plants fresh (no id yet); k>=3 must
+    # carry the recorded id so run_leg's by-id integrity gate and the [#N]
+    # recall-probe marker aren't id-blind.
+    assert "--planted-note-id" not in cmd2
+    assert cmd3[cmd3.index("--planted-note-id") + 1] == "1"
 
 
 def test_leg_cmd_workspace_dir_is_trajectory_unique(tmp_path):
@@ -831,8 +836,8 @@ def test_leg_cmd_workspace_dir_is_trajectory_unique(tmp_path):
     traj_b = tmp_path / "release_via_ci-none-none-s0"
     prior = {"tar": traj_a / "legs" / "1" / "workspace.tar", "manifest_sha256": "m1"}
 
-    cmd_a = run_plan._leg_cmd(spec, 2, prior=prior, traj_dir=traj_a, planted_anchor=None, args=args)
-    cmd_b = run_plan._leg_cmd(spec, 2, prior=prior, traj_dir=traj_b, planted_anchor=None, args=args)
+    cmd_a = run_plan._leg_cmd(spec, 2, prior=prior, traj_dir=traj_a, planted_anchor=None, planted_note_id=None, args=args)
+    cmd_b = run_plan._leg_cmd(spec, 2, prior=prior, traj_dir=traj_b, planted_anchor=None, planted_note_id=None, args=args)
 
     ws_a = cmd_a[cmd_a.index("--workspace-dir") + 1]
     ws_b = cmd_b[cmd_b.index("--workspace-dir") + 1]
