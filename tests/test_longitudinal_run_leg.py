@@ -829,11 +829,195 @@ def test_probe_non_hook_arm_succeeds_via_proactive_channel_unchanged(tmp_path, m
             return {"notes": "[#7] some note"}
         raise AssertionError(f"unexpected call: {method} {url}")
 
+    def fake_with_headers(method, url, payload=None, *, timeout=30.0, extra_headers=None):
+        # DEFECT 13: `probe()` now also runs a pre-session MCP handshake
+        # (`_mcp_handshake_probe`) against `/mcp` for arms "mcp"/"mcp-bare",
+        # over the header-returning transport seam (`_http_json_with_headers`).
+        assert method == "POST" and url.endswith("/mcp")
+        if payload and payload.get("method") == "initialize":
+            return {"jsonrpc": "2.0", "id": 1, "result": {}}, {"Mcp-Session-Id": "sess-1"}
+        if payload and payload.get("method") == "tools/list":
+            return {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "vectr_recall"}]}}, {}
+        raise AssertionError(f"unexpected /mcp payload: {payload}")
+
     monkeypatch.setattr(run_leg, "_http_json", fake)
+    monkeypatch.setattr(run_leg, "_http_json_with_headers", fake_with_headers)
     monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
     runner.probe()  # must not raise
     assert runner.record["planted_note_reachable_preflight"] is True
     assert runner.record["preflight"]["reachable_channel"] == "proactive"
+    assert runner.record["mcp_handshake_ok"] is True
+    assert runner.record["mcp_handshake_tools"] == 1
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 13: `_mcp_handshake_probe` / `_poll_recall_probe` unit coverage, plus
+# `probe()` integration for the handshake ABORT-before-spend criterion.
+#
+# Live symptom (sentinel-verified, mcp-arm k=2): headless `claude -p` emits
+# `system.init` before its async http-type MCP connect completes (a
+# server can legitimately read "pending" there while still connecting), and
+# current Claude Code versions never surface `mcp__vectr__*` tool schemas in
+# `system.init.tools` at all -- both a compliant `initialize`/`tools/list`
+# handshake straight against the daemon's own `/mcp` route (this probe) and
+# transcript-level tool-use evidence (scorer.py's `_mcp_tool_use_evidence`)
+# are needed as independent, non-`system.init`-dependent confirmations that
+# the vectr tool surface a leg is about to depend on is actually live.
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_handshake_probe_ok_true_on_successful_initialize_and_tools_list(monkeypatch):
+    def fake_with_headers(method, url, payload=None, *, timeout=30.0, extra_headers=None):
+        assert url == "http://127.0.0.1:8899/mcp"
+        if payload["method"] == "initialize":
+            assert extra_headers is None
+            return {"jsonrpc": "2.0", "id": 1, "result": {}}, {"Mcp-Session-Id": "sess-42"}
+        assert payload["method"] == "tools/list"
+        assert extra_headers == {"Mcp-Session-Id": "sess-42"}
+        return (
+            {"jsonrpc": "2.0", "id": 2, "result": {"tools": [
+                {"name": "vectr_search"}, {"name": "vectr_recall"}, {"name": "other_tool"},
+            ]}},
+            {},
+        )
+
+    monkeypatch.setattr(run_leg, "_http_json_with_headers", fake_with_headers)
+    out = run_leg._mcp_handshake_probe(8899)
+    assert out["ok"] is True
+    assert out["tool_count"] == 2  # only the two "vectr_"-prefixed names count
+    assert out["session_id"] == "sess-42"
+
+
+def test_mcp_handshake_probe_ok_false_when_no_vectr_prefixed_tool_present(monkeypatch):
+    def fake_with_headers(method, url, payload=None, *, timeout=30.0, extra_headers=None):
+        if payload["method"] == "initialize":
+            return {"jsonrpc": "2.0", "id": 1, "result": {}}, {"Mcp-Session-Id": "sess-1"}
+        return {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "unrelated_tool"}]}}, {}
+
+    monkeypatch.setattr(run_leg, "_http_json_with_headers", fake_with_headers)
+    out = run_leg._mcp_handshake_probe(8899)
+    assert out["ok"] is False
+    assert out["tool_count"] == 0
+
+
+def test_mcp_handshake_probe_ok_false_on_transport_error(monkeypatch):
+    monkeypatch.setattr(
+        run_leg, "_http_json_with_headers",
+        lambda *a, **k: ({"_error": "URLError"}, {}),
+    )
+    out = run_leg._mcp_handshake_probe(8899)
+    assert out["ok"] is False
+    assert out["session_id"] is None
+
+
+def test_mcp_handshake_probe_ok_false_on_json_rpc_error_response(monkeypatch):
+    def fake_with_headers(method, url, payload=None, *, timeout=30.0, extra_headers=None):
+        if payload["method"] == "initialize":
+            return {"jsonrpc": "2.0", "id": 1, "result": {}}, {"Mcp-Session-Id": "sess-1"}
+        return {"jsonrpc": "2.0", "id": 2, "error": {"code": -32601, "message": "no such method"}}, {}
+
+    monkeypatch.setattr(run_leg, "_http_json_with_headers", fake_with_headers)
+    out = run_leg._mcp_handshake_probe(8899)
+    assert out["ok"] is False
+
+
+def test_poll_recall_probe_stops_early_when_note_found(monkeypatch):
+    responses = [
+        {"notes": "", "method": "sql"},
+        {"notes": "[#9] some delivered content", "method": "semantic"},
+    ]
+    calls: list[dict] = []
+
+    def fake(method, url, payload=None, timeout=30):
+        assert url.endswith("/v1/recall")
+        calls.append(payload)
+        return responses[len(calls) - 1]
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    monkeypatch.setattr(run_leg.time, "sleep", lambda s: sleeps.append(s))
+
+    out = run_leg._poll_recall_probe(8899, "some query", 9, interval_s=2.0, timeout_s=30.0)
+    assert out["returned"] is True
+    assert out["method"] == "semantic"
+    assert len(calls) == 2  # stopped as soon as the note was found, not all 15 polls
+    assert sleeps == [2.0]  # exactly one sleep between the miss and the hit
+
+
+def test_poll_recall_probe_times_out_and_records_last_method_when_note_absent(monkeypatch):
+    calls = {"n": 0}
+
+    def fake(method, url, payload=None, timeout=30):
+        calls["n"] += 1
+        return {"notes": "", "method": "sql"}
+
+    clock = [0.0]
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    monkeypatch.setattr(run_leg.time, "time", lambda: clock[0])
+    monkeypatch.setattr(run_leg.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+
+    out = run_leg._poll_recall_probe(8899, "q", 9, interval_s=2.0, timeout_s=30.0)
+    assert out["returned"] is False
+    assert out["method"] == "sql"
+    assert out["elapsed_s"] >= 30.0
+    assert calls["n"] == 16  # polled every 2s up to and including the 30s deadline
+
+
+def test_poll_recall_probe_note_id_none_returns_none_never_true(monkeypatch):
+    """T0/single-shot debugging calls (no planted note) must not report a
+    false "returned=True" just because the recall response happens to be
+    non-empty; mirrors `leg_non_vacuity`'s own `note_id is None` skip rule."""
+    monkeypatch.setattr(run_leg, "_http_json", lambda *a, **k: {"notes": "[#3] unrelated", "method": "sql"})
+    monkeypatch.setattr(run_leg.time, "sleep", lambda s: None)
+    out = run_leg._poll_recall_probe(8899, "q", None, interval_s=2.0, timeout_s=2.0)
+    assert out["returned"] is None
+
+
+def test_probe_mcp_arm_aborts_when_mcp_handshake_fails(tmp_path, monkeypatch):
+    runner = _make_hook_runner(tmp_path, arm="mcp-bare")
+
+    def fake(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/proactive"):
+            return {"item_count": 1, "context": "", "anchor_ids": ["note:7"]}
+        raise AssertionError(f"unexpected call: {method} {url}")
+
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    monkeypatch.setattr(
+        run_leg, "_http_json_with_headers", lambda *a, **k: ({"_error": "URLError"}, {}),
+    )
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.probe()
+    assert "ABORT: the MCP streamable-HTTP handshake" in str(exc_info.value)
+    assert runner.record["mcp_handshake_ok"] is False
+    assert runner.record["mcp_handshake_tools"] == 0
+    assert (runner.artifacts / "mcp-handshake.json").exists()
+
+
+def test_probe_mcp_arm_allow_unreachable_bypasses_handshake_abort(tmp_path, monkeypatch):
+    runner = _make_hook_runner(tmp_path, arm="mcp", allow_unreachable=True)
+
+    def fake(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/proactive"):
+            return {"item_count": 1, "context": "", "anchor_ids": ["note:7"]}
+        raise AssertionError(f"unexpected call: {method} {url}")
+
+    monkeypatch.setattr(run_leg, "_http_json", fake)
+    monkeypatch.setattr(
+        run_leg, "_http_json_with_headers", lambda *a, **k: ({"_error": "URLError"}, {}),
+    )
+    monkeypatch.setattr(
+        run_leg, "_poll_recall_probe",
+        lambda *a, **k: {"returned": False, "elapsed_s": 30.0, "method": "sql"},
+    )
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
+
+    runner.probe()  # handshake failed, but --allow-unreachable must suppress the abort
+    assert runner.record["mcp_handshake_ok"] is False
+    assert runner.record["recall_probe_returned_note"] is False
+    assert runner.record["recall_probe_method"] == "sql"
+    assert runner.record["recall_probe_elapsed_s"] == 30.0
 
 
 # ---------------------------------------------------------------------------

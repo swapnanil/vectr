@@ -167,6 +167,137 @@ def _http_json(method: str, url: str, payload: dict | None = None, timeout: floa
         return {"_raw": body[:400]}
 
 
+def _http_json_with_headers(
+    method: str, url: str, payload: dict | None = None, *,
+    timeout: float = 30.0, extra_headers: dict[str, str] | None = None,
+) -> tuple[dict, dict[str, str]]:
+    """Like `_http_json`, but also returns the RESPONSE headers -- needed for
+    the MCP streamable-HTTP handshake (DEFECT 13, `_mcp_handshake_probe`
+    below): session identity there is carried in the `Mcp-Session-Id`
+    response header on `initialize` (`app/routes.py::mcp_jsonrpc`'s own
+    docstring), never in a JSON field, so `_http_json`'s body-only return
+    can't express it. `urllib`'s `HTTPMessage` header mapping is already
+    case-insensitive, matching HTTP's own semantics.
+    """
+    import urllib.error
+    import urllib.request
+
+    data = json.dumps(payload).encode() if payload is not None else None
+    headers = {"content-type": "application/json"} if data else {}
+    headers.update(extra_headers or {})
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            resp_headers = dict(resp.headers.items())
+    except urllib.error.HTTPError as exc:
+        resp_headers = dict(exc.headers.items()) if exc.headers else {}
+        return (
+            {"_http_error": exc.code, "_body": exc.read().decode("utf-8", "replace")[:400]},
+            resp_headers,
+        )
+    except Exception as exc:
+        return {"_error": type(exc).__name__}, {}
+    try:
+        return json.loads(body), resp_headers
+    except json.JSONDecodeError:
+        return {"_raw": body[:400]}, resp_headers
+
+
+def _mcp_handshake_probe(daemon_port: int, *, timeout: float = 30.0) -> dict[str, Any]:
+    """Pre-session MCP streamable-HTTP handshake probe (DEFECT 13): `initialize`
+    then `tools/list` against the daemon's real `/mcp` JSON-RPC route
+    (`app/routes.py::mcp_jsonrpc`), exactly as a compliant MCP client would --
+    proves the server `claude -p` is about to connect to over HTTP actually
+    serves the vectr tool surface, independent of whatever `system.init`'s
+    `mcp_servers` status happens to read at the instant the CLI emits it (an
+    http-type server legitimately reads "pending" there while its own async
+    connect is still in flight -- see `probe()`'s call site and
+    `scorer.leg_non_vacuity`'s docstring).
+
+    Returns `{"initialize": <raw resp>, "tools_list": <raw resp>,
+    "session_id": str | None, "ok": bool, "tool_count": int}`. `ok` requires
+    BOTH calls to return a JSON-RPC `result` (no `error`, no transport-level
+    `_http_error`/`_error`) and `tools_list`'s `result.tools` to contain at
+    least one tool name starting with `"vectr_"` (the MCP tool surface's own
+    naming convention -- `integrations/mcp_server/_schemas.py`).
+    """
+    url = f"http://127.0.0.1:{daemon_port}/mcp"
+    init_resp, init_headers = _http_json_with_headers(
+        "POST", url,
+        {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "longitudinal-harness", "version": "1"},
+            },
+        },
+        timeout=timeout,
+    )
+    session_id = init_headers.get("Mcp-Session-Id") or init_headers.get("mcp-session-id")
+
+    list_headers = {"Mcp-Session-Id": session_id} if session_id else None
+    tools_resp, _ = _http_json_with_headers(
+        "POST", url,
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        timeout=timeout, extra_headers=list_headers,
+    )
+
+    def _rpc_ok(resp: dict) -> bool:
+        return isinstance(resp, dict) and "result" in resp and "error" not in resp and (
+            "_http_error" not in resp and "_error" not in resp
+        )
+
+    tools = (tools_resp.get("result") or {}).get("tools") or [] if isinstance(tools_resp, dict) else []
+    tool_count = sum(
+        1 for t in tools if isinstance(t, dict) and str(t.get("name") or "").startswith("vectr_")
+    )
+    ok = _rpc_ok(init_resp) and _rpc_ok(tools_resp) and tool_count > 0
+    return {
+        "initialize": init_resp,
+        "tools_list": tools_resp,
+        "session_id": session_id,
+        "ok": ok,
+        "tool_count": tool_count,
+    }
+
+
+def _poll_recall_probe(
+    daemon_port: int, query: str, note_id: int | None, *,
+    interval_s: float = 2.0, timeout_s: float = 30.0,
+) -> dict[str, Any]:
+    """Fixes DEFECT 13's recall-probe race: the original single-shot `/v1/recall`
+    call fired ~2s after daemon start, before the embedder finished warming, and
+    was observed to answer `method=sql`/0 notes even though the SAME query
+    against the SAME daemon 26s later (the agent's own in-session recall)
+    answered `method=semantic`/1 note (confirmed via VECTR_AUDIT_LOG RECALL
+    lines). A cold-embedder miss at probe time is not evidence the memory
+    channel is unreachable -- it is evidence the probe ran too early. Poll the
+    same query every `interval_s` up to `timeout_s`, stopping as soon as the
+    note is found; the elapsed time and the response's own `method` field (when
+    present) are recorded for the record, not gated on -- this is a warm-up
+    tolerance, not a retrieval-quality check.
+    """
+    start = time.time()
+    last: dict = {}
+    while True:
+        last = _http_json(
+            "POST", f"http://127.0.0.1:{daemon_port}/v1/recall",
+            {"query": query}, timeout=60,
+        )
+        notes_text = last.get("notes") or ""
+        returned = (f"[#{note_id}]" in notes_text) if note_id is not None else None
+        elapsed = time.time() - start
+        if returned or elapsed >= timeout_s:
+            return {
+                "returned": returned,
+                "elapsed_s": round(elapsed, 2),
+                "method": last.get("method"),
+            }
+        time.sleep(interval_s)
+
+
 def _wait_for(url: str, timeout_s: float, label: str) -> dict:
     deadline = time.time() + timeout_s
     last: dict = {}
@@ -583,6 +714,7 @@ class LegRunner:
         self.restored_manifest_ok: bool | None = None
         self.trail_text_delivered: bool | None = None
         self.recall_probe_returned_note: bool | None = None
+        self.mcp_handshake_ok: bool | None = None
 
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         # leg_result.schema.json documents leg_id as
@@ -607,6 +739,11 @@ class LegRunner:
             "planted_note_id": self.note_id,
             "planted_anchor": self.planted_anchor,
             "notes_in_store_at_start": None,
+            "mcp_handshake_ok": None,
+            "mcp_handshake_tools": None,
+            "recall_probe_method": None,
+            "recall_probe_elapsed_s": None,
+            "recall_probe_returned_note": None,
         }
 
     # -- small path helper -------------------------------------------------
@@ -1029,14 +1166,37 @@ class LegRunner:
                 self.record["trail_text_delivered"] = found
 
             if self.arm in ("mcp", "mcp-bare"):
-                recall_out = _http_json(
-                    "POST", f"http://127.0.0.1:{self.daemon_port}/v1/recall",
-                    {"query": self.leg_spec.prompt}, timeout=60,
+                # DEFECT 13 (1/2): a pre-session MCP streamable-HTTP handshake
+                # against the daemon's real `/mcp` route -- proves the server this
+                # leg's `claude -p` session is about to connect to actually serves
+                # the vectr tool surface, independent of `system.init`'s
+                # `mcp_servers` status (see `_mcp_handshake_probe`'s docstring).
+                handshake = _mcp_handshake_probe(self.daemon_port)
+                self._out("mcp-handshake.json").write_text(json.dumps(handshake, indent=2))
+                self.mcp_handshake_ok = handshake["ok"]
+                self.record["mcp_handshake_ok"] = handshake["ok"]
+                self.record["mcp_handshake_tools"] = handshake["tool_count"]
+                if not handshake["ok"] and not self.args.allow_unreachable:
+                    raise SystemExit(
+                        "ABORT: the MCP streamable-HTTP handshake against the "
+                        f"daemon's /mcp route (port {self.daemon_port}) did not "
+                        "return a vectr_* tool from tools/list -- the server this "
+                        "leg's claude -p session is about to connect to is not "
+                        "actually serving the vectr tool surface. Fix the daemon "
+                        "(not the score); re-run with --allow-unreachable to "
+                        "record it anyway."
+                    )
+
+                # DEFECT 13 (2/2): poll (not single-shot) so an embedder still
+                # warming up at probe time isn't mistaken for an unreachable
+                # channel -- see `_poll_recall_probe`'s docstring.
+                recall_probe = _poll_recall_probe(
+                    self.daemon_port, self.leg_spec.prompt, self.note_id,
                 )
-                notes_text = recall_out.get("notes") or ""
-                returned = (f"[#{self.note_id}]" in notes_text) if self.note_id is not None else None
-                self.recall_probe_returned_note = returned
-                self.record["recall_probe_returned_note"] = returned
+                self.recall_probe_returned_note = recall_probe["returned"]
+                self.record["recall_probe_returned_note"] = recall_probe["returned"]
+                self.record["recall_probe_method"] = recall_probe["method"]
+                self.record["recall_probe_elapsed_s"] = recall_probe["elapsed_s"]
 
             if not reachable and not self.args.allow_unreachable:
                 channel = "the SessionStart channel" if is_hook_arm else "EITHER daemon-side probe"
@@ -1419,7 +1579,9 @@ class LegRunner:
             hook_injection_counts=self.record.get("hook_injection_counts"),
             transcript_path=self._out("transcript.jsonl"),
             planted_note_content=(variant.content if variant is not None else None),
+            note_id=self.note_id,
             recall_probe_returned_note=self.recall_probe_returned_note,
+            mcp_handshake_ok=self.record.get("mcp_handshake_ok"),
             trail_text_delivered=self.trail_text_delivered,
             agent_returncode=self.record.get("agent_returncode"),
             is_error=cost.get("is_error"),
