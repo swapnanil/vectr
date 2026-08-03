@@ -747,7 +747,19 @@ def cost_metrics(events: Sequence[dict]) -> dict[str, Any]:
 # "mcp-bare" (tools, no CLAUDE.md guidance -- DESIGN.md 4's optional bare variant)
 # gets the identical expectation to "mcp": the guidance text is an OUTCOME variable
 # the two variants exist to compare, never a non-vacuity gate, so both must observe
-# the same connected vectr server to be valid.
+# the same vectr server to be valid.
+#
+# DEFECT 13: for "mcp"/"mcp-bare" this dict's `[{"name": "vectr", "status":
+# "connected"}]` entry is no longer an exact-equality gate (see
+# `leg_non_vacuity`'s arm branch below) -- it is kept only as the aspirational
+# value `leg_non_vacuity` echoes into `non_vacuity["mcp_servers_expected"]` for
+# a human reading the record. The real gate is presence-of-"vectr"-by-name plus
+# a status/evidence check: headless `claude -p` emits `system.init` BEFORE its
+# async HTTP MCP connect completes, so a genuinely working http-type server can
+# legitimately show `status: "pending"` at init and connect seconds later --
+# an exact-equality check against "connected" false-negatived two live legs
+# that went on to use vectr tools successfully. Every other arm here still
+# expects `[]` and is still held to exact equality (unchanged).
 _EXPECTED_MCP_SERVERS: dict[str, list[dict[str, str]]] = {
     "none": [],
     "mcp": [{"name": "vectr", "status": "connected"}],
@@ -809,6 +821,50 @@ def _content_delivered_in_json_text(content: str, raw_text: str) -> bool:
     return collapse(escaped) in collapsed_haystack
 
 
+def _mcp_tool_use_evidence(events: Sequence[dict]) -> bool:
+    """DEFECT 13 clause 2, "tool-use" evidence class: true when the transcript's
+    OWN tool-call stream shows the agent actually used a vectr MCP tool and got
+    back a non-error result -- independent of whether `mcp__vectr__*` ever
+    appears in `system.init.tools`. Current Claude Code headless behavior defers
+    MCP tool schemas behind a `ToolSearch` tool: a connected, working MCP server
+    never lists its tools in `system.init` at all, so requiring that listing (the
+    pre-DEFECT-13 gate) false-negatived every session that called `ToolSearch`
+    first and then used the tools successfully.
+
+    Matches a `tool_use` block's `id` (an assistant-event field) against the
+    same id on a later `tool_result` block -- per the transcript protocol,
+    `tool_result` blocks always live in a `user`-typed event, never in the
+    `assistant` event that issued the call. A structural id/name match, not a
+    query-content read: `str(name).startswith("mcp__vectr__")` is the same
+    prefix test `leg_metrics`'s own `vectr_tool_calls` counter already uses
+    above in this file.
+    """
+    vectr_tool_use_ids = {
+        blk.get("id")
+        for ev in events
+        if ev.get("type") == "assistant"
+        for blk in ((ev.get("message") or {}).get("content") or [])
+        if isinstance(blk, dict)
+        and blk.get("type") == "tool_use"
+        and str(blk.get("name") or "").startswith("mcp__vectr__")
+        and blk.get("id")
+    }
+    if not vectr_tool_use_ids:
+        return False
+    for ev in events:
+        if ev.get("type") != "user":
+            continue
+        for blk in (ev.get("message") or {}).get("content") or []:
+            if (
+                isinstance(blk, dict)
+                and blk.get("type") == "tool_result"
+                and blk.get("tool_use_id") in vectr_tool_use_ids
+                and not blk.get("is_error")
+            ):
+                return True
+    return False
+
+
 def leg_non_vacuity(
     *,
     arm: str,
@@ -823,7 +879,9 @@ def leg_non_vacuity(
     hook_injection_counts: Mapping[str, Any] | None = None,
     transcript_path: Path | None = None,
     planted_note_content: str | None = None,
+    note_id: int | None = None,
     recall_probe_returned_note: bool | None = None,
+    mcp_handshake_ok: bool | None = None,
     trail_text_delivered: bool | None = None,
     agent_returncode: int | None = None,
     is_error: bool | None = None,
@@ -837,6 +895,35 @@ def leg_non_vacuity(
 
     `arm` is consulted ONLY here, never in `score_run`/`leg_metrics` -- the outcome
     verdict stays arm-blind; this function alone answers "did the channel fire?".
+
+    DEFECT 13 (arms "mcp"/"mcp-bare" only, both branches below): the pre-fix gate
+    read exact equality against `mcp_servers == [{"name": "vectr", "status":
+    "connected"}]` and required `mcp__vectr__*` literally inside
+    `system.init.tools`, and burned two real legs on false negatives -- headless
+    `claude -p` emits `system.init` before its async HTTP MCP connect settles
+    (so "pending" at init is a legitimate transient, not a dead server), and
+    current Claude Code headless behavior defers MCP tool schemas behind a
+    `ToolSearch` tool (so a connected, working server never lists its tools in
+    `system.init` at all). The fix has three independent parts:
+      1. `mcp_servers`: an entry named "vectr" must be present; "connected"
+         passes outright; "pending" is provisionally accepted, standing or
+         falling on evidence class 2 below; any other status, or no "vectr"
+         entry at all, fails.
+      2. `vectr_tools_evidence` (recorded in `non_vacuity`): one of
+         `"init-tools"` (the pre-fix signal, still sufficient on its own),
+         `"tool-use"` (`_mcp_tool_use_evidence` above -- a real `tool_use`/
+         `tool_result` pair in the transcript), or `"handshake"` (the caller's
+         own pre-session `/mcp` JSON-RPC probe, passed in as `mcp_handshake_ok`
+         -- see `run_leg.py`'s `_mcp_handshake_probe`). None of the three =
+         invalid; this still catches a genuinely dead server.
+      3. Recall delivery: `recall_probe_returned_note=False` no longer fails
+         the leg by itself (that probe's own daemon-side race is a SEPARATE,
+         harness-side bug -- `run_leg.py` now polls instead of a single shot).
+         It fails only when the transcript ALSO shows no delivery evidence:
+         the planted note's content reaching the agent inside a tool_result
+         (`_content_delivered_in_json_text` against the raw transcript) AND,
+         when `note_id` is given, the literal `"[#<note_id>]"` marker present
+         in that same raw text.
 
     `agent_returncode`/`is_error`/`output_tokens` gate a prerequisite BELOW the
     per-arm premise: did the agent session run at all. This is arm-agnostic and
@@ -859,7 +946,30 @@ def leg_non_vacuity(
         reasons.append("no system.init event in transcript")
     observed_servers = (init or {}).get("mcp_servers") or []
     expected_servers = _EXPECTED_MCP_SERVERS[arm]
-    if observed_servers != expected_servers:
+
+    # DEFECT 13 part 1: arms "mcp"/"mcp-bare" no longer gate on exact equality
+    # against `[{"name": "vectr", "status": "connected"}]` -- see this
+    # function's own docstring and `_EXPECTED_MCP_SERVERS`'s comment. Every
+    # other arm (all expecting `[]`) keeps the original exact-equality check.
+    mcp_server_status: str | None = None
+    if arm in ("mcp", "mcp-bare"):
+        mcp_server_entry = next(
+            (s for s in observed_servers if isinstance(s, dict) and s.get("name") == "vectr"), None
+        )
+        mcp_server_status = mcp_server_entry.get("status") if mcp_server_entry else None
+        if mcp_server_entry is None:
+            reasons.append(
+                f"no MCP server named 'vectr' present in system.init.mcp_servers "
+                f"(observed={observed_servers!r})"
+            )
+        elif mcp_server_status not in ("connected", "pending"):
+            reasons.append(
+                f"MCP server 'vectr' status {mcp_server_status!r} for arm {arm!r} is "
+                "neither 'connected' nor the transitional 'pending'"
+            )
+        # status == "pending" adds no reason of its own here -- it stands or
+        # falls on the vectr_tools_evidence gate below (arm branch).
+    elif observed_servers != expected_servers:
         reasons.append(f"mcp_servers {observed_servers!r} != expected {expected_servers!r} for arm {arm!r}")
 
     result = next((e for e in reversed(events) if e.get("type") == "result"), None)
@@ -887,6 +997,7 @@ def leg_non_vacuity(
     nv: dict[str, Any] = {
         "mcp_servers_observed": observed_servers,
         "mcp_servers_expected": [s.get("name") for s in expected_servers],
+        "mcp_server_status": mcp_server_status,
         "inject_events": len(inject_events),
         "audit_since_offset": audit_since_offset,
         "proxy_injected": proxy_injected,
@@ -906,14 +1017,62 @@ def leg_non_vacuity(
     elif arm in ("mcp", "mcp-bare"):
         if not notes_count_at_start:
             reasons.append(f"notes_count_at_start is 0 for arm {arm!r}")
+
+        # DEFECT 13 part 2: evidence hierarchy, replacing the init-tools-only
+        # check (see this function's docstring). "init-tools" is the pre-fix
+        # signal, kept first and still sufficient alone (legacy regression
+        # coverage); "tool-use"/"handshake" are the two new evidence classes
+        # that make a session valid even when system.init never lists
+        # mcp__vectr__* at all (current Claude Code headless behavior defers
+        # MCP tool schemas behind ToolSearch).
         tool_names = (init or {}).get("tools") or []
-        vectr_tools_present = any(str(t).startswith("mcp__vectr__") for t in tool_names)
-        nv["vectr_tools_in_init"] = vectr_tools_present
-        if not vectr_tools_present:
-            reasons.append("no mcp__vectr__* tool present in system.init tools")
+        init_tools_evidence = any(str(t).startswith("mcp__vectr__") for t in tool_names)
+        tool_use_evidence = _mcp_tool_use_evidence(events)
+        handshake_evidence = bool(mcp_handshake_ok)
+        if init_tools_evidence:
+            vectr_tools_evidence = "init-tools"
+        elif tool_use_evidence:
+            vectr_tools_evidence = "tool-use"
+        elif handshake_evidence:
+            vectr_tools_evidence = "handshake"
+        else:
+            vectr_tools_evidence = None
+        nv["vectr_tools_evidence"] = vectr_tools_evidence
+        if vectr_tools_evidence is None:
+            reasons.append(
+                f"no vectr tool evidence for arm {arm!r} -- checked system.init "
+                "tools, transcript tool_use/tool_result pairs, and the "
+                "pre-session MCP handshake, all absent"
+            )
+
+        # DEFECT 13 part 3: recall_probe_returned_note=False alone no longer
+        # fails the leg -- only when the transcript also carries no delivery
+        # evidence (see docstring). recall_probe_returned_note stays None (no
+        # gate either way) when the caller never ran the probe at all.
         nv["recall_probe_returned_note"] = recall_probe_returned_note
+        transcript_text = ""
+        if transcript_path is not None and Path(transcript_path).exists():
+            transcript_text = Path(transcript_path).read_text(encoding="utf-8", errors="replace")
+        content_delivered = bool(planted_note_content) and _content_delivered_in_json_text(
+            planted_note_content or "", transcript_text
+        )
+        marker_delivered: bool | None = None
+        if note_id is not None:
+            marker_delivered = f"[#{note_id}]" in transcript_text
+        nv["recall_delivery_content_in_transcript"] = content_delivered
+        nv["recall_delivery_marker_in_transcript"] = marker_delivered
         if recall_probe_returned_note is False:
-            reasons.append("daemon-side /v1/recall preflight did not return the planted note")
+            delivery_evidence = content_delivered and (
+                marker_delivered if note_id is not None else True
+            )
+            if not delivery_evidence:
+                reasons.append(
+                    "daemon-side /v1/recall preflight did not return the planted "
+                    "note, and the transcript shows no in-session delivery "
+                    "evidence either (planted content in a tool_result plus its "
+                    "[#id] marker)"
+                )
+
         if proxy_injected:
             reasons.append(f"proxy injected={proxy_injected} for arm {arm!r}")
 

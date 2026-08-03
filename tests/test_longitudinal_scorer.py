@@ -972,9 +972,11 @@ def test_leg_non_vacuity_exact_anchor_match_not_prefix(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# mcp-bare guard: held to the same connected-server bar as mcp, not the
+# mcp-bare guard: held to the same vectr-server-present bar as mcp, not the
 # empty-servers bar every other tool-less arm gets (fix landed in scorer.py's
-# _EXPECTED_MCP_SERVERS; this pins it against regressing).
+# leg_non_vacuity arm branch; this pins it against regressing). A "connected"
+# status plus mcp__vectr__* literally in system.init.tools is the LEGACY
+# shape (DEFECT 13's "init-tools" evidence class) -- still sufficient alone.
 # ---------------------------------------------------------------------------
 
 
@@ -988,7 +990,161 @@ def test_leg_non_vacuity_mcp_bare_accepts_connected_vectr_server():
         proxy_injected=0, recall_probe_returned_note=True,
     )
     assert result["valid"] is True, result["invalid_reason"]
-    assert result["non_vacuity"]["vectr_tools_in_init"] is True
+    assert result["non_vacuity"]["vectr_tools_evidence"] == "init-tools"
+    assert result["non_vacuity"]["mcp_server_status"] == "connected"
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 13: mcp/mcp-bare non-vacuity false negatives against current Claude
+# Code headless behavior. Two real behaviors the pre-fix gate misread as a
+# dead server: (1) headless `claude -p` emits `system.init` BEFORE its async
+# HTTP MCP connect settles, so an http-type server legitimately reads
+# "pending" at init and connects seconds later; (2) current Claude Code
+# defers MCP tool schemas behind a `ToolSearch` tool, so `mcp__vectr__*`
+# never appears in `system.init.tools` even once the server is connected and
+# working -- the agent calls ToolSearch, then uses the tools successfully via
+# ordinary tool_use/tool_result pairs. These fixtures use the REAL
+# stream-json event shapes (`system.init` with `mcp_servers`/`tools`,
+# assistant `tool_use` blocks, user `tool_result` blocks, a terminal
+# `result` event) rather than a synthesized "does it fail" stand-in.
+# ---------------------------------------------------------------------------
+
+
+def _mcp_tool_use_event(tool_use_id: str, name: str, *, input_: dict | None = None) -> dict:
+    return {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "tool_use", "id": tool_use_id, "name": name, "input": input_ or {}}]
+        },
+    }
+
+
+def _mcp_tool_result_event(tool_use_id: str, *, is_error: bool = False, text: str = "") -> dict:
+    return {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "is_error": is_error,
+                    "content": [{"type": "text", "text": text}],
+                }
+            ]
+        },
+    }
+
+
+def _mcp_transcript_events(*, status: str, extra_events: list[dict] | None = None) -> list[dict]:
+    events: list[dict] = [
+        {
+            "type": "system",
+            "subtype": "init",
+            "mcp_servers": [{"name": "vectr", "status": status}],
+            # ToolSearch present, mcp__vectr__* deliberately absent -- current
+            # Claude Code headless behavior (see block comment above).
+            "tools": ["Bash", "Read", "ToolSearch"],
+        }
+    ]
+    events.extend(extra_events or [])
+    events.append({"type": "result", "subtype": "success", "usage": {"output_tokens": 10}})
+    return events
+
+
+def _write_transcript(tmp_path: Path, events: list[dict]) -> Path:
+    path = tmp_path / "transcript.jsonl"
+    path.write_text("\n".join(json.dumps(ev) for ev in events) + "\n", encoding="utf-8")
+    return path
+
+
+def test_leg_non_vacuity_mcp_pending_with_tool_use_evidence_and_delivered_note_is_valid(tmp_path):
+    events = _mcp_transcript_events(
+        status="pending",
+        extra_events=[
+            _mcp_tool_use_event("toolu_1", "mcp__vectr__vectr_recall", input_={"query": "workspace lock"}),
+            _mcp_tool_result_event("toolu_1", text="[#7] lock acquisition notes ..."),
+        ],
+    )
+    transcript_path = _write_transcript(tmp_path, events)
+    result = scorer.leg_non_vacuity(
+        arm="mcp", k=2, events=events, notes_count_at_start=1, proxy_injected=0,
+        note_id=7, transcript_path=transcript_path,
+        planted_note_content="lock acquisition notes",
+        recall_probe_returned_note=True,
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+    assert result["non_vacuity"]["mcp_server_status"] == "pending"
+    assert result["non_vacuity"]["vectr_tools_evidence"] == "tool-use"
+
+
+def test_leg_non_vacuity_mcp_pending_with_no_tool_evidence_anywhere_is_invalid(tmp_path):
+    """A genuinely dead server (pending status, never used, no handshake) must
+    still fail -- DEFECT 13's fix is not a blanket amnesty for 'pending'."""
+    events = _mcp_transcript_events(status="pending")
+    transcript_path = _write_transcript(tmp_path, events)
+    result = scorer.leg_non_vacuity(
+        arm="mcp", k=2, events=events, notes_count_at_start=1, proxy_injected=0,
+        note_id=7, transcript_path=transcript_path,
+        recall_probe_returned_note=False,
+    )
+    assert result["valid"] is False
+    assert result["non_vacuity"]["vectr_tools_evidence"] is None
+    assert "no vectr tool evidence" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_mcp_connected_with_init_tools_is_valid_legacy_shape(tmp_path):
+    events = _mcp_transcript_events(status="connected")
+    events[0]["tools"] = ["Bash", "mcp__vectr__vectr_search"]  # legacy pre-ToolSearch shape
+    transcript_path = _write_transcript(tmp_path, events)
+    result = scorer.leg_non_vacuity(
+        arm="mcp", k=2, events=events, notes_count_at_start=1, proxy_injected=0,
+        note_id=7, transcript_path=transcript_path,
+        recall_probe_returned_note=True,
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+    assert result["non_vacuity"]["vectr_tools_evidence"] == "init-tools"
+    assert result["non_vacuity"]["mcp_server_status"] == "connected"
+
+
+def test_leg_non_vacuity_mcp_pending_handshake_ok_no_tool_use_recall_probe_true_is_valid(tmp_path):
+    """The adoption-zero case: the agent never called a vectr tool this leg, but
+    the harness's own pre-session `/mcp` handshake independently proved the
+    server served this session, and the polled recall probe (DEFECT 13 clause
+    3) did return the planted note. Must stay valid -- non-vacuity gates the
+    CHANNEL, never whether the agent chose to use it (DESIGN.md 4.1's own B
+    row: 'whether the agent calls recall is the measured outcome, not a
+    gate')."""
+    events = _mcp_transcript_events(status="pending")
+    transcript_path = _write_transcript(tmp_path, events)
+    result = scorer.leg_non_vacuity(
+        arm="mcp", k=2, events=events, notes_count_at_start=1, proxy_injected=0,
+        note_id=7, transcript_path=transcript_path,
+        mcp_handshake_ok=True, recall_probe_returned_note=True,
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+    assert result["non_vacuity"]["vectr_tools_evidence"] == "handshake"
+
+
+def test_leg_non_vacuity_mcp_recall_probe_false_and_no_transcript_delivery_is_invalid(tmp_path):
+    events = _mcp_transcript_events(
+        status="pending",
+        extra_events=[
+            _mcp_tool_use_event("toolu_2", "mcp__vectr__vectr_recall"),
+            _mcp_tool_result_event("toolu_2", text="unrelated content, no marker here"),
+        ],
+    )
+    transcript_path = _write_transcript(tmp_path, events)
+    result = scorer.leg_non_vacuity(
+        arm="mcp", k=2, events=events, notes_count_at_start=1, proxy_injected=0,
+        note_id=7, transcript_path=transcript_path,
+        planted_note_content="the fact you need",
+        recall_probe_returned_note=False,
+    )
+    assert result["valid"] is False
+    # tool-use evidence alone doesn't excuse a failed-and-undelivered recall clause
+    assert result["non_vacuity"]["vectr_tools_evidence"] == "tool-use"
+    assert "recall" in result["invalid_reason"].lower()
+    assert "transcript" in result["invalid_reason"].lower()
 
 
 # ---------------------------------------------------------------------------

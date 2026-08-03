@@ -480,9 +480,9 @@ A leg counts only if the arm's premise is independently confirmed. Any failure �
 
 | arm | gate (all must hold) |
 |---|---|
-| **all** | transcript `system.init` event present; `mcp_servers` equals the arm's expected list; `result.subtype == "success"`; leg *k>1* restored a snapshot whose sha256 manifest matches the recorded one |
+| **all** | transcript `system.init` event present; `mcp_servers` equals the arm's expected list (arm **B**, mcp/mcp-bare, uses a presence+status rule instead — see DEFECT 13 below); `result.subtype == "success"`; leg *k>1* restored a snapshot whose sha256 manifest matches the recorded one |
 | **A** | `notes_count == 0` at leg start (GET `/v1/status`); zero post-offset `PROACTIVE_INJECT` events; proxy `injected == 0`; `mcp_servers == []` |
-| **B** | `notes_count >= 1`; `mcp_servers == [{"name":"vectr","status":"connected"}]`; the vectr tool names appear in `init.tools`; a daemon-side `/v1/recall` preflight with the leg prompt returns the planted note; proxy `injected == 0`. **Whether the agent calls recall is the measured outcome, not a gate.** |
+| **B** | `notes_count >= 1`; an MCP server named `"vectr"` present in `mcp_servers` with status `"connected"` (or the transitional `"pending"`, provisionally accepted — DEFECT 13); vectr-tool evidence from ANY of `mcp__vectr__*` in `init.tools` (legacy shape), a real `tool_use`/`tool_result` pair for an `mcp__vectr__*` tool in the transcript, or the harness's own pre-session `/mcp` handshake probe; the polled daemon-side `/v1/recall` preflight either returns the planted note, or (if it doesn't) the transcript itself shows in-session delivery evidence; proxy `injected == 0`. **Whether the agent calls recall is the measured outcome, not a gate.** |
 | **C** | `notes_count >= 1`; planted anchor present in a post-offset `PROACTIVE_INJECT` line (exact comma-split match); proxy `injected > 0` |
 | **D1/D2** | `notes_count >= 1`; daemon `hook_injection_counts` nonzero for the expected event(s); proxy `injected == 0`. For **D1**, additionally: the planted note's content is found in the transcript (whitespace-normalized and JSON-escape-aware, DEFECT 8 — see below) — valid because stream-json renders `SessionStart` `additionalContext`. For **D2**'s `UserPromptSubmit`/`PreToolUse` events, transcript content is **never** consulted (the transcript does not render them — the trap-harness scorer's transcript-content rule is the known bug UPG-IU-HOOK-NONVACUITY-CANARY); delivery rests on `hook_injection_counts` plus the attestation's canary method |
 | **T3 variants** | the variant's provenance-trail text appears in the probe's returned context (§7.3) |
@@ -531,6 +531,49 @@ another's — the two files never import each other's internals (each is loaded
 independently, and `run_leg.py` runs as a fresh subprocess per leg rather than an
 in-process import), the same reason `_workspace_hash` and other small helpers are
 duplicated rather than shared.
+
+**Arm B (mcp/mcp-bare): `system.init`-only evidence produces false negatives
+(DEFECT 13).** Headless `claude -p` emits `system.init` before its async HTTP MCP
+connect settles, so an http-type server legitimately reads `status: "pending"` there
+while still connecting — not evidence of a dead server. Current Claude Code headless
+versions additionally defer MCP tool *schemas* behind a `ToolSearch` tool:
+`mcp__vectr__*` names never appear in `system.init.tools`, even for a connected,
+working server, once the agent calls `ToolSearch` and then uses the tools directly via
+ordinary `tool_use`/`tool_result` pairs. Two burned k=2 legs (both verified live before
+this fix, not by re-running a paid command) were marked invalid purely from these two
+false negatives, plus a third, independent race: `run_leg.py`'s `/v1/recall` preflight
+probe used to fire a single shot ~2s after daemon start — before the embedder finished
+warming — while the same query 26s later (the agent's own in-session recall) succeeded
+with `method=semantic`.
+
+`scorer.leg_non_vacuity`'s B-row gate now has three independent legs:
+1. `mcp_servers`: an entry named `"vectr"` must be present; `"connected"` passes
+   outright; `"pending"` is provisionally accepted, standing or falling on evidence
+   class 2 below; any other status, or no `"vectr"` entry at all, fails. Recorded as
+   `mcp_server_status` in `non_vacuity`.
+2. `vectr_tools_evidence` (recorded verbatim in `non_vacuity`): an evidence hierarchy
+   of `"init-tools"` (the pre-fix signal, legacy shape, still sufficient alone) →
+   `"tool-use"` (`_mcp_tool_use_evidence`: a real assistant `tool_use` block named
+   `mcp__vectr__*` matched to a non-error `tool_result` in the transcript) →
+   `"handshake"` (the harness's own pre-session `/mcp` JSON-RPC `initialize`/
+   `tools/list` probe, `run_leg.py`'s `_mcp_handshake_probe`, run before `claude -p`
+   even spawns — an ABORT-before-spend gate on its own, unless `--allow-unreachable`).
+   None of the three present ⇒ invalid; a genuinely dead server still fails.
+3. Recall delivery: `recall_probe_returned_note=False` no longer fails the leg by
+   itself — `run_leg.py` now polls `/v1/recall` every 2s for up to 30s
+   (`_poll_recall_probe`) rather than a single shot, closing most of the race, but a
+   leftover miss only fails the leg when the transcript ALSO shows no delivery
+   evidence (`_content_delivered_in_json_text` against the raw transcript, plus, when
+   `note_id` is known, the literal `"[#<note_id>]"` marker).
+
+`leg_non_vacuity` stays arm-blind about outcomes throughout: evidence class 2's
+hierarchy records WHICH signal fired, never which one the agent chose to call —
+tool-usage counts are diagnostic, not gating, beyond "did at least one class fire".
+`revalidate.py` recomputes this gate at $0 against a preserved leg's `result.json` +
+`transcript.jsonl` (no daemon/network/model call), writing `result.revalidated.json`
+as a new sibling file — `result.json` itself is never mutated; see that script's own
+module docstring for the full contract (mirrors `rescore.py`'s DEFECT 9 pattern, but
+for the non-vacuity gate instead of the outcome verdict).
 
 **Trajectory validity.** State carries forward, so a bad leg contaminates its
 successors. If leg *k* is invalid, record `trajectory_valid_through = k-1`; legs > *k*
