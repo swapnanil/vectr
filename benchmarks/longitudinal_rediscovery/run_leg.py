@@ -588,6 +588,189 @@ def _proactive_probe(
     return turn1, turn2
 
 
+def _transport_ok(resp: dict) -> bool:
+    """True when `_http_json` got a real HTTP response body, as opposed to a
+    transport-level failure (`_error`: the request never got a response at
+    all, e.g. connection refused; `_http_error`: an HTTP error status;
+    `_raw`: the body wasn't valid JSON). Used to tell "the daemon answered
+    but said no" apart from "the daemon (or embedder) never answered" --
+    UPG-EVAL-PLANT-DISPLACEMENT's infra-unreachable ABORT criterion below
+    depends on this distinction, not just a truthy/falsy response."""
+    return isinstance(resp, dict) and "_error" not in resp and "_http_error" not in resp and "_raw" not in resp
+
+
+def _note_by_id_probe(daemon_port: int, note_id: int, expected_content: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    """Direct daemon-side by-id existence/integrity probe for a planted note
+    (UPG-EVAL-PLANT-DISPLACEMENT) -- the PRIMARY reachability test for every
+    non-hook memory arm, replacing a channel-ranking-based reachability gate.
+    `/v1/recall` with `note_id` set (`app/service.py`'s single-note-expand
+    branch, UPG-RECALL-HIERARCHY) reads the note directly by id, independent
+    of any channel's matching/ranking/budget -- existence and content
+    integrity, not deliverability through one particular channel at one
+    particular moment. `app/service.py`'s own not-found sentinel is the
+    literal string `f"Note #{note_id} not found."`; a found note's block
+    starts with `[{note_id}] [...`. Comparing against the DECODED REST field
+    (`_store.py::_format_full_block`'s rendered text, already JSON-decoded
+    by `_http_json`) needs only `_collapse_ws`, not the JSON-escape-aware
+    `_content_delivered_in_json_text` (that helper is for RAW haystacks that
+    themselves embed a JSON-escaped string field -- see its own docstring).
+
+    Returns `{"transport_ok": bool, "exists": bool, "content_matches": bool,
+    "raw_chars": int}`. A transport failure (daemon unreachable) yields
+    `exists=False`/`content_matches=False` rather than raising -- the caller
+    tells "genuinely absent" apart from "infra broken" by ALSO consulting
+    `transport_ok` (and the corroborating proactive probe's own transport
+    status), per this module's `probe()` docstring.
+    """
+    out = _http_json(
+        "POST", f"http://127.0.0.1:{daemon_port}/v1/recall", {"note_id": note_id}, timeout=timeout,
+    )
+    transport_ok = _transport_ok(out)
+    notes_text = (out.get("notes") or "") if transport_ok else ""
+    not_found = notes_text.strip() == f"Note #{note_id} not found."
+    exists = transport_ok and notes_text.strip() != "" and not not_found
+    content_matches = bool(
+        exists and expected_content and _collapse_ws(expected_content) in _collapse_ws(notes_text)
+    )
+    return {
+        "transport_ok": transport_ok,
+        "exists": exists,
+        "content_matches": content_matches,
+        "raw_chars": len(notes_text),
+    }
+
+
+# Parses the FIXED candidate-line format `agent/proactive/matcher.py`'s
+# `_structural_note_candidate`/`_semantic_note_candidate` render into a
+# `/v1/proactive` response's own `context` field: `note #{id} ({kind},
+# {provenance}[, anchored to|mentions {anchor}]): {summary}`. Reimplemented
+# locally against the product's own deterministic OUTPUT format (never
+# imported, never query-content-conditional) -- the same established
+# convention as this file's `_STARTED_PORT`/`_content_delivered_in_json_text`.
+_CANDIDATE_LINE_RE = re.compile(
+    r"^note #(?P<id>\d+) \((?P<kind>[^,]+), (?P<provenance>[^,)]+)"
+    r"(?:, (?P<relation>anchored to|mentions) (?P<anchor_label>.+?))?\):"
+)
+
+# Parses the FIXED full-block header format `agent/working_context_store/
+# _store.py`'s `_format_full_block` renders for `/v1/recall(note_id=...)`:
+# `[{id}] [{PRIORITY}]{ [KIND]}? [{provenance}] ...`. `kind` is only present
+# when it differs from the default ("finding").
+_NOTE_HEADER_RE = re.compile(
+    r"^\[(?P<id>\d+)\] \[(?P<priority>[A-Z]+)\](?: \[(?P<kind>[A-Z]+)\])? \[(?P<provenance>[a-zA-Z]+)\]"
+)
+
+
+def _note_header_fields(daemon_port: int, note_id: int, *, timeout: float = 15.0) -> dict[str, Any]:
+    """Best-effort priority for one DISPLACING note id (`_proactive_rank_probe`
+    below), parsed from `/v1/recall(note_id=...)`'s own fixed header format
+    (`_NOTE_HEADER_RE`). Diagnostic metadata only, never a gate: a transport
+    hiccup or parse miss on one displacing note's lookup yields
+    `priority=None` rather than raising -- it must never abort a leg that
+    the primary by-id check already confirmed reachable.
+    """
+    out = _http_json(
+        "POST", f"http://127.0.0.1:{daemon_port}/v1/recall", {"note_id": note_id}, timeout=timeout,
+    )
+    notes_text = (out.get("notes") or "") if _transport_ok(out) else ""
+    m = _NOTE_HEADER_RE.match(notes_text.strip())
+    return {"priority": m.group("priority").lower() if m else None}
+
+
+def _proactive_rank_probe(
+    daemon_port: int, leg: "scen.LegSpec", workspace: Path, session_prefix: str,
+    planted_anchor: str, cap: int,
+) -> dict[str, Any]:
+    """Finds `planted_anchor`'s rank in the proactive channel when it is
+    absent from the channel's default-budget response (UPG-EVAL-PLANT-
+    DISPLACEMENT) -- called only after `_note_by_id_probe` has already
+    confirmed the note exists and is intact, so this is diagnostic ranking,
+    never a reachability gate on its own.
+
+    `/v1/proactive` has no `items`/`max_items` request override (its budget,
+    `proactive.max_items_per_event` in agent/config.yaml, is a static
+    per-workspace config value); this instead PAGINATES by repeating the
+    identical request against ONE synthetic `session_id`.
+    `ProactiveGate.select()` charges its cooldown ledger at retrieval by
+    default (`agent/proactive/gate.py`), so a candidate returned (and
+    charged) on round 1 is cooldown-suppressed on round 2 against the SAME
+    session_id, surfacing the next tier of eligible candidates -- an
+    existing product mechanism, read here purely as a harness-side
+    diagnostic technique, never a new request parameter and never touching
+    the real agent's own (differently-named) session_id, so this cannot
+    affect the paid leg's own delivery.
+
+    Each accumulated candidate's kind and anchored-ness are parsed from the
+    SAME response's `context` field via `_CANDIDATE_LINE_RE` -- never a new
+    call, never query content. Priority for each note ranked above the
+    plant is filled in via `_note_header_fields` (bounded by `cap`, so at
+    most `cap` extra zero-LLM-cost daemon calls). Stops as soon as the
+    plant is found, `cap` candidates have been accumulated, or a round
+    returns nothing further (the channel is exhausted for this session).
+
+    Returns `{"rank": int | None, "rounds": int, "exhausted": bool,
+    "accumulated_anchor_ids": [...], "displaced_by": [{"note_id", "kind",
+    "priority", "anchored"}, ...]}` -- `rank` is None when the plant never
+    surfaced within `cap` (still not a gate failure: the primary by-id
+    check already established the note is reachable in principle).
+    """
+    base = f"http://127.0.0.1:{daemon_port}/v1/proactive"
+    session_id = f"{session_prefix}-rankprobe"
+    accumulated: list[dict[str, Any]] = []
+    rounds = 0
+    exhausted = False
+    while len(accumulated) < cap:
+        resp = _http_json("POST", base, {
+            "text": leg.prompt,
+            "file_paths": [str(workspace / p) for p in leg.probe_files],
+            "symbols": [],
+            "session_id": session_id, "channel": "proxy",
+        }, timeout=60)
+        rounds += 1
+        anchor_ids = resp.get("anchor_ids") or []
+        if not anchor_ids:
+            exhausted = True
+            break
+        by_id: dict[str, dict[str, Any]] = {}
+        for line in (resp.get("context") or "").splitlines():
+            m = _CANDIDATE_LINE_RE.match(line.strip())
+            if m:
+                by_id[f"note:{m.group('id')}"] = {
+                    "kind": m.group("kind"),
+                    "anchored": m.group("relation") == "anchored to",
+                }
+        for aid in anchor_ids:
+            entry = {"anchor_id": aid, **by_id.get(aid, {"kind": None, "anchored": None})}
+            accumulated.append(entry)
+        if planted_anchor in anchor_ids:
+            break
+        if rounds > cap:  # safety valve against a misbehaving daemon looping forever
+            break
+
+    rank = next(
+        (i + 1 for i, e in enumerate(accumulated) if e["anchor_id"] == planted_anchor), None
+    )
+    above = accumulated if rank is None else accumulated[: rank - 1]
+    displaced_by = []
+    for e in above:
+        try:
+            nid = int(e["anchor_id"].split(":", 1)[1])
+        except (IndexError, ValueError):
+            nid = None
+        priority = _note_header_fields(daemon_port, nid)["priority"] if nid is not None else None
+        displaced_by.append({
+            "note_id": nid, "kind": e.get("kind"), "priority": priority, "anchored": e.get("anchored"),
+        })
+
+    return {
+        "rank": rank,
+        "rounds": rounds,
+        "exhausted": exhausted,
+        "accumulated_anchor_ids": [e["anchor_id"] for e in accumulated],
+        "displaced_by": displaced_by,
+    }
+
+
 def _session_start_probe(daemon_port: int, session_id: str) -> str:
     """Daemon-side SessionStart-channel reachability check (DEFECT 7): a direct
     `/v1/recall` POST carrying the exact `{"boot": True, "hook_event":
@@ -744,6 +927,12 @@ class LegRunner:
             "recall_probe_method": None,
             "recall_probe_elapsed_s": None,
             "recall_probe_returned_note": None,
+            # UPG-EVAL-PLANT-DISPLACEMENT: displacement diagnostics, non-hook
+            # memory arms only (None elsewhere -- see `probe()`).
+            "planted_rank": None,
+            "displaced_by": None,
+            "delivered_at_default": None,
+            "channel_delivery": None,
         }
 
     # -- small path helper -------------------------------------------------
@@ -1067,8 +1256,9 @@ class LegRunner:
             self.record["notes_in_store_at_start"] = post_plant_count
 
     def probe(self) -> None:
-        """Daemon-side reachability probes (DESIGN.md 4.1, 7.3). Never touches the
-        proxy -- see `_proactive_probe`'s docstring.
+        """Daemon-side reachability probes (DESIGN.md 4.1, 7.3, and the
+        UPG-EVAL-PLANT-DISPLACEMENT probe rewrite). Never touches the proxy --
+        see `_proactive_probe`'s docstring.
 
         The reachability ABORT criterion is arm-aware (DEFECT 7). `_proactive_probe`
         below queries the daemon's proactive/proxy channel (`/v1/proactive`,
@@ -1096,11 +1286,47 @@ class LegRunner:
         branch sends, directly against the daemon -- channel-true and
         zero-LLM-cost, and it does not require `write_hooks()` to have run yet
         (this method runs before hooks are installed -- see `main()`'s call
-        order). Non-hook arms are completely unaffected: `_proactive_probe`
-        remains their sole, unchanged reachability channel and abort criterion.
+        order).
+
+        UPG-EVAL-PLANT-DISPLACEMENT (2026-08-03 ruling): a live k>=2 leg
+        aborted pre-spend because the agent's OWN note from a prior leg (an
+        anchored, high-priority gotcha) legitimately outranked the unanchored
+        planted directive at the proactive channel's default item budget.
+        That ranking is working as intended -- an agent-authored, anchored,
+        high-priority note SHOULD be able to win a proactive slot -- so
+        treating "displaced" the same as "absent" was the actual defect:
+        every mcp/proxy trajectory whose agent writes a strong note would
+        otherwise self-terminate at its very next leg. Non-hook memory arms
+        (mcp, mcp-bare, proxy) therefore now gate on a DIRECT by-id
+        existence/integrity check (`_note_by_id_probe`, `/v1/recall` with
+        `note_id` set -- independent of any channel's ranking) as the
+        PRIMARY reachability test; `_proactive_probe`'s result is
+        corroborating diagnostics, never the gate, for these arms. When the
+        by-id check passes but the note is absent from the channel's
+        default-budget response, `_proactive_rank_probe` locates its actual
+        rank (or confirms it never surfaces within budget) and the leg
+        records `planted_rank`/`displaced_by`/`delivered_at_default`/
+        `channel_delivery` and RUNS -- "the channel fails to deliver under
+        contention" is a genuine measured property of THIS run, not an
+        instrument error (`scorer.leg_non_vacuity`'s arm "proxy" branch
+        reads `channel_delivery` so it does not then independently
+        re-invalidate the same already-accepted leg via its own post-hoc
+        delivery expectation). ABORT is now reserved for genuine
+        unreachability: the by-id check finds the note absent or
+        content-corrupt (`preflight["reachable_channel"] == "by_id"`), or
+        every probe path fails at the transport level -- daemon unreachable,
+        or the embedder never comes up within the polling window
+        (`preflight["infra_unreachable"] = True`, checked via `_transport_ok`
+        on the by-id probe AND both proactive-probe turns). Hook arms are
+        completely unaffected by any of this: they already judge
+        reachability against the SessionStart channel (immediately below,
+        unchanged), which a directive-kind note is structurally excluded
+        from the proactive channel's ranking in the first place, so this
+        specific displacement cannot occur there.
         """
         memory_arm = self.arm != "none"
         if memory_arm and (self.note_id is not None or self.planted_anchor):
+            variant = self._find_note_variant()
             turn1, turn2 = _proactive_probe(
                 self.daemon_port, self.leg_spec, self.workspace,
                 f"longprobe-{self.scenario.slug}-k{self.k}",
@@ -1125,7 +1351,6 @@ class LegRunner:
                 or preflight["turn2_with_file_anchor"]["planted_present"]
             )
 
-            variant = self._find_note_variant()
             is_hook_arm = self.arm in ("hook-sessionstart", "hook-full")
             if is_hook_arm:
                 session_start_notes = _session_start_probe(
@@ -1143,8 +1368,37 @@ class LegRunner:
                 reachable = session_start_reachable
             else:
                 preflight["proactive_probe_diagnostic_only"] = False
-                preflight["reachable_channel"] = "proactive"
-                reachable = proactive_reachable
+                preflight["reachable_channel"] = "by_id"
+                by_id = (
+                    _note_by_id_probe(self.daemon_port, self.note_id, variant.content)
+                    if self.note_id is not None
+                    else {"transport_ok": False, "exists": False, "content_matches": False, "raw_chars": 0}
+                )
+                preflight["by_id_probe"] = by_id
+                integrity_ok = by_id["exists"] and (by_id["content_matches"] or not variant.content)
+                reachable = integrity_ok
+
+                if integrity_ok:
+                    if proactive_reachable:
+                        self.record["delivered_at_default"] = True
+                        self.record["channel_delivery"] = "delivered_default"
+                    else:
+                        cap = max(1, min(self.notes_count_at_start or 1, 10))
+                        rank_probe = _proactive_rank_probe(
+                            self.daemon_port, self.leg_spec, self.workspace,
+                            f"longprobe-{self.scenario.slug}-k{self.k}", anchor, cap,
+                        )
+                        preflight["rank_probe"] = rank_probe
+                        self.record["planted_rank"] = rank_probe["rank"]
+                        self.record["displaced_by"] = rank_probe["displaced_by"]
+                        self.record["delivered_at_default"] = False
+                        self.record["channel_delivery"] = "displaced"
+                else:
+                    self.record["channel_delivery"] = "unreachable"
+                    preflight["infra_unreachable"] = (
+                        not by_id["transport_ok"]
+                        and not _transport_ok(turn1) and not _transport_ok(turn2)
+                    )
 
             self._out("preflight.json").write_text(json.dumps(preflight, indent=2))
             self.record["preflight"] = preflight
@@ -1199,9 +1453,25 @@ class LegRunner:
                 self.record["recall_probe_elapsed_s"] = recall_probe["elapsed_s"]
 
             if not reachable and not self.args.allow_unreachable:
-                channel = "the SessionStart channel" if is_hook_arm else "EITHER daemon-side probe"
+                if is_hook_arm:
+                    raise SystemExit(
+                        "ABORT: the planted note is not retrievable on the "
+                        "SessionStart channel, so this leg cannot test its memory "
+                        "channel. Fix the scenario (not the score); re-run with "
+                        "--allow-unreachable to record it anyway."
+                    )
+                if preflight.get("infra_unreachable"):
+                    raise SystemExit(
+                        "ABORT: infra unreachable -- neither the by-id /v1/recall "
+                        "integrity probe nor the daemon-side proactive probes got "
+                        f"a transport-level response from the daemon (port "
+                        f"{self.daemon_port}), so this leg's memory channel "
+                        "cannot be tested at all. Fix the daemon (not the score); "
+                        "re-run with --allow-unreachable to record it anyway."
+                    )
                 raise SystemExit(
-                    f"ABORT: the planted note is not retrievable on {channel}, so "
+                    "ABORT: the planted note is absent or content-corrupt in the "
+                    "daemon's store (by-id /v1/recall integrity check failed), so "
                     "this leg cannot test its memory channel. Fix the scenario "
                     "(not the score); re-run with --allow-unreachable to record "
                     "it anyway."
@@ -1586,6 +1856,7 @@ class LegRunner:
             agent_returncode=self.record.get("agent_returncode"),
             is_error=cost.get("is_error"),
             output_tokens=cost.get("output_tokens"),
+            channel_delivery=self.record.get("channel_delivery"),
         )
 
         self.record["score"] = run_score
@@ -1699,7 +1970,13 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--timeout-s", type=int, default=900)
     ap.add_argument("--vectr-bin", default=shutil.which("vectr") or "vectr")
     ap.add_argument("--allow-unreachable", action="store_true", help=(
-        "Record a leg even when the planted note fails both daemon-side preflight probes."
+        "Record a leg even on GENUINE preflight unreachability -- the planted note is "
+        "absent/content-corrupt in the store (by-id /v1/recall check), the SessionStart "
+        "channel never carries it (hook arms), or every probe path fails at the "
+        "transport level. Does NOT apply to mere channel displacement (a higher-ranked "
+        "note winning the proactive channel's default slot): that is recorded via "
+        "channel_delivery='displaced' and the leg runs regardless "
+        "(UPG-EVAL-PLANT-DISPLACEMENT)."
     ))
     ap.add_argument("--allow-hook-unreachable", action="store_true", help=(
         "Record a leg even when hook_preflight() cannot prove the SessionStart "

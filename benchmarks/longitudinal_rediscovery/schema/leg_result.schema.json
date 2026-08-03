@@ -33,6 +33,32 @@
     "planted_note_id": { "type": ["integer", "null"] },
     "planted_anchor": { "type": ["string", "null"], "description": "e.g. 'note:1'; matched by exact comma-split, so note:4 is never satisfied by note:41." },
     "notes_in_store_at_start": { "type": ["integer", "null"] },
+    "planted_rank": {
+      "type": ["integer", "null"],
+      "description": "UPG-EVAL-PLANT-DISPLACEMENT: the planted note's 1-based rank on the proactive channel as found by the preflight cooldown-ledger pagination probe, or null when the probe never ran or the note was not found within the probed cap."
+    },
+    "displaced_by": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "properties": {
+          "note_id": { "type": ["integer", "null"] },
+          "kind": { "type": ["string", "null"] },
+          "priority": { "type": ["string", "null"] },
+          "anchored": { "type": ["boolean", "null"] }
+        }
+      },
+      "description": "UPG-EVAL-PLANT-DISPLACEMENT: notes that ranked above the planted note on the proactive channel at preflight, in rank order. Empty when the planted note was delivered at the default budget; null when the probe never ran."
+    },
+    "delivered_at_default": {
+      "type": ["boolean", "null"],
+      "description": "UPG-EVAL-PLANT-DISPLACEMENT: whether the planted note was present in the proactive channel's response at the product's default budget (items=1), i.e. rank 1, at preflight."
+    },
+    "channel_delivery": {
+      "type": ["string", "null"],
+      "enum": ["delivered_default", "displaced", "unreachable", null],
+      "description": "UPG-EVAL-PLANT-DISPLACEMENT: preflight outcome of the planted note's direct by-id integrity check plus its proactive-channel rank probe. 'displaced' means the note passed by-id integrity but was outranked at the channel's default budget by a stronger note (own-work contention) -- the leg still runs and arm 'proxy' exempts its own delivery-expectation gate accordingly (see scorer.py's leg_non_vacuity docstring). Never set for arm 'none' or the hook arms (DEFECT 7: hook arms judge reachability via the SessionStart channel, not proactive)."
+    },
 
     "valid": {
       "type": "boolean",
@@ -62,7 +88,8 @@
         "planted_content_in_transcript": { "type": ["boolean", "null"] },
         "recall_probe_returned_note": { "type": ["boolean", "null"], "description": "Arm B: daemon-side /v1/recall preflight with the leg prompt returned the planted note." },
         "trail_text_delivered": { "type": ["boolean", "null"], "description": "T3 gate: the variant's provenance-trail text survived into the injected/recalled block." },
-        "planted_note_injected": { "type": ["boolean", "null"] }
+        "planted_note_injected": { "type": ["boolean", "null"] },
+        "channel_delivery": { "type": ["string", "null"], "enum": ["delivered_default", "displaced", "unreachable", null], "description": "UPG-EVAL-PLANT-DISPLACEMENT: pass-through of the preflight's channel_delivery outcome; consulted by arm 'proxy' to exempt its planted-anchor-injection expectation when 'displaced'." }
       }
     },
 

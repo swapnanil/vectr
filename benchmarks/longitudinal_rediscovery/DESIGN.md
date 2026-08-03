@@ -588,6 +588,65 @@ as a new sibling file — `result.json` itself is never mutated; see that script
 module docstring for the full contract (mirrors `rescore.py`'s DEFECT 9 pattern, but
 for the non-vacuity gate instead of the outcome verdict).
 
+**Pre-spend reachability is a by-id integrity check, not a channel-ranking check, for
+arms B/C (UPG-EVAL-PLANT-DISPLACEMENT).** A live *k*≥2 leg of S1 (`release_via_ci`, arm
+mcp) aborted pre-spend ($0) because the agent's OWN note from a prior leg — an anchored,
+`kind="gotcha"`, `priority="high"` note with real file anchors — legitimately outranked
+the unanchored planted directive at the proactive channel's default item budget
+(`items=1`). Turn 2 of `_proactive_probe` returned `anchor_ids=["note:2"]`,
+`planted_present=false`. **This ranking is the product working as intended**: an
+agent-authored, anchored, high-priority note winning a scarce proactive slot over an
+unanchored planted one is exactly what `ProactiveGate.select()`'s deterministic sort is
+for. Treating that outcome the same as "the note is gone" was the actual defect —
+every mcp/proxy trajectory whose agent writes a strong note during leg *k* would
+otherwise self-terminate at leg *k+1*, silently truncating exactly the trajectories most
+worth measuring (the ones where the agent is doing real work with memory).
+
+The fix separates two questions the old single proactive-channel probe conflated:
+*is the note retrievable at all* (reachability — an instrument concern) vs. *does it win
+the default-budget slot right now* (delivery under contention — a genuine, scenario-
+dependent property of this run). `run_leg.py`'s `probe()` now gates non-hook memory arms
+(B, C) on a **direct by-id existence/integrity check** (`_note_by_id_probe`, `POST
+/v1/recall` with `note_id` set — bypasses ranking entirely, checks only that the note
+exists and its content matches what was planted) as the PRIMARY reachability test; the
+proactive-channel probe (`_proactive_probe`, still run and recorded) is corroborating
+diagnostics only for these two arms. Hook arms (D1/D2) are unaffected — DEFECT 7 already
+routes their reachability gate through the SessionStart channel, and a `kind="directive"`
+note is structurally excluded from the proactive channel's ranking in the first place
+(§4.1's DEFECT 7 paragraph above), so this specific displacement cannot occur there.
+
+When the by-id check passes but the note is absent from the channel's default-budget
+response, `_proactive_rank_probe` locates the note's actual rank by paging the proactive
+channel with a synthetic, per-probe `session_id`: since an already-selected `anchor_id`
+is cooldown-suppressed on the next call to the same session (the existing product
+cooldown-ledger mechanism, not new product behavior), repeated calls reveal successive
+ranked batches up to a cap of `min(notes_count_at_start, 10)` calls. The leg then RUNS
+(never aborts) and records four additive fields, written into both `preflight.json` and
+`result.json`:
+
+- `planted_rank` — the note's 1-based rank on the channel, or `null` if never found
+  within the probed cap.
+- `displaced_by` — `[{note_id, kind, priority, anchored}, ...]` for every note that
+  ranked above it, in rank order.
+- `delivered_at_default` — `true` when the note was present at the default budget
+  (`items=1`, i.e. rank 1) without needing the rank probe at all.
+- `channel_delivery` — `"delivered_default"` / `"displaced"` / `"unreachable"`, a
+  pass-through summary consumed by `scorer.leg_non_vacuity`'s arm-C branch: a leg
+  annotated `"displaced"` is exempted from that branch's own planted-anchor-injection
+  expectation (§4.1's C row above), because the same contention observed at preflight is
+  expected to persist into the real session — re-invalidating it there would just be the
+  same false abort moved one step later. No other arm-C gate is affected, and no other
+  arm ever reads this field.
+
+**ABORT is now reserved for genuine unreachability only:** the by-id check finds the
+note absent or content-corrupt (`preflight["reachable_channel"] == "by_id"`), or every
+probe path fails at the transport level — daemon unreachable, or the embedder never
+comes up within the polling window (`preflight["infra_unreachable"] = true`, true only
+when the by-id probe AND both proactive-probe turns all fail at the transport layer, not
+merely return an empty/negative result). `--allow-unreachable` now only bypasses this
+narrowed genuine-unreachability abort; it has no bearing on `channel_delivery=
+"displaced"`, which never aborts regardless of the flag.
+
 **Trajectory validity.** State carries forward, so a bad leg contaminates its
 successors. If leg *k* is invalid, record `trajectory_valid_through = k-1`; legs > *k*
 are excluded even if they individually pass their gates.

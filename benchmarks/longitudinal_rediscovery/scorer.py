@@ -886,6 +886,7 @@ def leg_non_vacuity(
     agent_returncode: int | None = None,
     is_error: bool | None = None,
     output_tokens: int | None = None,
+    channel_delivery: str | None = None,
 ) -> dict[str, Any]:
     """DESIGN.md 4.1: was this leg's arm premise independently confirmed?
 
@@ -933,6 +934,22 @@ def leg_non_vacuity(
     != "success"` check above does not: `subtype: "success"` with `is_error: true`
     and zero output tokens -- a session that errored out before producing any
     response, still tagged "success" by the transcript's own `result` event.
+
+    `channel_delivery` (UPG-EVAL-PLANT-DISPLACEMENT, arm "proxy" only):
+    `run_leg.py`'s `probe()` now gates PRE-SPEND reachability on a direct
+    by-id existence/integrity check, not the proactive channel's ranking --
+    a note the channel doesn't deliver at its default budget (outranked by a
+    stronger agent-authored note) is recorded as `channel_delivery=
+    "displaced"` and the leg still runs, because that ranking is the product
+    working as intended, not an instrument failure. Arm "proxy"'s own
+    delivery expectation below (the planted anchor must appear in a
+    post-offset `PROACTIVE_INJECT` audit line) would otherwise
+    false-invalidate exactly this already-accepted case: the same
+    contention observed at preflight is expected to persist into the real
+    session, so a leg annotated `channel_delivery="displaced"` is exempted
+    from that one expectation -- every other arm-"proxy" gate (`notes_count_
+    at_start`, `proxy_injected > 0`) is unaffected, and every other arm
+    never reads this parameter at all.
     """
     if arm not in _EXPECTED_MCP_SERVERS:
         raise ValueError(f"unknown arm {arm!r}")
@@ -1004,6 +1021,7 @@ def leg_non_vacuity(
         "notes_in_store_at_start": notes_count_at_start,
         "trail_text_delivered": trail_text_delivered,
         "session_errored": session_errored,
+        "channel_delivery": channel_delivery,
     }
 
     if arm == "none":
@@ -1082,7 +1100,7 @@ def leg_non_vacuity(
         hits = [e for e in inject_events if planted_anchor in (e.get("anchors") or "").split(",")]
         nv["planted_anchor_injections"] = len(hits)
         nv["planted_note_retrieved"] = bool(hits)
-        if not hits:
+        if not hits and channel_delivery != "displaced":
             reasons.append(f"planted anchor {planted_anchor!r} absent from post-offset PROACTIVE_INJECT lines")
         if not proxy_injected:
             reasons.append("proxy injected == 0 for arm 'proxy'")
