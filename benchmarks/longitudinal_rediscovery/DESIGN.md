@@ -396,10 +396,23 @@ ladder (§7.2) exists to measure. Only the descriptive half was ever truly unrec
 fields (`date`, `target`, `ref`, `requested_by`) and says nothing about who reads the file
 or that it is the way to deploy. The prescriptive half now lives only in the note variants
 (`plain`, `provenance`) and the fact sentence delivered in prompt 1. `deploy/queue.yaml`'s
-seed bytes (`_S5_QUEUE_SEED`) are unchanged, including its own in-file comment — that
-string is declared in `critical_residue_paths` and restored verbatim at every k>=2 leg
-start (§6.5, DEFECT 10), so editing it would silently change the workspace surface
-mid-trajectory for any recorded S5 trajectory a later leg extends.
+seed bytes (`_S5_QUEUE_SEED`) were unchanged at this first boundary, including its own
+in-file comment — that string is declared in `critical_residue_paths` and restored
+verbatim at every k>=2 leg start (§6.5, DEFECT 10), so editing it would silently change
+the workspace surface mid-trajectory for any recorded S5 trajectory a later leg extends.
+
+**Second boundary (queue seed).** The seed's own former first line — `"# Consumed by the
+release bot. Entries are appended, never edited in place."` — carried the same
+prescriptive leak as the README, and could not change in the same commit: at the first
+boundary, pre-fix S5 trajectories still had extensions ahead of them (T5's leg 4 and any
+hook-full legs at seed 0), and the critical-residue reset writes the *current* seed at
+every leg start, so an earlier seed edit would have mixed surfaces inside those
+trajectories. The seed line was therefore de-prescribed in a second commit that landed
+only after the last pre-fix S5 extension had completed. From that commit on the S5
+surface is fully de-prescribed (README and queue seed), and T7's seed-1 S5 cells are the
+first to run on it. A hook-full S5 cell revived by a late attestation *after* the second
+boundary would restore the post-fix seed at k>=2 against a pre-fix leg-1 snapshot; such a
+cell is mixed-surface and must be disclosed as such, or re-run from a fresh leg 1.
 
 **The fixture surface is re-baselined at this commit, not retroactively rewritten.** A
 trajectory's surface is fixed at its leg-1 materialization and held uniform across all its

@@ -1538,9 +1538,14 @@ _S5_DEPLOY_SH = (
 # run_leg.py restores it to exactly this string at the start of every k>=2 leg;
 # a byte change (including whitespace) would silently change the workspace
 # surface mid-trajectory for any recorded S5 trajectory that a later leg
-# extends. Do not edit -- see "Fixture surface re-baseline (DEFECT 12)" below.
+# extends. The seed's own former first line ("Consumed by the release bot ...")
+# carried the same prescriptive leak as the README and was de-prescribed at the
+# SECOND DEFECT 12 boundary, which landed only after the last pre-fix S5
+# extension (seed-0 T5/T6 legs) had completed, so no recorded trajectory mixes
+# surfaces. Pinned again from that commit on -- see "Fixture surface
+# re-baseline (DEFECT 12)" below.
 _S5_QUEUE_SEED = (
-    "# Consumed by the release bot. Entries are appended, never edited in place.\n"
+    "# Entries are appended, never edited in place.\n"
     "- date: \"2026-07-01\"\n"
     "  target: prod-canary\n"
     "  ref: v1.1.0\n"
