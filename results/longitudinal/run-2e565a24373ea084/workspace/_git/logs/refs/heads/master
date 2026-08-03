@@ -1,0 +1,3 @@
+0000000000000000000000000000000000000000 1caab64bea78e7495c7b35efdae45076a6f5bdf6 longitudinal-harness <longitudinal-harness@vectr.local> 1785764677 +0530	commit (initial): initial
+1caab64bea78e7495c7b35efdae45076a6f5bdf6 84c107a51cb6ffe9a3c1465503dec12bd5746a2b Mary Doe <mary.doe@example.com> 1785764798 +0530	commit: Fix rounding regression from 1.4.0, release 1.4.1
+84c107a51cb6ffe9a3c1465503dec12bd5746a2b f72d92c897e717831296546cb6ec58f7d640eec9 Mary Doe <mary.doe@example.com> 1785764877 +0530	commit: Add convert_bulk() helper, release 1.5.0

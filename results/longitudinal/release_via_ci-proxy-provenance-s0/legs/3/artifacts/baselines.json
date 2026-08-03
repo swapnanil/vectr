@@ -1,0 +1,12 @@
+{
+  ".github/workflows/ci.yml": "e86ee7b673b62f7a5c7d79601ef7280d9f72516e290456aa02d57c475eb91a9c",
+  ".github/workflows/release.yml": "a6d54309a00f902ac1d36ac449a0fb420992f3e3c513eb15596697d402987ff5",
+  "CHANGELOG.md": "0def0c08356fca21f46de00bf5f74165fbe69c04b05142e6098d75992fcbebf2",
+  "CLAUDE.md": "8ec433764abf45cfe25512597f56d090dfeb76b552b29a5d1ace70fe76b7d690",
+  "pyproject.toml": "67ac06fb7235cd6c51ec5386c8c9a1a5928bc3dcbfa5d0398c637b8c93eb1976",
+  "scripts/preflight.sh": "7729c32f33c5fd02cff40fa81e336537c282de6273cb1b09b00b040982293a05",
+  "src/ledgerkit/__init__.py": "4d5aeb0796e5af938386e24792e808e0841a49c8cefe91050ca97c71fbd630e8",
+  "src/ledgerkit/__pycache__/__init__.cpython-314.pyc": "d91b5368476fed2f1a40b94073ff578be00284eeabda0798675510ca4e0e727e",
+  "src/ledgerkit/__pycache__/rates.cpython-314.pyc": "eee603f6c3ebf2c127418be947e601f72ed36080c51ef03b16090ab7e2130df5",
+  "src/ledgerkit/rates.py": "dccd26f67804cf6eca9914ea4dce112118e4806797ebda0f69e339f1a4f29e02"
+}

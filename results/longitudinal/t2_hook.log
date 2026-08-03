@@ -1,0 +1,33 @@
+{
+  "tier": "T2",
+  "plan": [
+    {
+      "trajectory_id": null,
+      "scenario": "release_via_ci",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "release_via_ci-hook-sessionstart-plain-s0",
+      "k": 2,
+      "status": "invalid",
+      "invalid_reason": "hook_injection_counts all zero for arm 'hook-sessionstart'; planted note content not found verbatim in transcript (valid for D1: stream-json renders SessionStart additionalContext)"
+    },
+    {
+      "trajectory_id": null,
+      "scenario": "deploy_reverted_by_reconciler",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-hook-sessionstart-plain-s0",
+      "k": 2,
+      "status": "invalid",
+      "invalid_reason": "hook_injection_counts all zero for arm 'hook-sessionstart'; planted note content not found verbatim in transcript (valid for D1: stream-json renders SessionStart additionalContext)"
+    }
+  ],
+  "spend_usd": 0.66,
+  "budget_exhausted": false
+}

@@ -1,0 +1,10 @@
+$ /Users/swapnanilsaha/Library/Python/3.14/bin/vectr init --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace --hooks --no-ide-config
+rc=0
+
+
+  Wrote vectr hooks to /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace/.claude/settings.json
+  Wrote vectr hooks to /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace/.codex/hooks.json
+  Skipped git post-commit hook: /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace is not a git working tree.
+  Skipped IDE config file writes for /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace (--no-ide-config). This choice persists at /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace/.vectr/ide_config for future start/restart/init calls; delete that file to re-enable.
+Workspace configured: /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace
+  Run 'vectr start --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace' to index and start the server.

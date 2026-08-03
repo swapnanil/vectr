@@ -1,0 +1,10 @@
+{
+  ".deploy-state": "354acc7f51076c816672bffcb6a8b659859eba38f7ac31c5a4136a55e508d32d",
+  "CLAUDE.md": "1ff48b1d1f550354f8ee29877e038463147ccf39b3e9e8c795901989293a1725",
+  "config/staging.yaml": "4f8f5aaa233cd3d17ee055424fe7cf41d0cf64ab5cbc6563b6b856836d279261",
+  "deploy/README.md": "c4a609a4f1b2b39394943ddd727d3f2f888012defdce1dbbae213b78730a4af8",
+  "deploy/queue.yaml": "64015f95ce53c491a16342bf72c20b8205dd58d7382f0e043e9572bf0edb4a7c",
+  "deploy.sh": "9f74e20dd0dede1b1c2253223c4107109b5e6ca8740c7466119ccbb83bcefea3",
+  "src/pilot/__init__.py": "2c7bddc4a1ce455b87146e3c8a3b439946f698fceba124c77e6147bb4d719d57",
+  "src/pilot/app.py": "f4ba6760bd0e82ade31bc137ebbc7b92979c5d3a93b4b6b1be3edc4903c118a1"
+}

@@ -1,0 +1,10 @@
+$ /Users/swapnanilsaha/Library/Python/3.14/bin/vectr start /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-provenance-s0/workspace --port 8899 --memory-only --no-ide-config
+rc=0
+
+
+  Skipped IDE config file writes for /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-provenance-s0/workspace (--no-ide-config). This choice persists at /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-provenance-s0/workspace/.vectr/ide_config for future start/restart/init calls; delete that file to re-enable.
+Vectr started [memory-only] (PID 25900) on port 8899
+Workspace : /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-provenance-s0/workspace
+MCP URL   : http://localhost:8899/mcp
+Logs      : /Users/swapnanilsaha/.vectr/logs/5f20a44a6ec3.log
+Mode      : memory-only (no code indexing/watcher; memory tools + hooks active)

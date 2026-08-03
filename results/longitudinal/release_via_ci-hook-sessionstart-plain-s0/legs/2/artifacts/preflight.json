@@ -1,0 +1,20 @@
+{
+  "turn1_text_only": {
+    "item_count": 0,
+    "chars": 0,
+    "anchor_ids": [],
+    "planted_present": false
+  },
+  "turn2_with_file_anchor": {
+    "item_count": 0,
+    "chars": 0,
+    "anchor_ids": [],
+    "planted_present": false
+  },
+  "session_start_channel": {
+    "reachable": true,
+    "notes_chars": 1130
+  },
+  "proactive_probe_diagnostic_only": true,
+  "reachable_channel": "session_start"
+}

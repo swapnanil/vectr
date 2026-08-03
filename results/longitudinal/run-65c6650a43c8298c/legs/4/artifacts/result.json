@@ -1,0 +1,130 @@
+{
+  "leg_id": "20260803T071251Z-bench_box_only-proxy-plain-s0-k4",
+  "trajectory_id": "bench_box_only-proxy-plain-s0",
+  "scenario": "bench_box_only",
+  "arm": "proxy",
+  "note_variant": "plain",
+  "seed": 0,
+  "k": 4,
+  "model": "sonnet",
+  "started_utc": "20260803T071251Z",
+  "origin": "told",
+  "leg1_id": null,
+  "restored_manifest_ok": true,
+  "planted_note_id": null,
+  "planted_anchor": "note:1",
+  "notes_in_store_at_start": 1,
+  "mcp_handshake_ok": null,
+  "mcp_handshake_tools": null,
+  "recall_probe_method": null,
+  "recall_probe_elapsed_s": null,
+  "recall_probe_returned_note": null,
+  "critical_residue_reset_paths": [
+    "RESULTS.md"
+  ],
+  "daemon_port": 8899,
+  "preflight": {
+    "turn1_text_only": {
+      "item_count": 0,
+      "chars": 0,
+      "anchor_ids": [],
+      "planted_present": false
+    },
+    "turn2_with_file_anchor": {
+      "item_count": 1,
+      "chars": 598,
+      "anchor_ids": [
+        "note:1"
+      ],
+      "planted_present": true
+    },
+    "proactive_probe_diagnostic_only": false,
+    "reachable_channel": "proactive"
+  },
+  "planted_note_reachable_preflight": true,
+  "audit_offset_after_preflight": 946,
+  "proxy_port": 8900,
+  "proxy_instance_id": "proxy-4234d121c8754a01",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace",
+  "agent_returncode": 0,
+  "agent_wall_s": 94.0,
+  "proxy_metrics": {
+    "requests": 10,
+    "injected": 1,
+    "inject_skipped": 8,
+    "inject_skipped_not_appendable": 2,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  },
+  "proxy_hard_killed": [],
+  "daemon_hard_killed": [],
+  "score": {
+    "primary_check": "results_traceable_radix_sort_leg4",
+    "fact_used": false,
+    "checks": [
+      {
+        "name": "results_traceable_radix_sort_leg4",
+        "passed": false,
+        "detail": "exit 1 (want 0); no remote-box row for 'radix_sort' in RESULTS.md"
+      }
+    ],
+    "checks_passed": 0,
+    "checks_total": 1,
+    "contradictions": []
+  },
+  "metrics": {
+    "acquisition_action_index": null,
+    "censored": true,
+    "censor_reason": "fact never acquired",
+    "turns_to_fact": null,
+    "tool_calls_to_fact": null,
+    "output_tokens_to_fact": null,
+    "billable_tokens_to_fact": null,
+    "context_tokens_at_fact": null,
+    "usd_to_fact_alloc": null,
+    "usd_to_fact_basis": null,
+    "mistake_committed": false,
+    "first_mistake_action_index": null,
+    "mistake_source": null,
+    "self_corrected": false,
+    "mistake_before_acquisition": null,
+    "rediscovery_actions": 2,
+    "vectr_tool_calls": 0,
+    "weak_prior": null,
+    "anchor_checked": null,
+    "verify_command_ran": null,
+    "trail_chars": null
+  },
+  "cost": {
+    "session_turns": 13,
+    "session_usd": 0.2694003,
+    "session_duration_ms": 93163,
+    "session_duration_api_ms": 91821,
+    "input_tokens": 231,
+    "output_tokens": 6672,
+    "cache_read_input_tokens": 317471,
+    "cache_creation_input_tokens": 12231,
+    "billable_tokens_session": 80626.85,
+    "tool_calls": 12,
+    "result_subtype": "success",
+    "is_error": false
+  },
+  "valid": true,
+  "invalid_reason": "",
+  "non_vacuity": {
+    "mcp_servers_observed": [],
+    "mcp_servers_expected": [],
+    "mcp_server_status": null,
+    "inject_events": 1,
+    "audit_since_offset": 946,
+    "proxy_injected": 1,
+    "notes_in_store_at_start": 1,
+    "trail_text_delivered": null,
+    "session_errored": false,
+    "planted_anchor_injections": 1,
+    "planted_note_retrieved": true
+  },
+  "end_state_manifest_sha256": "08b07f2970ede5bc745fe1faa9104108cd25ca4c9667d6f147933139cf18cbce",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/legs/4/end-state.tar"
+}

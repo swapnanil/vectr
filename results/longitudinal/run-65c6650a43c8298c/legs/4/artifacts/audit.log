@@ -1,0 +1,35 @@
+2026-08-03T12:42:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=Re-measure radix_sort after the bucket-count change. notes_returned=0 method=sql
+2026-08-03T12:42:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=RESULTS.md notes_returned=1 method=path
+2026-08-03T12:42:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=boxrun.sh notes_returned=0 method=path
+2026-08-03T12:42:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=Re-measure radix_sort after the bucket-count change. notes_returned=0 method=sql
+2026-08-03T12:42:52Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace channel=proxy items=1 anchors=note:1 chars=598 states=active
+2026-08-03T12:42:59Z PROACTIVE_RETRIEVE workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace channel=proxy items=1 anchors=note:1 chars=577 states=active token=084a8a35d81ef24b
+2026-08-03T12:43:05Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace channel=proxy items=1 anchors=note:1 chars=577 states=active token=084a8a35d81ef24b
+2026-08-03T12:43:05Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=Makefile notes_returned=0 method=path
+2026-08-03T12:43:05Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=RESULTS.md notes_returned=1 method=path
+2026-08-03T12:43:05Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=radix.py notes_returned=0 method=path
+2026-08-03T12:43:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=Makefile notes_returned=0 method=path
+2026-08-03T12:43:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=RESULTS.md notes_returned=1 method=path
+2026-08-03T12:43:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=radix.py notes_returned=0 method=path
+2026-08-03T12:43:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=run_bench.py notes_returned=0 method=path
+2026-08-03T12:43:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=boxrun.sh notes_returned=0 method=path
+2026-08-03T12:43:19Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=Makefile notes_returned=0 method=path
+2026-08-03T12:43:19Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=RESULTS.md notes_returned=1 method=path
+2026-08-03T12:43:19Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=radix.py notes_returned=0 method=path
+2026-08-03T12:43:19Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=run_bench.py notes_returned=0 method=path
+2026-08-03T12:43:19Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=boxrun.sh notes_returned=0 method=path
+2026-08-03T12:43:24Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=Makefile notes_returned=0 method=path
+2026-08-03T12:43:24Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=RESULTS.md notes_returned=1 method=path
+2026-08-03T12:43:24Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=radix.py notes_returned=0 method=path
+2026-08-03T12:43:24Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=run_bench.py notes_returned=0 method=path
+2026-08-03T12:43:24Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=boxrun.sh notes_returned=0 method=path
+2026-08-03T12:43:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=Makefile notes_returned=0 method=path
+2026-08-03T12:43:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=RESULTS.md notes_returned=1 method=path
+2026-08-03T12:43:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=radix.py notes_returned=0 method=path
+2026-08-03T12:43:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=run_bench.py notes_returned=0 method=path
+2026-08-03T12:43:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=boxrun.sh notes_returned=0 method=path
+2026-08-03T12:43:56Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=Makefile notes_returned=0 method=path
+2026-08-03T12:43:56Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=RESULTS.md notes_returned=1 method=path
+2026-08-03T12:43:56Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=radix.py notes_returned=0 method=path
+2026-08-03T12:43:56Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=run_bench.py notes_returned=0 method=path
+2026-08-03T12:43:56Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace query=boxrun.sh notes_returned=0 method=path

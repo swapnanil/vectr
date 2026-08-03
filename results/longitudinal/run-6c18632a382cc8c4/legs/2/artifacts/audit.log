@@ -1,0 +1,13 @@
+2026-08-03T19:23:53Z REMEMBER workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace note_id=1 priority=high kind=gotcha author_id=longitudinal-harness code_hash= tags= chars=296 provenance=agent scope=repo
+2026-08-03T19:23:53Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace query=The change in config/staging.yaml needs to reach staging -- get it deployed. notes_returned=0 method=sql
+2026-08-03T19:23:53Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace query=queue.yaml notes_returned=1 method=path
+2026-08-03T19:23:53Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace query=The change in config/staging.yaml needs to reach staging -- get it deployed. notes_returned=0 method=sql
+2026-08-03T19:23:53Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace channel=proxy items=1 anchors=note:1 chars=640 states=active
+2026-08-03T19:24:02Z PROACTIVE_RETRIEVE workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace channel=proxy items=1 anchors=note:1 chars=619 states=active token=c6f5496f9a68e859
+2026-08-03T19:24:06Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace channel=proxy items=1 anchors=note:1 chars=619 states=active token=c6f5496f9a68e859
+2026-08-03T19:24:06Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace query=deploy.sh notes_returned=1 method=path
+2026-08-03T19:24:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace query=deploy.sh notes_returned=1 method=path
+2026-08-03T19:24:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace query=staging.yaml notes_returned=0 method=path
+2026-08-03T19:24:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace query=README.md notes_returned=0 method=path
+2026-08-03T19:24:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace query=queue.yaml notes_returned=1 method=path
+2026-08-03T19:24:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace query=.deploy-state notes_returned=0 method=path

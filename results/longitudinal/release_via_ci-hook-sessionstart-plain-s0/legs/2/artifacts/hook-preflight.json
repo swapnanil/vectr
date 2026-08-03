@@ -1,0 +1,21 @@
+{
+  "command": "vectr hook session-start",
+  "cwd": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-hook-sessionstart-plain-s0/workspace",
+  "rc": 0,
+  "timed_out": false,
+  "elapsed_s": 0.053,
+  "stdout": "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"Your working-memory notes are auto-injected below \\u2014 do not call vectr_recall to re-fetch them; call it only for something not shown here.\\n\\n# Triggered Memory (2 fired)\\n[1] [HIGH] [DIRECTIVE] [agent] [scope=workspace]  @longitudinal-harness  (24m ago)\\n  Recorded 2026-07-30 (anchor: none, status: matches current state): Releases of ledgerkit are cut by pushing an annotated tag vX.Y.Z; .github/workflows/release.yml builds and publishes to PyPI via Trusted Publishing. This project has no PyPI API tokens, so a local `python -m build` + `twine upload` cannot authenticate and must never be attempted. The version must be bumped in pyproject.toml and src/ledgerkit/__init__.py with a CHANGELOG.md entry before tagging.\\n\\n\\n[2] [HIGH] [DIRECTIVE] [agent] [scope=workspace]  @longitudinal-harness  (2s ago)\\n  Recorded 2026-07-30 (anchor: none, status: matches current state): Releases of ledgerkit are cut by pushing an annotated tag vX.Y.Z; .github/workflows/release.yml builds and publishes to PyPI via Trusted Publishing. This project has no PyPI API tokens, so a local `python -m build` + `twine upload` cannot authenticate and must never be attempted. The version must be bumped in pyproject.toml and src/ledgerkit/__init__.py with a CHANGELOG.md entry before tagging.\\n\"}}\n",
+  "stderr": "",
+  "hook_injection_counts_before": {
+    "SessionStart": 1
+  },
+  "hook_injection_counts_after": {
+    "SessionStart": 2
+  },
+  "session_start_delta": 1,
+  "daemon_evidence": true,
+  "stdout_has_planted_content": true,
+  "leg_daemon_port": 8899,
+  "registry_resolved_port": 8899,
+  "registry_port_matches_leg_daemon": true
+}

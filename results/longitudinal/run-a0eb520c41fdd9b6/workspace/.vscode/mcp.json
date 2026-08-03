@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "vectr": {
+      "type": "http",
+      "url": "http://localhost:8899/mcp"
+    }
+  }
+}

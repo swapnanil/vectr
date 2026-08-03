@@ -1,0 +1,67 @@
+{
+  "trajectory_id": "deploy_reverted_by_reconciler-proxy-plain-s0",
+  "scenario": "deploy_reverted_by_reconciler",
+  "arm": "proxy",
+  "note_variant": "plain",
+  "seed": 0,
+  "n_legs": 4,
+  "db_dir": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/db",
+  "created_utc": "20260729T223222Z",
+  "updated_utc": "20260803T070049Z",
+  "leg1_id": "117a20104c458245548cfba6a8f234a1ab59e6436dbd5e94bc775720fbd53cbe",
+  "leg1_source": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/deploy_reverted_by_reconciler-s0",
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "legs": [
+    {
+      "k": 1,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/deploy_reverted_by_reconciler-s0/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/deploy_reverted_by_reconciler-s0/workspace.tar",
+      "end_state_manifest_sha256": "b5a9098564b3d2cdbb81657647736afd841d39026ad350e1311127acc0610deb",
+      "usd": 0.1961802,
+      "valid": true,
+      "started_utc": null,
+      "finished_utc": null
+    },
+    {
+      "k": 2,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/legs/2/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/legs/2/end-state.tar",
+      "end_state_manifest_sha256": "b5a9098564b3d2cdbb81657647736afd841d39026ad350e1311127acc0610deb",
+      "usd": 0.42240300000000003,
+      "valid": true,
+      "started_utc": "20260729T223222Z",
+      "finished_utc": "20260729T223507Z"
+    },
+    {
+      "k": 3,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/legs/3/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/legs/3/end-state.tar",
+      "end_state_manifest_sha256": "b5a9098564b3d2cdbb81657647736afd841d39026ad350e1311127acc0610deb",
+      "usd": 0.20321249999999996,
+      "valid": true,
+      "started_utc": "20260729T223507Z",
+      "finished_utc": "20260729T223617Z"
+    },
+    {
+      "k": 4,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/legs/4/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/legs/4/end-state.tar",
+      "end_state_manifest_sha256": "c628269c528cdfce7d5be570e86108badfb15557000e26ec7ca803a77bd204d0",
+      "usd": 0.29286239999999997,
+      "valid": true,
+      "started_utc": "20260803T065911Z",
+      "finished_utc": "20260803T070049Z"
+    }
+  ],
+  "trajectory_valid_through": 4,
+  "spend_usd": 1.11,
+  "tier": "T5",
+  "hook_attestation": null,
+  "notes": null,
+  "run_dir": "deploy_reverted_by_reconciler-proxy-plain-s0"
+}

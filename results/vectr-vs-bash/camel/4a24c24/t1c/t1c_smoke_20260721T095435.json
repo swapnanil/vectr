@@ -1,0 +1,187 @@
+{
+  "corpus": "camel",
+  "corpus_sha_by_arm": {
+    "vectr": "a543dc648c746edd8447c22585779284fb98182c",
+    "bash": "a543dc648c746edd8447c22585779284fb98182c"
+  },
+  "vectr_sha": "4a24c24",
+  "smoke_test": true,
+  "port": 8800,
+  "model": "sonnet",
+  "max_turns": 12,
+  "arms": [
+    "vectr",
+    "bash"
+  ],
+  "task_ids": [
+    "C01"
+  ],
+  "results": [
+    {
+      "id": "C01",
+      "arm": "vectr",
+      "category": "exploration",
+      "subsystem_hint": "route lifecycle / RouteBuilder",
+      "prompt": "Explain how a route defined with the Java DSL actually gets started in this codebase: walk through what happens between RouteBuilder.configure() being called and the route consuming its first exchange.",
+      "wall_s": 127.86,
+      "num_turns": 13,
+      "cost_usd": 0.6287415000000001,
+      "reported_duration_ms": 125638,
+      "is_error": true,
+      "error": null,
+      "tool_sequence": [
+        "ToolSearch",
+        "mcp__vectr__vectr_status",
+        "mcp__vectr__vectr_search",
+        "mcp__vectr__vectr_search",
+        "Read",
+        "Read",
+        "Read",
+        "Read",
+        "Read",
+        "mcp__vectr__vectr_search",
+        "Read",
+        "mcp__vectr__vectr_locate",
+        "Read",
+        "Read",
+        "mcp__vectr__vectr_search",
+        "Read",
+        "mcp__vectr__vectr_search",
+        "Read",
+        "Read",
+        "Read",
+        "Read",
+        "mcp__vectr__vectr_locate"
+      ],
+      "tool_call_counts": {
+        "ToolSearch": 1,
+        "mcp__vectr__vectr_status": 1,
+        "mcp__vectr__vectr_search": 5,
+        "Read": 13,
+        "mcp__vectr__vectr_locate": 2
+      },
+      "bash_native_counts": {
+        "Bash": 0,
+        "Grep": 0,
+        "Read": 13,
+        "Glob": 0
+      },
+      "search_calls": [
+        {
+          "n_results": 5,
+          "n_results_defaulted": false,
+          "query": "route startup lifecycle start consumer first exchange"
+        },
+        {
+          "n_results": 5,
+          "n_results_defaulted": false,
+          "query": "RouteBuilder configure method called route building"
+        },
+        {
+          "n_results": 5,
+          "n_results_defaulted": false,
+          "query": "AbstractCamelContext addRoutes startRoutes doStartRoutes internal route service"
+        },
+        {
+          "n_results": 5,
+          "n_results_defaulted": false,
+          "query": "RouteDefinition addToContext createRoute route reifier build processor chain"
+        },
+        {
+          "n_results": 3,
+          "n_results_defaulted": false,
+          "query": "addRouteDefinitions Model implementation create RouteService register route"
+        }
+      ],
+      "usage_input_tokens": 80571,
+      "usage_input_base_tokens": 1,
+      "usage_cache_creation_tokens": 2866,
+      "usage_cache_read_tokens": 77704,
+      "usage_output_tokens": 151,
+      "usage_unparsed": false,
+      "used_vectr": true,
+      "used_bash_native": true,
+      "final_answer": "",
+      "final_answer_tokens": 0,
+      "transcript_path": "results/vectr-vs-bash/camel/4a24c24/t1c/C01_vectr_20260721T095337.jsonl"
+    },
+    {
+      "id": "C01",
+      "arm": "bash",
+      "category": "exploration",
+      "subsystem_hint": "route lifecycle / RouteBuilder",
+      "prompt": "Explain how a route defined with the Java DSL actually gets started in this codebase: walk through what happens between RouteBuilder.configure() being called and the route consuming its first exchange.",
+      "wall_s": 58.31,
+      "num_turns": 13,
+      "cost_usd": 0.46095870000000005,
+      "reported_duration_ms": 56431,
+      "is_error": true,
+      "error": null,
+      "tool_sequence": [
+        "Bash",
+        "Bash",
+        "Read",
+        "Bash",
+        "Bash",
+        "Bash",
+        "Read",
+        "Bash",
+        "Read",
+        "Bash",
+        "Bash",
+        "Bash",
+        "Read",
+        "Bash",
+        "Read",
+        "Bash"
+      ],
+      "tool_call_counts": {
+        "Bash": 11,
+        "Read": 5
+      },
+      "bash_native_counts": {
+        "Bash": 11,
+        "Grep": 0,
+        "Read": 5,
+        "Glob": 0
+      },
+      "search_calls": [],
+      "usage_input_tokens": 61163,
+      "usage_input_base_tokens": 1,
+      "usage_cache_creation_tokens": 7056,
+      "usage_cache_read_tokens": 54106,
+      "usage_output_tokens": 236,
+      "usage_unparsed": false,
+      "used_vectr": false,
+      "used_bash_native": true,
+      "final_answer": "",
+      "final_answer_tokens": 0,
+      "transcript_path": "results/vectr-vs-bash/camel/4a24c24/t1c/C01_bash_20260721T095435.jsonl"
+    }
+  ],
+  "tool_choice_totals_by_arm": {
+    "vectr": {
+      "ToolSearch": 1,
+      "mcp__vectr__vectr_status": 1,
+      "mcp__vectr__vectr_search": 5,
+      "Read": 13,
+      "mcp__vectr__vectr_locate": 2
+    },
+    "bash": {
+      "Bash": 11,
+      "Read": 5
+    }
+  },
+  "tasks_scored_by_arm": {
+    "vectr": 1,
+    "bash": 1
+  },
+  "tasks_used_vectr_by_arm": {
+    "vectr": 1,
+    "bash": 0
+  },
+  "tasks_used_bash_native_by_arm": {
+    "vectr": 1,
+    "bash": 1
+  }
+}

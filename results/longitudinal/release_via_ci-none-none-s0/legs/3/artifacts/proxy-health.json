@@ -1,0 +1,14 @@
+{
+  "status": "ok",
+  "proxy": true,
+  "instance_id": "proxy-ffed9c25203240e0",
+  "metrics": {
+    "requests": 13,
+    "injected": 0,
+    "inject_skipped": 12,
+    "inject_skipped_not_appendable": 0,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  }
+}

@@ -1,0 +1,4 @@
+2026-07-30T03:07:37Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/legs/3/workspace query=Add a convert_bulk() helper to src/ledgerkit/rates.py with a changelog entry, then release 1.5.0. notes_returned=0 method=sql
+2026-07-30T03:07:37Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/legs/3/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T03:07:37Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/legs/3/workspace query=CHANGELOG.md notes_returned=0 method=path
+2026-07-30T03:07:37Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/legs/3/workspace query=Add a convert_bulk() helper to src/ledgerkit/rates.py with a changelog entry, then release 1.5.0. notes_returned=0 method=sql

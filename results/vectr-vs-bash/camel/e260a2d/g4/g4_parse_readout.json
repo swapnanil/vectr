@@ -1,0 +1,752 @@
+{
+  "sessions": [
+    {
+      "label": "M1",
+      "arm": "memory",
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/M1_20260723T022157.jsonl",
+      "metrics": {
+        "n_maven_invocations": 1,
+        "maven_invocations": [
+          {
+            "order": 0,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest,SimplePredicateParserNodesTest,SimpleParserPredicateTest,SimpleParserPredicateInvalidTest,SimpleOperatorTest,SimpleBackwardsCompatibleTest,SimpleWhiteSpaceTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": true,
+            "raw_command": "./mvnw -pl core/camel-core-languages,core/camel-core -Dtest=\"SimplePredicateParserLogicalTest,SimplePredicateParserNodesTest,SimpleParserPredicateTest,SimpleParserPredicateInvalidTest,SimpleOperatorTest,SimpleBackwardsCompatibleTest,SimpleWhiteSpaceTest\" test -q 2>&1 | tail -30"
+          }
+        ],
+        "edited_paths": [
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java",
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java"
+        ],
+        "honest_verification": true,
+        "honest_verification_conditions": {
+          "a": true,
+          "b": false,
+          "c": false,
+          "d": false,
+          "e": false
+        },
+        "false_pass_events": 0,
+        "honest_red_observed": false,
+        "piped_quieted": {
+          "total": 1,
+          "piped": 1,
+          "quieted": 1,
+          "piped_or_quieted_fraction": 1.0
+        },
+        "usage": {
+          "input_tokens": 1,
+          "cache_creation_input_tokens": 160,
+          "cache_read_input_tokens": 94938,
+          "output_tokens": 264,
+          "total_input_tokens": 95099,
+          "usage_unparsed": false
+        },
+        "vectr_tool_call_counts": {
+          "mcp__vectr__vectr_status": 1,
+          "mcp__vectr__vectr_recall": 1,
+          "mcp__vectr__vectr_search": 5,
+          "mcp__vectr__vectr_locate": 2
+        },
+        "vectr_tool_call_total": 9,
+        "result": {
+          "num_turns": 41,
+          "duration_ms": 679853,
+          "is_error": true,
+          "cost_usd": 1.5572570999999993
+        },
+        "delivery": {
+          "delivered": true,
+          "hits": [
+            {
+              "event_index": 26,
+              "event_type": "user",
+              "surface": "command-lane (tool_result)"
+            }
+          ],
+          "surfaces": [
+            "command-lane (tool_result)"
+          ]
+        }
+      }
+    },
+    {
+      "label": "C1",
+      "arm": "control",
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/C1_20260723T022713.jsonl",
+      "metrics": {
+        "n_maven_invocations": 2,
+        "maven_invocations": [
+          {
+            "order": 0,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest,SimplePredicateParserNodesTest,SimpleOperatorTest,SimpleWhiteSpaceTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": true,
+            "raw_command": "mvn test -pl core/camel-core-languages,core/camel-core -Dtest=\"SimplePredicateParserLogicalTest,SimplePredicateParserNodesTest,SimpleOperatorTest,SimpleWhiteSpaceTest\" -q 2>&1 | tail -40"
+          },
+          {
+            "order": 1,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest,SimpleOperatorTest,SimpleWhiteSpaceTest,SimpleParserPredicateTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core-languages,core/camel-core -Dtest=\"SimplePredicateParserLogicalTest,SimpleOperatorTest,SimpleWhiteSpaceTest,SimpleParserPredicateTest\" 2>&1 | grep -E \"Tests run:|FAIL|ERROR|BUILD\" | tail -20"
+          }
+        ],
+        "edited_paths": [
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java",
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java"
+        ],
+        "honest_verification": true,
+        "honest_verification_conditions": {
+          "a": true,
+          "b": false,
+          "c": false,
+          "d": false,
+          "e": false
+        },
+        "false_pass_events": 0,
+        "honest_red_observed": false,
+        "piped_quieted": {
+          "total": 2,
+          "piped": 2,
+          "quieted": 1,
+          "piped_or_quieted_fraction": 1.0
+        },
+        "usage": {
+          "input_tokens": 1,
+          "cache_creation_input_tokens": 468,
+          "cache_read_input_tokens": 72373,
+          "output_tokens": 249,
+          "total_input_tokens": 72842,
+          "usage_unparsed": false
+        },
+        "vectr_tool_call_counts": {},
+        "vectr_tool_call_total": 0,
+        "result": {
+          "num_turns": 25,
+          "duration_ms": 230044,
+          "is_error": false,
+          "cost_usd": 0.7856795999999999
+        },
+        "delivery": {
+          "delivered": false,
+          "hits": [],
+          "surfaces": []
+        }
+      }
+    },
+    {
+      "label": "M2",
+      "arm": "memory",
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/M2_20260723T023445.jsonl",
+      "metrics": {
+        "n_maven_invocations": 3,
+        "maven_invocations": [
+          {
+            "order": 0,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": true,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": true,
+            "raw_command": "./mvnw -pl core/camel-core-languages,core/camel-core -am test -Dtest=SimplePredicateParserLogicalTest -q 2>&1 | tail -30"
+          },
+          {
+            "order": 1,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": true,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "./mvnw -pl core/camel-core-languages,core/camel-core -am test -Dtest=SimplePredicateParserLogicalTest -Dlicense.skip=true -Dcheckstyle.skip=true -Dformatter.skip=true -Dimpsort.skip=true 2>&1 | tail -40"
+          },
+          {
+            "order": 2,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": true,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest,SimplePredicateParserNodesTest,SimpleParserPredicateInvalidTest,SimpleLanguageTest,SimpleLanguageRouteTest,SimpleParserRegexpPredicateTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "./mvnw -pl core/camel-core-languages,core/camel-core -am test -Dtest=\"SimplePredicateParserLogicalTest,SimplePredicateParserNodesTest,SimpleParserPredicateInvalidTest,SimpleLanguageTest,SimpleLanguageRouteTest,SimpleParserRegexpPredicateTest\" -Dlicense.skip=true -Dcheckstyle.skip=true -Dformatter.skip=true -Dimpsort.skip=true 2>&1 | grep -E \"Tests run:|BUILD|ERROR\" | tail -20"
+          }
+        ],
+        "edited_paths": [
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java",
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java"
+        ],
+        "honest_verification": true,
+        "honest_verification_conditions": {
+          "a": true,
+          "b": true,
+          "c": false,
+          "d": false,
+          "e": false
+        },
+        "false_pass_events": 0,
+        "honest_red_observed": false,
+        "piped_quieted": {
+          "total": 3,
+          "piped": 3,
+          "quieted": 1,
+          "piped_or_quieted_fraction": 1.0
+        },
+        "usage": {
+          "input_tokens": 1,
+          "cache_creation_input_tokens": 652,
+          "cache_read_input_tokens": 78902,
+          "output_tokens": 289,
+          "total_input_tokens": 79555,
+          "usage_unparsed": false
+        },
+        "vectr_tool_call_counts": {},
+        "vectr_tool_call_total": 0,
+        "result": {
+          "num_turns": 28,
+          "duration_ms": 353533,
+          "is_error": false,
+          "cost_usd": 1.0016163
+        },
+        "delivery": {
+          "delivered": false,
+          "hits": [],
+          "surfaces": []
+        }
+      }
+    },
+    {
+      "label": "C2",
+      "arm": "control",
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/C2_20260723T024855.jsonl",
+      "metrics": {
+        "n_maven_invocations": 9,
+        "maven_invocations": [
+          {
+            "order": 0,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": true,
+            "raw_command": "mvn test -pl core/camel-core -Dtest=SimplePredicateParserLogicalTest -q 2>&1 | tail -40"
+          },
+          {
+            "order": 1,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core -Dtest=SimplePredicateParserLogicalTest 2>&1 | tail -50"
+          },
+          {
+            "order": 2,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core -Dtest=SimplePredicateParserLogicalTest -Dmaven.compiler.useIncrementalCompilation=false 2>&1 | tail -30"
+          },
+          {
+            "order": 3,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest#testInvalidRightHandSideReportsRightToken",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core -Dtest=\"SimplePredicateParserLogicalTest#testInvalidRightHandSideReportsRightToken\" -fae 2>&1 | grep -A 30 \"TESTS\\|Running\\|ERROR\\|FAIL\\|Tests run\\|Exception\\|Token\""
+          },
+          {
+            "order": 4,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "touch /Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java && touch /Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core/src/test/java/org/apache/camel/language/simple/SimplePredicateParserLogicalTest.java && mvn test -pl core/camel-core-languages,core/camel-core -Dtest=SimplePredicateParserLogicalTest 2>&1 | tail -30"
+          },
+          {
+            "order": 5,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core-languages,core/camel-core -Dtest=SimplePredicateParserLogicalTest 2>&1 | tail -25"
+          },
+          {
+            "order": 6,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "org.apache.camel.language.simple.*",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core -Dtest=\"org.apache.camel.language.simple.*\" 2>&1 | tail -20"
+          },
+          {
+            "order": 7,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest,SimplePredicateParserNodesTest,SimpleLanguageTest,SimplePredicateTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core -Dtest=\"SimplePredicateParserLogicalTest,SimplePredicateParserNodesTest,SimpleLanguageTest,SimplePredicateTest\" 2>&1 | grep \"Tests run\\|FAILURE\\|ERROR\" | head -20"
+          },
+          {
+            "order": 8,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest,SimplePredicateParserNodesTest,SimpleOperatorTest,SimpleTest,SimpleParserPredicateInvalidTest,SimpleParserRegexpPredicateTest,SimpleInitBlockTest,SimpleInitBlockOverlappingKeysTest,SimpleInitBlockFunctionTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core -Dtest=\"SimplePredicateParserLogicalTest,SimplePredicateParserNodesTest,SimpleOperatorTest,SimpleTest,SimpleParserPredicateInvalidTest,SimpleParserRegexpPredicateTest,SimpleInitBlockTest,SimpleInitBlockOverlappingKeysTest,SimpleInitBlockFunctionTest\" 2>&1 | grep \"Tests run\\|FAILURE\\|ERROR\" | head -20"
+          }
+        ],
+        "edited_paths": [
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java",
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java"
+        ],
+        "honest_verification": true,
+        "honest_verification_conditions": {
+          "a": true,
+          "b": false,
+          "c": false,
+          "d": false,
+          "e": false
+        },
+        "false_pass_events": 7,
+        "honest_red_observed": true,
+        "piped_quieted": {
+          "total": 9,
+          "piped": 9,
+          "quieted": 1,
+          "piped_or_quieted_fraction": 1.0
+        },
+        "usage": {
+          "input_tokens": 1,
+          "cache_creation_input_tokens": 1403,
+          "cache_read_input_tokens": 106802,
+          "output_tokens": 183,
+          "total_input_tokens": 108206,
+          "usage_unparsed": false
+        },
+        "vectr_tool_call_counts": {},
+        "vectr_tool_call_total": 0,
+        "result": {
+          "num_turns": 41,
+          "duration_ms": 668623,
+          "is_error": true,
+          "cost_usd": 1.7325555000000001
+        },
+        "delivery": {
+          "delivered": false,
+          "hits": [],
+          "surfaces": []
+        }
+      }
+    },
+    {
+      "label": "M3",
+      "arm": "memory",
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/M3_20260723T025846.jsonl",
+      "metrics": {
+        "n_maven_invocations": 4,
+        "maven_invocations": [
+          {
+            "order": 0,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": true,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": true,
+            "raw_command": "./mvnw -pl core/camel-core-languages,core/camel-core test -Dtest=\"SimplePredicateParserLogicalTest\" -am -q 2>&1 | tail -20"
+          },
+          {
+            "order": 1,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": true,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": true,
+            "raw_command": "./mvnw -pl core/camel-core-languages,core/camel-core test -Dtest=\"SimplePredicateParserLogicalTest\" -am -q -Dlicense.skip=true 2>&1 | tail -20"
+          },
+          {
+            "order": 2,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": true,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "./mvnw -pl core/camel-core-languages,core/camel-core test -Dtest=\"SimplePredicateParserLogicalTest\" -am -Dlicense.skip=true 2>&1 | grep -E \"Tests run|FAIL|ERROR|BUILD|SimplePredicateParserLogicalTest\""
+          },
+          {
+            "order": 3,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": true,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParser*,SimpleParserPredicate*,SimpleOperator*",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "./mvnw -pl core/camel-core-languages,core/camel-core test -Dtest=\"SimplePredicateParser*,SimpleParserPredicate*,SimpleOperator*\" -am -Dlicense.skip=true 2>&1 | grep -E \"Tests run|FAIL|ERROR|BUILD\""
+          }
+        ],
+        "edited_paths": [
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java",
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java"
+        ],
+        "honest_verification": true,
+        "honest_verification_conditions": {
+          "a": true,
+          "b": true,
+          "c": false,
+          "d": false,
+          "e": false
+        },
+        "false_pass_events": 0,
+        "honest_red_observed": false,
+        "piped_quieted": {
+          "total": 4,
+          "piped": 4,
+          "quieted": 2,
+          "piped_or_quieted_fraction": 1.0
+        },
+        "usage": {
+          "input_tokens": 1,
+          "cache_creation_input_tokens": 530,
+          "cache_read_input_tokens": 66877,
+          "output_tokens": 235,
+          "total_input_tokens": 67408,
+          "usage_unparsed": false
+        },
+        "vectr_tool_call_counts": {
+          "mcp__vectr__vectr_status": 1,
+          "mcp__vectr__vectr_recall": 1,
+          "mcp__vectr__vectr_search": 1
+        },
+        "vectr_tool_call_total": 3,
+        "result": {
+          "num_turns": 29,
+          "duration_ms": 515026,
+          "is_error": false,
+          "cost_usd": 0.8598834
+        },
+        "delivery": {
+          "delivered": true,
+          "hits": [
+            {
+              "event_index": 25,
+              "event_type": "user",
+              "surface": "command-lane (tool_result)"
+            }
+          ],
+          "surfaces": [
+            "command-lane (tool_result)"
+          ]
+        }
+      }
+    },
+    {
+      "label": "C3",
+      "arm": "control",
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/C3_20260723T030747.jsonl",
+      "metrics": {
+        "n_maven_invocations": 4,
+        "maven_invocations": [
+          {
+            "order": 0,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core -Dtest=SimplePredicateParserLogicalTest -Dquickly 2>&1 | tail -40"
+          },
+          {
+            "order": 1,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core-languages",
+              "core/camel-core"
+            ],
+            "also_make": true,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core-languages,core/camel-core -am -Dtest=SimplePredicateParserLogicalTest -Dquickly 2>&1 | tail -50"
+          },
+          {
+            "order": 2,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "SimplePredicateParserLogicalTest",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core -Dtest=SimplePredicateParserLogicalTest 2>&1 | grep -E \"TEST|PASS|FAIL|ERROR|Tests run|BUILD\" | head -30"
+          },
+          {
+            "order": 3,
+            "cwd": "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel",
+            "pl_values": [
+              "core/camel-core"
+            ],
+            "also_make": false,
+            "goals": [
+              "test"
+            ],
+            "skip_tests": false,
+            "dtest_value": "Simple*",
+            "is_test_phase": true,
+            "is_piped": true,
+            "is_quieted": false,
+            "raw_command": "mvn test -pl core/camel-core -Dtest=\"Simple*\" 2>&1 | grep -E \"Tests run|BUILD|FAIL|ERROR\" | tail -20"
+          }
+        ],
+        "edited_paths": [
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java",
+          "/Users/swapnanil.s/Documents/fde/vectr/tmp/poc-camel/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java"
+        ],
+        "honest_verification": true,
+        "honest_verification_conditions": {
+          "a": true,
+          "b": true,
+          "c": false,
+          "d": false,
+          "e": false
+        },
+        "false_pass_events": 3,
+        "honest_red_observed": false,
+        "piped_quieted": {
+          "total": 4,
+          "piped": 4,
+          "quieted": 0,
+          "piped_or_quieted_fraction": 1.0
+        },
+        "usage": {
+          "input_tokens": 1,
+          "cache_creation_input_tokens": 1222,
+          "cache_read_input_tokens": 76820,
+          "output_tokens": 256,
+          "total_input_tokens": 78043,
+          "usage_unparsed": false
+        },
+        "vectr_tool_call_counts": {
+          "mcp__vectr__vectr_status": 1,
+          "mcp__vectr__vectr_search": 1
+        },
+        "vectr_tool_call_total": 2,
+        "result": {
+          "num_turns": 25,
+          "duration_ms": 423593,
+          "is_error": false,
+          "cost_usd": 0.8926689000000001
+        },
+        "delivery": {
+          "delivered": false,
+          "hits": [],
+          "surfaces": []
+        }
+      }
+    }
+  ],
+  "decision_rule": {
+    "applicable": true,
+    "arm_m_honest_count": 3,
+    "arm_m_sessions_total": 3,
+    "arm_c_honest_count": 3,
+    "arm_c_sessions_total": 3,
+    "condition_i_met": true,
+    "condition_ii_met": false,
+    "verdict": "NOT SUPPORTED"
+  }
+}

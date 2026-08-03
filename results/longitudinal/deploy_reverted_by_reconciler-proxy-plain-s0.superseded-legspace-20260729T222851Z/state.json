@@ -1,0 +1,55 @@
+{
+  "trajectory_id": "deploy_reverted_by_reconciler-proxy-plain-s0",
+  "scenario": "deploy_reverted_by_reconciler",
+  "arm": "proxy",
+  "note_variant": "plain",
+  "seed": 0,
+  "n_legs": 3,
+  "db_dir": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/db",
+  "created_utc": "20260729T214428Z",
+  "updated_utc": "20260729T214804Z",
+  "leg1_id": "117a20104c458245548cfba6a8f234a1ab59e6436dbd5e94bc775720fbd53cbe",
+  "leg1_source": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/deploy_reverted_by_reconciler-s0",
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "legs": [
+    {
+      "k": 1,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/deploy_reverted_by_reconciler-s0/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/deploy_reverted_by_reconciler-s0/workspace.tar",
+      "end_state_manifest_sha256": "b5a9098564b3d2cdbb81657647736afd841d39026ad350e1311127acc0610deb",
+      "usd": 0.1961802,
+      "valid": true,
+      "started_utc": null,
+      "finished_utc": null
+    },
+    {
+      "k": 2,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/legs/2/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/legs/2/end-state.tar",
+      "end_state_manifest_sha256": "54699c79c2373dded2ef37f56a38b9507afafc6fa815cb6493063452403b7f91",
+      "usd": 0.441975,
+      "valid": true,
+      "started_utc": "20260729T214428Z",
+      "finished_utc": "20260729T214803Z"
+    },
+    {
+      "k": 3,
+      "status": "failed",
+      "result_path": null,
+      "end_state_tar": null,
+      "end_state_manifest_sha256": null,
+      "usd": null,
+      "valid": null,
+      "started_utc": "20260729T214803Z",
+      "finished_utc": "20260729T214804Z"
+    }
+  ],
+  "trajectory_valid_through": 2,
+  "spend_usd": 0.64,
+  "tier": "T1",
+  "hook_attestation": null,
+  "notes": null
+}

@@ -1,0 +1,44 @@
+commit c1b135d513382ead6f0aac057942e892ae582f53
+Author: Claus Ibsen <claus.ibsen@gmail.com>
+Date:   Tue Jun 2 21:40:45 2026 +0200
+
+    CAMEL-23652: Fix route template local bean not found when param value matches bean name (#23713)
+    
+    When a template parameter value coincidentally matches a local bean name
+    (e.g., scheme=counter where counter is also a bean), the bean uniqueness
+    logic removed the bean from the registry but failed to add the bean name
+    as a template parameter, making {{beanName}} references unresolvable.
+    
+    Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java b/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java
+index c42c04fd7..e4732f66a 100644
+--- a/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java
++++ b/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java
+@@ -690,6 +690,7 @@ public class DefaultCamelContext extends SimpleCamelContext implements ModelCame
+                     // no side-effect from previously used values that Camel may use in its endpoint
+                     // registry and elsewhere
+                     if (bbr != null && !bbr.isEmpty()) {
++                        Map<String, String> beanNameMappings = new HashMap<>();
+                         for (Map.Entry<String, Object> param : params.entrySet()) {
+                             Object value = param.getValue();
+                             if (value instanceof String oldKey) {
+@@ -701,9 +702,18 @@ public class DefaultCamelContext extends SimpleCamelContext implements ModelCame
+                                             routeDefinition.getId(), oldKey, newKey);
+                                     bbrCopy.put(newKey, bbr.remove(oldKey));
+                                     param.setValue(newKey);
++                                    beanNameMappings.put(oldKey, newKey);
+                                 }
+                             }
+                         }
++                        // ensure bean names removed during clash detection are still
++                        // available as template parameters so they can be referenced
++                        // directly in routes via {{beanName}}
++                        for (Map.Entry<String, String> mapping : beanNameMappings.entrySet()) {
++                            if (!params.containsKey(mapping.getKey())) {
++                                params.put(mapping.getKey(), mapping.getValue());
++                            }
++                        }
+                         // the remainder of the local beans must also have their ids made global unique
+                         for (Map.Entry<String, Map<Class<?>, Object>> entry : bbr.entrySet()) {
+                             String oldKey = entry.getKey();

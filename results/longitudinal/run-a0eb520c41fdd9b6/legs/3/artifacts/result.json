@@ -1,0 +1,210 @@
+{
+  "leg_id": "20260803T141443Z-release_via_ci-mcp-plain-s0-k3",
+  "trajectory_id": "release_via_ci-mcp-plain-s0",
+  "scenario": "release_via_ci",
+  "arm": "mcp",
+  "note_variant": "plain",
+  "seed": 0,
+  "k": 3,
+  "model": "sonnet",
+  "started_utc": "20260803T141443Z",
+  "origin": "discovered",
+  "leg1_id": null,
+  "restored_manifest_ok": true,
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "notes_in_store_at_start": 2,
+  "mcp_handshake_ok": true,
+  "mcp_handshake_tools": 19,
+  "recall_probe_method": null,
+  "recall_probe_elapsed_s": 2.05,
+  "recall_probe_returned_note": true,
+  "planted_rank": null,
+  "displaced_by": [
+    {
+      "note_id": 2,
+      "kind": "gotcha",
+      "priority": null,
+      "anchored": true
+    },
+    {
+      "note_id": 2,
+      "kind": "gotcha",
+      "priority": null,
+      "anchored": true
+    }
+  ],
+  "delivered_at_default": false,
+  "channel_delivery": "displaced",
+  "daemon_port": 8899,
+  "preflight": {
+    "turn1_text_only": {
+      "item_count": 0,
+      "chars": 0,
+      "anchor_ids": [],
+      "planted_present": false
+    },
+    "turn2_with_file_anchor": {
+      "item_count": 1,
+      "chars": 643,
+      "anchor_ids": [
+        "note:2"
+      ],
+      "planted_present": false
+    },
+    "proactive_probe_diagnostic_only": false,
+    "reachable_channel": "by_id",
+    "by_id_probe": {
+      "transport_ok": true,
+      "exists": true,
+      "content_matches": true,
+      "raw_chars": 747
+    },
+    "rank_probe": {
+      "rank": null,
+      "rounds": 2,
+      "exhausted": false,
+      "accumulated_anchor_ids": [
+        "note:2",
+        "note:2"
+      ],
+      "displaced_by": [
+        {
+          "note_id": 2,
+          "kind": "gotcha",
+          "priority": null,
+          "anchored": true
+        },
+        {
+          "note_id": 2,
+          "kind": "gotcha",
+          "priority": null,
+          "anchored": true
+        }
+      ]
+    }
+  },
+  "planted_note_reachable_preflight": true,
+  "audit_offset_after_preflight": 3116,
+  "proxy_port": 8900,
+  "proxy_instance_id": "proxy-bd72c561935e4039",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace --no-inject",
+  "agent_returncode": 0,
+  "agent_wall_s": 113.1,
+  "proxy_metrics": {
+    "requests": 24,
+    "injected": 0,
+    "inject_skipped": 23,
+    "inject_skipped_not_appendable": 0,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  },
+  "proxy_hard_killed": [],
+  "daemon_hard_killed": [],
+  "score": {
+    "primary_check": "released_via_tag_1_5_0",
+    "fact_used": true,
+    "checks": [
+      {
+        "name": "released_via_tag_1_5_0",
+        "passed": true,
+        "detail": "version_bumped_pyproject=PASS; version_bumped_init=PASS; changelog_entry=PASS; no_local_upload=PASS",
+        "sub_checks": [
+          {
+            "name": "version_bumped_pyproject",
+            "passed": true,
+            "detail": "pattern found in pyproject.toml (want=True)"
+          },
+          {
+            "name": "version_bumped_init",
+            "passed": true,
+            "detail": "pattern found in src/ledgerkit/__init__.py (want=True)"
+          },
+          {
+            "name": "changelog_entry",
+            "passed": true,
+            "detail": "pattern found in CHANGELOG.md (want=True)"
+          },
+          {
+            "name": "no_local_upload",
+            "passed": true,
+            "detail": "0 matching command(s) (want=False)"
+          }
+        ]
+      },
+      {
+        "name": "annotated_tag_exists",
+        "passed": true,
+        "detail": "exit 0 (want 0)"
+      }
+    ],
+    "checks_passed": 2,
+    "checks_total": 2,
+    "contradictions": []
+  },
+  "metrics": {
+    "acquisition_action_index": 36,
+    "censored": false,
+    "censor_reason": null,
+    "turns_to_fact": 51,
+    "tool_calls_to_fact": 37,
+    "output_tokens_to_fact": 1007,
+    "billable_tokens_to_fact": 346282.95000000007,
+    "context_tokens_at_fact": 55910,
+    "usd_to_fact_alloc": 1.184922230116279,
+    "usd_to_fact_basis": "billable_token_share",
+    "mistake_committed": false,
+    "first_mistake_action_index": null,
+    "mistake_source": null,
+    "self_corrected": false,
+    "mistake_before_acquisition": null,
+    "rediscovery_actions": 1,
+    "vectr_tool_calls": 5,
+    "weak_prior": null,
+    "anchor_checked": null,
+    "verify_command_ran": null,
+    "trail_chars": null
+  },
+  "cost": {
+    "session_turns": 41,
+    "session_usd": 0.6777371999999999,
+    "session_duration_ms": 111172,
+    "session_duration_api_ms": 110548,
+    "input_tokens": 46,
+    "output_tokens": 8314,
+    "cache_read_input_tokens": 1100304,
+    "cache_creation_input_tokens": 37133,
+    "billable_tokens_session": 198062.65000000002,
+    "tool_calls": 40,
+    "result_subtype": "success",
+    "is_error": false
+  },
+  "valid": true,
+  "invalid_reason": "",
+  "non_vacuity": {
+    "mcp_servers_observed": [
+      {
+        "name": "vectr",
+        "status": "connected"
+      }
+    ],
+    "mcp_servers_expected": [
+      "vectr"
+    ],
+    "mcp_server_status": "connected",
+    "inject_events": 0,
+    "audit_since_offset": 3116,
+    "proxy_injected": 0,
+    "notes_in_store_at_start": 2,
+    "trail_text_delivered": null,
+    "session_errored": false,
+    "channel_delivery": "displaced",
+    "vectr_tools_evidence": "init-tools",
+    "recall_probe_returned_note": true,
+    "recall_delivery_content_in_transcript": true,
+    "recall_delivery_marker_in_transcript": true
+  },
+  "end_state_manifest_sha256": "acd5b529d6b5b53429d32c48108087772ec748195325342240507d41583d5517",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/legs/3/end-state.tar"
+}

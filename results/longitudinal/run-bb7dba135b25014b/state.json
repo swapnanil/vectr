@@ -1,0 +1,56 @@
+{
+  "trajectory_id": "release_via_ci-proxy-plain-s1",
+  "scenario": "release_via_ci",
+  "arm": "proxy",
+  "note_variant": "plain",
+  "seed": 1,
+  "n_legs": 3,
+  "db_dir": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/db",
+  "created_utc": "20260803T134802Z",
+  "updated_utc": "20260803T135101Z",
+  "leg1_id": "4f4e6cdb0054aa533b6c53b1408725e75dffd061b472907db8385ffd3d7cbb20",
+  "leg1_source": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/run-66b50a68a479466e",
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "legs": [
+    {
+      "k": 1,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/run-66b50a68a479466e/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/run-66b50a68a479466e/workspace.tar",
+      "end_state_manifest_sha256": "66cff1cfce2463e9803264c233d8ae90945c69719647a73906236ed64a3cb7ac",
+      "usd": 0.2763123,
+      "valid": true,
+      "started_utc": null,
+      "finished_utc": null
+    },
+    {
+      "k": 2,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/legs/2/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/legs/2/end-state.tar",
+      "end_state_manifest_sha256": "cec29ac1f6a35457d8e296dd04c90076e013e08630011221e2097e53d2d91583",
+      "usd": 0.3762837,
+      "valid": true,
+      "started_utc": "20260803T134802Z",
+      "finished_utc": "20260803T134944Z"
+    },
+    {
+      "k": 3,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/legs/3/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/legs/3/end-state.tar",
+      "end_state_manifest_sha256": "b10b9dbfac4e215d4ef74c3de0da4c1ecc403fb637e64cbc6da42f13ecb1383a",
+      "usd": 0.33749969999999996,
+      "valid": true,
+      "started_utc": "20260803T134944Z",
+      "finished_utc": "20260803T135101Z"
+    }
+  ],
+  "trajectory_valid_through": 3,
+  "spend_usd": 0.99,
+  "tier": "T7",
+  "hook_attestation": null,
+  "notes": null,
+  "run_dir": "run-bb7dba135b25014b"
+}

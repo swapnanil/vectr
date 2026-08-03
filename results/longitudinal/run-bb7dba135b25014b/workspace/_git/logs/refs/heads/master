@@ -1,0 +1,4 @@
+0000000000000000000000000000000000000000 1caab64bea78e7495c7b35efdae45076a6f5bdf6 longitudinal-harness <longitudinal-harness@vectr.local> 1785764677 +0530	commit (initial): initial
+1caab64bea78e7495c7b35efdae45076a6f5bdf6 00eba4085f96ebed741613b8a8995be590d5b725 Mary Doe <mary.doe@example.com> 1785764962 +0530	commit: Release 1.4.0
+00eba4085f96ebed741613b8a8995be590d5b725 fef9b5e004ab099e1c15cb4524eeceb52b9e8685 Mary Doe <mary.doe@example.com> 1785764975 +0530	commit: Fix cents-dropping rounding default, release 1.4.1
+fef9b5e004ab099e1c15cb4524eeceb52b9e8685 f494d4e07c1a90bbc6ec88554069486b1ce909df Mary Doe <mary.doe@example.com> 1785765056 +0530	commit: Add convert_bulk() helper, release 1.5.0

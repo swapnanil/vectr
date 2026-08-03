@@ -1,0 +1,30 @@
+# vectr default excludes — generated on first `vectr start`/`vectr init`.
+# vectr never overwrites this file once it exists; edit freely.
+# One entry per line, in any of three forms:
+#   a directory name           (e.g. vendor)
+#   a file glob                (e.g. *.generated.py)
+#   a `re:` path regex         (e.g. re:legacy/.*  or  re:.*_(backup|old|copy)\.\w+$)
+# `re:` patterns match against the workspace-relative path of each file.
+
+node_modules
+.venv
+venv
+env
+__pycache__
+.git
+dist
+build
+target
+.mypy_cache
+.pytest_cache
+.ruff_cache
+htmlcov
+coverage
+.tox
+.cache
+tmp
+vendor
+.next
+.nuxt
+out
+

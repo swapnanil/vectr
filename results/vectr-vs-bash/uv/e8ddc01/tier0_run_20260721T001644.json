@@ -1,0 +1,332 @@
+{
+  "corpus": "uv",
+  "vectr_sha": "e8ddc01",
+  "smoke_test": false,
+  "port": 8799,
+  "tools_list_overhead": {
+    "tokens": 5144,
+    "wall_ms": 3.15,
+    "raw_bytes": 20546
+  },
+  "task_ids": [
+    "T01",
+    "T02",
+    "T03",
+    "T04",
+    "T05",
+    "T06",
+    "T07",
+    "T08",
+    "T09",
+    "T10",
+    "T11",
+    "T12",
+    "T13",
+    "T14",
+    "T15"
+  ],
+  "results": [
+    {
+      "id": "T01",
+      "archetype": 1,
+      "archetype_name": "known_symbol_lookup",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 2,
+        "tokens": 1242,
+        "wall_ms": 3633.01,
+        "hit_at_call": 2,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 255,
+        "wall_ms": 64.44,
+        "hit_at_call": 1,
+        "answered": true
+      }
+    },
+    {
+      "id": "T02",
+      "archetype": 1,
+      "archetype_name": "known_symbol_lookup",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 1,
+        "tokens": 157,
+        "wall_ms": 31.26,
+        "hit_at_call": 1,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 548,
+        "wall_ms": 33.22,
+        "hit_at_call": 1,
+        "answered": true
+      }
+    },
+    {
+      "id": "T03",
+      "archetype": 2,
+      "archetype_name": "qualified_name",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 1,
+        "tokens": 201,
+        "wall_ms": 347.67,
+        "hit_at_call": 1,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 3385,
+        "wall_ms": 65.58,
+        "hit_at_call": 2,
+        "answered": true
+      }
+    },
+    {
+      "id": "T04",
+      "archetype": 3,
+      "archetype_name": "misremembered_identifier",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 2,
+        "tokens": 352,
+        "wall_ms": 132.91,
+        "hit_at_call": 2,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 18,
+        "wall_ms": 217.63,
+        "hit_at_call": 2,
+        "answered": true
+      }
+    },
+    {
+      "id": "T05",
+      "archetype": 3,
+      "archetype_name": "misremembered_identifier",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 3,
+        "tokens": 3733,
+        "wall_ms": 6790.43,
+        "hit_at_call": 2,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 74,
+        "wall_ms": 155.47,
+        "hit_at_call": null,
+        "answered": false
+      }
+    },
+    {
+      "id": "T06",
+      "archetype": 4,
+      "archetype_name": "nl_concept_paraphrase",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 1,
+        "tokens": 2306,
+        "wall_ms": 2955.1,
+        "hit_at_call": 1,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 49,
+        "wall_ms": 35.88,
+        "hit_at_call": 2,
+        "answered": true
+      }
+    },
+    {
+      "id": "T07",
+      "archetype": 4,
+      "archetype_name": "nl_concept_paraphrase",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 1,
+        "tokens": 914,
+        "wall_ms": 3211.08,
+        "hit_at_call": null,
+        "answered": false
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 344,
+        "wall_ms": 45.35,
+        "hit_at_call": 2,
+        "answered": true
+      }
+    },
+    {
+      "id": "T08",
+      "archetype": 5,
+      "archetype_name": "absent_topic",
+      "expect_absence": true,
+      "vectr": {
+        "calls": 1,
+        "tokens": 189,
+        "wall_ms": 2269.64,
+        "hit_at_call": null,
+        "answered": false,
+        "nonempty_calls": 1
+      },
+      "bash": {
+        "calls": 3,
+        "tokens": 0,
+        "wall_ms": 1193.46,
+        "hit_at_call": null,
+        "answered": false,
+        "nonempty_calls": 0
+      }
+    },
+    {
+      "id": "T09",
+      "archetype": 6,
+      "archetype_name": "who_calls_x",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 6,
+        "tokens": 3752,
+        "wall_ms": 777.15,
+        "hit_at_call": null,
+        "answered": false
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 0,
+        "wall_ms": 168.41,
+        "hit_at_call": null,
+        "answered": false
+      }
+    },
+    {
+      "id": "T10",
+      "archetype": 6,
+      "archetype_name": "who_calls_x",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 6,
+        "tokens": 1277,
+        "wall_ms": 115.26,
+        "hit_at_call": null,
+        "answered": false
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 431,
+        "wall_ms": 208.82,
+        "hit_at_call": 2,
+        "answered": true
+      }
+    },
+    {
+      "id": "T11",
+      "archetype": 7,
+      "archetype_name": "stack_trace_literal",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 1,
+        "tokens": 1961,
+        "wall_ms": 3123.61,
+        "hit_at_call": null,
+        "answered": false
+      },
+      "bash": {
+        "calls": 1,
+        "tokens": 5247,
+        "wall_ms": 159.55,
+        "hit_at_call": 1,
+        "answered": true
+      }
+    },
+    {
+      "id": "T12",
+      "archetype": 8,
+      "archetype_name": "doc_howto",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 1,
+        "tokens": 1357,
+        "wall_ms": 2583.04,
+        "hit_at_call": 1,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 697,
+        "wall_ms": 77.21,
+        "hit_at_call": 2,
+        "answered": true
+      }
+    },
+    {
+      "id": "T13",
+      "archetype": 9,
+      "archetype_name": "cross_file_flow",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 2,
+        "tokens": 3895,
+        "wall_ms": 5799.1,
+        "hit_at_call": 2,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 153,
+        "wall_ms": 35.55,
+        "hit_at_call": 1,
+        "answered": true
+      }
+    },
+    {
+      "id": "T14",
+      "archetype": 10,
+      "archetype_name": "structural_implementations",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 1,
+        "tokens": 488,
+        "wall_ms": 20.92,
+        "hit_at_call": 1,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 516,
+        "wall_ms": 26.72,
+        "hit_at_call": 1,
+        "answered": true
+      }
+    },
+    {
+      "id": "T15",
+      "archetype": 10,
+      "archetype_name": "structural_implementations",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 1,
+        "tokens": 417,
+        "wall_ms": 25.97,
+        "hit_at_call": 1,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 76,
+        "wall_ms": 27.58,
+        "hit_at_call": 1,
+        "answered": true
+      }
+    }
+  ]
+}

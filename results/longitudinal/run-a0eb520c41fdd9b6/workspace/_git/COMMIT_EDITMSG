@@ -1,0 +1,6 @@
+Add convert_bulk() helper and release 1.5.0
+
+Bulk currency conversion was previously a call-convert-in-a-loop
+pattern at every call site; convert_bulk() centralizes it.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>

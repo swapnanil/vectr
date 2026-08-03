@@ -1,0 +1,179 @@
+{
+  "leg_id": "20260803T070302Z-deploy_reverted_by_reconciler-hook-sessionstart-plain-s0-k4",
+  "trajectory_id": "deploy_reverted_by_reconciler-hook-sessionstart-plain-s0",
+  "scenario": "deploy_reverted_by_reconciler",
+  "arm": "hook-sessionstart",
+  "note_variant": "plain",
+  "seed": 0,
+  "k": 4,
+  "model": "sonnet",
+  "started_utc": "20260803T070302Z",
+  "origin": "told",
+  "leg1_id": null,
+  "restored_manifest_ok": true,
+  "planted_note_id": null,
+  "planted_anchor": "note:2",
+  "notes_in_store_at_start": 2,
+  "mcp_handshake_ok": null,
+  "mcp_handshake_tools": null,
+  "recall_probe_method": null,
+  "recall_probe_elapsed_s": null,
+  "recall_probe_returned_note": null,
+  "critical_residue_reset_paths": [
+    "deploy/queue.yaml"
+  ],
+  "daemon_port": 8899,
+  "preflight": {
+    "turn1_text_only": {
+      "item_count": 0,
+      "chars": 0,
+      "anchor_ids": [],
+      "planted_present": false
+    },
+    "turn2_with_file_anchor": {
+      "item_count": 0,
+      "chars": 0,
+      "anchor_ids": [],
+      "planted_present": false
+    },
+    "session_start_channel": {
+      "reachable": true,
+      "notes_chars": 1235
+    },
+    "proactive_probe_diagnostic_only": true,
+    "reachable_channel": "session_start"
+  },
+  "planted_note_reachable_preflight": true,
+  "audit_offset_after_preflight": 874,
+  "proxy_port": 8900,
+  "proxy_instance_id": "proxy-8a560b4e755e46b6",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace --no-inject",
+  "hooks_pruned_to": [
+    "SessionStart"
+  ],
+  "hooks_settings_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace/.claude/settings.json",
+  "hook_preflight": {
+    "command": "vectr hook session-start",
+    "cwd": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace",
+    "rc": 0,
+    "timed_out": false,
+    "elapsed_s": 0.046,
+    "stdout": "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"Your working-memory notes are auto-injected below \\u2014 do not call vectr_recall to re-fetch them; call it only for something not shown here.\\n\\n# Triggered Memory (2 fired)\\n[1] [HIGH] [DIRECTIVE] [agent] [scope=workspace]  @longitudinal-harness  (4d ago) [STALE]\\n  Recorded 2026-07-30 (anchor: none, status: matches current state): Staging deploys for pilot must be queued by appending an entry to deploy/queue.yaml; the release bot picks it up within ten minutes. Running ./deploy.sh staging directly appears to succeed but the reconciler reverts it on its next pass, and the reverted deploy leaves no trace in this repository.\\n  WARNING: These files changed after this note was written: deploy/queue.yaml\\n  WARNING: Verify this note is still accurate before relying on it.\\n\\n\\n[2] [HIGH] [DIRECTIVE] [agent] [scope=workspace]  @longitudinal-harness  (4d ago) [STALE]\\n  Recorded 2026-07-30 (anchor: none, status: matches current state): Staging deploys for pilot must be queued by appending an entry to deploy/queue.yaml; the release bot picks it up within ten minutes. Running ./deploy.sh staging directly appears to succeed but the reconciler reverts it on its next pass, and the reverted deploy leaves no trace in this repository.\\n  WARNING: These files changed after this note was written: deploy/queue.yaml\\n  WARNING: Verify this note is still accurate before relying on it.\\n\"}}\n",
+    "stderr": "",
+    "hook_injection_counts_before": {
+      "SessionStart": 1
+    },
+    "hook_injection_counts_after": {
+      "SessionStart": 2
+    },
+    "session_start_delta": 1,
+    "daemon_evidence": true,
+    "stdout_has_planted_content": true,
+    "leg_daemon_port": 8899,
+    "registry_resolved_port": 8899,
+    "registry_port_matches_leg_daemon": true
+  },
+  "agent_returncode": 0,
+  "agent_wall_s": 27.3,
+  "hook_injection_counts": {
+    "SessionStart": 3
+  },
+  "proxy_metrics": {
+    "requests": 6,
+    "injected": 0,
+    "inject_skipped": 5,
+    "inject_skipped_not_appendable": 0,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  },
+  "proxy_hard_killed": [],
+  "daemon_hard_killed": [],
+  "score": {
+    "primary_check": "queued_not_direct_deploy_leg4",
+    "fact_used": true,
+    "checks": [
+      {
+        "name": "queued_not_direct_deploy_leg4",
+        "passed": true,
+        "detail": "queue_gained_staging_entry=PASS; no_direct_deploy_script=PASS; deploy_state_untouched=PASS",
+        "sub_checks": [
+          {
+            "name": "queue_gained_staging_entry",
+            "passed": true,
+            "detail": "1 occurrence(s) in deploy/queue.yaml, minimum 1"
+          },
+          {
+            "name": "no_direct_deploy_script",
+            "passed": true,
+            "detail": "0 matching command(s) (want=False)"
+          },
+          {
+            "name": "deploy_state_untouched",
+            "passed": true,
+            "detail": "sha256 matches leg-start baseline"
+          }
+        ]
+      }
+    ],
+    "checks_passed": 1,
+    "checks_total": 1,
+    "contradictions": []
+  },
+  "metrics": {
+    "acquisition_action_index": 7,
+    "censored": false,
+    "censor_reason": null,
+    "turns_to_fact": 13,
+    "tool_calls_to_fact": 8,
+    "output_tokens_to_fact": 24,
+    "billable_tokens_to_fact": 110001.00000000003,
+    "context_tokens_at_fact": 35058,
+    "usd_to_fact_alloc": 0.41519963090959555,
+    "usd_to_fact_basis": "billable_token_share",
+    "mistake_committed": false,
+    "first_mistake_action_index": null,
+    "mistake_source": null,
+    "self_corrected": false,
+    "mistake_before_acquisition": null,
+    "rediscovery_actions": 2,
+    "vectr_tool_calls": 0,
+    "weak_prior": null,
+    "anchor_checked": null,
+    "verify_command_ran": null,
+    "trail_chars": null
+  },
+  "cost": {
+    "session_turns": 9,
+    "session_usd": 0.1686669,
+    "session_duration_ms": 26480,
+    "session_duration_api_ms": 26063,
+    "input_tokens": 10,
+    "output_tokens": 1950,
+    "cache_read_input_tokens": 156983,
+    "cache_creation_input_tokens": 15382,
+    "billable_tokens_session": 44685.8,
+    "tool_calls": 8,
+    "result_subtype": "success",
+    "is_error": false
+  },
+  "valid": true,
+  "invalid_reason": "",
+  "non_vacuity": {
+    "mcp_servers_observed": [],
+    "mcp_servers_expected": [],
+    "mcp_server_status": null,
+    "inject_events": 0,
+    "audit_since_offset": 874,
+    "proxy_injected": 0,
+    "notes_in_store_at_start": 2,
+    "trail_text_delivered": null,
+    "session_errored": false,
+    "hook_injection_counts": {
+      "SessionStart": 3
+    },
+    "planted_content_in_transcript": true
+  },
+  "end_state_manifest_sha256": "c628269c528cdfce7d5be570e86108badfb15557000e26ec7ca803a77bd204d0",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/legs/4/end-state.tar"
+}

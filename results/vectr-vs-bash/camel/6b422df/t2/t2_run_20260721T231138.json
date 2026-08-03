@@ -1,0 +1,752 @@
+{
+  "corpus": "camel",
+  "vectr_sha": "6b422df",
+  "smoke_test": false,
+  "port": 8800,
+  "model": "sonnet",
+  "max_turns": 40,
+  "arms": [
+    "vectr",
+    "bash"
+  ],
+  "task_ids": [
+    "T2-01",
+    "T2-02",
+    "T2-03",
+    "T2-04"
+  ],
+  "results": [
+    {
+      "id": "T2-01",
+      "seed_invalid": false,
+      "arms": {
+        "vectr": {
+          "id": "T2-01",
+          "arm": "vectr",
+          "category": "bugfix",
+          "subsystem_hint": null,
+          "prompt": "There is a bug in this codebase. When a route template defines a local bean and the template is instantiated with a parameter whose VALUE happens to be the same string as that local bean's name, creating the route fails: references to the local bean from within the template (e.g. {{beanName}}) can no longer be resolved, and the route reports the bean as not found. Expected behavior: a template's local bean should remain usable regardless of whether some parameter value coincides with its name. Find the root cause and fix it.",
+          "wall_s": 365.65,
+          "num_turns": 41,
+          "cost_usd": 1.4370012,
+          "reported_duration_ms": 363443,
+          "is_error": true,
+          "error": null,
+          "tool_sequence": [
+            "ToolSearch",
+            "mcp__vectr__vectr_status",
+            "ToolSearch",
+            "mcp__vectr__vectr_search",
+            "mcp__vectr__vectr_search",
+            "mcp__vectr__vectr_search",
+            "mcp__vectr__vectr_search",
+            "Bash",
+            "Read",
+            "Bash",
+            "Read",
+            "Bash",
+            "mcp__vectr__vectr_search",
+            "Bash",
+            "Read",
+            "Read",
+            "mcp__vectr__vectr_search",
+            "Bash",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "tool_call_counts": {
+            "ToolSearch": 2,
+            "mcp__vectr__vectr_status": 1,
+            "mcp__vectr__vectr_search": 6,
+            "Bash": 26,
+            "Read": 5
+          },
+          "bash_native_counts": {
+            "Bash": 26,
+            "Grep": 0,
+            "Read": 5,
+            "Glob": 0
+          },
+          "search_calls": [
+            {
+              "n_results": 8,
+              "n_results_defaulted": false,
+              "query": "route template local bean parameter value resolution substitution"
+            },
+            {
+              "n_results": 8,
+              "n_results_defaulted": false,
+              "query": "route template instantiation parameter substitution bean name lookup resolve"
+            },
+            {
+              "n_results": 8,
+              "n_results_defaulted": false,
+              "query": "addRouteFromTemplate createRoute template parameter replace string substitution"
+            },
+            {
+              "n_results": 5,
+              "n_results_defaulted": false,
+              "query": "addRouteFromTemplate RouteTemplateContext beans templateBeans bind replace"
+            },
+            {
+              "n_results": 8,
+              "n_results_defaulted": false,
+              "query": "route template property placeholder double curly brace bean name lookup not found"
+            },
+            {
+              "n_results": 8,
+              "n_results_defaulted": false,
+              "query": "RouteTemplateContext local bean registry lookup property placeholder resolvePropertyPlaceholders"
+            }
+          ],
+          "usage_input_tokens": 94744,
+          "usage_input_base_tokens": 1,
+          "usage_cache_creation_tokens": 164,
+          "usage_cache_read_tokens": 94579,
+          "usage_output_tokens": 115,
+          "usage_unparsed": false,
+          "used_vectr": true,
+          "used_bash_native": true,
+          "final_answer": "",
+          "final_answer_tokens": 0,
+          "timed_out": false,
+          "transcript_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-01_vectr_20260721T231850.jsonl",
+          "gate_pre": {
+            "passed": false,
+            "wall_s": 32.53
+          },
+          "gate_post": {
+            "passed": false,
+            "wall_s": 17.9
+          },
+          "tree_changes": {
+            "status_porcelain": " M core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java\n?? .vectrignore\n",
+            "diff": "diff --git a/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java b/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java\nindex e4732f66a..c42c04fd7 100644\n--- a/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java\n+++ b/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java\n@@ -690,7 +690,6 @@ public class DefaultCamelContext extends SimpleCamelContext implements ModelCame\n                     // no side-effect from previously used values that Camel may use in its endpoint\n                     // registry and elsewhere\n                     if (bbr != null && !bbr.isEmpty()) {\n-                        Map<String, String> beanNameMappings = new HashMap<>();\n                         for (Map.Entry<String, Object> param : params.entrySet()) {\n                             Object value = param.getValue();\n                             if (value instanceof String oldKey) {\n@@ -702,18 +701,9 @@ public class DefaultCamelContext extends SimpleCamelContext implements ModelCame\n                                             routeDefinition.getId(), oldKey, newKey);\n                                     bbrCopy.put(newKey, bbr.remove(oldKey));\n                                     param.setValue(newKey);\n-                                    beanNameMappings.put(oldKey, newKey);\n                                 }\n                             }\n                         }\n-                        // ensure bean names removed during clash detection are still\n-                        // available as template parameters so they can be referenced\n-                        // directly in routes via {{beanName}}\n-                        for (Map.Entry<String, String> mapping : beanNameMappings.entrySet()) {\n-                            if (!params.containsKey(mapping.getKey())) {\n-                                params.put(mapping.getKey(), mapping.getValue());\n-                            }\n-                        }\n                         // the remainder of the local beans must also have their ids made global unique\n                         for (Map.Entry<String, Map<Class<?>, Object>> entry : bbr.entrySet()) {\n                             String oldKey = entry.getKey();\n",
+            "diff_truncated": false
+          }
+        },
+        "bash": {
+          "id": "T2-01",
+          "arm": "bash",
+          "category": "bugfix",
+          "subsystem_hint": null,
+          "prompt": "There is a bug in this codebase. When a route template defines a local bean and the template is instantiated with a parameter whose VALUE happens to be the same string as that local bean's name, creating the route fails: references to the local bean from within the template (e.g. {{beanName}}) can no longer be resolved, and the route reports the bean as not found. Expected behavior: a template's local bean should remain usable regardless of whether some parameter value coincides with its name. Find the root cause and fix it.",
+          "wall_s": 422.04,
+          "num_turns": 40,
+          "cost_usd": 1.3726427999999997,
+          "reported_duration_ms": 419660,
+          "is_error": false,
+          "error": null,
+          "tool_sequence": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Bash",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Bash",
+            "Read",
+            "Bash",
+            "Bash",
+            "Read",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Read",
+            "Read",
+            "Edit",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "tool_call_counts": {
+            "Bash": 25,
+            "Read": 13,
+            "Edit": 1
+          },
+          "bash_native_counts": {
+            "Bash": 25,
+            "Grep": 0,
+            "Read": 13,
+            "Glob": 0
+          },
+          "search_calls": [],
+          "usage_input_tokens": 97622,
+          "usage_input_base_tokens": 1,
+          "usage_cache_creation_tokens": 149,
+          "usage_cache_read_tokens": 97472,
+          "usage_output_tokens": 440,
+          "usage_unparsed": false,
+          "used_vectr": false,
+          "used_bash_native": true,
+          "final_answer": "All clean. Here's a summary of the root cause and fix:\n\n---\n\n**Root cause** \u2014 `DefaultCamelContext.java`, `doStartRouteDefinitions` method (lines 692\u2013726):\n\nWhen a route template is started, Camel makes all local bean IDs globally unique by renaming them to `beanName-UUID`. There are two loops:\n\n1. **First loop** (lines 693\u2013706): scans each template *parameter entry* to detect if its *value* coincidentally equals a local bean name (a \"value clash\"). When found, it renames the bean (`bbrCopy.put(newKey, bbr.remove(oldKey))`), then updates that parameter value to the new key so `{{thatParam}}` still resolves correctly.\n\n2. **Second loop** (lines 708\u2013725): processes every bean *remaining in `bbr`* and, crucially, adds `params[beanName] = newKey` so that `{{beanName}}` used directly in the route (not via a parameter) can resolve to the renamed bean.\n\n**The bug**: the first loop calls `bbr.remove(oldKey)`, so the bean is gone from `bbr` before the second loop runs. The second loop therefore never adds `params[\"counter\"] = \"counter-UUID\"`, and `{{counter}}` in `bean:{{counter}}` cannot resolve \u2014 the route fails saying the bean is not found.\n\n**The fix**: inside the first loop, after moving the bean due to a value clash, also record `clashBeanParams[beanName] = newKey` (when the bean name is not already a parameter key). After the first iteration ends, apply `params.putAll(clashBeanParams)`. This mirrors exactly what the second loop does for the non-clash case, ensuring `{{beanName}}` always resolves regardless of whether a parameter's value happens to coincide with the bean's name.",
+          "final_answer_tokens": 401,
+          "timed_out": false,
+          "transcript_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-01_bash_20260721T232702.jsonl",
+          "gate_pre": {
+            "passed": false,
+            "wall_s": 32.53
+          },
+          "gate_post": {
+            "passed": true,
+            "wall_s": 14.35
+          },
+          "tree_changes": {
+            "status_porcelain": " M core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java\n?? .vectrignore\n",
+            "diff": "diff --git a/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java b/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java\nindex e4732f66a..4d1980c85 100644\n--- a/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java\n+++ b/core/camel-core-engine/src/main/java/org/apache/camel/impl/DefaultCamelContext.java\n@@ -690,7 +690,7 @@ public class DefaultCamelContext extends SimpleCamelContext implements ModelCame\n                     // no side-effect from previously used values that Camel may use in its endpoint\n                     // registry and elsewhere\n                     if (bbr != null && !bbr.isEmpty()) {\n-                        Map<String, String> beanNameMappings = new HashMap<>();\n+                        Map<String, String> clashBeanParams = new HashMap<>();\n                         for (Map.Entry<String, Object> param : params.entrySet()) {\n                             Object value = param.getValue();\n                             if (value instanceof String oldKey) {\n@@ -702,18 +702,15 @@ public class DefaultCamelContext extends SimpleCamelContext implements ModelCame\n                                             routeDefinition.getId(), oldKey, newKey);\n                                     bbrCopy.put(newKey, bbr.remove(oldKey));\n                                     param.setValue(newKey);\n-                                    beanNameMappings.put(oldKey, newKey);\n+                                    // if the bean name is not itself a parameter key, register it so\n+                                    // that {{beanName}} in the route still resolves to the new unique key\n+                                    if (!params.containsKey(oldKey)) {\n+                                        clashBeanParams.put(oldKey, newKey);\n+                                    }\n                                 }\n                             }\n                         }\n-                        // ensure bean names removed during clash detection are still\n-                        // available as template parameters so they can be referenced\n-                        // directly in routes via {{beanName}}\n-                        for (Map.Entry<String, String> mapping : beanNameMappings.entrySet()) {\n-                            if (!params.containsKey(mapping.getKey())) {\n-                                params.put(mapping.getKey(), mapping.getValue());\n-                            }\n-                        }\n+                        params.putAll(clashBeanParams);\n                         // the remainder of the local beans must also have their ids made global unique\n                         for (Map.Entry<String, Map<Class<?>, Object>> entry : bbr.entrySet()) {\n                             String oldKey = entry.getKey();\n",
+            "diff_truncated": false
+          }
+        }
+      },
+      "seed_patch_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-01_seed.patch",
+      "settle_pre": {
+        "settled": true,
+        "msg": "settled at total_chunks=176388 last_indexed='2026-07-21T01:53:04Z' after 32.6s"
+      },
+      "gate_pre": {
+        "passed": false,
+        "wall_s": 32.53
+      },
+      "settle_between_arms": [
+        {
+          "after_arm": "vectr",
+          "settled": true,
+          "msg": "settled at total_chunks=176388 last_indexed='2026-07-21T01:53:04Z' after 49.7s"
+        }
+      ]
+    },
+    {
+      "id": "T2-02",
+      "seed_invalid": false,
+      "arms": {
+        "vectr": {
+          "id": "T2-02",
+          "arm": "vectr",
+          "category": "bugfix",
+          "subsystem_hint": null,
+          "prompt": "There is a bug in this codebase's simple expression language parser. When the right-hand side of a logical operator (&& or ||) in a predicate is not a valid operand, the parser's error message names the wrong token: it reports the LEFT-hand side's token instead of the offending right-hand side one. Additionally, operand validation for logical operators is too permissive \u2014 nodes that are not actual predicate expressions (binary or logical expressions) are accepted on either side instead of being rejected, which is why the faulty error path is rarely reached. Expected behavior: invalid operands on either side of a logical operator are rejected, and the error message names the token of the side that is actually invalid. Fix both.",
+          "wall_s": 230.57,
+          "num_turns": 20,
+          "cost_usd": 0.7316867999999997,
+          "reported_duration_ms": 228581,
+          "is_error": false,
+          "error": null,
+          "tool_sequence": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Bash",
+            "Read",
+            "Read",
+            "Read",
+            "Bash",
+            "Bash",
+            "Read",
+            "Read",
+            "Edit",
+            "Edit",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "tool_call_counts": {
+            "Bash": 11,
+            "Read": 6,
+            "Edit": 2
+          },
+          "bash_native_counts": {
+            "Bash": 11,
+            "Grep": 0,
+            "Read": 6,
+            "Glob": 0
+          },
+          "search_calls": [],
+          "usage_input_tokens": 75407,
+          "usage_input_base_tokens": 1,
+          "usage_cache_creation_tokens": 842,
+          "usage_cache_read_tokens": 74564,
+          "usage_output_tokens": 282,
+          "usage_unparsed": false,
+          "used_vectr": false,
+          "used_bash_native": true,
+          "final_answer": "All 54 tests across all simple parser test classes pass. Here's a summary of the two fixes:\n\n**Bug 1** \u2014 `SimplePredicateParser.java` line 560: The error thrown when the right-hand side of a logical operator is invalid had two problems:\n1. The error message said `left.getToken()` \u2014 changed to `right.getToken()` so the message names the actual offending token\n2. The exception index was `token.getToken().getIndex()` (the `&&` operator itself) \u2014 changed to `right.getToken().getIndex()` so the index points at the invalid right-hand token (e.g., index 20 for `\"${body} == 'foo' && && ...\"`)\n\n**Bug 2** \u2014 `LogicalExpression.java`: Both `acceptLeftNode` and `acceptRightNode` unconditionally accepted every node and returned `true`. They now only accept `BinaryExpression` or `LogicalExpression` nodes (the only node types that are valid predicate operands for `&&`/`||`), returning `false` for anything else. Without this fix, the error path in Bug 1 was unreachable because invalid operands were silently accepted.",
+          "final_answer_tokens": 235,
+          "timed_out": false,
+          "transcript_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-02_vectr_20260721T233251.jsonl",
+          "gate_pre": {
+            "passed": false,
+            "wall_s": 36.48
+          },
+          "gate_post": {
+            "passed": true,
+            "wall_s": 32.62
+          },
+          "tree_changes": {
+            "status_porcelain": " M core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java\n M core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n?? .vectrignore\n",
+            "diff": "diff --git a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java\nindex c52cc4910..81448dad8 100644\n--- a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java\n+++ b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java\n@@ -558,7 +558,7 @@ public class SimplePredicateParser extends BaseSimpleParser {\n                 if (!logical.acceptRightNode(right)) {\n                     throw new SimpleParserException(\n                             \"Logical operator \" + operator + \" does not support right hand side token \" + right.getToken(),\n-                            token.getToken().getIndex());\n+                            right.getToken().getIndex());\n                 }\n \n                 // pop previous as we need to replace it with this binary operator\ndiff --git a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\nindex 535dce4fb..1a875d5f3 100644\n--- a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n+++ b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n@@ -48,19 +48,19 @@ public class LogicalExpression extends BaseSimpleNode {\n     }\n \n     public boolean acceptLeftNode(SimpleNode lef) {\n-        if (!(lef instanceof BinaryExpression) && !(lef instanceof LogicalExpression)) {\n-            return false;\n+        if (lef instanceof BinaryExpression || lef instanceof LogicalExpression) {\n+            this.left = lef;\n+            return true;\n         }\n-        this.left = lef;\n-        return true;\n+        return false;\n     }\n \n     public boolean acceptRightNode(SimpleNode right) {\n-        if (!(right instanceof BinaryExpression) && !(right instanceof LogicalExpression)) {\n-            return false;\n+        if (right instanceof BinaryExpression || right instanceof LogicalExpression) {\n+            this.right = right;\n+            return true;\n         }\n-        this.right = right;\n-        return true;\n+        return false;\n     }\n \n     public LogicalOperatorType getOperator() {\n",
+            "diff_truncated": false
+          }
+        },
+        "bash": {
+          "id": "T2-02",
+          "arm": "bash",
+          "category": "bugfix",
+          "subsystem_hint": null,
+          "prompt": "There is a bug in this codebase's simple expression language parser. When the right-hand side of a logical operator (&& or ||) in a predicate is not a valid operand, the parser's error message names the wrong token: it reports the LEFT-hand side's token instead of the offending right-hand side one. Additionally, operand validation for logical operators is too permissive \u2014 nodes that are not actual predicate expressions (binary or logical expressions) are accepted on either side instead of being rejected, which is why the faulty error path is rarely reached. Expected behavior: invalid operands on either side of a logical operator are rejected, and the error message names the token of the side that is actually invalid. Fix both.",
+          "wall_s": 211.37,
+          "num_turns": 17,
+          "cost_usd": 0.6390570000000001,
+          "reported_duration_ms": 209577,
+          "is_error": false,
+          "error": null,
+          "tool_sequence": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Bash",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Bash",
+            "Bash",
+            "Edit",
+            "Edit",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "tool_call_counts": {
+            "Bash": 9,
+            "Read": 5,
+            "Edit": 2
+          },
+          "bash_native_counts": {
+            "Bash": 9,
+            "Grep": 0,
+            "Read": 5,
+            "Glob": 0
+          },
+          "search_calls": [],
+          "usage_input_tokens": 67349,
+          "usage_input_base_tokens": 1,
+          "usage_cache_creation_tokens": 1098,
+          "usage_cache_read_tokens": 66250,
+          "usage_output_tokens": 228,
+          "usage_unparsed": false,
+          "used_vectr": false,
+          "used_bash_native": true,
+          "final_answer": "All 508 tests pass. Here's a summary of the two fixes made:\n\n**Fix 1 \u2014 Wrong token in error message** (`SimplePredicateParser.java:560`):\n\nThe `prepareLogicalExpressions` method used `left.getToken()` in the error message when the *right* side was invalid. Changed to `right.getToken()` so the message correctly identifies the offending token.\n\n**Fix 2 \u2014 Overly permissive operand validation** (`LogicalExpression.java`):\n\n`acceptLeftNode` and `acceptRightNode` unconditionally accepted any node and returned `true`. Now they reject any node that is not a `BinaryExpression` or `LogicalExpression`, which are the only types that represent actual predicate expressions valid as operands of `&&`/`||`. This is what makes the error path reachable in the first place \u2014 without this, bare numerics, literals, and other non-predicate nodes were silently accepted.",
+          "final_answer_tokens": 186,
+          "timed_out": false,
+          "transcript_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-02_bash_20260721T233735.jsonl",
+          "gate_pre": {
+            "passed": false,
+            "wall_s": 36.48
+          },
+          "gate_post": {
+            "passed": true,
+            "wall_s": 28.79
+          },
+          "tree_changes": {
+            "status_porcelain": "?? .vectrignore\n",
+            "diff": "",
+            "diff_truncated": false
+          }
+        }
+      },
+      "seed_patch_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-02_seed.patch",
+      "settle_pre": {
+        "settled": true,
+        "msg": "settled at total_chunks=176392 last_indexed='2026-07-21T01:53:04Z' after 63.9s"
+      },
+      "gate_pre": {
+        "passed": false,
+        "wall_s": 36.48
+      },
+      "settle_between_arms": [
+        {
+          "after_arm": "vectr",
+          "settled": true,
+          "msg": "settled at total_chunks=176320 last_indexed='2026-07-21T01:53:04Z' after 37.3s"
+        }
+      ]
+    },
+    {
+      "id": "T2-03",
+      "seed_invalid": false,
+      "arms": {
+        "vectr": {
+          "id": "T2-03",
+          "arm": "vectr",
+          "category": "bugfix",
+          "subsystem_hint": null,
+          "prompt": "There is a bug in this codebase's Vert.x-based platform HTTP component. When a route produces a Server-Sent Events response (content type text/event-stream) from a streaming source, individual events are not delivered to the client as they are produced: the async stream that feeds the response greedily fills its internal buffer before emitting anything, so an event only reaches the client when later data pushes it out. There is also a related defect where a partially filled buffer can be emitted containing trailing bytes beyond what was actually read. Expected behavior: for SSE responses each chunk read is flushed to the client immediately, and emitted buffers contain only the bytes actually read. Fix the streaming behavior.",
+          "wall_s": 506.66,
+          "num_turns": 13,
+          "cost_usd": 0.8841369,
+          "reported_duration_ms": 504273,
+          "is_error": false,
+          "error": null,
+          "tool_sequence": [
+            "ToolSearch",
+            "mcp__vectr__vectr_status",
+            "mcp__vectr__vectr_search",
+            "Bash",
+            "Bash",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Edit",
+            "Bash",
+            "Bash"
+          ],
+          "tool_call_counts": {
+            "ToolSearch": 1,
+            "mcp__vectr__vectr_status": 1,
+            "mcp__vectr__vectr_search": 1,
+            "Bash": 4,
+            "Read": 4,
+            "Edit": 1
+          },
+          "bash_native_counts": {
+            "Bash": 4,
+            "Grep": 0,
+            "Read": 4,
+            "Glob": 0
+          },
+          "search_calls": [
+            {
+              "n_results": 5,
+              "n_results_defaulted": false,
+              "query": "Server-Sent Events SSE streaming response platform HTTP Vert.x"
+            }
+          ],
+          "usage_input_tokens": 83800,
+          "usage_input_base_tokens": 1,
+          "usage_cache_creation_tokens": 1170,
+          "usage_cache_read_tokens": 82629,
+          "usage_output_tokens": 369,
+          "usage_unparsed": false,
+          "used_vectr": true,
+          "used_bash_native": true,
+          "final_answer": "119 tests pass, 0 failures, 0 errors. The fix is complete.\n\n---\n\n**Root cause summary:**\n\nTwo bugs in `AsyncInputStream.doRead(Buffer, int, ByteBuffer, long, Handler)`:\n\n1. **Greedy buffer filling (SSE stall):** The `else if (buffer.hasRemaining())` branch recursively re-read inside `executeBlocking` until the 8192-byte `ByteBuffer` was completely full before emitting anything. For SSE, the writer produces a small event (15 bytes) and then blocks waiting for the client to acknowledge it \u2014 but the client never sees it because the blocking read loop inside the worker thread is stuck waiting for 8177 more bytes that the writer won't produce until it gets the acknowledgment. Classic deadlock.\n\n2. **Trailing bytes:** `buffer.compact()` was called after emitting, which preserved the just-read bytes at positions 0..N-1 and set `position=N`. When the same `ByteBuffer` was reused for the next call and EOF arrived, `buffer.flip()` set `limit=N` (the leftover position from the previous read), causing `writeBuff.setBytes(0, buffer)` to re-emit those N stale bytes as a \"data\" chunk instead of the correct empty EOF sentinel.\n\n**Fix (`AsyncInputStream.java:216\u2013246`):** Collapsed all three result branches into one that emits immediately after each read. Replaced `buffer.compact()` with `buffer.clear()` so the `ByteBuffer` is fully reset between reads, carrying no stale data forward.",
+          "final_answer_tokens": 315,
+          "timed_out": false,
+          "transcript_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-03_vectr_20260721T234806.jsonl",
+          "gate_pre": {
+            "passed": false,
+            "wall_s": 31.54
+          },
+          "gate_post": {
+            "passed": true,
+            "wall_s": 13.03
+          },
+          "tree_changes": {
+            "status_porcelain": " M components/camel-ai/camel-a2a/src/main/docs/a2a-component.adoc\n M components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/AsyncInputStream.java\n M components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/VertxPlatformHttpSupport.java\n?? .vectrignore\n",
+            "diff": "diff --git a/components/camel-ai/camel-a2a/src/main/docs/a2a-component.adoc b/components/camel-ai/camel-a2a/src/main/docs/a2a-component.adoc\nindex 4515f9949..03c08d7ca 100644\n--- a/components/camel-ai/camel-a2a/src/main/docs/a2a-component.adoc\n+++ b/components/camel-ai/camel-a2a/src/main/docs/a2a-component.adoc\n@@ -36,7 +36,7 @@ Current Preview limitations:\n * Extended Agent Card / `GetExtendedAgentCard` is not implemented in this first release.\n * Consumers validate operation requests by default. Local-only examples in this page set `validateAuth=false`; network-exposed agents should use an agent card with `securitySchemes` and `securityRequirements` plus `apiKey`, `bearerToken`, or `oauthProfile` endpoint configuration.\n * The REST binding uses A2A custom-method paths containing colons, such as `/message:send`. These paths collide on Vert.x/platform-http. Use `protocolBinding=JSONRPC` with platform-http, or use `httpServerComponent=undertow` or `httpServerComponent=jetty` for REST custom-method routes.\n-* Real-time SSE streaming is verified with Vert.x/platform-http, Undertow, and Jetty.\n+* Real-time SSE streaming is verified with Undertow and Jetty. Vert.x/platform-http buffers `InputStream` responses and does not deliver events as they are emitted.\n * The default task store is in-memory and single-JVM. Register a custom `A2ATaskStore` for durable or cross-node task state.\n \n Maven users will need to add the following dependency to their `pom.xml`:\n@@ -51,7 +51,7 @@ Maven users will need to add the following dependency to their `pom.xml`:\n </dependency>\n ----\n \n-Consumer routes also need an HTTP server component at runtime. For example, add `camel-platform-http-vertx` for JSON-RPC agents (including SSE streaming), or `camel-undertow` / `camel-jetty` for REST custom-method routes. See <<Dependencies>> and <<HTTP Server Component Discovery>>.\n+Consumer routes also need an HTTP server component at runtime. For example, add `camel-platform-http-vertx` for JSON-RPC agents, or `camel-undertow` / `camel-jetty` for REST custom-method routes and real-time SSE streaming. See <<Dependencies>> and <<HTTP Server Component Discovery>>.\n \n == URI Format\n \n@@ -249,7 +249,7 @@ The A2A REST protocol uses Google's Custom Method convention with colons in path\n \n This means operation serving is not reliable with REST binding on Vert.x/platform-http. For example, `POST /message:stream` can be handled by the `SendMessage` route instead of the streaming route.\n \n-*Workaround:* Use `protocolBinding=JSONRPC` for agents running on Vert.x (the default `platform-http`). Alternatively, use `httpServerComponent=jetty` or `httpServerComponent=undertow`; their routers treat colons as literal characters.\n+*Workaround:* Use `protocolBinding=JSONRPC` for agents running on Vert.x (the default `platform-http`). Alternatively, use `httpServerComponent=jetty` or `httpServerComponent=undertow`; their routers treat colons as literal characters. For real-time SSE streaming, use Jetty or Undertow because Vert.x/platform-http buffers `InputStream` responses.\n \n === Authentication\n \n@@ -559,11 +559,19 @@ The consumer supports two SSE streaming patterns:\n * *`SendStreamingMessage`* \u2014 The stream starts with the submitted `Task`, followed by progress events from `A2AProgress` or `${a2a:emit()}`. When the route completes, the body is emitted as the final message.\n * *`SubscribeToTask`* \u2014 Clients subscribe via `POST /tasks/\\{id}:subscribe` to receive real-time SSE updates for an existing non-terminal task. The component uses an Event-to-Stream Bridge (`QueueStreamEmitter` + `SseQueueInputStream`) with heartbeat comments to keep the connection alive. The stream sends the current `Task` first and ends when the task later reaches a terminal state. Subscribing to an already-terminal task returns `UnsupportedOperationError`.\n \n-[NOTE]\n+[IMPORTANT]\n ====\n *HTTP Server Component for Streaming*\n \n-Real-time SSE streaming works with all tested HTTP server components: Vert.x/platform-http, Undertow, and Jetty.\n+For real-time SSE streaming, use `httpServerComponent=undertow` or `httpServerComponent=jetty`. The default Vert.x `platform-http` buffers `InputStream` responses due to an `AsyncInputStream` greedy-fill loop, causing all events to arrive at once.\n+\n+[source,yaml]\n+----\n+parameters:\n+  httpServerComponent: undertow\n+----\n+\n+This requires `camel-undertow` (or `camel-jetty`) on the classpath.\n ====\n \n SSE streaming parameters:\n@@ -1646,9 +1654,11 @@ The preview component does not auto-create arbitrary HTTP server components and\n \n Tested behavior in this Preview release:\n \n-* `camel-platform-http` / Vert.x - suitable for JSON-RPC agents (including SSE streaming) and serving the public agent card. REST custom-method paths containing colons can collide.\n+* `camel-platform-http` / Vert.x - suitable for JSON-RPC agents and serving the public agent card. REST custom-method paths containing colons can collide, and SSE `InputStream` responses are buffered.\n * `camel-undertow` and `camel-jetty` - suitable for REST custom-method paths and real-time SSE streaming.\n \n+For SSE streaming, specify `httpServerComponent=undertow` or `httpServerComponent=jetty` and add the matching component dependency.\n+\n == Data Format\n \n The `dataFormat` parameter controls what the exchange body contains, following the same convention as the xref:cxf-component.adoc[CXF component]. It applies to both consumer (inbound request) and producer (response) sides.\ndiff --git a/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/AsyncInputStream.java b/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/AsyncInputStream.java\nindex 17825ef41..5608de6e8 100644\n--- a/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/AsyncInputStream.java\n+++ b/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/AsyncInputStream.java\n@@ -48,7 +48,6 @@ public class AsyncInputStream implements ReadStream<Buffer> {\n     private final Vertx vertx;\n     private final Context context;\n     private final InboundBuffer<Buffer> queue;\n-    private final boolean eagerFlush;\n     private long readPos;\n     private boolean closed;\n     private boolean readInProgress;\n@@ -57,14 +56,9 @@ public class AsyncInputStream implements ReadStream<Buffer> {\n     private Handler<Throwable> exceptionHandler;\n \n     public AsyncInputStream(Vertx vertx, Context context, InputStream inputStream) {\n-        this(vertx, context, inputStream, false);\n-    }\n-\n-    public AsyncInputStream(Vertx vertx, Context context, InputStream inputStream, boolean eagerFlush) {\n         this.vertx = vertx;\n         this.context = context;\n         this.channel = Channels.newChannel(inputStream);\n-        this.eagerFlush = eagerFlush;\n         this.queue = new InboundBuffer<>(context, 0);\n         queue.handler(buffer -> {\n             if (buffer.length() > 0) {\n@@ -223,31 +217,16 @@ public class AsyncInputStream implements ReadStream<Buffer> {\n         vertx.executeBlocking(() -> channel.read(buffer))\n                 .onComplete(result -> {\n                     if (result.succeeded()) {\n-                        Integer bytesRead = result.result();\n-                        if (bytesRead == -1) {\n-                            // EOF\n-                            context.runOnContext((v) -> {\n-                                buffer.flip();\n-                                int written = offset + buffer.limit();\n-                                writeBuff.setBytes(offset, buffer);\n-                                buffer.compact();\n-                                handler.handle(Future.succeededFuture(writeBuff.slice(0, written)));\n-                            });\n-                        } else if (!eagerFlush && buffer.hasRemaining()) {\n-                            // Read from the next offset to fill the buffer\n-                            context.runOnContext((v) -> {\n-                                doRead(writeBuff, offset, buffer, position + bytesRead, handler);\n-                            });\n-                        } else {\n-                            // Emit what we have (always for eagerFlush, or when buffer is full)\n-                            context.runOnContext((v) -> {\n-                                buffer.flip();\n-                                int written = offset + buffer.limit();\n-                                writeBuff.setBytes(offset, buffer);\n-                                buffer.compact();\n-                                handler.handle(Future.succeededFuture(writeBuff.slice(0, written)));\n-                            });\n-                        }\n+                        // Emit whatever was read immediately (EOF yields an empty buffer as sentinel).\n+                        // Never loop to fill the ByteBuffer: that blocks SSE and other streaming\n+                        // responses that produce small chunks, and compact() would carry stale bytes\n+                        // into the next emission when an EOF follows a partial read.\n+                        context.runOnContext((v) -> {\n+                            buffer.flip();\n+                            writeBuff.setBytes(offset, buffer);\n+                            buffer.clear();\n+                            handler.handle(Future.succeededFuture(writeBuff));\n+                        });\n                     } else {\n                         context.runOnContext((v) -> handler.handle(Future.failedFuture(result.cause())));\n                     }\ndiff --git a/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/VertxPlatformHttpSupport.java b/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/VertxPlatformHttpSupport.java\nindex b731f93fa..3c9eba486 100644\n--- a/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/VertxPlatformHttpSupport.java\n+++ b/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/VertxPlatformHttpSupport.java\n@@ -237,12 +237,8 @@ public final class VertxPlatformHttpSupport {\n         Vertx vertx = ctx.vertx();\n         Context context = vertx.getOrCreateContext();\n \n-        // For SSE streams, flush each chunk immediately instead of greedily filling the buffer\n-        String contentType = response.headers().get(\"Content-Type\");\n-        boolean eagerFlush = contentType != null && contentType.startsWith(\"text/event-stream\");\n-\n         // Process the InputStream async to avoid blocking the Vert.x event loop on large responses\n-        AsyncInputStream asyncInputStream = new AsyncInputStream(vertx, context, is, eagerFlush);\n+        AsyncInputStream asyncInputStream = new AsyncInputStream(vertx, context, is);\n         asyncInputStream.exceptionHandler(promise::fail);\n         asyncInputStream.endHandler(event -> endHandler(promise, response, asyncInputStream));\n \n",
+            "diff_truncated": false
+          }
+        },
+        "bash": {
+          "id": "T2-03",
+          "arm": "bash",
+          "category": "bugfix",
+          "subsystem_hint": null,
+          "prompt": "There is a bug in this codebase's Vert.x-based platform HTTP component. When a route produces a Server-Sent Events response (content type text/event-stream) from a streaming source, individual events are not delivered to the client as they are produced: the async stream that feeds the response greedily fills its internal buffer before emitting anything, so an event only reaches the client when later data pushes it out. There is also a related defect where a partially filled buffer can be emitted containing trailing bytes beyond what was actually read. Expected behavior: for SSE responses each chunk read is flushed to the client immediately, and emitted buffers contain only the bytes actually read. Fix the streaming behavior.",
+          "wall_s": 440.6,
+          "num_turns": 16,
+          "cost_usd": 0.9090981000000001,
+          "reported_duration_ms": 438619,
+          "is_error": false,
+          "error": null,
+          "tool_sequence": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Read",
+            "Edit",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "tool_call_counts": {
+            "Bash": 7,
+            "Read": 7,
+            "Edit": 1
+          },
+          "bash_native_counts": {
+            "Bash": 7,
+            "Grep": 0,
+            "Read": 7,
+            "Glob": 0
+          },
+          "search_calls": [],
+          "usage_input_tokens": 82264,
+          "usage_input_base_tokens": 1,
+          "usage_cache_creation_tokens": 1669,
+          "usage_cache_read_tokens": 80594,
+          "usage_output_tokens": 387,
+          "usage_unparsed": false,
+          "used_vectr": false,
+          "used_bash_native": true,
+          "final_answer": "All 119 tests pass (1 skipped is the large-file performance test gated by a system property, which is expected).\n\nThe fix is in `AsyncInputStream.java`, in the `doRead(Buffer, int, ByteBuffer, long, Handler)` method. Here's what changed and why:\n\n**Bug 1 \u2014 Greedy buffering (SSE events not delivered eagerly):**\nThe old `buffer.hasRemaining()` branch recursed to fill the entire 8192-byte `ByteBuffer` before emitting anything. For SSE over a `PipedInputStream`, this created a deadlock: the writer sent event-1 and waited for acknowledgment, while the reader was blocked trying to fill the rest of the buffer \u2014 neither could proceed. The fix removes this branch entirely. Now each call to `channel.read()` emits whatever bytes it obtained immediately, giving SSE clients each event as soon as the data is available.\n\n**Bug 2 \u2014 Trailing bytes in emitted buffers:**\nThe old code used `buffer.compact()` after emitting, which preserves the bytes it just delivered at the start of the `ByteBuffer`. On a subsequent EOF read, `buffer.flip()` would set `limit` to the count of those stale bytes, causing them to be re-read into the next buffer \u2014 corrupted data and an infinite loop. The fix uses `buffer.clear()` instead, which fully resets the buffer so the next read starts clean with no stale content. For the EOF case specifically, the empty `writeBuff` is returned directly without any flip/setBytes, since there is no new data to emit and the queue handler treats a zero-length buffer as the end-of-stream signal.",
+          "final_answer_tokens": 328,
+          "timed_out": false,
+          "transcript_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-03_bash_20260721T235842.jsonl",
+          "gate_pre": {
+            "passed": false,
+            "wall_s": 31.54
+          },
+          "gate_post": {
+            "passed": true,
+            "wall_s": 13.08
+          },
+          "tree_changes": {
+            "status_porcelain": " M components/camel-ai/camel-a2a/src/main/docs/a2a-component.adoc\n M components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/AsyncInputStream.java\n M components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/VertxPlatformHttpSupport.java\n?? .vectrignore\n",
+            "diff": "diff --git a/components/camel-ai/camel-a2a/src/main/docs/a2a-component.adoc b/components/camel-ai/camel-a2a/src/main/docs/a2a-component.adoc\nindex 4515f9949..03c08d7ca 100644\n--- a/components/camel-ai/camel-a2a/src/main/docs/a2a-component.adoc\n+++ b/components/camel-ai/camel-a2a/src/main/docs/a2a-component.adoc\n@@ -36,7 +36,7 @@ Current Preview limitations:\n * Extended Agent Card / `GetExtendedAgentCard` is not implemented in this first release.\n * Consumers validate operation requests by default. Local-only examples in this page set `validateAuth=false`; network-exposed agents should use an agent card with `securitySchemes` and `securityRequirements` plus `apiKey`, `bearerToken`, or `oauthProfile` endpoint configuration.\n * The REST binding uses A2A custom-method paths containing colons, such as `/message:send`. These paths collide on Vert.x/platform-http. Use `protocolBinding=JSONRPC` with platform-http, or use `httpServerComponent=undertow` or `httpServerComponent=jetty` for REST custom-method routes.\n-* Real-time SSE streaming is verified with Vert.x/platform-http, Undertow, and Jetty.\n+* Real-time SSE streaming is verified with Undertow and Jetty. Vert.x/platform-http buffers `InputStream` responses and does not deliver events as they are emitted.\n * The default task store is in-memory and single-JVM. Register a custom `A2ATaskStore` for durable or cross-node task state.\n \n Maven users will need to add the following dependency to their `pom.xml`:\n@@ -51,7 +51,7 @@ Maven users will need to add the following dependency to their `pom.xml`:\n </dependency>\n ----\n \n-Consumer routes also need an HTTP server component at runtime. For example, add `camel-platform-http-vertx` for JSON-RPC agents (including SSE streaming), or `camel-undertow` / `camel-jetty` for REST custom-method routes. See <<Dependencies>> and <<HTTP Server Component Discovery>>.\n+Consumer routes also need an HTTP server component at runtime. For example, add `camel-platform-http-vertx` for JSON-RPC agents, or `camel-undertow` / `camel-jetty` for REST custom-method routes and real-time SSE streaming. See <<Dependencies>> and <<HTTP Server Component Discovery>>.\n \n == URI Format\n \n@@ -249,7 +249,7 @@ The A2A REST protocol uses Google's Custom Method convention with colons in path\n \n This means operation serving is not reliable with REST binding on Vert.x/platform-http. For example, `POST /message:stream` can be handled by the `SendMessage` route instead of the streaming route.\n \n-*Workaround:* Use `protocolBinding=JSONRPC` for agents running on Vert.x (the default `platform-http`). Alternatively, use `httpServerComponent=jetty` or `httpServerComponent=undertow`; their routers treat colons as literal characters.\n+*Workaround:* Use `protocolBinding=JSONRPC` for agents running on Vert.x (the default `platform-http`). Alternatively, use `httpServerComponent=jetty` or `httpServerComponent=undertow`; their routers treat colons as literal characters. For real-time SSE streaming, use Jetty or Undertow because Vert.x/platform-http buffers `InputStream` responses.\n \n === Authentication\n \n@@ -559,11 +559,19 @@ The consumer supports two SSE streaming patterns:\n * *`SendStreamingMessage`* \u2014 The stream starts with the submitted `Task`, followed by progress events from `A2AProgress` or `${a2a:emit()}`. When the route completes, the body is emitted as the final message.\n * *`SubscribeToTask`* \u2014 Clients subscribe via `POST /tasks/\\{id}:subscribe` to receive real-time SSE updates for an existing non-terminal task. The component uses an Event-to-Stream Bridge (`QueueStreamEmitter` + `SseQueueInputStream`) with heartbeat comments to keep the connection alive. The stream sends the current `Task` first and ends when the task later reaches a terminal state. Subscribing to an already-terminal task returns `UnsupportedOperationError`.\n \n-[NOTE]\n+[IMPORTANT]\n ====\n *HTTP Server Component for Streaming*\n \n-Real-time SSE streaming works with all tested HTTP server components: Vert.x/platform-http, Undertow, and Jetty.\n+For real-time SSE streaming, use `httpServerComponent=undertow` or `httpServerComponent=jetty`. The default Vert.x `platform-http` buffers `InputStream` responses due to an `AsyncInputStream` greedy-fill loop, causing all events to arrive at once.\n+\n+[source,yaml]\n+----\n+parameters:\n+  httpServerComponent: undertow\n+----\n+\n+This requires `camel-undertow` (or `camel-jetty`) on the classpath.\n ====\n \n SSE streaming parameters:\n@@ -1646,9 +1654,11 @@ The preview component does not auto-create arbitrary HTTP server components and\n \n Tested behavior in this Preview release:\n \n-* `camel-platform-http` / Vert.x - suitable for JSON-RPC agents (including SSE streaming) and serving the public agent card. REST custom-method paths containing colons can collide.\n+* `camel-platform-http` / Vert.x - suitable for JSON-RPC agents and serving the public agent card. REST custom-method paths containing colons can collide, and SSE `InputStream` responses are buffered.\n * `camel-undertow` and `camel-jetty` - suitable for REST custom-method paths and real-time SSE streaming.\n \n+For SSE streaming, specify `httpServerComponent=undertow` or `httpServerComponent=jetty` and add the matching component dependency.\n+\n == Data Format\n \n The `dataFormat` parameter controls what the exchange body contains, following the same convention as the xref:cxf-component.adoc[CXF component]. It applies to both consumer (inbound request) and producer (response) sides.\ndiff --git a/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/AsyncInputStream.java b/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/AsyncInputStream.java\nindex 17825ef41..1c1514ac4 100644\n--- a/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/AsyncInputStream.java\n+++ b/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/AsyncInputStream.java\n@@ -48,7 +48,6 @@ public class AsyncInputStream implements ReadStream<Buffer> {\n     private final Vertx vertx;\n     private final Context context;\n     private final InboundBuffer<Buffer> queue;\n-    private final boolean eagerFlush;\n     private long readPos;\n     private boolean closed;\n     private boolean readInProgress;\n@@ -57,14 +56,9 @@ public class AsyncInputStream implements ReadStream<Buffer> {\n     private Handler<Throwable> exceptionHandler;\n \n     public AsyncInputStream(Vertx vertx, Context context, InputStream inputStream) {\n-        this(vertx, context, inputStream, false);\n-    }\n-\n-    public AsyncInputStream(Vertx vertx, Context context, InputStream inputStream, boolean eagerFlush) {\n         this.vertx = vertx;\n         this.context = context;\n         this.channel = Channels.newChannel(inputStream);\n-        this.eagerFlush = eagerFlush;\n         this.queue = new InboundBuffer<>(context, 0);\n         queue.handler(buffer -> {\n             if (buffer.length() > 0) {\n@@ -225,27 +219,21 @@ public class AsyncInputStream implements ReadStream<Buffer> {\n                     if (result.succeeded()) {\n                         Integer bytesRead = result.result();\n                         if (bytesRead == -1) {\n-                            // EOF\n-                            context.runOnContext((v) -> {\n-                                buffer.flip();\n-                                int written = offset + buffer.limit();\n-                                writeBuff.setBytes(offset, buffer);\n-                                buffer.compact();\n-                                handler.handle(Future.succeededFuture(writeBuff.slice(0, written)));\n-                            });\n-                        } else if (!eagerFlush && buffer.hasRemaining()) {\n-                            // Read from the next offset to fill the buffer\n-                            context.runOnContext((v) -> {\n-                                doRead(writeBuff, offset, buffer, position + bytesRead, handler);\n-                            });\n+                            // EOF - emit empty buffer to signal end-of-stream; do not flip/setBytes\n+                            // to avoid re-reading stale bytes left in the buffer after a prior compact()\n+                            context.runOnContext((v) -> handler.handle(Future.succeededFuture(writeBuff)));\n+                        } else if (bytesRead == 0) {\n+                            // No bytes available yet (rare for blocking channels) - retry\n+                            context.runOnContext((v) -> doRead(writeBuff, offset, buffer, position, handler));\n                         } else {\n-                            // Emit what we have (always for eagerFlush, or when buffer is full)\n+                            // Emit the bytes that were just read without waiting to fill the buffer.\n+                            // Using clear() instead of compact() resets the buffer cleanly so stale\n+                            // bytes cannot leak into the next read cycle.\n                             context.runOnContext((v) -> {\n                                 buffer.flip();\n-                                int written = offset + buffer.limit();\n                                 writeBuff.setBytes(offset, buffer);\n-                                buffer.compact();\n-                                handler.handle(Future.succeededFuture(writeBuff.slice(0, written)));\n+                                buffer.clear();\n+                                handler.handle(Future.succeededFuture(writeBuff));\n                             });\n                         }\n                     } else {\ndiff --git a/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/VertxPlatformHttpSupport.java b/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/VertxPlatformHttpSupport.java\nindex b731f93fa..3c9eba486 100644\n--- a/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/VertxPlatformHttpSupport.java\n+++ b/components/camel-platform-http-vertx/src/main/java/org/apache/camel/component/platform/http/vertx/VertxPlatformHttpSupport.java\n@@ -237,12 +237,8 @@ public final class VertxPlatformHttpSupport {\n         Vertx vertx = ctx.vertx();\n         Context context = vertx.getOrCreateContext();\n \n-        // For SSE streams, flush each chunk immediately instead of greedily filling the buffer\n-        String contentType = response.headers().get(\"Content-Type\");\n-        boolean eagerFlush = contentType != null && contentType.startsWith(\"text/event-stream\");\n-\n         // Process the InputStream async to avoid blocking the Vert.x event loop on large responses\n-        AsyncInputStream asyncInputStream = new AsyncInputStream(vertx, context, is, eagerFlush);\n+        AsyncInputStream asyncInputStream = new AsyncInputStream(vertx, context, is);\n         asyncInputStream.exceptionHandler(promise::fail);\n         asyncInputStream.endHandler(event -> endHandler(promise, response, asyncInputStream));\n \n",
+            "diff_truncated": false
+          }
+        }
+      },
+      "seed_patch_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-03_seed.patch",
+      "settle_pre": {
+        "settled": true,
+        "msg": "settled at total_chunks=176376 last_indexed='2026-07-21T01:53:04Z' after 60.8s"
+      },
+      "gate_pre": {
+        "passed": false,
+        "wall_s": 31.54
+      },
+      "settle_between_arms": [
+        {
+          "after_arm": "vectr",
+          "settled": true,
+          "msg": "settled at total_chunks=176376 last_indexed='2026-07-21T01:53:04Z' after 179.4s"
+        }
+      ]
+    },
+    {
+      "id": "T2-04",
+      "seed_invalid": false,
+      "arms": {
+        "vectr": {
+          "id": "T2-04",
+          "arm": "vectr",
+          "category": "bugfix",
+          "subsystem_hint": null,
+          "prompt": "There is a bug in this codebase's langchain4j AI agent component. Converting a message body that is a wrapped file coming from a remote file system (for example a file consumed over FTP or SFTP, where the wrapped file's underlying file object is NOT a java.io.File) fails with an error stating the wrapped file must contain a java.io.File instance. Expected behavior: such remote wrapped-file bodies convert successfully to the agent body type \u2014 the converter should be able to determine the file's name and obtain its bytes without requiring a local java.io.File, and detect the MIME type from the resolved name. Fix the converter.",
+          "wall_s": 305.15,
+          "num_turns": 22,
+          "cost_usd": 0.7568258999999999,
+          "reported_duration_ms": 302887,
+          "is_error": false,
+          "error": null,
+          "tool_sequence": [
+            "ToolSearch",
+            "mcp__vectr__vectr_status",
+            "mcp__vectr__vectr_search",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Read",
+            "Bash",
+            "Bash",
+            "Read",
+            "Bash",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Edit",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "tool_call_counts": {
+            "ToolSearch": 1,
+            "mcp__vectr__vectr_status": 1,
+            "mcp__vectr__vectr_search": 1,
+            "Bash": 12,
+            "Read": 5,
+            "Edit": 1
+          },
+          "bash_native_counts": {
+            "Bash": 12,
+            "Grep": 0,
+            "Read": 5,
+            "Glob": 0
+          },
+          "search_calls": [
+            {
+              "n_results": 5,
+              "n_results_defaulted": false,
+              "query": "langchain4j AI agent message body converter wrapped file"
+            }
+          ],
+          "usage_input_tokens": 71114,
+          "usage_input_base_tokens": 1,
+          "usage_cache_creation_tokens": 710,
+          "usage_cache_read_tokens": 70403,
+          "usage_output_tokens": 309,
+          "usage_unparsed": false,
+          "used_vectr": true,
+          "used_bash_native": true,
+          "final_answer": "21/21 tests pass. Here's a summary of the fix:\n\n**Root cause:** `LangChain4jAgentConverter.toAiAgentBody(WrappedFile<?>, Exchange)` unconditionally cast `wrappedFile.getFile()` to `java.io.File` and threw if it wasn't one. For remote file systems (FTP, SFTP, etc.), `getFile()` returns a protocol-specific handle (e.g. a `String` remote path) \u2014 never a `java.io.File`. The actual file bytes come from `wrappedFile.getBody()`.\n\n**Fix (lines 99\u2013133 of `LangChain4jAgentConverter.java`):**\n- If `fileObj instanceof File` \u2192 existing local-file path (unchanged).\n- Otherwise \u2192 remote file path: read bytes from `wrappedFile.getBody()` (handling both `byte[]` and `InputStream` bodies), then call the existing `detectMimeTypeFromHeaders(exchange)` which already resolves MIME from `MEDIA_TYPE`, `FILE_CONTENT_TYPE`, `FILE_NAME` (extension sniffing), and cloud storage headers. If no MIME can be determined, it throws \u2014 which Camel wraps in `TypeConversionException`, exactly what the \"no headers\" test expects.",
+          "final_answer_tokens": 243,
+          "timed_out": false,
+          "transcript_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-04_vectr_20260722T000646.jsonl",
+          "gate_pre": {
+            "passed": false,
+            "wall_s": 15.13
+          },
+          "gate_post": {
+            "passed": true,
+            "wall_s": 11.15
+          },
+          "tree_changes": {
+            "status_porcelain": " M components/camel-ai/camel-langchain4j-agent/src/main/java/org/apache/camel/component/langchain4j/agent/LangChain4jAgentConverter.java\n?? .vectrignore\n",
+            "diff": "diff --git a/components/camel-ai/camel-langchain4j-agent/src/main/java/org/apache/camel/component/langchain4j/agent/LangChain4jAgentConverter.java b/components/camel-ai/camel-langchain4j-agent/src/main/java/org/apache/camel/component/langchain4j/agent/LangChain4jAgentConverter.java\nindex a266e547a..dbc0471a1 100644\n--- a/components/camel-ai/camel-langchain4j-agent/src/main/java/org/apache/camel/component/langchain4j/agent/LangChain4jAgentConverter.java\n+++ b/components/camel-ai/camel-langchain4j-agent/src/main/java/org/apache/camel/component/langchain4j/agent/LangChain4jAgentConverter.java\n@@ -36,7 +36,6 @@ import dev.langchain4j.data.video.Video;\n import org.apache.camel.Converter;\n import org.apache.camel.Exchange;\n import org.apache.camel.Message;\n-import org.apache.camel.NoTypeConversionAvailableException;\n import org.apache.camel.WrappedFile;\n import org.apache.camel.component.langchain4j.agent.api.AiAgentBody;\n import org.slf4j.Logger;\n@@ -97,50 +96,40 @@ public final class LangChain4jAgentConverter {\n      */\n     @Converter\n     public static AiAgentBody<?> toAiAgentBody(WrappedFile<?> wrappedFile, Exchange exchange) {\n-        String fileName = resolveFileName(wrappedFile, exchange);\n-        byte[] fileData = resolveFileData(wrappedFile, exchange);\n-        String mimeType = detectMimeType(fileName, exchange);\n-        Content content = createContent(fileData, mimeType);\n-        return buildAiAgentBody(exchange, content, \"\");\n-    }\n-\n-    private static String resolveFileName(WrappedFile<?> wrappedFile, Exchange exchange) {\n-        String headerName = exchange.getMessage().getHeader(Exchange.FILE_NAME, String.class);\n-        if (headerName != null) {\n-            return headerName;\n-        }\n         Object fileObj = wrappedFile.getFile();\n-        if (fileObj instanceof File file) {\n-            return file.getName();\n+        if (fileObj == null) {\n+            throw new IllegalArgumentException(\"WrappedFile contains null file\");\n         }\n-        Object body = wrappedFile.getBody();\n-        if (body instanceof File file) {\n-            return file.getName();\n-        }\n-        return null;\n-    }\n \n-    private static byte[] resolveFileData(WrappedFile<?> wrappedFile, Exchange exchange) {\n-        Object fileObj = wrappedFile.getFile();\n         if (fileObj instanceof File file) {\n-            return readFileBytes(file);\n+            // Local file (camel-file component)\n+            String mimeType = detectMimeType(file, exchange);\n+            byte[] fileData = readFileBytes(file);\n+            Content content = createContent(fileData, mimeType);\n+            return buildAiAgentBody(exchange, content, \"\");\n         }\n+\n+        // Remote file (FTP, SFTP, etc.) \u2014 the underlying handle is not a java.io.File.\n+        // Read bytes from the WrappedFile body, then detect the MIME type via headers.\n         Object body = wrappedFile.getBody();\n-        if (body instanceof File file) {\n-            return readFileBytes(file);\n-        }\n+        byte[] data;\n         if (body instanceof byte[] bytes) {\n-            return bytes;\n-        }\n-        if (body != null) {\n+            data = bytes;\n+        } else if (body instanceof InputStream is) {\n             try {\n-                return exchange.getContext().getTypeConverter().mandatoryConvertTo(byte[].class, exchange, body);\n-            } catch (NoTypeConversionAvailableException e) {\n-                throw new IllegalArgumentException(\n-                        \"WrappedFile body could not be converted to byte[]: \" + body.getClass().getName(), e);\n+                data = is.readAllBytes();\n+            } catch (IOException e) {\n+                throw new IllegalArgumentException(\"Failed to read WrappedFile input stream\", e);\n             }\n+        } else {\n+            throw new IllegalArgumentException(\n+                    \"Cannot read body from remote WrappedFile: expected byte[] or InputStream, got: \"\n+                                               + (body == null ? \"null\" : body.getClass().getName()));\n         }\n-        throw new IllegalArgumentException(\"WrappedFile body is null\");\n+\n+        String mimeType = detectMimeTypeFromHeaders(exchange);\n+        Content content = createContent(data, mimeType);\n+        return buildAiAgentBody(exchange, content, \"\");\n     }\n \n     /**\n@@ -267,7 +256,7 @@ public final class LangChain4jAgentConverter {\n      * <li>Auto-detection from file extension</li>\n      * </ol>\n      */\n-    private static String detectMimeType(String fileName, Exchange exchange) {\n+    private static String detectMimeType(File file, Exchange exchange) {\n         // Check agent-specific header first (highest priority)\n         String mediaType = exchange.getMessage().getHeader(MEDIA_TYPE, String.class);\n         if (mediaType != null) {\n@@ -280,14 +269,8 @@ public final class LangChain4jAgentConverter {\n             return fileContentType;\n         }\n \n-        if (fileName == null) {\n-            throw new IllegalArgumentException(\n-                    \"Cannot determine MIME type: no file name available. \"\n-                                               + \"Set the CamelLangChain4jAgentMediaType, CamelFileContentType, or CamelFileName header.\");\n-        }\n-\n         // Auto-detect from file extension\n-        return detectMimeTypeFromExtension(fileName);\n+        return detectMimeTypeFromExtension(file.getName());\n     }\n \n     /**\n",
+            "diff_truncated": false
+          }
+        },
+        "bash": {
+          "id": "T2-04",
+          "arm": "bash",
+          "category": "bugfix",
+          "subsystem_hint": null,
+          "prompt": "There is a bug in this codebase's langchain4j AI agent component. Converting a message body that is a wrapped file coming from a remote file system (for example a file consumed over FTP or SFTP, where the wrapped file's underlying file object is NOT a java.io.File) fails with an error stating the wrapped file must contain a java.io.File instance. Expected behavior: such remote wrapped-file bodies convert successfully to the agent body type \u2014 the converter should be able to determine the file's name and obtain its bytes without requiring a local java.io.File, and detect the MIME type from the resolved name. Fix the converter.",
+          "wall_s": 133.52,
+          "num_turns": 13,
+          "cost_usd": 0.3810276,
+          "reported_duration_ms": 131286,
+          "is_error": false,
+          "error": null,
+          "tool_sequence": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Read",
+            "Bash",
+            "Bash",
+            "Edit",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "tool_call_counts": {
+            "Bash": 9,
+            "Read": 2,
+            "Edit": 1
+          },
+          "bash_native_counts": {
+            "Bash": 9,
+            "Grep": 0,
+            "Read": 2,
+            "Glob": 0
+          },
+          "search_calls": [],
+          "usage_input_tokens": 52106,
+          "usage_input_base_tokens": 1,
+          "usage_cache_creation_tokens": 697,
+          "usage_cache_read_tokens": 51408,
+          "usage_output_tokens": 247,
+          "usage_unparsed": false,
+          "used_vectr": false,
+          "used_bash_native": true,
+          "final_answer": "All 21 tests pass. Here's what the fix does:\n\n**Root cause:** `toAiAgentBody(WrappedFile<?>, Exchange)` assumed the wrapped file's underlying handle was always a `java.io.File` and threw an `IllegalArgumentException` for any other type. Remote file system components (FTP, SFTP) wrap non-`File` handles (e.g., `String` path references) and buffer content into `wrappedFile.getBody()`.\n\n**Fix:** Instead of rejecting non-`File` handles, the converter now:\n1. **Local file (`java.io.File`):** retains the existing path \u2014 reads bytes from the file, detects MIME from name/headers.\n2. **Remote file (any other handle type):** reads bytes from `wrappedFile.getBody()` (supporting both `byte[]` and `InputStream`), then delegates MIME detection to `detectMimeTypeFromHeaders()` \u2014 which already has an `Exchange.FILE_NAME` extension fallback that FTP/SFTP components populate.",
+          "final_answer_tokens": 202,
+          "timed_out": false,
+          "transcript_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-04_bash_20260722T001340.jsonl",
+          "gate_pre": {
+            "passed": false,
+            "wall_s": 15.13
+          },
+          "gate_post": {
+            "passed": true,
+            "wall_s": 9.3
+          },
+          "tree_changes": {
+            "status_porcelain": " M components/camel-ai/camel-langchain4j-agent/src/main/java/org/apache/camel/component/langchain4j/agent/LangChain4jAgentConverter.java\n?? .vectrignore\n",
+            "diff": "diff --git a/components/camel-ai/camel-langchain4j-agent/src/main/java/org/apache/camel/component/langchain4j/agent/LangChain4jAgentConverter.java b/components/camel-ai/camel-langchain4j-agent/src/main/java/org/apache/camel/component/langchain4j/agent/LangChain4jAgentConverter.java\nindex a266e547a..c2fb3b531 100644\n--- a/components/camel-ai/camel-langchain4j-agent/src/main/java/org/apache/camel/component/langchain4j/agent/LangChain4jAgentConverter.java\n+++ b/components/camel-ai/camel-langchain4j-agent/src/main/java/org/apache/camel/component/langchain4j/agent/LangChain4jAgentConverter.java\n@@ -36,7 +36,6 @@ import dev.langchain4j.data.video.Video;\n import org.apache.camel.Converter;\n import org.apache.camel.Exchange;\n import org.apache.camel.Message;\n-import org.apache.camel.NoTypeConversionAvailableException;\n import org.apache.camel.WrappedFile;\n import org.apache.camel.component.langchain4j.agent.api.AiAgentBody;\n import org.slf4j.Logger;\n@@ -97,50 +96,43 @@ public final class LangChain4jAgentConverter {\n      */\n     @Converter\n     public static AiAgentBody<?> toAiAgentBody(WrappedFile<?> wrappedFile, Exchange exchange) {\n-        String fileName = resolveFileName(wrappedFile, exchange);\n-        byte[] fileData = resolveFileData(wrappedFile, exchange);\n-        String mimeType = detectMimeType(fileName, exchange);\n-        Content content = createContent(fileData, mimeType);\n-        return buildAiAgentBody(exchange, content, \"\");\n-    }\n-\n-    private static String resolveFileName(WrappedFile<?> wrappedFile, Exchange exchange) {\n-        String headerName = exchange.getMessage().getHeader(Exchange.FILE_NAME, String.class);\n-        if (headerName != null) {\n-            return headerName;\n-        }\n         Object fileObj = wrappedFile.getFile();\n-        if (fileObj instanceof File file) {\n-            return file.getName();\n-        }\n-        Object body = wrappedFile.getBody();\n-        if (body instanceof File file) {\n-            return file.getName();\n+        if (fileObj == null) {\n+            throw new IllegalArgumentException(\"WrappedFile contains null file\");\n         }\n-        return null;\n-    }\n \n-    private static byte[] resolveFileData(WrappedFile<?> wrappedFile, Exchange exchange) {\n-        Object fileObj = wrappedFile.getFile();\n-        if (fileObj instanceof File file) {\n-            return readFileBytes(file);\n+        if (fileObj instanceof File) {\n+            File file = (File) fileObj;\n+            String mimeType = detectMimeType(file, exchange);\n+            byte[] fileData = readFileBytes(file);\n+            Content content = createContent(fileData, mimeType);\n+            return buildAiAgentBody(exchange, content, \"\");\n         }\n+\n+        // Remote file (FTP, SFTP, etc.): the underlying handle is not a java.io.File.\n+        // Read the content from the body that the transport component has already buffered.\n         Object body = wrappedFile.getBody();\n-        if (body instanceof File file) {\n-            return readFileBytes(file);\n-        }\n-        if (body instanceof byte[] bytes) {\n-            return bytes;\n+        if (body == null) {\n+            throw new IllegalArgumentException(\n+                    \"WrappedFile has no body and does not contain a java.io.File; cannot read content\");\n         }\n-        if (body != null) {\n+\n+        byte[] data;\n+        if (body instanceof byte[]) {\n+            data = (byte[]) body;\n+        } else if (body instanceof InputStream) {\n             try {\n-                return exchange.getContext().getTypeConverter().mandatoryConvertTo(byte[].class, exchange, body);\n-            } catch (NoTypeConversionAvailableException e) {\n-                throw new IllegalArgumentException(\n-                        \"WrappedFile body could not be converted to byte[]: \" + body.getClass().getName(), e);\n+                data = ((InputStream) body).readAllBytes();\n+            } catch (IOException e) {\n+                throw new IllegalArgumentException(\"Failed to read WrappedFile body stream\", e);\n             }\n+        } else {\n+            throw new IllegalArgumentException(\"Unsupported WrappedFile body type: \" + body.getClass().getName());\n         }\n-        throw new IllegalArgumentException(\"WrappedFile body is null\");\n+\n+        String mimeType = detectMimeTypeFromHeaders(exchange);\n+        Content content = createContent(data, mimeType);\n+        return buildAiAgentBody(exchange, content, \"\");\n     }\n \n     /**\n@@ -267,7 +259,7 @@ public final class LangChain4jAgentConverter {\n      * <li>Auto-detection from file extension</li>\n      * </ol>\n      */\n-    private static String detectMimeType(String fileName, Exchange exchange) {\n+    private static String detectMimeType(File file, Exchange exchange) {\n         // Check agent-specific header first (highest priority)\n         String mediaType = exchange.getMessage().getHeader(MEDIA_TYPE, String.class);\n         if (mediaType != null) {\n@@ -280,14 +272,8 @@ public final class LangChain4jAgentConverter {\n             return fileContentType;\n         }\n \n-        if (fileName == null) {\n-            throw new IllegalArgumentException(\n-                    \"Cannot determine MIME type: no file name available. \"\n-                                               + \"Set the CamelLangChain4jAgentMediaType, CamelFileContentType, or CamelFileName header.\");\n-        }\n-\n         // Auto-detect from file extension\n-        return detectMimeTypeFromExtension(fileName);\n+        return detectMimeTypeFromExtension(file.getName());\n     }\n \n     /**\n",
+            "diff_truncated": false
+          }
+        }
+      },
+      "seed_patch_path": "results/vectr-vs-bash/camel/6b422df/t2/T2-04_seed.patch",
+      "settle_pre": {
+        "settled": true,
+        "msg": "settled at total_chunks=176374 last_indexed='2026-07-21T01:53:04Z' after 146.5s"
+      },
+      "gate_pre": {
+        "passed": false,
+        "wall_s": 15.13
+      },
+      "settle_between_arms": [
+        {
+          "after_arm": "vectr",
+          "settled": true,
+          "msg": "settled at total_chunks=176374 last_indexed='2026-07-21T01:53:04Z' after 266.8s"
+        }
+      ]
+    }
+  ],
+  "tasks_seed_invalid": 0,
+  "tasks_errored": 0,
+  "tasks_scored": 4
+}

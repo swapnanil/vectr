@@ -1,0 +1,67 @@
+{
+  "trajectory_id": "bench_box_only-none-none-s0",
+  "scenario": "bench_box_only",
+  "arm": "none",
+  "note_variant": "none",
+  "seed": 0,
+  "n_legs": 4,
+  "db_dir": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-f97ec0b421477436/db",
+  "created_utc": "20260803T070524Z",
+  "updated_utc": "20260803T071027Z",
+  "leg1_id": "7694b958951f349164b43e25fe8ab6b78cb0038dbdf57250791f11f02b5fac0a",
+  "leg1_source": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/run-acab115c181b8ee9",
+  "planted_note_id": null,
+  "planted_anchor": null,
+  "legs": [
+    {
+      "k": 1,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/run-acab115c181b8ee9/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/run-acab115c181b8ee9/workspace.tar",
+      "end_state_manifest_sha256": "7cbe94af610da3df8272ad20c1f55a2138a187a62b437090c606a13a3ab0657d",
+      "usd": 0.199962,
+      "valid": true,
+      "started_utc": null,
+      "finished_utc": null
+    },
+    {
+      "k": 2,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-f97ec0b421477436/legs/2/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-f97ec0b421477436/legs/2/end-state.tar",
+      "end_state_manifest_sha256": "c26bbb6009e6455be2af6626efc2d65f808d321dccf7e6024beff3046a1a341f",
+      "usd": 0.2496411,
+      "valid": true,
+      "started_utc": "20260803T070621Z",
+      "finished_utc": "20260803T070741Z"
+    },
+    {
+      "k": 3,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-f97ec0b421477436/legs/3/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-f97ec0b421477436/legs/3/end-state.tar",
+      "end_state_manifest_sha256": "883f71526e710f3aa47fb8fe8e07dba365a7fb81c820801a665692f22d233dd8",
+      "usd": 0.1914198,
+      "valid": true,
+      "started_utc": "20260803T070741Z",
+      "finished_utc": "20260803T070840Z"
+    },
+    {
+      "k": 4,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-f97ec0b421477436/legs/4/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-f97ec0b421477436/legs/4/end-state.tar",
+      "end_state_manifest_sha256": "6b019e6a7441a443ada4be4c0b20b0228ff7f3005286ebbff4e7a40fc41a5ced",
+      "usd": 0.3018513,
+      "valid": true,
+      "started_utc": "20260803T070840Z",
+      "finished_utc": "20260803T071027Z"
+    }
+  ],
+  "trajectory_valid_through": 4,
+  "spend_usd": 0.94,
+  "tier": "T5",
+  "hook_attestation": null,
+  "notes": null,
+  "run_dir": "run-f97ec0b421477436"
+}

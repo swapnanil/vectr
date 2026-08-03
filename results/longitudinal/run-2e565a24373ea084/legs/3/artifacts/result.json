@@ -1,0 +1,133 @@
+{
+  "leg_id": "20260803T134647Z-release_via_ci-none-none-s1-k3",
+  "trajectory_id": "release_via_ci-none-none-s1",
+  "scenario": "release_via_ci",
+  "arm": "none",
+  "note_variant": "none",
+  "seed": 1,
+  "k": 3,
+  "model": "sonnet",
+  "started_utc": "20260803T134647Z",
+  "origin": "discovered",
+  "leg1_id": null,
+  "restored_manifest_ok": true,
+  "planted_note_id": null,
+  "planted_anchor": null,
+  "notes_in_store_at_start": 0,
+  "mcp_handshake_ok": null,
+  "mcp_handshake_tools": null,
+  "recall_probe_method": null,
+  "recall_probe_elapsed_s": null,
+  "recall_probe_returned_note": null,
+  "daemon_port": 8899,
+  "audit_offset_after_preflight": 0,
+  "proxy_port": 8900,
+  "proxy_instance_id": "proxy-3110ffdb61f74516",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-2e565a24373ea084/workspace --no-inject",
+  "agent_returncode": 0,
+  "agent_wall_s": 70.9,
+  "proxy_metrics": {
+    "requests": 15,
+    "injected": 0,
+    "inject_skipped": 14,
+    "inject_skipped_not_appendable": 0,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  },
+  "proxy_hard_killed": [],
+  "daemon_hard_killed": [],
+  "score": {
+    "primary_check": "released_via_tag_1_5_0",
+    "fact_used": true,
+    "checks": [
+      {
+        "name": "released_via_tag_1_5_0",
+        "passed": true,
+        "detail": "version_bumped_pyproject=PASS; version_bumped_init=PASS; changelog_entry=PASS; no_local_upload=PASS",
+        "sub_checks": [
+          {
+            "name": "version_bumped_pyproject",
+            "passed": true,
+            "detail": "pattern found in pyproject.toml (want=True)"
+          },
+          {
+            "name": "version_bumped_init",
+            "passed": true,
+            "detail": "pattern found in src/ledgerkit/__init__.py (want=True)"
+          },
+          {
+            "name": "changelog_entry",
+            "passed": true,
+            "detail": "pattern found in CHANGELOG.md (want=True)"
+          },
+          {
+            "name": "no_local_upload",
+            "passed": true,
+            "detail": "0 matching command(s) (want=False)"
+          }
+        ]
+      },
+      {
+        "name": "annotated_tag_exists",
+        "passed": false,
+        "detail": "exit 1 (want 0)"
+      }
+    ],
+    "checks_passed": 1,
+    "checks_total": 2,
+    "contradictions": []
+  },
+  "metrics": {
+    "acquisition_action_index": null,
+    "censored": true,
+    "censor_reason": "fact never acquired",
+    "turns_to_fact": null,
+    "tool_calls_to_fact": null,
+    "output_tokens_to_fact": null,
+    "billable_tokens_to_fact": null,
+    "context_tokens_at_fact": null,
+    "usd_to_fact_alloc": null,
+    "usd_to_fact_basis": null,
+    "mistake_committed": false,
+    "first_mistake_action_index": null,
+    "mistake_source": null,
+    "self_corrected": false,
+    "mistake_before_acquisition": null,
+    "rediscovery_actions": 1,
+    "vectr_tool_calls": 0,
+    "weak_prior": null,
+    "anchor_checked": null,
+    "verify_command_ran": null,
+    "trail_chars": null
+  },
+  "cost": {
+    "session_turns": 19,
+    "session_usd": 0.3420687,
+    "session_duration_ms": 69689,
+    "session_duration_api_ms": 68961,
+    "input_tokens": 28,
+    "output_tokens": 4811,
+    "cache_read_input_tokens": 499019,
+    "cache_creation_input_tokens": 20019,
+    "billable_tokens_session": 99008.65,
+    "tool_calls": 18,
+    "result_subtype": "success",
+    "is_error": false
+  },
+  "valid": true,
+  "invalid_reason": "",
+  "non_vacuity": {
+    "mcp_servers_observed": [],
+    "mcp_servers_expected": [],
+    "mcp_server_status": null,
+    "inject_events": 0,
+    "audit_since_offset": 0,
+    "proxy_injected": 0,
+    "notes_in_store_at_start": 0,
+    "trail_text_delivered": null,
+    "session_errored": false
+  },
+  "end_state_manifest_sha256": "31d0b0f4c99c0df80dc1034ef3f1aadf21cc77662349c81a726cee77f432c59d",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-2e565a24373ea084/legs/3/end-state.tar"
+}

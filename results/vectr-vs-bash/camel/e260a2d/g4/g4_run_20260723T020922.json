@@ -1,0 +1,207 @@
+{
+  "corpus": "camel",
+  "task_id": "T2-02",
+  "vectr_sha": "e260a2d",
+  "port": 8800,
+  "model": "sonnet",
+  "max_turns": 40,
+  "sessions_requested": [
+    "M1",
+    "C1",
+    "M2",
+    "C2",
+    "M3",
+    "C3"
+  ],
+  "results": [
+    {
+      "label": "M1",
+      "arm": "memory",
+      "seed_invalid": false,
+      "seed_patch_path": "results/vectr-vs-bash/camel/e260a2d/g4/M1_seed.patch",
+      "settle_pre": {
+        "settled": true,
+        "msg": "settled at total_chunks=175650 last_indexed='2026-07-22T20:12:39Z' after 30.9s"
+      },
+      "gate_pre": {
+        "passed": false,
+        "wall_s": 35.43
+      },
+      "notes_count_after_clear": 0,
+      "notes_count_after_seed": 1,
+      "episodes_count_before": 0,
+      "arcs_pending_distill_before": 0,
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/M1_20260723T022157.jsonl",
+      "timed_out": false,
+      "is_error": false,
+      "episodes_count_after": 0,
+      "arcs_pending_distill_after": 0,
+      "gate_post": {
+        "passed": true,
+        "wall_s": 15.24
+      },
+      "tree_changes": {
+        "status_porcelain": "?? .vectrignore\n",
+        "diff": "",
+        "diff_truncated": false
+      }
+    },
+    {
+      "label": "C1",
+      "arm": "control",
+      "seed_invalid": false,
+      "seed_patch_path": "results/vectr-vs-bash/camel/e260a2d/g4/C1_seed.patch",
+      "settle_pre": {
+        "settled": true,
+        "msg": "settled at total_chunks=175718 last_indexed='2026-07-22T20:12:39Z' after 34.0s"
+      },
+      "gate_pre": {
+        "passed": false,
+        "wall_s": 27.02
+      },
+      "notes_count_after_clear": 0,
+      "episodes_count_before": 0,
+      "arcs_pending_distill_before": 0,
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/C1_20260723T022713.jsonl",
+      "timed_out": false,
+      "is_error": false,
+      "episodes_count_after": 0,
+      "arcs_pending_distill_after": 0,
+      "gate_post": {
+        "passed": true,
+        "wall_s": 13.01
+      },
+      "tree_changes": {
+        "status_porcelain": " M core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n?? .vectrignore\n",
+        "diff": "diff --git a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\nindex 535dce4fb..1a875d5f3 100644\n--- a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n+++ b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n@@ -48,19 +48,19 @@ public class LogicalExpression extends BaseSimpleNode {\n     }\n \n     public boolean acceptLeftNode(SimpleNode lef) {\n-        if (!(lef instanceof BinaryExpression) && !(lef instanceof LogicalExpression)) {\n-            return false;\n+        if (lef instanceof BinaryExpression || lef instanceof LogicalExpression) {\n+            this.left = lef;\n+            return true;\n         }\n-        this.left = lef;\n-        return true;\n+        return false;\n     }\n \n     public boolean acceptRightNode(SimpleNode right) {\n-        if (!(right instanceof BinaryExpression) && !(right instanceof LogicalExpression)) {\n-            return false;\n+        if (right instanceof BinaryExpression || right instanceof LogicalExpression) {\n+            this.right = right;\n+            return true;\n         }\n-        this.right = right;\n-        return true;\n+        return false;\n     }\n \n     public LogicalOperatorType getOperator() {\n",
+        "diff_truncated": false
+      }
+    },
+    {
+      "label": "M2",
+      "arm": "memory",
+      "seed_invalid": false,
+      "seed_patch_path": "results/vectr-vs-bash/camel/e260a2d/g4/M2_seed.patch",
+      "settle_pre": {
+        "settled": true,
+        "msg": "settled at total_chunks=175729 last_indexed='2026-07-22T20:12:39Z' after 45.8s"
+      },
+      "gate_pre": {
+        "passed": false,
+        "wall_s": 30.93
+      },
+      "notes_count_after_clear": 0,
+      "notes_count_after_seed": 1,
+      "episodes_count_before": 0,
+      "arcs_pending_distill_before": 0,
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/M2_20260723T023445.jsonl",
+      "timed_out": false,
+      "is_error": false,
+      "episodes_count_after": 0,
+      "arcs_pending_distill_after": 0,
+      "gate_post": {
+        "passed": true,
+        "wall_s": 14.38
+      },
+      "tree_changes": {
+        "status_porcelain": " M core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n?? .vectrignore\n",
+        "diff": "diff --git a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\nindex 535dce4fb..1a875d5f3 100644\n--- a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n+++ b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n@@ -48,19 +48,19 @@ public class LogicalExpression extends BaseSimpleNode {\n     }\n \n     public boolean acceptLeftNode(SimpleNode lef) {\n-        if (!(lef instanceof BinaryExpression) && !(lef instanceof LogicalExpression)) {\n-            return false;\n+        if (lef instanceof BinaryExpression || lef instanceof LogicalExpression) {\n+            this.left = lef;\n+            return true;\n         }\n-        this.left = lef;\n-        return true;\n+        return false;\n     }\n \n     public boolean acceptRightNode(SimpleNode right) {\n-        if (!(right instanceof BinaryExpression) && !(right instanceof LogicalExpression)) {\n-            return false;\n+        if (right instanceof BinaryExpression || right instanceof LogicalExpression) {\n+            this.right = right;\n+            return true;\n         }\n-        this.right = right;\n-        return true;\n+        return false;\n     }\n \n     public LogicalOperatorType getOperator() {\n",
+        "diff_truncated": false
+      }
+    },
+    {
+      "label": "C2",
+      "arm": "control",
+      "seed_invalid": false,
+      "seed_patch_path": "results/vectr-vs-bash/camel/e260a2d/g4/C2_seed.patch",
+      "settle_pre": {
+        "settled": true,
+        "msg": "settled at total_chunks=175740 last_indexed='2026-07-22T20:12:39Z' after 110.4s"
+      },
+      "gate_pre": {
+        "passed": false,
+        "wall_s": 33.68
+      },
+      "notes_count_after_clear": 0,
+      "episodes_count_before": 0,
+      "arcs_pending_distill_before": 0,
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/C2_20260723T024855.jsonl",
+      "timed_out": false,
+      "is_error": false,
+      "episodes_count_after": 0,
+      "arcs_pending_distill_after": 0,
+      "gate_post": {
+        "passed": true,
+        "wall_s": 12.58
+      },
+      "tree_changes": {
+        "status_porcelain": " M core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n?? .vectrignore\n",
+        "diff": "diff --git a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\nindex 535dce4fb..1a875d5f3 100644\n--- a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n+++ b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n@@ -48,19 +48,19 @@ public class LogicalExpression extends BaseSimpleNode {\n     }\n \n     public boolean acceptLeftNode(SimpleNode lef) {\n-        if (!(lef instanceof BinaryExpression) && !(lef instanceof LogicalExpression)) {\n-            return false;\n+        if (lef instanceof BinaryExpression || lef instanceof LogicalExpression) {\n+            this.left = lef;\n+            return true;\n         }\n-        this.left = lef;\n-        return true;\n+        return false;\n     }\n \n     public boolean acceptRightNode(SimpleNode right) {\n-        if (!(right instanceof BinaryExpression) && !(right instanceof LogicalExpression)) {\n-            return false;\n+        if (right instanceof BinaryExpression || right instanceof LogicalExpression) {\n+            this.right = right;\n+            return true;\n         }\n-        this.right = right;\n-        return true;\n+        return false;\n     }\n \n     public LogicalOperatorType getOperator() {\n",
+        "diff_truncated": false
+      }
+    },
+    {
+      "label": "M3",
+      "arm": "memory",
+      "seed_invalid": false,
+      "seed_patch_path": "results/vectr-vs-bash/camel/e260a2d/g4/M3_seed.patch",
+      "settle_pre": {
+        "settled": true,
+        "msg": "settled at total_chunks=175721 last_indexed='2026-07-22T20:12:39Z' after 17.0s"
+      },
+      "gate_pre": {
+        "passed": false,
+        "wall_s": 34.39
+      },
+      "notes_count_after_clear": 0,
+      "notes_count_after_seed": 1,
+      "episodes_count_before": 0,
+      "arcs_pending_distill_before": 0,
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/M3_20260723T025846.jsonl",
+      "timed_out": false,
+      "is_error": false,
+      "episodes_count_after": 0,
+      "arcs_pending_distill_after": 0,
+      "gate_post": {
+        "passed": true,
+        "wall_s": 15.88
+      },
+      "tree_changes": {
+        "status_porcelain": "?? .vectrignore\n",
+        "diff": "",
+        "diff_truncated": false
+      }
+    },
+    {
+      "label": "C3",
+      "arm": "control",
+      "seed_invalid": false,
+      "seed_patch_path": "results/vectr-vs-bash/camel/e260a2d/g4/C3_seed.patch",
+      "settle_pre": {
+        "settled": true,
+        "msg": "settled at total_chunks=175722 last_indexed='2026-07-22T20:12:39Z' after 10.5s"
+      },
+      "gate_pre": {
+        "passed": false,
+        "wall_s": 42.28
+      },
+      "notes_count_after_clear": 0,
+      "episodes_count_before": 0,
+      "arcs_pending_distill_before": 0,
+      "transcript_path": "results/vectr-vs-bash/camel/e260a2d/g4/C3_20260723T030747.jsonl",
+      "timed_out": false,
+      "is_error": false,
+      "episodes_count_after": 0,
+      "arcs_pending_distill_after": 0,
+      "gate_post": {
+        "passed": true,
+        "wall_s": 14.94
+      },
+      "tree_changes": {
+        "status_porcelain": " M core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n?? .vectrignore\n",
+        "diff": "diff --git a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\nindex 535dce4fb..1a875d5f3 100644\n--- a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n+++ b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java\n@@ -48,19 +48,19 @@ public class LogicalExpression extends BaseSimpleNode {\n     }\n \n     public boolean acceptLeftNode(SimpleNode lef) {\n-        if (!(lef instanceof BinaryExpression) && !(lef instanceof LogicalExpression)) {\n-            return false;\n+        if (lef instanceof BinaryExpression || lef instanceof LogicalExpression) {\n+            this.left = lef;\n+            return true;\n         }\n-        this.left = lef;\n-        return true;\n+        return false;\n     }\n \n     public boolean acceptRightNode(SimpleNode right) {\n-        if (!(right instanceof BinaryExpression) && !(right instanceof LogicalExpression)) {\n-            return false;\n+        if (right instanceof BinaryExpression || right instanceof LogicalExpression) {\n+            this.right = right;\n+            return true;\n         }\n-        this.right = right;\n-        return true;\n+        return false;\n     }\n \n     public LogicalOperatorType getOperator() {\n",
+        "diff_truncated": false
+      }
+    }
+  ]
+}

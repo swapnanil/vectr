@@ -1,0 +1,10 @@
+{
+  ".github/workflows/ci.yml": "e86ee7b673b62f7a5c7d79601ef7280d9f72516e290456aa02d57c475eb91a9c",
+  ".github/workflows/release.yml": "a6d54309a00f902ac1d36ac449a0fb420992f3e3c513eb15596697d402987ff5",
+  "CHANGELOG.md": "81db9daf64ebbfd0552048c32f3748c6858f775bcba5c83b649da8877bf63bc7",
+  "CLAUDE.md": "8ec433764abf45cfe25512597f56d090dfeb76b552b29a5d1ace70fe76b7d690",
+  "pyproject.toml": "67ac06fb7235cd6c51ec5386c8c9a1a5928bc3dcbfa5d0398c637b8c93eb1976",
+  "scripts/preflight.sh": "7729c32f33c5fd02cff40fa81e336537c282de6273cb1b09b00b040982293a05",
+  "src/ledgerkit/__init__.py": "4d5aeb0796e5af938386e24792e808e0841a49c8cefe91050ca97c71fbd630e8",
+  "src/ledgerkit/rates.py": "dccd26f67804cf6eca9914ea4dce112118e4806797ebda0f69e339f1a4f29e02"
+}

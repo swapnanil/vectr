@@ -1,0 +1,42 @@
+2026-08-03T19:18:03Z REMEMBER workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace note_id=1 priority=high kind=gotcha author_id=longitudinal-harness code_hash= tags= chars=397 provenance=agent scope=repo
+2026-08-03T19:18:03Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=1.4.0 shipped the bad default flagged by the FIXME in src/ledgerkit/rates.py. Fix it and release 1.4.1. notes_returned=0 method=sql
+2026-08-03T19:18:03Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:18:03Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=pyproject.toml notes_returned=1 method=path
+2026-08-03T19:18:03Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=1.4.0 shipped the bad default flagged by the FIXME in src/ledgerkit/rates.py. Fix it and release 1.4.1. notes_returned=0 method=sql
+2026-08-03T19:18:03Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace channel=proxy items=1 anchors=note:1 chars=736 states=active
+2026-08-03T19:18:11Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:18:11Z PROACTIVE_RETRIEVE workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace channel=proxy items=1 anchors=note:1 chars=711 states=active token=dfa97ccce37ec83e
+2026-08-03T19:18:17Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace channel=proxy items=1 anchors=note:1 chars=711 states=active token=dfa97ccce37ec83e
+2026-08-03T19:18:17Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:18:23Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:18:23Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=pyproject.toml notes_returned=1 method=path
+2026-08-03T19:18:23Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=__init__.py notes_returned=1 method=path
+2026-08-03T19:18:31Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:18:31Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=pyproject.toml notes_returned=1 method=path
+2026-08-03T19:18:31Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=__init__.py notes_returned=1 method=path
+2026-08-03T19:18:34Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:18:34Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=pyproject.toml notes_returned=1 method=path
+2026-08-03T19:18:34Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=__init__.py notes_returned=1 method=path
+2026-08-03T19:18:34Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=release.yml notes_returned=1 method=path
+2026-08-03T19:18:43Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:18:43Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=pyproject.toml notes_returned=1 method=path
+2026-08-03T19:18:43Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=__init__.py notes_returned=1 method=path
+2026-08-03T19:18:43Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=release.yml notes_returned=1 method=path
+2026-08-03T19:19:18Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:19:18Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=pyproject.toml notes_returned=1 method=path
+2026-08-03T19:19:18Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=__init__.py notes_returned=1 method=path
+2026-08-03T19:19:18Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=release.yml notes_returned=1 method=path
+2026-08-03T19:19:22Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:19:22Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=pyproject.toml notes_returned=1 method=path
+2026-08-03T19:19:22Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=__init__.py notes_returned=1 method=path
+2026-08-03T19:19:22Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=release.yml notes_returned=1 method=path
+2026-08-03T19:19:27Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=pyproject.toml notes_returned=1 method=path
+2026-08-03T19:19:27Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=__init__.py notes_returned=1 method=path
+2026-08-03T19:19:27Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=release.yml notes_returned=1 method=path
+2026-08-03T19:19:27Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:19:27Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=CHANGELOG.md notes_returned=1 method=path
+2026-08-03T19:19:35Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=release.yml notes_returned=1 method=path
+2026-08-03T19:19:35Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=rates.py notes_returned=0 method=path
+2026-08-03T19:19:35Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=pyproject.toml notes_returned=1 method=path
+2026-08-03T19:19:35Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=__init__.py notes_returned=1 method=path
+2026-08-03T19:19:35Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-bb7dba135b25014b/workspace query=CHANGELOG.md notes_returned=1 method=path

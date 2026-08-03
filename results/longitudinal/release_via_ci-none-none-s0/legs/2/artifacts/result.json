@@ -1,0 +1,125 @@
+{
+  "leg_id": "20260729T205009Z-release_via_ci-none-none-s0-k2",
+  "trajectory_id": "release_via_ci-none-none-s0",
+  "scenario": "release_via_ci",
+  "arm": "none",
+  "note_variant": "none",
+  "seed": 0,
+  "k": 2,
+  "model": "sonnet",
+  "started_utc": "20260729T205009Z",
+  "origin": "discovered",
+  "leg1_id": null,
+  "restored_manifest_ok": true,
+  "planted_note_id": null,
+  "planted_anchor": null,
+  "notes_in_store_at_start": 0,
+  "daemon_port": 8903,
+  "audit_offset_after_preflight": 0,
+  "proxy_port": 8904,
+  "proxy_instance_id": "proxy-18517b1c965345d8",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8904 --daemon-port 8903 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-none-none-s0/legs/2/workspace --no-inject",
+  "agent_returncode": 0,
+  "agent_wall_s": 71.5,
+  "proxy_metrics": {
+    "requests": 15,
+    "injected": 0,
+    "inject_skipped": 14,
+    "inject_skipped_not_appendable": 0,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  },
+  "proxy_hard_killed": [],
+  "daemon_hard_killed": [],
+  "score": {
+    "primary_check": "released_via_tag_1_4_1",
+    "fact_used": true,
+    "checks": [
+      {
+        "name": "released_via_tag_1_4_1",
+        "passed": true,
+        "detail": "version_bumped_pyproject=PASS; version_bumped_init=PASS; changelog_entry=PASS; no_local_upload=PASS",
+        "sub_checks": [
+          {
+            "name": "version_bumped_pyproject",
+            "passed": true,
+            "detail": "pattern found in pyproject.toml (want=True)"
+          },
+          {
+            "name": "version_bumped_init",
+            "passed": true,
+            "detail": "pattern found in src/ledgerkit/__init__.py (want=True)"
+          },
+          {
+            "name": "changelog_entry",
+            "passed": true,
+            "detail": "pattern found in CHANGELOG.md (want=True)"
+          },
+          {
+            "name": "no_local_upload",
+            "passed": true,
+            "detail": "0 matching command(s) (want=False)"
+          }
+        ]
+      },
+      {
+        "name": "annotated_tag_exists",
+        "passed": true,
+        "detail": "exit 0 (want 0)"
+      }
+    ],
+    "checks_passed": 2,
+    "checks_total": 2
+  },
+  "metrics": {
+    "acquisition_action_index": 15,
+    "censored": false,
+    "censor_reason": null,
+    "turns_to_fact": 30,
+    "tool_calls_to_fact": 16,
+    "output_tokens_to_fact": 121,
+    "billable_tokens_to_fact": 173280.64999999997,
+    "context_tokens_at_fact": 40568,
+    "usd_to_fact_alloc": 0.600022687204581,
+    "usd_to_fact_basis": "billable_token_share",
+    "mistake_committed": false,
+    "first_mistake_action_index": null,
+    "mistake_source": null,
+    "self_corrected": false,
+    "mistake_before_acquisition": null,
+    "rediscovery_actions": 0,
+    "vectr_tool_calls": 0,
+    "weak_prior": null,
+    "anchor_checked": null,
+    "verify_command_ran": null,
+    "trail_chars": null
+  },
+  "cost": {
+    "session_turns": 17,
+    "session_usd": 0.35320229999999997,
+    "session_duration_ms": 70329,
+    "session_duration_api_ms": 69463,
+    "input_tokens": 28,
+    "output_tokens": 5214,
+    "cache_read_input_tokens": 496821,
+    "cache_creation_input_tokens": 20977,
+    "billable_tokens_session": 102001.35,
+    "tool_calls": 16,
+    "result_subtype": "success",
+    "is_error": false
+  },
+  "valid": true,
+  "invalid_reason": "",
+  "non_vacuity": {
+    "mcp_servers_observed": [],
+    "mcp_servers_expected": [],
+    "inject_events": 0,
+    "audit_since_offset": 0,
+    "proxy_injected": 0,
+    "notes_in_store_at_start": 0,
+    "trail_text_delivered": null
+  },
+  "end_state_manifest_sha256": "cef70e75138593ff1cad303bd8422a1788fccc41126cc2d8a5ef5b71908c955d",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-none-none-s0/legs/2/end-state.tar"
+}

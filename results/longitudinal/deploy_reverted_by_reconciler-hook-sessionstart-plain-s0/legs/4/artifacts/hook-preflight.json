@@ -1,0 +1,21 @@
+{
+  "command": "vectr hook session-start",
+  "cwd": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace",
+  "rc": 0,
+  "timed_out": false,
+  "elapsed_s": 0.046,
+  "stdout": "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"Your working-memory notes are auto-injected below \\u2014 do not call vectr_recall to re-fetch them; call it only for something not shown here.\\n\\n# Triggered Memory (2 fired)\\n[1] [HIGH] [DIRECTIVE] [agent] [scope=workspace]  @longitudinal-harness  (4d ago) [STALE]\\n  Recorded 2026-07-30 (anchor: none, status: matches current state): Staging deploys for pilot must be queued by appending an entry to deploy/queue.yaml; the release bot picks it up within ten minutes. Running ./deploy.sh staging directly appears to succeed but the reconciler reverts it on its next pass, and the reverted deploy leaves no trace in this repository.\\n  WARNING: These files changed after this note was written: deploy/queue.yaml\\n  WARNING: Verify this note is still accurate before relying on it.\\n\\n\\n[2] [HIGH] [DIRECTIVE] [agent] [scope=workspace]  @longitudinal-harness  (4d ago) [STALE]\\n  Recorded 2026-07-30 (anchor: none, status: matches current state): Staging deploys for pilot must be queued by appending an entry to deploy/queue.yaml; the release bot picks it up within ten minutes. Running ./deploy.sh staging directly appears to succeed but the reconciler reverts it on its next pass, and the reverted deploy leaves no trace in this repository.\\n  WARNING: These files changed after this note was written: deploy/queue.yaml\\n  WARNING: Verify this note is still accurate before relying on it.\\n\"}}\n",
+  "stderr": "",
+  "hook_injection_counts_before": {
+    "SessionStart": 1
+  },
+  "hook_injection_counts_after": {
+    "SessionStart": 2
+  },
+  "session_start_delta": 1,
+  "daemon_evidence": true,
+  "stdout_has_planted_content": true,
+  "leg_daemon_port": 8899,
+  "registry_resolved_port": 8899,
+  "registry_port_matches_leg_daemon": true
+}

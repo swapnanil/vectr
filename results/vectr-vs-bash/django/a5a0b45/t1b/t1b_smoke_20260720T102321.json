@@ -1,0 +1,75 @@
+{
+  "corpus": "django",
+  "vectr_sha": "a5a0b45",
+  "smoke_test": true,
+  "port": 8798,
+  "model": "sonnet",
+  "max_turns": 8,
+  "task_ids": [
+    "B01"
+  ],
+  "results": [
+    {
+      "id": "B01",
+      "category": "exact_qualified_name",
+      "symbol_hint": "Model.delete",
+      "prompt": "Can you show me Model.delete -- specifically what happens to related objects when a model instance is deleted?",
+      "wall_s": 89.74,
+      "num_turns": 10,
+      "cost_usd": 0.265682,
+      "reported_duration_ms": 87506,
+      "is_error": false,
+      "error": null,
+      "tool_sequence": [
+        "ToolSearch",
+        "mcp__vectr__vectr_locate",
+        "mcp__vectr__vectr_status",
+        "mcp__vectr__vectr_locate",
+        "mcp__vectr__vectr_search",
+        "Read",
+        "mcp__vectr__vectr_search",
+        "Read",
+        "Read"
+      ],
+      "tool_call_counts": {
+        "ToolSearch": 1,
+        "mcp__vectr__vectr_locate": 2,
+        "mcp__vectr__vectr_status": 1,
+        "mcp__vectr__vectr_search": 2,
+        "Read": 3
+      },
+      "tokens_by_tool": {
+        "ToolSearch": 0,
+        "mcp__vectr__vectr_locate": 1598,
+        "mcp__vectr__vectr_status": 300,
+        "mcp__vectr__vectr_search": 1791,
+        "Read": 3615
+      },
+      "total_tool_result_tokens": 7304,
+      "search_calls": [
+        {
+          "n_results": 3,
+          "query": "Model.delete method instance deletion related objects cascade"
+        },
+        {
+          "n_results": 2,
+          "query": "Model delete method using collector"
+        }
+      ],
+      "used_vectr": true,
+      "used_bash_native": true,
+      "final_answer_tokens": 809,
+      "transcript_path": "results/vectr-vs-bash/django/a5a0b45/t1b/B01_20260720T102321.jsonl"
+    }
+  ],
+  "tool_choice_totals": {
+    "ToolSearch": 1,
+    "mcp__vectr__vectr_locate": 2,
+    "mcp__vectr__vectr_status": 1,
+    "mcp__vectr__vectr_search": 2,
+    "Read": 3
+  },
+  "tasks_used_vectr": 1,
+  "tasks_used_bash_native": 1,
+  "tasks_scored": 1
+}

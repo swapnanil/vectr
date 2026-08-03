@@ -1,0 +1,55 @@
+{
+  "trajectory_id": "release_via_ci-proxy-plain-s0",
+  "scenario": "release_via_ci",
+  "arm": "proxy",
+  "note_variant": "plain",
+  "seed": 0,
+  "n_legs": 3,
+  "db_dir": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/db",
+  "created_utc": "20260729T213638Z",
+  "updated_utc": "20260729T213737Z",
+  "leg1_id": "cdb7c650324154abb0069044a573b84aea8933535fe3bd043248dbd51bf659e6",
+  "leg1_source": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0",
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "legs": [
+    {
+      "k": 1,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0/workspace.tar",
+      "end_state_manifest_sha256": "66cff1cfce2463e9803264c233d8ae90945c69719647a73906236ed64a3cb7ac",
+      "usd": 0.29990220000000006,
+      "valid": true,
+      "started_utc": null,
+      "finished_utc": null
+    },
+    {
+      "k": 2,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/legs/2/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/legs/2/end-state.tar",
+      "end_state_manifest_sha256": "d46342adbf6fe2a90560865f19700e9dffe7065fbe029c45b9ca82781c8bc043",
+      "usd": 0.2083215,
+      "valid": true,
+      "started_utc": "20260729T213638Z",
+      "finished_utc": "20260729T213735Z"
+    },
+    {
+      "k": 3,
+      "status": "failed",
+      "result_path": null,
+      "end_state_tar": null,
+      "end_state_manifest_sha256": null,
+      "usd": null,
+      "valid": null,
+      "started_utc": "20260729T213735Z",
+      "finished_utc": "20260729T213737Z"
+    }
+  ],
+  "trajectory_valid_through": 2,
+  "spend_usd": 0.51,
+  "tier": "T1",
+  "hook_attestation": null,
+  "notes": null
+}

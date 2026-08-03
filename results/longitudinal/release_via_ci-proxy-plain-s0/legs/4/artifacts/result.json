@@ -1,0 +1,154 @@
+{
+  "leg_id": "20260803T065621Z-release_via_ci-proxy-plain-s0-k4",
+  "trajectory_id": "release_via_ci-proxy-plain-s0",
+  "scenario": "release_via_ci",
+  "arm": "proxy",
+  "note_variant": "plain",
+  "seed": 0,
+  "k": 4,
+  "model": "sonnet",
+  "started_utc": "20260803T065621Z",
+  "origin": "discovered",
+  "leg1_id": null,
+  "restored_manifest_ok": true,
+  "planted_note_id": null,
+  "planted_anchor": "note:1",
+  "notes_in_store_at_start": 1,
+  "mcp_handshake_ok": null,
+  "mcp_handshake_tools": null,
+  "recall_probe_method": null,
+  "recall_probe_elapsed_s": null,
+  "recall_probe_returned_note": null,
+  "daemon_port": 8899,
+  "preflight": {
+    "turn1_text_only": {
+      "item_count": 0,
+      "chars": 0,
+      "anchor_ids": [],
+      "planted_present": false
+    },
+    "turn2_with_file_anchor": {
+      "item_count": 1,
+      "chars": 736,
+      "anchor_ids": [
+        "note:1"
+      ],
+      "planted_present": true
+    },
+    "proactive_probe_diagnostic_only": false,
+    "reachable_channel": "proactive"
+  },
+  "planted_note_reachable_preflight": true,
+  "audit_offset_after_preflight": 982,
+  "proxy_port": 8900,
+  "proxy_instance_id": "proxy-e681237795874f4a",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/workspace",
+  "agent_returncode": 0,
+  "agent_wall_s": 86.6,
+  "proxy_metrics": {
+    "requests": 13,
+    "injected": 1,
+    "inject_skipped": 11,
+    "inject_skipped_not_appendable": 3,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  },
+  "proxy_hard_killed": [],
+  "daemon_hard_killed": [],
+  "score": {
+    "primary_check": "released_via_tag_1_5_1",
+    "fact_used": true,
+    "checks": [
+      {
+        "name": "released_via_tag_1_5_1",
+        "passed": true,
+        "detail": "version_bumped_pyproject=PASS; version_bumped_init=PASS; changelog_entry=PASS; no_local_upload=PASS",
+        "sub_checks": [
+          {
+            "name": "version_bumped_pyproject",
+            "passed": true,
+            "detail": "pattern found in pyproject.toml (want=True)"
+          },
+          {
+            "name": "version_bumped_init",
+            "passed": true,
+            "detail": "pattern found in src/ledgerkit/__init__.py (want=True)"
+          },
+          {
+            "name": "changelog_entry",
+            "passed": true,
+            "detail": "pattern found in CHANGELOG.md (want=True)"
+          },
+          {
+            "name": "no_local_upload",
+            "passed": true,
+            "detail": "0 matching command(s) (want=False)"
+          }
+        ]
+      },
+      {
+        "name": "annotated_tag_exists",
+        "passed": false,
+        "detail": "exit 1 (want 0)"
+      }
+    ],
+    "checks_passed": 1,
+    "checks_total": 2,
+    "contradictions": []
+  },
+  "metrics": {
+    "acquisition_action_index": null,
+    "censored": true,
+    "censor_reason": "fact never acquired",
+    "turns_to_fact": null,
+    "tool_calls_to_fact": null,
+    "output_tokens_to_fact": null,
+    "billable_tokens_to_fact": null,
+    "context_tokens_at_fact": null,
+    "usd_to_fact_alloc": null,
+    "usd_to_fact_basis": null,
+    "mistake_committed": false,
+    "first_mistake_action_index": null,
+    "mistake_source": null,
+    "self_corrected": false,
+    "mistake_before_acquisition": null,
+    "rediscovery_actions": 1,
+    "vectr_tool_calls": 0,
+    "weak_prior": null,
+    "anchor_checked": null,
+    "verify_command_ran": null,
+    "trail_chars": null
+  },
+  "cost": {
+    "session_turns": 19,
+    "session_usd": 0.3231477,
+    "session_duration_ms": 85771,
+    "session_duration_api_ms": 84549,
+    "input_tokens": 292,
+    "output_tokens": 4877,
+    "cache_read_input_tokens": 420529,
+    "cache_creation_input_tokens": 20493,
+    "billable_tokens_session": 92346.15,
+    "tool_calls": 18,
+    "result_subtype": "success",
+    "is_error": false
+  },
+  "valid": true,
+  "invalid_reason": "",
+  "non_vacuity": {
+    "mcp_servers_observed": [],
+    "mcp_servers_expected": [],
+    "mcp_server_status": null,
+    "inject_events": 1,
+    "audit_since_offset": 982,
+    "proxy_injected": 1,
+    "notes_in_store_at_start": 1,
+    "trail_text_delivered": null,
+    "session_errored": false,
+    "planted_anchor_injections": 1,
+    "planted_note_retrieved": true
+  },
+  "end_state_manifest_sha256": "28ee2472fcb4a109694d607c81a8069679e967c6460a303cab7f41ba01291651",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/legs/4/end-state.tar"
+}

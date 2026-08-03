@@ -1,0 +1,144 @@
+{
+  "leg_id": "20260729T205231Z-release_via_ci-proxy-plain-s0-k2",
+  "trajectory_id": "release_via_ci-proxy-plain-s0",
+  "scenario": "release_via_ci",
+  "arm": "proxy",
+  "note_variant": "plain",
+  "seed": 0,
+  "k": 2,
+  "model": "sonnet",
+  "started_utc": "20260729T205231Z",
+  "origin": "discovered",
+  "leg1_id": null,
+  "restored_manifest_ok": true,
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "notes_in_store_at_start": 0,
+  "daemon_port": 8903,
+  "preflight": {
+    "turn1_text_only": {
+      "item_count": 0,
+      "chars": 0,
+      "anchor_ids": [],
+      "planted_present": false
+    },
+    "turn2_with_file_anchor": {
+      "item_count": 1,
+      "chars": 736,
+      "anchor_ids": [
+        "note:1"
+      ],
+      "planted_present": true
+    }
+  },
+  "planted_note_reachable_preflight": true,
+  "audit_offset_after_preflight": 1393,
+  "proxy_port": 8904,
+  "proxy_instance_id": "proxy-b3bfed32e6e64665",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8904 --daemon-port 8903 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/legs/2/workspace",
+  "agent_returncode": 0,
+  "agent_wall_s": 84.0,
+  "proxy_metrics": {
+    "requests": 18,
+    "injected": 1,
+    "inject_skipped": 16,
+    "inject_skipped_not_appendable": 3,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  },
+  "proxy_hard_killed": [],
+  "daemon_hard_killed": [],
+  "score": {
+    "primary_check": "released_via_tag_1_4_1",
+    "fact_used": true,
+    "checks": [
+      {
+        "name": "released_via_tag_1_4_1",
+        "passed": true,
+        "detail": "version_bumped_pyproject=PASS; version_bumped_init=PASS; changelog_entry=PASS; no_local_upload=PASS",
+        "sub_checks": [
+          {
+            "name": "version_bumped_pyproject",
+            "passed": true,
+            "detail": "pattern found in pyproject.toml (want=True)"
+          },
+          {
+            "name": "version_bumped_init",
+            "passed": true,
+            "detail": "pattern found in src/ledgerkit/__init__.py (want=True)"
+          },
+          {
+            "name": "changelog_entry",
+            "passed": true,
+            "detail": "pattern found in CHANGELOG.md (want=True)"
+          },
+          {
+            "name": "no_local_upload",
+            "passed": true,
+            "detail": "0 matching command(s) (want=False)"
+          }
+        ]
+      },
+      {
+        "name": "annotated_tag_exists",
+        "passed": false,
+        "detail": "exit 1 (want 0)"
+      }
+    ],
+    "checks_passed": 1,
+    "checks_total": 2
+  },
+  "metrics": {
+    "acquisition_action_index": null,
+    "censored": true,
+    "censor_reason": "fact never acquired",
+    "turns_to_fact": null,
+    "tool_calls_to_fact": null,
+    "output_tokens_to_fact": null,
+    "billable_tokens_to_fact": null,
+    "context_tokens_at_fact": null,
+    "usd_to_fact_alloc": null,
+    "usd_to_fact_basis": null,
+    "mistake_committed": false,
+    "first_mistake_action_index": null,
+    "mistake_source": null,
+    "self_corrected": false,
+    "mistake_before_acquisition": null,
+    "rediscovery_actions": 2,
+    "vectr_tool_calls": 0,
+    "weak_prior": null,
+    "anchor_checked": null,
+    "verify_command_ran": null,
+    "trail_chars": null
+  },
+  "cost": {
+    "session_turns": 22,
+    "session_usd": 0.3938973,
+    "session_duration_ms": 82613,
+    "session_duration_api_ms": 79083,
+    "input_tokens": 302,
+    "output_tokens": 5567,
+    "cache_read_input_tokens": 620521,
+    "cache_creation_input_tokens": 20555,
+    "billable_tokens_session": 115882.85,
+    "tool_calls": 21,
+    "result_subtype": "success",
+    "is_error": false
+  },
+  "valid": false,
+  "invalid_reason": "notes_count_at_start is 0 for arm 'proxy'",
+  "non_vacuity": {
+    "mcp_servers_observed": [],
+    "mcp_servers_expected": [],
+    "inject_events": 1,
+    "audit_since_offset": 1393,
+    "proxy_injected": 1,
+    "notes_in_store_at_start": 0,
+    "trail_text_delivered": null,
+    "planted_anchor_injections": 1,
+    "planted_note_retrieved": true
+  },
+  "end_state_manifest_sha256": "821eab3d1b70e2d076eb009dabc23c02a9d137b4fcb09f303d111b0fdb0c4d07",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-plain-s0/legs/2/end-state.tar"
+}

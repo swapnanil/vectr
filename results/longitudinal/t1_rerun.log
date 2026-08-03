@@ -1,0 +1,70 @@
+{
+  "tier": "T1",
+  "plan": [
+    {
+      "trajectory_id": null,
+      "scenario": "release_via_ci",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "release_via_ci-none-none-s0",
+      "k": 2,
+      "status": "already-done"
+    },
+    {
+      "trajectory_id": "release_via_ci-none-none-s0",
+      "k": 3,
+      "status": "already-done"
+    },
+    {
+      "trajectory_id": "release_via_ci-proxy-plain-s0",
+      "k": 2,
+      "status": "done",
+      "usd": 0.2083215
+    },
+    {
+      "trajectory_id": "release_via_ci-proxy-plain-s0",
+      "k": 3,
+      "status": "failed",
+      "returncode": 1,
+      "stderr": "ABORT: the planted note is not retrievable on EITHER daemon-side probe, so this leg cannot test its memory channel. Fix the scenario (not the score); re-run with --allow-unreachable to record it anyway.\n"
+    },
+    {
+      "trajectory_id": null,
+      "scenario": "deploy_reverted_by_reconciler",
+      "seed": 0,
+      "k": 1,
+      "status": "done(shared-leg1)",
+      "usd": 0.1961802
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-none-none-s0",
+      "k": 2,
+      "status": "done",
+      "usd": 0.3264594
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-none-none-s0",
+      "k": 3,
+      "status": "done",
+      "usd": 0.2342709
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-proxy-plain-s0",
+      "k": 2,
+      "status": "done",
+      "usd": 0.441975
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-proxy-plain-s0",
+      "k": 3,
+      "status": "failed",
+      "returncode": 1,
+      "stderr": "ABORT: the planted note is not retrievable on EITHER daemon-side probe, so this leg cannot test its memory channel. Fix the scenario (not the score); re-run with --allow-unreachable to record it anyway.\n"
+    }
+  ],
+  "spend_usd": 1.41,
+  "budget_exhausted": false
+}

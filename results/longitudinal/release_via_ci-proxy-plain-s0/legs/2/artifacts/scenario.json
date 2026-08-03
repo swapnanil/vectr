@@ -1,0 +1,14 @@
+{
+  "slug": "release_via_ci",
+  "title": "Releases go through CI on a tag push, never a local upload",
+  "origin": "discovered",
+  "corroborable": true,
+  "k": 2,
+  "prompt": "1.4.0 shipped the bad default flagged by the FIXME in src/ledgerkit/rates.py. Fix it and release 1.4.1.",
+  "primary_check": "released_via_tag_1_4_1",
+  "checks": [
+    "AllOf(name='released_via_tag_1_4_1', of=(FileMatches(name='version_bumped_pyproject', path='pyproject.toml', pattern='version\\\\s*=\\\\s*\"1\\\\.4\\\\.1\"', want=True), FileMatches(name='version_bumped_init', path='src/ledgerkit/__init__.py', pattern='__version__\\\\s*=\\\\s*\"1\\\\.4\\\\.1\"', want=True), FileMatches(name='changelog_entry', path='CHANGELOG.md', pattern='##\\\\s*1\\\\.4\\\\.1', want=True), CommandRan(name='no_local_upload', pattern='twine\\\\s+upload|uv\\\\s+publish|poetry\\\\s+publish', want=False)))",
+    "VerifyCommand(name='annotated_tag_exists', argv=('python3', '{verify_dir}/verify_tag.py', 'v1.4.1'), expect_returncode=0)"
+  ],
+  "is_forcing_leg": false
+}

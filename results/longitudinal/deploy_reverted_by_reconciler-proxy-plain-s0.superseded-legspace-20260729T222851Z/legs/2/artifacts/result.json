@@ -1,0 +1,136 @@
+{
+  "leg_id": "20260729T214428Z-deploy_reverted_by_reconciler-proxy-plain-s0-k2",
+  "trajectory_id": "deploy_reverted_by_reconciler-proxy-plain-s0",
+  "scenario": "deploy_reverted_by_reconciler",
+  "arm": "proxy",
+  "note_variant": "plain",
+  "seed": 0,
+  "k": 2,
+  "model": "sonnet",
+  "started_utc": "20260729T214428Z",
+  "origin": "told",
+  "leg1_id": null,
+  "restored_manifest_ok": true,
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "notes_in_store_at_start": 1,
+  "daemon_port": 8903,
+  "notes_in_store_pre_plant": 0,
+  "preflight": {
+    "turn1_text_only": {
+      "item_count": 0,
+      "chars": 0,
+      "anchor_ids": [],
+      "planted_present": false
+    },
+    "turn2_with_file_anchor": {
+      "item_count": 1,
+      "chars": 640,
+      "anchor_ids": [
+        "note:1"
+      ],
+      "planted_present": true
+    }
+  },
+  "planted_note_reachable_preflight": true,
+  "audit_offset_after_preflight": 1228,
+  "proxy_port": 8904,
+  "proxy_instance_id": "proxy-07046836a57c4964",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8904 --daemon-port 8903 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/legs/2/workspace",
+  "agent_returncode": 0,
+  "agent_wall_s": 211.5,
+  "proxy_metrics": {
+    "requests": 8,
+    "injected": 1,
+    "inject_skipped": 6,
+    "inject_skipped_not_appendable": 1,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  },
+  "proxy_hard_killed": [],
+  "daemon_hard_killed": [],
+  "score": {
+    "primary_check": "queued_not_direct_deploy_leg2",
+    "fact_used": false,
+    "checks": [
+      {
+        "name": "queued_not_direct_deploy_leg2",
+        "passed": false,
+        "detail": "queue_gained_staging_entry=FAIL; no_direct_deploy_script=FAIL; deploy_state_untouched=FAIL",
+        "sub_checks": [
+          {
+            "name": "queue_gained_staging_entry",
+            "passed": false,
+            "detail": "1 occurrence(s) in deploy/queue.yaml, minimum 2"
+          },
+          {
+            "name": "no_direct_deploy_script",
+            "passed": false,
+            "detail": "2 matching command(s) (want=False); first: echo \"=== CLAUDE.md ===\" && cat CLAUDE.md\necho \"=== .deploy-state ===\" && cat .deploy-state\necho \"=== deploy.sh ===\" && cat deploy.sh\necho \"=== config/staging.y"
+          },
+          {
+            "name": "deploy_state_untouched",
+            "passed": false,
+            "detail": "file was modified this leg"
+          }
+        ]
+      }
+    ],
+    "checks_passed": 0,
+    "checks_total": 1
+  },
+  "metrics": {
+    "acquisition_action_index": null,
+    "censored": true,
+    "censor_reason": "fact never acquired",
+    "turns_to_fact": null,
+    "tool_calls_to_fact": null,
+    "output_tokens_to_fact": null,
+    "billable_tokens_to_fact": null,
+    "context_tokens_at_fact": null,
+    "usd_to_fact_alloc": null,
+    "usd_to_fact_basis": null,
+    "mistake_committed": true,
+    "first_mistake_action_index": 1,
+    "mistake_source": "action",
+    "self_corrected": false,
+    "mistake_before_acquisition": null,
+    "rediscovery_actions": 1,
+    "vectr_tool_calls": 0,
+    "weak_prior": null,
+    "anchor_checked": null,
+    "verify_command_ran": null,
+    "trail_chars": null
+  },
+  "cost": {
+    "session_turns": 7,
+    "session_usd": 0.441975,
+    "session_duration_ms": 210157,
+    "session_duration_api_ms": 205653,
+    "input_tokens": 236,
+    "output_tokens": 16880,
+    "cache_read_input_tokens": 257650,
+    "cache_creation_input_tokens": 18462,
+    "billable_tokens_session": 133478.5,
+    "tool_calls": 6,
+    "result_subtype": "success",
+    "is_error": false
+  },
+  "valid": true,
+  "invalid_reason": "",
+  "non_vacuity": {
+    "mcp_servers_observed": [],
+    "mcp_servers_expected": [],
+    "inject_events": 1,
+    "audit_since_offset": 1228,
+    "proxy_injected": 1,
+    "notes_in_store_at_start": 1,
+    "trail_text_delivered": null,
+    "session_errored": false,
+    "planted_anchor_injections": 1,
+    "planted_note_retrieved": true
+  },
+  "end_state_manifest_sha256": "54699c79c2373dded2ef37f56a38b9507afafc6fa815cb6493063452403b7f91",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/legs/2/end-state.tar"
+}

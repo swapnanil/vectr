@@ -1,0 +1,56 @@
+{
+  "trajectory_id": "deploy_reverted_by_reconciler-hook-full-plain-s0",
+  "scenario": "deploy_reverted_by_reconciler",
+  "arm": "hook-full",
+  "note_variant": "plain",
+  "seed": 0,
+  "n_legs": 3,
+  "db_dir": null,
+  "created_utc": "20260803T072042Z",
+  "updated_utc": "20260803T072042Z",
+  "leg1_id": null,
+  "leg1_source": null,
+  "planted_note_id": null,
+  "planted_anchor": null,
+  "legs": [
+    {
+      "k": 1,
+      "status": "pending",
+      "result_path": null,
+      "end_state_tar": null,
+      "end_state_manifest_sha256": null,
+      "usd": null,
+      "valid": null,
+      "started_utc": null,
+      "finished_utc": null
+    },
+    {
+      "k": 2,
+      "status": "skipped",
+      "result_path": null,
+      "end_state_tar": null,
+      "end_state_manifest_sha256": null,
+      "usd": null,
+      "valid": null,
+      "started_utc": null,
+      "finished_utc": null
+    },
+    {
+      "k": 3,
+      "status": "skipped",
+      "result_path": null,
+      "end_state_tar": null,
+      "end_state_manifest_sha256": null,
+      "usd": null,
+      "valid": null,
+      "started_utc": null,
+      "finished_utc": null
+    }
+  ],
+  "trajectory_valid_through": null,
+  "spend_usd": 0.0,
+  "tier": "T6",
+  "hook_attestation": null,
+  "notes": "arm hook-full skipped: no verified hook-attestation supplied",
+  "run_dir": "run-25b8a16fefe0e5b8"
+}

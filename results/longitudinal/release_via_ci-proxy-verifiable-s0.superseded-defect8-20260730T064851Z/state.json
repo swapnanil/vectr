@@ -1,0 +1,55 @@
+{
+  "trajectory_id": "release_via_ci-proxy-verifiable-s0",
+  "scenario": "release_via_ci",
+  "arm": "proxy",
+  "note_variant": "verifiable",
+  "seed": 0,
+  "n_legs": 3,
+  "db_dir": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/db",
+  "created_utc": "20260730T061659Z",
+  "updated_utc": "20260730T061846Z",
+  "leg1_id": "cdb7c650324154abb0069044a573b84aea8933535fe3bd043248dbd51bf659e6",
+  "leg1_source": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0",
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "legs": [
+    {
+      "k": 1,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0/workspace.tar",
+      "end_state_manifest_sha256": "66cff1cfce2463e9803264c233d8ae90945c69719647a73906236ed64a3cb7ac",
+      "usd": 0.29990220000000006,
+      "valid": true,
+      "started_utc": null,
+      "finished_utc": null
+    },
+    {
+      "k": 2,
+      "status": "invalid",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/legs/2/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/legs/2/end-state.tar",
+      "end_state_manifest_sha256": "6a21674b8c0648cd64279a23f7d6380eec126d89be6a232b54f3fb5d3b2b3d89",
+      "usd": 0.3952124999999999,
+      "valid": false,
+      "started_utc": "20260730T061659Z",
+      "finished_utc": "20260730T061846Z"
+    },
+    {
+      "k": 3,
+      "status": "skipped",
+      "result_path": null,
+      "end_state_tar": null,
+      "end_state_manifest_sha256": null,
+      "usd": null,
+      "valid": null,
+      "started_utc": null,
+      "finished_utc": null
+    }
+  ],
+  "trajectory_valid_through": 1,
+  "spend_usd": 0.7,
+  "tier": "T3",
+  "hook_attestation": null,
+  "notes": null
+}

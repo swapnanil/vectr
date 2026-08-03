@@ -1,0 +1,58 @@
+2026-07-30T11:47:00Z REMEMBER workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace note_id=1 priority=high kind=gotcha author_id=longitudinal-harness code_hash= tags= chars=583 provenance=agent scope=repo
+2026-07-30T11:47:00Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=1.4.0 shipped the bad default flagged by the FIXME in src/ledgerkit/rates.py. Fix it and release 1.4.1. notes_returned=0 method=sql
+2026-07-30T11:47:00Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:47:00Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:47:00Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=1.4.0 shipped the bad default flagged by the FIXME in src/ledgerkit/rates.py. Fix it and release 1.4.1. notes_returned=0 method=sql
+2026-07-30T11:47:00Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace channel=proxy items=1 anchors=note:1 chars=922 states=active
+2026-07-30T11:47:09Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:47:09Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=CHANGELOG.md notes_returned=1 method=path
+2026-07-30T11:47:09Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:47:09Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=__init__.py notes_returned=1 method=path
+2026-07-30T11:47:09Z PROACTIVE_RETRIEVE workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace channel=proxy items=1 anchors=note:1 chars=920 states=active token=ec097be8de1dde9d
+2026-07-30T11:47:14Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace channel=proxy items=1 anchors=note:1 chars=920 states=active token=ec097be8de1dde9d
+2026-07-30T11:47:14Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:47:14Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=CHANGELOG.md notes_returned=1 method=path
+2026-07-30T11:47:14Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:47:14Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=__init__.py notes_returned=1 method=path
+2026-07-30T11:47:21Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:47:21Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=CHANGELOG.md notes_returned=1 method=path
+2026-07-30T11:47:21Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:47:21Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=__init__.py notes_returned=1 method=path
+2026-07-30T11:47:24Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:47:24Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=CHANGELOG.md notes_returned=1 method=path
+2026-07-30T11:47:24Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:47:24Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=__init__.py notes_returned=1 method=path
+2026-07-30T11:47:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:47:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=CHANGELOG.md notes_returned=1 method=path
+2026-07-30T11:47:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:47:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=__init__.py notes_returned=1 method=path
+2026-07-30T11:48:16Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:48:16Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=CHANGELOG.md notes_returned=1 method=path
+2026-07-30T11:48:16Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:48:16Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=__init__.py notes_returned=1 method=path
+2026-07-30T11:48:16Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=release.yml notes_returned=1 method=path
+2026-07-30T11:48:16Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=ci.yml notes_returned=0 method=path
+2026-07-30T11:48:23Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:48:23Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=CHANGELOG.md notes_returned=1 method=path
+2026-07-30T11:48:23Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:48:23Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=__init__.py notes_returned=1 method=path
+2026-07-30T11:48:23Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=release.yml notes_returned=1 method=path
+2026-07-30T11:48:23Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=ci.yml notes_returned=0 method=path
+2026-07-30T11:48:31Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:48:31Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=CHANGELOG.md notes_returned=1 method=path
+2026-07-30T11:48:31Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:48:31Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=__init__.py notes_returned=1 method=path
+2026-07-30T11:48:31Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=release.yml notes_returned=1 method=path
+2026-07-30T11:48:31Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=ci.yml notes_returned=0 method=path
+2026-07-30T11:48:34Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=release.yml notes_returned=1 method=path
+2026-07-30T11:48:34Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=ci.yml notes_returned=0 method=path
+2026-07-30T11:48:34Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:48:34Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:48:34Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=__init__.py notes_returned=1 method=path
+2026-07-30T11:48:34Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=CHANGELOG.md notes_returned=1 method=path
+2026-07-30T11:48:40Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=release.yml notes_returned=1 method=path
+2026-07-30T11:48:40Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=ci.yml notes_returned=0 method=path
+2026-07-30T11:48:40Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=rates.py notes_returned=0 method=path
+2026-07-30T11:48:40Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=pyproject.toml notes_returned=1 method=path
+2026-07-30T11:48:40Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=__init__.py notes_returned=1 method=path
+2026-07-30T11:48:40Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/workspace query=CHANGELOG.md notes_returned=1 method=path

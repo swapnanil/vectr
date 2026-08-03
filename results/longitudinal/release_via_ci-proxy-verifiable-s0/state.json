@@ -1,0 +1,55 @@
+{
+  "trajectory_id": "release_via_ci-proxy-verifiable-s0",
+  "scenario": "release_via_ci",
+  "arm": "proxy",
+  "note_variant": "verifiable",
+  "seed": 0,
+  "n_legs": 3,
+  "db_dir": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/db",
+  "created_utc": "20260730T064857Z",
+  "updated_utc": "20260730T065242Z",
+  "leg1_id": "cdb7c650324154abb0069044a573b84aea8933535fe3bd043248dbd51bf659e6",
+  "leg1_source": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0",
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "legs": [
+    {
+      "k": 1,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0/workspace.tar",
+      "end_state_manifest_sha256": "66cff1cfce2463e9803264c233d8ae90945c69719647a73906236ed64a3cb7ac",
+      "usd": 0.29990220000000006,
+      "valid": true,
+      "started_utc": null,
+      "finished_utc": null
+    },
+    {
+      "k": 2,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/legs/2/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/legs/2/end-state.tar",
+      "end_state_manifest_sha256": "6b2b029bedb7a46838edb0848547ec49864f61b176c86764ab1ab2534133366d",
+      "usd": 0.43422269999999996,
+      "valid": true,
+      "started_utc": "20260730T064857Z",
+      "finished_utc": "20260730T065128Z"
+    },
+    {
+      "k": 3,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/legs/3/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/legs/3/end-state.tar",
+      "end_state_manifest_sha256": "96c5769ffdc234bd9fd56483b727bf7a697c10ea02da100a39773c169b54d420",
+      "usd": 0.36901530000000016,
+      "valid": true,
+      "started_utc": "20260730T065128Z",
+      "finished_utc": "20260730T065242Z"
+    }
+  ],
+  "trajectory_valid_through": 3,
+  "spend_usd": 1.1,
+  "tier": "T3",
+  "hook_attestation": null,
+  "notes": null
+}

@@ -1,0 +1,16 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  id-token: write   # Trusted Publishing. No API tokens are issued for this project:
+                    # publishing is possible ONLY from this workflow.
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1

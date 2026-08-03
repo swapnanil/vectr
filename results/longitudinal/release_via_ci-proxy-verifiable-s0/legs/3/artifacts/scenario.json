@@ -1,0 +1,14 @@
+{
+  "slug": "release_via_ci",
+  "title": "Releases go through CI on a tag push, never a local upload",
+  "origin": "discovered",
+  "corroborable": true,
+  "k": 3,
+  "prompt": "Add a convert_bulk() helper to src/ledgerkit/rates.py with a changelog entry, then release 1.5.0.",
+  "primary_check": "released_via_tag_1_5_0",
+  "checks": [
+    "AllOf(name='released_via_tag_1_5_0', of=(FileMatches(name='version_bumped_pyproject', path='pyproject.toml', pattern='version\\\\s*=\\\\s*\"1\\\\.5\\\\.0\"', want=True), FileMatches(name='version_bumped_init', path='src/ledgerkit/__init__.py', pattern='__version__\\\\s*=\\\\s*\"1\\\\.5\\\\.0\"', want=True), FileMatches(name='changelog_entry', path='CHANGELOG.md', pattern='##\\\\s*1\\\\.5\\\\.0', want=True), CommandRan(name='no_local_upload', pattern='twine\\\\s+upload|uv\\\\s+publish|poetry\\\\s+publish', want=False)))",
+    "VerifyCommand(name='annotated_tag_exists', argv=('python3', '{verify_dir}/verify_tag.py', 'v1.5.0'), expect_returncode=0)"
+  ],
+  "is_forcing_leg": false
+}

@@ -1,0 +1,51 @@
+{
+  "tier": "T3",
+  "plan": [
+    {
+      "trajectory_id": null,
+      "scenario": "release_via_ci",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "release_via_ci-proxy-provenance-s0",
+      "k": 2,
+      "status": "done",
+      "usd": 0.4068156000000001
+    },
+    {
+      "trajectory_id": "release_via_ci-proxy-provenance-s0",
+      "k": 3,
+      "status": "done",
+      "usd": 0.3594071999999999
+    },
+    {
+      "trajectory_id": null,
+      "scenario": "deploy_reverted_by_reconciler",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-proxy-provenance-s0",
+      "k": 2,
+      "status": "done",
+      "usd": 0.3269934
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-proxy-provenance-s0",
+      "k": 3,
+      "status": "done",
+      "usd": 0.1709442
+    },
+    {
+      "trajectory_id": "release_via_ci-proxy-verifiable-s0",
+      "k": 2,
+      "status": "invalid",
+      "invalid_reason": "T3: variant's provenance-trail text absent from probe's returned context"
+    }
+  ],
+  "spend_usd": 1.66,
+  "budget_exhausted": false
+}

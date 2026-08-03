@@ -1,0 +1,6 @@
+2026-08-03T12:33:03Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace query=Deploy the 1.2.0 tag to staging. notes_returned=0 method=sql
+2026-08-03T12:33:03Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace query=queue.yaml notes_returned=2 method=path
+2026-08-03T12:33:03Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace query=Deploy the 1.2.0 tag to staging. notes_returned=0 method=sql
+2026-08-03T12:33:03Z TRIGGER_FIRE workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace trigger_event=session-start file_path= command= fired=2
+2026-08-03T12:33:05Z TRIGGER_FIRE workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace trigger_event=session-start file_path= command= fired=2
+2026-08-03T12:33:05Z TRIGGER_FIRE workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-hook-sessionstart-plain-s0/workspace trigger_event=session-start file_path= command= fired=2

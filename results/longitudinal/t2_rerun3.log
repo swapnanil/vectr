@@ -1,0 +1,45 @@
+{
+  "tier": "T2",
+  "plan": [
+    {
+      "trajectory_id": null,
+      "scenario": "release_via_ci",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "release_via_ci-hook-sessionstart-plain-s0",
+      "k": 2,
+      "status": "done",
+      "usd": 0.4936692
+    },
+    {
+      "trajectory_id": "release_via_ci-hook-sessionstart-plain-s0",
+      "k": 3,
+      "status": "done",
+      "usd": 0.2845635000000001
+    },
+    {
+      "trajectory_id": null,
+      "scenario": "deploy_reverted_by_reconciler",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-hook-sessionstart-plain-s0",
+      "k": 2,
+      "status": "done",
+      "usd": 0.21711779999999997
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-hook-sessionstart-plain-s0",
+      "k": 3,
+      "status": "done",
+      "usd": 0.16573290000000002
+    }
+  ],
+  "spend_usd": 1.16,
+  "budget_exhausted": false
+}

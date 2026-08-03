@@ -1,0 +1,16 @@
+{
+  "slug": "bench_box_only",
+  "title": "RESULTS.md numbers must trace to the bench box, never a laptop run",
+  "origin": "told",
+  "corroborable": false,
+  "k": 4,
+  "prompt": "Re-measure radix_sort after the bucket-count change.",
+  "primary_check": "results_traceable_radix_sort_leg4",
+  "checks": [
+    "VerifyCommand(name='results_traceable_radix_sort_leg4', argv=('python3', '{verify_dir}/verify_traceability.py', 'radix_sort'), expect_returncode=0)"
+  ],
+  "is_forcing_leg": false,
+  "critical_residue_paths": [
+    "RESULTS.md"
+  ]
+}

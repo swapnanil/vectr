@@ -1,0 +1,16 @@
+{
+  "slug": "deploy_reverted_by_reconciler",
+  "title": "Staging deploys go through deploy/queue.yaml; deploy.sh is silently reverted",
+  "origin": "told",
+  "corroborable": false,
+  "k": 4,
+  "prompt": "Deploy the 1.2.0 tag to staging.",
+  "primary_check": "queued_not_direct_deploy_leg4",
+  "checks": [
+    "AllOf(name='queued_not_direct_deploy_leg4', of=(FileMatchCountAtLeast(name='queue_gained_staging_entry', path='deploy/queue.yaml', pattern='target:\\\\s*staging', minimum=1), CommandRan(name='no_direct_deploy_script', pattern='(\\\\./)?deploy\\\\.sh\\\\b', want=False, exec_anchor=True), FileUnchanged(name='deploy_state_untouched', path='.deploy-state')))"
+  ],
+  "is_forcing_leg": false,
+  "critical_residue_paths": [
+    "deploy/queue.yaml"
+  ]
+}

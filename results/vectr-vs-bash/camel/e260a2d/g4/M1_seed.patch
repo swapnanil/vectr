@@ -1,0 +1,51 @@
+commit 55d5f8434ea09cde0b4dd967b0f50860a4dcb6f6
+Author: Adriano Machado <60320+ammachado@users.noreply.github.com>
+Date:   Fri Jun 19 02:51:35 2026 -0400
+
+    CAMEL-23796: Fix wrong token in logical operator right-hand-side error message
+    
+    Fix SimplePredicateParser to report the correct token when the
+    right-hand side of a logical operator (&&/||) is invalid — it was
+    using left.getToken() instead of right.getToken().
+    
+    Make LogicalExpression.acceptLeftNode/acceptRightNode enforce that
+    only BinaryExpression or LogicalExpression nodes are valid on each
+    side, making the error branch reachable and testable.
+    
+    Closes #24118
+
+diff --git a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java
+index 016e819fa..d50831ce0 100644
+--- a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java
++++ b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/SimplePredicateParser.java
+@@ -552,7 +552,7 @@ public class SimplePredicateParser extends BaseSimpleParser {
+                 }
+                 if (!logical.acceptRightNode(right)) {
+                     throw new SimpleParserException(
+-                            "Logical operator " + operator + " does not support right hand side token " + left.getToken(),
++                            "Logical operator " + operator + " does not support right hand side token " + right.getToken(),
+                             token.getToken().getIndex());
+                 }
+ 
+diff --git a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java
+index afbcd2efe..535dce4fb 100644
+--- a/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java
++++ b/core/camel-core-languages/src/main/java/org/apache/camel/language/simple/ast/LogicalExpression.java
+@@ -48,11 +48,17 @@ public class LogicalExpression extends BaseSimpleNode {
+     }
+ 
+     public boolean acceptLeftNode(SimpleNode lef) {
++        if (!(lef instanceof BinaryExpression) && !(lef instanceof LogicalExpression)) {
++            return false;
++        }
+         this.left = lef;
+         return true;
+     }
+ 
+     public boolean acceptRightNode(SimpleNode right) {
++        if (!(right instanceof BinaryExpression) && !(right instanceof LogicalExpression)) {
++            return false;
++        }
+         this.right = right;
+         return true;
+     }

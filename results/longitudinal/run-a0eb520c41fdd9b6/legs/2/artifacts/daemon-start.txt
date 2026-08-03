@@ -1,0 +1,17 @@
+$ /Users/swapnanilsaha/Library/Python/3.14/bin/vectr start /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace --port 8899 --memory-only
+rc=0
+
+
+  Created /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace/.vectrignore (default excludes)
+  Appended vectr block to /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace/CLAUDE.md
+  Created /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace/.cursor/rules/vectr.mdc
+  Created /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace/.mcp.json
+  Created /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace/.cursor/mcp.json
+  Created /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace/.vscode/mcp.json
+  Created /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace/.codex/config.toml
+  Created /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace/.claude/settings.json
+Vectr started [memory-only] (PID 48613) on port 8899
+Workspace : /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/workspace
+MCP URL   : http://localhost:8899/mcp
+Logs      : /Users/swapnanilsaha/.vectr/logs/1abd21171636.log
+Mode      : memory-only (no code indexing/watcher; memory tools + hooks active)

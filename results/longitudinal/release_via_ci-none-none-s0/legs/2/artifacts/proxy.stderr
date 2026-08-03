@@ -1,0 +1,13 @@
+Vectr proxy (experimental — Proactive context) starting.
+  Listening : http://127.0.0.1:8904
+  Upstream  : https://api.anthropic.com
+  Injection : off (transparent pass-through)
+  Resp cache: off
+  Wire it up:
+    export ANTHROPIC_BASE_URL=http://127.0.0.1:8904
+  Bypass at any time by unsetting it:
+    unset ANTHROPIC_BASE_URL
+  Caveats on a non-first-party base URL (documented upstream):
+    - MCP tool search is disabled unless ENABLE_TOOL_SEARCH=true and the proxy forwards tool_reference blocks.
+    - Remote Control is disabled on a non-api.anthropic.com base URL.
+  The upstream API key is forwarded untouched and never stored or logged.

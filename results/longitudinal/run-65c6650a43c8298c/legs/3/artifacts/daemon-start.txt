@@ -1,0 +1,10 @@
+$ /Users/swapnanilsaha/Library/Python/3.14/bin/vectr start /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace --port 8899 --memory-only --no-ide-config
+rc=0
+
+
+  Skipped IDE config file writes for /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace (--no-ide-config). This choice persists at /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace/.vectr/ide_config for future start/restart/init calls; delete that file to re-enable.
+Vectr started [memory-only] (PID 62071) on port 8899
+Workspace : /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-65c6650a43c8298c/workspace
+MCP URL   : http://localhost:8899/mcp
+Logs      : /Users/swapnanilsaha/.vectr/logs/fd0694adab9b.log
+Mode      : memory-only (no code indexing/watcher; memory tools + hooks active)

@@ -1,0 +1,9 @@
+# Consumed by the release bot. Entries are appended, never edited in place.
+- date: "2026-07-01"
+  target: prod-canary
+  ref: v1.1.0
+  requested_by: ops-bot
+- date: "2026-07-30"
+  target: staging
+  ref: main
+  requested_by: mary.doe@example.com

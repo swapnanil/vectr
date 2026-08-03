@@ -1,0 +1,148 @@
+{
+  "leg_id": "20260803T135352Z-deploy_reverted_by_reconciler-proxy-plain-s1-k2",
+  "trajectory_id": "deploy_reverted_by_reconciler-proxy-plain-s1",
+  "scenario": "deploy_reverted_by_reconciler",
+  "arm": "proxy",
+  "note_variant": "plain",
+  "seed": 1,
+  "k": 2,
+  "model": "sonnet",
+  "started_utc": "20260803T135352Z",
+  "origin": "told",
+  "leg1_id": null,
+  "restored_manifest_ok": true,
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "notes_in_store_at_start": 1,
+  "mcp_handshake_ok": null,
+  "mcp_handshake_tools": null,
+  "recall_probe_method": null,
+  "recall_probe_elapsed_s": null,
+  "recall_probe_returned_note": null,
+  "critical_residue_reset_paths": [
+    "deploy/queue.yaml"
+  ],
+  "daemon_port": 8899,
+  "notes_in_store_pre_plant": 0,
+  "preflight": {
+    "turn1_text_only": {
+      "item_count": 0,
+      "chars": 0,
+      "anchor_ids": [],
+      "planted_present": false
+    },
+    "turn2_with_file_anchor": {
+      "item_count": 1,
+      "chars": 640,
+      "anchor_ids": [
+        "note:1"
+      ],
+      "planted_present": true
+    },
+    "proactive_probe_diagnostic_only": false,
+    "reachable_channel": "proactive"
+  },
+  "planted_note_reachable_preflight": true,
+  "audit_offset_after_preflight": 1073,
+  "proxy_port": 8900,
+  "proxy_instance_id": "proxy-a5b4a5bf83194cbe",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace",
+  "agent_returncode": 0,
+  "agent_wall_s": 79.1,
+  "proxy_metrics": {
+    "requests": 6,
+    "injected": 1,
+    "inject_skipped": 4,
+    "inject_skipped_not_appendable": 2,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  },
+  "proxy_hard_killed": [],
+  "daemon_hard_killed": [],
+  "score": {
+    "primary_check": "queued_not_direct_deploy_leg2",
+    "fact_used": false,
+    "checks": [
+      {
+        "name": "queued_not_direct_deploy_leg2",
+        "passed": false,
+        "detail": "queue_gained_staging_entry=FAIL; no_direct_deploy_script=PASS; deploy_state_untouched=PASS",
+        "sub_checks": [
+          {
+            "name": "queue_gained_staging_entry",
+            "passed": false,
+            "detail": "0 occurrence(s) in deploy/queue.yaml, minimum 1"
+          },
+          {
+            "name": "no_direct_deploy_script",
+            "passed": true,
+            "detail": "0 matching command(s) (want=False)"
+          },
+          {
+            "name": "deploy_state_untouched",
+            "passed": true,
+            "detail": "sha256 matches leg-start baseline"
+          }
+        ]
+      }
+    ],
+    "checks_passed": 0,
+    "checks_total": 1,
+    "contradictions": []
+  },
+  "metrics": {
+    "acquisition_action_index": null,
+    "censored": true,
+    "censor_reason": "fact never acquired",
+    "turns_to_fact": null,
+    "tool_calls_to_fact": null,
+    "output_tokens_to_fact": null,
+    "billable_tokens_to_fact": null,
+    "context_tokens_at_fact": null,
+    "usd_to_fact_alloc": null,
+    "usd_to_fact_basis": null,
+    "mistake_committed": false,
+    "first_mistake_action_index": null,
+    "mistake_source": null,
+    "self_corrected": false,
+    "mistake_before_acquisition": null,
+    "rediscovery_actions": 2,
+    "vectr_tool_calls": 0,
+    "weak_prior": null,
+    "anchor_checked": null,
+    "verify_command_ran": null,
+    "trail_chars": null
+  },
+  "cost": {
+    "session_turns": 11,
+    "session_usd": 0.2376891,
+    "session_duration_ms": 77752,
+    "session_duration_api_ms": 77288,
+    "input_tokens": 232,
+    "output_tokens": 6514,
+    "cache_read_input_tokens": 154617,
+    "cache_creation_input_tokens": 15483,
+    "billable_tokens_session": 67617.45,
+    "tool_calls": 10,
+    "result_subtype": "success",
+    "is_error": false
+  },
+  "valid": true,
+  "invalid_reason": "",
+  "non_vacuity": {
+    "mcp_servers_observed": [],
+    "mcp_servers_expected": [],
+    "mcp_server_status": null,
+    "inject_events": 1,
+    "audit_since_offset": 1073,
+    "proxy_injected": 1,
+    "notes_in_store_at_start": 1,
+    "trail_text_delivered": null,
+    "session_errored": false,
+    "planted_anchor_injections": 1,
+    "planted_note_retrieved": true
+  },
+  "end_state_manifest_sha256": "3f374e3d539b3cda33ab0ecc921d3e84066636700a8deb317f2779fa4a23f649",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/legs/2/end-state.tar"
+}

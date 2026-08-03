@@ -1,0 +1,2 @@
+SessionEnd hook ["/redacted/session-end-hook" ai hook run --host claude-code] failed: /bin/sh: /redacted/session-end-hook: No such file or directory
+

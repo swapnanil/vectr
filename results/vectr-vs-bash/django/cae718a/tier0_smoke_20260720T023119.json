@@ -1,0 +1,80 @@
+{
+  "corpus": "django",
+  "vectr_sha": "cae718a",
+  "smoke_test": true,
+  "port": 8798,
+  "tools_list_overhead": {
+    "tokens": 5144,
+    "wall_ms": 33.99,
+    "raw_bytes": 20546
+  },
+  "task_ids": [
+    "T01",
+    "T08",
+    "T11"
+  ],
+  "results": [
+    {
+      "id": "T01",
+      "archetype": 1,
+      "archetype_name": "known_symbol_lookup",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 1,
+        "tokens": 171,
+        "wall_ms": 42.54,
+        "hit_at_call": 1,
+        "answered": true
+      },
+      "bash": {
+        "calls": 2,
+        "tokens": 457,
+        "wall_ms": 59.58,
+        "hit_at_call": 1,
+        "answered": true
+      }
+    },
+    {
+      "id": "T08",
+      "archetype": 5,
+      "archetype_name": "absent_topic",
+      "expect_absence": true,
+      "vectr": {
+        "calls": 1,
+        "tokens": 342,
+        "wall_ms": 5850.37,
+        "hit_at_call": null,
+        "answered": false,
+        "nonempty_calls": 1
+      },
+      "bash": {
+        "calls": 3,
+        "tokens": 269,
+        "wall_ms": 540.42,
+        "hit_at_call": null,
+        "answered": false,
+        "nonempty_calls": 2
+      }
+    },
+    {
+      "id": "T11",
+      "archetype": 7,
+      "archetype_name": "stack_trace_literal",
+      "expect_absence": false,
+      "vectr": {
+        "calls": 1,
+        "tokens": 1890,
+        "wall_ms": 4884.71,
+        "hit_at_call": 1,
+        "answered": true
+      },
+      "bash": {
+        "calls": 1,
+        "tokens": 22,
+        "wall_ms": 238.61,
+        "hit_at_call": 1,
+        "answered": true
+      }
+    }
+  ]
+}

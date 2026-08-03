@@ -1,0 +1,21 @@
+2026-08-03T12:18:44Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=0 method=sql
+2026-08-03T12:18:44Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=queue.yaml notes_returned=2 method=path
+2026-08-03T12:18:44Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=0 method=sql
+2026-08-03T12:18:44Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace channel=proxy items=1 anchors=note:1 chars=640 states=active
+2026-08-03T12:18:44Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=0 method=sql
+2026-08-03T12:18:46Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:18:48Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:18:50Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:18:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:18:54Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:18:56Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:18:58Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:19:00Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:19:02Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:19:04Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:19:06Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:19:08Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:19:10Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:19:12Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:19:14Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=Roll staging back to the previous release. notes_returned=2 method=semantic
+2026-08-03T12:19:32Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace query=staging deployment release rollback notes_returned=2 method=semantic

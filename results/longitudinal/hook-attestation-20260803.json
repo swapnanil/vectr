@@ -1,0 +1,22 @@
+{
+  "verified": false,
+  "date": "2026-08-03",
+  "claude_code_version": "2.1.220",
+  "method": "canary claude -p runs (model claude-haiku-4-5) in a hooks-configured scratch workspace with a vectr memory-only daemon; evidence = daemon-side /v1/status hook_injection_counts deltas across the session window, cross-checked against transcript hook_started events and tool_use blocks",
+  "events": {
+    "SessionStart": {
+      "fires_headless": true,
+      "evidence": "counter 1->2->3 across two canary sessions; hook_started events present in both transcripts"
+    },
+    "UserPromptSubmit": {
+      "fires_headless": true,
+      "evidence": "counter 0->1->2 across two canary sessions"
+    },
+    "PreToolUse": {
+      "fires_headless": false,
+      "evidence": "second canary session made Read x1 and Bash x1 tool calls (tool_use blocks in transcript); zero PreToolUse hook_started events; daemon counter unchanged 1->1 (the 1 is a direct CLI control invocation which DID fire and increment, proving trigger matching and counting both work)"
+    }
+  },
+  "conclusion": "hook-full (D2) premise not satisfiable headless on this Claude Code version: PreToolUse never invoked by claude -p; SessionStart and UserPromptSubmit fire reliably. T6 stays skipped by design.",
+  "control": "direct CLI 'vectr hook pre-tool-use' with a Read payload for the canary path returned fired=1 additionalContext and incremented the counter, isolating the failure to headless hook invocation, not vectr"
+}

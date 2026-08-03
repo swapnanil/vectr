@@ -1,0 +1,65 @@
+{
+  "tier": "T1",
+  "plan": [
+    {
+      "trajectory_id": null,
+      "scenario": "release_via_ci",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "release_via_ci-none-none-s0",
+      "k": 2,
+      "status": "already-done"
+    },
+    {
+      "trajectory_id": "release_via_ci-none-none-s0",
+      "k": 3,
+      "status": "already-done"
+    },
+    {
+      "trajectory_id": "release_via_ci-proxy-plain-s0",
+      "k": 2,
+      "status": "done",
+      "usd": 0.4020918
+    },
+    {
+      "trajectory_id": "release_via_ci-proxy-plain-s0",
+      "k": 3,
+      "status": "done",
+      "usd": 0.3582234
+    },
+    {
+      "trajectory_id": null,
+      "scenario": "deploy_reverted_by_reconciler",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-none-none-s0",
+      "k": 2,
+      "status": "already-done"
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-none-none-s0",
+      "k": 3,
+      "status": "already-done"
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-proxy-plain-s0",
+      "k": 2,
+      "status": "done",
+      "usd": 0.42240300000000003
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-proxy-plain-s0",
+      "k": 3,
+      "status": "done",
+      "usd": 0.20321249999999996
+    }
+  ],
+  "spend_usd": 1.39,
+  "budget_exhausted": false
+}

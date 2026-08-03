@@ -1,0 +1,30 @@
+{
+  "corpus": "camel",
+  "task_id": "T2-02",
+  "vectr_sha": "36ad53a",
+  "port": 8800,
+  "model": "sonnet",
+  "max_turns": 40,
+  "sessions_requested": [
+    "M1",
+    "C1",
+    "M2",
+    "C2",
+    "M3",
+    "C3"
+  ],
+  "results": [
+    {
+      "label": "M1",
+      "arm": "memory",
+      "seed_invalid": false,
+      "error": "TimeoutError('timed out')"
+    },
+    {
+      "label": "C1",
+      "arm": "control",
+      "seed_invalid": false,
+      "error": "TimeoutError('timed out')"
+    }
+  ]
+}

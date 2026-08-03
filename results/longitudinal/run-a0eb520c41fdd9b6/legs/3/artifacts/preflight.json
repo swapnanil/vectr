@@ -1,0 +1,47 @@
+{
+  "turn1_text_only": {
+    "item_count": 0,
+    "chars": 0,
+    "anchor_ids": [],
+    "planted_present": false
+  },
+  "turn2_with_file_anchor": {
+    "item_count": 1,
+    "chars": 643,
+    "anchor_ids": [
+      "note:2"
+    ],
+    "planted_present": false
+  },
+  "proactive_probe_diagnostic_only": false,
+  "reachable_channel": "by_id",
+  "by_id_probe": {
+    "transport_ok": true,
+    "exists": true,
+    "content_matches": true,
+    "raw_chars": 747
+  },
+  "rank_probe": {
+    "rank": null,
+    "rounds": 2,
+    "exhausted": false,
+    "accumulated_anchor_ids": [
+      "note:2",
+      "note:2"
+    ],
+    "displaced_by": [
+      {
+        "note_id": 2,
+        "kind": "gotcha",
+        "priority": null,
+        "anchored": true
+      },
+      {
+        "note_id": 2,
+        "kind": "gotcha",
+        "priority": null,
+        "anchored": true
+      }
+    ]
+  }
+}

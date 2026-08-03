@@ -1,0 +1,10 @@
+{
+  "pyproject.toml": "121c2a78c92146fae53b052bd45c5e2800117c8112b2a2256240d08d7dade40b",
+  "src/ledgerkit/__init__.py": "7ba60422c4bed8116b60c8d603e616637260c2fdbbda4f57ea9dd0df121588b1",
+  "src/ledgerkit/rates.py": "298e820249f67ddb731bd63789dca841e996c51ed655aaa207013234f17cc616",
+  "CHANGELOG.md": "2d77e89256549f0bc0a9af0c4796ca52c620544fc142720121683fdfdb41e5b5",
+  "CLAUDE.md": "8ec433764abf45cfe25512597f56d090dfeb76b552b29a5d1ace70fe76b7d690",
+  ".github/workflows/ci.yml": "e86ee7b673b62f7a5c7d79601ef7280d9f72516e290456aa02d57c475eb91a9c",
+  ".github/workflows/release.yml": "a6d54309a00f902ac1d36ac449a0fb420992f3e3c513eb15596697d402987ff5",
+  "scripts/preflight.sh": "7729c32f33c5fd02cff40fa81e336537c282de6273cb1b09b00b040982293a05"
+}

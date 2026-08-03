@@ -1,0 +1,69 @@
+{
+  "trajectory_id": "release_via_ci-mcp-plain-s0",
+  "scenario": "release_via_ci",
+  "arm": "mcp",
+  "note_variant": "plain",
+  "seed": 0,
+  "n_legs": 4,
+  "db_dir": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/db",
+  "created_utc": "20260803T055819Z",
+  "updated_utc": "20260803T141641Z",
+  "leg1_id": "cdb7c650324154abb0069044a573b84aea8933535fe3bd043248dbd51bf659e6",
+  "leg1_source": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0",
+  "planted_note_id": 1,
+  "planted_anchor": "note:1",
+  "legs": [
+    {
+      "k": 1,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/_shared/leg1/release_via_ci-s0/workspace.tar",
+      "end_state_manifest_sha256": "66cff1cfce2463e9803264c233d8ae90945c69719647a73906236ed64a3cb7ac",
+      "usd": 0.29990220000000006,
+      "valid": true,
+      "started_utc": null,
+      "finished_utc": null
+    },
+    {
+      "k": 2,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/legs/2/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/legs/2/end-state.tar",
+      "end_state_manifest_sha256": "a34dfeb7ec474db5b48e36765c3df33d1059e3c681f16010b456364793f763ac",
+      "usd": 0.7157600999999999,
+      "valid": true,
+      "started_utc": "20260803T055819Z",
+      "finished_utc": "20260803T060104Z",
+      "revalidated_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/legs/2/artifacts/result.revalidated.json",
+      "revalidation": "DEFECT 13: non-vacuity gate recomputed from preserved bytes by revalidate.py at vectr 99ecbbd; evidence_class=tool-use; original result.json unmodified"
+    },
+    {
+      "k": 3,
+      "status": "done",
+      "result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/legs/3/artifacts/result.json",
+      "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-a0eb520c41fdd9b6/legs/3/end-state.tar",
+      "end_state_manifest_sha256": "acd5b529d6b5b53429d32c48108087772ec748195325342240507d41583d5517",
+      "usd": 0.6777371999999999,
+      "valid": true,
+      "started_utc": "20260803T141443Z",
+      "finished_utc": "20260803T141641Z"
+    },
+    {
+      "k": 4,
+      "status": "pending",
+      "result_path": null,
+      "end_state_tar": null,
+      "end_state_manifest_sha256": null,
+      "usd": null,
+      "valid": null,
+      "started_utc": null,
+      "finished_utc": null
+    }
+  ],
+  "trajectory_valid_through": 3,
+  "spend_usd": 1.69,
+  "tier": "T2",
+  "hook_attestation": null,
+  "notes": "k=2 revalidated valid under DEFECT 13 gate fix (sentinel, 2026-08-03)",
+  "run_dir": "run-a0eb520c41fdd9b6"
+}

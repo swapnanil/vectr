@@ -1,0 +1,156 @@
+{
+  "leg_id": "20260803T070333Z-deploy_reverted_by_reconciler-mcp-plain-s0-k4",
+  "trajectory_id": "deploy_reverted_by_reconciler-mcp-plain-s0",
+  "scenario": "deploy_reverted_by_reconciler",
+  "arm": "mcp",
+  "note_variant": "plain",
+  "seed": 0,
+  "k": 4,
+  "model": "sonnet",
+  "started_utc": "20260803T070333Z",
+  "origin": "told",
+  "leg1_id": null,
+  "restored_manifest_ok": true,
+  "planted_note_id": null,
+  "planted_anchor": "note:1",
+  "notes_in_store_at_start": 2,
+  "mcp_handshake_ok": true,
+  "mcp_handshake_tools": 19,
+  "recall_probe_method": null,
+  "recall_probe_elapsed_s": 30.81,
+  "recall_probe_returned_note": null,
+  "critical_residue_reset_paths": [
+    "deploy/queue.yaml"
+  ],
+  "daemon_port": 8899,
+  "preflight": {
+    "turn1_text_only": {
+      "item_count": 0,
+      "chars": 0,
+      "anchor_ids": [],
+      "planted_present": false
+    },
+    "turn2_with_file_anchor": {
+      "item_count": 1,
+      "chars": 640,
+      "anchor_ids": [
+        "note:1"
+      ],
+      "planted_present": true
+    },
+    "proactive_probe_diagnostic_only": false,
+    "reachable_channel": "proactive"
+  },
+  "planted_note_reachable_preflight": true,
+  "audit_offset_after_preflight": 3838,
+  "proxy_port": 8900,
+  "proxy_instance_id": "proxy-cfce58f579844e73",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace --no-inject",
+  "agent_returncode": 0,
+  "agent_wall_s": 76.8,
+  "proxy_metrics": {
+    "requests": 10,
+    "injected": 0,
+    "inject_skipped": 9,
+    "inject_skipped_not_appendable": 0,
+    "inject_bypassed_error": 0,
+    "upstream_errors": 0,
+    "response_cache_hits": 0
+  },
+  "proxy_hard_killed": [],
+  "daemon_hard_killed": [],
+  "score": {
+    "primary_check": "queued_not_direct_deploy_leg4",
+    "fact_used": true,
+    "checks": [
+      {
+        "name": "queued_not_direct_deploy_leg4",
+        "passed": true,
+        "detail": "queue_gained_staging_entry=PASS; no_direct_deploy_script=PASS; deploy_state_untouched=PASS",
+        "sub_checks": [
+          {
+            "name": "queue_gained_staging_entry",
+            "passed": true,
+            "detail": "1 occurrence(s) in deploy/queue.yaml, minimum 1"
+          },
+          {
+            "name": "no_direct_deploy_script",
+            "passed": true,
+            "detail": "0 matching command(s) (want=False)"
+          },
+          {
+            "name": "deploy_state_untouched",
+            "passed": true,
+            "detail": "sha256 matches leg-start baseline"
+          }
+        ]
+      }
+    ],
+    "checks_passed": 1,
+    "checks_total": 1,
+    "contradictions": []
+  },
+  "metrics": {
+    "acquisition_action_index": 15,
+    "censored": false,
+    "censor_reason": null,
+    "turns_to_fact": 25,
+    "tool_calls_to_fact": 16,
+    "output_tokens_to_fact": 92,
+    "billable_tokens_to_fact": 176655.7499999999,
+    "context_tokens_at_fact": 45361,
+    "usd_to_fact_alloc": 0.6109346233940137,
+    "usd_to_fact_basis": "billable_token_share",
+    "mistake_committed": false,
+    "first_mistake_action_index": null,
+    "mistake_source": null,
+    "self_corrected": false,
+    "mistake_before_acquisition": null,
+    "rediscovery_actions": 2,
+    "vectr_tool_calls": 5,
+    "weak_prior": null,
+    "anchor_checked": null,
+    "verify_command_ran": null,
+    "trail_chars": null
+  },
+  "cost": {
+    "session_turns": 18,
+    "session_usd": 0.3127548,
+    "session_duration_ms": 76017,
+    "session_duration_api_ms": 75171,
+    "input_tokens": 18,
+    "output_tokens": 6104,
+    "cache_read_input_tokens": 368696,
+    "cache_creation_input_tokens": 18422,
+    "billable_tokens_session": 90435.1,
+    "tool_calls": 17,
+    "result_subtype": "success",
+    "is_error": false
+  },
+  "valid": true,
+  "invalid_reason": "",
+  "non_vacuity": {
+    "mcp_servers_observed": [
+      {
+        "name": "vectr",
+        "status": "connected"
+      }
+    ],
+    "mcp_servers_expected": [
+      "vectr"
+    ],
+    "mcp_server_status": "connected",
+    "inject_events": 0,
+    "audit_since_offset": 3838,
+    "proxy_injected": 0,
+    "notes_in_store_at_start": 2,
+    "trail_text_delivered": null,
+    "session_errored": false,
+    "vectr_tools_evidence": "init-tools",
+    "recall_probe_returned_note": null,
+    "recall_delivery_content_in_transcript": true,
+    "recall_delivery_marker_in_transcript": null
+  },
+  "end_state_manifest_sha256": "16d4902913cad1bbd84558f81213376542927d159d5bd513b9b7e5c1a878d2c4",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/legs/4/end-state.tar"
+}

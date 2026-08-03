@@ -1,0 +1,24 @@
+2026-08-03T12:29:13Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=Deploy the 1.2.0 tag to staging. notes_returned=0 method=sql
+2026-08-03T12:29:13Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=queue.yaml notes_returned=1 method=path
+2026-08-03T12:29:13Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=Deploy the 1.2.0 tag to staging. notes_returned=0 method=sql
+2026-08-03T12:29:13Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace channel=proxy items=1 anchors=note:1 chars=640 states=active
+2026-08-03T12:29:22Z PROACTIVE_RETRIEVE workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace channel=proxy items=1 anchors=note:1 chars=619 states=active token=272b7e49b8293ef3
+2026-08-03T12:29:30Z PROACTIVE_INJECT workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace channel=proxy items=1 anchors=note:1 chars=619 states=active token=272b7e49b8293ef3
+2026-08-03T12:29:30Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=deploy.sh notes_returned=1 method=path
+2026-08-03T12:29:36Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=deploy.sh notes_returned=1 method=path
+2026-08-03T12:29:36Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=README.md notes_returned=0 method=path
+2026-08-03T12:29:36Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=queue.yaml notes_returned=1 method=path
+2026-08-03T12:29:49Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=deploy.sh notes_returned=1 method=path
+2026-08-03T12:29:49Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=README.md notes_returned=0 method=path
+2026-08-03T12:29:49Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=queue.yaml notes_returned=1 method=path
+2026-08-03T12:29:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=deploy.sh notes_returned=1 method=path
+2026-08-03T12:29:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=README.md notes_returned=0 method=path
+2026-08-03T12:29:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=queue.yaml notes_returned=1 method=path
+2026-08-03T12:29:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=staging.yaml notes_returned=0 method=path
+2026-08-03T12:29:52Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=app.py notes_returned=0 method=path
+2026-08-03T12:30:44Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=deploy.sh notes_returned=1 method=path
+2026-08-03T12:30:44Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=README.md notes_returned=0 method=path
+2026-08-03T12:30:44Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=queue.yaml notes_returned=1 method=path
+2026-08-03T12:30:44Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=staging.yaml notes_returned=0 method=path
+2026-08-03T12:30:44Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=app.py notes_returned=0 method=path
+2026-08-03T12:30:44Z RECALL workspace=/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-plain-s0/workspace query=ide_config notes_returned=0 method=path

@@ -1,0 +1,35 @@
+{
+  "tier": "T2",
+  "plan": [
+    {
+      "trajectory_id": null,
+      "scenario": "release_via_ci",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "release_via_ci-hook-sessionstart-plain-s0",
+      "k": 2,
+      "status": "failed",
+      "returncode": 1,
+      "stderr": "ABORT: the planted note is not retrievable on EITHER daemon-side probe, so this leg cannot test its memory channel. Fix the scenario (not the score); re-run with --allow-unreachable to record it anyway.\n"
+    },
+    {
+      "trajectory_id": null,
+      "scenario": "deploy_reverted_by_reconciler",
+      "seed": 0,
+      "k": 1,
+      "status": "leg1-cached"
+    },
+    {
+      "trajectory_id": "deploy_reverted_by_reconciler-hook-sessionstart-plain-s0",
+      "k": 2,
+      "status": "failed",
+      "returncode": 1,
+      "stderr": "ABORT: the planted note is not retrievable on EITHER daemon-side probe, so this leg cannot test its memory channel. Fix the scenario (not the score); re-run with --allow-unreachable to record it anyway.\n"
+    }
+  ],
+  "spend_usd": 0.0,
+  "budget_exhausted": false
+}

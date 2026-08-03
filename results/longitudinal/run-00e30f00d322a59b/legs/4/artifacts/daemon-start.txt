@@ -1,0 +1,10 @@
+$ /Users/swapnanilsaha/Library/Python/3.14/bin/vectr start /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace --port 8899 --memory-only
+rc=0
+
+
+  Updated /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace/.cursor/mcp.json (port 8899)
+Vectr started [memory-only] (PID 59948) on port 8899
+Workspace : /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-00e30f00d322a59b/workspace
+MCP URL   : http://localhost:8899/mcp
+Logs      : /Users/swapnanilsaha/.vectr/logs/9933bd6e1947.log
+Mode      : memory-only (no code indexing/watcher; memory tools + hooks active)

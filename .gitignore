@@ -90,7 +90,6 @@ vscode-extension/package-lock.json
 
 # benchmark run artifacts (eval output, not source)
 benchmarks/harness/results/
-/results/vectr-vs-bash/
 /.vectrignore
 
 # Local vectr daemon workspace data (created when a vectr instance indexes this repo)
