@@ -17,7 +17,8 @@ scenarios, arms, variants, defect record, and scoring.
   snapshot. The trajectory-level `workspace/` is the live carried-forward workspace.
 - Leg 1 is shared per scenario and seed and lives under `_shared/leg1/`, together with the
   scenario definition used for the run.
-- Top-level `results.jsonl` and `results.rescored.jsonl` aggregate every leg.
+- Top-level `results.jsonl` and `results.rescored.jsonl` aggregate the trajectory legs; the
+  shared first sessions keep their records under `_shared/leg1/`.
 - Superseded and invalidated trajectories are retained beside the live ones, with the
   invalidation reason carried in the directory name.
 
