@@ -1852,6 +1852,7 @@ class VectrService:
         interrupted: bool,
         stdout_tail: str,
         stderr_tail: str,
+        harness_success: bool | None = None,
     ) -> int:
         """Write ONE deterministic, zero-inference episode row per
         Bash/Edit/Write/MultiEdit tool call (called only by `POST /v1/episode`,
@@ -1861,6 +1862,12 @@ class VectrService:
         server-side, mirroring `record_commit_note`'s own "raw facts
         client-side, interpretation server-side" split; no embedding ever
         happens on this path.
+
+        `harness_success` (tri-state, default None) is forwarded straight
+        into `agent.outcome.derive_outcome` — see that module's docstring
+        for what it is and why it exists; it is never persisted as its own
+        column, only consumed to help derive the `outcome` column, exactly
+        like `is_error`/`interrupted`.
 
         `description` (Bash tool_input.description, an LLM-authored one-line
         summary) is accepted for forward compatibility but not persisted —
@@ -1905,6 +1912,7 @@ class VectrService:
             interrupted=interrupted,
             stdout_digest=stdout_digest,
             stderr_digest=stderr_digest,
+            harness_success=harness_success,
         )
         episode_ts = ts if ts is not None else time.time()
         episode_id = self._episode_store.insert(

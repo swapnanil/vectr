@@ -693,6 +693,7 @@ async def episode(body: EpisodeRequest, request: Request) -> EpisodeResponse:
         rc=body.rc,
         is_error=body.is_error,
         interrupted=body.interrupted,
+        harness_success=body.harness_success,
         stdout_tail=body.stdout_tail,
         stderr_tail=body.stderr_tail,
     )

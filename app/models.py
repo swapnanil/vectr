@@ -817,6 +817,15 @@ class EpisodeRequest(BaseModel):
     rc: int | None = Field(default=None, description="Exit code, if the editor's tool_response ever includes one")
     is_error: bool = Field(default=False)
     interrupted: bool = Field(default=False)
+    harness_success: bool | None = Field(
+        default=None,
+        description=(
+            "Tri-state: True/False only when the hook layer is certain which "
+            "discrete post-tool-call event the editor routed this call through "
+            "(e.g. Claude Code's PostToolUse vs PostToolUseFailure); None when "
+            "this integration doesn't expose that signal. See agent/outcome.py."
+        ),
+    )
     stdout_tail: str = Field(default="", description="Client-truncated stdout text")
     stderr_tail: str = Field(default="", description="Client-truncated stderr text")
 

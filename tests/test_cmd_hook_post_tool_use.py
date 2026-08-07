@@ -62,7 +62,7 @@ class TestBuildEpisodePayload:
         assert payload == {
             "session_id": "abc-123", "cwd": "/repo", "tool": "bash",
             "command": 'git commit -m "fix"', "description": "commit", "file_path": None,
-            "rc": 0, "is_error": False, "interrupted": False,
+            "rc": 0, "is_error": False, "interrupted": False, "harness_success": None,
             "stdout_tail": "ok\n", "stderr_tail": "",
         }
 
@@ -173,6 +173,53 @@ class TestBuildEpisodePayload:
         }
         payload = m._build_episode_payload(event)
         assert payload["stdout_tail"] == "hi\n"
+
+
+class TestHarnessSuccessDerivation:
+    """UPG-EPISODE-OUTCOME-CLASSIFICATION: `harness_success` is derived from
+    `hook_event_name` alone — the discrete event the harness routed the
+    call through, tool-call structure (R5-sanctioned), never a guess."""
+
+    def test_explicit_post_tool_use_event_name_is_harness_success_true(self):
+        event = {
+            "cwd": "/repo", "tool_name": "Bash", "hook_event_name": "PostToolUse",
+            "tool_input": {"command": "jq '.' file.json"},
+            "tool_response": {"stdout": "{}\n", "stderr": ""},
+        }
+        payload = m._build_episode_payload(event)
+        assert payload["harness_success"] is True
+        assert payload["rc"] is None  # G0: no exit-code field on this path, ever
+
+    def test_missing_hook_event_name_is_harness_success_none_not_true(self):
+        """Defensive: an unrecognized/absent event name must never be
+        guessed as success — only the literal "PostToolUse" string does."""
+        event = {
+            "cwd": "/repo", "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+            "tool_response": {"stdout": "hi\n", "stderr": ""},
+        }
+        payload = m._build_episode_payload(event)
+        assert payload["harness_success"] is None
+
+    def test_post_tool_use_failure_event_name_is_harness_success_false(self):
+        event = {
+            "cwd": "/repo", "tool_name": "Bash", "hook_event_name": "PostToolUseFailure",
+            "tool_input": {"command": "false"},
+            "error": "Exit code 1\nboom",
+        }
+        payload = m._build_episode_payload(event)
+        assert payload["harness_success"] is False
+
+    def test_edit_tool_also_gets_harness_success_from_event_name(self):
+        """The signal is about which hook fired, not the tool kind — a
+        successful Edit/Write/MultiEdit/apply_patch call gets the same
+        tri-state treatment as Bash."""
+        event = {
+            "cwd": "/repo", "tool_name": "Edit", "hook_event_name": "PostToolUse",
+            "tool_input": {"file_path": "/repo/a.py"}, "tool_response": {},
+        }
+        payload = m._build_episode_payload(event)
+        assert payload["harness_success"] is True
 
 
 class TestBuildEpisodePayloadPostToolUseFailure:

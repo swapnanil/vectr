@@ -170,6 +170,11 @@ POST_TOOL_USE_FIXTURES = [
     '{"cwd": "/p", "tool_name": "Bash", "hook_event_name": "PostToolUseFailure", '
     '"tool_input": {"command": "sleep 100"}, "error": "Exit code -1\\ninterrupted", '
     '"is_interrupt": true}',
+    # UPG-EPISODE-OUTCOME-CLASSIFICATION: explicit success-routed event name
+    # (harness_success=True derivation) — both implementations must agree.
+    '{"cwd": "/p", "tool_name": "Bash", "hook_event_name": "PostToolUse", '
+    '"tool_input": {"command": "jq \'.\' file.json"}, '
+    '"tool_response": {"stdout": "{}\\n", "stderr": ""}}',
 ]
 
 
