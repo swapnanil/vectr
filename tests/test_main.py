@@ -1511,6 +1511,12 @@ class TestVersionSkewWiring:
         """UPG-CACHE-LITTER: `vectr cache prune` removes empty per-workspace
         hash dirs under the cache root, skipping live-instance dirs (R1)."""
         from pathlib import Path as _P
+        from agent.config import CACHE_DIR_ENV
+        # cmd_cache resolves its cache root via agent.config.vectr_cache_root
+        # (UPG-TEST-CACHE-ISOLATION), which prefers VECTR_CACHE_DIR over
+        # Path.home() when set — unset it so this test exercises the
+        # Path.home() fallback it's actually probing.
+        monkeypatch.delenv(CACHE_DIR_ENV, raising=False)
         monkeypatch.setattr(_P, "home", lambda: tmp_path)
         cache_root = tmp_path / ".cache" / "vectr"
         empty = cache_root / "0041394e972f"
@@ -1529,6 +1535,8 @@ class TestVersionSkewWiring:
 
     def test_cmd_cache_prune_dry_run_keeps_dirs(self, tmp_path, monkeypatch, capsys):
         from pathlib import Path as _P
+        from agent.config import CACHE_DIR_ENV
+        monkeypatch.delenv(CACHE_DIR_ENV, raising=False)
         monkeypatch.setattr(_P, "home", lambda: tmp_path)
         cache_root = tmp_path / ".cache" / "vectr"
         empty = cache_root / "0041394e972f"
@@ -1541,6 +1549,8 @@ class TestVersionSkewWiring:
 
     def test_cmd_cache_prune_skips_live_instance_dir(self, tmp_path, monkeypatch, capsys):
         from pathlib import Path as _P
+        from agent.config import CACHE_DIR_ENV
+        monkeypatch.delenv(CACHE_DIR_ENV, raising=False)
         monkeypatch.setattr(_P, "home", lambda: tmp_path)
         cache_root = tmp_path / ".cache" / "vectr"
         live_empty = cache_root / "0041394e972f"
@@ -1971,8 +1981,15 @@ class TestCmdForget:
         # layout, deleting nothing for workspaces on the current
         # ~/.cache/vectr/<hash>/ layout while still reporting success.
         import argparse
+        from agent.config import CACHE_DIR_ENV
         from agent.working_context_store import WorkingContextStore
 
+        # cmd_forget --all resolves its cache root via
+        # agent.config.vectr_cache_root (UPG-TEST-CACHE-ISOLATION), which
+        # prefers VECTR_CACHE_DIR over HOME-derived Path.home() when set —
+        # unset it so this test exercises the HOME fallback it's actually
+        # probing, rather than the whole session's own cache override.
+        monkeypatch.delenv(CACHE_DIR_ENV, raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
         current = tmp_path / ".cache" / "vectr" / "aaaa1111bbbb"
         legacy = tmp_path / ".cache" / "vectr" / "db" / "cccc2222dddd"

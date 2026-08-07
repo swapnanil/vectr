@@ -556,12 +556,28 @@ ARC_TRANSIENT_MARKER_IDS : frozenset[str]
     mark a captured arc `low_confidence`: the failure's stderr matched a
     transient-error signature, so the "fix" may just be an environment
     retry rather than a real one.
+
+CACHE_DIR_ENV : str
+    Name of the environment variable (``VECTR_CACHE_DIR``) that overrides
+    the cache root every on-disk cache path resolves under (UPG-TEST-CACHE-
+    ISOLATION). Defined once here so every callsite imports the same name
+    instead of re-typing the literal string.
+
+vectr_cache_root() -> Path
+    The single resolution point for vectr's cache root — every module that
+    used to compute ``Path.home() / ".cache" / "vectr"`` on its own calls
+    this instead. Reads ``VECTR_CACHE_DIR`` at call time (not import time),
+    so a caller (e.g. the test suite, via a session-scoped fixture) can set
+    it before constructing any service and every subsequent cache path
+    (workspace DB dirs, the Hugging Face model cache, cache-maintenance
+    sweeps) is redirected there.
 """
 from __future__ import annotations
 
 import importlib.resources as _ilr
 import os as _os
 import re as _re
+from pathlib import Path
 from typing import Any
 
 import yaml as _yaml
@@ -1247,3 +1263,29 @@ MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS: int = int(_hygiene_cfg["stale_task_warn
 _recall_for_path_cfg: dict[str, Any] = _cfg["memory_recall_for_path"]
 MEMORY_RECALL_FOR_PATH_OVERFETCH_MULTIPLIER: int = int(_recall_for_path_cfg["overfetch_multiplier"])
 MEMORY_RECALL_FOR_PATH_OVERFETCH_CEILING: int = int(_recall_for_path_cfg["overfetch_ceiling"])
+
+# ---------------------------------------------------------------------------
+# UPG-TEST-CACHE-ISOLATION: single override point for vectr's on-disk cache
+# root. Every module that resolves a cache path (workspace DB dirs, the
+# Hugging Face model cache, cache-maintenance sweeps) calls vectr_cache_root()
+# instead of independently hardcoding Path.home() / ".cache" / "vectr" — the
+# most direct consequence being that the test suite can redirect the WHOLE
+# cache root to a tmp_path via one env var (see tests/conftest.py's
+# `_isolated_cache_root` fixture) rather than each callsite needing its own
+# override plumbed through. Not a config.yaml tunable: this is a runtime
+# location override (same category as VECTR_DB_DIR/VECTR_PORT), not a magic
+# number/threshold/weight.
+# ---------------------------------------------------------------------------
+
+CACHE_DIR_ENV: str = "VECTR_CACHE_DIR"
+
+
+def vectr_cache_root() -> Path:
+    """Root directory for vectr's on-disk cache (workspace DB dirs, HF model
+    cache). Reads CACHE_DIR_ENV (VECTR_CACHE_DIR) at call time — never cached
+    at import — so a caller that sets the env var after this module has
+    already been imported (e.g. a pytest fixture) is still honored on every
+    subsequent call. Falls back to the standard ~/.cache/vectr location when
+    unset."""
+    override = _os.environ.get(CACHE_DIR_ENV)
+    return Path(override) if override else Path.home() / ".cache" / "vectr"

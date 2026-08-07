@@ -38,6 +38,45 @@ from app.service import VectrService as _RealVectrService
 
 
 # ---------------------------------------------------------------------------
+# UPG-TEST-CACHE-ISOLATION: redirect the whole session off the real user
+# cache (~/.cache/vectr).
+#
+# Every product cache-path resolution — VectrService's workspace DB dir
+# (app/service.py:_default_db_dir), CodeIndexer's own db_path fallback
+# (agent/indexer/_core.py), and the Hugging Face model cache (agent/indexer/
+# _types.py, agent/searcher.py) — goes through agent.config.vectr_cache_root(),
+# which reads VECTR_CACHE_DIR at CALL time (never cached at import). Setting
+# that env var once here, before the first test runs, is therefore enough to
+# isolate every VectrService(workspace_root=str(tmp_path)) / CodeIndexer(...)
+# construction anywhere in the suite — hundreds of call sites across dozens
+# of test files, present and future — with no change needed to any of them:
+# this fixture is autouse, so no test signature has to name it.
+#
+# Before vectr_cache_root() existed, each of those constructions used a
+# per-test-unique tmp_path as its workspace root, hashed to a unique cache
+# slug, and wrote a real directory under ~/.cache/vectr for every test that
+# ran — a 2026-07-20 cleanup swept ~4,000 such junk dirs (~550 MB) left by
+# prior suite runs.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_cache_root(tmp_path_factory) -> Generator[Path, None, None]:
+    from agent.config import CACHE_DIR_ENV
+
+    cache_dir = tmp_path_factory.mktemp("vectr_cache_root")
+    # A session-scoped fixture cannot request the function-scoped `monkeypatch`
+    # fixture, so this uses pytest's own MonkeyPatch class directly — the
+    # documented pattern for env-var patching outside a test function
+    # (https://docs.pytest.org/en/stable/how-to/monkeypatch.html).
+    mp = pytest.MonkeyPatch()
+    mp.setenv(CACHE_DIR_ENV, str(cache_dir))
+    try:
+        yield cache_dir
+    finally:
+        mp.undo()
+
+
+# ---------------------------------------------------------------------------
 # Dummy embed provider — deterministic, zero-download
 # ---------------------------------------------------------------------------
 
@@ -491,59 +530,29 @@ def client_real_memory(tmp_path):
         real_store.snapshot(ws, label=label)
     svc.list_snapshots.side_effect = lambda: real_store.list_snapshots(ws)
 
-    def _resume(session_id=None, surface="mcp"):
-        # Mirrors VectrService.resume() exactly (see app/service.py) against
-        # the REAL store, the same way `_recall`/`_remember` above do for
-        # their routes — a REST test exercising this fixture goes through
-        # the real selection/rendering, not a hollow mock return.
-        from agent.working_context_store import _note_title
-        state = real_store.resume_state(ws, session_id=session_id)
-        last_task = state["last_task"]
-        gotchas = state["gotchas"]
-        snapshot = state["snapshot"]
-        notes_for_staleness = ([last_task] if last_task else []) + gotchas
-        stale = real_store.check_staleness(notes_for_staleness, ws) if notes_for_staleness else {}
-
-        def _summary(note):
-            return {
-                "note_id": note.note_id, "kind": note.kind, "priority": note.priority,
-                "title": _note_title(note), "created_at": note.created_at,
-                "anchors": [a[0] for a in (note.anchors or []) if a],
-                "stale": note.note_id in stale,
-            }
-
-        formatted = real_store.format_resume(state, ws, stale_warnings=stale, surface=surface)
-        return {
-            "last_task": _summary(last_task) if last_task else None,
-            "gotchas": [_summary(g) for g in gotchas],
-            "snapshot": snapshot,
-            "gotchas_truncated": state["gotchas_truncated"],
-            "formatted": formatted,
-        }
-
-    svc.resume.side_effect = _resume
-
-    # UPG-COMMIT-MEMORY-HOOK: mirrors VectrService.record_commit_note's own
-    # logic against the REAL store (same active-task lookup via boot_recall,
-    # same content formatting) so /v1/commit-note REST tests exercise the
-    # real remember() write path, not a stub that always returns a bare int.
-    def _record_commit_note(sha, subject, branch, files):
-        from agent.config import HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS
-        from app.service import _format_commit_note_content, _COMMIT_NOTE_TAG, _COMMIT_NOTE_AGENT_ID
-
-        task_note = None
-        for note in real_store.boot_recall(ws):
-            if note.kind == "task":
-                task_note = note
-                break
-        content = _format_commit_note_content(sha, subject, branch, files, task_note)
-        return real_store.remember(
-            ws, content, [_COMMIT_NOTE_TAG], "low", None, kind="finding",
-            title=f"Commit {sha}: {subject[:HOOKS_COMMIT_NOTE_MAX_SUBJECT_CHARS]}",
-            author_id=_COMMIT_NOTE_AGENT_ID, provenance="auto",
-        )
-
-    svc.record_commit_note.side_effect = _record_commit_note
+    # UPG-CONFTEST-REAL-MEMORY-MIRRORS: resume() and record_commit_note() are
+    # bound straight to the REAL VectrService methods (app/service.py) rather
+    # than hand-duplicated here, so a bug in either real method fails these
+    # tests instead of silently passing against a parallel reimplementation
+    # that could drift from it. The real methods only touch
+    # self._context_store / self._workspace_root / self._search_only (plus,
+    # for record_commit_note, self._current_task_note()/self._require_memory_
+    # layer()/self.remember() — all bound the same way below), so those are
+    # set as real attributes on the mock `svc` and the real unbound methods
+    # are called against it (svc.remember already delegates to the real
+    # store via `_remember` above, so record_commit_note's internal
+    # `self.remember(...)` call composes with it for free).
+    svc._context_store = real_store
+    svc._workspace_root = ws
+    svc._search_only = False
+    svc._require_memory_layer = lambda: _RealVectrService._require_memory_layer(svc)
+    svc._current_task_note = lambda: _RealVectrService._current_task_note(svc)
+    svc.resume.side_effect = lambda session_id=None, surface="mcp": _RealVectrService.resume(
+        svc, session_id=session_id, surface=surface
+    )
+    svc.record_commit_note.side_effect = lambda sha, subject, branch, files: (
+        _RealVectrService.record_commit_note(svc, sha, subject, branch, files)
+    )
 
     # UPG-CONFTEST-SERVICE-CLOBBER: save/restore app.state.service (see the
     # `client` fixture) so this partial-real service does not persist into a
