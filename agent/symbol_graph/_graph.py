@@ -805,13 +805,18 @@ class SymbolGraph:
         # full `idx_edge_unique` covering-index scan over the whole
         # workspace instead of a direct `idx_edge_to` index seek — ~15x
         # slower measured on a synthetic 300k-edge graph (~18.6ms →
-        # ~1.0ms median for a 50-name lookup). `PRAGMA optimize` is
-        # SQLite's own recommended once-per-session maintenance pragma: it
-        # only re-analyzes tables whose change count crossed its internal
-        # threshold, so this costs a few milliseconds even on a large graph
-        # and is a no-op on an unchanged one.
+        # ~1.0ms median for a 50-name lookup). The gather is an explicit
+        # bounded `ANALYZE edges`, not `PRAGMA optimize`: optimize only
+        # considers tables the *current connection* has read or written, and
+        # `_conn()` hands out a brand new connection per call, so on the
+        # SQLite builds that honour that rule the pragma is a silent no-op
+        # here and `sqlite_stat1` is never created (observed as a Linux-only
+        # CI failure against a macOS-passing local build). `analysis_limit`
+        # caps the rows examined per index, which is SQLite's own recipe for
+        # a few-millisecond ANALYZE on a large table.
         with self._conn() as conn:
-            conn.execute("PRAGMA optimize")
+            conn.execute("PRAGMA analysis_limit=400")
+            conn.execute("ANALYZE edges")
 
         return {
             "symbols": total_symbols, "edges": edge_count, "files": len(file_paths),
@@ -1842,7 +1847,7 @@ class SymbolGraph:
 
         UPG-CALLER-INDEGREE-ANALYZE: this `idx_edge_to` plan only holds when
         SQLite has table/index statistics to reason with — `build_for_
-        workspace` runs `PRAGMA optimize` once per full build so a fresh or
+        workspace` runs a bounded `ANALYZE edges` once per full build so a fresh or
         rebuilt graph always has them; without it SQLite's planner falls
         back to a full covering-index workspace scan here (measured ~15x
         slower on a synthetic 300k-edge graph)."""
