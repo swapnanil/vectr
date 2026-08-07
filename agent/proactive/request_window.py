@@ -32,6 +32,21 @@ _SYMBOL_KEYS = ("name", "symbol", "query", "pattern")
 # independently-drifting list.
 _EDIT_TOOL_NAMES = ("Edit", "Write", "MultiEdit", "apply_patch")
 
+# Message roles whose text contributes to the window (UPG-PROXY-WINDOW-
+# BOILERPLATE-EVICTS-TASK). A wire-protocol/API-contract constant — same
+# category as `_FILE_PATH_KEYS`/`_SYMBOL_KEYS`/`_EDIT_TOOL_NAMES` above, not a
+# content-side heuristic — and matches this module's own docstring, which has
+# always described the window as "recent user/assistant text". A captured
+# real editor first-request carries a trailing role="system" harness
+# reminder message (thousands of chars) alongside the actual role="user" task
+# text; `assemble_window` used to join every message's text regardless of
+# role and keep only the trailing `max_chars` of the JOINED blob, so a long
+# trailing non-user/assistant message could — and, measured, did — evict the
+# user's own task text entirely. Restricting extraction to these two roles
+# BEFORE the char-budget truncation is a structural (role) filter, never a
+# read of what any message's text says.
+_WINDOW_TEXT_ROLES = ("user", "assistant")
+
 
 def _is_identifier(token: str) -> bool:
     """Deterministic is-identifier check (CamelCase / snake_case / dotted
@@ -86,6 +101,15 @@ def assemble_window(
     The window is a pure function of the body plus the bounds — no persistence,
     no network. Bounded by record count AND character budget so cost stays flat
     regardless of conversation length.
+
+    Only messages whose `role` is in `_WINDOW_TEXT_ROLES` ("user"/"assistant")
+    contribute TEXT to the window (UPG-PROXY-WINDOW-BOILERPLATE-EVICTS-TASK) —
+    a structural, role-based filter applied BEFORE the trailing `max_chars`
+    truncation below, so a long non-user/assistant message (e.g. a harness
+    system-reminder) can never evict the user's own task text from the kept
+    tail. Anchor extraction (file paths / symbols from `tool_use` blocks) is
+    unaffected in practice: those blocks live on assistant-role messages,
+    which remain in scope.
     """
     if not isinstance(body, dict):
         return ProactiveWindow()
@@ -101,6 +125,8 @@ def assemble_window(
 
     for msg in recent:
         if not isinstance(msg, dict):
+            continue
+        if msg.get("role") not in _WINDOW_TEXT_ROLES:
             continue
         content = msg.get("content")
         if isinstance(content, str):

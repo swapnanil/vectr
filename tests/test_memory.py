@@ -2897,6 +2897,34 @@ class TestFireAndFormat:
         assert len(note_ids) == 1
         assert "never push to main" in text
 
+    def test_gotcha_over_the_100tk_cap_still_delivers_body_guidance_not_just_title(self, tmp_path) -> None:
+        """UPG-HOOK-GOTCHA-CAP-TITLE-ONLY acceptance case, end-to-end through
+        the real `_format_full_block` renderer `fire_and_format()` uses: a
+        gotcha note whose full render is well over its 100-token per-kind
+        cap (agent/config.yaml `memory_triggers.injection.per_kind_token_cap
+        .gotcha`) — matching the longitudinal eval's real NoteVariant
+        renders, measured 101-181tk — must still deliver its actual body
+        guidance on the hook channel, not degrade to the title-only
+        index-tier line."""
+        from agent.trigger_engine import MEMORY_TRIGGER_PER_KIND_TOKEN_CAP, token_estimate
+        store, ws = _store(tmp_path), str(tmp_path)
+        guidance = "Always drain the outbound queue before restarting this worker."
+        filler = (
+            " Watch for partial writes during shutdown and retry with backoff "
+            "instead of dropping the batch outright."
+        ) * 4
+        note_id = store.remember(
+            ws, guidance + filler, kind="gotcha", title="worker restart ordering",
+            anchors=["worker.py"],
+        )
+        text, note_ids = store.fire_and_format(ws, event="pre-edit", file_path="worker.py")
+        assert note_ids == {note_id}
+        assert guidance in text  # body guidance reached the wire
+        assert "worker restart ordering" not in text  # index-tier title, never rendered on the full tier
+        # The delivered block is genuinely bounded by the per-kind cap, not
+        # merely "happened to be short" — confirms a real trim occurred.
+        assert token_estimate(text) <= MEMORY_TRIGGER_PER_KIND_TOKEN_CAP["gotcha"] + 20  # + header/envelope slack
+
     # -----------------------------------------------------------------
     # G3 — arm-C double-dip regression (memoization-l1-capture-design §5.3)
     # -----------------------------------------------------------------

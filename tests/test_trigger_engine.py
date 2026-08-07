@@ -885,13 +885,20 @@ class TestPackInjection:
         assert len(packed[0].text) not in range(1, len(full_text))  # never a partial slice of full_text
         assert packed[0].text != full_text[: len(full_text) // 2]
 
-    def test_full_text_over_per_injection_cap_downgrades_to_index(self) -> None:
+    def test_full_text_over_per_injection_cap_trims_into_the_cap(self) -> None:
+        """UPG-HOOK-GOTCHA-CAP-TITLE-ONLY: text with no sentence/word
+        boundary to back off to (one run of characters, as here) still gets
+        a hard-cut TRIM into the cap — it stays on the full tier with a
+        shortened body, rather than downgrading to the title-only index
+        line."""
         from agent.config import MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP, MEMORY_TRIGGER_CHARS_PER_TOKEN
         note = _note(note_id=1, kind="directive")
         oversized_full = "X" * (MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP * MEMORY_TRIGGER_CHARS_PER_TOKEN * 2)
         packed = pack_injection([(note, oversized_full, "short index line")])
-        assert packed[0].tier == "index"
-        assert packed[0].text == "short index line"
+        assert packed[0].tier == "full"
+        assert packed[0].text != "short index line"
+        assert packed[0].text.endswith("…")
+        assert token_estimate(packed[0].text) <= MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP
 
     @pytest.mark.parametrize("kind", ["directive", "gotcha", "operational"])
     def test_per_kind_cap_overrides_the_flat_per_injection_cap(self, kind: str) -> None:
@@ -899,7 +906,9 @@ class TestPackInjection:
         `per_kind_token_cap` override (agent/config.yaml) rather than
         sharing the flat MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP — text sized
         to fit under the flat cap but OVER the (smaller) kind-specific cap
-        must still downgrade to the index tier."""
+        must still be trimmed into that smaller cap, staying on the full
+        tier (UPG-HOOK-GOTCHA-CAP-TITLE-ONLY: never a whole-tier downgrade
+        for a kind whose full render legitimately exceeds its cap)."""
         from agent.config import (
             MEMORY_TRIGGER_CHARS_PER_TOKEN,
             MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP,
@@ -911,25 +920,58 @@ class TestPackInjection:
         # sized to clear the flat cap but not the kind-specific one
         text = "X" * ((kind_cap + 1) * MEMORY_TRIGGER_CHARS_PER_TOKEN)
         packed = pack_injection([(note, text, "short index line")])
-        assert packed[0].tier == "index"
-        assert packed[0].text == "short index line"
+        assert packed[0].tier == "full"
+        assert packed[0].text != "short index line"
+        assert token_estimate(packed[0].text) <= kind_cap
+
+    def test_trim_backs_off_to_a_sentence_boundary_before_hard_cutting(self) -> None:
+        """UPG-HOOK-GOTCHA-CAP-TITLE-ONLY: when a sentence boundary (". ")
+        exists within the trim budget, the trim backs off to it — mirrors
+        agent/proactive/matcher.py's `_cap()` — instead of hard-cutting
+        mid-word; the packed text still carries real body guidance, not
+        just its title."""
+        from agent.config import MEMORY_TRIGGER_PER_KIND_TOKEN_CAP
+        gotcha_cap = MEMORY_TRIGGER_PER_KIND_TOKEN_CAP["gotcha"]
+        note = _note(note_id=1, kind="gotcha")
+        first_sentence = "Always drain the outbound queue before restarting this worker."
+        filler_sentence = (
+            " Watch for partial writes during shutdown and retry with backoff "
+            "instead of dropping the batch outright."
+        )
+        text = first_sentence + filler_sentence * 6
+        packed = pack_injection([(note, text, "short index line")])
+        assert packed[0].tier == "full"
+        assert first_sentence in packed[0].text  # real body guidance reached the wire
+        assert packed[0].text.endswith("…")
+        # a genuine sentence-boundary back-off, not a hard mid-word cut: the
+        # character right before the trailing ellipsis is the sentence-
+        # terminating period.
+        assert packed[0].text[-2] == "."
+        assert token_estimate(packed[0].text) <= gotcha_cap
 
     def test_per_session_budget_evicts_from_the_bottom_of_total_order(self) -> None:
-        from agent.config import MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP, MEMORY_TRIGGER_CHARS_PER_TOKEN
-        # The higher-precedence note alone consumes the entire per-session
-        # budget (at whichever tier it lands on); a second, lower-precedence
-        # note must then be evicted entirely rather than the first note being
-        # truncated to make room.
-        huge_text = "Y" * (MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP * MEMORY_TRIGGER_CHARS_PER_TOKEN)
+        from agent.config import MEMORY_TRIGGER_PER_KIND_TOKEN_CAP, MEMORY_TRIGGER_CHARS_PER_TOKEN
+        # The higher-precedence note is trimmed into its own per-kind cap
+        # before the session budget is ever checked (per-kind trim runs
+        # first in pack_injection). Pin the session budget to exactly that
+        # trimmed size — computed once via the same production trim, so
+        # this test tracks the real trim size rather than assuming it —
+        # so a second, lower-precedence note has nothing left and must be
+        # evicted entirely rather than the first note being truncated
+        # further to make room.
+        directive_cap = MEMORY_TRIGGER_PER_KIND_TOKEN_CAP["directive"]
+        huge_text = "Y" * (directive_cap * MEMORY_TRIGGER_CHARS_PER_TOKEN * 4)
         high = _note(note_id=1, kind="directive")
         low = _note(note_id=2, kind="reference")
-        packed = pack_injection([
-            (low, "full low", "idx low"),
-            (high, huge_text, huge_text),
-        ])
+        trimmed_alone = pack_injection([(high, huge_text, huge_text)], budget=10**9)
+        exact_budget = token_estimate(trimmed_alone[0].text)
+        packed = pack_injection(
+            [(low, "full low", "idx low"), (high, huge_text, huge_text)],
+            budget=exact_budget,
+        )
         note_ids = [p.note_id for p in packed]
-        assert 1 in note_ids  # the higher-precedence note is kept
-        assert 2 not in note_ids  # the lower-precedence note is evicted, not truncated
+        assert 1 in note_ids  # the higher-precedence note is kept (trimmed into its own cap)
+        assert 2 not in note_ids  # the lower-precedence note is evicted, not squeezed in
 
     def test_note_that_fits_at_neither_tier_is_evicted_entirely(self) -> None:
         from agent.config import MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP, MEMORY_TRIGGER_CHARS_PER_TOKEN
@@ -943,17 +985,18 @@ class TestPackInjection:
 
     def test_eviction_stops_packing_lower_precedence_items_never_backfill(self) -> None:
         from agent.config import MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP, MEMORY_TRIGGER_CHARS_PER_TOKEN
-        # The top-order item is oversized even at its index tier (it does
-        # not fit in the whole per-session budget), so it is evicted. A
-        # lower-order item that would otherwise fit easily in the freed-up
-        # budget must NOT be packed in its place: eviction is a stop signal,
-        # not a skip, so nothing lower-precedence ever ships while
-        # something higher-precedence was dropped.
+        # The top-order item's per-kind trim still doesn't fit the
+        # (deliberately tiny) session budget passed here, nor does its
+        # index-tier fallback, so it is evicted. A lower-order item that
+        # would otherwise fit easily in a nominal per-session budget must
+        # NOT be packed in its place: eviction is a stop signal, not a
+        # skip, so nothing lower-precedence ever ships while something
+        # higher-precedence was dropped.
         oversized = "D" * (MEMORY_TRIGGER_PER_SESSION_TOKEN_CAP * MEMORY_TRIGGER_CHARS_PER_TOKEN * 2)
         huge_directive = _note(note_id=1, kind="directive")
         small_finding = _note(note_id=2, kind="finding")
-        packed = pack_injection([
-            (small_finding, "full finding text", "idx finding"),
-            (huge_directive, oversized, oversized),
-        ])
+        packed = pack_injection(
+            [(small_finding, "full finding text", "idx finding"), (huge_directive, oversized, oversized)],
+            budget=1,
+        )
         assert packed == []
