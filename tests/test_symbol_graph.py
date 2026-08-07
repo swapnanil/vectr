@@ -2114,6 +2114,212 @@ class TestCallerTiebreakAlphaUPG:
 
 
 # ---------------------------------------------------------------------------
+# UPG-TRACE-CALLER-AGGREGATION: two callers sharing a leaf name in different
+# files must both appear in the trace — the old collapse-by-bare-name key
+# elected one file's edge as the sole representative and folded every other
+# file's call sites into its ×N count, so the real caller in the second (or
+# third...) file never appeared anywhere in the rendered output.
+# ---------------------------------------------------------------------------
+
+class TestCallerAggregationDoesNotCollapseAcrossFilesUPG:
+    def test_same_leaf_name_callers_in_different_files_both_appear(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [
+            (f"{ws}/one/handler.py", "__call__", 10, "target"),
+            (f"{ws}/two/handler.py", "__call__", 20, "target"),
+        ])
+        callers = g.callers(ws, "target")
+        files = {e.from_file for e in callers}
+        assert files == {f"{ws}/one/handler.py", f"{ws}/two/handler.py"}
+        assert len(callers) == 2
+
+    def test_same_file_call_sites_still_fold_into_one_entry_with_count(self, tmp_path) -> None:
+        # Same name, same file, multiple call sites — this ambiguity a
+        # receiver-blind static graph genuinely can't resolve further, so
+        # it still collapses into one entry (unlike the cross-file case).
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [
+            (f"{ws}/handler.py", "__call__", 10, "target"),
+            (f"{ws}/handler.py", "__call__", 40, "target"),
+        ])
+        callers = g.callers(ws, "target")
+        assert len(callers) == 1
+        assert callers[0].call_count == 2
+
+    def test_three_files_same_leaf_name_all_three_appear(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [
+            (f"{ws}/a/handler.py", "__call__", 5, "target"),
+            (f"{ws}/b/handler.py", "__call__", 6, "target"),
+            (f"{ws}/c/handler.py", "__call__", 7, "target"),
+        ])
+        callers = g.callers(ws, "target")
+        files = {e.from_file for e in callers}
+        assert files == {
+            f"{ws}/a/handler.py", f"{ws}/b/handler.py", f"{ws}/c/handler.py",
+        }
+
+    def test_rendered_trace_shows_both_files_not_one_elected_representative(
+        self, tmp_path,
+    ) -> None:
+        # Direct guard on the formatter output an LLM actually reads — not
+        # just the underlying list — matching the caller's real complaint:
+        # "who calls X" must not answer with only ONE file when several
+        # different files genuinely call it.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [
+            (f"{ws}/one/handler.py", "__call__", 10, "target"),
+            (f"{ws}/two/handler.py", "__call__", 20, "target"),
+        ])
+        result = g.trace(ws, "target", direction="callers")
+        text = g.format_trace_for_llm(result, "target")
+        assert f"{ws}/one/handler.py" in text
+        assert f"{ws}/two/handler.py" in text
+
+
+# ---------------------------------------------------------------------------
+# UPG-TRACE-ABS-PATH: trace output renders workspace-relative paths, matching
+# the convention UPG-RELATIVE-PATH-RENDER already established for
+# search/fetch/evict (a `workspace:` header line + relative paths below it),
+# rather than leaking the absolute filesystem path of the machine that built
+# the index.
+# ---------------------------------------------------------------------------
+
+class TestTraceRelativePathsUPG:
+    def test_no_workspace_default_keeps_absolute_paths(self, tmp_path) -> None:
+        # Backward compatibility: callers that don't pass `workspace` (the
+        # pre-existing 2-arg call shape used throughout this file) still get
+        # the exact same output as before this change.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [(f"{ws}/handler.py", "caller", 10, "target")])
+        result = g.trace(ws, "target", direction="callers")
+        text = g.format_trace_for_llm(result, "target")
+        assert f"{ws}/handler.py:10" in text
+        assert "workspace:" not in text
+
+    def test_workspace_relative_caller_path_no_absolute_root_substring(self, tmp_path) -> None:
+        # Matches the UPG-RELATIVE-PATH-RENDER convention already verified
+        # for search/fetch/evict: the absolute root appears exactly once, in
+        # the `workspace:` header — no rendered line repeats it.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [(f"{ws}/pkg/handler.py", "caller", 10, "target")])
+        result = g.trace(ws, "target", direction="callers")
+        text = g.format_trace_for_llm(result, "target", workspace=ws)
+        assert f"workspace: {ws}" in text
+        assert "pkg/handler.py:10" in text
+        assert f"{ws}/pkg/handler.py:10" not in text
+        assert text.count(ws) == 1
+
+    def test_workspace_relative_by_definition_branch_caller_path(self, tmp_path) -> None:
+        # The by-definition rendering branch (ambiguous name / qualified
+        # class) has its OWN caller-rendering loop — must not regress
+        # separately from the flat branch above.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [
+            ("target", "function", f"{ws}/mod_a.py"),
+            ("target", "function", f"{ws}/mod_b.py"),
+        ])
+        _seed_edges(g, ws, [(f"{ws}/pkg/handler.py", "caller", 10, "target")])
+        result = g.trace(ws, "target", direction="both")
+        text = g.format_trace_for_llm(result, "target", workspace=ws)
+        assert "pkg/handler.py:10" in text
+        assert f"{ws}/pkg/handler.py:10" not in text
+
+
+# ---------------------------------------------------------------------------
+# UPG-TRACE-FETCH-IDS: each rendered caller/callee line carries a real,
+# vectr_fetch-resolvable `relpath:start-end` id when the index actually has a
+# stored chunk covering that site — never a fabricated one. This is checked
+# here with a stub `chunk_span_lookup` (isolating the rendering logic from a
+# real Chroma index); the true round-trip through `vectr_fetch` is covered by
+# an integration test elsewhere.
+# ---------------------------------------------------------------------------
+
+class TestTraceFetchIdsUPG:
+    def test_caller_line_gets_fetch_id_when_span_resolves(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [(f"{ws}/handler.py", "caller", 10, "target")])
+        result = g.trace(ws, "target", direction="callers")
+
+        def stub_lookup(locations):
+            return {(f"{ws}/handler.py", 10): (5, 15)}
+
+        text = g.format_trace_for_llm(
+            result, "target", workspace=ws, chunk_span_lookup=stub_lookup,
+        )
+        assert "[fetch: handler.py:5-15]" in text
+
+    def test_caller_line_omits_fetch_id_when_span_does_not_resolve(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [(f"{ws}/handler.py", "caller", 10, "target")])
+        result = g.trace(ws, "target", direction="callers")
+
+        def stub_lookup(locations):
+            return {}  # index has no chunk covering this site
+
+        text = g.format_trace_for_llm(
+            result, "target", workspace=ws, chunk_span_lookup=stub_lookup,
+        )
+        assert "[fetch:" not in text
+        assert f"handler.py:10" in text
+
+    def test_callee_line_gets_fetch_id_for_unambiguous_definition(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [("helper", "function", f"{ws}/util.py")])
+        _seed_edges(g, ws, [(f"{ws}/a.py", "caller", 1, "helper")])
+        result = g.trace(ws, "caller", direction="callees")
+
+        def stub_lookup(locations):
+            spans = {}
+            for file_path, line in locations:
+                if file_path == f"{ws}/util.py":
+                    spans[(file_path, line)] = (1, 3)
+            return spans
+
+        text = g.format_trace_for_llm(
+            result, "caller", workspace=ws, chunk_span_lookup=stub_lookup,
+        )
+        assert "[fetch: util.py:1-3]" in text
+
+    def test_callee_line_omits_fetch_id_for_ambiguous_definition(self, tmp_path) -> None:
+        # Two definitions for the same callee name — never guess which one.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [
+            ("helper", "function", f"{ws}/util_a.py"),
+            ("helper", "function", f"{ws}/util_b.py"),
+        ])
+        _seed_edges(g, ws, [(f"{ws}/a.py", "caller", 1, "helper")])
+        result = g.trace(ws, "caller", direction="callees")
+
+        def stub_lookup(locations):
+            return {loc: (1, 3) for loc in locations}
+
+        text = g.format_trace_for_llm(
+            result, "caller", workspace=ws, chunk_span_lookup=stub_lookup,
+        )
+        assert "[fetch:" not in text
+
+    def test_no_chunk_span_lookup_renders_no_fetch_ids(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [(f"{ws}/handler.py", "caller", 10, "target")])
+        result = g.trace(ws, "target", direction="callers")
+        text = g.format_trace_for_llm(result, "target", workspace=ws)
+        assert "[fetch:" not in text
+
+
+# ---------------------------------------------------------------------------
 # UPG-4.3 — suppress builtins/stdlib from callee lists (repo-internal by default)
 # ---------------------------------------------------------------------------
 

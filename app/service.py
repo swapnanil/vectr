@@ -1589,7 +1589,16 @@ class VectrService:
         return self._symbol_graph.format_locate_for_llm(result, name)
 
     def format_trace(self, trace_result: dict, name: str) -> str:
-        return self._symbol_graph.format_trace_for_llm(trace_result, name)
+        # UPG-TRACE-ABS-PATH / UPG-TRACE-FETCH-IDS: workspace root doubles as
+        # both the display-relpath root and the chunk-span lookup's own
+        # symbol-graph query key (same value `trace()` already uses for
+        # DB scoping).
+        chunk_span_lookup = getattr(self._indexer, "chunk_span_for_lines", None)
+        return self._symbol_graph.format_trace_for_llm(
+            trace_result, name,
+            workspace=self._workspace_root,
+            chunk_span_lookup=chunk_span_lookup,
+        )
 
     # ------------------------------------------------------------------
     # Memory — working context store

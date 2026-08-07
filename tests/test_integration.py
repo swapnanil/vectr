@@ -13,6 +13,7 @@ Two tiers:
 """
 from __future__ import annotations
 
+import re
 import textwrap
 from pathlib import Path
 from unittest.mock import patch
@@ -300,6 +301,67 @@ class TestFullPipelineFast:
         client, _, _ = real_service_client
         resp = client.post("/v1/search", json={})
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# UPG-TRACE-FETCH-IDS — true round trip: a fetch id printed in trace output
+# must resolve through the real fetch pipeline, not just look plausible.
+# ---------------------------------------------------------------------------
+
+class TestTraceFetchIdRoundTrip:
+    def test_caller_line_fetch_id_resolves_through_v1_fetch(self, real_service_client) -> None:
+        client, svc, ws = real_service_client
+        (Path(ws) / "trace_fetch_ids_callee.py").write_text(
+            "def target_fn():\n    return 1\n"
+        )
+        (Path(ws) / "trace_fetch_ids_caller.py").write_text(
+            "from trace_fetch_ids_callee import target_fn\n\n"
+            "def caller_fn():\n    return target_fn()\n"
+        )
+        index_resp = client.post("/v1/index", json={"path": ws, "force": True})
+        assert index_resp.status_code == 200
+
+        trace_resp = client.post("/v1/trace", json={"name": "target_fn", "direction": "callers"})
+        assert trace_resp.status_code == 200
+        text = trace_resp.json()["formatted"]
+
+        m = re.search(r"\[fetch: ([^\]]+)\]", text)
+        assert m, f"no fetch id rendered in trace output:\n{text}"
+        fetch_id = m.group(1)
+        # UPG-TRACE-ABS-PATH: the id itself must be workspace-relative, not
+        # carry the absolute workspace root.
+        assert ws not in fetch_id
+
+        fetch_resp = client.post("/v1/fetch", json={"ids": [fetch_id]})
+        assert fetch_resp.status_code == 200
+        entries = fetch_resp.json()["results"]
+        assert len(entries) == 1
+        assert entries[0]["found"] is True
+        assert "target_fn" in entries[0]["content"] or "caller_fn" in entries[0]["content"]
+
+    def test_mcp_trace_fetch_id_resolves_through_vectr_fetch(self, real_service_client) -> None:
+        client, svc, ws = real_service_client
+        (Path(ws) / "trace_fetch_ids_mcp_callee.py").write_text(
+            "def mcp_target_fn():\n    return 1\n"
+        )
+        (Path(ws) / "trace_fetch_ids_mcp_caller.py").write_text(
+            "from trace_fetch_ids_mcp_callee import mcp_target_fn\n\n"
+            "def mcp_caller_fn():\n    return mcp_target_fn()\n"
+        )
+        client.post("/v1/index", json={"path": ws, "force": True})
+
+        trace_resp = client.post("/mcp", json=_tool_call("vectr_trace", {
+            "name": "mcp_target_fn", "direction": "callers",
+        }))
+        text = trace_resp.json()["result"]["content"][0]["text"]
+
+        m = re.search(r"\[fetch: ([^\]]+)\]", text)
+        assert m, f"no fetch id rendered in MCP trace output:\n{text}"
+        fetch_id = m.group(1)
+
+        fetch_resp = client.post("/mcp", json=_tool_call("vectr_fetch", {"ids": [fetch_id]}))
+        fetch_text = fetch_resp.json()["result"]["content"][0]["text"]
+        assert "not found" not in fetch_text.lower()
 
 
 # ---------------------------------------------------------------------------
