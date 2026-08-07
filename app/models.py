@@ -99,13 +99,22 @@ class FetchEntry(BaseModel):
     symbol: str | None = None
     language: str = ""
     content: str = ""
+    # UPG-FETCH-ID-MISALIGN-MSG: only set when found=False. "misaligned"
+    # means the same file has other chunks indexed — the requested line
+    # range just doesn't match a stored span; `nearest_ids` names the
+    # closest real chunk ids so the caller's next fetch can succeed without
+    # a round trip. "file_changed" means the file has no chunks indexed at
+    # all — the file most likely changed since indexing.
+    reason: str | None = None
+    nearest_ids: list[str] = []
 
 
 class FetchResponse(BaseModel):
     results: list[FetchEntry]
-    # Shared note, present only when at least one requested id was not found —
-    # the most likely cause is the file changed since indexing (the chunk's
-    # line range shifted or the symbol was removed), not a transient error.
+    # Shared note, present only when at least one requested id was NOT found
+    # for the "file_changed" reason above — genuinely absent/moved/deleted
+    # files, not misaligned-but-present ones (those carry their own
+    # per-entry reason + nearest_ids instead).
     note: str | None = None
     processing_ms: int
 

@@ -97,6 +97,48 @@ class TestRestFetchRoute:
         assert body["results"][0]["found"] is False
         assert body["note"]
 
+    def test_misaligned_id_carries_reason_and_nearest_ids_no_shared_note(self) -> None:
+        """UPG-FETCH-ID-MISALIGN-MSG: a merely-misaligned id (the file IS
+        indexed; the requested span doesn't match a stored chunk) is
+        structurally distinct from a genuine miss — its own `reason` +
+        `nearest_ids` fields carry the actionable data, and the shared
+        "file likely changed" note must NOT fire (it belongs to the
+        genuinely-changed case only)."""
+        svc = _base_mock_service()
+        svc.memory_only = False
+        svc.fetch.return_value = [
+            {
+                "id": "real.py:40-60", "found": False, "reason": "misaligned",
+                "nearest_ids": ["real.py:1-35", "real.py:61-90"],
+            },
+        ]
+        for c in self._client(svc):
+            resp = c.post("/v1/fetch", json={"ids": ["real.py:40-60"]})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["results"][0]["found"] is False
+        assert body["results"][0]["reason"] == "misaligned"
+        assert body["results"][0]["nearest_ids"] == ["real.py:1-35", "real.py:61-90"]
+        assert body["note"] is None
+
+    def test_file_changed_reason_populates_note_misaligned_entry_does_not(self) -> None:
+        """A response mixing both miss reasons: the shared note fires only
+        because of the genuine file_changed entry; the misaligned entry's
+        own fields are unaffected by that footer."""
+        svc = _base_mock_service()
+        svc.memory_only = False
+        svc.fetch.return_value = [
+            {"id": "real.py:40-60", "found": False, "reason": "misaligned", "nearest_ids": ["real.py:1-35"]},
+            {"id": "gone.py:1-5", "found": False, "reason": "file_changed", "nearest_ids": []},
+        ]
+        for c in self._client(svc):
+            resp = c.post("/v1/fetch", json={"ids": ["real.py:40-60", "gone.py:1-5"]})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["note"]
+        assert body["results"][0]["reason"] == "misaligned"
+        assert body["results"][1]["reason"] == "file_changed"
+
     def test_memory_only_returns_503(self) -> None:
         svc = _base_mock_service()
         svc.memory_only = True

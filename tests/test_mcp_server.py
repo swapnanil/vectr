@@ -1118,6 +1118,59 @@ class TestVectrFetch:
         text = result["content"][0]["text"]
         assert "gone.py:1-5" in text
         assert "not found" in text
+        assert "file likely changed" in text, "genuine file-change miss keeps its own distinct footer note"
+
+    def test_fetch_renders_explicit_file_changed_reason_same_as_default(self) -> None:
+        """UPG-FETCH-ID-MISALIGN-MSG: an explicit reason="file_changed" entry
+        (the file has no chunks indexed at all) renders identically to the
+        default/legacy no-reason shape above."""
+        svc = _mock_service()
+        svc.fetch.return_value = [
+            {"id": "gone.py:1-5", "found": False, "reason": "file_changed", "nearest_ids": []},
+        ]
+        result = handle_tools_call("vectr_fetch", {"ids": ["gone.py:1-5"]}, svc)
+        text = result["content"][0]["text"]
+        assert "gone.py:1-5" in text
+        assert "not found" in text
+        assert "file likely changed" in text
+
+    def test_fetch_renders_misaligned_id_with_nearest_chunk_ids_not_file_changed_note(self) -> None:
+        """UPG-FETCH-ID-MISALIGN-MSG: a line-range MISALIGNMENT (the file IS
+        indexed; the requested span just doesn't match a stored chunk) must
+        say so distinctly and name the nearest stored chunk ids — NOT the
+        generic "file likely changed" note, which would send the caller
+        down a false stale-index diagnosis and into a blind whole-file read."""
+        svc = _mock_service()
+        svc.fetch.return_value = [
+            {
+                "id": "real.py:40-60", "found": False, "reason": "misaligned",
+                "nearest_ids": ["real.py:1-35", "real.py:61-90"],
+            },
+        ]
+        result = handle_tools_call("vectr_fetch", {"ids": ["real.py:40-60"]}, svc)
+        text = result["content"][0]["text"]
+        assert "real.py:40-60" in text
+        assert "no chunk covers this exact span" in text
+        assert "real.py:1-35" in text and "real.py:61-90" in text, (
+            f"nearest stored chunk ids must be named so the next call succeeds. Got: {text}"
+        )
+        assert "file likely changed" not in text, (
+            "a misaligned id must not trigger the genuine file-changed diagnosis"
+        )
+
+    def test_fetch_mixed_misaligned_and_file_changed_only_footer_for_genuine_miss(self) -> None:
+        """A response mixing both miss types shows each entry's own message,
+        and the generic footer fires only because of the genuine miss."""
+        svc = _mock_service()
+        svc.fetch.return_value = [
+            {"id": "real.py:40-60", "found": False, "reason": "misaligned", "nearest_ids": ["real.py:1-35"]},
+            {"id": "gone.py:1-5", "found": False, "reason": "file_changed", "nearest_ids": []},
+        ]
+        result = handle_tools_call("vectr_fetch", {"ids": ["real.py:40-60", "gone.py:1-5"]}, svc)
+        text = result["content"][0]["text"]
+        assert "no chunk covers this exact span" in text
+        assert "file likely changed" in text
+        assert text.count("file likely changed") == 1, "the generic footer must not repeat per entry"
 
     def test_fetch_ids_echoed_in_request_order(self) -> None:
         svc = _mock_service()
@@ -2501,6 +2554,58 @@ class TestFormatSearchResults:
         )
         assert "more lines" in text
         assert "vectr_fetch(ids=" in text, "footer must reappear once a body/excerpt was actually shown"
+
+    def test_retained_excerpt_applies_storage_cap_truncation_warning(self) -> None:
+        """UPG-POINTER-RETAIN-STORAGE-CAP-HONESTY: a retained excerpt (low
+        confidence AND this result's own ce_relevance clears the retention
+        floor) must apply the SAME storage-cap detection the full-body path
+        uses below — otherwise "vectr_fetch(...) restores the full chunk"
+        reads as if it restores the whole symbol, when fetch actually
+        returns the same capped content and only a file Read reaches the
+        missing tail. Three-way condition: chunk capped at index time AND
+        the set is low-confidence AND this result individually clears the
+        retention floor. 100-line symbol, only 45 lines survived the
+        index-time storage cap — also longer than POINTER_MODE_RETAIN_
+        EXCERPT_LINES (20), so this exercises the excerpt-truncation branch
+        too (both messages must appear, not just one)."""
+        from agent.searcher import SearchResult, SearchResultList
+        stored_content = "\n".join(f"    line {i}" for i in range(45))
+        r = SearchResult(
+            file_path="big.py", lines="1-100", symbol_name="BigClass.method",
+            language="python", score=0.9, content=stored_content,
+            score_source="reranker", ce_relevance=0.9,
+            symbol_start_line=1, symbol_end_line=100,
+        )
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        assert "more lines (content capped at ~2000 chars)" in text, (
+            f"retained excerpt must carry the storage-cap warning too. Got: {text[-400:]}"
+        )
+        assert "Read(" in text and "offset=0" in text and "limit=100" in text, (
+            f"missing Read() fallback pointer on the retained excerpt. Got: {text[-400:]}"
+        )
+
+    def test_retained_excerpt_within_excerpt_bound_still_flags_storage_cap(self) -> None:
+        """The storage-cap warning must also fire when the retained excerpt
+        itself is short enough to render in full (no excerpt-length
+        truncation), but the underlying chunk was still capped at index
+        time relative to its symbol's recorded line span."""
+        from agent.searcher import SearchResult, SearchResultList
+        stored_content = "\n".join(f"    line {i}" for i in range(10))
+        r = SearchResult(
+            file_path="tiny_excerpt.py", lines="1-200", symbol_name="BigClass.huge_method",
+            language="python", score=0.9, content=stored_content,
+            score_source="reranker", ce_relevance=0.9,
+            symbol_start_line=1, symbol_end_line=200,
+        )
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        assert "more lines (content capped at ~2000 chars)" in text, (
+            f"retained excerpt shown in full must still carry the storage-cap warning. Got: {text[-400:]}"
+        )
+        assert "Read(" in text and "offset=0" in text and "limit=200" in text
 
     def test_result_count_shown(self) -> None:
         from agent.searcher import SearchResult

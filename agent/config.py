@@ -457,6 +457,14 @@ FETCH_MAX_IDS_PER_CALL : int
     fetch` call (UPG-CTX-EVICT). Bounds the deterministic re-fetch-by-id
     surface so it can't be used as an unbounded bulk export of the index.
 
+FETCH_MISALIGN_NEAREST_MAX : int
+    Maximum nearest stored chunk ids reported per requested id whose line
+    range merely misaligns with chunk boundaries in an otherwise-indexed
+    file (UPG-FETCH-ID-MISALIGN-MSG) — distinguishes this case from a
+    genuinely absent/changed file so vectr_fetch's own "not found" response
+    tells the caller what to ask for next instead of implying the index is
+    stale.
+
 ARC_DETECTION_ENABLED : bool
     Master switch for arc detection: whether `VectrService.record_episode`
     feeds persisted bash/edit episodes into `ArcDetector.observe()` at all.
@@ -1029,6 +1037,7 @@ EMBEDDING_THREAD_CAP: int = _resolve_embedding_thread_cap()
 # ---------------------------------------------------------------------------
 
 FETCH_MAX_IDS_PER_CALL: int = int(_cfg["fetch"]["max_ids_per_call"])
+FETCH_MISALIGN_NEAREST_MAX: int = int(_cfg["fetch"]["misalign_nearest_max"])
 
 # ---------------------------------------------------------------------------
 # Arc detection: command normalization + mutation-similarity + streaming
