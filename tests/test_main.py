@@ -1129,6 +1129,219 @@ class TestCmdRestart:
         assert entry is not None
         assert entry["pid"] == 22222
 
+    # -- UPG-RESTART-DROPS-EXTRA-ROOTS ----------------------------------
+
+    def test_bare_positional_restart_inherits_all_extra_roots(self, tmp_path):
+        """The live bug: a multi-root instance's own staleness banner says
+        `vectr restart <primary-path>` — that bare positional restart must
+        bring back every extra root, not just the primary one."""
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, extra_roots=["/project/b", "/project/c"])
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(workspace=ws, port=8765))
+
+        assert mock_do_start.call_args.kwargs["extra_roots"] == ["/project/b", "/project/c"]
+
+    def test_default_workspace_restart_inherits_all_extra_roots(self, tmp_path, monkeypatch):
+        """Same as above with no positional and no --path at all (the
+        VECTR_WORKSPACE/cwd default) — also under-specified, also inherits."""
+        ws_dir = tmp_path / "a"
+        ws_dir.mkdir()
+        ws = str(ws_dir.resolve())
+        wh = workspace_hash(ws)
+        monkeypatch.setenv("VECTR_WORKSPACE", ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, extra_roots=["/project/b"])
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(workspace=None, paths=None, port=8765))
+
+        assert mock_do_start.call_args.kwargs["extra_roots"] == ["/project/b"]
+
+    def test_explicit_path_flags_replace_registered_extra_roots_no_merge(self, tmp_path):
+        """Explicit --path flags win outright — the previous instance's
+        recorded extra_roots must NOT be silently merged back in."""
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, extra_roots=["/project/b", "/project/c"])
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws, "/project/d"], port=8765))
+
+        assert mock_do_start.call_args.kwargs["extra_roots"] == ["/project/d"]
+
+    def test_explicit_code_workspace_file_replaces_registered_extra_roots(self, tmp_path):
+        """A `.code-workspace` positional is itself an explicit multi-root
+        spec — its folder list wins outright, no merge either."""
+        ws_dir_a = tmp_path / "a"
+        ws_dir_a.mkdir()
+        ws_dir_d = tmp_path / "d"
+        ws_dir_d.mkdir()
+        ws = str(ws_dir_a)
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, extra_roots=["/project/b", "/project/c"])
+
+        code_ws_file = tmp_path / "proj.code-workspace"
+        code_ws_file.write_text(json.dumps({
+            "folders": [{"path": str(ws_dir_a)}, {"path": str(ws_dir_d)}],
+        }))
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(workspace=str(code_ws_file), port=8765))
+
+        assert mock_do_start.call_args.kwargs["extra_roots"] == [str(ws_dir_d)]
+
+    def test_restart_without_prior_entry_keeps_only_given_roots(self, tmp_path):
+        """No registry entry (fresh workspace) — nothing to inherit, and
+        this must not raise."""
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(workspace="/project/a", port=8765))
+
+        assert mock_do_start.call_args.kwargs["extra_roots"] == []
+
+    def test_extra_roots_inheritance_announced_on_stderr(self, tmp_path, capsys):
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, extra_roots=["/project/b"])
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start"):
+            m.cmd_restart(_make_args(workspace=ws, port=8765))
+
+        err = capsys.readouterr().err
+        assert "/project/b" in err
+        assert "--path" in err
+
+    def test_explicit_roots_print_no_inheritance_announcement(self, tmp_path, capsys):
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, extra_roots=["/project/b"])
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start"):
+            m.cmd_restart(_make_args(paths=[ws, "/project/d"], port=8765))
+
+        assert "inherited" not in capsys.readouterr().err
+
+    def test_inherited_roots_each_get_a_workspace_config_write(self, tmp_path):
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345, extra_roots=["/project/b", "/project/c"])
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server"), \
+             patch("main._write_workspace_config") as mock_write, \
+             patch("main._do_start"):
+            m.cmd_restart(_make_args(workspace=ws, port=8765))
+
+        assert mock_write.call_count == 3
+        written_roots = [c.args[0] for c in mock_write.call_args_list]
+        assert written_roots == [ws, "/project/b", "/project/c"]
+
+
+# ---------------------------------------------------------------------------
+# _resolve_restart_roots / _restart_roots_explicit (UPG-RESTART-DROPS-EXTRA-ROOTS)
+# ---------------------------------------------------------------------------
+
+class TestResolveRestartRoots:
+    def test_no_entry_returns_roots_unchanged(self):
+        roots, inherited = m._resolve_restart_roots(None, ["/a"], roots_explicit=False)
+        assert roots == ["/a"]
+        assert inherited is None
+
+    def test_entry_without_extra_roots_returns_roots_unchanged(self):
+        roots, inherited = m._resolve_restart_roots({"extra_roots": []}, ["/a"], roots_explicit=False)
+        assert roots == ["/a"]
+        assert inherited is None
+
+    def test_legacy_entry_without_extra_roots_key_returns_roots_unchanged(self):
+        """Entries written by an older vectr have no `extra_roots` key at
+        all — must fall back cleanly, not raise."""
+        roots, inherited = m._resolve_restart_roots({}, ["/a"], roots_explicit=False)
+        assert roots == ["/a"]
+        assert inherited is None
+
+    def test_inherits_extra_roots_when_not_explicit(self):
+        entry = {"extra_roots": ["/b", "/c"]}
+        roots, inherited = m._resolve_restart_roots(entry, ["/a"], roots_explicit=False)
+        assert roots == ["/a", "/b", "/c"]
+        assert inherited == ["/b", "/c"]
+
+    def test_explicit_roots_never_merge_with_registry(self):
+        entry = {"extra_roots": ["/b", "/c"]}
+        roots, inherited = m._resolve_restart_roots(entry, ["/a", "/d"], roots_explicit=True)
+        assert roots == ["/a", "/d"]
+        assert inherited is None
+
+    def test_primary_root_deduplicated_out_of_inherited_extras(self):
+        entry = {"extra_roots": ["/a", "/b"]}
+        roots, inherited = m._resolve_restart_roots(entry, ["/a"], roots_explicit=False)
+        assert roots == ["/a", "/b"]
+        assert inherited == ["/b"]
+
+
+class TestRestartRootsExplicit:
+    def test_bare_positional_directory_is_not_explicit(self):
+        assert m._restart_roots_explicit(_make_args(workspace="/project/a")) is False
+
+    def test_code_workspace_positional_is_explicit(self):
+        assert m._restart_roots_explicit(_make_args(workspace="/x/y.code-workspace")) is True
+
+    def test_path_flags_are_explicit(self):
+        assert m._restart_roots_explicit(_make_args(paths=["/a", "/b"])) is True
+
+    def test_single_path_flag_is_still_explicit(self):
+        """Even ONE --path flag is a deliberate choice to name roots
+        explicitly, not the default 'under-specified' shape."""
+        assert m._restart_roots_explicit(_make_args(paths=["/a"])) is True
+
+    def test_default_with_nothing_given_is_not_explicit(self):
+        assert m._restart_roots_explicit(_make_args(workspace=None, paths=None)) is False
+
 
 # ---------------------------------------------------------------------------
 # _configured_mcp_ports / _warn_on_stale_mcp_configs
@@ -1454,6 +1667,44 @@ class TestHandleDaemonCallError:
 
 
 # ---------------------------------------------------------------------------
+# _restart_command (UPG-RESTART-DROPS-MODE / UPG-RESTART-DROPS-EXTRA-ROOTS)
+# ---------------------------------------------------------------------------
+
+class TestRestartCommandCodeWorkspaceFile:
+    def test_prefers_registry_code_workspace_file_over_workspace_root(self):
+        cmd = m._restart_command(
+            {"workspace_root": "/project/a", "mode": "full"},
+            {"code_workspace_file": "/x/y.code-workspace"},
+        )
+        assert cmd == "vectr restart /x/y.code-workspace"
+
+    def test_falls_back_to_workspace_root_when_no_code_workspace_file_recorded(self):
+        cmd = m._restart_command(
+            {"workspace_root": "/project/a", "mode": "full"},
+            {"code_workspace_file": None},
+        )
+        assert cmd == "vectr restart /project/a"
+
+    def test_falls_back_to_workspace_root_when_no_registry_entry_given(self):
+        cmd = m._restart_command({"workspace_root": "/project/a", "mode": "full"})
+        assert cmd == "vectr restart /project/a"
+
+    def test_mode_flag_still_appended_when_code_workspace_file_used(self):
+        cmd = m._restart_command(
+            {"workspace_root": "/project/a", "mode": "memory-only"},
+            {"code_workspace_file": "/x/y.code-workspace"},
+        )
+        assert cmd == "vectr restart /x/y.code-workspace --memory-only"
+
+    def test_code_workspace_file_quoted_when_it_has_spaces(self):
+        cmd = m._restart_command(
+            {"workspace_root": "/project/a", "mode": "full"},
+            {"code_workspace_file": "/x/my code.code-workspace"},
+        )
+        assert cmd == "vectr restart '/x/my code.code-workspace'"
+
+
+# ---------------------------------------------------------------------------
 # _check_version_skew (UPG-CLI-DAEMON-VERSION-SKEW)
 # ---------------------------------------------------------------------------
 
@@ -1520,6 +1771,52 @@ class TestCheckVersionSkew:
         with patch("main.compute_version_stamp", return_value="1.0.0+abc1234"):
             m._check_version_skew(8765, daemon_status={"version_stamp": "1.0.0+abc1234"})
         assert capsys.readouterr().err == ""
+
+    # -- UPG-RESTART-DROPS-EXTRA-ROOTS: registry_entry passthrough ------
+
+    def test_prefers_registry_code_workspace_file_over_workspace_root(self, capsys):
+        """A multi-root instance's suggestion should reproduce every root by
+        naming the .code-workspace file it was launched from, when the
+        registry recorded one — not just the primary folder."""
+        with patch("main.compute_version_stamp", return_value="1.0.0+local1"):
+            m._check_version_skew(
+                8765,
+                daemon_status={
+                    "version_stamp": "1.0.0+old0000",
+                    "mode": "memory-only",
+                    "workspace_root": "/project/a",
+                },
+                registry_entry={"code_workspace_file": "/x/y.code-workspace"},
+            )
+        line = capsys.readouterr().err.strip()
+        assert "vectr restart /x/y.code-workspace --memory-only" in line
+
+    def test_falls_back_to_workspace_root_without_registry_entry(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.0.0+local1"):
+            m._check_version_skew(
+                8765,
+                daemon_status={
+                    "version_stamp": "1.0.0+old0000",
+                    "mode": "memory-only",
+                    "workspace_root": "/project/a",
+                },
+            )
+        line = capsys.readouterr().err.strip()
+        assert "vectr restart /project/a --memory-only" in line
+
+    def test_falls_back_to_workspace_root_when_registry_entry_has_no_code_workspace_file(self, capsys):
+        with patch("main.compute_version_stamp", return_value="1.0.0+local1"):
+            m._check_version_skew(
+                8765,
+                daemon_status={
+                    "version_stamp": "1.0.0+old0000",
+                    "mode": "memory-only",
+                    "workspace_root": "/project/a",
+                },
+                registry_entry={"code_workspace_file": None},
+            )
+        line = capsys.readouterr().err.strip()
+        assert "vectr restart /project/a --memory-only" in line
 
 
 class TestVersionSkewKeysOnGitSha:
@@ -1669,7 +1966,7 @@ class TestVersionSkewWiring:
             MockReg.return_value.get.return_value = None
             args = argparse.Namespace(path=str(tmp_path), force=False, port=8765)
             m.cmd_index(args)
-        mock_check.assert_called_once_with(8765)
+        mock_check.assert_called_once_with(8765, registry_entry=None)
 
     def test_cmd_search_calls_check_version_skew(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -1682,7 +1979,7 @@ class TestVersionSkewWiring:
             MockReg.return_value.get.return_value = None
             args = argparse.Namespace(query="x", n=10, language=None, port=8765)
             m.cmd_search(args)
-        mock_check.assert_called_once_with(8765)
+        mock_check.assert_called_once_with(8765, registry_entry=None)
 
     def test_cmd_fetch_calls_check_version_skew(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -1695,7 +1992,7 @@ class TestVersionSkewWiring:
             MockReg.return_value.get.return_value = None
             args = argparse.Namespace(ids=["a.py:1-5"], port=8765)
             m.cmd_fetch(args)
-        mock_check.assert_called_once_with(8765)
+        mock_check.assert_called_once_with(8765, registry_entry=None)
 
     def test_cmd_remember_calls_check_version_skew(self, tmp_path):
         mock_resp = MagicMock()
@@ -1708,7 +2005,7 @@ class TestVersionSkewWiring:
             args = argparse.Namespace(content="x", tags=None, priority="medium",
                                       path=str(tmp_path), port=8765)
             m.cmd_remember(args)
-        mock_check.assert_called_once_with(8765)
+        mock_check.assert_called_once_with(8765, registry_entry=None)
 
     def test_cmd_recall_calls_check_version_skew(self, tmp_path):
         mock_resp = MagicMock()
@@ -1721,7 +2018,7 @@ class TestVersionSkewWiring:
             args = argparse.Namespace(query="x", tags=None, priority=None,
                                       limit=10, path=str(tmp_path), port=8765)
             m.cmd_recall(args)
-        mock_check.assert_called_once_with(8765)
+        mock_check.assert_called_once_with(8765, registry_entry=None)
 
     def test_cmd_forget_calls_check_version_skew(self, tmp_path):
         mock_resp = MagicMock()
@@ -1733,7 +2030,7 @@ class TestVersionSkewWiring:
             MockReg.return_value.get.return_value = None
             args = argparse.Namespace(path=str(tmp_path), port=8765)
             m.cmd_forget(args)
-        mock_check.assert_called_once_with(8765)
+        mock_check.assert_called_once_with(8765, registry_entry=None)
 
     def test_cmd_cache_prune_removes_empty_dirs(self, tmp_path, monkeypatch, capsys):
         """UPG-CACHE-LITTER: `vectr cache prune` removes empty per-workspace
@@ -1809,7 +2106,10 @@ class TestVersionSkewWiring:
             MockReg.return_value.get.return_value = {"port": 8765, "pid": 1, "workspace": str(tmp_path)}
             args = argparse.Namespace(path=str(tmp_path), port=8765, all=False)
             m.cmd_status(args)
-        mock_check.assert_called_once_with(8765, daemon_status=status_data)
+        mock_check.assert_called_once_with(
+            8765, daemon_status=status_data,
+            registry_entry={"port": 8765, "pid": 1, "workspace": str(tmp_path)},
+        )
 
 
 # ---------------------------------------------------------------------------
