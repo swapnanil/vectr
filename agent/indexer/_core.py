@@ -1113,6 +1113,55 @@ class CodeIndexer:
             })
         return results
 
+    def chunk_span_for_lines(
+        self, locations: list[tuple[str, int]],
+    ) -> dict[tuple[str, int], tuple[int, int]]:
+        """Real, stored chunk boundaries covering each ``(file_path, line)``
+        in *locations* — the fetch-id support for trace output
+        (UPG-TRACE-FETCH-IDS). ``vectr_trace`` lines name a call site or a
+        definition by file+line, not by chunk id; this resolves each such
+        site to the ACTUAL indexed chunk span containing it, so the trace
+        renderer can hand back a ``relpath:start-end`` id ``vectr_fetch``
+        accepts, in the same response — no follow-up ``vectr_locate`` round
+        trip per name.
+
+        One metadata-only ``get(where={"file_path": ...})`` per distinct
+        file (the same query shape ``_delete_chunks_for_file`` already uses),
+        never a query-time embedding or rerank. A location with no covering
+        chunk in the index is simply absent from the returned mapping — the
+        caller must never invent a boundary for a site the index doesn't
+        actually have a chunk for.
+        """
+        result: dict[tuple[str, int], tuple[int, int]] = {}
+        if not locations:
+            return result
+        by_file: dict[str, list[int]] = {}
+        for file_path, line in locations:
+            by_file.setdefault(file_path, []).append(line)
+        for file_path, lines in by_file.items():
+            try:
+                with _timed_chroma_call("get"):
+                    existing = self._collection.get(
+                        where={"file_path": file_path}, include=["metadatas"],
+                    )
+            except Exception:
+                continue
+            metas = existing.get("metadatas") or []
+            spans: list[tuple[int, int]] = []
+            for meta in metas:
+                try:
+                    spans.append((int(meta["start_line"]), int(meta["end_line"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            for line in lines:
+                best: tuple[int, int] | None = None
+                for s, e in spans:
+                    if s <= line <= e and (best is None or (e - s) < (best[1] - best[0])):
+                        best = (s, e)
+                if best is not None:
+                    result[(file_path, line)] = best
+        return result
+
     def get_chunk_documents(self, chunk_ids: list[str]) -> dict[str, tuple[str, dict]]:
         """Batch-fetch (document, metadata) from the body collection for given ids.
 

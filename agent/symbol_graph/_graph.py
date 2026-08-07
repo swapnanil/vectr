@@ -11,8 +11,9 @@ import sqlite3
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
+from agent.render_paths import workspace_relpath
 from agent.symbol_graph._types import Symbol, LocateResult, CallEdge
 from agent.symbol_graph._constants import (
     SNIPPET_LINES,
@@ -1643,31 +1644,53 @@ class SymbolGraph:
 
         UPG-CALLER-TIEBREAK-ALPHA: on the callers path (`rank_repo_defined=
         False`) call frequency was the only relevance signal above — a tied
-        call_count fell all the way through to plain alphabetical name order
-        (the `repo = set(groups)` line below is a harmless no-op for that
-        path; it only exists so callees' unrelated primary key can be
-        computed the same way). Ties are now broken by the caller's own
-        repo-defined ancestry (repo-defined before external/unresolved —
-        `ingest_trace_data` documents that a caller name need not resolve to
-        a known symbol), then by in-degree — how many distinct places
-        elsewhere in the graph call that candidate — as a bounded,
-        query-time stand-in for centrality; no new stored/precomputed
-        centrality pipeline. Both lookups are scoped to only the names that
-        actually collide on call_count, so the common untied case pays no
-        extra query cost."""
-        groups: dict[str, dict] = {}
+        call_count fell all the way through to plain alphabetical name order.
+        Ties are now broken by the caller's own repo-defined ancestry
+        (repo-defined before external/unresolved — `ingest_trace_data`
+        documents that a caller name need not resolve to a known symbol),
+        then by in-degree — how many distinct places elsewhere in the graph
+        call that candidate — as a bounded, query-time stand-in for
+        centrality; no new stored/precomputed centrality pipeline. Both
+        lookups are scoped to only the names that actually collide on
+        call_count, so the common untied case pays no extra query cost.
+
+        UPG-TRACE-CALLER-AGGREGATION: the collapse key on the callers path
+        (`group="from_symbol"`) used to be the bare name alone — two
+        unrelated functions sharing a leaf name in different files (e.g.
+        `__call__` defined on two different classes) merged every call site
+        under ONE elected representative edge, so a real caller in the
+        second file never appeared anywhere in the rendered trace even
+        though its call was counted in the `×N` suffix. Callers now
+        collapse by (name, from_file): call sites in the SAME file still
+        fold into one entry with a `call_count` (a real ambiguity a
+        receiver-blind static graph can't resolve further — which exact
+        call in that file bound the reference), but two callers sharing a
+        name in DIFFERENT files are always kept as distinct entries, so
+        neither can hide the other. `from_file` is the final, deterministic
+        tiebreak when two such entries also tie on every other signal.
+        Callees (`group="to_symbol"`) keep the name-only collapse — one
+        aggregation call here only ever covers callees of a SINGLE
+        definition's call sites, so `to_symbol`'s originating file never
+        varies within it; a callEE name itself resolving to multiple
+        DEFINITIONS is a different ambiguity, already handled separately by
+        `trace()`'s `by_definition` split (UPG-4.1)."""
+        groups: dict[tuple | str, dict] = {}
         for e in edges:
-            k = e.from_symbol if group == "from_symbol" else e.to_symbol
+            name = e.from_symbol if group == "from_symbol" else e.to_symbol
+            ident = (name, e.from_file) if group == "from_symbol" else name
             site = (e.from_file, e.from_line, e.to_symbol)
-            g = groups.get(k)
+            g = groups.get(ident)
             if g is None:
-                groups[k] = {"edge": e, "sites": {site}}
+                groups[ident] = {"edge": e, "sites": {site}, "name": name}
             else:
                 g["sites"].add(site)
         # Repo-defined ranking only matters for callees (the *from_symbol* of a
         # caller is by definition a function in this repo). Skipping the lookup
-        # for callers also avoids a needless symbols-table scan.
-        repo = self._known_symbol_names(workspace, list(groups)) if rank_repo_defined else set(groups)
+        # for callers also avoids a needless symbols-table scan. Deduped by
+        # name — two caller groups sharing a name (different files) must not
+        # bind the same symbols-table row twice.
+        names = list({g["name"] for g in groups.values()})
+        repo = self._known_symbol_names(workspace, names) if rank_repo_defined else set(names)
         suppress = rank_repo_defined and not include_builtins
 
         tie_repo: set[str] = set()
@@ -1680,35 +1703,42 @@ class SymbolGraph:
 
         ranked: list[tuple] = []
         hidden = 0
-        for k, g in groups.items():
+        for g in groups.values():
             e = g["edge"]
-            if suppress and self._is_builtin_call(k, e.from_file, repo):
+            name = g["name"]
+            if suppress and self._is_builtin_call(name, e.from_file, repo):
                 hidden += 1
                 continue
             e.call_count = len(g["sites"])
             if rank_repo_defined:
-                ranked.append((0 if k in repo else 1, -e.call_count, k, e))
+                ranked.append((0 if name in repo else 1, -e.call_count, name, e))
             else:
                 ranked.append((
                     -e.call_count,
-                    0 if k in tie_repo else 1,
-                    -tie_in_degree.get(k, 0),
-                    k,
+                    0 if name in tie_repo else 1,
+                    -tie_in_degree.get(name, 0),
+                    name,
+                    e.from_file,
                     e,
                 ))
         ranked.sort(key=lambda t: t[:-1])
         return [t[-1] for t in ranked[:limit]], hidden
 
     @staticmethod
-    def _tied_call_count_names(groups: dict[str, dict]) -> set[str]:
+    def _tied_call_count_names(groups: dict) -> set[str]:
         """Names in *groups* whose call_count collides with at least one
         other name's — the only candidates a tie-break signal can actually
         change the order of (UPG-CALLER-TIEBREAK-ALPHA); an untied name is
-        already fully decided by call_count and never consults these maps."""
+        already fully decided by call_count and never consults these maps.
+        Reads each group's own `name` field rather than its dict key
+        (UPG-TRACE-CALLER-AGGREGATION: the key is `(name, from_file)` on the
+        callers path, no longer the bare name alone) — two groups for the
+        SAME name in different files correctly count as a tie needing a
+        secondary signal, same as two groups for different names."""
         by_count: dict[int, list[str]] = {}
-        for k, g in groups.items():
-            by_count.setdefault(len(g["sites"]), []).append(k)
-        return {k for names in by_count.values() if len(names) > 1 for k in names}
+        for g in groups.values():
+            by_count.setdefault(len(g["sites"]), []).append(g["name"])
+        return {name for names in by_count.values() if len(names) > 1 for name in names}
 
     def _caller_in_degree(self, workspace: str, names: list[str]) -> dict[str, int]:
         """How many distinct calling functions target each of *names*
@@ -2182,8 +2212,123 @@ class SymbolGraph:
         lines.append("")
         return "\n".join(lines)
 
-    def format_trace_for_llm(self, trace_result: dict, symbol_name: str) -> str:
-        lines = [f"Call graph trace for '{symbol_name}':\n"]
+    def _trace_call_site_ids(
+        self,
+        workspace: str,
+        callers: list | None,
+        callee_lists: list[list],
+        chunk_span_lookup: (
+            "Callable[[list[tuple[str, int]]], dict[tuple[str, int], tuple[int, int]]] | None"
+        ),
+    ) -> tuple[dict[tuple[str, int], tuple[int, int]], dict[str, tuple[str, int]]]:
+        """Batch-resolve real, stored chunk spans for every call site this
+        response will render (UPG-TRACE-FETCH-IDS) — ONE call to
+        `chunk_span_lookup` covering every caller's own call site plus every
+        callee's own (unambiguous) definition site, never a per-line query.
+        This is the response-packing lens: a caller/callee line that already
+        names a location gets the `vectr_fetch`-ready id for it in the SAME
+        response, deterministic and token-bounded, instead of forcing a
+        follow-up `vectr_locate` round-trip per name.
+
+        Returns `(spans, callee_loc)`:
+          `spans`      — (file_path, line) -> the real (start_line, end_line)
+                         of the chunk covering that line, ONLY for locations
+                         the index actually has a stored chunk for. A
+                         location the resolver can't match is simply absent
+                         — the render helpers below treat that as "no id",
+                         never a guessed one.
+          `callee_loc` — to_symbol name -> (file_path, start_line) of its
+                         OWN definition, resolved via the same exact-name
+                         lookup used elsewhere in this class, and ONLY
+                         populated when the name resolves to exactly one
+                         definition (an ambiguous callee name gets no id
+                         rather than an arbitrarily-chosen one).
+        """
+        if chunk_span_lookup is None or not workspace:
+            return {}, {}
+        locations: set[tuple[str, int]] = set()
+        for e in callers or []:
+            locations.add((e.from_file, e.from_line))
+        callee_loc: dict[str, tuple[str, int]] = {}
+        for cs in callee_lists:
+            for e in cs:
+                if e.to_symbol in callee_loc:
+                    continue
+                defs = self._exact_definitions(workspace, e.to_symbol, limit=2)
+                if len(defs) == 1:
+                    loc = (defs[0].file_path, defs[0].start_line)
+                    callee_loc[e.to_symbol] = loc
+                    locations.add(loc)
+        if not locations:
+            return {}, callee_loc
+        try:
+            spans = chunk_span_lookup(list(locations))
+        except Exception:
+            spans = {}
+        return spans, callee_loc
+
+    @staticmethod
+    def _fetch_id_suffix(
+        location: tuple[str, int] | None,
+        spans: dict[tuple[str, int], tuple[int, int]],
+        workspace: str,
+    ) -> str:
+        """`  [fetch: relpath:start-end]` for a location whose real, stored
+        chunk span resolved, else "" — never a fabricated id
+        (UPG-TRACE-FETCH-IDS): a plausible-looking id that doesn't actually
+        resolve through `vectr_fetch` is worse than no id at all."""
+        if location is None:
+            return ""
+        span = spans.get(location)
+        if span is None:
+            return ""
+        file_path, _ = location
+        rel = workspace_relpath(file_path, workspace)
+        return f"  [fetch: {rel}:{span[0]}-{span[1]}]"
+
+    def _render_caller_line(
+        self, e: CallEdge, spans: dict[tuple[str, int], tuple[int, int]], workspace: str,
+    ) -> str:
+        """One `Called by` line — UPG-TRACE-ABS-PATH renders `e.from_file`
+        workspace-relative; UPG-TRACE-FETCH-IDS appends a real fetch id when
+        the call site resolves to a stored chunk."""
+        rel = workspace_relpath(e.from_file, workspace)
+        suffix = self._fetch_id_suffix((e.from_file, e.from_line), spans, workspace)
+        return (
+            f"  {e.from_symbol}  in {rel}:{e.from_line}"
+            f"{self._count_suffix(e)}{self._dynamic_marker(e)}{suffix}"
+        )
+
+    def _render_callee_line(
+        self,
+        e: CallEdge,
+        indent: str,
+        callee_loc: dict[str, tuple[str, int]],
+        spans: dict[tuple[str, int], tuple[int, int]],
+        workspace: str,
+    ) -> str:
+        """One `Calls` line — UPG-TRACE-FETCH-IDS appends a real fetch id for
+        the callee's own definition when it resolves unambiguously."""
+        suffix = self._fetch_id_suffix(callee_loc.get(e.to_symbol), spans, workspace)
+        return f"{indent}{e.to_symbol}{self._count_suffix(e)}{self._dynamic_marker(e)}{suffix}"
+
+    def format_trace_for_llm(
+        self,
+        trace_result: dict,
+        symbol_name: str,
+        workspace: str = "",
+        chunk_span_lookup: (
+            "Callable[[list[tuple[str, int]]], dict[tuple[str, int], tuple[int, int]]] | None"
+        ) = None,
+    ) -> str:
+        # UPG-TRACE-ABS-PATH: the absolute workspace root is printed ONCE
+        # here (when known) — every path/id rendered below is relative to
+        # it, the same convention `_format_search_results` and
+        # `EvictionAdvisor` already use (UPG-RELATIVE-PATH-RENDER).
+        lines = [f"Call graph trace for '{symbol_name}':"]
+        if workspace:
+            lines.append(f"workspace: {workspace}")
+        lines.append("")
 
         # F33 (UPG-17.1): the leaf name actually matched against the edge/symbol
         # tables — used only for the "any '<leaf>'" caller wording below so it
@@ -2210,6 +2355,10 @@ class SymbolGraph:
         by_def = trace_result.get("by_definition")
         qualified_class = trace_result.get("qualified_class")
         if by_def and (len(by_def) > 1 or qualified_class):
+            by_def_callers = trace_result.get("callers")
+            spans, callee_loc = self._trace_call_site_ids(
+                workspace, by_def_callers, [entry["callees"] for entry in by_def], chunk_span_lookup,
+            )
             if qualified_class:
                 lines.append(
                     f"Resolved '{symbol_name}' to {len(by_def)} definition"
@@ -2240,7 +2389,7 @@ class SymbolGraph:
                 if cs:
                     any_callees_found = True
                     for e in cs:
-                        lines.append(f"    {e.to_symbol}{self._count_suffix(e)}{self._dynamic_marker(e)}")
+                        lines.append(self._render_callee_line(e, "    ", callee_loc, spans, workspace))
                 else:
                     lines.append("    (none found in index)")
                     if d.kind == "class":
@@ -2249,16 +2398,13 @@ class SymbolGraph:
                 if note:
                     lines.append(note)
                 lines.append("")
-            callers = trace_result.get("callers")
+            callers = by_def_callers
             callers_empty = callers is not None and not callers
             if callers is not None:
                 if callers:
                     lines.append(f"{self._caller_verb(callers)} — any '{leaf_name}' ({len(callers)}):")
                     for e in callers:
-                        lines.append(
-                            f"  {e.from_symbol}  in {e.from_file}:{e.from_line}"
-                            f"{self._count_suffix(e)}{self._dynamic_marker(e)}"
-                        )
+                        lines.append(self._render_caller_line(e, spans, workspace))
                 else:
                     lines.append(f"Called by — any '{leaf_name}': (none found in index)")
             if callers_empty and not any_callees_found:
@@ -2266,6 +2412,8 @@ class SymbolGraph:
             return "\n".join(lines)
 
         callers = trace_result.get("callers", [])
+        callees = trace_result.get("callees", [])
+        spans, callee_loc = self._trace_call_site_ids(workspace, callers, [callees], chunk_span_lookup)
         callers_empty = callers is not None and not callers
         if callers is not None:
             if callers:
@@ -2281,16 +2429,12 @@ class SymbolGraph:
                 else:
                     lines.append(f"{self._caller_verb(callers)} ({len(callers)}):")
                 for e in callers:
-                    lines.append(
-                        f"  {e.from_symbol}  in {e.from_file}:{e.from_line}"
-                        f"{self._count_suffix(e)}{self._dynamic_marker(e)}"
-                    )
+                    lines.append(self._render_caller_line(e, spans, workspace))
             elif qualifier_unresolved:
                 lines.append(f"Called by — any '{leaf_name}': (none found in index)")
             else:
                 lines.append("Called by: (none found in index)")
 
-        callees = trace_result.get("callees", [])
         callees_empty = callees is not None and not callees
         if callees is not None:
             if callees:
@@ -2302,7 +2446,7 @@ class SymbolGraph:
                 else:
                     lines.append(f"\nCalls ({len(callees)}):")
                 for e in callees:
-                    lines.append(f"  {e.to_symbol}{self._count_suffix(e)}{self._dynamic_marker(e)}")
+                    lines.append(self._render_callee_line(e, "  ", callee_loc, spans, workspace))
             else:
                 if qualifier_unresolved:
                     lines.append(f"\nCalls — any '{leaf_name}': (none found in index)")
