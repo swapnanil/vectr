@@ -302,7 +302,7 @@ class CodeIndexer:
         # .vectrignore/.gitignore, deleted, or moved out of all roots). Without
         # this, editing .vectrignore stops *new* indexing but leaves the old
         # chunks in the collection forever. (UPG-8.4)
-        mtime_cache = self._load_mtime_cache()
+        mtime_cache, schema_stale = self._load_mtime_cache_with_reason()
         pruned = self._prune_orphaned_chunks(should_index_paths, mtime_cache)
 
         # UPG-EMBEDDER-SWAP-GRANITE: vectors from two different embedding
@@ -328,6 +328,21 @@ class CodeIndexer:
                 )
                 force = True
             self._recreate_collections()
+
+        # UPG-CHUNK-LOGIC-VERSION-FINGERPRINT: a cache written by an older
+        # INDEXING_SCHEMA_VERSION means the chunking/embedding pipeline changed
+        # since the last index — already-stored chunks no longer reflect what a
+        # fresh index would produce (mirrors the symbol graph's own
+        # `is_stale()` → "toolchain changed — full rebuild" pattern, see
+        # agent/symbol_graph/_constants.py:graph_toolchain_fingerprint).
+        # `not force` avoids a redundant second reason line when the embed-model
+        # stamp above already decided this is a full rebuild.
+        if schema_stale and not force:
+            logger.info(
+                "Content index stale — chunking/embedding logic changed since "
+                "the last index — full re-chunk/re-embed"
+            )
+            force = True
 
         if force:
             # Clean rebuild: ignore the mtime cache so every file is re-indexed,
@@ -618,11 +633,30 @@ class CodeIndexer:
         return self._db_dir / "index_cache.json"
 
     def _load_mtime_cache(self) -> dict[str, float]:
+        cache, _schema_stale = self._load_mtime_cache_with_reason()
+        return cache
+
+    def _load_mtime_cache_with_reason(self) -> tuple[dict[str, float], bool]:
+        """Load the mtime cache, plus whether it was invalidated specifically
+        because INDEXING_SCHEMA_VERSION changed (as opposed to no cache file
+        existing at all — a genuinely fresh workspace, where there is nothing
+        to compare against and no "changed since last index" reason to report).
+
+        `index_workspace()` uses the second element to (a) force=True the same
+        way an embed-model-stamp mismatch does, so Phase 2's stale-chunk sweep
+        actually deletes each file's previously-stored chunks instead of
+        silently leaving them alongside freshly re-chunked ones (a schema
+        mismatch that only cleared the incremental-skip dict, without also
+        forcing the delete-before-reinsert step, could accumulate orphaned
+        chunks whose ids no longer match anything a fresh chunker would
+        produce), and (b) log one clear reason line, matching the symbol
+        graph's is_stale() → "toolchain changed" message style.
+        """
         path = self._mtime_cache_path()
         try:
             cache = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {}
+            return {}, False
         # Schema-version gate: a cache written by an older INDEXING_SCHEMA_VERSION
         # (e.g. before ARCH-4's purpose vector existed) is treated as a cold
         # cache — every file falls into `to_index` on the next index_workspace()
@@ -633,8 +667,8 @@ class CodeIndexer:
         # is also treated as stale.
         stored_version = cache.pop(_MTIME_CACHE_SCHEMA_KEY, None)
         if stored_version != INDEXING_SCHEMA_VERSION:
-            return {}
-        return cache
+            return {}, True
+        return cache, False
 
     def _save_mtime_cache(self, cache: dict[str, float]) -> None:
         path = self._mtime_cache_path()

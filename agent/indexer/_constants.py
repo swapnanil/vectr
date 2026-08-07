@@ -58,26 +58,45 @@ _UPSERT_BATCH_SIZE = 100  # rows per ChromaDB upsert — SQLite variable limit i
 _CHUNK_WORKERS = min(8, os.cpu_count() or 4)  # parallel chunking workers
 
 # ---------------------------------------------------------------------------
-# L3 content-index schema version — mtime-cache rebuild trigger
+# L3 content-index chunking/embedding-logic version — mtime-cache rebuild trigger
 # ---------------------------------------------------------------------------
 
+# THE CHUNKING-LOGIC VERSION. Bump this — and only this — whenever a change to
+# chunking or embedding behavior would make chunks already sitting in an
+# existing user's index stale, incomplete, or different from what a fresh
+# index would now produce (a new/changed chunk boundary, a chunk that used to
+# be dropped and now isn't, a new derived vector, changed purpose-text
+# distillation, etc). A binary upgrade with no version bump silently keeps
+# serving the OLD chunk set forever — restarting on the new binary re-chunks
+# only files whose content itself changed, not the ones affected by the logic
+# change (UPG-CHUNK-LOGIC-VERSION-FINGERPRINT).
+#
 # Intentionally NOT in config.yaml (Tier-3): INDEXING_SCHEMA_VERSION is a
-# schema-migration trigger, same category as symbol_graph.SYMBOL_SCHEMA_VERSION.
-# Changing it via config would silently corrupt or force a rebuild without the
-# usual version-bump safeguard.
+# schema-migration trigger, same category as symbol_graph.SYMBOL_SCHEMA_VERSION
+# (agent/symbol_graph/_constants.py) — mirror that file's is_stale()/
+# graph_toolchain_fingerprint() pattern when reasoning about this one; the two
+# are deliberately the same idea for the two different indexes (L2 symbol
+# graph vs L3 content index), not two different designs. They stay separate
+# constants/mechanisms (not one merged fingerprint) because they recover
+# differently: the symbol graph has no incremental path and always fully
+# rebuilds, so its is_stale() only decides whether to log why; this constant's
+# mismatch instead colds the incremental mtime cache so index_workspace()'s
+# normal per-file diff (chunk vs skip) naturally re-chunks every file, the
+# same recovery path force=True already uses (UPG-8.6). Changing it via
+# config could silently corrupt or force a rebuild without the usual
+# version-bump safeguard.
 #
 # Stored as a sentinel entry in the per-workspace mtime cache (index_cache.json,
-# see CodeIndexer._load_mtime_cache/_save_mtime_cache). On load, a version
-# mismatch is treated as a cold cache — every file re-enters `to_index` on the
-# next `index_workspace()` and is fully re-chunked/re-embedded, the same
-# recovery path `force=True` already uses (UPG-8.6). This is the existing
-# index-rebuild mechanism; bumping the version is how a pipeline change (new
-# chunk content, new derived vector) reaches an already-indexed workspace
-# without a manual cache wipe.
-#
-# Bump whenever chunking or embedding changes in a way that makes
-# already-embedded chunks stale or incomplete relative to what a fresh index
-# would produce.
+# see CodeIndexer._load_mtime_cache_with_reason/_save_mtime_cache, both
+# co-located with the ChromaDB collection under the same per-workspace cache
+# dir so they always clear together). On load, a version mismatch is treated
+# as a cold cache — every file re-enters `to_index` on the next
+# `index_workspace()`, `force` is set True (mirroring the embed-model-stamp
+# mismatch a few lines below it) so Phase 2 actually deletes each file's
+# previously-stored chunks before Phase 3 re-inserts the fresh ones, and one
+# INFO line names the reason, matching the symbol graph's own
+# "stale or toolchain changed — full rebuild" message style. A cache with no
+# version key at all (pre-ARCH-4, unversioned) is also treated as stale.
 INDEXING_SCHEMA_VERSION = 4  # 1: pre-ARCH-4 baseline (unversioned cache, implicit) · 2: per-symbol purpose vector added (ARCH-4) · 3: purpose-text docstring distillation changed to first-paragraph-only + capped non-Python leading-doc block (ARCH-4-DEBUG) — old purpose vectors are stale relative to a fresh index and must rebuild · 4: symbol-bearing definition chunks (class/struct/enum/interface/type-alias/function/method) exempted from UPG-1.1 trivial-drop (UPG-TRIVIAL-DROP-ALIAS-DEFS) — previously-dropped one-line alias defs now emit a chunk, changing the chunk set for affected files
 
 # Sentinel key inside the mtime-cache JSON that carries INDEXING_SCHEMA_VERSION.

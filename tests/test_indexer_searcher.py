@@ -7,6 +7,7 @@ Tests verify the real ChromaDB storage and hybrid BM25+vector search pipeline.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import textwrap
@@ -2441,6 +2442,162 @@ class TestSchemaVersionRebuildTrigger:
         loaded = indexer._load_mtime_cache()
         assert loaded  # non-empty: current-schema cache is preserved as-is
         assert "__vectr_index_schema_version__" not in loaded  # sentinel stripped from the dict
+
+    def test_unchanged_schema_no_content_change_skips_rebuild(self, indexer, tmp_path, caplog) -> None:
+        """UPG-CHUNK-LOGIC-VERSION-FINGERPRINT acceptance #1: with the constant
+        unchanged and no file content changed, a restart re-chunks nothing —
+        today's incremental-skip behavior must not regress."""
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        indexer._write_embed_model_stamp()  # matches on the next call too
+
+        delete_calls: list = []
+        real_delete = indexer._collection.delete
+
+        def _tracking_delete(*args, **kwargs):
+            delete_calls.append((args, kwargs))
+            return real_delete(*args, **kwargs)
+
+        indexer._collection.delete = _tracking_delete
+        with caplog.at_level(logging.INFO, logger="agent.indexer._core"):
+            indexer.index_workspace()
+        assert delete_calls == []
+        assert any("up to date — nothing to re-index" in r.message for r in caplog.records)
+        assert not any("chunking/embedding logic changed" in r.message for r in caplog.records)
+
+    def test_schema_bump_triggers_full_rechunk_with_reason_log_and_no_orphans(
+        self, indexer, tmp_path, caplog, monkeypatch,
+    ) -> None:
+        """UPG-CHUNK-LOGIC-VERSION-FINGERPRINT acceptance #2: bumping the
+        constant, with zero file content changed, triggers a full re-chunk/
+        re-embed with a reason line naming the cause AND actually replaces
+        the old chunk set rather than leaving stale chunks orphaned alongside
+        the newly produced ones (the real defect this task fixes: a schema
+        mismatch used to cold the incremental-skip cache without also forcing
+        Phase 2's delete-before-reinsert step, so a chunking-logic change that
+        alters a file's chunk boundaries left the old chunks behind)."""
+        from agent.indexer._types import CodeChunk
+
+        target = make_py(tmp_path, "a.py", "def a():\n    pass\n")
+        real_path = str(Path(target).resolve())
+
+        old_chunk = CodeChunk(
+            chunk_id=f"{real_path}:1-2", file_path=real_path,
+            content="def a():\n    pass\n", language="python",
+            node_type="function_definition", start_line=1, end_line=2, symbol_name="a",
+        )
+        import agent.indexer._core as core_module
+        monkeypatch.setattr(core_module, "chunk_file", lambda p: [old_chunk])
+        indexer.index_workspace()
+        indexer._write_embed_model_stamp()  # isolate this test to the schema trigger only
+        assert set(indexer._collection.get()["ids"]) == {f"{real_path}:1-2"}
+
+        # Simulate a chunking-logic version bump the same way the existing
+        # TestSchemaVersionRebuildTrigger tests do: tamper the on-disk sentinel.
+        cache_path = indexer._mtime_cache_path()
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        raw["__vectr_index_schema_version__"] = -1
+        cache_path.write_text(json.dumps(raw), encoding="utf-8")
+
+        # New chunking logic recovers a chunk the old logic used to drop —
+        # different ids than before, same file content.
+        new_chunk_1 = CodeChunk(
+            chunk_id=f"{real_path}:1-1", file_path=real_path,
+            content="def a():\n", language="python",
+            node_type="function_definition", start_line=1, end_line=1, symbol_name="a",
+        )
+        new_chunk_2 = CodeChunk(
+            chunk_id=f"{real_path}:2-2", file_path=real_path,
+            content="    pass\n", language="python",
+            node_type="pass_statement", start_line=2, end_line=2, symbol_name=None,
+        )
+        monkeypatch.setattr(core_module, "chunk_file", lambda p: [new_chunk_1, new_chunk_2])
+
+        with caplog.at_level(logging.INFO, logger="agent.indexer._core"):
+            indexer.index_workspace()
+
+        ids_after = set(indexer._collection.get()["ids"])
+        assert ids_after == {f"{real_path}:1-1", f"{real_path}:2-2"}, (
+            "schema-triggered rebuild must replace the old chunk set, not "
+            "accumulate it alongside the new one"
+        )
+        assert any(
+            "Content index stale" in r.message and "chunking/embedding logic changed" in r.message
+            for r in caplog.records
+        ), "a schema mismatch must log one clear reason line"
+        # Same user-visible progress logging a normal full index produces.
+        assert any("Indexing 1/1 files" in r.message for r in caplog.records)
+        assert any("Indexed" in r.message and "chunks from" in r.message for r in caplog.records)
+
+        # Bumping leaves no permanent state: the next restart with the same
+        # constant and no content change is back to a pure incremental skip.
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="agent.indexer._core"):
+            indexer.index_workspace()
+        assert any("up to date — nothing to re-index" in r.message for r in caplog.records)
+
+
+class TestChunkLogicVersusEmbedModelStampInteraction:
+    """UPG-CHUNK-LOGIC-VERSION-FINGERPRINT: the chunking-logic version
+    (INDEXING_SCHEMA_VERSION) and the embed-model stamp (UPG-EMBEDDER-SWAP-
+    GRANITE) are two independently-triggered full-rebuild mechanisms that
+    must compose without fighting, double-rebuilding, or shadowing each
+    other's required side effect."""
+
+    def test_schema_stale_alone_does_not_touch_embed_model_path(
+        self, indexer, tmp_path, caplog,
+    ) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        indexer._write_embed_model_stamp()  # matching stamp: embed path is a no-op
+
+        cache_path = indexer._mtime_cache_path()
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        raw["__vectr_index_schema_version__"] = -1
+        cache_path.write_text(json.dumps(raw), encoding="utf-8")
+
+        old_collection = indexer._collection
+        caplog.clear()  # drop the first (fresh-index) call's own embed-stamp warning
+        with caplog.at_level(logging.INFO, logger="agent.indexer._core"):
+            indexer.index_workspace()
+        # Only the chunking-logic reason fired — the embed-model warning did not.
+        assert any("chunking/embedding logic changed" in r.message for r in caplog.records)
+        assert not any("Embedding model changed" in r.message for r in caplog.records)
+        # No collection drop/recreate — a same-dimension schema bump only
+        # needs per-file delete+reinsert, not the embed-stamp's harder reset.
+        assert indexer._collection is old_collection
+
+    def test_both_stale_simultaneously_rebuilds_once_without_shadowing_recreate(
+        self, indexer, tmp_path, caplog,
+    ) -> None:
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+
+        cache_path = indexer._mtime_cache_path()
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        raw["__vectr_index_schema_version__"] = -1
+        cache_path.write_text(json.dumps(raw), encoding="utf-8")
+
+        stamp_path = indexer._embed_model_stamp_path()
+        stamp_path.write_text(json.dumps({"embed_model": "some-other-model"}), encoding="utf-8")
+
+        old_collection = indexer._collection
+        count_before = indexer._collection.count()
+        caplog.clear()  # drop the first (fresh-index) call's own embed-stamp warning
+        with caplog.at_level(logging.INFO, logger="agent.indexer._core"):
+            indexer.index_workspace()
+
+        # The embed-model mismatch still does its required, stronger side
+        # effect (drop + recreate, for vector-dimension safety) regardless of
+        # which check set force=True first.
+        assert indexer._collection is not old_collection
+        assert indexer._collection.count() == count_before
+        # Exactly one reason line — the embed-model one takes precedence, the
+        # schema-stale block's `not force` guard suppresses its own line
+        # rather than printing a second, less-specific reason.
+        assert any("Embedding model changed" in r.message for r in caplog.records)
+        assert not any("chunking/embedding logic changed" in r.message for r in caplog.records)
+        assert indexer._stored_embed_model() == indexer.embed_model
 
 
 class TestEmbedModelStampRebuildTrigger:
