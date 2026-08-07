@@ -112,7 +112,7 @@ class TestCmdStart:
 
         mock_do_start.assert_called_once_with(
             ws, 8765, wh, extra_roots=[], memory_only=False, search_only=False, workspace_explicit=True,
-            code_workspace_file=None, host="127.0.0.1", no_ide_config=False,
+            code_workspace_file=None, host="127.0.0.1", no_ide_config=False, json_output=False,
         )
 
     def test_prunes_dead_entries_before_starting(self, tmp_path):
@@ -139,6 +139,158 @@ class TestCmdStart:
             m.cmd_start(_make_args(paths=[ws], port=8765))
 
         assert prune_called, "prune_dead was not called"
+
+
+class TestCmdStartStrictPort:
+    """UPG-CLI-STOP-NO-PORT-FLAG companion: --strict-port must fail loudly
+    instead of silently walking find_free_port past a busy --port."""
+
+    def test_strict_port_passed_through_to_find_free_port(self, tmp_path):
+        ws = "/project/a"
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch.object(reg, "find_free_port", wraps=reg.find_free_port) as mock_ffp, \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start"):
+            m.cmd_start(_make_args(paths=[ws], port=8765, strict_port=True))
+
+        assert mock_ffp.call_args.kwargs.get("strict") is True or mock_ffp.call_args.args[-1] is True
+
+    def test_strict_port_busy_exits_nonzero_with_message(self, tmp_path, capsys):
+        ws = "/project/a"
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=False), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_start(_make_args(paths=[ws], port=8765, strict_port=True))
+
+        assert exc_info.value.code != 0
+        mock_do_start.assert_not_called()
+        err = capsys.readouterr().err
+        assert "8765" in err
+
+    def test_strict_port_busy_json_output(self, tmp_path, capsys):
+        ws = "/project/a"
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=False), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start"):
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_start(_make_args(paths=[ws], port=8765, strict_port=True, json_output=True))
+
+        assert exc_info.value.code != 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "failed"
+
+    def test_default_not_strict_still_walks_past_busy_port(self, tmp_path):
+        """No --strict-port (the default) preserves the pre-existing
+        walk-forward behavior — this flag is purely additive."""
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        def port_free(port):
+            return port == 8766  # 8765 busy, 8766 free
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", side_effect=port_free), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_start(_make_args(paths=[ws], port=8765))
+
+        assert mock_do_start.call_args.args[1] == 8766
+
+
+class TestCmdStartJsonOutput:
+    """UPG-CLI-STOP-NO-PORT-FLAG companion: --json prints a single
+    machine-readable line on stdout so scripts can discover the actually-
+    bound port without scraping human stderr text."""
+
+    def test_already_running_json(self, tmp_path, capsys):
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._is_pid_alive", return_value=True), \
+             patch("main._write_workspace_config"):
+            m.cmd_start(_make_args(paths=[ws], port=8765, json_output=True))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "already_running"
+        assert out["port"] == 8765
+        assert out["pid"] == 12345
+
+    def test_ready_json_reports_bound_port(self, tmp_path):
+        """The bound port (which may differ from --port after a forward
+        walk) must be discoverable from the JSON line — this is the whole
+        point of the flag."""
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        buf = io.StringIO()
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._preflight_grammars"), \
+             patch("main.subprocess.Popen") as mock_popen, \
+             patch("main._wait_for_daemon_ready", return_value=True), \
+             patch("main._migrate_legacy_files"), \
+             patch("main._warn_on_stale_mcp_configs"), \
+             patch("sys.stdout", buf):
+            mock_popen.return_value.pid = 54321
+            m.cmd_start(_make_args(paths=[ws], port=8765, json_output=True))
+
+        out = json.loads(buf.getvalue().strip())
+        assert out["status"] == "ready"
+        assert out["port"] == 8765
+        assert out["pid"] == 54321
+        assert out["mcp_url"] == "http://localhost:8765/mcp"
+
+    def test_failed_json_exits_nonzero(self, tmp_path):
+        ws = "/project/a"
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        buf = io.StringIO()
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._preflight_grammars"), \
+             patch("main.subprocess.Popen") as mock_popen, \
+             patch("main._wait_for_daemon_ready", return_value=False), \
+             patch("main._migrate_legacy_files"), \
+             patch("main._warn_on_stale_mcp_configs"), \
+             patch("sys.stdout", buf):
+            mock_popen.return_value.pid = 54321
+            with pytest.raises(SystemExit) as exc_info:
+                m.cmd_start(_make_args(paths=[ws], port=8765, json_output=True))
+
+        assert exc_info.value.code != 0
+        out = json.loads(buf.getvalue().strip())
+        assert out["status"] == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +358,7 @@ class TestCmdStop:
         with patch("main.InstanceRegistry", return_value=reg), \
              patch("agent.instance_registry._is_pid_alive", return_value=True), \
              patch("main._stop_server") as mock_stop:
-            m.cmd_stop(_make_args(path=ws, **{"all": False}))
+            m.cmd_stop(_make_args(path=ws, port=None, **{"all": False}))
 
         mock_stop.assert_called_once_with(12345)
         assert reg.get(wh) is None
@@ -216,7 +368,7 @@ class TestCmdStop:
 
         with patch("main.InstanceRegistry", return_value=reg), \
              patch("agent.instance_registry._is_pid_alive", return_value=False):
-            m.cmd_stop(_make_args(path="/project/a", **{"all": False}))
+            m.cmd_stop(_make_args(path="/project/a", port=None, **{"all": False}))
 
         err = capsys.readouterr().err
         assert "No registered instance" in err
@@ -259,7 +411,7 @@ class TestCmdStop:
         with patch("main.InstanceRegistry", return_value=reg), \
              patch("agent.instance_registry._is_pid_alive", return_value=True), \
              patch("main._stop_server") as mock_stop:
-            m.cmd_stop(_make_args(workspace=ws, path="/should/be/ignored", **{"all": False}))
+            m.cmd_stop(_make_args(workspace=ws, path="/should/be/ignored", port=None, **{"all": False}))
 
         mock_stop.assert_called_once_with(12345)
         assert reg.get(wh) is None
@@ -273,7 +425,7 @@ class TestCmdStop:
         with patch("main.InstanceRegistry", return_value=reg), \
              patch("agent.instance_registry._is_pid_alive", return_value=True), \
              patch("main._stop_server") as mock_stop:
-            m.cmd_stop(_make_args(workspace=None, path=ws, **{"all": False}))
+            m.cmd_stop(_make_args(workspace=None, path=ws, port=None, **{"all": False}))
 
         mock_stop.assert_called_once_with(12345)
         assert reg.get(wh) is None
@@ -291,7 +443,7 @@ class TestCmdStop:
         with patch("main.InstanceRegistry", return_value=reg), \
              patch("agent.instance_registry._is_pid_alive", return_value=True), \
              patch("main._stop_server") as mock_stop:
-            m.cmd_stop(_make_args(workspace=ws_positional, path=ws_flag, **{"all": False}))
+            m.cmd_stop(_make_args(workspace=ws_positional, path=ws_flag, port=None, **{"all": False}))
 
         mock_stop.assert_called_once_with(12345)
         assert reg.get(wh) is None
@@ -314,10 +466,73 @@ class TestCmdStop:
         with patch("main.InstanceRegistry", return_value=reg), \
              patch("agent.instance_registry._is_pid_alive", return_value=True), \
              patch("main._stop_server") as mock_stop:
-            m.cmd_stop(_make_args(workspace=str(ws_file), **{"all": False}))
+            m.cmd_stop(_make_args(workspace=str(ws_file), port=None, **{"all": False}))
 
         mock_stop.assert_called_once_with(12345)
         assert reg.get(wh) is None
+
+
+class TestCmdStopPortFlag:
+    """UPG-CLI-STOP-NO-PORT-FLAG: `vectr stop --port N` stops the instance
+    bound to that port deterministically, without needing to know (or
+    reconstruct) its registered workspace path — the addressing scripts and
+    harnesses managing scratch daemons actually have on hand."""
+
+    def test_stop_by_port_stops_matching_instance(self, tmp_path):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash("/project/a"), "/project/a", 8951, 12345)
+        reg.register(workspace_hash("/project/b"), "/project/b", 8952, 54321)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server") as mock_stop:
+            m.cmd_stop(_make_args(port=8952, **{"all": False}))
+
+        mock_stop.assert_called_once_with(54321)
+        assert reg.get(workspace_hash("/project/b")) is None
+        # The instance on a DIFFERENT port must survive untouched.
+        assert reg.get(workspace_hash("/project/a")) is not None
+
+    def test_stop_by_port_wins_over_path_and_positional(self, tmp_path):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash("/project/a"), "/project/a", 8951, 12345)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server") as mock_stop:
+            m.cmd_stop(_make_args(
+                workspace="/should/be/ignored", path="/also/ignored",
+                port=8951, **{"all": False},
+            ))
+
+        mock_stop.assert_called_once_with(12345)
+        assert reg.get(workspace_hash("/project/a")) is None
+
+    def test_stop_by_port_exits_nonzero_when_nothing_bound(self, tmp_path, capsys):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(workspace_hash("/project/a"), "/project/a", 8951, 12345)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=True), \
+             patch("main._stop_server") as mock_stop, \
+             pytest.raises(SystemExit) as exc_info:
+            m.cmd_stop(_make_args(port=9999, **{"all": False}))
+
+        assert exc_info.value.code != 0
+        mock_stop.assert_not_called()
+        err = capsys.readouterr().err
+        assert "9999" in err
+        # The unrelated instance on a different port must be untouched.
+        assert reg.get(workspace_hash("/project/a")) is not None
+
+    def test_stop_by_port_exits_nonzero_when_registry_empty(self, tmp_path):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             pytest.raises(SystemExit) as exc_info:
+            m.cmd_stop(_make_args(port=9999, **{"all": False}))
+
+        assert exc_info.value.code != 0
 
 
 # ---------------------------------------------------------------------------
@@ -1156,6 +1371,19 @@ class TestNoIdeConfigOptOut:
         out = capsys.readouterr().out
         assert "--no-ide-config" in out
         assert "CLAUDE.md" in out
+
+    def test_no_ide_config_help_text_discloses_marker_persists(self):
+        """UPG-IDE-CONFIG-MARKER-DESPITE-FLAG: `--no-ide-config` opts out of
+        writing the 8 IDE integration files, but a `.vectr/ide_config`
+        marker file is still written (and always has been — persistence of
+        the opt-out choice across future start/restart/init calls IS the
+        documented feature, see test_maybe_write_skips_and_persists_with_flag
+        and test_cmd_init_no_ide_config_flag_skips_writes_end_to_end above).
+        The `--no-ide-config` flag's own help text (not just the command
+        description) must say so, so `--help` alone is enough to learn this
+        without reading source."""
+        assert ".vectr/ide_config" in m._NO_IDE_CONFIG_HELP
+        assert "persist" in m._NO_IDE_CONFIG_HELP.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -2776,6 +3004,79 @@ class TestHookInstanceResolution:
             assert m._resolve_hook_instance(str(tmp_path / "nope")) is None
 
 
+class TestGetPortForWorkspace:
+    """UPG-CLI-PATH-IGNORED: `_get_port_for_workspace` backs every --path-
+    accepting query subcommand (status/index/search/fetch/remember/recall/
+    resume/forget/proxy). It used to do an EXACT workspace_hash lookup only,
+    so `--path <subdir-of-a-registered-workspace>` silently fell through to
+    `fallback` (usually the default port, commonly some OTHER unrelated
+    instance) instead of resolving to the registered instance that actually
+    covers that directory. Fixed by reusing `_resolve_hook_instance`'s
+    walk-up-parents resolution instead of a bespoke exact-hash lookup."""
+
+    def test_exact_workspace_match_resolves_registered_port(self, tmp_path):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        root = tmp_path / "proj"
+        root.mkdir()
+        reg.register(workspace_hash(str(root.resolve())), str(root.resolve()), 9111, 333)
+        with patch("main.InstanceRegistry", return_value=reg):
+            assert m._get_port_for_workspace(str(root), fallback=8765) == 9111
+
+    def test_subdirectory_of_registered_workspace_resolves_to_same_port(self, tmp_path):
+        """The regression case: --path pointing at a subdirectory (e.g. a
+        lane coder's cwd inside a worktree) of an already-registered
+        workspace must resolve to THAT workspace's port, not fall through to
+        `fallback`."""
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        root = tmp_path / "proj"
+        sub = root / "src" / "deep"
+        sub.mkdir(parents=True)
+        reg.register(workspace_hash(str(root.resolve())), str(root.resolve()), 9111, 333)
+        with patch("main.InstanceRegistry", return_value=reg):
+            assert m._get_port_for_workspace(str(sub), fallback=8765) == 9111
+
+    def test_unregistered_workspace_falls_back(self, tmp_path):
+        """No registered instance covers this path (not even an ancestor) →
+        `fallback` is still the correct, honest answer here."""
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        with patch("main.InstanceRegistry", return_value=reg):
+            assert m._get_port_for_workspace(str(tmp_path / "nope"), fallback=8765) == 8765
+
+
+class TestCmdStatusPathSubdirectory:
+    """UPG-CLI-PATH-IGNORED end-to-end: `vectr status --path <subdir-of-B>`
+    with two live daemons (A on the default port, B elsewhere) must report
+    on B, never silently fall back to A because of an exact-hash-only lookup."""
+
+    def test_status_path_subdir_reports_correct_instance_not_default(self, tmp_path, capsys):
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        ws_a = tmp_path / "a"          # sits at the default/fallback port
+        ws_b = tmp_path / "b"
+        sub_b = ws_b / "worktrees" / "lane"
+        ws_a.mkdir()
+        sub_b.mkdir(parents=True)
+        reg.register(workspace_hash(str(ws_a.resolve())), str(ws_a.resolve()), 8765, 111)
+        reg.register(workspace_hash(str(ws_b.resolve())), str(ws_b.resolve()), 9222, 222)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "workspace_root": str(ws_b), "indexed_files": 7, "total_chunks": 42,
+            "last_indexed": "2026-01-01T00:00:00Z", "embed_model": "granite", "mode": "full",
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("httpx.get", return_value=mock_resp) as mock_get:
+            m.cmd_status(_make_args(path=str(sub_b), port=8765))
+
+        # The daemon call must have gone to B's port (9222), never the
+        # exact-hash fallback (8765) that a same-named, unrelated instance
+        # A happens to occupy.
+        called_url = mock_get.call_args.args[0] if mock_get.call_args.args else mock_get.call_args.kwargs.get("url", "")
+        assert "9222" in called_url
+        assert "8765" not in called_url
+
+
 class TestFetchRecallResilience:
     def test_returns_empty_on_connect_error(self):
         import httpx
@@ -3718,7 +4019,7 @@ class TestMultiRoot:
 
         mock_do_start.assert_called_once_with(
             ws_a, 8765, wh, extra_roots=[ws_b], memory_only=False, search_only=False, workspace_explicit=True,
-            code_workspace_file=None, host="127.0.0.1", no_ide_config=False,
+            code_workspace_file=None, host="127.0.0.1", no_ide_config=False, json_output=False,
         )
 
 

@@ -68,6 +68,7 @@ from agent.config import (
 )
 from agent.instance_registry import (
     InstanceRegistry,
+    PortBusyError,
     _is_pid_alive,
     workspace_hash,
 )
@@ -1728,6 +1729,7 @@ def _do_start(
     code_workspace_file: str | None = None,
     host: str = "127.0.0.1",
     no_ide_config: bool = False,
+    json_output: bool = False,
 ) -> None:
     if memory_only and search_only:
         raise ValueError("Cannot start vectr in both --memory-only and --search-only mode simultaneously")
@@ -1807,7 +1809,33 @@ def _do_start(
     # finished loading the embedder in its FastAPI lifespan. Running
     # `vectr status` right after that "success" line could still see a
     # connection refused, reading as start having lied.
-    if _wait_for_daemon_ready(port, proc.pid):
+    ready = _wait_for_daemon_ready(port, proc.pid)
+    alive = ready or _is_pid_alive(proc.pid)
+    status = "ready" if ready else ("not_ready" if alive else "failed")
+
+    if json_output:
+        # UPG-CLI-STOP-NO-PORT-FLAG companion: a single deterministic line on
+        # stdout so scripts/harnesses can discover the actually-bound port
+        # (find_free_port may have walked past a busy --port) without
+        # scraping the human stderr text. Unlike the text branch below,
+        # "failed" exits non-zero here — this surface is opt-in specifically
+        # for callers that check results programmatically.
+        print(json.dumps({
+            "status": status,
+            "port": port,
+            "pid": proc.pid,
+            "workspace": workspace,
+            "extra_roots": extra_roots or [],
+            "mode": _mode_name(memory_only, search_only),
+            "mcp_url": f"http://{'localhost' if _is_loopback_host(host) else host}:{port}/mcp",
+            "host": host,
+            "logs": str(log_path),
+        }))
+        if status == "failed":
+            sys.exit(1)
+        return
+
+    if ready:
         print(f"Vectr started{mode_tag} (PID {proc.pid}) on port {port}", file=sys.stderr)
         print(f"Workspace : {workspace}", file=sys.stderr)
         if extra_roots:
@@ -1834,7 +1862,7 @@ def _do_start(
             )
         else:
             print(f"Check indexing progress: vectr status --path {workspace}", file=sys.stderr)
-    elif _is_pid_alive(proc.pid):
+    elif alive:
         print(
             f"Vectr started{mode_tag} (PID {proc.pid}) on port {port}, but has not "
             f"started responding yet after {CLI_START_READY_POLL_TIMEOUT_S:.0f}s.",
@@ -1856,7 +1884,24 @@ def _do_start(
 
 
 def _get_port_for_workspace(workspace: str, fallback: int) -> int:
-    entry = InstanceRegistry().get(workspace_hash(workspace))
+    """Resolve the port serving `workspace` for every `--path`-accepting
+    query subcommand (index/search/fetch/remember/recall/resume/status/
+    forget/proxy).
+
+    UPG-CLI-PATH-IGNORED: this used to do an EXACT `workspace_hash` lookup
+    only, so `--path <subdir-of-a-registered-workspace>` (or any workspace
+    the caller resolves slightly differently than the one it was started
+    with) never matched and silently fell through to `fallback` — usually
+    the default port, which commonly has some OTHER, unrelated instance
+    listening (e.g. an always-on daemon for a different project). The CLI
+    then happily reported on that wrong instance with no hint the requested
+    `--path` was ignored. Reuses `_resolve_hook_instance`'s walk-up-parents
+    registry resolution (the same one hook dispatch relies on for exactly
+    this reason) instead of reimplementing it, so a subagent whose cwd is a
+    subdirectory of a registered workspace reaches that workspace's own
+    daemon here too.
+    """
+    entry = _resolve_hook_instance(workspace)
     return entry["port"] if entry is not None else fallback
 
 
@@ -1962,6 +2007,8 @@ def cmd_start(args: argparse.Namespace) -> None:
     # write user-defined exclusions to .vectrignore before indexing starts
     _apply_exclude_args(workspace, getattr(args, "exclude", None) or [])
 
+    json_output = getattr(args, "json_output", False)
+
     registry = InstanceRegistry()
     registry.prune_dead()
 
@@ -1970,15 +2017,37 @@ def cmd_start(args: argparse.Namespace) -> None:
         port = entry["port"]
         for root in roots:
             _maybe_write_workspace_config(root, port, args, search_only=search_only)
-        print("Vectr is already running for this workspace.", file=sys.stderr)
-        print(f"  Workspace : {workspace}", file=sys.stderr)
-        print(f"  Port      : {port}", file=sys.stderr)
-        print(f"  MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
+        if json_output:
+            print(json.dumps({
+                "status": "already_running",
+                "port": port,
+                "pid": entry["pid"],
+                "workspace": workspace,
+                "extra_roots": extra_roots,
+                "mode": entry.get("mode", _mode_name(memory_only, search_only)),
+                "mcp_url": f"http://localhost:{port}/mcp",
+                "host": entry.get("host", "127.0.0.1"),
+            }))
+        else:
+            print("Vectr is already running for this workspace.", file=sys.stderr)
+            print(f"  Workspace : {workspace}", file=sys.stderr)
+            print(f"  Port      : {port}", file=sys.stderr)
+            print(f"  MCP URL   : http://localhost:{port}/mcp", file=sys.stderr)
         for root in roots:
             _warn_on_stale_mcp_configs(root, port)
         return
 
-    port = registry.find_free_port(ws_hash, preferred_port)
+    # UPG-CLI-STOP-NO-PORT-FLAG companion: --strict-port asks find_free_port
+    # to fail loudly instead of silently walking past a busy --port, for
+    # scripts/harnesses that need the daemon on an exact, predictable port.
+    try:
+        port = registry.find_free_port(ws_hash, preferred_port, strict=getattr(args, "strict_port", False))
+    except PortBusyError as e:
+        if json_output:
+            print(json.dumps({"status": "failed", "error": str(e)}))
+        else:
+            print(f"Vectr failed to start: {e}", file=sys.stderr)
+        sys.exit(1)
     for root in roots:
         _maybe_write_workspace_config(root, port, args, search_only=search_only)
     if not memory_only:
@@ -1988,6 +2057,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
         code_workspace_file=_code_workspace_file_arg(args), host=host,
         no_ide_config=getattr(args, "no_ide_config", False),
+        json_output=json_output,
     )
     for root in roots:
         _warn_on_stale_mcp_configs(root, port)
@@ -3099,6 +3169,29 @@ def cmd_stop(args: argparse.Namespace) -> None:
             print(f"  Stopped PID {pid}")
         return
 
+    # UPG-CLI-STOP-NO-PORT-FLAG: port-addressed stop, for scripts/harnesses
+    # that manage scratch daemons by the port they launched on and have no
+    # reason to know (or reconstruct) the exact registered workspace path.
+    # Wins over the positional workspace / --path, matching how the
+    # positional already wins over --path in `_resolve_stop_workspace` —
+    # the most specific identifier given wins.
+    port = getattr(args, "port", None)
+    if port is not None:
+        registry.prune_dead()
+        match = next(
+            ((wh, e) for wh, e in registry.list_all().items() if e["port"] == port),
+            None,
+        )
+        if match is None:
+            print(f"No vectr instance registered on port {port}.", file=sys.stderr)
+            sys.exit(1)
+        ws_hash, entry = match
+        pid = entry["pid"]
+        _stop_server(pid)
+        registry.unregister(ws_hash)
+        print(f"Vectr stopped (PID {pid}) on port {port}")
+        return
+
     workspace = _resolve_stop_workspace(args)
     ws_hash = workspace_hash(workspace)
     registry.prune_dead()
@@ -3311,7 +3404,11 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"Vectr config reset for: {workspace}", file=sys.stderr)
         return
 
-    entry = InstanceRegistry().get(workspace_hash(workspace))
+    # UPG-CLI-PATH-IGNORED: walk-up resolution (same as `_get_port_for_workspace`
+    # / `_resolve_hook_instance`), not an exact-hash-only lookup — `init` run
+    # from a subdirectory of an already-registered workspace should discover
+    # that instance's real port and mode, not guess a provisional one.
+    entry = _resolve_hook_instance(workspace)
     port_is_provisional = entry is None
     port = entry["port"] if entry is not None else int(os.getenv("VECTR_PORT", str(DEFAULT_PORT)))
     if port_is_provisional:
@@ -3659,6 +3756,34 @@ def main() -> None:
         dest="no_ide_config",
         help=_NO_IDE_CONFIG_HELP,
     )
+    p_start.add_argument(
+        "--strict-port",
+        action="store_true",
+        default=False,
+        dest="strict_port",
+        help=(
+            "Fail instead of walking to a different port when --port is not "
+            "free (UPG-CLI-STOP-NO-PORT-FLAG companion). By default `start` "
+            "treats --port as a preference and scans forward for the first "
+            "free port past it, so the daemon can end up bound somewhere "
+            "other than what was requested with no error. --strict-port "
+            "exits non-zero instead, for scripts/harnesses that need the "
+            "daemon on an exact, predictable port."
+        ),
+    )
+    p_start.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        dest="json_output",
+        help=(
+            "Print a single-line JSON object to stdout describing the "
+            "outcome (status, port, pid, workspace, mode, mcp_url) instead "
+            "of the human-readable text on stderr, for scripts/harnesses "
+            "that need to discover the actually-bound port programmatically. "
+            "Exits non-zero when status is \"failed\"."
+        ),
+    )
 
     p_stop = sub.add_parser("stop", help="Stop the daemon for a workspace")
     p_stop.add_argument(
@@ -3667,6 +3792,14 @@ def main() -> None:
              "(same positional `start`/`restart` accept; wins over --path if both given)",
     )
     p_stop.add_argument("--path", default=_default_path)
+    p_stop.add_argument(
+        "--port", type=int, default=None,
+        help="Stop the instance bound to this port instead of resolving by workspace "
+             "path (UPG-CLI-STOP-NO-PORT-FLAG). Deterministic for scripts/harnesses "
+             "managing scratch daemons by port; wins over the positional workspace "
+             "and --path when given. Exits non-zero if nothing is registered on "
+             "this port.",
+    )
     p_stop.add_argument("--all", action="store_true", help="Stop all running instances")
 
     p_restart = sub.add_parser(

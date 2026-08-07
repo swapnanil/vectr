@@ -16,6 +16,13 @@ from typing import Any
 REGISTRY_PATH = Path.home() / ".vectr" / "instances.json"
 
 
+class PortBusyError(RuntimeError):
+    """Raised by `find_free_port(..., strict=True)` when the preferred port
+    (or, on a dead-entry restart, the workspace's previous port) is not free
+    and strict mode forbids silently walking to a different one
+    (UPG-CLI-STOP-NO-PORT-FLAG companion)."""
+
+
 def workspace_hash(path: str) -> str:
     """sha256(absolute_workspace_path)[:12] — same prefix used for cache dirs."""
     return hashlib.sha256(path.encode()).hexdigest()[:12]
@@ -131,7 +138,7 @@ class InstanceRegistry:
         data.pop(ws_hash, None)
         self._write(data)
 
-    def find_free_port(self, ws_hash: str, preferred_port: int) -> int:
+    def find_free_port(self, ws_hash: str, preferred_port: int, strict: bool = False) -> int:
         """Allocate a port per spec algorithm:
 
         1. If ws_hash has a live entry → return its port (caller detects no-op).
@@ -144,6 +151,14 @@ class InstanceRegistry:
            later sits inside that window on every run — retrying absorbs it
            instead of immediately walking to a different port.
         3. Scan from preferred_port upward until a free port binds (up to 100 tries).
+
+        `strict=True` (UPG-CLI-STOP-NO-PORT-FLAG companion) skips step 3's
+        upward scan: a busy `preferred_port` (or a dead entry's previous port
+        still busy after step 2's retries) raises `PortBusyError` immediately
+        instead of silently binding a different port — the walk-past-busy
+        behaviour is exactly what makes `--port N` only a PREFERENCE for a
+        script/harness that needs a deterministic bound port with no way to
+        discover a silent substitution short of parsing human-oriented output.
         """
         # Imported lazily (not at module top level): `agent.hook_cli` imports
         # `InstanceRegistry` on every `vectr hook <event>` subprocess dispatch
@@ -170,6 +185,21 @@ class InstanceRegistry:
                     return port
                 if attempt < INSTANCE_REGISTRY_PORT_REUSE_RETRY_ATTEMPTS - 1:
                     time.sleep(INSTANCE_REGISTRY_PORT_REUSE_RETRY_DELAY_S)
+            if strict:
+                raise PortBusyError(
+                    f"Port {port} (this workspace's previous port) is still busy "
+                    f"after {INSTANCE_REGISTRY_PORT_REUSE_RETRY_ATTEMPTS} retries; "
+                    f"refusing to pick a different port in strict-port mode."
+                )
+
+        if strict:
+            if _port_is_free(preferred_port):
+                return preferred_port
+            raise PortBusyError(
+                f"Port {preferred_port} is already in use and strict-port mode "
+                f"was requested; refusing to fall back to a different port. "
+                f"Free port {preferred_port} or pass a different --port."
+            )
 
         for offset in range(100):
             candidate = preferred_port + offset
