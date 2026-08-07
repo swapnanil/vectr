@@ -209,7 +209,16 @@ async def fetch(body: FetchRequest, request: Request) -> FetchResponse:
         raise HTTPException(status_code=500, detail={"error": "fetch_failed", "detail": str(exc)})
 
     from app.service import _FETCH_NOT_FOUND_NOTE
-    any_missing = any(not e["found"] for e in entries)
+    # UPG-FETCH-ID-MISALIGN-MSG: the shared note is the genuine
+    # "file likely changed" signal only — a missing entry whose id defaults
+    # to that reason (or predates this field, e.g. an older indexer/mock)
+    # counts toward it; a "misaligned" entry carries its own reason +
+    # nearest_ids per-entry instead, so it must not also trigger the
+    # generic note.
+    any_file_changed = any(
+        not e["found"] and e.get("reason", "file_changed") != "misaligned"
+        for e in entries
+    )
     return FetchResponse(
         results=[
             FetchEntry(
@@ -220,10 +229,12 @@ async def fetch(body: FetchRequest, request: Request) -> FetchResponse:
                 symbol=e.get("symbol_name") or None if e["found"] else None,
                 language=e.get("language", ""),
                 content=e.get("content", ""),
+                reason=e.get("reason") if not e["found"] else None,
+                nearest_ids=e.get("nearest_ids") or [],
             )
             for e in entries
         ],
-        note=_FETCH_NOT_FOUND_NOTE if any_missing else None,
+        note=_FETCH_NOT_FOUND_NOTE if any_file_changed else None,
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

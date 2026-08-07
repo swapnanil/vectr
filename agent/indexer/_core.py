@@ -17,6 +17,7 @@ from agent.chroma_dispatch import timed_chroma_call as _timed_chroma_call
 from agent.chunk_quality import build_purpose_text, is_symbol_bearing_chunk
 from agent.config import DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED
 from agent.config import EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL
+from agent.config import FETCH_MISALIGN_NEAREST_MAX
 from agent.indexer._constants import (
     EXCLUDED_DIRS,
     _FILE_BATCH_SIZE,
@@ -69,6 +70,54 @@ def _upsert_in_batches(
                 metadatas=metadatas[j: j + batch_size],
                 embeddings=embeddings[j: j + batch_size],
             )
+
+
+def _parse_chunk_id(chunk_id: str) -> tuple[str, int, int] | None:
+    """Split a stored `path:start_line-end_line` chunk id into its parts, or
+    None when it doesn't parse as that shape.
+
+    Mirrors `agent/render_paths.py::resolve_chunk_id`'s own convention: the
+    line-range suffix is split on the LAST colon so a path containing a
+    colon is never mangled. Used by `CodeIndexer.fetch_chunks`'s
+    misalignment detection (UPG-FETCH-ID-MISALIGN-MSG), where a candidate
+    chunk's own id is the only source of its line range — no extra
+    metadata fetch needed.
+    """
+    path, sep, line_range = chunk_id.rpartition(":")
+    if not sep:
+        return None
+    start_str, dash, end_str = line_range.rpartition("-")
+    if not dash:
+        return None
+    try:
+        return path, int(start_str), int(end_str)
+    except ValueError:
+        return None
+
+
+def _nearest_chunk_ids_by_span(
+    candidate_ids: list[str], start_line: int, end_line: int, limit: int,
+) -> list[str]:
+    """Rank same-file `candidate_ids` by proximity to (`start_line`,
+    `end_line`) and return the closest `limit` (UPG-FETCH-ID-MISALIGN-MSG).
+
+    Deterministic arithmetic on the ids' own encoded spans — no embedding or
+    ranking involved: an overlapping chunk sorts first (distance 0), then
+    non-overlapping chunks by distance from the nearer edge, with the id
+    string itself as the final tiebreak. Ids that don't parse as
+    `path:start-end` are skipped.
+    """
+    scored: list[tuple[int, int, str]] = []
+    for cid in candidate_ids:
+        parsed = _parse_chunk_id(cid)
+        if parsed is None:
+            continue
+        _, c_start, c_end = parsed
+        overlaps = c_start <= end_line and c_end >= start_line
+        distance = 0 if overlaps else min(abs(c_start - end_line), abs(c_end - start_line))
+        scored.append((0 if overlaps else 1, distance, cid))
+    scored.sort()
+    return [cid for _, _, cid in scored[:limit]]
 
 
 class CodeIndexer:
@@ -1074,7 +1123,21 @@ class CodeIndexer:
         doesn't have — both are corrected here):
           {"id": ..., "found": True,  "file_path": ..., "start_line": ...,
            "end_line": ..., "symbol_name": ..., "language": ..., "content": ...}
-          {"id": ..., "found": False}
+          {"id": ..., "found": False, "reason": "misaligned" | "file_changed",
+           "nearest_ids": [...]}
+
+        UPG-FETCH-ID-MISALIGN-MSG: a miss comes in two genuinely different
+        shapes and callers act on them differently. If the requested id's
+        line range simply doesn't line up with a stored chunk span but the
+        SAME file still has other chunks indexed, the file is fine — the
+        caller just guessed a span (e.g. from a stale rendering, or a
+        hand-typed range) — so `reason="misaligned"` and `nearest_ids` names
+        the closest real chunk ids in that file, letting the caller's very
+        next `vectr_fetch` call succeed. If the file has no chunks indexed
+        at all, it genuinely may have changed since indexing (edited, moved,
+        or deleted) — `reason="file_changed"`, `nearest_ids` empty. An id
+        that doesn't parse as `path:start-end` also falls back to
+        `"file_changed"` (nothing to compare against).
 
         Raises ValueError if `ids` exceeds FETCH_MAX_IDS_PER_CALL.
         """
@@ -1098,7 +1161,7 @@ class CodeIndexer:
         for requested_id in ids:
             hit = by_id.get(requested_id)
             if hit is None:
-                results.append({"id": requested_id, "found": False})
+                results.append(self._not_found_fetch_entry(requested_id))
                 continue
             doc, meta = hit
             results.append({
@@ -1112,6 +1175,40 @@ class CodeIndexer:
                 "content": doc,
             })
         return results
+
+    def _not_found_fetch_entry(self, requested_id: str) -> dict:
+        """Build the `found=False` entry for one missed `fetch_chunks` id,
+        distinguishing a line-range MISALIGNMENT from a genuinely absent file
+        (UPG-FETCH-ID-MISALIGN-MSG).
+
+        A cheap ids-only existence probe (`include=[]`, no metadata/document
+        payload) against the SAME `file_path` tells the two cases apart: if
+        the file has any other chunk indexed at all, the file itself is
+        fine and the miss is purely a span mismatch — `nearest_ids` names the
+        closest real chunk ids in that file (ranked by span proximity, an
+        arithmetic comparison of the ids' own encoded line ranges — no
+        embedding/ranking involved) so the caller's next `vectr_fetch` call
+        can succeed without a round trip. If the file has no chunks indexed
+        at all, or `requested_id` doesn't even parse as `path:start-end`,
+        this falls back to the original "may have changed since indexing"
+        signal.
+        """
+        parsed = _parse_chunk_id(requested_id)
+        if parsed is None:
+            return {"id": requested_id, "found": False, "reason": "file_changed", "nearest_ids": []}
+        file_path, start_line, end_line = parsed
+        try:
+            with _timed_chroma_call("get"):
+                existing = self._collection.get(where={"file_path": file_path}, include=[])
+        except Exception:
+            existing = {}
+        file_chunk_ids = list(existing.get("ids") or [])
+        if not file_chunk_ids:
+            return {"id": requested_id, "found": False, "reason": "file_changed", "nearest_ids": []}
+        nearest = _nearest_chunk_ids_by_span(
+            file_chunk_ids, start_line, end_line, FETCH_MISALIGN_NEAREST_MAX,
+        )
+        return {"id": requested_id, "found": False, "reason": "misaligned", "nearest_ids": nearest}
 
     def get_chunk_documents(self, chunk_ids: list[str]) -> dict[str, tuple[str, dict]]:
         """Batch-fetch (document, metadata) from the body collection for given ids.

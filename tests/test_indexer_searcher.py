@@ -2307,8 +2307,46 @@ class TestFetchChunks:
             assert entry["file_path"]
 
     def test_missing_id_reported_as_not_found(self, indexer) -> None:
+        """UPG-FETCH-ID-MISALIGN-MSG: a file with NO chunks indexed at all
+        (never indexed / genuinely gone) reports reason="file_changed" with
+        no nearest ids to offer."""
         result = indexer.fetch_chunks(["does-not-exist.py:1-2"])
-        assert result == [{"id": "does-not-exist.py:1-2", "found": False}]
+        assert result == [
+            {"id": "does-not-exist.py:1-2", "found": False, "reason": "file_changed", "nearest_ids": []},
+        ]
+
+    def test_misaligned_span_reports_nearest_chunk_ids_from_same_file(self, indexer, tmp_path) -> None:
+        """UPG-FETCH-ID-MISALIGN-MSG: the file the caller asked about IS
+        indexed — only the requested line span doesn't match a stored chunk
+        — so this is a misalignment, not a stale/moved/deleted file. The
+        real chunk id (same file) must be named as the nearest match."""
+        path = make_py(tmp_path, "real.py", "def known(): pass")
+        indexer.index_file(path)
+        body_ids, _, _ = indexer.get_all_documents()
+        real_id = body_ids[0]
+        file_path = real_id.rsplit(":", 1)[0]
+        bad_id = f"{file_path}:9000-9005"
+
+        result = indexer.fetch_chunks([bad_id])
+        assert len(result) == 1
+        entry = result[0]
+        assert entry["found"] is False
+        assert entry["reason"] == "misaligned"
+        assert entry["nearest_ids"] == [real_id]
+
+    def test_misaligned_span_for_never_indexed_file_falls_back_to_file_changed(
+        self, indexer, tmp_path,
+    ) -> None:
+        """A syntactically well-formed `path:start-end` id whose file has NO
+        chunks at all (never indexed) must NOT be misreported as
+        "misaligned" — there is nothing in that file to be misaligned with."""
+        path = make_py(tmp_path, "real.py", "def known(): pass")
+        indexer.index_file(path)  # indexes real.py, not other.py below
+
+        result = indexer.fetch_chunks(["/nowhere/other.py:1-5"])
+        assert result == [
+            {"id": "/nowhere/other.py:1-5", "found": False, "reason": "file_changed", "nearest_ids": []},
+        ]
 
     def test_mixed_found_and_missing_preserves_request_order(self, indexer, tmp_path) -> None:
         path = make_py(tmp_path, "mix.py", "def known(): pass")
@@ -2330,6 +2368,55 @@ class TestFetchChunks:
         too_many = [f"id-{i}" for i in range(FETCH_MAX_IDS_PER_CALL + 1)]
         with pytest.raises(ValueError):
             indexer.fetch_chunks(too_many)
+
+
+class TestParseChunkIdAndNearestChunkIds:
+    """Smallest-level coverage for the two pure helpers behind
+    UPG-FETCH-ID-MISALIGN-MSG's misalignment detection — no ChromaDB, no
+    fixtures, just the arithmetic on chunk id strings."""
+
+    def test_parse_chunk_id_splits_path_and_line_range(self) -> None:
+        from agent.indexer._core import _parse_chunk_id
+        assert _parse_chunk_id("a/b/c.py:10-20") == ("a/b/c.py", 10, 20)
+
+    def test_parse_chunk_id_splits_on_last_colon_for_colon_bearing_path(self) -> None:
+        from agent.indexer._core import _parse_chunk_id
+        assert _parse_chunk_id("C:/repo/a.py:10-20") == ("C:/repo/a.py", 10, 20)
+
+    def test_parse_chunk_id_returns_none_for_no_line_range(self) -> None:
+        from agent.indexer._core import _parse_chunk_id
+        assert _parse_chunk_id("no-colon-here") is None
+
+    def test_parse_chunk_id_returns_none_for_non_numeric_range(self) -> None:
+        from agent.indexer._core import _parse_chunk_id
+        assert _parse_chunk_id("a.py:start-end") is None
+
+    def test_nearest_chunk_ids_prefers_overlap_over_distance(self) -> None:
+        from agent.indexer._core import _nearest_chunk_ids_by_span
+        candidates = ["a.py:1-5", "a.py:40-60", "a.py:100-120"]
+        # Requested span 45-50 overlaps a.py:40-60 exactly; the others don't.
+        nearest = _nearest_chunk_ids_by_span(candidates, 45, 50, limit=3)
+        assert nearest[0] == "a.py:40-60"
+
+    def test_nearest_chunk_ids_ranks_by_distance_when_no_overlap(self) -> None:
+        from agent.indexer._core import _nearest_chunk_ids_by_span
+        candidates = ["a.py:1-5", "a.py:200-210", "a.py:100-120"]
+        # Requested span 130-140: a.py:100-120 is 10 lines away, a.py:200-210
+        # is 60 lines away, a.py:1-5 is 125 lines away.
+        nearest = _nearest_chunk_ids_by_span(candidates, 130, 140, limit=3)
+        assert nearest == ["a.py:100-120", "a.py:200-210", "a.py:1-5"]
+
+    def test_nearest_chunk_ids_respects_limit(self) -> None:
+        from agent.indexer._core import _nearest_chunk_ids_by_span
+        candidates = [f"a.py:{i}-{i + 5}" for i in range(0, 100, 10)]
+        nearest = _nearest_chunk_ids_by_span(candidates, 500, 505, limit=2)
+        assert len(nearest) == 2
+
+    def test_nearest_chunk_ids_skips_unparseable_candidates(self) -> None:
+        from agent.indexer._core import _nearest_chunk_ids_by_span
+        candidates = ["a.py:no-range-here", "a.py:40-60"]
+        nearest = _nearest_chunk_ids_by_span(candidates, 45, 50, limit=3)
+        assert nearest == ["a.py:40-60"]
 
 
 class TestSchemaVersionRebuildTrigger:

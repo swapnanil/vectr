@@ -1507,6 +1507,15 @@ fetch:
   # surface into an unbounded bulk-export of the whole index.
   max_ids_per_call: 20
 
+  # UPG-FETCH-ID-MISALIGN-MSG: when a requested id's line range doesn't match
+  # any stored chunk span but the same file DOES have other chunks indexed,
+  # the miss is a span misalignment, not a stale/moved/deleted file — the
+  # response names the nearest stored chunk ids instead of the generic
+  # "file likely changed" note so the caller's next call can succeed without
+  # a round trip. This caps how many nearest ids are reported per misaligned
+  # request id.
+  misalign_nearest_max: 5
+
 memory_triggers:
   # TRIGGER-ENGINE wave 1 (bm2-design-skeleton.md §2/§3) — per-memory P/E/T
   # triggers: one deterministic total order, reused for fire precedence,

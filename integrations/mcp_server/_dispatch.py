@@ -188,8 +188,14 @@ def handle_tools_call(
         # query-doc relevance value rather than a per-query rank-derived one,
         # so a caller can also read it directly — this banner remains the
         # explicit, hard-to-miss signal that the whole result set may be a
-        # weak/unrelated guess. Results are still shown in full below it;
-        # nothing is suppressed.
+        # weak/unrelated guess. Every result is still LISTED below it (never
+        # dropped) but its body is not, by default: pointer mode
+        # (UPG-LOWCONF-OUTPUT-SLIM / UPG-FLOOR-SLIM-PAYLOAD) renders each
+        # result as a file:line pointer rather than full content, expandable
+        # on demand with vectr_fetch(ids=[...]); a result whose own
+        # ce_relevance individually clears the retention floor keeps a
+        # bounded excerpt instead of a bare pointer (UPG-POINTER-MODE-
+        # UNIFORM-STRIP).
         low_conf = getattr(results, "low_confidence", False)
         if low_conf:
             from agent.config import NOTFOUND_FLOOR_BANNER
@@ -1232,6 +1238,19 @@ def _format_search_results(
             # vectr_fetch round trip first.
             lines.append(f"    ({POINTER_MODE_RETAIN_LABEL}: ce_relevance {r.ce_relevance:.3f})")
             lines.append("")
+            # UPG-POINTER-RETAIN-STORAGE-CAP-HONESTY: same storage-cap check
+            # the full-body path below applies — a retained excerpt can ALSO
+            # be a chunk the indexer itself truncated at index time, in which
+            # case vectr_fetch would restore the same capped content, not the
+            # missing tail. Computed here (not reusing the honest-path
+            # locals, which aren't in scope for a `continue`d low_conf
+            # branch) so this excerpt never implies a full-symbol restore
+            # that vectr_fetch can't deliver.
+            s_start = getattr(r, "symbol_start_line", 0)
+            s_end = getattr(r, "symbol_end_line", 0)
+            truncation_warning = _storage_cap_truncation_warning(
+                r.content, workspace_relpath(r.file_path, workspace_root), s_start, s_end,
+            )
             content_lines = r.content.splitlines()
             if len(content_lines) > POINTER_MODE_RETAIN_EXCERPT_LINES:
                 lines.append("\n".join(content_lines[:POINTER_MODE_RETAIN_EXCERPT_LINES]))
@@ -1239,8 +1258,12 @@ def _format_search_results(
                     f"... {len(content_lines) - POINTER_MODE_RETAIN_EXCERPT_LINES} more lines — "
                     f"vectr_fetch(ids=[{chunk_id!r}]) restores the full chunk"
                 )
+                if truncation_warning:
+                    lines.append(truncation_warning)
             else:
                 lines.append(r.content)
+                if truncation_warning:
+                    lines.append(truncation_warning)
             lines.append("")
             continue
         lines.append("")
@@ -1288,6 +1311,16 @@ def _format_search_results(
     return "\n".join(lines)
 
 
+def _relativize_chunk_id(chunk_id: str, workspace_root: str) -> str:
+    """Render a `path:start-end` chunk id workspace-relative for display
+    (same convention as UPG-RELATIVE-PATH-RENDER's other id renderers). An
+    id that doesn't parse that way is returned unchanged."""
+    path, sep, line_range = chunk_id.rpartition(":")
+    if not sep:
+        return chunk_id
+    return f"{workspace_relpath(path, workspace_root)}:{line_range}"
+
+
 def _format_fetch_results(entries: list[dict], workspace_root: str = "") -> str:
     """Render vectr_fetch results using the same id + symbol + content
     conventions as _format_search_results (UPG-CTX-EVICT), so a restored
@@ -1305,15 +1338,36 @@ def _format_fetch_results(entries: list[dict], workspace_root: str = "") -> str:
     ids regardless of whether the caller fetched by a relative or absolute id);
     the absolute root is printed once in the header. A not-found entry echoes
     the exact id the caller passed so a bad id is recognizable.
+
+    UPG-FETCH-ID-MISALIGN-MSG: a not-found entry with `reason="misaligned"`
+    (the file has other chunks indexed; the requested span just doesn't
+    match one of them) renders its own message naming the nearest stored
+    chunk ids — response-packing, so the caller's very next vectr_fetch call
+    can succeed without a round trip — and is excluded from the generic
+    "file likely changed" footer below, which now fires only for entries
+    that are genuinely absent (`reason="file_changed"`, or an older/mocked
+    entry with no `reason` at all, defaulting to the same genuine-miss
+    handling as before this change).
     """
     lines: list[str] = []
     if workspace_root:
         lines.append(f"workspace: {workspace_root}")
-    missing = [e["id"] for e in entries if not e["found"]]
+    missing_file_changed = [
+        e["id"] for e in entries
+        if not e["found"] and e.get("reason", "file_changed") != "misaligned"
+    ]
     for e in entries:
         lines.append(f"{'─' * 60}")
         if not e["found"]:
-            lines.append(f"[{e['id']}] not found")
+            if e.get("reason") == "misaligned":
+                nearest = [_relativize_chunk_id(n, workspace_root) for n in (e.get("nearest_ids") or [])]
+                nearest_str = ", ".join(nearest) if nearest else "(none in this file)"
+                lines.append(
+                    f"[{e['id']}] no chunk covers this exact span — "
+                    f"nearest stored chunks are [{nearest_str}]"
+                )
+            else:
+                lines.append(f"[{e['id']}] not found")
             lines.append("")
             continue
         rel_path = workspace_relpath(e.get("file_path", ""), workspace_root)
@@ -1330,7 +1384,7 @@ def _format_fetch_results(entries: list[dict], workspace_root: str = "") -> str:
         if truncation_warning:
             lines.append(truncation_warning)
         lines.append("")
-    if missing:
+    if missing_file_changed:
         from app.service import _FETCH_NOT_FOUND_NOTE
         lines.append(_FETCH_NOT_FOUND_NOTE)
     return "\n".join(lines)
