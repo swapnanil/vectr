@@ -16,6 +16,8 @@ Package layout:
                    _FILE_PATH_RE, _extract_file_paths)
   _events.py     — note lifecycle event log (NOTE_EVENT_KINDS, NOTE_EVENT_ACTORS,
                    NOTE_LIFECYCLE_STATES, fold()) — UPG-MEMORY-STATE-MACHINE
+  _content_file.py — content_file path resolution + read (resolve_remember_content,
+                   read_content_file) — UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS
   _store.py      — WorkingContextStore class (full store API)
 
 All names that existed on the flat agent/working_context_store.py module are
@@ -69,6 +71,13 @@ from agent.working_context_store._user_quote import (
     normalize_for_binding,
 )
 
+# content_file resolution (UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS)
+from agent.working_context_store._content_file import (
+    read_content_file,
+    resolve_content_file_path,
+    resolve_remember_content,
+)
+
 # Encryption helpers
 from agent.working_context_store._encryption import (
     _FILE_PATH_RE,
@@ -118,6 +127,10 @@ __all__ = [
     "USER_QUOTE_TOO_SHORT",
     "bind_user_quote",
     "normalize_for_binding",
+    # content_file resolution (UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS)
+    "read_content_file",
+    "resolve_content_file_path",
+    "resolve_remember_content",
     # Encryption
     "_FILE_PATH_RE",
     "_NoteEncryptor",

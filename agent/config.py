@@ -1261,6 +1261,9 @@ _proxy_suggest_cfg: dict[str, Any] = _mem_write_cfg["proxy_anchor_suggestions"]
 MEMORY_WRITE_PROXY_SUGGEST_ENABLED: bool = bool(_proxy_suggest_cfg["enabled"])
 MEMORY_WRITE_PROXY_SUGGEST_LIMIT: int = int(_proxy_suggest_cfg["limit"])
 
+_content_file_cfg: dict[str, Any] = _mem_write_cfg["content_file"]
+MEMORY_WRITE_CONTENT_FILE_MAX_BYTES: int = int(_content_file_cfg["max_bytes"])
+
 # ---------------------------------------------------------------------------
 # UPG-TASK-SUPERSEDES-HYGIENE: vectr_status stale-task nudge thresholds.
 # Nudge only — never decay, auto-supersede, or auto-expire a note.

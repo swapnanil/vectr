@@ -1669,6 +1669,19 @@ memory_write:
     # rides along with a write, it does not replace a deliberate lookup.
     limit: 4
 
+  content_file:
+    # UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS: vectr_remember accepts a
+    # content_file path as an alternative to inline `content`, so a long,
+    # escape-dense code-heavy note body never has to survive being streamed
+    # as a long JSON string inside a model-emitted tool-call argument (the
+    # failure this exists to route around: such a body can be corrupted
+    # mid-stream at the caller's own tool-input layer before it ever
+    # reaches vectr). Size cap on the file read this way — generous
+    # relative to the failure case that motivated it (a few KB), bounded
+    # only so content_file cannot be used to load an unrelated large file
+    # (a log dump, a full source tree) into a single working-memory note.
+    max_bytes: 1048576
+
 proactive:
   # UPG-PRO — "Proactive context" (experimental). Deterministically surface the
   # relevant working-memory note / structural match at a sanctioned delivery
