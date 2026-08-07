@@ -46,6 +46,7 @@ import time
 from dataclasses import dataclass, field
 
 from agent.config import (
+    MEMORY_TRIGGER_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION,
     MEMORY_TRIGGER_CHARS_PER_TOKEN,
     MEMORY_TRIGGER_KIND_PRIORITY,
     MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP,
@@ -752,6 +753,55 @@ def token_estimate(text: str) -> int:
     return max(1, len(text) // MEMORY_TRIGGER_CHARS_PER_TOKEN)
 
 
+def _trim_full_text_to_cap(text: str, max_tokens: int) -> tuple[str, int]:
+    """Trim TEXT to fit within MAX_TOKENS (converted to chars via
+    `MEMORY_TRIGGER_CHARS_PER_TOKEN`), backing off to a SENTENCE boundary
+    (". ") within the trim budget when one exists there, else a WORD
+    boundary (" "), else a hard character cut — never a bare mid-word/mid-
+    sentence slice for its own sake, but never refusing to trim either.
+
+    UPG-HOOK-GOTCHA-CAP-TITLE-ONLY: mirrors `agent/proactive/matcher.py`'s
+    `_cap()` (the proxy channel's own UPG-PROXY-INJECT-TITLE-ONLY fix),
+    applied to `pack_injection()`'s per-kind/per-injection cap instead of the
+    proxy's single-line candidate cap — same ladder, same
+    min-boundary-fraction guard, different caller. Unlike `_cap()`, this does
+    NOT collapse TEXT to one line first: a full-tier block
+    (`_format_full_block()`) is deliberately multi-line (header, content,
+    staleness warnings), and only the trailing slice is affected by
+    truncation, so internal newlines before the cut point are preserved.
+
+    Returns `(trimmed_text, token_estimate(trimmed_text))`. The returned
+    text is ALWAYS at most `max_tokens` tokens by construction (the trimmed
+    char length never exceeds `max_tokens * MEMORY_TRIGGER_CHARS_PER_TOKEN`),
+    except when `max_tokens` is too small to hold even the trailing ellipsis
+    character — the caller falls back to the index-tier line in that
+    pathological case (see `pack_injection`)."""
+    if max_tokens <= 0:
+        return "…", token_estimate("…")
+    max_chars = max_tokens * MEMORY_TRIGGER_CHARS_PER_TOKEN
+    if len(text) <= max_chars:
+        return text, token_estimate(text)
+    if max_chars <= 1:
+        return "…", token_estimate("…")
+
+    budget = max_chars - 1
+    window = text[:budget]
+    min_boundary = max(1, int(budget * MEMORY_TRIGGER_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION))
+
+    sentence_boundary = window.rfind(". ")
+    if sentence_boundary >= min_boundary:
+        trimmed = window[: sentence_boundary + 1] + "…"
+        return trimmed, token_estimate(trimmed)
+
+    word_boundary = window.rfind(" ")
+    if word_boundary >= min_boundary:
+        trimmed = window[:word_boundary].rstrip() + "…"
+        return trimmed, token_estimate(trimmed)
+
+    trimmed = window.rstrip() + "…"
+    return trimmed, token_estimate(trimmed)
+
+
 @dataclass
 class PackedItem:
     note_id: int
@@ -770,15 +820,28 @@ def pack_injection(
     by the shared `total_order_key` and packs greedily, spending the given
     `budget` (defaults to the full per-session cap when omitted/None — a
     single call in isolation, e.g. a direct unit-test call or a fresh
-    session's first delivery). A memory is NEVER partially truncated — it
-    injects whole (subject to its own per-injection cap, else it drops to its
-    index-tier line), or is evicted entirely if even the index-tier line
-    does not fit. Eviction is always from the BOTTOM of the shared total
-    order — the lowest-precedence notes are the ones dropped first. The
-    moment any item is evicted for not fitting even at the index tier,
-    packing STOPS entirely: nothing lower-precedence is ever allowed to
-    ship while something higher-precedence was dropped, even if it would
-    have fit in the leftover budget.
+    session's first delivery).
+
+    A full-tier memory whose OWN per-kind/per-injection cap it exceeds is
+    TRIMMED into that cap (`_trim_full_text_to_cap()`, sentence/word-
+    boundary backoff — UPG-HOOK-GOTCHA-CAP-TITLE-ONLY, parity with the
+    proxy channel's UPG-PROXY-INJECT-TITLE-ONLY fix) rather than dropped
+    wholesale to its index-tier title line: the whole point of a full-tier
+    kind (directive/gotcha/operational) is that its BODY guidance reaches
+    the wire, and a bare character cut there would have read as corrupted
+    output rather than an intentionally shortened block, so it still backs
+    off to a clean boundary first. It only falls back to the index-tier
+    line when the cap is too small to hold even the trimmed text's trailing
+    ellipsis (a pathological config, not a real per-kind cap). Separately,
+    a memory is NEVER partially truncated against the shared multi-note
+    BUDGET below — it packs whole (at whichever tier/trim it already
+    reached above), or is evicted entirely if even its index-tier line does
+    not fit in what's left of `budget`. Eviction is always from the BOTTOM
+    of the shared total order — the lowest-precedence notes are the ones
+    dropped first. The moment any item is evicted for not fitting even at
+    the index tier, packing STOPS entirely: nothing lower-precedence is
+    ever allowed to ship while something higher-precedence was dropped,
+    even if it would have fit in the leftover budget.
 
     Passing the session ledger's `remaining_budget()` here is what makes the
     per-session cap CUMULATIVE across every `fire_triggers`/`fire_and_format`
@@ -799,7 +862,11 @@ def pack_injection(
             note.kind, MEMORY_TRIGGER_PER_INJECTION_TOKEN_CAP
         )
         if tier == "full" and tokens > per_injection_cap:
-            text, tier, tokens = index_text, "index", token_estimate(index_text)
+            trimmed_text, trimmed_tokens = _trim_full_text_to_cap(text, per_injection_cap)
+            if trimmed_tokens <= per_injection_cap:
+                text, tokens = trimmed_text, trimmed_tokens
+            else:
+                text, tier, tokens = index_text, "index", token_estimate(index_text)
 
         if tokens > budget:
             if tier == "full":

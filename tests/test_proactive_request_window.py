@@ -80,6 +80,65 @@ def test_assemble_window_bounds_and_malformed():
     assert len(w.text) <= 500
 
 
+# -- role-based window text (UPG-PROXY-WINDOW-BOILERPLATE-EVICTS-TASK) ------
+
+def test_trailing_system_role_boilerplate_never_evicts_user_task_text():
+    """Real captured shape: an editor's first request pairs a role='user'
+    message carrying the actual task with a TRAILING role='system' harness
+    reminder that dwarfs it. Before the role filter, joining every message's
+    text and keeping only the trailing max_chars char budget landed entirely
+    inside the reminder, discarding the user's task text outright."""
+    task_text = "Please fix the off-by-one in the retry counter at retry.py:42." * 7  # 423 chars-ish
+    task_text = task_text[:423]
+    reminder_text = "R" * 8682
+    body = {
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": task_text}]},
+            {"role": "system", "content": [{"type": "text", "text": reminder_text}]},
+        ]
+    }
+    assert len(task_text) + len(reminder_text) > 2000  # precondition: budget can't hold both
+    w = assemble_window(body, max_chars=2000)
+    assert task_text in w.text
+    assert "R" * 20 not in w.text  # none of the boilerplate survives
+
+
+def test_non_user_assistant_role_contributes_no_text_or_anchors():
+    body = {"messages": [
+        {"role": "user", "content": "real task"},
+        {"role": "system", "content": [
+            {"type": "text", "text": "ignored boilerplate"},
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "ignored.py"}},
+        ]},
+    ]}
+    w = assemble_window(body)
+    assert "ignored boilerplate" not in w.text
+    assert "ignored.py" not in w.file_paths
+
+
+def test_assistant_role_text_and_anchors_still_included():
+    body = {"messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "working on it"},
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "kept.py"}},
+        ]},
+    ]}
+    w = assemble_window(body)
+    assert "working on it" in w.text
+    assert "kept.py" in w.file_paths
+
+
+def test_message_missing_role_contributes_no_text():
+    body = {"messages": [
+        {"content": "no role field at all"},
+        {"role": "user", "content": "real"},
+    ]}
+    w = assemble_window(body)
+    assert "no role field at all" not in w.text
+    assert "real" in w.text
+
+
 # -- edit-vs-read tool distinction (UPG-PROXY-INJECT-SINGLE-TURN) -----------
 
 def test_edit_tool_call_populates_edited_file_paths():

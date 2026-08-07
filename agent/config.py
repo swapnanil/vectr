@@ -1201,6 +1201,14 @@ MEMORY_TRIGGER_PER_TURN_TOKEN_CAP: int = int(_trig_inject_cfg["per_turn_token_ca
 MEMORY_TRIGGER_PER_KIND_TOKEN_CAP: dict[str, int] = {
     str(kind): int(cap) for kind, cap in _trig_inject_cfg["per_kind_token_cap"].items()
 }
+# UPG-HOOK-GOTCHA-CAP-TITLE-ONLY: min fraction of a trim's char budget a
+# sentence/word boundary must still preserve to be used, else `pack_injection`
+# falls back to a hard character cut — see agent/trigger_engine.py's
+# `_trim_full_text_to_cap()`. Same shape as the proxy channel's
+# PROACTIVE_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION, kept as a distinct key.
+MEMORY_TRIGGER_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION: float = float(
+    _trig_inject_cfg["body_truncation_min_boundary_fraction"]
+)
 
 # Trigger engine wave 2b (TRIGGER-ENGINE, bm2-design-skeleton.md §8) — the M
 # (semantic) primitive's fixed per-kind cosine thresholds. Built by direct

@@ -1538,8 +1538,13 @@ memory_triggers:
 
   injection:
     # Per-injected-memory token cap (full-text tier: directive/gotcha). A
-    # memory over this cap is NEVER partially truncated — it either injects
-    # whole or drops to its index-tier one-liner (never a half-cut body).
+    # memory over this cap is TRIMMED into the cap (sentence/word-boundary
+    # backoff, see body_truncation_min_boundary_fraction below) rather than
+    # dropped wholesale to its index-tier one-liner — UPG-HOOK-GOTCHA-CAP-
+    # TITLE-ONLY, parity with the proxy channel's own UPG-PROXY-INJECT-
+    # TITLE-ONLY fix (agent/proactive/matcher.py::_cap()). It only falls
+    # back to the index-tier line if the cap is too small to hold even a
+    # single trimmed character (pathological config, not a real deployment).
     per_injection_token_cap: 1500
     # Cumulative token cap for everything injected in one delivery moment
     # (one hook firing / one fire-evaluation call). Notes are packed in total-
@@ -1566,6 +1571,18 @@ memory_triggers:
     # caps above (same rough ratio as hooks.log_chars_per_token; kept as a
     # separate key since the two domains may need to diverge later).
     chars_per_token: 4
+    # UPG-HOOK-GOTCHA-CAP-TITLE-ONLY: when a full-tier render exceeds its own
+    # per_injection_token_cap/per_kind_token_cap, the trim backs off to the
+    # nearest sentence boundary (". ") within the trim budget when one exists
+    # there, else the nearest word boundary (" "), else a hard character cut —
+    # same fallback ladder as the proxy channel's own min-boundary-fraction
+    # (agent/proactive/matcher.py::_cap(),
+    # proactive.body_truncation_min_boundary_fraction), kept as a separate
+    # key here since the two channels may need to diverge later. A boundary
+    # is only used when it still keeps at least this fraction of the trim
+    # budget — backing off further than that would throw away most of the
+    # content chasing a nicer cut point, which is worse than a hard cut.
+    body_truncation_min_boundary_fraction: 0.5
 
   semantic:
     # TRIGGER-ENGINE wave 2b (bm2-design-skeleton.md §8) — the M (semantic)
