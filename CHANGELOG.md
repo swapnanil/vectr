@@ -1,5 +1,89 @@
 # Changelog
 
+## 1.9.0 - 2026-08-07
+
+A trace answer stops hiding real callers behind a same-named one and becomes
+chainable into `vectr_fetch`; a mistyped qualified name gets the same
+near-miss help a mistyped bare name already got; a failed fetch says which of
+its two very different causes it hit; `--path` resolves from anywhere inside a
+workspace; and shell episodes stop being classified `unknown` on hosts that
+report success without an exit code.
+
+### Retrieval
+- `vectr_trace` collapses callers by `(name, file)` instead of by name alone.
+  Two unrelated functions sharing a leaf name in different files (two classes
+  each defining `__call__`) used to merge under one elected representative
+  edge, so a real caller in the second file never appeared in the rendered
+  trace even though its calls were counted in the `xN` suffix. Same-file call
+  sites still fold into one entry with a count, which is a genuine ambiguity a
+  receiver-blind static graph cannot resolve further. Callees keep the
+  name-only collapse.
+- Trace paths render workspace-relative, and every call site carries a
+  `vectr_fetch`-ready chunk id, so reading the code around a caller is one
+  chained call instead of a path fix-up plus a file read.
+- Qualified-name near-miss now covers a typo in the **leaf** segment, not only
+  in the qualifier (`QuerySt.get_or_creat`, both halves misspelled). The
+  fallback resolves the bare leaf through the same per-segment machinery an
+  unqualified token already gets, then ranks by qualifier similarity, so a
+  doubly-mistyped token still surfaces its real symbol as a labeled-inexact
+  suggestion. The widen step is also guarded so it can no longer displace an
+  exact resolution that already succeeded.
+- `vectr_fetch` distinguishes its two miss shapes. A requested id whose line
+  range does not align to a stored chunk span, in a file that still has chunks
+  indexed, returns `reason="misaligned"` plus `nearest_ids` naming the closest
+  real chunk ids in that file, so the caller's next fetch succeeds. Only a file
+  with no indexed chunks at all returns `reason="file_changed"`. New config
+  `fetch.misalign_nearest_max` (default 5) caps the suggestion list. Callers
+  reading the old shape are unaffected: the field defaults to `file_changed`.
+- The caller in-degree tiebreak query now has index statistics to plan with. A
+  full graph build gathers them once via a bounded `ANALYZE`, which flips a
+  selective `to_symbol IN (...)` lookup from a whole-workspace covering-index
+  scan to a direct index seek (measured ~18.6ms to ~1.0ms for a 50-name lookup
+  on a synthetic 300k-edge graph). Enclosing-container lookups during
+  qualifier scoring are batched per file rather than issued per candidate.
+
+### CLI
+- `vectr start --path` / query subcommands resolve a path through the
+  workspace instance that **owns** it: pointing at a subdirectory of an
+  indexed workspace now finds that workspace's daemon instead of reporting
+  nothing running.
+- `vectr stop --port N` stops the instance bound to a port, bypassing
+  workspace-path resolution entirely and exiting non-zero if nothing is
+  registered there. Deterministic for scripts and harnesses that manage
+  scratch daemons by port.
+- `vectr start --strict-port` fails instead of walking to the next free port
+  when the requested one is taken, and `vectr start --json` prints a
+  machine-readable result (port, workspace, mode, whether an existing instance
+  was reused). Exit codes are reliable on the `--json` surface.
+
+### Working-memory delivery
+- The trigger-engine per-injection token cap now **trims** an oversized note
+  body to the cap instead of demoting the note to title-only. A capped note
+  previously delivered its label and none of its guidance. Truncation backs off
+  to a sentence or word boundary, controlled by the new
+  `memory_triggers.injection.body_truncation_min_boundary_fraction` (default
+  0.5), rather than cutting mid-word.
+- The proactive request window is built from user and assistant text only.
+  Host-injected system reminders could be an order of magnitude longer than the
+  user's actual message, so the tail-window slice was filled with boilerplate
+  and the real task text was evicted before scoring ever saw it.
+
+### Episode capture
+- Bash episodes are classified from the host's success signal when no exit code
+  is available. Claude Code's post-tool event carries no `rc`, which left the
+  outcome cascade with nothing to key on for most everyday commands: measured
+  across the live episode store, `outcome=unknown` fell from 91.6% to 0.0% and
+  detected failure-to-success arcs rose from 0.675 to 1.605 per 100 episodes.
+  The new signal sits below markers and `rc` in the cascade, and below
+  `is_error`, since some hosts report one event name for both outcomes. No
+  previously non-`unknown` classification changes.
+
+### Internals
+- Cache path resolution is centralized and reads `VECTR_CACHE_DIR` at call
+  time rather than import time. Precedence is `VECTR_DB_DIR` >
+  `VECTR_CACHE_DIR` > `~/.cache/vectr`. Test sessions now get an isolated cache
+  root instead of writing into the real one.
+
 ## 1.8.0 - 2026-08-03
 
 A restart now means "the same daemon again", version staleness is decided by
