@@ -398,6 +398,44 @@ def _locate_class_enclosed_batch(rows: list) -> list[bool]:
     return result
 
 
+def _enclosing_container_batch(symbols: list) -> list[str]:
+    """Batch-cached counterpart to `_enclosing_container_from_file` for a
+    list of `Symbol` objects — one file read (and, on the impl-container
+    fallback path, one parse) per unique `file_path` across *symbols*,
+    mirroring `_locate_class_enclosed_batch`'s per-file caching. Returns the
+    enclosing class/impl-container name (or `""`) parallel to *symbols*.
+
+    UPG-QUALIFIER-SIM-FILE-CACHE: `nearest_symbol_names`'s qualified
+    near-miss ranking pool can hold up to
+    `search.identifier_hint.qualified_nearmiss.candidate_pool_cap` candidates
+    (default 50) — a common leaf name colliding across many same-file
+    sibling classes/impl blocks previously meant `_qualifier_similarity_key`
+    re-reading (and, on the impl-container path, re-parsing) that same file
+    once per candidate defined in it.
+    """
+    from agent.indexer import LANG_BY_EXT
+    file_lines: dict[str, list[str]] = {}
+    impl_spans: dict[str, list[tuple[int, int, str]]] = {}
+    result: list[str] = []
+    for s in symbols:
+        fp = s.file_path
+        if fp not in file_lines:
+            try:
+                file_lines[fp] = Path(fp).read_text(
+                    encoding="utf-8", errors="ignore"
+                ).splitlines()
+            except OSError:
+                file_lines[fp] = []
+        enclosing = _enclosing_class_from_lines(file_lines[fp], s.start_line)
+        if not enclosing:
+            if fp not in impl_spans:
+                language = LANG_BY_EXT.get(Path(fp).suffix.lower(), "")
+                impl_spans[fp] = _impl_container_spans(fp, language)
+            enclosing = _owner_from_spans(impl_spans[fp], s.start_line)
+        result.append(enclosing)
+    return result
+
+
 # UPG-15.16: SQL pre-ranking order applied BEFORE the exact/suffix LIMIT cap so
 # the canonical definition of a frequently-defined name enters the candidate pool
 # that _partial_match_key then ranks. In any large codebase a common class or
@@ -756,6 +794,23 @@ class SymbolGraph:
             "complete": "1" if complete else "0",
             "built_at": str(time.time()),
         })
+
+        # UPG-CALLER-INDEGREE-ANALYZE: a full workspace build bulk-inserts
+        # thousands of rows through index_file()'s per-statement executes —
+        # SQLite never gathers table/index statistics on its own after a
+        # write, so the query planner keeps guessing off stale (or absent)
+        # `sqlite_stat1` data. Without it, a selective lookup like
+        # `_caller_in_degree`'s `to_symbol IN (...)` scan gets planned as a
+        # full `idx_edge_unique` covering-index scan over the whole
+        # workspace instead of a direct `idx_edge_to` index seek — ~15x
+        # slower measured on a synthetic 300k-edge graph (~18.6ms →
+        # ~1.0ms median for a 50-name lookup). `PRAGMA optimize` is
+        # SQLite's own recommended once-per-session maintenance pragma: it
+        # only re-analyzes tables whose change count crossed its internal
+        # threshold, so this costs a few milliseconds even on a large graph
+        # and is a no-op on an unchanged one.
+        with self._conn() as conn:
+            conn.execute("PRAGMA optimize")
 
         return {
             "symbols": total_symbols, "edges": edge_count, "files": len(file_paths),
@@ -1517,6 +1572,17 @@ class SymbolGraph:
         real one. Ranking against `class_qualifier` (the explicit argument
         the caller passed) is a result-side signal, not query-content
         gating.
+
+        UPG-QUALIFIED-TYPO-NEARMISS: the LEAF segment can carry a typo too
+        (e.g. "QuerySt.get_or_creat" — both segments misspelled), in which
+        case even the exact-leaf pool above is empty and there is nothing to
+        rank. Falls back to resolving the bare leaf alone through
+        `locate_l2` — the exact same per-segment partial-match machinery a
+        bare (unqualified) token already gets, not a new parallel fuzzy
+        path — and ranks whatever it finds by the same qualifier-similarity
+        key. A doubly-typo'd qualified token then still surfaces its correct
+        symbol as a labeled-inexact suggestion instead of a zero-suggestion
+        miss.
         """
         if limit <= 0:
             return []
@@ -1525,20 +1591,45 @@ class SymbolGraph:
             return result.symbols[:limit]
 
         class_qualifier, leaf = _split_class_qualifier(token)
-        if class_qualifier:
+        # UPG-NEARMISS-WIDEN-EXACT-GUARD: an exact-strategy result already
+        # resolved `token` cleanly — widening a resolved qualified token out
+        # to every OTHER same-leaf class would turn a correct answer into a
+        # pile of unrelated near-miss suggestions. Only "none" (the qualifier
+        # matched no real enclosing class) is a genuine miss to widen from.
+        if class_qualifier and result.resolution_strategy != "exact":
             pool = self._exact_definitions(
                 workspace, leaf, limit=SYMBOL_GRAPH_QUALIFIED_NEARMISS_CANDIDATE_CAP,
             )
-            if pool:
-                ranked = sorted(
-                    pool, key=lambda c: self._qualifier_similarity_key(class_qualifier, c),
+            if not pool:
+                leaf_result = self.locate_l2(
+                    workspace, leaf, limit=SYMBOL_GRAPH_QUALIFIED_NEARMISS_CANDIDATE_CAP,
                 )
-                top = ranked[:limit]
-                for s in top:
+                if leaf_result.resolution_strategy != "none":
+                    pool = leaf_result.symbols
+            if pool:
+                # UPG-QUALIFIER-SIM-FILE-CACHE: resolve every candidate's
+                # enclosing container in one batch pass (one file read per
+                # unique file_path across the whole pool) rather than letting
+                # `_qualifier_similarity_key` re-read the same file once per
+                # candidate defined in it.
+                enclosing_names = _enclosing_container_batch(pool)
+                order = sorted(
+                    range(len(pool)),
+                    key=lambda i: self._qualifier_similarity_key(
+                        class_qualifier, pool[i], enclosing_names[i],
+                    ),
+                )[:limit]
+                top = [pool[i] for i in order]
+                for i, s in zip(order, top):
                     s.snippet = self.get_snippet(s.file_path, s.start_line, s.end_line)
-                    enclosing = _enclosing_container_from_file(s.file_path, s.start_line)
-                    if enclosing:
-                        s.name = f"{enclosing}.{s.name}"
+                    # Symbols sourced from the leaf-only `locate_l2` retry may
+                    # already carry a (wrongly-anchored) qualified name from
+                    # its own auto-qualification — only qualify a still-bare
+                    # name here (mirrors the `_with_snippets` convention).
+                    # Reuses the batch-computed enclosing name above rather
+                    # than re-reading the file a second time.
+                    if "." not in s.name and "::" not in s.name and enclosing_names[i]:
+                        s.name = f"{enclosing_names[i]}.{s.name}"
                 return top
 
         min_len = SEARCH_IDENTIFIER_HINT_NEARMISS_MIN_PREFIX_LEN
@@ -1717,7 +1808,14 @@ class SymbolGraph:
         ALPHA). Deliberately not a new stored centrality pipeline: one
         grouped COUNT over the same `edges` table `_known_symbol_names`
         already queries (using the same `idx_edge_to` index), scoped to the
-        (typically small) set of names actually tied on call_count."""
+        (typically small) set of names actually tied on call_count.
+
+        UPG-CALLER-INDEGREE-ANALYZE: this `idx_edge_to` plan only holds when
+        SQLite has table/index statistics to reason with — `build_for_
+        workspace` runs `PRAGMA optimize` once per full build so a fresh or
+        rebuilt graph always has them; without it SQLite's planner falls
+        back to a full covering-index workspace scan here (measured ~15x
+        slower on a synthetic 300k-edge graph)."""
         if not names:
             return {}
         counts: dict[str, int] = {}
@@ -1796,7 +1894,9 @@ class SymbolGraph:
         return [self._row_to_symbol(r) for r in rows]
 
     @staticmethod
-    def _qualifier_similarity_key(class_qualifier: str, candidate: Symbol) -> tuple[float, float]:
+    def _qualifier_similarity_key(
+        class_qualifier: str, candidate: Symbol, enclosing: str,
+    ) -> tuple[float, float]:
         """Sort key for UPG-LOCATE-FALLBACK-NO-SIMILARITY (ascending order =
         best match first — negate the ratios so `sorted()` puts the closest
         candidate first). Ranks a same-leaf definition candidate by how
@@ -1811,8 +1911,15 @@ class SymbolGraph:
         enclosing type at all — a module-level definition — falls back to
         comparing the qualifier against its path). The caller's `sorted()`
         is stable, so a full tie on both ratios preserves the candidates'
-        original (canonical-fetch-order) relative order."""
-        enclosing = _enclosing_container_from_file(candidate.file_path, candidate.start_line)
+        original (canonical-fetch-order) relative order.
+
+        UPG-QUALIFIER-SIM-FILE-CACHE: `enclosing` is precomputed by the
+        caller via `_enclosing_container_batch` (one file read per unique
+        file_path across the whole ranking pool) rather than derived here
+        via `_enclosing_container_from_file` — a per-candidate call would
+        re-read (and, on the impl-container fallback, re-parse) the same
+        file once per candidate defined in it, up to the qualified near-miss
+        candidate pool cap file reads on this fallback path."""
         type_ratio = (
             SequenceMatcher(None, class_qualifier.lower(), enclosing.lower()).ratio()
             if enclosing else 0.0
