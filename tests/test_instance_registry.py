@@ -13,6 +13,7 @@ import pytest
 
 from agent.instance_registry import (
     InstanceRegistry,
+    PortBusyError,
     _is_pid_alive,
     _port_is_free,
     workspace_hash,
@@ -265,6 +266,55 @@ def test_find_free_port_retries_previous_port_before_walking_forward(registry):
     assert port == 8900  # reused, never walked to 8766+
     assert calls.count(8900) == 3
     assert mock_sleep.call_count == 2  # slept between the 3 attempts, not after the last
+
+
+def test_find_free_port_strict_returns_preferred_when_free(registry):
+    """strict=True, unknown workspace, preferred port free → return it
+    immediately without scanning forward (UPG-CLI-STOP-NO-PORT-FLAG)."""
+    calls: list[int] = []
+
+    def port_free(port: int) -> bool:
+        calls.append(port)
+        return port == 8765
+
+    with patch("agent.instance_registry._port_is_free", side_effect=port_free):
+        port = registry.find_free_port("newworkspace0", 8765, strict=True)
+
+    assert port == 8765
+    assert calls == [8765]  # never probed 8766+
+
+
+def test_find_free_port_strict_raises_when_preferred_busy(registry):
+    """strict=True, unknown workspace, preferred port busy → PortBusyError,
+    never silently walk to a different port."""
+    with patch("agent.instance_registry._port_is_free", return_value=False):
+        with pytest.raises(PortBusyError, match="8765"):
+            registry.find_free_port("newworkspace0", 8765, strict=True)
+
+
+def test_find_free_port_strict_raises_after_dead_entry_retries_exhausted(registry):
+    """strict=True, dead entry whose previous port never frees up within the
+    bounded retry window → PortBusyError naming that previous port, not a
+    silent walk to preferred_port or beyond."""
+    registry.register("aaa000000000", "/project/a", 8900, 99999)
+
+    with patch("agent.instance_registry._is_pid_alive", return_value=False), \
+         patch("agent.instance_registry._port_is_free", return_value=False), \
+         patch("agent.instance_registry.time.sleep"):
+        with pytest.raises(PortBusyError, match="8900"):
+            registry.find_free_port("aaa000000000", 8765, strict=True)
+
+
+def test_find_free_port_strict_reuses_live_dead_entry_port_without_error(registry):
+    """strict=True, dead entry whose previous port IS free → reuse it, same
+    as non-strict mode; strict only changes the no-port-available path."""
+    registry.register("aaa000000000", "/project/a", 8900, 99999)
+
+    with patch("agent.instance_registry._is_pid_alive", return_value=False), \
+         patch("agent.instance_registry._port_is_free", return_value=True):
+        port = registry.find_free_port("aaa000000000", 8765, strict=True)
+
+    assert port == 8900
 
 
 def test_find_free_port_retry_is_bounded_by_config(registry):
