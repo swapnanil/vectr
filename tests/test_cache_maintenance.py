@@ -89,12 +89,21 @@ class TestPruneEmptyCacheDirs:
 
 
 class TestLazyCreationUPGCACHELITTER:
+    """_default_db_dir's Path.home()-based fallback only runs when
+    VECTR_CACHE_DIR is unset (agent.config.vectr_cache_root — UPG-TEST-CACHE-
+    ISOLATION); the whole pytest session sets that env var (tests/conftest.py's
+    _isolated_cache_root), so these tests must unset it to exercise the
+    fallback they're actually testing rather than transparently hitting the
+    session's own override."""
+
     def test_default_db_dir_does_not_create_subdir(self, tmp_path, monkeypatch) -> None:
         """UPG-CACHE-LITTER creation-side fix: resolving the DB path must not
         create the per-workspace subdir — only a real service does, when it also
         writes its notes DB."""
+        from agent.config import CACHE_DIR_ENV
         from app import service as service_mod
 
+        monkeypatch.delenv(CACHE_DIR_ENV, raising=False)
         monkeypatch.setattr(service_mod.Path, "home", staticmethod(lambda: tmp_path))
         ws = "/some/workspace/path"
         db_dir = service_mod._default_db_dir(ws)
@@ -103,8 +112,10 @@ class TestLazyCreationUPGCACHELITTER:
         assert not Path(db_dir).exists()
 
     def test_default_db_dir_slug_is_stable(self, tmp_path, monkeypatch) -> None:
+        from agent.config import CACHE_DIR_ENV
         from app import service as service_mod
 
+        monkeypatch.delenv(CACHE_DIR_ENV, raising=False)
         monkeypatch.setattr(service_mod.Path, "home", staticmethod(lambda: tmp_path))
         ws = "/some/workspace/path"
         d1 = service_mod._default_db_dir(ws)

@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Protocol
 
 from agent.config import (
     EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL,
     EMBEDDING_MAX_SEQ_LENGTH as _EMBEDDING_MAX_SEQ_LENGTH,
     EMBEDDING_THREAD_CAP as _EMBEDDING_THREAD_CAP,
+    vectr_cache_root as _vectr_cache_root,
 )
 
 
@@ -76,7 +76,7 @@ class LocalEmbedProvider:
         except RuntimeError:
             pass
 
-        cache_dir = Path.home() / ".cache" / "vectr" / "models"
+        cache_dir = _vectr_cache_root() / "models"
         cache_dir.mkdir(parents=True, exist_ok=True)
         # UPG-RERANKER-HF-NETWORK: prefer an offline (local_files_only) load
         # when this model is already fully cached, so a warm daemon start

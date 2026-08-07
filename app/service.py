@@ -46,6 +46,7 @@ from agent.config import (
     MEMORY_WRITE_RELATED_MIN_SIMILARITY,
     MEMORY_WRITE_PROXY_SUGGEST_ENABLED,
     MEMORY_WRITE_PROXY_SUGGEST_LIMIT,
+    vectr_cache_root,
 )
 from agent.eviction_advisor import EvictionAdvisor
 from agent.proxy_anchors import suggest_proxy_anchors
@@ -92,7 +93,7 @@ def _default_db_dir(workspace_root: str) -> str:
     only when a real service is built, which then immediately writes its notes
     DB — so an empty dir never corresponds to a live workspace."""
     from agent.fs_permissions import secure_dir
-    cache_root = Path.home() / ".cache" / "vectr"
+    cache_root = vectr_cache_root()
     secure_dir(cache_root)
     return str(cache_root / _cache_dir_slug(workspace_root))
 

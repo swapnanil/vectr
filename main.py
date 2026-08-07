@@ -65,6 +65,7 @@ from agent.config import (
     CLI_VERSION_SKEW_PROBE_TIMEOUT_S,
     DEFAULT_PORT,
     HOOKS_POST_COMMIT_TIMEOUT_S,
+    vectr_cache_root,
 )
 from agent.instance_registry import (
     InstanceRegistry,
@@ -3343,7 +3344,7 @@ def cmd_forget(args: argparse.Namespace) -> None:
     # bypassing the running server (server may be down, or multiple instances).
     if getattr(args, "all", False):
         from agent.working_context_store import WorkingContextStore
-        cache_root = Path.home() / ".cache" / "vectr"
+        cache_root = vectr_cache_root()
         # Layout of record: ~/.cache/vectr/<workspace-hash>/working_context.sqlite
         # (app.service._default_db_dir). Earlier builds nested the same file under
         # ~/.cache/vectr/db/<hash>/ — sweep both layouts so --all cannot silently
@@ -3385,7 +3386,7 @@ def cmd_cache(args: argparse.Namespace) -> None:
         return
     from agent.cache_maintenance import live_instance_slugs, prune_empty_cache_dirs
 
-    cache_root = Path.home() / ".cache" / "vectr"
+    cache_root = vectr_cache_root()
     protected = live_instance_slugs()
     dry_run = getattr(args, "dry_run", False)
     affected = prune_empty_cache_dirs(cache_root, protected_slugs=protected, dry_run=dry_run)
@@ -3521,7 +3522,7 @@ def cmd_watch(args: argparse.Namespace) -> None:
 
     # Use same db layout as VectrService so a later `vectr start` shares the index.
     db_hash = hashlib.md5(workspace.encode()).hexdigest()[:12]
-    db_dir = Path.home() / ".cache" / "vectr" / db_hash
+    db_dir = vectr_cache_root() / db_hash
     db_dir.mkdir(parents=True, exist_ok=True)
 
     indexer = CodeIndexer(workspace, embed_model=embed_model, db_path=str(db_dir / "chroma"),

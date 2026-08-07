@@ -101,6 +101,12 @@ class TestCacheDirPermissions:
 
     def test_default_db_dir_secures_parent_without_creating_subdir(self, tmp_path, monkeypatch) -> None:
         # Redirect ~/.cache to a temp home so we never touch the real cache.
+        # _default_db_dir resolves its cache root via agent.config.vectr_cache_root
+        # (UPG-TEST-CACHE-ISOLATION), which prefers VECTR_CACHE_DIR over Path.home()
+        # when set — unset it so this test exercises the Path.home() fallback it's
+        # actually probing, rather than the whole session's own cache override.
+        from agent.config import CACHE_DIR_ENV
+        monkeypatch.delenv(CACHE_DIR_ENV, raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         from agent.fs_permissions import secure_dir
         from app.service import _default_db_dir

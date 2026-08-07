@@ -18,6 +18,7 @@ from agent.chunk_quality import build_purpose_text, is_symbol_bearing_chunk
 from agent.config import DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED
 from agent.config import EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL
 from agent.config import FETCH_MISALIGN_NEAREST_MAX
+from agent.config import vectr_cache_root as _vectr_cache_root
 from agent.indexer._constants import (
     EXCLUDED_DIRS,
     _FILE_BATCH_SIZE,
@@ -132,7 +133,7 @@ class CodeIndexer:
         self._extra_roots: list[Path] = [Path(r).resolve() for r in (extra_roots or [])]
         self.embed_model = embed_model
 
-        db_dir = Path(db_path) if db_path else Path.home() / ".cache" / "vectr" / "db" / self._workspace_hash()
+        db_dir = Path(db_path) if db_path else _vectr_cache_root() / "db" / self._workspace_hash()
         db_dir.mkdir(parents=True, exist_ok=True)
         self._db_dir = db_dir
 

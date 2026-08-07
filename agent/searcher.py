@@ -6,7 +6,6 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from rank_bm25 import BM25Plus
 
@@ -40,6 +39,7 @@ from agent.config import (
     NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE as _NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE,
     RESULT_FLOOR_ENABLED as _RESULT_FLOOR_ENABLED,
     RESULT_FLOOR_MIN_RELEVANCE as _RESULT_FLOOR_MIN_RELEVANCE,
+    vectr_cache_root as _vectr_cache_root,
 )
 from agent.indexer import CodeIndexer
 
@@ -138,7 +138,7 @@ class _Reranker:
             from agent.model_cache import load_with_offline_preference, suppress_model_load_noise
             suppress_model_load_noise()
             from sentence_transformers import CrossEncoder
-            cache_dir = str(Path.home() / ".cache" / "vectr" / "models")
+            cache_dir = str(_vectr_cache_root() / "models")
             # UPG-RERANKER-HF-NETWORK: prefer an offline (local_files_only)
             # load when this model is already fully cached, so search never
             # makes live huggingface.co calls just to re-confirm a cache it
