@@ -16,6 +16,7 @@ Tests verify:
 from __future__ import annotations
 
 import math
+import sqlite3
 import textwrap
 from pathlib import Path
 
@@ -848,6 +849,86 @@ class TestNearestSymbolNamesQualifierSimilarityUPG:
 
         near = g.nearest_symbol_names("ws", "Bogus.process", limit=2)
         assert len(near) == 2
+
+
+# ---------------------------------------------------------------------------
+# UPG-QUALIFIED-TYPO-NEARMISS: a qualified token with a typo in BOTH the
+# class qualifier AND the leaf (so neither the "none"-strategy qualifier
+# widening above, which needs an exact leaf, nor locate_l2's own qualified
+# strategies fire) still surfaces a labeled-inexact suggestion by retrying
+# the leaf alone through the same non-exact locate_l2 machinery.
+# ---------------------------------------------------------------------------
+
+class TestNearestSymbolNamesQualifiedLeafTypoUPG:
+    def test_typo_in_both_segments_still_returns_ranked_suggestions(
+        self, tmp_path,
+    ) -> None:
+        g = SymbolGraph(str(tmp_path))
+        make_py(
+            tmp_path, "widgets.py",
+            "class WidgetRegistry:\n    def fetch_item(self):\n        pass\n"
+            "class GadgetHelper:\n    def fetch_item(self):\n        pass\n",
+        )
+        g.index_file("ws", str(tmp_path / "widgets.py"))
+
+        # Pin the gap: an exact-leaf widen (_exact_definitions) finds nothing
+        # because the leaf itself has a typo too.
+        assert g._exact_definitions("ws", "fetch_itm", limit=50) == []
+        assert g.locate_l2(
+            "ws", "WidgetRegistery.fetch_itm",
+        ).resolution_strategy == "none"
+
+        near = g.nearest_symbol_names("ws", "WidgetRegistery.fetch_itm", limit=10)
+        # Correct symbol first (its owning class is the closer string match
+        # to the failed qualifier); nothing here is an empty/zero-suggestion
+        # miss despite both segments being misspelled.
+        assert [s.name for s in near] == [
+            "WidgetRegistry.fetch_item",
+            "GadgetHelper.fetch_item",
+        ]
+
+    def test_single_candidate_typo_in_both_segments(self, tmp_path) -> None:
+        """Simplest shape of the bug report: one real symbol, typo'd class
+        AND typo'd leaf, must not fall back to a flat empty result."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(
+            tmp_path, "orders.py",
+            "class OrderRepository:\n    def save_record(self):\n        pass\n",
+        )
+        g.index_file("ws", str(tmp_path / "orders.py"))
+
+        near = g.nearest_symbol_names("ws", "OrderRepositary.save_recrd", limit=10)
+        assert [s.name for s in near] == ["OrderRepository.save_record"]
+
+
+# ---------------------------------------------------------------------------
+# UPG-NEARMISS-WIDEN-EXACT-GUARD: an already-exact-resolved qualified token
+# must not be widened out to unrelated same-leaf sibling classes.
+# ---------------------------------------------------------------------------
+
+class TestNearestSymbolNamesExactGuardUPG:
+    def test_exact_resolvable_qualified_token_is_not_widened_to_siblings(
+        self, tmp_path,
+    ) -> None:
+        # Three short (below nearmiss_min_prefix_len) sibling classes share a
+        # leaf method name; the token is spelled correctly and resolves
+        # exactly via locate_l2. Widening would incorrectly surface the two
+        # unrelated siblings as "near-miss" results for an already-correct
+        # lookup.
+        g = SymbolGraph(str(tmp_path))
+        make_py(
+            tmp_path, "mod.py",
+            "class Foo:\n    def process(self):\n        pass\n"
+            "class Bar:\n    def process(self):\n        pass\n"
+            "class Baz:\n    def process(self):\n        pass\n",
+        )
+        g.index_file("ws", str(tmp_path / "mod.py"))
+
+        exact = g.locate_l2("ws", "Foo.process")
+        assert exact.resolution_strategy == "exact"
+
+        near = g.nearest_symbol_names("ws", "Foo.process", limit=10)
+        assert near == []
 
 
 class TestLevenshtein:
@@ -2320,6 +2401,89 @@ class TestTraceFetchIdsUPG:
 
 
 # ---------------------------------------------------------------------------
+# UPG-CALLER-INDEGREE-ANALYZE — build_for_workspace gathers query-planner
+# statistics so _caller_in_degree's selective `to_symbol IN (...)` lookup
+# plans through idx_edge_to instead of a full covering-index table scan.
+# ---------------------------------------------------------------------------
+
+class TestCallerInDegreeAnalyzeUPG:
+    def _seed_selective_edges(self, g: "SymbolGraph", ws: str) -> list[str]:
+        # Many distinct `to_symbol` values (selective for idx_edge_to) all
+        # under one workspace (NOT selective for idx_edge_workspace/the
+        # covering index) — mirrors a real multi-thousand-symbol workspace
+        # closely enough that the planner's choice actually depends on
+        # having statistics, rather than being forced either way by shape.
+        import random
+        rng = random.Random(7)
+        names = [f"sym_{i}" for i in range(500)]
+        specs = []
+        for i in range(3000):
+            to_sym = rng.choice(names)
+            from_sym = f"caller_{rng.randint(0, 3000)}"
+            specs.append((f"{ws}/file_{i % 50}.py", from_sym, i % 500, to_sym))
+        _seed_edges(g, ws, specs)
+        return names[:10]
+
+    def test_build_for_workspace_populates_edge_index_statistics(
+        self, tmp_path,
+    ) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        self._seed_selective_edges(g, ws)
+        with g._conn() as conn:
+            # `sqlite_stat1` itself doesn't exist until the first ANALYZE
+            # creates it, so "no statistics yet" also covers the missing-
+            # table case rather than only an empty-but-present table.
+            try:
+                before = {
+                    r["idx"] for r in conn.execute(
+                        "SELECT idx FROM sqlite_stat1 WHERE tbl = 'edges'"
+                    ).fetchall()
+                }
+            except sqlite3.OperationalError:
+                before = set()
+        assert "idx_edge_to" not in before  # no ANALYZE has run yet
+
+        g.build_for_workspace(ws, [])
+
+        with g._conn() as conn:
+            after = {
+                r["idx"] for r in conn.execute(
+                    "SELECT idx FROM sqlite_stat1 WHERE tbl = 'edges'"
+                ).fetchall()
+            }
+        assert "idx_edge_to" in after
+
+    def test_caller_in_degree_query_plans_via_idx_edge_to_after_build(
+        self, tmp_path,
+    ) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        tied_names = self._seed_selective_edges(g, ws)
+
+        def plan_uses_idx_edge_to() -> bool:
+            with g._conn() as conn:
+                placeholders = ",".join("?" * len(tied_names))
+                rows = conn.execute(
+                    "EXPLAIN QUERY PLAN SELECT to_symbol, "
+                    "COUNT(DISTINCT from_symbol) FROM edges WHERE workspace = ? "
+                    f"AND to_symbol IN ({placeholders}) GROUP BY to_symbol",
+                    (ws, *tied_names),
+                ).fetchall()
+            return any("idx_edge_to" in r["detail"] for r in rows)
+
+        assert plan_uses_idx_edge_to() is False  # stale/absent stats, pre-build
+
+        g.build_for_workspace(ws, [])
+
+        assert plan_uses_idx_edge_to() is True
+        # The fixed query plan is what makes _caller_in_degree itself return
+        # correct counts too, not just a cheaper plan.
+        counts = g._caller_in_degree(ws, tied_names)
+        assert all(name in counts for name in tied_names if counts.get(name))
+
+
+# ---------------------------------------------------------------------------
 # UPG-4.3 — suppress builtins/stdlib from callee lists (repo-internal by default)
 # ---------------------------------------------------------------------------
 
@@ -3663,6 +3827,93 @@ def _seed_importance_graph(g: "SymbolGraph", ws: str, tmp_path) -> dict[str, str
             )
 
     return files
+
+
+# ---------------------------------------------------------------------------
+# UPG-QUALIFIER-SIM-FILE-CACHE: _enclosing_container_batch is the
+# _locate_class_enclosed_batch-style per-file cache for
+# nearest_symbol_names' qualified near-miss ranking pool, so
+# _qualifier_similarity_key never re-reads (or re-parses) the same
+# candidate file once per candidate defined in it.
+# ---------------------------------------------------------------------------
+
+class TestEnclosingContainerBatchUPG:
+    def test_reads_each_file_at_most_once_across_many_candidates(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from agent.symbol_graph._graph import _enclosing_container_batch
+
+        src = (
+            "class WidgetRegistry:\n    def process(self):\n        pass\n"
+            "class GadgetHelper:\n    def process(self):\n        pass\n"
+            "class SprocketFactory:\n    def process(self):\n        pass\n"
+        )
+        fp = tmp_path / "widgets.py"
+        fp.write_text(src)
+
+        calls = {"count": 0}
+        real_read_text = Path.read_text
+
+        def counting_read_text(self, *args, **kwargs):
+            if str(self) == str(fp):
+                calls["count"] += 1
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+        symbols = [
+            Symbol(1, "ws", "process", "method", str(fp), 2, 3),
+            Symbol(2, "ws", "process", "method", str(fp), 5, 6),
+            Symbol(3, "ws", "process", "method", str(fp), 8, 9),
+        ]
+        names = _enclosing_container_batch(symbols)
+
+        assert names == ["WidgetRegistry", "GadgetHelper", "SprocketFactory"]
+        assert calls["count"] == 1, (
+            "expected one read for 3 candidates sharing one file_path, "
+            f"got {calls['count']}"
+        )
+
+    def test_symbol_with_no_enclosing_container_returns_empty_string(
+        self, tmp_path,
+    ) -> None:
+        from agent.symbol_graph._graph import _enclosing_container_batch
+
+        fp = tmp_path / "mod.py"
+        fp.write_text("def free_function():\n    pass\n")
+
+        names = _enclosing_container_batch(
+            [Symbol(1, "ws", "free_function", "function", str(fp), 1, 2)]
+        )
+        assert names == [""]
+
+    def test_multiple_files_each_read_once(self, tmp_path, monkeypatch) -> None:
+        from agent.symbol_graph._graph import _enclosing_container_batch
+
+        fp_a = tmp_path / "a.py"
+        fp_a.write_text("class Alpha:\n    def process(self):\n        pass\n")
+        fp_b = tmp_path / "b.py"
+        fp_b.write_text("class Beta:\n    def process(self):\n        pass\n")
+
+        calls: dict[str, int] = {}
+        real_read_text = Path.read_text
+
+        def counting_read_text(self, *args, **kwargs):
+            calls[str(self)] = calls.get(str(self), 0) + 1
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+        symbols = [
+            Symbol(1, "ws", "process", "method", str(fp_a), 2, 3),
+            Symbol(2, "ws", "process", "method", str(fp_b), 2, 3),
+            Symbol(3, "ws", "process", "method", str(fp_a), 2, 3),
+        ]
+        names = _enclosing_container_batch(symbols)
+
+        assert names == ["Alpha", "Beta", "Alpha"]
+        assert calls[str(fp_a)] == 1
+        assert calls[str(fp_b)] == 1
 
 
 class TestFileImportanceARCH1a:
