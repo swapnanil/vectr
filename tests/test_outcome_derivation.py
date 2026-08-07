@@ -57,6 +57,118 @@ class TestExitCodeFallback:
         assert result["outcome"] == "failure"
 
 
+class TestHarnessSuccessTier:
+    """UPG-EPISODE-OUTCOME-CLASSIFICATION: `harness_success` (tri-state,
+    caller-supplied only when it genuinely knows which discrete hook event
+    routed the tool call — the same tool-call-structure category as `rc`)
+    fills the tier between `is_error` and `unknown`, closing the gap where a
+    successfully-routed everyday command carries no exit code and matches no
+    build/test marker. It sits BELOW `is_error`, not above it: `is_error`,
+    when an integration populates it, is a direct per-call truth claim,
+    while `harness_success` is a routing inference that only holds under an
+    assumed event vocabulary (not guaranteed for every integration — see
+    agent/outcome.py's module docstring)."""
+
+    def test_harness_success_true_no_rc_no_markers_is_success(self):
+        result = derive_outcome(
+            rc=None, is_error=False, interrupted=False,
+            stdout_digest="{}\n", stderr_digest="",
+            harness_success=True,
+        )
+        assert result["outcome"] == "success"
+
+    def test_harness_success_false_no_rc_no_markers_is_failure(self):
+        result = derive_outcome(
+            rc=None, is_error=False, interrupted=False,
+            stdout_digest="", stderr_digest="",
+            harness_success=False,
+        )
+        assert result["outcome"] == "failure"
+
+    def test_harness_success_none_no_rc_no_markers_stays_unknown(self):
+        """The default: an integration that doesn't supply the signal gets
+        exactly the pre-fix behavior — never guessed."""
+        result = derive_outcome(
+            rc=None, is_error=False, interrupted=False,
+            stdout_digest="", stderr_digest="",
+            harness_success=None,
+        )
+        assert result["outcome"] == "unknown"
+
+    def test_rc_still_beats_harness_success_when_both_present(self):
+        result = derive_outcome(
+            rc=1, is_error=False, interrupted=False,
+            stdout_digest="", stderr_digest="",
+            harness_success=True,
+        )
+        assert result["outcome"] == "failure"
+
+    def test_failure_marker_beats_harness_success_true(self):
+        """The T2 exit-code-lying case, restated for harness_success: a
+        build tool piped through a display-only stage can report
+        harness_success=True (the harness itself saw a clean top-level
+        exit) while its own printed output says otherwise — markers still
+        win, producing soft_failure, never a false success."""
+        result = derive_outcome(
+            rc=None, is_error=False, interrupted=False,
+            stdout_digest="[INFO] BUILD FAILURE", stderr_digest="",
+            harness_success=True,
+        )
+        assert result["outcome"] == "soft_failure"
+
+    def test_success_marker_beats_harness_success_false(self):
+        result = derive_outcome(
+            rc=None, is_error=False, interrupted=False,
+            stdout_digest="5 passed in 1.2s", stderr_digest="",
+            harness_success=False,
+        )
+        assert result["outcome"] == "success"
+
+    def test_interrupted_beats_harness_success_true(self):
+        result = derive_outcome(
+            rc=None, is_error=False, interrupted=True,
+            stdout_digest="", stderr_digest="",
+            harness_success=True,
+        )
+        assert result["outcome"] == "interrupted"
+
+    def test_is_error_true_beats_harness_success_true(self):
+        """`is_error`, when the caller supplies True, wins over a
+        conflicting `harness_success=True` (agent/outcome.py's derive_outcome
+        docstring): `is_error` is a direct per-call truth claim, while
+        `harness_success` is only a routing inference that assumes the
+        editor's event vocabulary cleanly separates success from failure by
+        event name — an assumption not guaranteed for every integration
+        (e.g. one whose hook surface fires the same event name regardless of
+        outcome). Never observed to disagree on Claude Code today (G0:
+        `is_error` is structurally always False on its verified success
+        path, so this tier never fires there)."""
+        result = derive_outcome(
+            rc=None, is_error=True, interrupted=False,
+            stdout_digest="", stderr_digest="",
+            harness_success=True,
+        )
+        assert result["outcome"] == "failure"
+
+    def test_is_error_true_still_used_when_harness_success_is_none(self):
+        result = derive_outcome(
+            rc=None, is_error=True, interrupted=False,
+            stdout_digest="", stderr_digest="",
+            harness_success=None,
+        )
+        assert result["outcome"] == "failure"
+
+    def test_default_omitted_harness_success_matches_none(self):
+        """Callers that don't pass harness_success at all (existing
+        integrations, pre-fix call sites) get identical behavior to
+        harness_success=None explicitly — additive, not a breaking change."""
+        result = derive_outcome(
+            rc=None, is_error=False, interrupted=False,
+            stdout_digest="", stderr_digest="",
+        )
+        assert result["outcome"] == "unknown"
+
+
 class TestSignalTermination:
     def test_rc_137_is_interrupted_and_signal(self):
         result = derive_outcome(

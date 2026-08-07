@@ -115,6 +115,34 @@ class TestRecordEpisodeIntegration:
         )
         assert svc.count_episodes() == 2
 
+    def test_harness_success_true_derives_success_outcome_without_rc_or_markers(self, tmp_path, monkeypatch):
+        """UPG-EPISODE-OUTCOME-CLASSIFICATION: an everyday command that
+        matches no build/test marker and carries no rc (the real-world
+        success-path shape) still derives outcome=success end-to-end when
+        the hook layer forwards harness_success=True."""
+        svc = _make_real_service(tmp_path, monkeypatch)
+        svc.record_episode(
+            session_id="s1", ts=None, cwd=str(tmp_path), tool="bash",
+            command="jq '.' file.json", description=None, file_path=None,
+            rc=None, is_error=False, interrupted=False,
+            harness_success=True,
+            stdout_tail="{}\n", stderr_tail="",
+        )
+        row = svc.list_episodes()[0]
+        assert row["outcome"] == "success"
+
+    def test_harness_success_false_derives_failure_outcome(self, tmp_path, monkeypatch):
+        svc = _make_real_service(tmp_path, monkeypatch)
+        svc.record_episode(
+            session_id="s1", ts=None, cwd=str(tmp_path), tool="edit",
+            command=None, description=None, file_path=str(tmp_path / "x.py"),
+            rc=None, is_error=True, interrupted=False,
+            harness_success=False,
+            stdout_tail="", stderr_tail="",
+        )
+        row = svc.list_episodes()[0]
+        assert row["outcome"] == "failure"
+
     def test_list_episodes_filters_by_session_id(self, tmp_path, monkeypatch):
         svc = _make_real_service(tmp_path, monkeypatch)
         svc.record_episode(
@@ -277,6 +305,36 @@ class TestEpisodeRoute:
             assert resp.json()["detail"]["error"] == "search_only_mode"
         finally:
             svc._search_only = False
+
+    def test_harness_success_field_reaches_the_stored_outcome(self, real_episode_client):
+        """REST-level pin (mock-fidelity rule): `harness_success` posted on
+        the wire must reach `record_episode` and flip a marker-less,
+        rc-less episode out of outcome=unknown."""
+        client, svc = real_episode_client
+        resp = client.post(
+            "/v1/episode",
+            json={
+                "session_id": "s1", "cwd": "/repo", "tool": "bash",
+                "command": "gh pr view 1", "harness_success": True,
+                "stdout_tail": "some ordinary output\n",
+            },
+        )
+        assert resp.status_code == 200
+        row = svc.list_episodes(session_id="s1")[0]
+        assert row["outcome"] == "success"
+
+    def test_harness_success_omitted_defaults_to_none_stays_unknown(self, real_episode_client):
+        client, svc = real_episode_client
+        resp = client.post(
+            "/v1/episode",
+            json={
+                "session_id": "s1", "cwd": "/repo", "tool": "bash",
+                "command": "ps aux", "stdout_tail": "some ordinary output\n",
+            },
+        )
+        assert resp.status_code == 200
+        row = svc.list_episodes(session_id="s1")[0]
+        assert row["outcome"] == "unknown"
 
 
 class TestArcDetectionWiring:

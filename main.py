@@ -2542,6 +2542,19 @@ def _build_episode_payload(event: dict) -> dict | None:
       `_parse_failure_error`) and `is_interrupt` (note the different key
       name vs. `interrupted` on the success path — normalized to the same
       `interrupted` episode field here).
+    - `harness_success` is derived from `hook_event_name` alone (which
+      discrete event the harness routed this call through — tool-call
+      structure, the same R5-sanctioned category as `rc`): True only for
+      the literal string "PostToolUse", False for "PostToolUseFailure",
+      None otherwise (payload drift / an editor that sends neither name —
+      never guessed). UPG-EPISODE-OUTCOME-CLASSIFICATION: on the success
+      path Bash's `tool_response` structurally never carries an exit code
+      at all (see above), so most ordinary, non-build-tool commands
+      previously had no signal to escape outcome="unknown" with; the fact
+      that PostToolUse (not PostToolUseFailure) fired at all is itself the
+      missing signal — `agent/outcome.py`'s cascade still checks content
+      markers and `rc` first, so a piped/quieted build failure that prints
+      a failure marker despite a clean top-level exit still wins.
 
     Every field is still read defensively (`.get()`, isinstance checks) in
     case a future harness version or Codex's own payload drifts from this
@@ -2583,12 +2596,14 @@ def _build_episode_payload(event: dict) -> dict | None:
         return "" if value is None else str(value)
 
     if hook_event_name == "PostToolUseFailure":
+        harness_success = False
         rc, remainder = _parse_failure_error(_text(event.get("error")))
         is_error = True
         interrupted = bool(event.get("is_interrupt", False))
         stdout_tail = remainder
         stderr_tail = ""
     else:
+        harness_success = True if hook_event_name == "PostToolUse" else None
         tool_response = event.get("tool_response") or {}
         if not isinstance(tool_response, dict):
             tool_response = {}
@@ -2609,6 +2624,7 @@ def _build_episode_payload(event: dict) -> dict | None:
         "rc": rc,
         "is_error": is_error,
         "interrupted": interrupted,
+        "harness_success": harness_success,
         "stdout_tail": _tail_truncate(stdout_tail, _EPISODE_FOREGROUND_TRUNCATE_CHARS),
         "stderr_tail": _tail_truncate(stderr_tail, _EPISODE_FOREGROUND_TRUNCATE_CHARS),
     }

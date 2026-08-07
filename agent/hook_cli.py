@@ -320,12 +320,14 @@ def _build_episode_payload(event: dict) -> dict | None:
         return "" if value is None else str(value)
 
     if hook_event_name == "PostToolUseFailure":
+        harness_success = False
         rc, remainder = _parse_failure_error(_text(event.get("error")))
         is_error = True
         interrupted = bool(event.get("is_interrupt", False))
         stdout_tail = remainder
         stderr_tail = ""
     else:
+        harness_success = True if hook_event_name == "PostToolUse" else None
         tool_response = event.get("tool_response") or {}
         if not isinstance(tool_response, dict):
             tool_response = {}
@@ -346,6 +348,7 @@ def _build_episode_payload(event: dict) -> dict | None:
         "rc": rc,
         "is_error": is_error,
         "interrupted": interrupted,
+        "harness_success": harness_success,
         "stdout_tail": _tail_truncate(stdout_tail, _EPISODE_FOREGROUND_TRUNCATE_CHARS),
         "stderr_tail": _tail_truncate(stderr_tail, _EPISODE_FOREGROUND_TRUNCATE_CHARS),
     }
