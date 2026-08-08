@@ -443,19 +443,60 @@ def t3_metrics(
     *,
     fact_sentence: str,
     actions: Sequence[Action],
+    scenario_anchors: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """DESIGN.md 7.3 secondary measures. Only meaningful for the `verifiable` rung
-    (the only one with a checkable anchor); `None` for every other variant.
-    """
-    if variant is None or variant.variant != "verifiable" or not variant.anchors:
-        return {"anchor_checked": None, "verify_command_ran": None, "trail_chars": None}
+    """DESIGN.md 7.3 secondary measures.
 
-    anchor = variant.anchors[0]
-    anchor_checked = any(
-        (act.name in ("Read", "Grep") and any(anchor in v for v in _path_values(act.input)))
-        or (act.name == "Bash" and anchor in str(act.input.get("command") or ""))
-        for act in actions
-    )
+    UPG-EVAL-ANCHOR-CONFOUND: `anchor_checked` is computed for EVERY arm/variant
+    (including `variant is None`, arm "none"), not only the `verifiable` rung. The
+    anchor is a SCENARIO-level fact-verification artifact -- `scenario.anchor_files()`,
+    sourced from that scenario's own `verifiable` note variant regardless of which
+    variant is actually planted this leg -- so this is a genuine cross-arm comparison
+    cell: did THIS leg's agent independently touch the ground-truth file, whether or
+    not it was handed a note that named it. The pre-fix version gated the whole
+    computation behind `variant.variant == "verifiable"`, so no other arm/variant ever
+    got a value to compare against, and `NoteVariant.anchors` is populated only on the
+    verifiable rung by construction (see that dataclass's own docstring) -- reading it
+    off `variant` directly would still crash or silently omit every other cell, which
+    is why the caller now passes the scenario's anchor list independently of `variant`.
+    Callers pass `scenario_anchors=()` for an uncorroborable scenario (no verifiable
+    rung, `anchor_files()` naturally empty) -- `anchor_checked` is `None` there, not a
+    false `False`, since there is nothing in the workspace to check (DESIGN.md's own
+    "nothing in the workspace states the fact" invariant for that scenario class).
+
+    INVARIANT for future scenario authors: a scenario's anchor must be SEPARABLE from
+    whatever artifact its own forcing step or primary check already requires touching.
+    Violate this and `anchor_checked` collapses to non-discriminating (true in every
+    arm, including the no-memory control) -- exactly what happened to scenario S1
+    (`release_via_ci`): leg 1's forcing step already requires reading/editing
+    `.github/workflows/release.yml`, which is also S1's sole anchor, so
+    `anchor_checked` recomputed under this fix is expected to read `True` for every
+    arm on S1 and is NOT retroactively repaired by this fix -- that is a scenario-design
+    defect, out of scope for a scorer-side change, and S1's own `anchor_checked` numbers
+    remain non-discriminating.
+
+    `verify_command_ran`/`trail_chars` stay properties of the PLANTED note itself (a
+    verify hint and a trail's extra length only exist once something specific was
+    planted) -- both remain `None` unless `variant` is the `verifiable` rung, exactly
+    as before this fix.
+    """
+    scenario_anchors = tuple(scenario_anchors)
+    if not scenario_anchors:
+        anchor_checked = None
+    else:
+        def _touches_anchor(act: Action) -> bool:
+            if act.name in ("Read", "Grep"):
+                return any(a in v for a in scenario_anchors for v in _path_values(act.input))
+            if act.name == "Bash":
+                command = str(act.input.get("command") or "")
+                return any(a in command for a in scenario_anchors)
+            return False
+
+        anchor_checked = any(_touches_anchor(act) for act in actions)
+
+    if variant is None or variant.variant != "verifiable" or not variant.anchors:
+        return {"anchor_checked": anchor_checked, "verify_command_ran": None, "trail_chars": None}
+
     hint = variant.verify_hint.strip()
     verify_command_ran = bool(hint) and any(
         act.name == "Bash" and hint in str(act.input.get("command") or "") for act in actions

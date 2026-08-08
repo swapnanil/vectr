@@ -232,6 +232,138 @@ def test_fact_token_confined_to_anchor_files_and_leg1_prompt():
                 )
 
 
+# ---------------------------------------------------------------------------
+# UPG-EVAL-ANCHOR-CONFOUND: t3_metrics's anchor_checked is a cross-arm
+# comparison cell -- computed for every variant (including variant=None, arm
+# "none"), sourced from the scenario's own anchor_files(), never from
+# variant.anchors directly (populated only on the verifiable rung).
+# ---------------------------------------------------------------------------
+
+
+def test_t3_metrics_anchor_checked_computed_for_plain_variant_via_read():
+    s1 = scen.get("release_via_ci")
+    plain = next(v for v in s1.note_variants if v.variant == "plain")
+    events = _transcript([("Read", {"file_path": ".github/workflows/release.yml"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        plain, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert result["anchor_checked"] is True
+    # Properties of the PLANTED note itself stay scoped to the verifiable rung --
+    # a plain-rung note has no verify hint, so these remain None regardless.
+    assert result["verify_command_ran"] is None
+    assert result["trail_chars"] is None
+
+
+def test_t3_metrics_anchor_checked_false_for_plain_variant_when_anchor_untouched():
+    s1 = scen.get("release_via_ci")
+    plain = next(v for v in s1.note_variants if v.variant == "plain")
+    events = _transcript([("Read", {"file_path": "CHANGELOG.md"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        plain, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert result["anchor_checked"] is False
+
+
+def test_t3_metrics_anchor_checked_computed_for_provenance_variant_via_bash():
+    s1 = scen.get("release_via_ci")
+    provenance = next(v for v in s1.note_variants if v.variant == "provenance")
+    events = _transcript([("Bash", {"command": "cat .github/workflows/release.yml"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        provenance, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert result["anchor_checked"] is True
+
+
+def test_t3_metrics_anchor_checked_computed_when_no_note_was_planted_at_all():
+    """arm "none": variant is None (no note planted), but the scenario's anchor
+    is a workspace-level fact-verification artifact independent of whether any
+    note named it -- this is the no-memory CONTROL cell the confound removed.
+    """
+    s1 = scen.get("release_via_ci")
+    events = _transcript([("Grep", {"path": ".github/workflows/release.yml", "pattern": "id-token"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert result["anchor_checked"] is True
+    assert result["verify_command_ran"] is None
+    assert result["trail_chars"] is None
+
+
+def test_t3_metrics_anchor_checked_is_none_for_uncorroborable_scenario():
+    """An uncorroborable scenario (S5/S6, told not discovered) declares no
+    verifiable rung, so anchor_files() is empty and there is nothing in the
+    workspace to check -- anchor_checked stays None (not a false False)."""
+    s5 = scen.get("deploy_reverted_by_reconciler")
+    assert s5.anchor_files() == ()
+    plain = next(v for v in s5.note_variants if v.variant == "plain")
+    events = _transcript([("Read", {"file_path": "deploy/queue.yaml"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        plain, fact_sentence=s5.fact_sentence, actions=actions,
+        scenario_anchors=s5.anchor_files(),
+    )
+    assert result["anchor_checked"] is None
+
+
+def test_t3_metrics_verify_command_ran_and_trail_chars_still_verifiable_only():
+    """Regression guard: the two variant-specific T3 measures are unaffected by
+    this fix -- still None for every non-verifiable variant/arm, still computed
+    normally for the verifiable rung."""
+    s1 = scen.get("release_via_ci")
+    verifiable = next(v for v in s1.note_variants if v.variant == "verifiable")
+    plain = next(v for v in s1.note_variants if v.variant == "plain")
+
+    events = _transcript([("Bash", {"command": 'grep -n "id-token" .github/workflows/release.yml'})])
+    actions = scorer.build_action_stream(events)
+
+    verifiable_result = scorer.t3_metrics(
+        verifiable, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert verifiable_result["verify_command_ran"] is True
+    assert verifiable_result["trail_chars"] is not None and verifiable_result["trail_chars"] > 0
+
+    plain_result = scorer.t3_metrics(
+        plain, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert plain_result["verify_command_ran"] is None
+    assert plain_result["trail_chars"] is None
+
+
+def test_t3_metrics_s1_anchor_checked_is_non_discriminating_across_arms():
+    """Documents the KNOWN, NOT-fixed-by-this-change scenario-design confound
+    on S1: its own leg-1 forcing step already requires touching
+    `.github/workflows/release.yml`, which is also S1's sole anchor, so
+    anchor_checked is expected to read True for every arm (including the
+    no-memory control) as soon as the forcing step's own Read fires -- this
+    scenario's anchor_checked numbers are non-discriminating regardless of
+    which variant/arm produced them. A future scenario must keep its anchor
+    separable from its forcing step's own required artifact, or this collapse
+    repeats (see t3_metrics's own docstring)."""
+    s1 = scen.get("release_via_ci")
+    leg1 = s1.legs[0]
+    assert leg1.is_forcing_leg is True
+    assert s1.anchor_files() == (".github/workflows/release.yml",)
+    # This is the artifact leg 1's own forcing step (releasing 1.4.0) requires
+    # touching, regardless of what note (if any) this leg's arm was handed:
+    events = _transcript([("Read", {"file_path": ".github/workflows/release.yml"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert result["anchor_checked"] is True  # true even with variant=None / arm "none"
+
+
 def test_verify_scripts_never_land_inside_the_workspace(tmp_path):
     """A verifier inside the workspace would leak the answer to the no-memory arm."""
     for slug, scenario in scen.SCENARIOS.items():

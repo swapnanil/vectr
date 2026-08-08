@@ -236,7 +236,10 @@ def rescore_leg(result_path: Path) -> dict[str, Any] | None:
         if note_variant_name and note_variant_name != "none":
             variant = next((v for v in scenario.note_variants if v.variant == note_variant_name), None)
         metrics.update(
-            scorer.t3_metrics(variant, fact_sentence=scenario.fact_sentence, actions=actions)
+            scorer.t3_metrics(
+                variant, fact_sentence=scenario.fact_sentence, actions=actions,
+                scenario_anchors=scenario.anchor_files(),
+            )
         )
         run_score["contradictions"] = scorer.detect_contradictions(
             leg_spec, checks=run_score["checks"], metrics=metrics

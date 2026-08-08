@@ -2046,7 +2046,10 @@ class LegRunner:
         )
         variant = self._find_note_variant() if self.note_variant != "none" else None
         metrics.update(
-            scorer.t3_metrics(variant, fact_sentence=self.scenario.fact_sentence, actions=actions)
+            scorer.t3_metrics(
+                variant, fact_sentence=self.scenario.fact_sentence, actions=actions,
+                scenario_anchors=self.scenario.anchor_files(),
+            )
         )
         run_score["contradictions"] = scorer.detect_contradictions(
             self.leg_spec, checks=run_score["checks"], metrics=metrics
