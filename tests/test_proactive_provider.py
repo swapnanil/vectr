@@ -99,7 +99,8 @@ def test_provider_constructed_via_wiring_has_timeout_below_budget():
         response_cache_ttl_seconds=60.0, response_cache_max_entries=256,
         structural_kinds=("gotcha", "finding", "decision", "operational", "reference"),
         structural_overfetch_multiplier=4, structural_overfetch_ceiling=60,
-        structural_score_declared_anchor=1.0, structural_score_gotcha_mention=0.9,
+        structural_score_declared_anchor=1.0, structural_score_declared_trigger=0.95,
+        structural_score_gotcha_mention=0.9,
         structural_score_mention=0.6, max_weak_structural_items=1,
     )
     # The exact construction main.py performs.
