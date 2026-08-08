@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.cmdnorm import classify_arg, normalize_command, tokenize
+from app.cmdnorm import classify_arg, leading_cd_target, normalize_command, tokenize
 
 
 class TestTokenize:
@@ -130,6 +130,59 @@ class TestNormalizeCommandDecoration:
         # compound chain, so that is what defines the normalized command.
         n = normalize_command("make clean && make build")
         assert n.verb == "make build"
+
+
+class TestLeadingCdTarget:
+    """UPG-ARC-CWD-VS-EFFECTIVE-DIR: `leading_cd_target` extracts the
+    directory a leading `cd` chain sets, for `app.arcs._bucket_key` to use
+    as the EFFECTIVE cwd instead of trusting the episode's raw `cwd`
+    field. Covers the shell shapes this fix explicitly does and does not
+    handle (see the function's own docstring for the full rationale)."""
+
+    def test_and_separator(self) -> None:
+        assert leading_cd_target("cd /repo-a && make build") == "/repo-a"
+
+    def test_semicolon_separator(self) -> None:
+        # NOTE: the semicolon must be whitespace-separated (`; `, not `;`
+        # glued onto the preceding token) — this module's shlex-based
+        # tokenizer only splits on `;` as a standalone token, a
+        # PRE-EXISTING limitation shared by `normalize_command`'s own
+        # `_strip_leading_cd`/compound-splitting (not introduced here;
+        # `normalize_command("cd /repo-a; make build")` — no space before
+        # `;` — already fails to strip the leading cd today).
+        assert leading_cd_target("cd /repo-a ; make build") == "/repo-a"
+
+    def test_quoted_path(self) -> None:
+        assert leading_cd_target('cd "/path with spaces" && make build') == "/path with spaces"
+
+    def test_repeated_leading_cd_uses_last_target(self) -> None:
+        assert leading_cd_target("cd a && cd b && npm run build") == "b"
+
+    def test_relative_path_returned_unresolved(self) -> None:
+        assert leading_cd_target("cd ../other-repo && make build") == "../other-repo"
+
+    def test_no_leading_cd_returns_none(self) -> None:
+        assert leading_cd_target("make build") is None
+
+    def test_bare_cd_no_argument_returns_none(self) -> None:
+        # $HOME has no concrete path in argv — deliberately unhandled,
+        # caller falls back to the episode's own cwd field.
+        assert leading_cd_target("cd && make build") is None
+
+    def test_flagged_cd_not_recognized(self) -> None:
+        # `cd -- <path>` is a 3-token leading segment; `_strip_leading_cd`
+        # already only recognizes bare `cd`/`cd <path>` (<= 2 tokens), and
+        # this function mirrors that exactly rather than diverging on it.
+        assert leading_cd_target("cd -- /repo-a && make build") is None
+
+    def test_non_leading_cd_not_recognized(self) -> None:
+        # Only a LEADING cd is unambiguous prefix decoration; a `cd`
+        # appearing after another command in the chain is deliberately
+        # out of scope (see docstring).
+        assert leading_cd_target("mkdir -p /repo-a && cd /repo-a && make build") is None
+
+    def test_pushd_not_recognized(self) -> None:
+        assert leading_cd_target("pushd /repo-a && make build") is None
 
 
 class TestNormalizeCommandPipelineCollapse:
