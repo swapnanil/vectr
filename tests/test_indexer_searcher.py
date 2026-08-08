@@ -3605,6 +3605,219 @@ class TestDocstringDedupWiring:
         assert out[0].dup_count == 1
 
 
+# ---------------------------------------------------------------------------
+# LANE-P1-DEDUP — near-duplicate RESULT-SET collapse hardening for DEF-C.
+# Frees result-list slots wasted on near-identical chunks (the uv `Lock`
+# witness: 3 near-identical benchmark-script docstrings occupying top-3,
+# evicting the canonical definition) while guarding the false-collapse risk
+# a docstring-only key cannot see on its own — two genuinely different
+# definitions (a trait and its impl; two overloads) that merely share a
+# copy-pasted one-line doc summary. See _is_near_duplicate_body in
+# agent/searcher.py and ranking.docstring_dedup.body_similarity_min_ratio in
+# agent/config.yaml for the two gates and their measured margins.
+# ---------------------------------------------------------------------------
+
+class TestNearDuplicateResultSetCollapse:
+    def test_uv_lock_witness_near_dups_collapse_and_free_slots(self, searcher) -> None:
+        """Mirrors the uv corpus witness: a query for `Lock` returned a
+        top-3 of three near-identical "Resolve a modified lockfile using
+        pip-tools" docstring chunks from scripts/benchmark/*.py, evicting the
+        canonical `Lock` definition and another distinct result entirely.
+        Collapsing the near-dups to one representative must free the two
+        wasted slots for the previously-buried distinct results."""
+        near_dup_1 = _sr(
+            'def bench_resolve_uv():\n'
+            '    """Resolve a modified lockfile using pip-tools."""\n'
+            '    start = time.time()\n'
+            '    subprocess.run(["pip-compile", "requirements.in"])\n'
+            '    return time.time() - start\n',
+            path="/p/scripts/benchmark/resolve_uv.py",
+        )
+        near_dup_2 = _sr(
+            'def bench_resolve_poetry():\n'
+            '    """Resolve a modified lockfile using pip-tools."""\n'
+            '    start = time.time()\n'
+            '    subprocess.run(["poetry", "lock"])\n'
+            '    return time.time() - start\n',
+            path="/p/scripts/benchmark/resolve_poetry.py",
+        )
+        near_dup_3 = _sr(
+            'def bench_resolve_pdm():\n'
+            '    """Resolve a modified lockfile using pip-tools."""\n'
+            '    start = time.time()\n'
+            '    subprocess.run(["pdm", "lock", "--no-cross-platform"])\n'
+            '    return time.time() - start\n',
+            path="/p/scripts/benchmark/resolve_pdm.py",
+        )
+        lock_def = _sr(
+            "struct Lock {\n    packages: Vec<Package>,\n}\n// canonical lockfile struct",
+            path="/p/src/lock.rs", lang="rust", node_type="struct_item",
+        )
+        other_distinct = _sr(
+            "def parse_pip_tools_output(text):\n    return [l for l in text.splitlines() if l]\n",
+            path="/p/src/parser.py",
+        )
+        cands = [near_dup_1, near_dup_2, near_dup_3, lock_def, other_distinct]
+        out = searcher._apply_quality_and_dedup("Lock", cands)
+
+        near_dup_reps = [r for r in out if r.file_path.startswith("/p/scripts/benchmark/")]
+        assert len(near_dup_reps) == 1, (
+            f"expected the 3 near-identical benchmark scripts to collapse to 1, "
+            f"got {len(near_dup_reps)}: {[r.file_path for r in out]}"
+        )
+        assert near_dup_reps[0].dup_count == 2
+
+        # Both previously-buried distinct results now fit inside the top-3 —
+        # the freed slots are not simply left unused.
+        top3 = out[:3]
+        assert lock_def in top3
+        assert other_distinct in top3
+
+    def test_trait_and_impl_sharing_doc_comment_do_not_collapse(self, searcher) -> None:
+        """A trait definition and its impl commonly carry the SAME
+        copy-pasted doc comment in real Rust code. These are genuinely
+        different answers (the interface vs. a concrete implementation) and
+        must never collapse merely because DEF-C's docstring key matches —
+        node_type differs (trait_item vs impl_item), the structural gate
+        that stops this regardless of any similarity threshold. Measured
+        full-body similarity is ~0.857 — ABOVE the 0.75 content threshold, so
+        gate 2 alone would wrongly let this collapse; gate 1 is what
+        actually stops it."""
+        trait_def = _sr(
+            "/// Provides a way to resolve dependency conflicts.\n"
+            "/// Used by the solver's core algorithm.\n"
+            "trait Resolver {\n    fn resolve(&self) -> Lock;\n}",
+            path="/p/src/resolver.rs", lang="rust", node_type="trait_item",
+        )
+        impl_def = _sr(
+            "/// Provides a way to resolve dependency conflicts.\n"
+            "/// Used by the solver's core algorithm.\n"
+            "impl Resolver for PubGrubResolver {\n    fn resolve(&self) -> Lock {\n        self.solve()\n    }\n}",
+            path="/p/src/pubgrub_resolver.rs", lang="rust", node_type="impl_item",
+        )
+        out = searcher._apply_quality_and_dedup("resolve dependency conflicts", [trait_def, impl_def])
+        assert len(out) == 2, f"trait and impl wrongly collapsed: {[r.file_path for r in out]}"
+
+    def test_overload_with_different_implementation_does_not_collapse(self, searcher) -> None:
+        """Two constructors sharing only a boilerplate one-line doc summary
+        ("Constructs a new instance.") but built from genuinely different
+        logic must not collapse. Both sides are the same node_type
+        (function_item), so gate 1 is a no-op here — the content-similarity
+        gate must catch it alone: measured ratio 0.53, well below the 0.75
+        default threshold (margin 0.22)."""
+        signature_ctor = _sr(
+            "/// Constructs a new instance.\n"
+            "fn new(name: &str) -> Self {\n"
+            "    Self { name: name.to_string(), timeout: DEFAULT_TIMEOUT }\n"
+            "}",
+            path="/p/src/ctor_basic.rs", lang="rust", node_type="function_item",
+        )
+        config_ctor = _sr(
+            "/// Constructs a new instance.\n"
+            "fn from_config(cfg: &Config) -> Self {\n"
+            "    let name = cfg.resolve_name();\n"
+            "    let timeout = cfg.timeout_or_default();\n"
+            "    Self { name, timeout }\n"
+            "}",
+            path="/p/src/ctor_from_config.rs", lang="rust", node_type="function_item",
+        )
+        out = searcher._apply_quality_and_dedup(
+            "construct a new instance", [signature_ctor, config_ctor],
+        )
+        assert len(out) == 2, f"overloads wrongly collapsed: {[r.file_path for r in out]}"
+
+    def test_collapse_group_membership_is_order_invariant(self, searcher) -> None:
+        """`_apply_quality_and_dedup` derives its base relevance from input
+        POSITION (`base = 1.0 - i / n`, agent/searcher.py) by deliberate,
+        pre-existing design — candidates always arrive pre-ranked from a
+        single retrieval+rerank pass, so which literal instance survives as
+        the kept representative legitimately depends on rank and is out of
+        this task's scope to change. What must NOT depend on input order is
+        the collapse DECISION itself: the near-dup group must always
+        recognize each other as duplicates of one another, and the
+        genuinely distinct `Lock` definition must never be swept into that
+        group, no matter what order any of them arrive in."""
+        near_dup_1 = _sr(
+            'def bench_resolve_uv():\n'
+            '    """Resolve a modified lockfile using pip-tools."""\n'
+            '    subprocess.run(["pip-compile"])\n',
+            path="/p/scripts/benchmark/resolve_uv.py",
+        )
+        near_dup_2 = _sr(
+            'def bench_resolve_poetry():\n'
+            '    """Resolve a modified lockfile using pip-tools."""\n'
+            '    subprocess.run(["poetry", "lock"])\n',
+            path="/p/scripts/benchmark/resolve_poetry.py",
+        )
+        near_dup_3 = _sr(
+            'def bench_resolve_pdm():\n'
+            '    """Resolve a modified lockfile using pip-tools."""\n'
+            '    subprocess.run(["pdm", "lock"])\n',
+            path="/p/scripts/benchmark/resolve_pdm.py",
+        )
+        lock_def = _sr(
+            "struct Lock {\n    packages: Vec<Package>,\n}\n// canonical lockfile struct",
+            path="/p/src/lock.rs", lang="rust", node_type="struct_item",
+        )
+        near_dup_paths = {near_dup_1.file_path, near_dup_2.file_path, near_dup_3.file_path}
+
+        forward = [near_dup_1, near_dup_2, near_dup_3, lock_def]
+        backward = list(reversed(forward))
+        shuffled = [lock_def, near_dup_3, near_dup_1, near_dup_2]
+
+        for order in (forward, backward, shuffled):
+            out = searcher._apply_quality_and_dedup("Lock", list(order))
+            near_dup_reps = [r for r in out if r.file_path in near_dup_paths]
+            assert len(out) == 2, f"order {[c.file_path for c in order]}: {[r.file_path for r in out]}"
+            assert len(near_dup_reps) == 1
+            assert near_dup_reps[0].dup_count == 2
+            assert lock_def.file_path in [r.file_path for r in out]
+
+    def test_collapse_is_deterministic_across_repeated_calls(self, searcher) -> None:
+        """For a FIXED input order — the only order that occurs in
+        production, since candidates always arrive once, pre-ranked, from a
+        single retrieval+rerank pass — calling `_apply_quality_and_dedup`
+        repeatedly on independent copies of the same candidate list must
+        produce byte-for-byte identical output every time. This exercises
+        the new near-dup bookkeeping itself (`seen_docstring:
+        dict[str, list[int]]`, LANE-P1-DEDUP): a plain dict built in a
+        single deterministic pass over `scored`, never a `set()` or any
+        other structure whose iteration order could vary run to run."""
+
+        def make_candidates():
+            return [
+                _sr(
+                    'def bench_resolve_uv():\n'
+                    '    """Resolve a modified lockfile using pip-tools."""\n'
+                    '    subprocess.run(["pip-compile"])\n',
+                    path="/p/scripts/benchmark/resolve_uv.py",
+                ),
+                _sr(
+                    'def bench_resolve_poetry():\n'
+                    '    """Resolve a modified lockfile using pip-tools."""\n'
+                    '    subprocess.run(["poetry", "lock"])\n',
+                    path="/p/scripts/benchmark/resolve_poetry.py",
+                ),
+                _sr(
+                    'def bench_resolve_pdm():\n'
+                    '    """Resolve a modified lockfile using pip-tools."""\n'
+                    '    subprocess.run(["pdm", "lock"])\n',
+                    path="/p/scripts/benchmark/resolve_pdm.py",
+                ),
+                _sr(
+                    "struct Lock {\n    packages: Vec<Package>,\n}\n// canonical lockfile struct",
+                    path="/p/src/lock.rs", lang="rust", node_type="struct_item",
+                ),
+            ]
+
+        runs = [searcher._apply_quality_and_dedup("Lock", make_candidates()) for _ in range(5)]
+        paths = [[r.file_path for r in out] for out in runs]
+        dup_counts = [[r.dup_count for r in out] for out in runs]
+        assert all(p == paths[0] for p in paths), f"non-deterministic across repeated calls: {paths}"
+        assert all(d == dup_counts[0] for d in dup_counts), f"non-deterministic dup_count: {dup_counts}"
+        assert len(runs[0]) == 2
+
+
 class TestImportancePrior:
     """ARCH-1b: file-level PageRank importance blended as a relevance-gated
     multiplicative prior into the final search sort."""

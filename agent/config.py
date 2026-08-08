@@ -198,6 +198,14 @@ DOCSTRING_DEDUP_MIN_CHARS : int
     never folded by the docstring dedup key — chunks with a trivial or absent
     leading header keep every occurrence (UPG-RUST-DEF-EVICTION / DEF-C).
 
+DOCSTRING_DEDUP_BODY_SIMILARITY_MIN : float
+    Minimum difflib.SequenceMatcher ratio between two chunks' full normalized
+    bodies required before a matching docstring-dedup key is allowed to
+    actually collapse them (LANE-P1-DEDUP false-collapse guard on DEF-C). A
+    shared leading doc/comment alone is not sufficient — a trait/interface and
+    its impl, or two different overloads, often carry the identical
+    copy-pasted doc summary over genuinely different implementations.
+
 INDEXING_FLOW_SCAN_HEAD_BYTES : int
     Bytes scanned from the start of a `.js` file when detecting Flow type syntax
     (UPG-JSFLOW-SYMBOLS). A header scan, not a full-file walk.
@@ -758,6 +766,7 @@ _ddd_cfg: dict[str, Any] = _cfg["ranking"]["docstring_dedup"]
 
 DOCSTRING_DEDUP_LINES: int = int(_ddd_cfg["lines"])
 DOCSTRING_DEDUP_MIN_CHARS: int = int(_ddd_cfg["min_chars"])
+DOCSTRING_DEDUP_BODY_SIMILARITY_MIN: float = float(_ddd_cfg["body_similarity_min_ratio"])
 
 # ---------------------------------------------------------------------------
 # Rerank pool sizes (UPG-12.1) + reranker model
