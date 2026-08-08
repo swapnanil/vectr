@@ -313,6 +313,89 @@ def test_t3_metrics_anchor_checked_is_none_for_uncorroborable_scenario():
     assert result["anchor_checked"] is None
 
 
+# ---------------------------------------------------------------------------
+# UPG-EVAL-TOUCHES-ANCHOR-SUBSTRING: anchor matching must be by path component
+# (Read/Grep) and by shell token (Bash), never a raw substring search -- a raw
+# `a in v` matches a `.bak` sibling, a Grep `pattern` argument that happens to
+# contain the anchor's characters, and an `echo` of the anchor's name, none of
+# which are the agent actually inspecting the anchor file. These tests use a
+# synthetic anchor ("config.py") via `scenario_anchors=` directly rather than a
+# real scenario's `anchor_files()` -- none of the six scenarios' real anchors
+# happen to exercise the `.bak`/`echo` shapes, and `t3_metrics` takes
+# `scenario_anchors` as a plain argument for exactly this reason.
+# ---------------------------------------------------------------------------
+
+
+def test_t3_metrics_anchor_checked_false_for_bak_sibling_path():
+    """`vendor/other/config.py.bak` must NOT match anchor `config.py` -- the
+    trailing path COMPONENT is `config.py.bak`, not `config.py`; a raw
+    substring search matches this (the defect), a component comparison does
+    not (the fix)."""
+    events = _transcript([("Read", {"file_path": "vendor/other/config.py.bak"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence="irrelevant", actions=actions, scenario_anchors=("config.py",),
+    )
+    assert result["anchor_checked"] is False
+
+
+def test_t3_metrics_anchor_checked_false_for_echo_only_bash_command():
+    """`echo config.py` must NOT count as touching the anchor -- echo's
+    arguments are literal output text, never a file the shell or the invoked
+    program opens, unlike the genuine inspection commands
+    (`grep`/`head`/`cat`/`python <path>`) every scenario's own verify hint
+    uses (see `test_t3_metrics_anchor_checked_computed_for_provenance_variant_via_bash`
+    and `test_t3_metrics_verify_command_ran_and_trail_chars_still_verifiable_only`
+    below, which must keep scoring True)."""
+    events = _transcript([("Bash", {"command": "echo config.py"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence="irrelevant", actions=actions, scenario_anchors=("config.py",),
+    )
+    assert result["anchor_checked"] is False
+
+
+def test_t3_metrics_anchor_checked_false_for_grep_pattern_argument_mention():
+    """A Grep `pattern` argument that happens to contain the anchor's name is
+    not a path reference at all -- `_path_values` already excludes `pattern`
+    from consideration (only `file_path`/`path`/`notebook_path` are path
+    inputs), so this stays False both before and after the fix; pinned here
+    so a future change to `_path_values` cannot silently reintroduce it."""
+    events = _transcript(
+        [("Grep", {"path": "src", "pattern": "references config.py somewhere"})]
+    )
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence="irrelevant", actions=actions, scenario_anchors=("config.py",),
+    )
+    assert result["anchor_checked"] is False
+
+
+def test_t3_metrics_anchor_checked_true_for_genuine_subpath_read():
+    """A real, deeper path whose trailing component IS the anchor still
+    counts -- `src/pkg/config.py` names the same file `config.py` does, just
+    from a different root; the fix must not narrow this to exact-string
+    equality."""
+    events = _transcript([("Read", {"file_path": "src/pkg/config.py"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence="irrelevant", actions=actions, scenario_anchors=("config.py",),
+    )
+    assert result["anchor_checked"] is True
+
+
+def test_t3_metrics_anchor_checked_true_for_genuine_bash_inspection_token():
+    """A real inspection command (`head -5 config.py`) with the anchor as a
+    trailing argument token must still count -- this is the exact shape of
+    every scenario's own `verify_hint` (DESIGN.md 7.2)."""
+    events = _transcript([("Bash", {"command": "head -5 config.py"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence="irrelevant", actions=actions, scenario_anchors=("config.py",),
+    )
+    assert result["anchor_checked"] is True
+
+
 def test_t3_metrics_verify_command_ran_and_trail_chars_still_verifiable_only():
     """Regression guard: the two variant-specific T3 measures are unaffected by
     this fix -- still None for every non-verifiable variant/arm, still computed
