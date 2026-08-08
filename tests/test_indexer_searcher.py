@@ -3275,6 +3275,91 @@ class TestEmbedModelStampRebuildTrigger:
         assert idx2._stored_embed_model() == "different-dimension-model"
 
 
+class TestEmbedModelStampAutoselectIntegration:
+    """UPG-EMBEDDER-AUTOSELECT requirement 5: the embed-model stamp mismatch
+    check (see TestEmbedModelStampRebuildTrigger above) is a plain string
+    comparison against `self.embed_model` — agnostic to WHY that string
+    changed. This proves the SAME safety path already holds for a
+    selection-driven change: `agent.strategy_selector.resolve_embed_model()`
+    picking a different model (via a matching evidence-table row, injected
+    here — the shipped table is empty) forces the identical full
+    drop-and-recreate rebuild as an env-var-driven change, with no new
+    product code required to wire it up correctly once a real evidence row
+    ships.
+    """
+
+    def test_evidence_table_driven_model_change_forces_full_rebuild(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from tests.conftest import _DummyEmbedProvider
+        from agent import indexer as idx_module
+        from agent.indexer import CodeIndexer
+        from agent.strategy_selector import CodebaseFingerprint, resolve_embed_model
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _model: _DummyEmbedProvider())
+
+        # A real C-dominant fingerprint would come from a corpus of .c files;
+        # a single .py fixture file is enough here since only the SELECTED
+        # MODEL STRING (not the fingerprint's real source language) drives
+        # what this test proves — the stamp mismatch check downstream of it.
+        make_py(tmp_path, "a.py", "def a(): pass")
+        db_path = str(tmp_path / "chroma")
+
+        fp = CodebaseFingerprint(
+            total_files=500, language_dist={"c": 500}, dominant_language="c",
+            is_monorepo=False, size_class="large",
+        )
+
+        # Run 1: no evidence row yet — resolves to the configured default,
+        # same as every real workspace today.
+        model_1, _ = resolve_embed_model(fp, explicit_override=None, table={})
+        idx1 = CodeIndexer(workspace_root=str(tmp_path), embed_model=model_1, db_path=db_path)
+        idx1.index_workspace()
+        count_before = idx1._collection.count()
+        assert count_before > 0
+        assert idx1._stored_embed_model() == model_1
+
+        # Run 2: a (test-only, never-shipped) evidence row now matches this
+        # fingerprint's dominant language and selects a DIFFERENT model —
+        # exactly what a future real evidence row would do.
+        synthetic_table = {"c": "some-org/some-c-optimized-embedder"}
+        model_2, _ = resolve_embed_model(fp, explicit_override=None, table=synthetic_table)
+        assert model_2 != model_1
+
+        idx2 = CodeIndexer(workspace_root=str(tmp_path), embed_model=model_2, db_path=db_path)
+        old_collection = idx2._collection
+        old_purpose = idx2._purpose_collection
+        idx2.index_workspace()
+
+        assert idx2._collection is not old_collection, (
+            "a selection-driven embed-model change must drop and recreate "
+            "the body collection, exactly like an env-var-driven change"
+        )
+        assert idx2._purpose_collection is not old_purpose
+        assert idx2._collection.count() == count_before  # fully re-populated
+        assert idx2._stored_embed_model() == model_2
+
+    def test_explicit_override_beats_evidence_table_before_it_ever_reaches_the_indexer(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """The precedence rule itself (explicit env var wins over a table
+        row) determines what string ever reaches CodeIndexer's embed_model —
+        proven at the resolve_embed_model layer so an operator pin can never
+        be silently overridden by a future evidence row."""
+        from agent.strategy_selector import CodebaseFingerprint, resolve_embed_model
+
+        fp = CodebaseFingerprint(
+            total_files=500, language_dist={"c": 500}, dominant_language="c",
+            is_monorepo=False, size_class="large",
+        )
+        synthetic_table = {"c": "some-org/some-c-optimized-embedder"}
+        model, rationale = resolve_embed_model(
+            fp, explicit_override="operator/pinned-model", table=synthetic_table,
+        )
+        assert model == "operator/pinned-model"
+        assert "explicitly set" in rationale
+
+
 # ---------------------------------------------------------------------------
 # ARCH-4 — dilution evidence gate: dual-vector pool entry, end-to-end
 # through index -> search.

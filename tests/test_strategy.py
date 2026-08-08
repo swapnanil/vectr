@@ -18,9 +18,12 @@ import pytest
 
 from agent.config import EMBEDDING_DEFAULT_MODEL
 from agent.strategy_selector import (
+    EMBED_MODEL_EVIDENCE_TABLE,
     CodebaseFingerprint,
     RetrievalStrategy,
     fingerprint,
+    resolve_embed_model,
+    select_embed_model_from_evidence,
     select_strategy,
 )
 
@@ -161,13 +164,18 @@ class TestSelectStrategy:
         # but dominant_language=python + no monorepo/grpc/legacy → should be False
         assert s.graph_first is False
 
-    def test_all_codebases_recommend_default_model(self) -> None:
+    def test_all_codebases_recommend_default_model(self, monkeypatch) -> None:
+        # select_strategy() reads VECTR_EMBED_MODEL as the tier-1 explicit
+        # override (UPG-EMBEDDER-AUTOSELECT); assert this independent of
+        # whatever the ambient process environment happens to hold.
+        monkeypatch.delenv("VECTR_EMBED_MODEL", raising=False)
         for lang in ("go", "java", "rust", "python", None):
             s = select_strategy(_fp(dominant_language=lang))
             assert s.recommended_embed_model == EMBEDDING_DEFAULT_MODEL, \
                 f"Expected configured default model for lang={lang}, got {s.recommended_embed_model}"
 
-    def test_large_codebase_recommends_default_model(self) -> None:
+    def test_large_codebase_recommends_default_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("VECTR_EMBED_MODEL", raising=False)
         s = select_strategy(_fp(size_class="large", dominant_language=None))
         assert s.recommended_embed_model == EMBEDDING_DEFAULT_MODEL
 
@@ -191,6 +199,137 @@ class TestSelectStrategy:
             s = select_strategy(fp)
             total = round(s.semantic_weight + s.bm25_weight, 6)
             assert total == 1.0, f"Weights {s.semantic_weight}+{s.bm25_weight}={total} != 1.0"
+
+
+# ---------------------------------------------------------------------------
+# Embed model autoselection — UPG-EMBEDDER-AUTOSELECT
+#
+# EMBED_MODEL_EVIDENCE_TABLE ships empty (the C→arctic candidate row was
+# invalidated by the same-index A/B, see the table's module-level comment) —
+# these tests exercise the SELECTION MECHANISM's precedence rules against an
+# injected synthetic table so real selection behaviour is proven without
+# shipping a fabricated evidence row. Every real workspace resolves through
+# the shipped empty table, covered separately by TestSelectStrategy's
+# `test_all_codebases_recommend_default_model` / `test_large_codebase_
+# recommends_default_model`, which assert byte-identical default selection.
+# ---------------------------------------------------------------------------
+
+class TestEmbedModelHonestRationale:
+    """TASK 1: the rationale must never assert an optimality vectr has not
+    measured. With the shipped table empty, no fingerprint can ever produce
+    a table match, so every rationale must describe the no-match/default
+    path honestly."""
+
+    def test_no_rationale_claims_optimality(self, monkeypatch) -> None:
+        monkeypatch.delenv("VECTR_EMBED_MODEL", raising=False)
+        for lang in ("go", "java", "rust", "python", "javascript", "typescript", "c", None):
+            for size in ("small", "medium", "large"):
+                s = select_strategy(_fp(dominant_language=lang, size_class=size))
+                assert "optimal" not in s.rationale.lower(), (
+                    f"rationale asserts unmeasured optimality for lang={lang} size={size}: "
+                    f"{s.rationale!r}"
+                )
+
+    def test_rationale_states_no_row_matched_and_default_used(self, monkeypatch) -> None:
+        monkeypatch.delenv("VECTR_EMBED_MODEL", raising=False)
+        s = select_strategy(_fp(dominant_language="rust", size_class="large"))
+        assert "no embed-model evidence row" in s.rationale
+        assert EMBEDDING_DEFAULT_MODEL in s.rationale
+
+
+class TestSelectEmbedModelFromEvidence:
+    """Pure fp -> model-or-None lookup (requirement 2). No I/O; behaviour
+    proven against an injected synthetic table, never the shipped empty one."""
+
+    def test_empty_shipped_table_never_matches(self) -> None:
+        assert EMBED_MODEL_EVIDENCE_TABLE == {}
+        for lang in ("c", "python", "rust", None):
+            fp = _fp(dominant_language=lang)
+            assert select_embed_model_from_evidence(fp) is None
+
+    def test_synthetic_table_match_returns_model(self) -> None:
+        fp = _fp(dominant_language="c")
+        table = {"c": "some-org/some-c-optimized-embedder"}
+        assert select_embed_model_from_evidence(fp, table=table) == "some-org/some-c-optimized-embedder"
+
+    def test_synthetic_table_no_match_returns_none(self) -> None:
+        fp = _fp(dominant_language="python")
+        table = {"c": "some-org/some-c-optimized-embedder"}
+        assert select_embed_model_from_evidence(fp, table=table) is None
+
+    def test_none_dominant_language_never_matches(self) -> None:
+        fp = _fp(dominant_language=None)
+        table = {"c": "some-org/some-c-optimized-embedder"}
+        assert select_embed_model_from_evidence(fp, table=table) is None
+
+
+class TestResolveEmbedModelPrecedence:
+    """Three-tier precedence (requirement 3): explicit override > table row >
+    configured default. Each tier tested independently and in combination so
+    no tier can silently shadow another."""
+
+    _TABLE = {"c": "some-org/some-c-optimized-embedder"}
+
+    def test_no_override_no_match_falls_back_to_configured_default(self) -> None:
+        fp = _fp(dominant_language="python")
+        model, rationale = resolve_embed_model(fp, explicit_override=None, table=self._TABLE)
+        assert model == EMBEDDING_DEFAULT_MODEL
+        assert "no embed-model evidence row" in rationale
+
+    def test_matching_table_row_wins_over_built_in_default(self) -> None:
+        fp = _fp(dominant_language="c")
+        model, rationale = resolve_embed_model(fp, explicit_override=None, table=self._TABLE)
+        assert model == "some-org/some-c-optimized-embedder"
+        assert model != EMBEDDING_DEFAULT_MODEL
+        assert "evidence row matched" in rationale
+
+    def test_explicit_override_wins_over_matching_table_row(self) -> None:
+        fp = _fp(dominant_language="c")
+        model, rationale = resolve_embed_model(
+            fp, explicit_override="operator/forced-model", table=self._TABLE
+        )
+        assert model == "operator/forced-model"
+        assert "explicitly set" in rationale
+        assert "evidence table not consulted" in rationale
+
+    def test_explicit_override_wins_even_with_no_table_match(self) -> None:
+        fp = _fp(dominant_language="python")
+        model, rationale = resolve_embed_model(
+            fp, explicit_override="operator/forced-model", table=self._TABLE
+        )
+        assert model == "operator/forced-model"
+
+    def test_empty_string_override_treated_as_unset(self) -> None:
+        # os.environ.get() returns "" only if the variable is literally set to
+        # the empty string — treat that the same as unset (never select an
+        # empty model name) rather than short-circuiting to "".
+        fp = _fp(dominant_language="c")
+        model, _ = resolve_embed_model(fp, explicit_override="", table=self._TABLE)
+        assert model == "some-org/some-c-optimized-embedder"
+
+    def test_default_table_param_is_the_shipped_empty_table(self) -> None:
+        fp = _fp(dominant_language="c")
+        model, rationale = resolve_embed_model(fp, explicit_override=None)
+        assert model == EMBEDDING_DEFAULT_MODEL
+        assert "no embed-model evidence row" in rationale
+
+
+class TestSelectStrategyEmbedModelIntegration:
+    """select_strategy() is the one production call site (app/service.py's
+    `_refresh_strategy`, invoked at index time) that wires the selection
+    mechanism through — proven here via monkeypatched env, exactly as a real
+    VECTR_EMBED_MODEL-setting operator would trigger it."""
+
+    def test_env_var_override_flows_through_select_strategy(self, monkeypatch) -> None:
+        monkeypatch.setenv("VECTR_EMBED_MODEL", "operator/forced-model")
+        s = select_strategy(_fp(dominant_language="python"))
+        assert s.recommended_embed_model == "operator/forced-model"
+        assert "explicitly set" in s.rationale
+
+    def test_no_env_var_uses_default_with_empty_table(self, monkeypatch) -> None:
+        monkeypatch.delenv("VECTR_EMBED_MODEL", raising=False)
+        s = select_strategy(_fp(dominant_language="c", size_class="large"))
+        assert s.recommended_embed_model == EMBEDDING_DEFAULT_MODEL
 
 
 # ---------------------------------------------------------------------------

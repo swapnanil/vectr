@@ -69,6 +69,97 @@ _FRAMEWORK_SIGNALS: dict[str, list[str]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Embed-model autoselection (UPG-EMBEDDER-AUTOSELECT)
+# ---------------------------------------------------------------------------
+#
+# Evidence-keyed embed-model overrides, keyed on
+# `CodebaseFingerprint.dominant_language`. SHIPS EMPTY.
+#
+# The one candidate row this table was built for — a C/C++-dominant
+# workspace preferring a different embedder than the granite default —
+# was INVALIDATED by the same-index A/B (2026-07-07, cpython corpus,
+# identical 21,811-chunk struct-chunk set, dual-vector max-blend, 300-deep
+# pool): granite beat arctic on C too (pool-top10 13/24 vs 8/24, top5 8 vs
+# 5, in-pool@300 23 vs 19). The earlier C regression that motivated this
+# table was mis-attributed to the embedder; it was actually the struct-
+# chunking pool-growth + sibling-crowding confound (fixed separately,
+# UPG-SIBLING-TYPEDEF-CROWDING). Granite stays the universal default and
+# this table has zero live rows — see docs/tasks.md UPG-EMBEDDER-SWAP-
+# GRANITE for the full evidence trail.
+#
+# Adding a row here requires a benchmark VERDICT, not intuition: an A/B run
+# on an IDENTICAL chunk set (same chunker/index config — only the embedder
+# varies) where the candidate model strictly dominates the current default
+# for that `dominant_language`, on a representative multi-case set. A
+# single corpus's raw numbers without a same-index control, or a partial
+# sample, is not evidence.
+EMBED_MODEL_EVIDENCE_TABLE: dict[str, str] = {}
+
+
+def select_embed_model_from_evidence(
+    fp: CodebaseFingerprint,
+    table: dict[str, str] | None = None,
+) -> str | None:
+    """Pure fingerprint -> model-or-None lookup against the evidence table.
+
+    No I/O. `table` defaults to the shipped `EMBED_MODEL_EVIDENCE_TABLE`
+    (empty); tests may inject a synthetic table to exercise real selection
+    behaviour without shipping a fabricated evidence row. Returns None when
+    `fp.dominant_language` has no matching row — including always, while the
+    shipped table is empty — so the caller falls back to the configured
+    default.
+    """
+    t = EMBED_MODEL_EVIDENCE_TABLE if table is None else table
+    if fp.dominant_language is None:
+        return None
+    return t.get(fp.dominant_language)
+
+
+def resolve_embed_model(
+    fp: CodebaseFingerprint,
+    explicit_override: str | None = None,
+    table: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Three-tier embed-model precedence, returning (model, rationale).
+
+    1. `explicit_override` — the caller's already-resolved
+       `os.environ.get("VECTR_EMBED_MODEL")` (None when unset) — ALWAYS
+       wins; the evidence table is not consulted.
+    2. A matching `EMBED_MODEL_EVIDENCE_TABLE` row for this fingerprint wins
+       over the built-in default.
+    3. No match falls back to the configured default
+       (`agent.config.EMBEDDING_DEFAULT_MODEL`).
+
+    Pure and I/O-free: `explicit_override` is passed in rather than read
+    from the environment here, so every precedence tier is exercised by
+    passing plain arguments — no monkeypatching required.
+
+    `embedding.default_model` (agent/config.yaml) has no "unset" state
+    distinct from "vectr's shipped value" — every deployment carries some
+    value for it — so it cannot be independently detected as an operator
+    override without a fabricated sentinel. It is therefore always tier 3
+    ("the configured default"), never a tier-1 override in its own right;
+    `VECTR_EMBED_MODEL` is the one channel with genuine unset-vs-set
+    semantics today.
+    """
+    if explicit_override:
+        return explicit_override, (
+            "embed model explicitly set via VECTR_EMBED_MODEL — evidence "
+            f"table not consulted, using {explicit_override}"
+        )
+    table_model = select_embed_model_from_evidence(fp, table)
+    if table_model is not None:
+        return table_model, (
+            "embed-model evidence row matched dominant language "
+            f"{fp.dominant_language!r} — using {table_model}"
+        )
+    return EMBEDDING_DEFAULT_MODEL, (
+        "no embed-model evidence row for this fingerprint — using "
+        f"configured default {EMBEDDING_DEFAULT_MODEL}"
+    )
+
+
 def _detect_monorepo(workspace_root: str) -> bool:
     root = Path(workspace_root)
     for signal in _MONOREPO_SIGNALS:
@@ -311,11 +402,17 @@ def select_strategy(fp: CodebaseFingerprint) -> RetrievalStrategy:
         graph_first = True
         reasons.append("complex codebase (high avg file length) — graph traversal preferred")
 
-    # Recommend embed model
-    is_code_heavy = fp.dominant_language in _STATIC_LANGS or fp.size_class == "large"
-    recommended = EMBEDDING_DEFAULT_MODEL
-    if is_code_heavy:
-        reasons.append(f"code-heavy repo — default {EMBEDDING_DEFAULT_MODEL} is optimal")
+    # Embed model selection (UPG-EMBEDDER-AUTOSELECT): a deterministic,
+    # evidence-keyed table lookup, applied at index time — never a query-side
+    # heuristic, since it keys purely on the corpus fingerprint (dominant
+    # language) computed above, the same class of index-side signal as every
+    # weight/graph_first rule in this function. `EMBED_MODEL_EVIDENCE_TABLE`
+    # ships empty (see its module-level comment), so `recommended` resolves
+    # to the configured default on every real workspace today.
+    recommended, embed_reason = resolve_embed_model(
+        fp, explicit_override=os.environ.get("VECTR_EMBED_MODEL")
+    )
+    reasons.append(embed_reason)
 
     return RetrievalStrategy(
         semantic_weight=round(sem, 2),
