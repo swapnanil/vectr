@@ -11,6 +11,8 @@ import logging
 import math
 import re
 import textwrap
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2287,6 +2289,573 @@ class TestStreamingEmbedUpsert:
         # The index itself is still correct — streaming changes WHEN rows are
         # written, never WHAT is written.
         assert idx.total_chunks == 20
+
+
+class TestIndexResourceGovernor:
+    """UPG-INDEX-RESOURCE-GOVERNOR: priority clamp + duty-cycle pacing around
+    Phase 3 (and the purpose-vector pass), plus file-level checkpointing so a
+    kill/restart mid-index never re-embeds already-completed work. Exercised
+    against a real CodeIndexer + real ChromaDB collection on tiny synthetic
+    corpora only — never a large real repo."""
+
+    def test_default_config_applies_priority_clamp_and_pacing(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        import contextlib
+        import agent.indexer._core as core_module
+
+        calls: list[tuple] = []
+
+        @contextlib.contextmanager
+        def _recording_lowered_priority(enabled, **kwargs):
+            calls.append(("lowered_priority", enabled))
+            yield
+
+        monkeypatch.setattr(core_module, "lowered_priority", _recording_lowered_priority)
+
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+
+        lowered_calls = [c for c in calls if c[0] == "lowered_priority"]
+        assert lowered_calls, "lowered_priority was never invoked around the embed batch loop"
+        assert all(enabled is True for _, enabled in lowered_calls), (
+            f"default config (INDEX_GOVERNOR_ENABLED=True, no foreground-fast) must "
+            f"govern every batch loop: {lowered_calls}"
+        )
+
+    def test_foreground_fast_env_disables_governor(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        import contextlib
+        import agent.indexer._core as core_module
+
+        monkeypatch.setenv("VECTR_FOREGROUND_FAST", "1")
+
+        calls: list[tuple] = []
+
+        @contextlib.contextmanager
+        def _recording_lowered_priority(enabled, **kwargs):
+            calls.append(("lowered_priority", enabled))
+            yield
+
+        monkeypatch.setattr(core_module, "lowered_priority", _recording_lowered_priority)
+
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+
+        lowered_calls = [c for c in calls if c[0] == "lowered_priority"]
+        assert lowered_calls, "lowered_priority was never invoked"
+        assert all(enabled is False for _, enabled in lowered_calls), (
+            f"VECTR_FOREGROUND_FAST=1 must restore unthrottled indexing exactly: {lowered_calls}"
+        )
+
+    def test_governor_disabled_in_config_skips_clamp(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        import contextlib
+        import agent.indexer._core as core_module
+
+        monkeypatch.setattr(core_module, "_INDEX_GOVERNOR_ENABLED", False)
+
+        calls: list[tuple] = []
+
+        @contextlib.contextmanager
+        def _recording_lowered_priority(enabled, **kwargs):
+            calls.append(("lowered_priority", enabled))
+            yield
+
+        monkeypatch.setattr(core_module, "lowered_priority", _recording_lowered_priority)
+
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+
+        lowered_calls = [c for c in calls if c[0] == "lowered_priority"]
+        assert lowered_calls and all(enabled is False for _, enabled in lowered_calls)
+
+    def test_index_file_purpose_pass_never_governed(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        """The single-file watcher path (index_file) must stay ungoverned —
+        small, interactive-latency-sensitive work, unlike a bulk
+        index_workspace() run."""
+        import contextlib
+        import agent.indexer._core as core_module
+
+        calls: list[tuple] = []
+
+        @contextlib.contextmanager
+        def _recording_lowered_priority(enabled, **kwargs):
+            calls.append(("lowered_priority", enabled))
+            yield
+
+        monkeypatch.setattr(core_module, "lowered_priority", _recording_lowered_priority)
+
+        path = make_py(tmp_path, "a.py", "def known_fn(): pass")
+        indexer.index_file(path)
+
+        lowered_calls = [c for c in calls if c[0] == "lowered_priority"]
+        assert lowered_calls, "lowered_priority was never invoked from index_file's purpose pass"
+        assert all(enabled is False for _, enabled in lowered_calls)
+
+    def test_zero_chunk_files_checkpointed_before_batch_loop_runs(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        """A file that chunks to zero chunks (mixed into a run with normal
+        files) must be checkpointed as soon as Phase 3 begins, not only at
+        the very end of the run (previously this mtime was silently
+        discarded whenever `all_chunks` overall was non-empty but this
+        particular file's own chunk list was empty)."""
+        import agent.indexer._core as core_module
+
+        monkeypatch.setattr(core_module, "_EMBED_BATCH_SIZE", 1)
+
+        real_path = make_py(tmp_path, "real.py", "def real_fn(): pass")
+        empty_path = tmp_path / "empty.py"
+        empty_path.write_text("")  # chunks to zero chunks
+
+        saved_snapshots: list[dict] = []
+        real_save = indexer._save_mtime_cache
+
+        def _recording_save(cache):
+            saved_snapshots.append(dict(cache))
+            real_save(cache)
+
+        monkeypatch.setattr(indexer, "_save_mtime_cache", _recording_save)
+
+        indexer.index_workspace()
+
+        assert saved_snapshots, "mtime cache was never persisted"
+        assert str(empty_path) in saved_snapshots[0], (
+            f"zero-chunk file must be in the FIRST mtime-cache persist, "
+            f"before Phase 3's batch loop runs: {saved_snapshots[0]}"
+        )
+        assert str(real_path) not in saved_snapshots[0], (
+            "the real file's chunk had not been embedded yet when the "
+            "zero-chunk pre-checkpoint fired"
+        )
+
+    def test_kill_mid_index_resumes_without_reembedding_completed_files(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Acceptance criterion: killing the daemon mid-index and restarting
+        resumes without re-embedding completed work. Simulated with a real
+        CodeIndexer against a real on-disk ChromaDB collection: the embed
+        provider raises partway through Phase 3 (the crash), and a SECOND
+        CodeIndexer instance against the same db_path must never be asked to
+        re-embed a chunk whose file was already checkpointed before the
+        crash."""
+        import agent.indexer._core as core_module
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        monkeypatch.setattr(core_module, "_EMBED_BATCH_SIZE", 1)
+        monkeypatch.setattr(core_module, "_INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES", 1)
+
+        for i in range(4):
+            make_py(tmp_path, f"m{i}.py", f"def f{i}():\n    return {i}\n")
+
+        embedded_before_crash: list[str] = []
+        call_count = {"n": 0}
+
+        class _CrashingProvider:
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                call_count["n"] += 1
+                if call_count["n"] > 2:
+                    raise RuntimeError("simulated crash")
+                embedded_before_crash.extend(texts)
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts: list[str]) -> list[list[float]]:
+                return self.embed(texts)
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _CrashingProvider())
+
+        db_path = str(tmp_path / "chroma")
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            indexer1.index_workspace()
+
+        class _RecordingProvider:
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                self.calls.append(list(texts))
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts: list[str]) -> list[list[float]]:
+                return self.embed(texts)
+
+        recorder = _RecordingProvider()
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: recorder)
+
+        indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer2.index_workspace()
+
+        reembedded_texts = {t for call in recorder.calls for t in call}
+        assert not (reembedded_texts & set(embedded_before_crash)), (
+            "resume re-embedded a chunk whose file was already checkpointed before the crash"
+        )
+        # Every chunk ends up indexed exactly once across the two runs.
+        assert indexer2.total_chunks == 4
+
+    def test_embed_model_stamp_survives_a_mid_run_crash(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Regression guard for the stamp-timing defect this task fixed: the
+        stamp must be written before Phase 3 begins, not only at the very
+        end of a successful run — otherwise a crashed first-ever index on a
+        brand-new workspace leaves no stamp, and a resumed run reads back
+        None (treated as a mismatch), wiping the checkpointed progress via
+        _recreate_collections()."""
+        import agent.indexer._core as core_module
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        monkeypatch.setattr(core_module, "_EMBED_BATCH_SIZE", 1)
+
+        make_py(tmp_path, "a.py", "def a(): pass")
+        make_py(tmp_path, "b.py", "def b(): pass")
+
+        class _CrashingProvider:
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                raise RuntimeError("simulated crash on the very first batch")
+
+            def embed_query(self, texts: list[str]) -> list[list[float]]:
+                return [[0.1] * 8 for _ in texts]
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _CrashingProvider())
+
+        db_path = str(tmp_path / "chroma")
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        with pytest.raises(RuntimeError):
+            indexer1.index_workspace()
+
+        assert indexer1._stored_embed_model() == indexer1.embed_model, (
+            "the embed-model stamp must be written before Phase 3 begins, "
+            "surviving a crash on the very first embed batch"
+        )
+
+
+class TestPurposePassDeferral:
+    """UPG-PURPOSE-PASS-DEFERRAL: by default (config `defer_purpose_pass`,
+    True) and outside --foreground-fast, index_workspace() hands the
+    purpose-vector pass to a single-worker background executor and returns
+    without waiting for it. Search already degrades gracefully while
+    purpose vectors are backfilling via `query_vector_purpose`'s existing
+    empty/partial-collection guard — this reuses that mechanism rather than
+    inventing a second "partial readiness" notion. Exercised against a real
+    CodeIndexer + real ChromaDB collection on tiny synthetic corpora only —
+    never a large real repo."""
+
+    def _wait_until_not_pending(self, idx, timeout: float = 5.0) -> None:
+        deadline = time.time() + timeout
+        while idx.purpose_vectors_pending and time.time() < deadline:
+            time.sleep(0.01)
+
+    def test_purpose_pass_scheduled_on_background_executor_by_default(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        calls: list[str] = []
+        real_upsert = indexer._upsert_purpose_vectors
+
+        def _recording(*args, **kwargs):
+            calls.append(threading.current_thread().name)
+            return real_upsert(*args, **kwargs)
+
+        monkeypatch.setattr(indexer, "_upsert_purpose_vectors", _recording)
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        indexer.index_workspace()
+
+        deadline = time.time() + 5
+        while not calls and time.time() < deadline:
+            time.sleep(0.01)
+
+        assert calls, "the deferred purpose pass never ran"
+        assert calls[0].startswith("vectr-purpose"), (
+            f"default config must run the purpose pass on the background "
+            f"executor thread, not the caller's thread: {calls}"
+        )
+
+    def test_foreground_fast_runs_purpose_pass_synchronously(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("VECTR_FOREGROUND_FAST", "1")
+        calls: list[str] = []
+        real_upsert = indexer._upsert_purpose_vectors
+
+        def _recording(*args, **kwargs):
+            calls.append(threading.current_thread().name)
+            return real_upsert(*args, **kwargs)
+
+        monkeypatch.setattr(indexer, "_upsert_purpose_vectors", _recording)
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        indexer.index_workspace()
+
+        assert calls, "purpose pass never ran"
+        assert not calls[0].startswith("vectr-purpose"), (
+            f"--foreground-fast must run the purpose pass synchronously on "
+            f"the caller's own thread: {calls}"
+        )
+        assert indexer.purpose_vectors_pending is False, (
+            "a synchronous run must never leave purpose_vectors_pending True"
+        )
+        assert indexer._purpose_collection.count() == 1
+
+    def test_defer_purpose_pass_config_false_runs_synchronously(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        import agent.indexer._core as core_module
+
+        monkeypatch.setattr(core_module, "_INDEX_GOVERNOR_DEFER_PURPOSE_PASS_ENABLED", False)
+        calls: list[str] = []
+        real_upsert = indexer._upsert_purpose_vectors
+
+        def _recording(*args, **kwargs):
+            calls.append(threading.current_thread().name)
+            return real_upsert(*args, **kwargs)
+
+        monkeypatch.setattr(indexer, "_upsert_purpose_vectors", _recording)
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        indexer.index_workspace()
+
+        assert calls and not calls[0].startswith("vectr-purpose"), (
+            f"defer_purpose_pass=False must restore synchronous behaviour: {calls}"
+        )
+        assert indexer.purpose_vectors_pending is False
+
+    def test_purpose_vectors_pending_true_during_window_false_after(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        release = threading.Event()
+
+        class _ThreadGatedEmbedProvider:
+            """Embeds instantly except on the deferred purpose executor's
+            own thread, where it blocks until `release` is set — lets the
+            test observe the deferral window deterministically without
+            depending on real embedding timing."""
+
+            def embed(self, texts):
+                if threading.current_thread().name.startswith("vectr-purpose"):
+                    release.wait(timeout=5)
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _ThreadGatedEmbedProvider())
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        idx = CodeIndexer(workspace_root=str(tmp_path), db_path=str(tmp_path / "chroma"))
+        try:
+            idx.index_workspace()
+            assert idx.purpose_vectors_pending is True, (
+                "purpose pass should be scheduled and blocked on the test gate"
+            )
+            assert idx.total_chunks == 1, "content must already be indexed"
+            assert idx._purpose_collection.count() == 0, (
+                "purpose collection must still be empty while the pass is blocked"
+            )
+
+            release.set()
+            self._wait_until_not_pending(idx)
+            assert idx.purpose_vectors_pending is False
+            assert idx._purpose_collection.count() == 1
+        finally:
+            release.set()
+            idx.close()
+
+    def test_search_serves_results_while_purpose_pass_pending(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+        from agent.searcher import CodeSearcher
+
+        release = threading.Event()
+
+        class _ThreadGatedEmbedProvider:
+            def embed(self, texts):
+                if threading.current_thread().name.startswith("vectr-purpose"):
+                    release.wait(timeout=5)
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _ThreadGatedEmbedProvider())
+
+        make_py(tmp_path, "a.py", "def known_function():\n    return 42\n")
+        idx = CodeIndexer(workspace_root=str(tmp_path), db_path=str(tmp_path / "chroma"))
+        try:
+            idx.index_workspace()
+            assert idx.purpose_vectors_pending is True
+
+            s = CodeSearcher(idx)
+            s.refresh_bm25()
+            results, _ = s.search("known_function", n_results=5, rerank=False)
+            assert results, "search returned nothing while purpose vectors were pending"
+            assert any("known_function" in r.content for r in results)
+
+            release.set()
+            self._wait_until_not_pending(idx)
+        finally:
+            release.set()
+            idx.close()
+
+    def test_deferred_purpose_pass_produces_same_result_as_synchronous(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        source = tmp_path / "src"
+        source.mkdir()
+        make_py(source, "a.py", "def known_fn():\n    '''docstring'''\n    return 1\n")
+        make_py(source, "b.py", "def other_fn():\n    return 2\n")
+
+        monkeypatch.setenv("VECTR_FOREGROUND_FAST", "1")
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        sync_indexer = CodeIndexer(workspace_root=str(source), db_path=str(tmp_path / "sync_chroma"))
+        sync_indexer.index_workspace()
+        sync_ids = set(sync_indexer._purpose_collection.get()["ids"])
+        sync_indexer.close()
+
+        monkeypatch.delenv("VECTR_FOREGROUND_FAST", raising=False)
+        deferred_indexer = CodeIndexer(workspace_root=str(source), db_path=str(tmp_path / "deferred_chroma"))
+        deferred_indexer.index_workspace()
+        self._wait_until_not_pending(deferred_indexer)
+        deferred_ids = set(deferred_indexer._purpose_collection.get()["ids"])
+        deferred_indexer.close()
+
+        assert sync_ids, "reference synchronous run produced no purpose vectors"
+        assert deferred_ids == sync_ids, (
+            f"a deferred pass must eventually produce the same purpose "
+            f"collection ids as a synchronous run: sync={sync_ids} "
+            f"deferred={deferred_ids}"
+        )
+
+    def test_purpose_pass_failure_leaves_content_durable_and_purpose_retryable(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Content-completion (mtime_cache) and purpose-completion (the
+        purpose collection) are decoupled signals: a purpose pass that
+        crashes (simulated) never rolls back or blocks the content
+        checkpoint that already landed in Phase 3 — content is upserted by
+        chunk_id independently of the purpose collection, so there is
+        nothing for a purpose-pass failure to invalidate. The file is
+        therefore also considered up to date by Phase 1's mtime check on a
+        plain next run (no re-embed of unchanged content, matching pre-
+        UPG-PURPOSE-PASS-DEFERRAL incremental-index behaviour) — the
+        crashed file's purpose vector is only re-attempted via `--force` or
+        by touching the file so it re-enters `to_index`, at which point the
+        (idempotent, upsert-by-chunk_id) purpose pass lands it correctly."""
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        path = make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        db_path = str(tmp_path / "chroma")
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+
+        def _crashing_upsert(*args, **kwargs):
+            raise RuntimeError("simulated crash mid purpose pass")
+
+        monkeypatch.setattr(indexer1, "_upsert_purpose_vectors", _crashing_upsert)
+        indexer1.index_workspace()
+        self._wait_until_not_pending(indexer1)
+        assert indexer1.purpose_vectors_pending is False
+
+        assert indexer1.total_chunks == 1, "content must be durably indexed regardless"
+        assert indexer1._purpose_collection.count() == 0
+
+        mtime_cache = indexer1._load_mtime_cache()
+        assert mtime_cache, (
+            "content checkpointing is unconditional and independent of the "
+            "purpose pass — a purpose-pass crash must not leave content "
+            "looking unindexed"
+        )
+        indexer1.close()
+
+        # A plain next run with no changes: content is unchanged, so Phase 1
+        # correctly skips the file — this run does no work at all, and the
+        # purpose vector the crashed run lost stays lost until forced.
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer2.index_workspace()
+        self._wait_until_not_pending(indexer2)
+        assert indexer2.total_chunks == 1
+        assert indexer2._purpose_collection.count() == 0, (
+            "an unforced, no-op incremental run must not re-embed unchanged "
+            "content just to retry a stale purpose gap"
+        )
+        indexer2.close()
+
+        # Forcing (or touching the file) re-enters it into `to_index` and
+        # the purpose pass lands it correctly this time.
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer3 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer3.index_workspace(force=True)
+        self._wait_until_not_pending(indexer3)
+        assert indexer3.total_chunks == 1
+        assert indexer3._purpose_collection.count() == 1, (
+            "a forced re-run must land the purpose vector the crashed run lost"
+        )
+        indexer3.close()
+
+    def test_close_does_not_block_on_pending_deferred_pass(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        release = threading.Event()  # deliberately never set in this test
+
+        class _StuckEmbedProvider:
+            def embed(self, texts):
+                if threading.current_thread().name.startswith("vectr-purpose"):
+                    release.wait()
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _StuckEmbedProvider())
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        idx = CodeIndexer(workspace_root=str(tmp_path), db_path=str(tmp_path / "chroma"))
+        idx.index_workspace()
+        assert idx.purpose_vectors_pending is True
+
+        start = time.time()
+        idx.close()
+        elapsed = time.time() - start
+        assert elapsed < 2.0, (
+            f"close() must not block on a stuck deferred purpose pass, took {elapsed:.2f}s"
+        )
+
+        release.set()  # unblock the background thread so it doesn't leak past the test
 
 
 class TestFetchChunks:

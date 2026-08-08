@@ -1405,6 +1405,17 @@ class VectrService:
             "mode": mode,
             "version_stamp": self._version_stamp,
             "reindex_in_progress": reindex_in_progress,
+            # UPG-PURPOSE-PASS-DEFERRAL: True while a background purpose-
+            # vector pass is scheduled/running (config `defer_purpose_pass`,
+            # default on) — search still returns results during this window
+            # (body-similarity only, `query_vector_purpose`'s empty/partial-
+            # collection guard), so this makes a possible quality dip
+            # explainable instead of silent. Always False when the indexer
+            # hasn't been constructed yet, or when deferral never ran
+            # (disabled, or `--foreground-fast`).
+            "purpose_vectors_pending": (
+                self._indexer.purpose_vectors_pending if self._indexer else False
+            ),
             # UPG-NOTES-EMBED-MIGRATION: normally None — migration runs
             # synchronously at startup, so this only surfaces a mid-failure
             # state (e.g. the embedder was unavailable during migration).

@@ -394,6 +394,19 @@ def handle_tools_call(
                     "available; memory tools are fully ready"
                 )
 
+        # UPG-PURPOSE-PASS-DEFERRAL: purpose vectors (the dual-vector search
+        # ranking signal) are still backfilling in the background — search
+        # already returns results during this window (body-similarity only),
+        # so this makes a possible temporary ranking-quality dip explainable
+        # rather than silent. Clears on its own once the pass finishes; no
+        # action needed from the caller.
+        if status.get("purpose_vectors_pending", False):
+            lines.append(
+                "  → purpose vectors are backfilling in the background: "
+                "search results are ranked on body similarity only until this "
+                "finishes — no action needed, this clears automatically"
+            )
+
         # UPG-NOTES-EMBED-MIGRATION: surfaces a mid-failure state only — the
         # migration that keeps note vectors and the configured embed model in
         # sync runs synchronously at startup, so this is normally absent.

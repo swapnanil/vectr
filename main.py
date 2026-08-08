@@ -1752,6 +1752,7 @@ def _do_start(
     host: str = "127.0.0.1",
     no_ide_config: bool = False,
     json_output: bool = False,
+    foreground_fast: bool = False,
 ) -> None:
     if memory_only and search_only:
         raise ValueError("Cannot start vectr in both --memory-only and --search-only mode simultaneously")
@@ -1802,6 +1803,11 @@ def _do_start(
         # .cursor/mcp.json and .claude/settings.json anyway. Propagate the
         # choice across the subprocess boundary so the opt-out actually holds.
         env["VECTR_CONFIGURE_IDE"] = "0"
+    if foreground_fast:
+        # UPG-INDEX-RESOURCE-GOVERNOR: restores pre-governor behaviour
+        # exactly — read by agent/indexer/_core.py's _foreground_fast_enabled()
+        # to skip both the OS priority clamp and the duty-cycle pacing.
+        env["VECTR_FOREGROUND_FAST"] = "1"
     vectr_dir = Path(__file__).resolve().parent
     with open(log_path, "a") as log_file:
         proc = subprocess.Popen(
@@ -2080,6 +2086,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         code_workspace_file=_code_workspace_file_arg(args), host=host,
         no_ide_config=getattr(args, "no_ide_config", False),
         json_output=json_output,
+        foreground_fast=getattr(args, "foreground_fast", False),
     )
     for root in roots:
         _warn_on_stale_mcp_configs(root, port)
@@ -3412,6 +3419,7 @@ def cmd_restart(args: argparse.Namespace) -> None:
         memory_only=memory_only, search_only=search_only, workspace_explicit=explicit,
         code_workspace_file=_code_workspace_file_arg(args), host=host,
         no_ide_config=getattr(args, "no_ide_config", False),
+        foreground_fast=getattr(args, "foreground_fast", False),
     )
     for root in roots:
         _warn_on_stale_mcp_configs(root, port)
@@ -3854,6 +3862,22 @@ def main() -> None:
         help=_NO_IDE_CONFIG_HELP,
     )
     p_start.add_argument(
+        "--foreground-fast",
+        action="store_true",
+        default=False,
+        dest="foreground_fast",
+        help=(
+            "Disable the indexer's resource governor (UPG-INDEX-RESOURCE-"
+            "GOVERNOR): no OS priority clamp, no duty-cycle pacing between "
+            "embedding batches. Indexing runs at the same full-tilt, "
+            "multi-core pace as before the governor existed. Use on a "
+            "dedicated machine (CI, a scratch box) where interactive "
+            "responsiveness during indexing does not matter and finishing "
+            "sooner does. Checkpoint/resume is a correctness guarantee, not "
+            "a throttle, and stays on regardless of this flag."
+        ),
+    )
+    p_start.add_argument(
         "--strict-port",
         action="store_true",
         default=False,
@@ -3971,6 +3995,13 @@ def main() -> None:
         default=False,
         dest="no_ide_config",
         help=_NO_IDE_CONFIG_HELP,
+    )
+    p_restart.add_argument(
+        "--foreground-fast",
+        action="store_true",
+        default=False,
+        dest="foreground_fast",
+        help="Restart without the indexer's resource governor (see vectr start --foreground-fast).",
     )
 
     p_forget = sub.add_parser("forget", help="Delete working-memory notes for a workspace")
