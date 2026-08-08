@@ -85,7 +85,10 @@ def _transcript(
 
     One `assistant` event per action (not batched) so each action's `event_index`
     lands on its own event, matching how `leg_metrics` reads the acquiring event's
-    own usage for `context_tokens_at_fact`.
+    own usage for `context_tokens_at_fact`. Each event gets a synthetic, per-event
+    unique `message.id` -- `_dedupe_assistant_messages` (UPG-EVAL-DEDUPE-NO-
+    MESSAGE-ID) raises on a missing id, and every real event carries one, so a
+    fixture with none would not represent a real transcript shape.
     """
     usage = usage or {"input_tokens": 100, "output_tokens": 50}
     events: list[dict] = [
@@ -96,11 +99,12 @@ def _transcript(
             "tools": tools if tools is not None else [],
         }
     ]
-    for name, input_ in actions:
+    for idx, (name, input_) in enumerate(actions):
         events.append(
             {
                 "type": "assistant",
                 "message": {
+                    "id": f"msg_test_{idx}",
                     "content": [{"type": "tool_use", "name": name, "input": input_}],
                     "usage": usage,
                 },
@@ -313,6 +317,89 @@ def test_t3_metrics_anchor_checked_is_none_for_uncorroborable_scenario():
     assert result["anchor_checked"] is None
 
 
+# ---------------------------------------------------------------------------
+# UPG-EVAL-TOUCHES-ANCHOR-SUBSTRING: anchor matching must be by path component
+# (Read/Grep) and by shell token (Bash), never a raw substring search -- a raw
+# `a in v` matches a `.bak` sibling, a Grep `pattern` argument that happens to
+# contain the anchor's characters, and an `echo` of the anchor's name, none of
+# which are the agent actually inspecting the anchor file. These tests use a
+# synthetic anchor ("config.py") via `scenario_anchors=` directly rather than a
+# real scenario's `anchor_files()` -- none of the six scenarios' real anchors
+# happen to exercise the `.bak`/`echo` shapes, and `t3_metrics` takes
+# `scenario_anchors` as a plain argument for exactly this reason.
+# ---------------------------------------------------------------------------
+
+
+def test_t3_metrics_anchor_checked_false_for_bak_sibling_path():
+    """`vendor/other/config.py.bak` must NOT match anchor `config.py` -- the
+    trailing path COMPONENT is `config.py.bak`, not `config.py`; a raw
+    substring search matches this (the defect), a component comparison does
+    not (the fix)."""
+    events = _transcript([("Read", {"file_path": "vendor/other/config.py.bak"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence="irrelevant", actions=actions, scenario_anchors=("config.py",),
+    )
+    assert result["anchor_checked"] is False
+
+
+def test_t3_metrics_anchor_checked_false_for_echo_only_bash_command():
+    """`echo config.py` must NOT count as touching the anchor -- echo's
+    arguments are literal output text, never a file the shell or the invoked
+    program opens, unlike the genuine inspection commands
+    (`grep`/`head`/`cat`/`python <path>`) every scenario's own verify hint
+    uses (see `test_t3_metrics_anchor_checked_computed_for_provenance_variant_via_bash`
+    and `test_t3_metrics_verify_command_ran_and_trail_chars_still_verifiable_only`
+    below, which must keep scoring True)."""
+    events = _transcript([("Bash", {"command": "echo config.py"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence="irrelevant", actions=actions, scenario_anchors=("config.py",),
+    )
+    assert result["anchor_checked"] is False
+
+
+def test_t3_metrics_anchor_checked_false_for_grep_pattern_argument_mention():
+    """A Grep `pattern` argument that happens to contain the anchor's name is
+    not a path reference at all -- `_path_values` already excludes `pattern`
+    from consideration (only `file_path`/`path`/`notebook_path` are path
+    inputs), so this stays False both before and after the fix; pinned here
+    so a future change to `_path_values` cannot silently reintroduce it."""
+    events = _transcript(
+        [("Grep", {"path": "src", "pattern": "references config.py somewhere"})]
+    )
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence="irrelevant", actions=actions, scenario_anchors=("config.py",),
+    )
+    assert result["anchor_checked"] is False
+
+
+def test_t3_metrics_anchor_checked_true_for_genuine_subpath_read():
+    """A real, deeper path whose trailing component IS the anchor still
+    counts -- `src/pkg/config.py` names the same file `config.py` does, just
+    from a different root; the fix must not narrow this to exact-string
+    equality."""
+    events = _transcript([("Read", {"file_path": "src/pkg/config.py"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence="irrelevant", actions=actions, scenario_anchors=("config.py",),
+    )
+    assert result["anchor_checked"] is True
+
+
+def test_t3_metrics_anchor_checked_true_for_genuine_bash_inspection_token():
+    """A real inspection command (`head -5 config.py`) with the anchor as a
+    trailing argument token must still count -- this is the exact shape of
+    every scenario's own `verify_hint` (DESIGN.md 7.2)."""
+    events = _transcript([("Bash", {"command": "head -5 config.py"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence="irrelevant", actions=actions, scenario_anchors=("config.py",),
+    )
+    assert result["anchor_checked"] is True
+
+
 def test_t3_metrics_verify_command_ran_and_trail_chars_still_verifiable_only():
     """Regression guard: the two variant-specific T3 measures are unaffected by
     this fix -- still None for every non-verifiable variant/arm, still computed
@@ -362,6 +449,133 @@ def test_t3_metrics_s1_anchor_checked_is_non_discriminating_across_arms():
         scenario_anchors=s1.anchor_files(),
     )
     assert result["anchor_checked"] is True  # true even with variant=None / arm "none"
+
+
+# ---------------------------------------------------------------------------
+# UPG-EVAL-S1-ANCHOR-SEPARABILITY: audit of the SAME invariant (t3_metrics's own
+# docstring) across every scenario, not only S1. A scenario's anchor must be
+# separable from whatever its own forcing step OR fact_acquisition already
+# requires touching, or anchor_checked collapses to non-discriminating. This is
+# a SCENARIO-DESIGN property, never patched in scorer.py.
+#
+# Audit result:
+#   S1 release_via_ci     -- VIOLATION, leg 1 only (pinned above). Cannot be
+#                             fixed without a rebuild: `.github/workflows/
+#                             release.yml` is the sole artifact in the repo
+#                             documenting the correct release process, so any
+#                             from-scratch investigation that corrects the
+#                             twine mistake necessarily reads it. Legs 2-4 stay
+#                             separable (a memory arm that trusts its note tags
+#                             directly, touching nothing).
+#   S2 spec_lives_outside -- COMPLIANT at every leg (pinned below). The forcing
+#                             step's own `make check` failure output is what a
+#                             from-scratch investigation surfaces
+#                             (rediscovery_work's `BashAction(r"make\s+check|
+#                             docs.?lint")` alternative) -- never a literal read
+#                             of docs_lint.py's own source.
+#   S3 runner_not_pytest  -- VIOLATION, EVERY leg, structurally worse than S1
+#                             (pinned below). The anchor (`tools/t`) IS the
+#                             executable `fact_acquisition` requires running;
+#                             acquiring the fact and touching the anchor are
+#                             the same Bash action by construction, not an
+#                             incidental forcing-step collision. Cannot be
+#                             fixed without a rebuild that redefines what
+#                             "using the fact" means for a scenario whose
+#                             ground truth is an executable script.
+#   S4 secrets_not_dotenv -- Same structural coupling as S3 (pinned below):
+#                             the anchor (`scripts/envctl`) is the executable
+#                             `fact_acquisition` requires running.
+#   S5/S6 (told, uncorroborable) -- vacuously compliant: anchor_files() == ()
+#                             for both (no verifiable rung, nothing in the
+#                             workspace states the fact), so anchor_checked is
+#                             `None`, never a non-discriminating `True`
+#                             (test_t3_metrics_anchor_checked_is_none_for_
+#                             uncorroborable_scenario covers S5; extended below
+#                             to confirm S6 identically).
+# ---------------------------------------------------------------------------
+
+
+def test_t3_metrics_s2_anchor_checked_false_for_a_no_recall_control():
+    """S2's no-recall control (arm A's own expected leg-1 shape, DESIGN.md:
+    'Edits orbit/docs/spec.md directly; make check still fails at the end.')
+    runs `make check`, sees it fail, and edits the wrong mirror file --
+    without ever reading docs_lint.py's own source -- and still scores
+    anchor_checked False. This is the documented no-recall control the audit
+    above requires: S2 stays separable, unlike S1/S3/S4."""
+    s2 = scen.get("spec_lives_outside")
+    assert s2.anchor_files() == ("orbit/tools/docs_lint.py",)
+    events = _transcript(
+        [
+            ("Bash", {"command": "make check"}),
+            ("Edit", {"file_path": "orbit/docs/spec.md", "old_string": "x", "new_string": "y"}),
+        ]
+    )
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence=s2.fact_sentence, actions=actions,
+        scenario_anchors=s2.anchor_files(),
+    )
+    assert result["anchor_checked"] is False
+
+
+def test_t3_metrics_s3_anchor_checked_coincides_with_fact_acquisition_every_leg():
+    r"""UPG-EVAL-S1-ANCHOR-SEPARABILITY audit, S3: unlike S1's leg-1-only
+    collision, S3's anchor (`tools/t`) IS the artifact its own
+    `fact_acquisition` pattern requires running (`BashAction(r"(\./)?tools/t\b")`)
+    at EVERY leg -- there is no way to acquire this scenario's fact (use the
+    correct test runner instead of bare pytest) without that same action also
+    touching the anchor. The collapse is structural and leg-independent, not
+    an incidental forcing-step collision, and is NOT fixable by moving the
+    anchor or re-specifying fact_acquisition without changing what 'using the
+    fact' means for a scenario whose ground truth is an executable script --
+    out of scope for a scorer- or scenario-side change in this task."""
+    s3 = scen.get("runner_not_pytest")
+    assert s3.anchor_files() == ("tools/t",)
+    for leg in s3.legs:
+        events = _transcript([("Bash", {"command": "./tools/t"})])
+        actions = scorer.build_action_stream(events)
+        assert scorer.first_index(actions, leg.fact_acquisition) is not None  # fact acquired
+        result = scorer.t3_metrics(
+            None, fact_sentence=s3.fact_sentence, actions=actions,
+            scenario_anchors=s3.anchor_files(),
+        )
+        assert result["anchor_checked"] is True  # ...and so is the anchor, every leg
+
+
+def test_t3_metrics_s4_anchor_checked_coincides_with_fact_acquisition_every_leg():
+    """Same structural coupling as S3 (see that test's docstring): S4's
+    anchor (`scripts/envctl`) is the executable its `fact_acquisition`
+    pattern requires running, at every leg."""
+    s4 = scen.get("secrets_not_dotenv")
+    assert s4.anchor_files() == ("scripts/envctl",)
+    for leg in s4.legs:
+        events = _transcript([("Bash", {"command": "scripts/envctl get API_KEY"})])
+        actions = scorer.build_action_stream(events)
+        assert scorer.first_index(actions, leg.fact_acquisition) is not None  # fact acquired
+        result = scorer.t3_metrics(
+            None, fact_sentence=s4.fact_sentence, actions=actions,
+            scenario_anchors=s4.anchor_files(),
+        )
+        assert result["anchor_checked"] is True  # ...and so is the anchor, every leg
+
+
+def test_t3_metrics_s5_and_s6_anchor_checked_vacuously_compliant():
+    """S5/S6 (told, uncorroborable) declare no verifiable rung -- nothing in
+    the workspace states the fact for either -- so anchor_files() is empty and
+    the separability invariant is vacuously satisfied: anchor_checked is
+    `None` (nothing to check), never a non-discriminating `True`."""
+    s5 = scen.get("deploy_reverted_by_reconciler")
+    s6 = scen.get("bench_box_only")
+    assert s5.anchor_files() == ()
+    assert s6.anchor_files() == ()
+    for scenario in (s5, s6):
+        events = _transcript([("Bash", {"command": "cat some/file"})])
+        actions = scorer.build_action_stream(events)
+        result = scorer.t3_metrics(
+            None, fact_sentence=scenario.fact_sentence, actions=actions,
+            scenario_anchors=scenario.anchor_files(),
+        )
+        assert result["anchor_checked"] is None
 
 
 def test_verify_scripts_never_land_inside_the_workspace(tmp_path):
@@ -1071,16 +1285,24 @@ def test_dedupe_assistant_messages_collapses_shared_message_id():
     assert deduped[1]["message"]["id"] == "msg_B"
 
 
-def test_dedupe_assistant_messages_never_merges_events_with_no_id():
-    """Hand-built fixtures (this file's own `_transcript()`) never set `message.id`
-    -- such events must NOT be merged against each other, or every pre-existing
-    fixture-based test in this file that sums usage over >1 action would silently
-    change behaviour."""
+def test_dedupe_assistant_messages_raises_on_missing_message_id():
+    """UPG-EVAL-DEDUPE-NO-MESSAGE-ID: an `assistant` event with no `message.id` must
+    fail LOUDLY, not be silently appended unconditionally (the old behaviour --
+    fail-open -- reintroduces the exact double-count 48e39bc fixed the moment any
+    real event lacks an id, since an id-less event was never deduped against
+    anything, including another id-less event carrying the same real call split
+    across multiple stream fragments). Verified against every preserved real
+    stream-json transcript in this repo (58 transcripts, 1287 assistant events):
+    `message.id` is always present, so a missing id here means a malformed
+    transcript or a hand-built fixture that forgot to set one -- either way, the
+    caller must be told, not silently under/over-counted. This file's own
+    `_transcript()` helper sets a synthetic id per event for exactly this reason."""
     events = [
         {"type": "assistant", "message": {"content": [{"type": "tool_use"}], "usage": {}}},
         {"type": "assistant", "message": {"content": [{"type": "tool_use"}], "usage": {}}},
     ]
-    assert scorer._dedupe_assistant_messages(events) == events
+    with pytest.raises(ValueError, match="message.id"):
+        scorer._dedupe_assistant_messages(events)
 
 
 def test_billable_tokens_to_fact_counts_a_split_api_call_once(tmp_path):

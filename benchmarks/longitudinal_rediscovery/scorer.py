@@ -26,10 +26,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 # `benchmarks/injection_utility/` has its own `scorer.py` AND its own `scenarios.py`.
@@ -158,6 +159,78 @@ _PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 
 def _path_values(input_: Mapping[str, Any]) -> list[str]:
     return [str(input_[k]) for k in _PATH_INPUT_KEYS if input_.get(k) is not None]
+
+
+# ---------------------------------------------------------------------------
+# UPG-EVAL-TOUCHES-ANCHOR-SUBSTRING: anchor matching by path component / shell
+# token, never a raw substring search.
+#
+# `a in v` (bare substring) matches whenever the anchor's characters appear ANYWHERE
+# inside a longer string -- a `.bak` sibling (`config.py.bak` contains `config.py`),
+# an unrelated file whose name happens to end the same way, or a Bash command that
+# merely PRINTS the anchor's name (`echo config.py`) rather than touching the file.
+# None of those are the agent inspecting the anchor. The fix scopes matching to the
+# unit that actually denotes a path or a shell argument: a trailing PATH COMPONENT
+# run for Read/Grep, and a whitespace/quoting-delimited TOKEN for Bash.
+# ---------------------------------------------------------------------------
+
+
+def _anchor_matches_path(value: str, anchor: str) -> bool:
+    """True when `value`'s path components end with `anchor`'s path components (in
+    order), or vice versa -- covers a deeper real path naming the same file
+    (`src/pkg/config.py` for anchor `config.py`) without requiring either side to know
+    the other's workspace root. Rejects a `.bak` sibling (`config.py.bak`'s trailing
+    component is `config.py.bak`, not `config.py`) and an unrelated file that merely
+    contains the anchor's characters (`old_config.py`), because neither shares a
+    trailing path COMPONENT with the anchor -- a bare substring test would match both.
+    """
+    value_parts = PurePosixPath(value).parts
+    anchor_parts = PurePosixPath(anchor).parts
+    if not value_parts or not anchor_parts:
+        return False
+    shorter, longer = (
+        (anchor_parts, value_parts)
+        if len(anchor_parts) <= len(value_parts)
+        else (value_parts, anchor_parts)
+    )
+    return longer[-len(shorter):] == shorter
+
+
+# Commands whose own arguments are literal OUTPUT TEXT, never a file the shell or an
+# invoked program opens -- `echo config.py` never touches `config.py`. Every genuine
+# inspection command a scenario's own verify_hint uses (`grep`/`head`/`cat`/`python
+# <path>`, DESIGN.md 7.2) is deliberately absent from this set and must keep counting.
+_BASH_LITERAL_ARG_COMMANDS = frozenset({"echo", "printf"})
+
+# Shell command separators a real shell allows between distinct invocations, reusing
+# DEFECT 9's own separator set (`_EXEC_BOUNDARY`) so a multi-command Bash string is
+# tokenized per invoked command, not as one run-on argument list.
+_SHELL_SEGMENT_SEPARATOR = re.compile(r"[;&|\n]+")
+
+
+def _bash_command_touches_anchor(command: str, anchors: Sequence[str]) -> bool:
+    """True when `command` invokes an anchor path as a genuine shell TOKEN -- either
+    as the program being run (`./tools/t status`, `scripts/envctl get FOO`) or as one
+    of that program's own arguments (`head -5 config.py`) -- never as a substring of
+    some unrelated longer token. Splits on shell command separators and tokenizes each
+    segment with `shlex.split` (POSIX quoting rules) after stripping any leading
+    interpreter/exec-wrapper prefix (`_strip_exec_prefixes`, DEFECT 9), then compares
+    each token against every anchor by path component (`_anchor_matches_path`).
+    """
+    for segment in _SHELL_SEGMENT_SEPARATOR.split(command):
+        segment = _strip_exec_prefixes(segment)
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            # Unbalanced quoting (e.g. a heredoc body) -- fall back to whitespace
+            # splitting rather than dropping the segment; still token-boundary
+            # matching, never a substring search.
+            tokens = segment.split()
+        if not tokens or tokens[0] in _BASH_LITERAL_ARG_COMMANDS:
+            continue
+        if any(_anchor_matches_path(token, anchor) for token in tokens for anchor in anchors):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -345,19 +418,34 @@ def _billable_tokens(usage: Mapping[str, Any]) -> float:
 # fields are "stock" (retained-context) vs "incremental" (this-call-only) -- it
 # fixes the actual event-count bug rather than reformulating around it.
 #
-# Hand-built test fixtures (`tests/test_longitudinal_scorer.py`'s `_transcript()`)
-# model one event as one call and never set `message.id`; events with no id are
-# NOT deduplicated against each other, so existing fixture-based tests keep their
-# original semantics unchanged.
+# UPG-EVAL-DEDUPE-NO-MESSAGE-ID: an `assistant` event missing `message.id` is a
+# hard error, not a silent pass-through. The earlier version appended an id-less
+# event unconditionally (never deduped against anything, including another
+# id-less event carrying the same real call's other content fragment) -- that
+# fail-open reintroduces the exact double-count this function exists to fix
+# (48e39bc) the moment any real event lacks an id. Verified against every
+# preserved real stream-json transcript in this repo (58 transcripts, 1287
+# assistant events): `message.id` is ALWAYS present in a live CLI transcript.
+# An id-less event reaching this function is therefore a malformed/truncated
+# transcript or a hand-built test fixture that forgot to set one -- both must
+# be reported, never silently under- or over-counted. Test fixtures
+# (`tests/test_longitudinal_scorer.py`'s `_transcript()`) set a synthetic,
+# per-event unique id for exactly this reason.
 def _dedupe_assistant_messages(events: Sequence[dict]) -> list[dict]:
     seen: set[str] = set()
     out: list[dict] = []
     for ev in events:
         mid = ((ev.get("message") or {}).get("id"))
-        if mid is not None:
-            if mid in seen:
-                continue
-            seen.add(mid)
+        if mid is None:
+            raise ValueError(
+                "assistant event missing message.id -- every real stream-json "
+                "assistant event carries one; a fixture or transcript without one "
+                "must set an explicit id rather than being silently merged "
+                "(UPG-EVAL-DEDUPE-NO-MESSAGE-ID)"
+            )
+        if mid in seen:
+            continue
+        seen.add(mid)
         out.append(ev)
     return out
 
@@ -498,7 +586,7 @@ def t3_metrics(
     actions: Sequence[Action],
     scenario_anchors: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """DESIGN.md 7.3 secondary measures.
+    r"""DESIGN.md 7.3 secondary measures.
 
     UPG-EVAL-ANCHOR-CONFOUND: `anchor_checked` is computed for EVERY arm/variant
     (including `variant is None`, arm "none"), not only the `verifiable` rung. The
@@ -518,15 +606,37 @@ def t3_metrics(
     "nothing in the workspace states the fact" invariant for that scenario class).
 
     INVARIANT for future scenario authors: a scenario's anchor must be SEPARABLE from
-    whatever artifact its own forcing step or primary check already requires touching.
-    Violate this and `anchor_checked` collapses to non-discriminating (true in every
-    arm, including the no-memory control) -- exactly what happened to scenario S1
-    (`release_via_ci`): leg 1's forcing step already requires reading/editing
-    `.github/workflows/release.yml`, which is also S1's sole anchor, so
-    `anchor_checked` recomputed under this fix is expected to read `True` for every
-    arm on S1 and is NOT retroactively repaired by this fix -- that is a scenario-design
-    defect, out of scope for a scorer-side change, and S1's own `anchor_checked` numbers
-    remain non-discriminating.
+    whatever artifact its own forcing step, primary check, or `fact_acquisition`
+    pattern already requires touching. Violate this and `anchor_checked` collapses to
+    non-discriminating (true in every arm, including the no-memory control).
+
+    UPG-EVAL-S1-ANCHOR-SEPARABILITY audited every corroborable scenario against this
+    invariant (`tests/test_longitudinal_scorer.py`'s own audit block, same UPG tag,
+    pins each result):
+      - S1 (`release_via_ci`): VIOLATION, leg 1 only. Leg 1's forcing step already
+        requires reading/editing `.github/workflows/release.yml`, S1's sole anchor, so
+        `anchor_checked` is `True` for every arm on leg 1 -- non-discriminating there.
+        Legs 2-4 stay separable. NOT fixable without a rebuild: that file is the sole
+        artifact in the repo documenting the correct release process, so any
+        from-scratch investigation that corrects the leg's forced mistake necessarily
+        reads it; there is no decoy artifact to move the anchor to without breaking
+        the "anchor = ground truth" contract.
+      - S2 (`spec_lives_outside`): compliant at every leg. The forcing step's `make
+        check` failure output is what a from-scratch investigation surfaces
+        (`rediscovery_work`'s own `BashAction(r"make\s+check|docs.?lint")`
+        alternative), never a literal read of the anchor's own source.
+      - S3 (`runner_not_pytest`), S4 (`secrets_not_dotenv`): VIOLATION, EVERY leg --
+        structurally worse than S1. Each scenario's anchor (`tools/t`,
+        `scripts/envctl`) IS the executable its own `fact_acquisition` pattern
+        requires running, so acquiring the fact and touching the anchor are the same
+        Bash action by construction, not an incidental forcing-step collision. NOT
+        fixable without a rebuild that redefines what "using the fact" means for a
+        scenario whose ground truth is an executable script.
+      - S5/S6 (told, uncorroborable): vacuously compliant -- `anchor_files()` is empty
+        for both, so `anchor_checked` is `None`, never a non-discriminating `True`.
+    None of the above is retroactively repaired by a scorer-side change -- these are
+    scenario-design properties, not a matching bug, and are out of scope for a
+    scorer.py fix.
 
     `verify_command_ran`/`trail_chars` stay properties of the PLANTED note itself (a
     verify hint and a trail's extra length only exist once something specific was
@@ -539,10 +649,14 @@ def t3_metrics(
     else:
         def _touches_anchor(act: Action) -> bool:
             if act.name in ("Read", "Grep"):
-                return any(a in v for a in scenario_anchors for v in _path_values(act.input))
+                return any(
+                    _anchor_matches_path(v, a)
+                    for a in scenario_anchors
+                    for v in _path_values(act.input)
+                )
             if act.name == "Bash":
                 command = str(act.input.get("command") or "")
-                return any(a in command for a in scenario_anchors)
+                return _bash_command_touches_anchor(command, scenario_anchors)
             return False
 
         anchor_checked = any(_touches_anchor(act) for act in actions)
