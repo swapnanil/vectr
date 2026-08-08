@@ -174,12 +174,20 @@ def real_service_client(tmp_path_factory):
     """
     tmp = tmp_path_factory.mktemp("real_svc")
 
-    with patch("agent.indexer.get_embed_provider", return_value=_DummyEmbedProvider()), \
-         patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp), "VECTR_EMBED_MODEL": "dummy"}):
+    # Both env vars are read only once, synchronously, inside VectrService.__init__
+    # (app/service.py: VECTR_EMBED_MODEL at self._embed_model assignment,
+    # VECTR_DB_DIR at db_dir resolution) — never re-read afterward. Scoping this
+    # patch to just the constructor call (like the app.service.VectrService patch
+    # below already does) prevents it from leaking VECTR_EMBED_MODEL=dummy into
+    # os.environ for the rest of the test session: this fixture is session-scoped,
+    # so a `with` block wrapped around the `yield` would only restore os.environ at
+    # session teardown, after every other test file has already run with it set.
+    with patch("agent.indexer.get_embed_provider", return_value=_DummyEmbedProvider()):
         from app.service import VectrService
         from api import app
 
-        svc = VectrService(workspace_root=str(tmp))
+        with patch.dict("os.environ", {"VECTR_DB_DIR": str(tmp), "VECTR_EMBED_MODEL": "dummy"}):
+            svc = VectrService(workspace_root=str(tmp))
 
         # Patch `app.service.VectrService` only across TestClient startup, where the
         # `lifespan` handler's own `VectrService(...)` call must be intercepted to
