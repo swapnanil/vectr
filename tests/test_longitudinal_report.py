@@ -241,6 +241,28 @@ def test_trajectory_report_carries_identity_fields_from_first_leg():
     assert (t["scenario"], t["arm"], t["note_variant"], t["seed"]) == ("release_via_ci", "proxy", "plain", 0)
 
 
+def test_trajectory_report_row_surfaces_context_tokens_at_fact_alongside_rdc():
+    """UPG-EVAL-BTF-DOUBLECOUNT: `context_tokens_at_fact` is reported on every
+    per-leg row alongside `rdc["billable_tokens_to_fact"]` -- an exact snapshot of
+    retained context at the acquiring turn, distinct from the weighted aggregate
+    RDC component -- but is never itself an RDC component (rdc_ratio/rdc_delta/
+    cross_arm_delta must never see it)."""
+    metrics = _metrics()
+    metrics["context_tokens_at_fact"] = 4321
+    legs = [_leg_record(scenario="release_via_ci", arm="proxy", note_variant="plain", seed=0, k=2, metrics=metrics)]
+    t = report.trajectory_report("release_via_ci-proxy-plain-s0", legs, None, "discovered")
+    row = t["legs"][0]
+    assert row["context_tokens_at_fact"] == 4321
+    assert "context_tokens_at_fact" not in row["rdc"]
+    assert "context_tokens_at_fact" not in report.RDC_COMPONENTS
+
+
+def test_trajectory_report_row_context_tokens_at_fact_defaults_to_none_when_absent():
+    legs = [_leg_record(scenario="release_via_ci", arm="none", note_variant="none", seed=0, k=2, metrics=_metrics())]
+    t = report.trajectory_report("release_via_ci-none-none-s0", legs, None, "discovered")
+    assert t["legs"][0]["context_tokens_at_fact"] is None
+
+
 def test_cross_arm_delta_only_pairs_matching_k_present_in_both():
     leg1_record = _leg1_result(mistake_committed=True)
     a_legs = [

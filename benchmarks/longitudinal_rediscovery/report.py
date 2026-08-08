@@ -289,6 +289,12 @@ def trajectory_report(
             "self_corrected": metrics.get("self_corrected"),
             "rdc": rdc_k,
             "rdc_ratio": rdc_ratio(rdc_k, rdc_1),
+            # UPG-EVAL-BTF-DOUBLECOUNT: reported alongside `rdc["billable_tokens_to_fact"]`
+            # (an aggregate across every distinct billed call up to the fact), never
+            # folded into RDC itself -- an exact single-event snapshot of retained
+            # context at the acquiring turn answers a different question and must
+            # not silently enter a ratio/delta component it was never designed for.
+            "context_tokens_at_fact": metrics.get("context_tokens_at_fact"),
             "session_usd": (rec.get("cost") or {}).get("session_usd"),
             "contradictions": (rec.get("score") or {}).get("contradictions") or [],
         }

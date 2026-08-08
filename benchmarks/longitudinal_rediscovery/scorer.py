@@ -329,6 +329,39 @@ def _billable_tokens(usage: Mapping[str, Any]) -> float:
     )
 
 
+# UPG-EVAL-BTF-DOUBLECOUNT: one real, distinctly-billed Anthropic API response can
+# reach the transcript as MORE THAN ONE `assistant` stream-json event -- a response
+# containing a `thinking` block followed by one or more parallel `tool_use` blocks
+# is written as that many separate lines, each carrying an IDENTICAL COPY of that
+# one call's `message.usage` (the API bills usage once per call; the CLI's own
+# event-splitting is a transport/streaming detail, not a second call). Verified
+# against an already-recorded leg transcript: 31 raw `assistant` events collapsed
+# to 14 distinct `message.id` values, and summing weighted usage over the 31 raw
+# events (the pre-fix behaviour) totalled ~1.75x that leg's own
+# `billable_tokens_session` (a single cumulative snapshot off the transcript's
+# final `result` event, cost_metrics() below) -- for a value that only spans a
+# PREFIX of the same leg. Deduplicating by `message.id` before summing counts each
+# real call's usage exactly once, with no assumption about which individual usage
+# fields are "stock" (retained-context) vs "incremental" (this-call-only) -- it
+# fixes the actual event-count bug rather than reformulating around it.
+#
+# Hand-built test fixtures (`tests/test_longitudinal_scorer.py`'s `_transcript()`)
+# model one event as one call and never set `message.id`; events with no id are
+# NOT deduplicated against each other, so existing fixture-based tests keep their
+# original semantics unchanged.
+def _dedupe_assistant_messages(events: Sequence[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for ev in events:
+        mid = ((ev.get("message") or {}).get("id"))
+        if mid is not None:
+            if mid in seen:
+                continue
+            seen.add(mid)
+        out.append(ev)
+    return out
+
+
 def leg_metrics(
     leg: LegSpec,
     *,
@@ -348,6 +381,19 @@ def leg_metrics(
     isolation and has no visibility into sibling legs. `report.py` combines a
     trajectory's sequence of these per-leg records into RDC(k)/RDC(1) ratios,
     cross-arm deltas, and `mistake_rate_post`/`mistake_repetition_rate`.
+
+    UPG-EVAL-BTF-DOUBLECOUNT: `turns_to_fact`, `output_tokens_to_fact` and
+    `billable_tokens_to_fact` are all computed from the SAME `message.id`-deduped
+    prefix event list (`_dedupe_assistant_messages`), so a real API call the CLI
+    happened to split across multiple `assistant` stream events (a `thinking` block
+    plus one or more parallel `tool_use` blocks) is counted once in each of these
+    three fields, not once per content-block fragment. `context_tokens_at_fact`
+    reads a single event's own usage directly and was never affected. Always report
+    `context_tokens_at_fact` alongside `billable_tokens_to_fact`: the former is an
+    exact snapshot of the acquiring turn's own retained-context size; the latter is
+    a weighted aggregate of every distinct billed call up to and including that
+    turn, and the two answer different questions ("how much context is live right
+    now" vs "how much has this leg spent so far").
     """
     a = first_index(actions, leg.fact_acquisition)
     m = first_index(actions, leg.mistake_signature)
@@ -409,9 +455,16 @@ def leg_metrics(
     prefix_events = [
         ev for i, ev in enumerate(events) if i <= e_index and ev.get("type") == "assistant"
     ]
+    # UPG-EVAL-BTF-DOUBLECOUNT: dedupe by `message.id` FIRST -- `turns_to_fact`
+    # (a real conversational-turn count, not a raw stream-event count) and the
+    # output/billable sums below all read from this same deduped list, so a
+    # single real API call whose response the CLI split across multiple
+    # `assistant` stream events counts once everywhere in this function, not
+    # once per content-block fragment (see `_dedupe_assistant_messages` above).
+    deduped_prefix_events = _dedupe_assistant_messages(prefix_events)
     output_tokens = 0
     billable = 0.0
-    for ev in prefix_events:
+    for ev in deduped_prefix_events:
         usage = ((ev.get("message") or {}).get("usage")) or {}
         output_tokens += int(usage.get("output_tokens") or 0)
         billable += _billable_tokens(usage)
@@ -425,7 +478,7 @@ def leg_metrics(
 
     result.update(
         {
-            "turns_to_fact": len(prefix_events),
+            "turns_to_fact": len(deduped_prefix_events),
             "tool_calls_to_fact": a + 1,
             "output_tokens_to_fact": output_tokens,
             "billable_tokens_to_fact": billable,
@@ -443,19 +496,60 @@ def t3_metrics(
     *,
     fact_sentence: str,
     actions: Sequence[Action],
+    scenario_anchors: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """DESIGN.md 7.3 secondary measures. Only meaningful for the `verifiable` rung
-    (the only one with a checkable anchor); `None` for every other variant.
-    """
-    if variant is None or variant.variant != "verifiable" or not variant.anchors:
-        return {"anchor_checked": None, "verify_command_ran": None, "trail_chars": None}
+    """DESIGN.md 7.3 secondary measures.
 
-    anchor = variant.anchors[0]
-    anchor_checked = any(
-        (act.name in ("Read", "Grep") and any(anchor in v for v in _path_values(act.input)))
-        or (act.name == "Bash" and anchor in str(act.input.get("command") or ""))
-        for act in actions
-    )
+    UPG-EVAL-ANCHOR-CONFOUND: `anchor_checked` is computed for EVERY arm/variant
+    (including `variant is None`, arm "none"), not only the `verifiable` rung. The
+    anchor is a SCENARIO-level fact-verification artifact -- `scenario.anchor_files()`,
+    sourced from that scenario's own `verifiable` note variant regardless of which
+    variant is actually planted this leg -- so this is a genuine cross-arm comparison
+    cell: did THIS leg's agent independently touch the ground-truth file, whether or
+    not it was handed a note that named it. The pre-fix version gated the whole
+    computation behind `variant.variant == "verifiable"`, so no other arm/variant ever
+    got a value to compare against, and `NoteVariant.anchors` is populated only on the
+    verifiable rung by construction (see that dataclass's own docstring) -- reading it
+    off `variant` directly would still crash or silently omit every other cell, which
+    is why the caller now passes the scenario's anchor list independently of `variant`.
+    Callers pass `scenario_anchors=()` for an uncorroborable scenario (no verifiable
+    rung, `anchor_files()` naturally empty) -- `anchor_checked` is `None` there, not a
+    false `False`, since there is nothing in the workspace to check (DESIGN.md's own
+    "nothing in the workspace states the fact" invariant for that scenario class).
+
+    INVARIANT for future scenario authors: a scenario's anchor must be SEPARABLE from
+    whatever artifact its own forcing step or primary check already requires touching.
+    Violate this and `anchor_checked` collapses to non-discriminating (true in every
+    arm, including the no-memory control) -- exactly what happened to scenario S1
+    (`release_via_ci`): leg 1's forcing step already requires reading/editing
+    `.github/workflows/release.yml`, which is also S1's sole anchor, so
+    `anchor_checked` recomputed under this fix is expected to read `True` for every
+    arm on S1 and is NOT retroactively repaired by this fix -- that is a scenario-design
+    defect, out of scope for a scorer-side change, and S1's own `anchor_checked` numbers
+    remain non-discriminating.
+
+    `verify_command_ran`/`trail_chars` stay properties of the PLANTED note itself (a
+    verify hint and a trail's extra length only exist once something specific was
+    planted) -- both remain `None` unless `variant` is the `verifiable` rung, exactly
+    as before this fix.
+    """
+    scenario_anchors = tuple(scenario_anchors)
+    if not scenario_anchors:
+        anchor_checked = None
+    else:
+        def _touches_anchor(act: Action) -> bool:
+            if act.name in ("Read", "Grep"):
+                return any(a in v for a in scenario_anchors for v in _path_values(act.input))
+            if act.name == "Bash":
+                command = str(act.input.get("command") or "")
+                return any(a in command for a in scenario_anchors)
+            return False
+
+        anchor_checked = any(_touches_anchor(act) for act in actions)
+
+    if variant is None or variant.variant != "verifiable" or not variant.anchors:
+        return {"anchor_checked": anchor_checked, "verify_command_ran": None, "trail_chars": None}
+
     hint = variant.verify_hint.strip()
     verify_command_ran = bool(hint) and any(
         act.name == "Bash" and hint in str(act.input.get("command") or "") for act in actions
@@ -970,6 +1064,26 @@ def leg_non_vacuity(
     from that one expectation -- every other arm-"proxy" gate (`notes_count_
     at_start`, `proxy_injected > 0`) is unaffected, and every other arm
     never reads this parameter at all.
+
+    `notes_count_at_start` (UPG-EVAL-STORE-MATCH): for every arm WITHOUT live
+    vectr tool access ("proxy", "hook-sessionstart", "hook-full",
+    "hook-userpromptsubmit"), the store's only possible content-adding event
+    across an entire trajectory is `run_leg.py::LegRunner.plant_note()`'s
+    single call at k==2 -- so the premise check is exact equality to 1, not
+    merely non-zero. A higher count means the trajectory-persistent
+    `--db-dir` picked up a stray note from an earlier failed-then-retried
+    plant attempt at k==2 (`run_plan.py::_supersede` only renames away the
+    leg's own artifact directory, never `--db-dir` itself); a lower count (0)
+    means the plant/forward chain broke. Arms "mcp"/"mcp-bare" are exempt
+    from this exact-equality check (only "> 0" is required) because their
+    agent has live tool access and may legitimately grow the store past 1
+    via its own `vectr_remember` calls in an earlier leg -- that is real
+    measured behavior, not a defect. `run_leg.py::LegRunner
+    .verify_note_store_matched()` carries this same invariant as a pre-spend
+    gate (before any paid agent session runs), and
+    `LegRunner._reset_note_store()` clears the store immediately before
+    every plant so a retried k==2 attempt cannot accumulate notes in the
+    first place.
     """
     if arm not in _EXPECTED_MCP_SERVERS:
         raise ValueError(f"unknown arm {arm!r}")
@@ -1053,6 +1167,13 @@ def leg_non_vacuity(
             reasons.append(f"proxy injected={proxy_injected} for arm 'none'")
 
     elif arm in ("mcp", "mcp-bare"):
+        # UPG-EVAL-STORE-MATCH: deliberately NOT tightened to != 1 like the
+        # non-tool arms below. These two arms give the agent a live vectr MCP
+        # server, so a later leg's store can legitimately hold more than the
+        # one harness-planted note if the agent itself called
+        # vectr_remember/vectr_forget during an earlier leg -- that is real
+        # measured behavior, not a harness defect. Only "> 0" is a valid
+        # premise check here.
         if not notes_count_at_start:
             reasons.append(f"notes_count_at_start is 0 for arm {arm!r}")
 
@@ -1115,8 +1236,21 @@ def leg_non_vacuity(
             reasons.append(f"proxy injected={proxy_injected} for arm {arm!r}")
 
     elif arm == "proxy":
-        if not notes_count_at_start:
-            reasons.append("notes_count_at_start is 0 for arm 'proxy'")
+        # UPG-EVAL-STORE-MATCH: arm 'proxy' has no live vectr tool access, so
+        # across an entire trajectory the store's only content-adding event is
+        # `run_leg.py::LegRunner.plant_note()`'s single call at k==2 (k>=3 legs
+        # never re-plant, see `run_plan.py::_leg_cmd`). notes_count_at_start
+        # must therefore be exactly 1, not merely non-zero -- a higher count
+        # means the trajectory-persistent --db-dir accumulated stray notes
+        # from an earlier failed-then-retried attempt at plant time
+        # (`run_plan.py::_supersede` only renames away the leg's own artifact
+        # directory, never --db-dir). `run_leg.py::LegRunner.plant_note()` now
+        # resets the store immediately before planting
+        # (`_reset_note_store()`), and `verify_note_store_matched()` gates this
+        # same invariant pre-spend; this check is the arm-blind, post-hoc twin
+        # of that gate for legs/records that predate it or override it.
+        if notes_count_at_start != 1:
+            reasons.append(f"notes_count_at_start={notes_count_at_start!r} != 1 for arm 'proxy'")
         hits = [e for e in inject_events if planted_anchor in (e.get("anchors") or "").split(",")]
         nv["planted_anchor_injections"] = len(hits)
         nv["planted_note_retrieved"] = bool(hits)
@@ -1126,8 +1260,11 @@ def leg_non_vacuity(
             reasons.append("proxy injected == 0 for arm 'proxy'")
 
     elif arm in ("hook-sessionstart", "hook-full"):
-        if not notes_count_at_start:
-            reasons.append(f"notes_count_at_start is 0 for arm {arm!r}")
+        # UPG-EVAL-STORE-MATCH: same exact-count-1 invariant as arm 'proxy'
+        # above (no live vectr tool access -> the single k==2 plant is the
+        # store's only content-adding event for the whole trajectory).
+        if notes_count_at_start != 1:
+            reasons.append(f"notes_count_at_start={notes_count_at_start!r} != 1 for arm {arm!r}")
         counts = dict(hook_injection_counts or {})
         nv["hook_injection_counts"] = counts
         hook_fired = any(int(v or 0) > 0 for v in counts.values())
@@ -1160,8 +1297,10 @@ def leg_non_vacuity(
             nv["planted_content_in_transcript"] = None
 
     else:  # hook-userpromptsubmit -- see this function's own docstring
-        if not notes_count_at_start:
-            reasons.append(f"notes_count_at_start is 0 for arm {arm!r}")
+        # UPG-EVAL-STORE-MATCH: same exact-count-1 invariant (see the 'proxy'
+        # branch above for the full rationale).
+        if notes_count_at_start != 1:
+            reasons.append(f"notes_count_at_start={notes_count_at_start!r} != 1 for arm {arm!r}")
         delta = user_prompt_submit_injection_delta
         nv["user_prompt_submit_injection_delta"] = delta
         hook_fired = delta is not None and int(delta) >= 1

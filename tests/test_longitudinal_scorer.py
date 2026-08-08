@@ -232,6 +232,138 @@ def test_fact_token_confined_to_anchor_files_and_leg1_prompt():
                 )
 
 
+# ---------------------------------------------------------------------------
+# UPG-EVAL-ANCHOR-CONFOUND: t3_metrics's anchor_checked is a cross-arm
+# comparison cell -- computed for every variant (including variant=None, arm
+# "none"), sourced from the scenario's own anchor_files(), never from
+# variant.anchors directly (populated only on the verifiable rung).
+# ---------------------------------------------------------------------------
+
+
+def test_t3_metrics_anchor_checked_computed_for_plain_variant_via_read():
+    s1 = scen.get("release_via_ci")
+    plain = next(v for v in s1.note_variants if v.variant == "plain")
+    events = _transcript([("Read", {"file_path": ".github/workflows/release.yml"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        plain, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert result["anchor_checked"] is True
+    # Properties of the PLANTED note itself stay scoped to the verifiable rung --
+    # a plain-rung note has no verify hint, so these remain None regardless.
+    assert result["verify_command_ran"] is None
+    assert result["trail_chars"] is None
+
+
+def test_t3_metrics_anchor_checked_false_for_plain_variant_when_anchor_untouched():
+    s1 = scen.get("release_via_ci")
+    plain = next(v for v in s1.note_variants if v.variant == "plain")
+    events = _transcript([("Read", {"file_path": "CHANGELOG.md"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        plain, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert result["anchor_checked"] is False
+
+
+def test_t3_metrics_anchor_checked_computed_for_provenance_variant_via_bash():
+    s1 = scen.get("release_via_ci")
+    provenance = next(v for v in s1.note_variants if v.variant == "provenance")
+    events = _transcript([("Bash", {"command": "cat .github/workflows/release.yml"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        provenance, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert result["anchor_checked"] is True
+
+
+def test_t3_metrics_anchor_checked_computed_when_no_note_was_planted_at_all():
+    """arm "none": variant is None (no note planted), but the scenario's anchor
+    is a workspace-level fact-verification artifact independent of whether any
+    note named it -- this is the no-memory CONTROL cell the confound removed.
+    """
+    s1 = scen.get("release_via_ci")
+    events = _transcript([("Grep", {"path": ".github/workflows/release.yml", "pattern": "id-token"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert result["anchor_checked"] is True
+    assert result["verify_command_ran"] is None
+    assert result["trail_chars"] is None
+
+
+def test_t3_metrics_anchor_checked_is_none_for_uncorroborable_scenario():
+    """An uncorroborable scenario (S5/S6, told not discovered) declares no
+    verifiable rung, so anchor_files() is empty and there is nothing in the
+    workspace to check -- anchor_checked stays None (not a false False)."""
+    s5 = scen.get("deploy_reverted_by_reconciler")
+    assert s5.anchor_files() == ()
+    plain = next(v for v in s5.note_variants if v.variant == "plain")
+    events = _transcript([("Read", {"file_path": "deploy/queue.yaml"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        plain, fact_sentence=s5.fact_sentence, actions=actions,
+        scenario_anchors=s5.anchor_files(),
+    )
+    assert result["anchor_checked"] is None
+
+
+def test_t3_metrics_verify_command_ran_and_trail_chars_still_verifiable_only():
+    """Regression guard: the two variant-specific T3 measures are unaffected by
+    this fix -- still None for every non-verifiable variant/arm, still computed
+    normally for the verifiable rung."""
+    s1 = scen.get("release_via_ci")
+    verifiable = next(v for v in s1.note_variants if v.variant == "verifiable")
+    plain = next(v for v in s1.note_variants if v.variant == "plain")
+
+    events = _transcript([("Bash", {"command": 'grep -n "id-token" .github/workflows/release.yml'})])
+    actions = scorer.build_action_stream(events)
+
+    verifiable_result = scorer.t3_metrics(
+        verifiable, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert verifiable_result["verify_command_ran"] is True
+    assert verifiable_result["trail_chars"] is not None and verifiable_result["trail_chars"] > 0
+
+    plain_result = scorer.t3_metrics(
+        plain, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert plain_result["verify_command_ran"] is None
+    assert plain_result["trail_chars"] is None
+
+
+def test_t3_metrics_s1_anchor_checked_is_non_discriminating_across_arms():
+    """Documents the KNOWN, NOT-fixed-by-this-change scenario-design confound
+    on S1: its own leg-1 forcing step already requires touching
+    `.github/workflows/release.yml`, which is also S1's sole anchor, so
+    anchor_checked is expected to read True for every arm (including the
+    no-memory control) as soon as the forcing step's own Read fires -- this
+    scenario's anchor_checked numbers are non-discriminating regardless of
+    which variant/arm produced them. A future scenario must keep its anchor
+    separable from its forcing step's own required artifact, or this collapse
+    repeats (see t3_metrics's own docstring)."""
+    s1 = scen.get("release_via_ci")
+    leg1 = s1.legs[0]
+    assert leg1.is_forcing_leg is True
+    assert s1.anchor_files() == (".github/workflows/release.yml",)
+    # This is the artifact leg 1's own forcing step (releasing 1.4.0) requires
+    # touching, regardless of what note (if any) this leg's arm was handed:
+    events = _transcript([("Read", {"file_path": ".github/workflows/release.yml"})])
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence=s1.fact_sentence, actions=actions,
+        scenario_anchors=s1.anchor_files(),
+    )
+    assert result["anchor_checked"] is True  # true even with variant=None / arm "none"
+
+
 def test_verify_scripts_never_land_inside_the_workspace(tmp_path):
     """A verifier inside the workspace would leak the answer to the no-memory arm."""
     for slug, scenario in scen.SCENARIOS.items():
@@ -919,6 +1051,102 @@ def test_censoring_never_imputes_from_session_totals(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# UPG-EVAL-BTF-DOUBLECOUNT: one real, distinctly-billed API call must be counted
+# once in turns_to_fact/output_tokens_to_fact/billable_tokens_to_fact, even when
+# the CLI split its response across multiple `assistant` stream-json events
+# (a `thinking` block followed by a `tool_use` block, sharing one `message.id`
+# and an identical `message.usage`).
+# ---------------------------------------------------------------------------
+
+
+def test_dedupe_assistant_messages_collapses_shared_message_id():
+    events = [
+        {"type": "assistant", "message": {"id": "msg_A", "content": [{"type": "thinking"}], "usage": {}}},
+        {"type": "assistant", "message": {"id": "msg_A", "content": [{"type": "tool_use"}], "usage": {}}},
+        {"type": "assistant", "message": {"id": "msg_B", "content": [{"type": "tool_use"}], "usage": {}}},
+    ]
+    deduped = scorer._dedupe_assistant_messages(events)
+    assert len(deduped) == 2
+    assert deduped[0]["message"]["id"] == "msg_A"
+    assert deduped[1]["message"]["id"] == "msg_B"
+
+
+def test_dedupe_assistant_messages_never_merges_events_with_no_id():
+    """Hand-built fixtures (this file's own `_transcript()`) never set `message.id`
+    -- such events must NOT be merged against each other, or every pre-existing
+    fixture-based test in this file that sums usage over >1 action would silently
+    change behaviour."""
+    events = [
+        {"type": "assistant", "message": {"content": [{"type": "tool_use"}], "usage": {}}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use"}], "usage": {}}},
+    ]
+    assert scorer._dedupe_assistant_messages(events) == events
+
+
+def test_billable_tokens_to_fact_counts_a_split_api_call_once(tmp_path):
+    """The exact bug: one real API call whose response contains a `thinking` block
+    and a `tool_use` block reaches the transcript as TWO `assistant` events sharing
+    one `message.id` and identical usage. Pre-fix, summing over raw events double-
+    bills that one call; post-fix, `_dedupe_assistant_messages` collapses it to a
+    single contribution before `turns_to_fact`/`output_tokens_to_fact`/
+    `billable_tokens_to_fact` are computed."""
+    scenario = scen.get("release_via_ci")
+    leg = scenario.legs[0]  # fact_acquisition: git tag ...v1.4.0 (OR git push --tags)
+
+    usage_a = {
+        "input_tokens": 100, "cache_creation_input_tokens": 50,
+        "cache_read_input_tokens": 200, "output_tokens": 10,
+    }
+    usage_b = {
+        "input_tokens": 5, "cache_creation_input_tokens": 5,
+        "cache_read_input_tokens": 300, "output_tokens": 20,
+    }
+    events = [
+        {"type": "system", "subtype": "init", "mcp_servers": [], "tools": []},
+        # One real API call (msg_A) split across a thinking fragment and a
+        # (non-matching) tool_use fragment -- both carry msg_A's own usage.
+        {
+            "type": "assistant",
+            "message": {"id": "msg_A", "content": [{"type": "thinking"}], "usage": usage_a},
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg_A",
+                "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "echo setup"}}],
+                "usage": usage_a,
+            },
+        },
+        # A second, distinct real API call (msg_B) whose tool_use IS the
+        # fact-acquisition action.
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg_B",
+                "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "git tag v1.4.0 && git push --tags"}}],
+                "usage": usage_b,
+            },
+        },
+        {"type": "result", "subtype": "success", "num_turns": 2, "usage": usage_b},
+    ]
+    actions = scorer.build_action_stream(events)
+    metrics = scorer.leg_metrics(
+        leg, events=events, actions=actions, workspace=tmp_path,
+        leg_start_baselines={}, k=1, origin=scenario.origin,
+    )
+
+    expected_billable = scorer._billable_tokens(usage_a) + scorer._billable_tokens(usage_b)
+    assert metrics["turns_to_fact"] == 2  # 2 real calls, not 3 raw events
+    assert metrics["output_tokens_to_fact"] == usage_a["output_tokens"] + usage_b["output_tokens"]
+    assert metrics["billable_tokens_to_fact"] == pytest.approx(expected_billable)
+    # context_tokens_at_fact reads the acquiring event's own usage directly --
+    # never summed, so it was never affected by this bug either way.
+    assert metrics["context_tokens_at_fact"] == (
+        usage_b["input_tokens"] + usage_b["cache_creation_input_tokens"] + usage_b["cache_read_input_tokens"]
+    )
+
+
+# ---------------------------------------------------------------------------
 # a missing transcript degrades to "not acquired", never raises (DESIGN.md 11.6)
 # ---------------------------------------------------------------------------
 
@@ -948,6 +1176,86 @@ def test_missing_transcript_degrades_to_not_acquired(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# UPG-EVAL-STORE-MATCH: notes_count_at_start must be EXACTLY 1 (not merely
+# non-zero) for every arm without live vectr tool access. Arms "mcp"/
+# "mcp-bare" are exempt (their agent can legitimately grow the store past 1
+# via its own vectr_remember calls in an earlier leg -- see
+# leg_non_vacuity's own docstring).
+# ---------------------------------------------------------------------------
+
+
+def test_leg_non_vacuity_proxy_rejects_a_store_count_above_one():
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="proxy", k=3, events=events, notes_count_at_start=2,
+        proxy_injected=1, planted_anchor="note:4",
+    )
+    assert result["valid"] is False
+    assert "notes_count_at_start=2" in result["invalid_reason"]
+    assert "!= 1" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_proxy_rejects_a_store_count_of_zero():
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="proxy", k=2, events=events, notes_count_at_start=0,
+        proxy_injected=1, planted_anchor="note:4",
+    )
+    assert result["valid"] is False
+    assert "!= 1" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_hook_sessionstart_rejects_a_store_count_above_one(tmp_path):
+    events = _init_and_result_events(mcp_servers=[])
+    transcript_path = _write_transcript(tmp_path, events)
+    result = scorer.leg_non_vacuity(
+        arm="hook-sessionstart", k=3, events=events, notes_count_at_start=2,
+        hook_injection_counts={"session_start": 1}, transcript_path=transcript_path,
+        planted_note_content="the fact", note_id=9,
+    )
+    assert result["valid"] is False
+    assert "!= 1" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_hook_userpromptsubmit_rejects_a_store_count_above_one():
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="hook-userpromptsubmit", k=3, events=events, notes_count_at_start=2,
+        user_prompt_submit_injection_delta=1,
+    )
+    assert result["valid"] is False
+    assert "!= 1" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_mcp_arm_still_accepts_a_store_count_above_one():
+    """Arms 'mcp'/'mcp-bare' are exempt from the exact-count-1 invariant --
+    their agent has live vectr tool access, so a count above 1 by a later leg
+    can be genuine agent behavior (its own vectr_remember calls from an
+    earlier leg), not a harness defect."""
+    events = _init_and_result_events(
+        mcp_servers=[{"name": "vectr", "status": "connected"}],
+        tools=["Bash", "mcp__vectr__search", "mcp__vectr__recall"],
+    )
+    result = scorer.leg_non_vacuity(
+        arm="mcp", k=3, events=events, notes_count_at_start=4, proxy_injected=0,
+        recall_probe_returned_note=True,
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+
+
+def test_leg_non_vacuity_mcp_bare_arm_still_accepts_a_store_count_above_one():
+    events = _init_and_result_events(
+        mcp_servers=[{"name": "vectr", "status": "connected"}],
+        tools=["Bash", "mcp__vectr__search", "mcp__vectr__recall"],
+    )
+    result = scorer.leg_non_vacuity(
+        arm="mcp-bare", k=3, events=events, notes_count_at_start=5, proxy_injected=0,
+        recall_probe_returned_note=True,
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+
+
+# ---------------------------------------------------------------------------
 # exact anchor matching: note:4 is never satisfied by note:41 (DESIGN.md 11.6)
 # ---------------------------------------------------------------------------
 
@@ -959,8 +1267,13 @@ def test_leg_non_vacuity_exact_anchor_match_not_prefix(tmp_path):
     audit_log.write_text(
         "2026-07-29T12:00:00Z PROACTIVE_INJECT anchors=note:41 count=1\n", encoding="utf-8"
     )
+    # notes_count_at_start=1: arm "proxy" has no live vectr tool access, so the
+    # store's only content-adding event across a trajectory is this harness's
+    # single k==2 plant (UPG-EVAL-STORE-MATCH) -- any other value now fails
+    # leg_non_vacuity's own store-match premise, independent of the anchor
+    # check this test targets.
     result = scorer.leg_non_vacuity(
-        arm="proxy", k=1, events=events, notes_count_at_start=3,
+        arm="proxy", k=1, events=events, notes_count_at_start=1,
         audit_log=audit_log, proxy_injected=1, planted_anchor="note:4",
     )
     assert result["non_vacuity"]["planted_anchor_injections"] == 0
@@ -971,7 +1284,7 @@ def test_leg_non_vacuity_exact_anchor_match_not_prefix(tmp_path):
         "2026-07-29T12:00:01Z PROACTIVE_INJECT anchors=note:4 count=1\n", encoding="utf-8"
     )
     result2 = scorer.leg_non_vacuity(
-        arm="proxy", k=1, events=events, notes_count_at_start=3,
+        arm="proxy", k=1, events=events, notes_count_at_start=1,
         audit_log=audit_log, proxy_injected=1, planted_anchor="note:4",
     )
     assert result2["non_vacuity"]["planted_anchor_injections"] == 1
@@ -1000,7 +1313,7 @@ def test_leg_non_vacuity_proxy_displaced_channel_delivery_is_valid_despite_no_hi
     audit_log.write_text("", encoding="utf-8")  # no PROACTIVE_INJECT line for note:7 at all
 
     result = scorer.leg_non_vacuity(
-        arm="proxy", k=2, events=events, notes_count_at_start=2,
+        arm="proxy", k=2, events=events, notes_count_at_start=1,
         audit_log=audit_log, proxy_injected=1, planted_anchor="note:7",
         channel_delivery="displaced",
     )
@@ -1019,7 +1332,7 @@ def test_leg_non_vacuity_proxy_without_displaced_annotation_still_invalid_on_no_
     audit_log.write_text("", encoding="utf-8")
 
     result = scorer.leg_non_vacuity(
-        arm="proxy", k=2, events=events, notes_count_at_start=2,
+        arm="proxy", k=2, events=events, notes_count_at_start=1,
         audit_log=audit_log, proxy_injected=1, planted_anchor="note:7",
         channel_delivery=None,
     )
@@ -1027,7 +1340,7 @@ def test_leg_non_vacuity_proxy_without_displaced_annotation_still_invalid_on_no_
     assert "planted anchor" in result["invalid_reason"]
 
     result2 = scorer.leg_non_vacuity(
-        arm="proxy", k=2, events=events, notes_count_at_start=2,
+        arm="proxy", k=2, events=events, notes_count_at_start=1,
         audit_log=audit_log, proxy_injected=1, planted_anchor="note:7",
         channel_delivery="delivered_default",
     )
