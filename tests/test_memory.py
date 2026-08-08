@@ -739,6 +739,51 @@ class TestRecallForPathUPG96:
         store.remember("/repo", "an unrelated caveat about auth", kind="gotcha")
         assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
 
+    def test_declared_trigger_flood_does_not_evict_an_unrelated_anchor_match(
+        self, tmp_path
+    ) -> None:
+        """Regression for the send-back on top of this section's own fix
+        (commit 9356777 introduced this gap while making the harness
+        discriminating for the fix above): `triggers LIKE '%"path"%'` cannot
+        be scoped to one file the way the content/anchors arms are (a
+        trigger's `path` is a glob, evaluated in Python afterward, not a
+        literal SQL LIKE comparison) -- so it is a superset over EVERY note
+        that declares ANY path trigger for ANY file, workspace-wide. Folding
+        that superset into the SAME LIMIT-bounded SQL query as the content/
+        anchors arms meant a workspace with enough OTHER trigger-declaring
+        notes could push a genuinely file-scoped anchor match off the end of
+        the pool before this method's own Python-side narrowing ever ran --
+        a single note declaring a broad glob like "**/*.py" could silently
+        starve every other file's structural recall of its strongest
+        (declared_anchor) evidence, workspace-wide.
+
+        This note is anchored with a BARE basename ("gate.py", not
+        "src/gate.py") and its content never mentions the filename at all,
+        so the ONLY way it can be found is the anchor arm -- isolating this
+        from the bare-basename-anchor-candidate-set fix this same
+        regression fix also required (`_anchors_exact_match()` previously
+        only ever saw `path_candidates`, which never contains a bare
+        basename unless the file sits at the workspace root)."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the pool ceiling here is capped at 25 concurrent handles",
+            kind="gotcha", anchors=["gate.py"],
+        )
+        # 15 NEWER notes, each declaring a path trigger for a DIFFERENT,
+        # unrelated file -- none of them structurally relates to gate.py.
+        # limit=3 here (recall_for_path()'s own pool_size = max(limit,
+        # min(limit*4, 200)) = 12) makes 15 > pool_size, so pre-fix these
+        # alone would already fill the single shared LIMIT-12 pool by
+        # recency, before the anchor note (the oldest note in the store) is
+        # ever reached.
+        for k in range(15):
+            store.remember(
+                "/repo", f"cross-cutting note #{k}, no filename mentioned",
+                kind="finding", triggers=[{"path": f"other_{k:02d}.py"}],
+            )
+        notes = store.recall_for_path("/repo", "/repo/gate.py", limit=3)
+        assert any("pool ceiling" in n.content for n in notes)
+
 
 # ---------------------------------------------------------------------------
 # format_notes_for_llm

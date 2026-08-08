@@ -2356,53 +2356,124 @@ class WorkingContextStore:
         # would silently never match an absolute anchor. `_anchors_exact_match()`
         # below is what does the precise narrowing; the SQL step here only
         # needs to guarantee no true match is excluded from the pool.
-        sql = (
+        #
+        # UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL regression fix: the triggers
+        # arm runs as its OWN query with its OWN `LIMIT pool_size`, never
+        # OR-ed into the content/anchors query. `triggers LIKE '%"path"%'`
+        # cannot be scoped to this file the way the content/anchors arms are
+        # (a declared trigger is a glob, e.g. "**/*.py", evaluated below via
+        # `path_trigger_match()` — no LIKE pattern expresses glob semantics),
+        # so it is a superset over EVERY note that declares ANY path trigger
+        # for ANY file, workspace-wide. Folding that superset into one shared
+        # `LIMIT`-bounded query meant a workspace with enough trigger-
+        # declaring notes could push genuinely file-scoped content/anchor
+        # matches off the end of the pool before this method's own Python-
+        # side narrowing ever ran — a single note declaring a broad glob
+        # like "**/*.py" could silently starve every other file's structural
+        # recall. Two independently-bounded queries hold the pool size
+        # invariant regardless of how many trigger-declaring notes exist.
+        content_anchors_sql = (
             "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
-            "AND (content LIKE ? OR content LIKE ? OR anchors LIKE ? OR anchors LIKE ?"
-            " OR triggers LIKE ?)"
+            "AND (content LIKE ? OR content LIKE ? OR anchors LIKE ? OR anchors LIKE ?)"
         )
-        params: list = [
+        content_anchors_params: list = [
             workspace,
             f"%{basename}%",
             f"%{relpath_or_basename}%",
             f"%{basename}%",
             f"%{relpath_or_basename}%",
-            '%"path"%',
         ]
+        triggers_sql = (
+            "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
+            "AND triggers LIKE ?"
+        )
+        triggers_params: list = [workspace, '%"path"%']
         if kind:
-            sql += " AND kind = ?"
-            params.append(kind)
+            content_anchors_sql += " AND kind = ?"
+            content_anchors_params.append(kind)
+            triggers_sql += " AND kind = ?"
+            triggers_params.append(kind)
         # UPG-RECALL-ORDER-CHURN: same deterministic tie-break as recall()'s
         # default SQL path — last_accessed excluded (recall() bumps it on
         # every note it returns, which would otherwise reorder these ties on
         # the very next call). UPG-TASK-NOTE-INJECTION-RECENCY: same kind='task'
         # trust/decay exemption as recall() — see that method's docstring.
-        sql += (
+        order_by = (
             " ORDER BY"
             " (CASE WHEN kind = 'task' THEN 1.0 ELSE author_trust_score END) DESC,"
             " (CASE WHEN kind = 'task' THEN 1.0 ELSE decay_score END) DESC,"
             " created_at DESC, note_id DESC LIMIT ?"
         )
-        params.append(pool_size)
+        content_anchors_sql += order_by
+        content_anchors_params.append(pool_size)
+        triggers_sql += order_by
+        triggers_params.append(pool_size)
 
         with self._conn() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        pool = [self._row_to_note(r) for r in rows]
+            content_anchors_rows = conn.execute(content_anchors_sql, content_anchors_params).fetchall()
+            triggers_rows = conn.execute(triggers_sql, triggers_params).fetchall()
 
-        matched: list[WorkingNote] = []
+        # Merge the two independently-bounded pools, deduping by note_id (a
+        # note can legitimately surface from both queries — e.g. it mentions
+        # this file in its content AND declares an unrelated path trigger —
+        # and must only occupy one slot), then re-sort the union with the
+        # same ordering the two SQL queries already used, so a note from
+        # either arm competes on equal footing rather than the content/
+        # anchors arm's rows always sorting ahead by construction.
+        def _sort_key(note: WorkingNote) -> tuple:
+            trust = 1.0 if note.kind == "task" else note.author_trust_score
+            decay = 1.0 if note.kind == "task" else note.decay_score
+            return (trust, decay, note.created_at, note.note_id)
+
+        merged_by_id: dict[int, WorkingNote] = {}
+        for row in (*content_anchors_rows, *triggers_rows):
+            note = self._row_to_note(row)
+            merged_by_id.setdefault(note.note_id, note)
+        pool = sorted(merged_by_id.values(), key=_sort_key, reverse=True)
+
+        # Each match is tagged with how strongly it relates to this file —
+        # 0 = declared anchor (strongest), 1 = declared triggers[].path glob,
+        # 2 = content-boundary mention (weakest) — matching the same
+        # relation hierarchy `agent/proactive/matcher.py`'s tier scoring
+        # already encodes downstream (declared_anchor > declared_trigger >
+        # mention). `pool` overflowing this method's own `limit` is now
+        # common once a workspace has enough trigger-declaring notes (a
+        # single broad glob like "**/*.py" genuinely matches every file, so
+        # every such note is a real match for every path) — a plain
+        # recency-ordered truncation would let a flood of newer, weaker
+        # trigger/content matches silently displace an older but stronger
+        # anchor match. Sorting by relation strength before truncating (a
+        # structural note property, not a query-content check) guarantees
+        # that never happens; `pool`'s existing recency order is preserved
+        # as the tiebreak *within* each relation tier via Python's stable
+        # sort.
+        matched: list[tuple[int, WorkingNote]] = []
         for note in pool:
-            if _anchors_exact_match(note.anchors, path_candidates):
-                matched.append(note)
+            # `trigger_path_candidates` (not the bare `path_candidates`) —
+            # a note's `anchors` entry is legitimately either workspace-
+            # relative/absolute OR a bare basename (`remember(anchors=[...])`
+            # accepts either; `agent/proactive/matcher.py`'s own
+            # `_first_anchor()` checks both `base in declared` and `path in
+            # declared`). Checking only `path_candidates` here previously
+            # meant a bare-basename anchor could never satisfy this exact-
+            # match arm unless the file sat at the workspace root, silently
+            # demoting a genuine declared-anchor note to a weaker
+            # content-boundary classification (or, when its content never
+            # happens to mention the basename, dropping it from `matched`
+            # entirely).
+            if _anchors_exact_match(note.anchors, trigger_path_candidates):
+                matched.append((0, note))
                 continue
             if path_trigger_match(note.triggers, trigger_path_candidates) is not None:
-                matched.append(note)
+                matched.append((1, note))
                 continue
             content = note.content or ""
             if _path_boundary_match(content, basename) or (
                 relpath and _path_boundary_match(content, relpath)
             ):
-                matched.append(note)
-        notes = matched[:limit]
+                matched.append((2, note))
+        matched.sort(key=lambda pair: pair[0])
+        notes = [note for _, note in matched[:limit]]
 
         notes = _scope_filter(notes, session_id=session_id, file_path=path_candidates)
         audit("RECALL", workspace=workspace, query=basename, notes_returned=len(notes), method="path")
