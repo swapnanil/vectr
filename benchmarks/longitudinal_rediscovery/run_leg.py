@@ -1902,6 +1902,18 @@ class LegRunner:
                 f"anyway. See {preflight_path}."
             )
 
+        # UPG-EVAL-HOOKCOUNT-CUMULATIVE: `probe()` (run strictly before this
+        # method -- see `main()`'s call order) already settled `self.
+        # audit_offset` once, but that settle predates the hook subprocess
+        # call just above, which is itself this leg's own preflight traffic.
+        # Re-settle now so the "post-offset" window `scorer.leg_non_vacuity`
+        # reads via `audit_since_offset` starts at the real `run_agent()`
+        # session that follows, excluding this method's own traffic too (not
+        # just `probe()`'s) -- same audit-log-quiescence mechanism `probe()`
+        # itself uses, see its own comment there.
+        self.audit_offset = self._settled_audit_size()
+        self.record["audit_offset_after_preflight"] = self.audit_offset
+
     def _mcp_config_path(self) -> Path | None:
         """Path to pass via `--mcp-config` for the two MCP arms, else None (no
         config file at all; `--strict-mcp-config` alone then yields zero servers).
@@ -1971,10 +1983,28 @@ class LegRunner:
         # `capture_and_teardown()`'s later snapshot would also include this
         # leg's own preflight traffic) and record the delta for
         # `scorer.leg_non_vacuity` (never transcript content for this arm).
+        #
+        # UPG-EVAL-HOOKCOUNT-CUMULATIVE: arms "hook-sessionstart"/"hook-full"
+        # bracket the SAME subprocess the same way, for the same reason --
+        # `hook_preflight()` (run just before this method, D1 only) and
+        # `probe()`'s `_session_start_probe()` (run even earlier, every hook
+        # arm) both legitimately fire the daemon's `hook_injection_counts`
+        # counters as their own pre-spend mechanism/reachability checks, so
+        # the end-of-leg CUMULATIVE snapshot `capture_and_teardown()` used to
+        # read directly overstated what THIS leg's real agent session alone
+        # caused. `hook_fired = any(... > 0 ...)` in `scorer.leg_non_vacuity`
+        # would otherwise read True purely from `hook_preflight()`'s own
+        # passing check, independent of whether the real session's hook
+        # fired at all -- most consequential for arm "hook-full", whose
+        # non-vacuity gate has no transcript-content conjunct to fall back
+        # on (see that function's own arm branch).
         usps_count_before: int | None = None
-        if self.arm == "hook-userpromptsubmit":
+        hook_counts_before: dict[str, Any] | None = None
+        if self.arm in ("hook-sessionstart", "hook-full", "hook-userpromptsubmit"):
             before = _http_json("GET", f"http://127.0.0.1:{self.daemon_port}/v1/status", timeout=10)
-            usps_count_before = int((before.get("hook_injection_counts") or {}).get("UserPromptSubmit", 0) or 0)
+            hook_counts_before = dict(before.get("hook_injection_counts") or {})
+            if self.arm == "hook-userpromptsubmit":
+                usps_count_before = int(hook_counts_before.get("UserPromptSubmit", 0) or 0)
 
         started = time.time()
         with transcript.open("w") as out:
@@ -1992,12 +2022,22 @@ class LegRunner:
         self.record["agent_returncode"] = proc.returncode
         self.record["agent_wall_s"] = round(time.time() - started, 1)
 
-        if self.arm == "hook-userpromptsubmit":
+        if self.arm in ("hook-sessionstart", "hook-full", "hook-userpromptsubmit"):
             after = _http_json("GET", f"http://127.0.0.1:{self.daemon_port}/v1/status", timeout=10)
-            usps_count_after = int((after.get("hook_injection_counts") or {}).get("UserPromptSubmit", 0) or 0)
-            self.record["user_prompt_submit_injection_count_before"] = usps_count_before
-            self.record["user_prompt_submit_injection_count_after"] = usps_count_after
-            self.record["user_prompt_submit_injection_delta"] = usps_count_after - (usps_count_before or 0)
+            hook_counts_after = dict(after.get("hook_injection_counts") or {})
+            if self.arm == "hook-userpromptsubmit":
+                usps_count_after = int(hook_counts_after.get("UserPromptSubmit", 0) or 0)
+                self.record["user_prompt_submit_injection_count_before"] = usps_count_before
+                self.record["user_prompt_submit_injection_count_after"] = usps_count_after
+                self.record["user_prompt_submit_injection_delta"] = usps_count_after - (usps_count_before or 0)
+            else:
+                keys = set(hook_counts_before or {}) | set(hook_counts_after)
+                self.record["hook_injection_counts_before_agent"] = hook_counts_before
+                self.record["hook_injection_counts_after_agent"] = hook_counts_after
+                self.record["hook_injection_counts"] = {
+                    k: int(hook_counts_after.get(k, 0) or 0) - int((hook_counts_before or {}).get(k, 0) or 0)
+                    for k in keys
+                }
 
     # -- teardown + scoring ------------------------------------------------
 
@@ -2005,7 +2045,17 @@ class LegRunner:
         if self.arm in ("hook-sessionstart", "hook-full", "hook-userpromptsubmit"):
             status = _http_json("GET", f"http://127.0.0.1:{self.daemon_port}/v1/status", timeout=10)
             self._out("daemon-status-final.json").write_text(json.dumps(status, indent=2))
-            self.record["hook_injection_counts"] = status.get("hook_injection_counts")
+            # UPG-EVAL-HOOKCOUNT-CUMULATIVE: this final `/v1/status` read is
+            # end-of-leg CUMULATIVE (it also includes this leg's own pre-agent
+            # `hook_preflight()`/`probe()` traffic on top of the real agent
+            # session) -- kept here purely as a diagnostic snapshot, never as
+            # the non-vacuity evidence `scorer.leg_non_vacuity` consumes.
+            # `run_agent()` already recorded the delta-bracketed
+            # `record["hook_injection_counts"]` (arms "hook-sessionstart"/
+            # "hook-full") and `record["user_prompt_submit_injection_delta"]`
+            # (arm "hook-userpromptsubmit") that scoring actually reads; do
+            # not overwrite either here.
+            self.record["hook_injection_counts_cumulative_final"] = status.get("hook_injection_counts")
 
         health = _http_json("GET", f"http://127.0.0.1:{self.proxy_port}/__vectr_proxy/health", timeout=10)
         self._out("proxy-health.json").write_text(json.dumps(health, indent=2))
