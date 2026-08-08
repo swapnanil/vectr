@@ -115,6 +115,18 @@ DEFAULT_PROXY_PORT = 8900
 ARMS = ("none", "mcp", "mcp-bare", "proxy", "hook-sessionstart", "hook-full", "hook-userpromptsubmit")
 NOTE_VARIANTS = ("none", "plain", "provenance", "verifiable")
 
+# UPG-EVAL-STORE-MATCH (`verify_note_store_matched()` below): the only two arms
+# that connect a live vectr MCP server to the agent (mirrors `scorer.py`'s own
+# `_EXPECTED_MCP_SERVERS` -- the arms whose expected `system.init.mcp_servers`
+# entry is non-empty). Every other arm's agent has no vectr tool at all, so the
+# ONLY way a note can ever enter its store is this harness's own single
+# `plant_note()` call at k==2 -- for those arms `notes_in_store_at_start` must be
+# EXACTLY 1 at every k>=2 leg. These two are excluded from that exact-count
+# invariant: an agent with live tool access may legitimately call
+# `vectr_remember` during an earlier leg and grow the store past 1 by the time a
+# later leg starts, which is real measured behavior, not a harness defect.
+_ARMS_WITH_LIVE_TOOL_ACCESS = ("mcp", "mcp-bare")
+
 # Vectr/IDE-owned paths excluded from the drift-verification manifest and from
 # leg_start_baselines -- structural and uniform across every scenario/arm/leg
 # (never keyed on query content): `.git` for repeated-hashing efficiency across a
@@ -1248,7 +1260,44 @@ class LegRunner:
         payload["triggers"] = triggers
         payload["kind"] = "directive"
 
+    def _reset_note_store(self) -> None:
+        """UPG-EVAL-STORE-MATCH: clear every note from this trajectory's store
+        immediately before this leg's plant -- `plant_note()` runs exactly once per
+        trajectory (only k==2, `run_plan.py::_leg_cmd`: k>=3 forwards
+        `--planted-anchor`/`--planted-note-id` instead of planting again), so the
+        store must be EMPTY immediately before that single plant for the resulting
+        `notes_in_store_at_start` to be note-count matched across every arm.
+
+        Without this, a k==2 attempt that plants successfully and THEN fails later
+        in the same leg (`write_hooks()`/`hook_preflight()` are extra abortable
+        steps arms "hook-sessionstart"/"hook-full" run AFTER `plant_note()` that
+        arm "proxy" does not) leaves its just-planted note sitting in
+        `--db-dir` -- which `run_plan.py`'s failed-leg retry path
+        (`_supersede(leg_dir)`) supersedes only the leg's own artifact directory,
+        never the trajectory-persistent `--db-dir` itself. A retried plant then adds
+        a SECOND note on top of the first attempt's, and a further retry a third,
+        with no reset in between -- exactly the asymmetry a review of recorded runs
+        found: hook legs beginning with 2 (k2) / 3 (k3) notes in store against
+        exactly 1 in every proxy leg, because hook arms fail-after-plant more often.
+
+        Uses the existing `/v1/memory/clear` route (`app/routes.py`, the same
+        primitive `vectr_forget(all=true)` already exposes on the MCP surface) --
+        not a new mechanism. Idempotent and a practical no-op on a fresh db (there
+        is nothing to delete). Best-effort: a failed clear call is recorded
+        diagnostically rather than aborting the leg here, because
+        `verify_note_store_matched()` (called right after `plant_note()` in
+        `main()`, before any paid agent session) is the actual enforcement point --
+        it catches a clear that silently failed to leave the store empty via the
+        post-plant count itself, with a clearer diagnostic than a raw HTTP error
+        would give in isolation.
+        """
+        out = _http_json(
+            "POST", f"http://127.0.0.1:{self.daemon_port}/v1/memory/clear", {}, timeout=30
+        )
+        self.record["note_store_reset_before_plant"] = out.get("deleted")
+
     def plant_note(self) -> None:
+        self._reset_note_store()
         variant = self._find_note_variant()
         payload: dict[str, Any] = {
             "content": variant.content,
@@ -1293,6 +1342,50 @@ class LegRunner:
         if isinstance(post_plant_count, int):
             self.notes_count_at_start = post_plant_count
             self.record["notes_in_store_at_start"] = post_plant_count
+
+    def verify_note_store_matched(self) -> None:
+        """UPG-EVAL-STORE-MATCH pre-spend gate: mirrors `probe()`'s and
+        `hook_preflight()`'s "fix the scenario, not the score" contract -- catch a
+        store-count mismatch BEFORE the paid `claude -p` session, not after.
+
+        Called from `main()` right after the `--plant-note` step (whether or not
+        THIS leg itself planted -- k>=3 legs never plant but still read this same
+        trajectory-persistent store) and before any daemon-side probe or agent
+        spawn. For arm "none" there is nothing to check (its own branch elsewhere
+        already asserts an empty store). For every arm except
+        `_ARMS_WITH_LIVE_TOOL_ACCESS`, the store's only possible content-adding
+        event across an entire trajectory is this harness's own single
+        `plant_note()` call at k==2 (`_reset_note_store()`'s docstring has the
+        retry-accumulation defect this closes) -- so `notes_count_at_start` must be
+        exactly 1, never merely non-zero. `_ARMS_WITH_LIVE_TOOL_ACCESS` arms are
+        exempt: their agent has live vectr tool access, so a count above 1 by a
+        later leg can be genuine agent behavior from an earlier leg, not a defect.
+
+        Aborts (nonzero exit) on a mismatch unless `--allow-store-mismatch` is
+        passed, matching every other preflight gate's override pattern in this
+        file. `scorer.leg_non_vacuity()` carries the same invariant for the
+        arms this function also gates (post-hoc, arm-blind-outcome-preserving) --
+        this function exists so the mismatch is caught before money is spent, not
+        only recorded afterward.
+        """
+        if self.arm == "none" or self.arm in _ARMS_WITH_LIVE_TOOL_ACCESS:
+            return
+        if self.notes_count_at_start == 1:
+            return
+        self.record["store_count_matched"] = False
+        if self.args.allow_store_mismatch:
+            self.record["store_mismatch_allowed"] = True
+            return
+        raise SystemExit(
+            f"ABORT: notes_in_store_at_start={self.notes_count_at_start!r} != 1 for "
+            f"arm {self.arm!r} at k={self.k} (UPG-EVAL-STORE-MATCH) -- this arm's "
+            f"agent has no live vectr tool access, so the store's only "
+            f"content-adding event is this harness's own single plant at k==2; any "
+            f"other count means the trajectory-persistent --db-dir is carrying "
+            f"stray notes from an earlier failed-then-retried attempt at this same "
+            f"k, or the plant/forward chain broke. Pass --allow-store-mismatch to "
+            f"override for debugging."
+        )
 
     def probe(self) -> None:
         """Daemon-side reachability probes (DESIGN.md 4.1, 7.3, and the
@@ -2104,6 +2197,12 @@ def _build_argparser() -> argparse.ArgumentParser:
         "hook mechanism delivers the planted note on this leg's own scratch "
         "daemon (arms hook-sessionstart/hook-full only)."
     ))
+    ap.add_argument("--allow-store-mismatch", action="store_true", help=(
+        "Record a leg even when verify_note_store_matched() finds "
+        "notes_in_store_at_start != 1 for an arm with no live vectr tool access "
+        "(UPG-EVAL-STORE-MATCH). Debugging only -- a real campaign run should "
+        "never need this; it means the trajectory's --db-dir carries stray notes."
+    ))
     ap.add_argument("--probe-only", action="store_true", help=(
         "ZERO-QUOTA: materialize/restore, start the daemon, optionally plant, run "
         "the daemon-side probes, tear down, print a summary. Spawns no agent, writes "
@@ -2182,6 +2281,7 @@ def main() -> None:
             runner.start_daemon()
             if args.plant_note:
                 runner.plant_note()
+            runner.verify_note_store_matched()
             runner.probe()
         finally:
             _stop_daemon(args.vectr_bin, runner.workspace, runner.daemon_port, runner._daemon_env())
@@ -2200,6 +2300,7 @@ def main() -> None:
         runner.start_daemon()
         if args.plant_note:
             runner.plant_note()
+        runner.verify_note_store_matched()
         runner.probe()
         runner.start_proxy()
         if runner.arm in ("hook-sessionstart", "hook-full", "hook-userpromptsubmit"):

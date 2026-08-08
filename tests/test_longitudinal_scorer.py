@@ -948,6 +948,86 @@ def test_missing_transcript_degrades_to_not_acquired(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# UPG-EVAL-STORE-MATCH: notes_count_at_start must be EXACTLY 1 (not merely
+# non-zero) for every arm without live vectr tool access. Arms "mcp"/
+# "mcp-bare" are exempt (their agent can legitimately grow the store past 1
+# via its own vectr_remember calls in an earlier leg -- see
+# leg_non_vacuity's own docstring).
+# ---------------------------------------------------------------------------
+
+
+def test_leg_non_vacuity_proxy_rejects_a_store_count_above_one():
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="proxy", k=3, events=events, notes_count_at_start=2,
+        proxy_injected=1, planted_anchor="note:4",
+    )
+    assert result["valid"] is False
+    assert "notes_count_at_start=2" in result["invalid_reason"]
+    assert "!= 1" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_proxy_rejects_a_store_count_of_zero():
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="proxy", k=2, events=events, notes_count_at_start=0,
+        proxy_injected=1, planted_anchor="note:4",
+    )
+    assert result["valid"] is False
+    assert "!= 1" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_hook_sessionstart_rejects_a_store_count_above_one(tmp_path):
+    events = _init_and_result_events(mcp_servers=[])
+    transcript_path = _write_transcript(tmp_path, events)
+    result = scorer.leg_non_vacuity(
+        arm="hook-sessionstart", k=3, events=events, notes_count_at_start=2,
+        hook_injection_counts={"session_start": 1}, transcript_path=transcript_path,
+        planted_note_content="the fact", note_id=9,
+    )
+    assert result["valid"] is False
+    assert "!= 1" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_hook_userpromptsubmit_rejects_a_store_count_above_one():
+    events = _init_and_result_events(mcp_servers=[])
+    result = scorer.leg_non_vacuity(
+        arm="hook-userpromptsubmit", k=3, events=events, notes_count_at_start=2,
+        user_prompt_submit_injection_delta=1,
+    )
+    assert result["valid"] is False
+    assert "!= 1" in result["invalid_reason"]
+
+
+def test_leg_non_vacuity_mcp_arm_still_accepts_a_store_count_above_one():
+    """Arms 'mcp'/'mcp-bare' are exempt from the exact-count-1 invariant --
+    their agent has live vectr tool access, so a count above 1 by a later leg
+    can be genuine agent behavior (its own vectr_remember calls from an
+    earlier leg), not a harness defect."""
+    events = _init_and_result_events(
+        mcp_servers=[{"name": "vectr", "status": "connected"}],
+        tools=["Bash", "mcp__vectr__search", "mcp__vectr__recall"],
+    )
+    result = scorer.leg_non_vacuity(
+        arm="mcp", k=3, events=events, notes_count_at_start=4, proxy_injected=0,
+        recall_probe_returned_note=True,
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+
+
+def test_leg_non_vacuity_mcp_bare_arm_still_accepts_a_store_count_above_one():
+    events = _init_and_result_events(
+        mcp_servers=[{"name": "vectr", "status": "connected"}],
+        tools=["Bash", "mcp__vectr__search", "mcp__vectr__recall"],
+    )
+    result = scorer.leg_non_vacuity(
+        arm="mcp-bare", k=3, events=events, notes_count_at_start=5, proxy_injected=0,
+        recall_probe_returned_note=True,
+    )
+    assert result["valid"] is True, result["invalid_reason"]
+
+
+# ---------------------------------------------------------------------------
 # exact anchor matching: note:4 is never satisfied by note:41 (DESIGN.md 11.6)
 # ---------------------------------------------------------------------------
 
@@ -959,8 +1039,13 @@ def test_leg_non_vacuity_exact_anchor_match_not_prefix(tmp_path):
     audit_log.write_text(
         "2026-07-29T12:00:00Z PROACTIVE_INJECT anchors=note:41 count=1\n", encoding="utf-8"
     )
+    # notes_count_at_start=1: arm "proxy" has no live vectr tool access, so the
+    # store's only content-adding event across a trajectory is this harness's
+    # single k==2 plant (UPG-EVAL-STORE-MATCH) -- any other value now fails
+    # leg_non_vacuity's own store-match premise, independent of the anchor
+    # check this test targets.
     result = scorer.leg_non_vacuity(
-        arm="proxy", k=1, events=events, notes_count_at_start=3,
+        arm="proxy", k=1, events=events, notes_count_at_start=1,
         audit_log=audit_log, proxy_injected=1, planted_anchor="note:4",
     )
     assert result["non_vacuity"]["planted_anchor_injections"] == 0
@@ -971,7 +1056,7 @@ def test_leg_non_vacuity_exact_anchor_match_not_prefix(tmp_path):
         "2026-07-29T12:00:01Z PROACTIVE_INJECT anchors=note:4 count=1\n", encoding="utf-8"
     )
     result2 = scorer.leg_non_vacuity(
-        arm="proxy", k=1, events=events, notes_count_at_start=3,
+        arm="proxy", k=1, events=events, notes_count_at_start=1,
         audit_log=audit_log, proxy_injected=1, planted_anchor="note:4",
     )
     assert result2["non_vacuity"]["planted_anchor_injections"] == 1
@@ -1000,7 +1085,7 @@ def test_leg_non_vacuity_proxy_displaced_channel_delivery_is_valid_despite_no_hi
     audit_log.write_text("", encoding="utf-8")  # no PROACTIVE_INJECT line for note:7 at all
 
     result = scorer.leg_non_vacuity(
-        arm="proxy", k=2, events=events, notes_count_at_start=2,
+        arm="proxy", k=2, events=events, notes_count_at_start=1,
         audit_log=audit_log, proxy_injected=1, planted_anchor="note:7",
         channel_delivery="displaced",
     )
@@ -1019,7 +1104,7 @@ def test_leg_non_vacuity_proxy_without_displaced_annotation_still_invalid_on_no_
     audit_log.write_text("", encoding="utf-8")
 
     result = scorer.leg_non_vacuity(
-        arm="proxy", k=2, events=events, notes_count_at_start=2,
+        arm="proxy", k=2, events=events, notes_count_at_start=1,
         audit_log=audit_log, proxy_injected=1, planted_anchor="note:7",
         channel_delivery=None,
     )
@@ -1027,7 +1112,7 @@ def test_leg_non_vacuity_proxy_without_displaced_annotation_still_invalid_on_no_
     assert "planted anchor" in result["invalid_reason"]
 
     result2 = scorer.leg_non_vacuity(
-        arm="proxy", k=2, events=events, notes_count_at_start=2,
+        arm="proxy", k=2, events=events, notes_count_at_start=1,
         audit_log=audit_log, proxy_injected=1, planted_anchor="note:7",
         channel_delivery="delivered_default",
     )

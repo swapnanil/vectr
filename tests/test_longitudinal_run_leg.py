@@ -91,6 +91,9 @@ def test_plant_note_records_post_plant_note_count(tmp_path, monkeypatch):
 
     def fake_http_json(method, url, payload=None, timeout=30):
         calls.append((method, url))
+        if method == "POST" and url.endswith("/v1/memory/clear"):
+            # UPG-EVAL-STORE-MATCH: plant_note() resets the store first.
+            return {"deleted": 0}
         if method == "POST" and url.endswith("/v1/remember"):
             return {"note_id": 7}
         if method == "GET" and url.endswith("/v1/status"):
@@ -107,12 +110,16 @@ def test_plant_note_records_post_plant_note_count(tmp_path, monkeypatch):
     assert runner.record["notes_in_store_at_start"] == 1
     # ...and the stale pre-plant snapshot is preserved separately, not discarded.
     assert runner.record["notes_in_store_pre_plant"] == 0
-    # One GET /v1/status re-snapshot happened, after the POST /v1/remember plant.
+    # One GET /v1/status re-snapshot happened, after the POST /v1/remember plant,
+    # which itself happened after the store reset (UPG-EVAL-STORE-MATCH).
+    assert ("POST", f"http://127.0.0.1:{runner.daemon_port}/v1/memory/clear") in calls
     assert ("POST", f"http://127.0.0.1:{runner.daemon_port}/v1/remember") in calls
     assert ("GET", f"http://127.0.0.1:{runner.daemon_port}/v1/status") in calls
+    clear_i = calls.index(("POST", f"http://127.0.0.1:{runner.daemon_port}/v1/memory/clear"))
     plant_i = calls.index(("POST", f"http://127.0.0.1:{runner.daemon_port}/v1/remember"))
     status_i = calls.index(("GET", f"http://127.0.0.1:{runner.daemon_port}/v1/status"))
-    assert plant_i < status_i
+    assert clear_i < plant_i < status_i
+    assert runner.record["note_store_reset_before_plant"] == 0
 
 
 def test_plant_note_falls_back_to_pre_plant_count_on_bad_status_reply(tmp_path, monkeypatch):
@@ -125,6 +132,8 @@ def test_plant_note_falls_back_to_pre_plant_count_on_bad_status_reply(tmp_path, 
     runner.record["notes_in_store_at_start"] = 3
 
     def fake_http_json(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/memory/clear"):
+            return {"deleted": 3}
         if method == "POST" and url.endswith("/v1/remember"):
             return {"note_id": 9}
         if method == "GET" and url.endswith("/v1/status"):
@@ -899,6 +908,8 @@ def test_plant_note_sends_directive_kind_and_session_start_trigger_for_hook_arms
     captured = {}
 
     def fake_http_json(method, url, payload=None, timeout=30):
+        if method == "POST" and url.endswith("/v1/memory/clear"):
+            return {"deleted": 0}
         if method == "POST" and url.endswith("/v1/remember"):
             captured["payload"] = payload
             return {"note_id": 7}
@@ -1936,3 +1947,113 @@ def test_spawn_env_for_agent_strips_and_resets_git_identity_env_vars(monkeypatch
     assert env["GIT_COMMITTER_EMAIL"] == scen.SYNTHETIC_GIT_USER_EMAIL
     assert "Real Operator" not in env.values()
     assert "real.operator@example.org" not in env.values()
+
+
+# ---------------------------------------------------------------------------
+# UPG-EVAL-STORE-MATCH: exact-count-1 store premise for non-tool arms
+# ---------------------------------------------------------------------------
+#
+# Root cause: `run_plan.py`'s failed-leg retry (`_supersede(leg_dir)`) only
+# renames away a leg's own artifact directory, never the trajectory-persistent
+# `--db-dir`. A k==2 attempt that plants successfully and then fails a LATER
+# step in the same leg (arms "hook-sessionstart"/"hook-full" run
+# write_hooks()/hook_preflight() after plant_note(); arm "proxy" does not) gets
+# retried, and the retry plants a second note on top of the first, with no
+# reset in between. Recorded runs showed hook legs starting with 2 (k2) / 3
+# (k3) notes in store against exactly 1 in every proxy leg. Fix: (a)
+# `plant_note()` clears the store via `/v1/memory/clear` immediately before
+# planting, and (b) `verify_note_store_matched()` gates
+# `notes_count_at_start == 1` pre-spend for every arm without live vectr tool
+# access (arms "mcp"/"mcp-bare" are exempt: their agent can legitimately grow
+# the store past 1 via its own `vectr_remember` calls in an earlier leg).
+
+
+def test_verify_note_store_matched_aborts_when_count_is_not_one_for_proxy_arm(tmp_path):
+    runner = _make_runner(tmp_path)
+    runner.notes_count_at_start = 2
+    with pytest.raises(SystemExit) as excinfo:
+        runner.verify_note_store_matched()
+    assert "!= 1" in str(excinfo.value)
+    assert runner.record["store_count_matched"] is False
+
+
+def test_verify_note_store_matched_aborts_when_count_is_zero_for_proxy_arm(tmp_path):
+    runner = _make_runner(tmp_path)
+    runner.notes_count_at_start = 0
+    with pytest.raises(SystemExit):
+        runner.verify_note_store_matched()
+
+
+def test_verify_note_store_matched_passes_when_count_is_exactly_one(tmp_path):
+    runner = _make_runner(tmp_path)
+    runner.notes_count_at_start = 1
+    runner.verify_note_store_matched()  # must not raise
+    assert "store_count_matched" not in runner.record
+
+
+def test_verify_note_store_matched_exempts_mcp_arm_with_count_above_one(tmp_path):
+    """Arms with live vectr tool access can legitimately carry more than one
+    note into a later leg (the agent's own vectr_remember calls from an
+    earlier leg) -- this is real measured behavior, not the defect the
+    exact-count-1 gate targets, so these arms are checked only for "> 0"
+    elsewhere (scorer.leg_non_vacuity), never here.
+    """
+    runner = _make_runner(tmp_path, arm="mcp")
+    runner.notes_count_at_start = 4
+    runner.verify_note_store_matched()  # must not raise
+    assert "store_count_matched" not in runner.record
+
+
+def test_verify_note_store_matched_exempts_mcp_bare_arm_with_count_above_one(tmp_path):
+    runner = _make_runner(tmp_path, arm="mcp-bare")
+    runner.notes_count_at_start = 3
+    runner.verify_note_store_matched()  # must not raise
+
+
+def test_verify_note_store_matched_is_a_noop_for_arm_none(tmp_path):
+    """Arm 'none' never plants (`--plant-note` is rejected outright for it in
+    `_validate_args`), so there is no plant-count invariant to check here --
+    its own store-emptiness premise is asserted by scorer.leg_non_vacuity's
+    "none" branch instead.
+    """
+    runner = _make_runner(tmp_path, arm="none")
+    runner.notes_count_at_start = 0
+    runner.verify_note_store_matched()  # must not raise
+    runner.notes_count_at_start = 5
+    runner.verify_note_store_matched()  # still must not raise -- out of scope here
+
+
+def test_verify_note_store_matched_checks_hook_arms_too(tmp_path):
+    for arm in ("hook-sessionstart", "hook-full", "hook-userpromptsubmit"):
+        runner = _make_runner(tmp_path, arm=arm)
+        runner.notes_count_at_start = 2
+        with pytest.raises(SystemExit):
+            runner.verify_note_store_matched()
+        runner2 = _make_runner(tmp_path, arm=arm)
+        runner2.notes_count_at_start = 1
+        runner2.verify_note_store_matched()  # must not raise
+
+
+def test_verify_note_store_matched_allow_override_flag_records_but_does_not_abort(tmp_path):
+    runner = _make_runner(tmp_path, allow_store_mismatch=True)
+    runner.notes_count_at_start = 2
+    runner.verify_note_store_matched()  # must not raise
+    assert runner.record["store_count_matched"] is False
+    assert runner.record["store_mismatch_allowed"] is True
+
+
+def test_reset_note_store_calls_memory_clear_and_records_deleted_count(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path)
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        calls.append((method, url))
+        return {"deleted": 5}
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+
+    runner._reset_note_store()
+
+    assert ("POST", f"http://127.0.0.1:{runner.daemon_port}/v1/memory/clear") in calls
+    assert runner.record["note_store_reset_before_plant"] == 5

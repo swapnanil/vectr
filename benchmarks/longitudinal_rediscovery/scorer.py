@@ -970,6 +970,26 @@ def leg_non_vacuity(
     from that one expectation -- every other arm-"proxy" gate (`notes_count_
     at_start`, `proxy_injected > 0`) is unaffected, and every other arm
     never reads this parameter at all.
+
+    `notes_count_at_start` (UPG-EVAL-STORE-MATCH): for every arm WITHOUT live
+    vectr tool access ("proxy", "hook-sessionstart", "hook-full",
+    "hook-userpromptsubmit"), the store's only possible content-adding event
+    across an entire trajectory is `run_leg.py::LegRunner.plant_note()`'s
+    single call at k==2 -- so the premise check is exact equality to 1, not
+    merely non-zero. A higher count means the trajectory-persistent
+    `--db-dir` picked up a stray note from an earlier failed-then-retried
+    plant attempt at k==2 (`run_plan.py::_supersede` only renames away the
+    leg's own artifact directory, never `--db-dir` itself); a lower count (0)
+    means the plant/forward chain broke. Arms "mcp"/"mcp-bare" are exempt
+    from this exact-equality check (only "> 0" is required) because their
+    agent has live tool access and may legitimately grow the store past 1
+    via its own `vectr_remember` calls in an earlier leg -- that is real
+    measured behavior, not a defect. `run_leg.py::LegRunner
+    .verify_note_store_matched()` carries this same invariant as a pre-spend
+    gate (before any paid agent session runs), and
+    `LegRunner._reset_note_store()` clears the store immediately before
+    every plant so a retried k==2 attempt cannot accumulate notes in the
+    first place.
     """
     if arm not in _EXPECTED_MCP_SERVERS:
         raise ValueError(f"unknown arm {arm!r}")
@@ -1053,6 +1073,13 @@ def leg_non_vacuity(
             reasons.append(f"proxy injected={proxy_injected} for arm 'none'")
 
     elif arm in ("mcp", "mcp-bare"):
+        # UPG-EVAL-STORE-MATCH: deliberately NOT tightened to != 1 like the
+        # non-tool arms below. These two arms give the agent a live vectr MCP
+        # server, so a later leg's store can legitimately hold more than the
+        # one harness-planted note if the agent itself called
+        # vectr_remember/vectr_forget during an earlier leg -- that is real
+        # measured behavior, not a harness defect. Only "> 0" is a valid
+        # premise check here.
         if not notes_count_at_start:
             reasons.append(f"notes_count_at_start is 0 for arm {arm!r}")
 
@@ -1115,8 +1142,21 @@ def leg_non_vacuity(
             reasons.append(f"proxy injected={proxy_injected} for arm {arm!r}")
 
     elif arm == "proxy":
-        if not notes_count_at_start:
-            reasons.append("notes_count_at_start is 0 for arm 'proxy'")
+        # UPG-EVAL-STORE-MATCH: arm 'proxy' has no live vectr tool access, so
+        # across an entire trajectory the store's only content-adding event is
+        # `run_leg.py::LegRunner.plant_note()`'s single call at k==2 (k>=3 legs
+        # never re-plant, see `run_plan.py::_leg_cmd`). notes_count_at_start
+        # must therefore be exactly 1, not merely non-zero -- a higher count
+        # means the trajectory-persistent --db-dir accumulated stray notes
+        # from an earlier failed-then-retried attempt at plant time
+        # (`run_plan.py::_supersede` only renames away the leg's own artifact
+        # directory, never --db-dir). `run_leg.py::LegRunner.plant_note()` now
+        # resets the store immediately before planting
+        # (`_reset_note_store()`), and `verify_note_store_matched()` gates this
+        # same invariant pre-spend; this check is the arm-blind, post-hoc twin
+        # of that gate for legs/records that predate it or override it.
+        if notes_count_at_start != 1:
+            reasons.append(f"notes_count_at_start={notes_count_at_start!r} != 1 for arm 'proxy'")
         hits = [e for e in inject_events if planted_anchor in (e.get("anchors") or "").split(",")]
         nv["planted_anchor_injections"] = len(hits)
         nv["planted_note_retrieved"] = bool(hits)
@@ -1126,8 +1166,11 @@ def leg_non_vacuity(
             reasons.append("proxy injected == 0 for arm 'proxy'")
 
     elif arm in ("hook-sessionstart", "hook-full"):
-        if not notes_count_at_start:
-            reasons.append(f"notes_count_at_start is 0 for arm {arm!r}")
+        # UPG-EVAL-STORE-MATCH: same exact-count-1 invariant as arm 'proxy'
+        # above (no live vectr tool access -> the single k==2 plant is the
+        # store's only content-adding event for the whole trajectory).
+        if notes_count_at_start != 1:
+            reasons.append(f"notes_count_at_start={notes_count_at_start!r} != 1 for arm {arm!r}")
         counts = dict(hook_injection_counts or {})
         nv["hook_injection_counts"] = counts
         hook_fired = any(int(v or 0) > 0 for v in counts.values())
@@ -1160,8 +1203,10 @@ def leg_non_vacuity(
             nv["planted_content_in_transcript"] = None
 
     else:  # hook-userpromptsubmit -- see this function's own docstring
-        if not notes_count_at_start:
-            reasons.append(f"notes_count_at_start is 0 for arm {arm!r}")
+        # UPG-EVAL-STORE-MATCH: same exact-count-1 invariant (see the 'proxy'
+        # branch above for the full rationale).
+        if notes_count_at_start != 1:
+            reasons.append(f"notes_count_at_start={notes_count_at_start!r} != 1 for arm {arm!r}")
         delta = user_prompt_submit_injection_delta
         nv["user_prompt_submit_injection_delta"] = delta
         hook_fired = delta is not None and int(delta) >= 1
