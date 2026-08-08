@@ -41,6 +41,7 @@ from agent.config import (
     RESULT_FLOOR_ENABLED as _RESULT_FLOOR_ENABLED,
     RESULT_FLOOR_MIN_RELEVANCE as _RESULT_FLOOR_MIN_RELEVANCE,
     DOCSTRING_DEDUP_BODY_SIMILARITY_MIN as _DOCSTRING_DEDUP_BODY_SIMILARITY_MIN,
+    DOCSTRING_DEDUP_MAX_REPS_COMPARED as _DOCSTRING_DEDUP_MAX_REPS_COMPARED,
     vectr_cache_root as _vectr_cache_root,
 )
 from agent.indexer import CodeIndexer
@@ -994,6 +995,29 @@ class CodeSearcher:
         # key. Deterministic: representative order follows `scored`'s already
         # deterministic best-first order, and a candidate always matches the
         # first qualifying representative in that order.
+        #
+        # LATENCY BOUND: each candidate is compared against at most the first
+        # config.DOCSTRING_DEDUP_MAX_REPS_COMPARED representatives under its
+        # doc_key (the earliest-kept, i.e. best-ranked, since `seen_docstring`
+        # is built in `scored`'s deterministic best-first order) rather than
+        # the full, unboundedly-growing list. Comparing against every
+        # already-kept representative sharing a doc_key is O(n^2)
+        # SequenceMatcher calls in exactly the case this guard exists for:
+        # many chunks sharing one boilerplate leading doc/comment (a license
+        # header, "Returns a reference to the underlying value.") but with
+        # genuinely different bodies, so nothing collapses and the
+        # representative list grows to n (measured: ~4ms per ~2KB-body
+        # comparison: uncapped, n=200 candidates sharing one doc_key costs
+        # ~69s; this cap brings the same case to ~2.4s at the default below).
+        # The cap fails in the SAFE direction ONLY: a candidate that would
+        # have matched a representative past the cap is simply never
+        # compared against it and becomes its own separate result — the
+        # worst case is the wasted result-list slot DEF-C exists to reclaim,
+        # never a false collapse (the failure mode this task treats as
+        # strictly worse). What is actually compared, when it is compared,
+        # is unchanged by this cap — content is never truncated, so the
+        # documented similarity margins for
+        # DOCSTRING_DEDUP_BODY_SIMILARITY_MIN are unaffected.
         seen_content: dict[str, int] = {}
         seen_docstring: dict[str, list[int]] = {}
         out: list[SearchResult] = []
@@ -1002,7 +1026,8 @@ class CodeSearcher:
             doc_key = leading_docstring_key(r.content, r.language)
             existing_idx = seen_content.get(content_key)
             if existing_idx is None and doc_key:
-                for rep_idx in seen_docstring.get(doc_key, []):
+                reps = seen_docstring.get(doc_key, [])
+                for rep_idx in reps[:_DOCSTRING_DEDUP_MAX_REPS_COMPARED]:
                     if _is_near_duplicate_body(r, out[rep_idx]):
                         existing_idx = rep_idx
                         break

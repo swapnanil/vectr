@@ -206,6 +206,15 @@ DOCSTRING_DEDUP_BODY_SIMILARITY_MIN : float
     its impl, or two different overloads, often carry the identical
     copy-pasted doc summary over genuinely different implementations.
 
+DOCSTRING_DEDUP_MAX_REPS_COMPARED : int
+    Max already-kept representatives compared per doc_key before a new
+    candidate stops being compared and becomes its own representative
+    (LANE-P1-DEDUP latency bound on the guard above). Bounds the collapse
+    loop to O(n * k) instead of O(n^2) SequenceMatcher calls when many
+    chunks share one boilerplate leading doc but are genuinely different.
+    Fails in the safe direction only — a candidate past this bound is never
+    falsely collapsed, only left as an extra separate result.
+
 INDEXING_FLOW_SCAN_HEAD_BYTES : int
     Bytes scanned from the start of a `.js` file when detecting Flow type syntax
     (UPG-JSFLOW-SYMBOLS). A header scan, not a full-file walk.
@@ -767,6 +776,7 @@ _ddd_cfg: dict[str, Any] = _cfg["ranking"]["docstring_dedup"]
 DOCSTRING_DEDUP_LINES: int = int(_ddd_cfg["lines"])
 DOCSTRING_DEDUP_MIN_CHARS: int = int(_ddd_cfg["min_chars"])
 DOCSTRING_DEDUP_BODY_SIMILARITY_MIN: float = float(_ddd_cfg["body_similarity_min_ratio"])
+DOCSTRING_DEDUP_MAX_REPS_COMPARED: int = int(_ddd_cfg["max_reps_compared"])
 
 # ---------------------------------------------------------------------------
 # Rerank pool sizes (UPG-12.1) + reranker model

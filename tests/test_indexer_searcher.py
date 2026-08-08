@@ -3817,6 +3817,63 @@ class TestNearDuplicateResultSetCollapse:
         assert all(d == dup_counts[0] for d in dup_counts), f"non-deterministic dup_count: {dup_counts}"
         assert len(runs[0]) == 2
 
+    def test_comparison_count_bounded_per_doc_key(self, searcher, monkeypatch) -> None:
+        """Pins the LATENCY BOUND itself (not the gates' correctness, already
+        covered above): a large pool of chunks sharing one boilerplate
+        leading doc/comment but with genuinely different bodies — e.g. many
+        distinct accessor methods all documented "Returns a reference to the
+        underlying value." — must not blow up the number of
+        _is_near_duplicate_body comparisons performed as the pool grows.
+        Asserted on the COMPARISON COUNT (deterministic), never on
+        wall-clock (flaky in CI). Without the per-doc_key representative cap
+        this is O(n^2): every candidate compares against every prior
+        representative, because none of them ever collapse (all genuinely
+        different). With the cap it is bounded to at most
+        n * DOCSTRING_DEDUP_MAX_REPS_COMPARED."""
+        import agent.searcher as searcher_module
+        from agent.config import DOCSTRING_DEDUP_MAX_REPS_COMPARED
+
+        call_count = 0
+        real_fn = searcher_module._is_near_duplicate_body
+
+        def counting_wrapper(a, b):
+            nonlocal call_count
+            call_count += 1
+            return real_fn(a, b)
+
+        monkeypatch.setattr(searcher_module, "_is_near_duplicate_body", counting_wrapper)
+
+        def make_body(i: int) -> str:
+            # Long enough, and varied enough per line, that the normalized
+            # SequenceMatcher ratio between any two of these sits well below
+            # the 0.75 gate-2 threshold (measured ~0.24 for this shape) —
+            # a short, near-identical-except-one-digit body would defeat the
+            # point of this test by legitimately collapsing under gate 2.
+            lines = [
+                f"    let field_{i}_{j} = compute_step_{j}(state, ctx_{i});"
+                for j in range(15)
+            ]
+            return (
+                "/// Returns a reference to the underlying value.\n"
+                f"fn accessor_{i}(&self) -> &Value {{\n" + "\n".join(lines) + "\n}\n"
+            )
+
+        n = 50
+        cands = [
+            _sr(make_body(i), path=f"/p/src/mod_{i}.rs", lang="rust", node_type="function_item")
+            for i in range(n)
+        ]
+        out = searcher._apply_quality_and_dedup("accessor", cands)
+
+        assert call_count <= n * DOCSTRING_DEDUP_MAX_REPS_COMPARED, (
+            f"comparison count {call_count} exceeds the O(n*k) bound "
+            f"(n={n}, k={DOCSTRING_DEDUP_MAX_REPS_COMPARED}) — the "
+            f"per-doc_key representative cap regressed"
+        )
+        # Sanity: these genuinely-different chunks never collapse — the cap
+        # must not have caused (or masked) a false collapse either.
+        assert len(out) == n
+
 
 class TestImportancePrior:
     """ARCH-1b: file-level PageRank importance blended as a relevance-gated

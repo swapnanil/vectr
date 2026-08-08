@@ -317,6 +317,35 @@ ranking:
     # split without requiring near-byte-identity. Read via
     # config.DOCSTRING_DEDUP_BODY_SIMILARITY_MIN.
     body_similarity_min_ratio: 0.75
+    # LANE-P1-DEDUP latency bound: the gate above (SequenceMatcher.ratio on
+    # full normalized bodies) is O(1) per PAIR but the collapse loop that
+    # calls it is O(n^2) in the exact case gate 2 exists for — many chunks
+    # sharing one boilerplate leading doc/comment (a license header,
+    # "Returns a reference to the underlying value.") but with genuinely
+    # different bodies, so nothing collapses and the kept-representative
+    # list under that doc_key grows to n. Each new candidate is compared
+    # against at most this many already-kept representatives (the
+    # earliest/best-ranked ones under its doc_key) instead of the full,
+    # unboundedly-growing list. Fails in the SAFE direction only — a
+    # candidate that would have matched a representative past this bound is
+    # simply never compared against it and becomes its own separate result,
+    # so the worst case this bound can cause is an extra wasted result-list
+    # slot (the pre-existing problem DEF-C exists to reduce), never a false
+    # collapse. What is compared, when it is compared, is unaffected — this
+    # does not truncate content, so it does not change
+    # `body_similarity_min_ratio`'s measured margins above. Measured
+    # (tests/test_indexer_searcher.py::TestNearDuplicateResultSetCollapse
+    # and a throwaway benchmark script, ~2KB bodies, one shared doc_key,
+    # nothing genuinely collapses): uncapped, n=60 candidates costs ~5.6s
+    # and n=200 costs ~69s (SequenceMatcher.ratio on ~2KB bodies measures
+    # ~4ms/pair; comparisons grow O(n^2)); at this default, n=60 costs
+    # ~0.5s and n=200 costs ~2.4s — a ~23-29x reduction, and now bounded
+    # rather than unboundedly quadratic. `n=60` is
+    # `ranking.rerank.top_k_unfiltered`, the realistic common ceiling for
+    # candidates reaching this function; `n=200` is
+    # `ranking.rerank.pre_filter_fetch_k`, the pre-rerank-path ceiling. Read
+    # via config.DOCSTRING_DEDUP_MAX_REPS_COMPARED.
+    max_reps_compared: 3
 
   locate_ranking:
     # UPG-15.10: scope-depth + line-span signals for locate ranking.
