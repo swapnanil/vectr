@@ -451,6 +451,133 @@ def test_t3_metrics_s1_anchor_checked_is_non_discriminating_across_arms():
     assert result["anchor_checked"] is True  # true even with variant=None / arm "none"
 
 
+# ---------------------------------------------------------------------------
+# UPG-EVAL-S1-ANCHOR-SEPARABILITY: audit of the SAME invariant (t3_metrics's own
+# docstring) across every scenario, not only S1. A scenario's anchor must be
+# separable from whatever its own forcing step OR fact_acquisition already
+# requires touching, or anchor_checked collapses to non-discriminating. This is
+# a SCENARIO-DESIGN property, never patched in scorer.py.
+#
+# Audit result:
+#   S1 release_via_ci     -- VIOLATION, leg 1 only (pinned above). Cannot be
+#                             fixed without a rebuild: `.github/workflows/
+#                             release.yml` is the sole artifact in the repo
+#                             documenting the correct release process, so any
+#                             from-scratch investigation that corrects the
+#                             twine mistake necessarily reads it. Legs 2-4 stay
+#                             separable (a memory arm that trusts its note tags
+#                             directly, touching nothing).
+#   S2 spec_lives_outside -- COMPLIANT at every leg (pinned below). The forcing
+#                             step's own `make check` failure output is what a
+#                             from-scratch investigation surfaces
+#                             (rediscovery_work's `BashAction(r"make\s+check|
+#                             docs.?lint")` alternative) -- never a literal read
+#                             of docs_lint.py's own source.
+#   S3 runner_not_pytest  -- VIOLATION, EVERY leg, structurally worse than S1
+#                             (pinned below). The anchor (`tools/t`) IS the
+#                             executable `fact_acquisition` requires running;
+#                             acquiring the fact and touching the anchor are
+#                             the same Bash action by construction, not an
+#                             incidental forcing-step collision. Cannot be
+#                             fixed without a rebuild that redefines what
+#                             "using the fact" means for a scenario whose
+#                             ground truth is an executable script.
+#   S4 secrets_not_dotenv -- Same structural coupling as S3 (pinned below):
+#                             the anchor (`scripts/envctl`) is the executable
+#                             `fact_acquisition` requires running.
+#   S5/S6 (told, uncorroborable) -- vacuously compliant: anchor_files() == ()
+#                             for both (no verifiable rung, nothing in the
+#                             workspace states the fact), so anchor_checked is
+#                             `None`, never a non-discriminating `True`
+#                             (test_t3_metrics_anchor_checked_is_none_for_
+#                             uncorroborable_scenario covers S5; extended below
+#                             to confirm S6 identically).
+# ---------------------------------------------------------------------------
+
+
+def test_t3_metrics_s2_anchor_checked_false_for_a_no_recall_control():
+    """S2's no-recall control (arm A's own expected leg-1 shape, DESIGN.md:
+    'Edits orbit/docs/spec.md directly; make check still fails at the end.')
+    runs `make check`, sees it fail, and edits the wrong mirror file --
+    without ever reading docs_lint.py's own source -- and still scores
+    anchor_checked False. This is the documented no-recall control the audit
+    above requires: S2 stays separable, unlike S1/S3/S4."""
+    s2 = scen.get("spec_lives_outside")
+    assert s2.anchor_files() == ("orbit/tools/docs_lint.py",)
+    events = _transcript(
+        [
+            ("Bash", {"command": "make check"}),
+            ("Edit", {"file_path": "orbit/docs/spec.md", "old_string": "x", "new_string": "y"}),
+        ]
+    )
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence=s2.fact_sentence, actions=actions,
+        scenario_anchors=s2.anchor_files(),
+    )
+    assert result["anchor_checked"] is False
+
+
+def test_t3_metrics_s3_anchor_checked_coincides_with_fact_acquisition_every_leg():
+    r"""UPG-EVAL-S1-ANCHOR-SEPARABILITY audit, S3: unlike S1's leg-1-only
+    collision, S3's anchor (`tools/t`) IS the artifact its own
+    `fact_acquisition` pattern requires running (`BashAction(r"(\./)?tools/t\b")`)
+    at EVERY leg -- there is no way to acquire this scenario's fact (use the
+    correct test runner instead of bare pytest) without that same action also
+    touching the anchor. The collapse is structural and leg-independent, not
+    an incidental forcing-step collision, and is NOT fixable by moving the
+    anchor or re-specifying fact_acquisition without changing what 'using the
+    fact' means for a scenario whose ground truth is an executable script --
+    out of scope for a scorer- or scenario-side change in this task."""
+    s3 = scen.get("runner_not_pytest")
+    assert s3.anchor_files() == ("tools/t",)
+    for leg in s3.legs:
+        events = _transcript([("Bash", {"command": "./tools/t"})])
+        actions = scorer.build_action_stream(events)
+        assert scorer.first_index(actions, leg.fact_acquisition) is not None  # fact acquired
+        result = scorer.t3_metrics(
+            None, fact_sentence=s3.fact_sentence, actions=actions,
+            scenario_anchors=s3.anchor_files(),
+        )
+        assert result["anchor_checked"] is True  # ...and so is the anchor, every leg
+
+
+def test_t3_metrics_s4_anchor_checked_coincides_with_fact_acquisition_every_leg():
+    """Same structural coupling as S3 (see that test's docstring): S4's
+    anchor (`scripts/envctl`) is the executable its `fact_acquisition`
+    pattern requires running, at every leg."""
+    s4 = scen.get("secrets_not_dotenv")
+    assert s4.anchor_files() == ("scripts/envctl",)
+    for leg in s4.legs:
+        events = _transcript([("Bash", {"command": "scripts/envctl get API_KEY"})])
+        actions = scorer.build_action_stream(events)
+        assert scorer.first_index(actions, leg.fact_acquisition) is not None  # fact acquired
+        result = scorer.t3_metrics(
+            None, fact_sentence=s4.fact_sentence, actions=actions,
+            scenario_anchors=s4.anchor_files(),
+        )
+        assert result["anchor_checked"] is True  # ...and so is the anchor, every leg
+
+
+def test_t3_metrics_s5_and_s6_anchor_checked_vacuously_compliant():
+    """S5/S6 (told, uncorroborable) declare no verifiable rung -- nothing in
+    the workspace states the fact for either -- so anchor_files() is empty and
+    the separability invariant is vacuously satisfied: anchor_checked is
+    `None` (nothing to check), never a non-discriminating `True`."""
+    s5 = scen.get("deploy_reverted_by_reconciler")
+    s6 = scen.get("bench_box_only")
+    assert s5.anchor_files() == ()
+    assert s6.anchor_files() == ()
+    for scenario in (s5, s6):
+        events = _transcript([("Bash", {"command": "cat some/file"})])
+        actions = scorer.build_action_stream(events)
+        result = scorer.t3_metrics(
+            None, fact_sentence=scenario.fact_sentence, actions=actions,
+            scenario_anchors=scenario.anchor_files(),
+        )
+        assert result["anchor_checked"] is None
+
+
 def test_verify_scripts_never_land_inside_the_workspace(tmp_path):
     """A verifier inside the workspace would leak the answer to the no-memory arm."""
     for slug, scenario in scen.SCENARIOS.items():
