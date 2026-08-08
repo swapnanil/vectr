@@ -6,12 +6,14 @@ import time
 
 from agent.config import (
     PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+    PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER,
     PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
     PROACTIVE_STRUCTURAL_SCORE_MENTION,
 )
 from agent.proactive.matcher import ProactiveMatcher
 from agent.proactive.types import (
     STRUCTURAL_TIER_DECLARED_ANCHOR,
+    STRUCTURAL_TIER_DECLARED_TRIGGER,
     STRUCTURAL_TIER_GOTCHA_MENTION,
     STRUCTURAL_TIER_MENTION,
     ProactiveWindow,
@@ -20,10 +22,11 @@ from agent.searcher import SearchResult
 from agent.working_context_store._types import WorkingNote
 
 
-def _note(note_id, content, kind="finding", title=""):
+def _note(note_id, content, kind="finding", title="", triggers=None):
     return WorkingNote(
         note_id=note_id, workspace="/ws", content=content, tags=[], priority="medium",
         created_at=time.time(), last_accessed=time.time(), kind=kind, title=title,
+        triggers=triggers,
     )
 
 
@@ -70,6 +73,7 @@ def _matcher(source, **kw):
         min_similarity=0.35, max_chars_per_event=800,
         structural_note=True, semantic_note=True, code_search=True,
         structural_score_declared_anchor=PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+        structural_score_declared_trigger=PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER,
         structural_score_gotcha_mention=PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
         structural_score_mention=PROACTIVE_STRUCTURAL_SCORE_MENTION,
     )
@@ -168,6 +172,80 @@ def test_structural_note_gotcha_mention_is_middle_tier():
         < c.score
         < PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR
     )
+
+
+# -- UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL: declared trigger-glob tier -----
+
+def test_structural_note_declared_trigger_says_triggers_on():
+    """A note whose EXPLICIT `triggers[]` declares a 'path' glob matching
+    the window file gets the "triggers on X" wording, scores
+    PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER, and is tagged
+    STRUCTURAL_TIER_DECLARED_TRIGGER -- even though it has no declared
+    `anchors` entry and its content never mentions the filename (non-
+    vacuity: this can only be the trigger-glob path, not the anchor or
+    mention path)."""
+    n = _note(20, "the backoff cap here needs tuning", triggers=[{"path": "resolver.py"}])
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 1
+    c = cands[0]
+    assert "triggers on resolver.py" in c.line
+    assert "anchored to" not in c.line
+    assert "mentions" not in c.line
+    assert c.score == PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER
+    assert c.structural_tier == STRUCTURAL_TIER_DECLARED_TRIGGER
+
+
+def test_declared_trigger_ranks_between_anchor_and_gotcha_mention():
+    """UPG-PROXY-WEAK-TIER-TIEBREAK: a declared trigger glob is an explicit
+    author declaration, the same evidentiary class as an anchor -- it must
+    not be laundered through the weak `mention` score band (16/20 admitted
+    weak-tier items there were off-topic). Ranked below a plain anchor
+    (a glob can match many files; an anchor names exactly one) but strictly
+    above gotcha_mention/mention."""
+    n = _note(21, "the backoff cap here needs tuning", triggers=[{"path": "resolver.py"}])
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    c = _matcher(src, semantic_note=False, code_search=False).match(w)[0]
+    assert (
+        PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION
+        < c.score
+        < PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR
+    )
+
+
+def test_declared_trigger_glob_wildcard_matches_via_matcher():
+    n = _note(22, "package-wide caveat", triggers=[{"path": "*.py"}])
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 1
+    assert cands[0].structural_tier == STRUCTURAL_TIER_DECLARED_TRIGGER
+
+
+def test_declared_anchor_still_wins_over_a_declared_trigger_on_the_same_note():
+    """When a note declares BOTH an exact anchor and a (broader) trigger
+    glob for the same file, the stronger anchor relation wins -- matching
+    `_first_anchor()`'s declared-order precedence (anchor checked first)."""
+    n = _note(23, "the backoff cap here needs tuning", triggers=[{"path": "*.py"}])
+    n.anchors = [["resolver.py", None]]
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    c = _matcher(src, semantic_note=False, code_search=False).match(w)[0]
+    assert c.structural_tier == STRUCTURAL_TIER_DECLARED_ANCHOR
+    assert c.score == PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR
+
+
+def test_declared_trigger_candidate_does_not_carry_anchor_path():
+    """Event-anchored single-turn retirement (UPG-PROXY-INJECT-SINGLE-TURN)
+    stays scoped to declared-anchor evidence only -- a declared_trigger
+    candidate is a weaker tier and must not participate."""
+    n = _note(24, "the backoff cap here needs tuning", triggers=[{"path": "resolver.py"}])
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    c = _matcher(src, semantic_note=False, code_search=False).match(w)[0]
+    assert c.anchor_path is None
 
 
 def test_semantic_note_respects_floor():

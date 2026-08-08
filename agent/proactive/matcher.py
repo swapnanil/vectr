@@ -32,11 +32,13 @@ from agent.config import PROACTIVE_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION
 from agent.proactive.types import (
     CANDIDATE_STATE_NOT_APPLICABLE,
     STRUCTURAL_TIER_DECLARED_ANCHOR,
+    STRUCTURAL_TIER_DECLARED_TRIGGER,
     STRUCTURAL_TIER_GOTCHA_MENTION,
     STRUCTURAL_TIER_MENTION,
     Candidate,
     ProactiveWindow,
 )
+from agent.trigger_engine import path_trigger_match
 from agent.working_context_store._store import (
     _ANTI_MEMORY_TEMPLATE,
     _date_str,
@@ -237,30 +239,44 @@ def _provenance_label(note: WorkingNote) -> str:
 def _structural_note_candidate(
     note: WorkingNote,
     anchor: str,
-    is_declared_anchor: bool,
+    relation: str,
     max_chars: int,
     score_declared_anchor: float,
+    score_declared_trigger: float,
     score_gotcha_mention: float,
     score_mention: float,
     state: dict | None = None,
     anchor_path: str | None = None,
 ) -> Candidate:
+    """`relation` is one of the STRUCTURAL_TIER_* constants `_first_anchor()`
+    resolved: DECLARED_ANCHOR, DECLARED_TRIGGER, or MENTION (raw — kind
+    branching below turns a mention into GOTCHA_MENTION or plain MENTION,
+    exactly as before this note's kind was already the only thing that
+    branch depended on)."""
     summary = _note_summary(note, state)
     kind_label = _kind_label(note, state)
     provenance_label = _provenance_label(note)
-    relation = "anchored to" if is_declared_anchor else "mentions"
+    if relation == STRUCTURAL_TIER_DECLARED_ANCHOR:
+        relation_text = "anchored to"
+    elif relation == STRUCTURAL_TIER_DECLARED_TRIGGER:
+        relation_text = "triggers on"
+    else:
+        relation_text = "mentions"
     line = _cap(
-        f"note #{note.note_id} ({kind_label}, {provenance_label}, {relation} {anchor}): "
+        f"note #{note.note_id} ({kind_label}, {provenance_label}, {relation_text} {anchor}): "
         f"{summary}",
         max_chars,
     )
     # UPG-PROXY-INJECT-PRECISION lever 2: a tiered score, replacing a flat
     # hardcoded 1.0. Each branch reads only a STRUCTURAL property already in
-    # hand — `is_declared_anchor` (computed above by `_first_anchor` from
-    # `note.anchors`) or `note.kind` — never window/query content.
-    if is_declared_anchor:
+    # hand — `relation` (computed above by `_first_anchor` from `note.
+    # anchors`/`note.triggers`) or `note.kind` — never window/query content.
+    if relation == STRUCTURAL_TIER_DECLARED_ANCHOR:
         score = score_declared_anchor
         tier = STRUCTURAL_TIER_DECLARED_ANCHOR
+    elif relation == STRUCTURAL_TIER_DECLARED_TRIGGER:
+        score = score_declared_trigger
+        tier = STRUCTURAL_TIER_DECLARED_TRIGGER
     elif note.kind == "gotcha":
         score = score_gotcha_mention
         tier = STRUCTURAL_TIER_GOTCHA_MENTION
@@ -344,6 +360,7 @@ class ProactiveMatcher:
         min_similarity: float,
         max_chars_per_event: int,
         structural_score_declared_anchor: float,
+        structural_score_declared_trigger: float,
         structural_score_gotcha_mention: float,
         structural_score_mention: float,
         structural_note: bool = True,
@@ -357,6 +374,7 @@ class ProactiveMatcher:
         self._min_similarity = min_similarity
         self._max_chars = max_chars_per_event
         self._structural_score_declared_anchor = structural_score_declared_anchor
+        self._structural_score_declared_trigger = structural_score_declared_trigger
         self._structural_score_gotcha_mention = structural_score_gotcha_mention
         self._structural_score_mention = structural_score_mention
         self._structural_note = structural_note
@@ -450,13 +468,21 @@ class ProactiveMatcher:
                     continue
                 found = _first_anchor(note, anchors)
                 if found is not None:
-                    anchor_path, anchor, is_declared_anchor = found
+                    anchor_path, anchor, relation = found
                 else:
-                    anchor_path, anchor, is_declared_anchor = None, "file", True
+                    # Defensive fallback: the source returned a note this
+                    # window's anchors/triggers/content narrowing can't
+                    # explain (e.g. a MatchSource test double that ignores
+                    # `structural_notes(paths)`'s own path argument). Treated
+                    # as the strongest tier, matching this branch's pre-
+                    # existing behaviour before the anchor/trigger/mention
+                    # 3-way split.
+                    anchor_path, anchor, relation = None, "file", STRUCTURAL_TIER_DECLARED_ANCHOR
                 candidates.append(
                     _structural_note_candidate(
-                        note, anchor, is_declared_anchor, self._max_chars,
+                        note, anchor, relation, self._max_chars,
                         self._structural_score_declared_anchor,
+                        self._structural_score_declared_trigger,
                         self._structural_score_gotcha_mention,
                         self._structural_score_mention,
                         state,
@@ -487,18 +513,33 @@ class ProactiveMatcher:
 
 def _first_anchor(
     note: WorkingNote, anchors: dict[str, str]
-) -> tuple[str, str, bool] | None:
-    """Return (window_file_path, display_label, is_declared_anchor) for the
-    first window file this note is actually about.
+) -> tuple[str, str, str] | None:
+    """Return (window_file_path, display_label, relation) for the first
+    window file this note is actually about. `relation` is one of the
+    STRUCTURAL_TIER_* constants: DECLARED_ANCHOR, DECLARED_TRIGGER, or
+    MENTION (the caller further splits MENTION into GOTCHA_MENTION/MENTION
+    by `note.kind` — see `_structural_note_candidate`).
 
     UPG-PROXY-SUBSTRING-ANCHOR/2b: the note's DECLARED `anchors` column is
     checked first — an exact match there is the strongest signal, and the
-    caller may honestly say "anchored to X". Only when no declared anchor
-    matches does this fall back to a boundary-matched content mention,
-    using the SAME `_path_boundary_match()` rule `recall_for_path()` uses
-    (shared, not forked) — the caller must render that case as "mentions
-    X", a materially weaker provenance claim than "anchored to X". Returns
-    None when the note is about none of the window's files.
+    caller may honestly say "anchored to X".
+
+    UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL: when no declared anchor
+    matches, the note's own EXPLICIT `triggers[]` is checked next for a
+    'path' glob matching this window file, via `path_trigger_match()`
+    (agent/trigger_engine.py) — the same declared-glob evaluation the live
+    hook's trigger engine already uses to FIRE such a note, now also
+    consulted for structural RELEVANCE. A glob is deliberate authorial
+    intent ("this note concerns this file"), same evidentiary class as an
+    anchor, so the caller renders it as "triggers on X" — weaker than
+    "anchored to X" (a glob can match many files; an anchor names exactly
+    one) but strictly stronger than an incidental content mention.
+
+    Only when neither matches does this fall back to a boundary-matched
+    content mention, using the SAME `_path_boundary_match()` rule
+    `recall_for_path()` uses (shared, not forked) — the caller must render
+    that case as "mentions X", the weakest provenance claim. Returns None
+    when the note is about none of the window's files.
 
     The window file path (`anchors` dict's key, not its basename value) is
     returned alongside the display label so `match()` can carry it onto the
@@ -509,9 +550,12 @@ def _first_anchor(
     declared = {a[0] for a in (note.anchors or []) if a}
     for path, base in anchors.items():
         if base and (base in declared or path in declared):
-            return path, base, True
+            return path, base, STRUCTURAL_TIER_DECLARED_ANCHOR
+    for path, base in anchors.items():
+        if path_trigger_match(note.triggers, (path, base)) is not None:
+            return path, base, STRUCTURAL_TIER_DECLARED_TRIGGER
     content = note.content or ""
     for path, base in anchors.items():
         if base and _path_boundary_match(content, base):
-            return path, base, False
+            return path, base, STRUCTURAL_TIER_MENTION
     return None

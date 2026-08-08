@@ -235,6 +235,52 @@ def effective_triggers(note: WorkingNote) -> list[dict]:
     return note.triggers if note.triggers else default_bundle_for_kind(note.kind, note.anchors, note.priority)
 
 
+def path_trigger_match(
+    triggers: list[dict] | None, path_candidates: tuple[str, ...] | None
+) -> str | None:
+    """The declared-glob half of the P (path) trigger primitive, read as a
+    STRUCTURAL RELEVANCE signal rather than a live-firing conjunction.
+
+    `_trigger_matches()` below answers "does trigger T fire right now?" — a
+    conjunction over every axis T declares (path AND event AND symbol...).
+    This answers a narrower question the structural recall channel
+    (`WorkingContextStore.recall_for_path()`, `agent.proactive.matcher.
+    _first_anchor()`) needs: "did the note's author deliberately say this
+    note concerns this file?" — checking ONLY the 'path' glob of each
+    trigger in `triggers` against `path_candidates` (every equivalent form
+    of the file being recalled, the same shape `_trigger_matches()` takes),
+    ignoring every other axis a trigger might also declare (event/symbol/
+    semantic/command). `triggers` must be the note's own EXPLICIT
+    `triggers[]` — never a kind-default bundle resolved via
+    `default_bundle_for_kind()`/`effective_triggers()`: a default bundle's
+    path glob is already derived straight from `anchors` (see
+    `default_bundle_for_kind()`'s gotcha branch), so that case is already
+    covered by the existing anchor signal, and re-deriving it here would
+    just double-count the same declaration under a different tier.
+
+    Returns the first matching glob pattern (for an explanatory "triggers
+    on <pattern>" render), or None when no declared trigger's path glob
+    matches any candidate, `triggers` is empty/None, or `path_candidates`
+    is empty/None.
+
+    UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL: this is a declared-glob-vs-
+    file-path comparison — both sides are structural properties (the
+    note's own declared trigger, the file being recalled), never a read of
+    prompt/query/conversation content, so it stays inside the no-query-
+    heuristics rule's explicit carve-out for structural path matching (the
+    same carve-out `_trigger_matches()`'s own P primitive already relies
+    on)."""
+    if not triggers or not path_candidates:
+        return None
+    for trigger in triggers:
+        path_pattern = trigger.get("path")
+        if path_pattern is None:
+            continue
+        if any(fnmatch.fnmatch(candidate, path_pattern) for candidate in path_candidates):
+            return path_pattern
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------

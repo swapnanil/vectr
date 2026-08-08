@@ -5,7 +5,7 @@ Builds a self-contained, ~300-note store with a realistic kind mix (most
 notes are kind="task" in-progress chatter, matching a real dev session) and
 plants known-ground-truth notes against 20 synthetic "window" files. Ground
 truth is a property of THIS GENERATOR, not an automated relevance judge run
-at harness time — the harness classifies whatever the real API actually
+at harness time -- the harness classifies whatever the real API actually
 returns by looking each returned note id up in the dict this module hands
 back, never by re-deriving relevance from content.
 
@@ -13,9 +13,9 @@ Recreates the exact starvation mechanism the P0/precision audit diagnosed:
 `recall_for_path()`'s own SQL ordering exempts kind="task" notes to a
 constant (author_trust_score, decay_score) = (1.0, 1.0), so a freshly
 written task note ties every other freshly written note on those columns
-and the tie breaks on `created_at DESC, note_id DESC` — i.e. plain recency.
+and the tie breaks on `created_at DESC, note_id DESC` -- i.e. plain recency.
 Each window plants its few real (gold) notes FIRST, then several kind="task"
-chatter notes AFTER (so they are more recent) — under the OLD undersized
+chatter notes AFTER (so they are more recent) -- under the OLD undersized
 `limit` passed into `recall_for_path()` this pushes every gold note past the
 truncation cutoff before the kind-eligibility filter ever runs; under the
 new overfetch multiplier the whole matching set fits and the filter can do
@@ -26,18 +26,34 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 WINDOW_COUNT = 20
-TASK_NOISE_PER_WINDOW = 7  # > OLD limit (max_items_per_event * 2 == 6, see
-                            # config.yaml's proactive.max_items_per_event),
+TASK_NOISE_PER_WINDOW = 6  # UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL: was 7
+                            # (> OLD limit (max_items_per_event * 2 == 6) and
                             # < NEW limit (min(3 * 4, 60) == 12) together with
-                            # the 4 gold/weak notes below (7 + 4 == 11 <= 12).
-FILLER_COUNT = 80  # bulk, unrelated to any window file — realistic store size
+                            # the 4 gold/weak notes that existed then, 7 + 4
+                            # == 11 <= 12). Two more per-window notes below
+                            # (the declared_trigger gold/weak_offtopic pair)
+                            # raised that count to 6, so noise dropped by 1
+                            # to keep the total at 6 + 6 == 12, exactly
+                            # `_ServiceMatchSource.structural_notes()`'s pool
+                            # size (min(max_items_per_event(3) *
+                            # structural_overfetch_multiplier(4),
+                            # structural_overfetch_ceiling(60)) == 12) --
+                            # `recall_for_path()`'s own `matched[:limit]` cut
+                            # is exactly this same 12, so more than 12 real
+                            # per-window matches would silently truncate the
+                            # OLDEST one (Tier A, inserted first) before this
+                            # generator's ground truth even matters,
+                            # reintroducing the starvation class this budget
+                            # is tuned to avoid -- unrelated to whatever the
+                            # new tier's own precision turns out to be.
+FILLER_COUNT = 80  # bulk, unrelated to any window file -- realistic store size
 FILLER_TASK_FRACTION = 0.75  # most filler is task chatter too, matching a
                               # real dev session's kind mix.
 
 REVOKED_WINDOWS = (0, 1)  # a couple of windows get their Tier-A gold note
                            # revoked after the fact, so the harness has real
                            # deterrent-rendered items to count (not just
-                           # assertions) — see the assertions-vs-deterrents
+                           # assertions) -- see the assertions-vs-deterrents
                            # split in run_harness.py.
 
 _ELIGIBLE_ROTATION = ("gotcha", "finding", "decision", "operational", "reference")
@@ -130,6 +146,36 @@ def build_synthetic_store(svc) -> GroundTruth:
             f"refactor touched {other_a}, {basename}, {other_b}; no "
             f"behavior change intended, just import cleanup.",
             kind="finding",
+        )
+        gt.category_by_id[nid] = "weak_offtopic"
+        gt.kind_by_id[nid] = "finding"
+        gt.window_by_id[nid] = i
+
+        # UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL: declared triggers[].path
+        # only -- no anchor, no filename mention anywhere in the body, not
+        # kind="gotcha". This note's ONLY route into the structural channel
+        # is the declared glob, so it isolates the new declared_trigger
+        # tier (score 0.95) from the other three tiers above. Genuinely
+        # on-topic content -> gold.
+        nid = svc.remember(
+            f"the request queue backing this service caps in-flight jobs "
+            f"at {50 + i}; raising it needs a matching worker-pool bump.",
+            kind="finding",
+            triggers=[{"path": basename}],
+        )
+        gt.category_by_id[nid] = "gold"
+        gt.kind_by_id[nid] = "finding"
+        gt.window_by_id[nid] = i
+
+        # Same declared-trigger-only route, but content genuinely about
+        # something else entirely -- weak_offtopic under the new tier,
+        # exactly the charitable/strict split the existing tiers already
+        # exercise for content-mention matches.
+        nid = svc.remember(
+            "quarterly infra review: overall p95 latency across the fleet "
+            "held flat this cycle, no single service called out.",
+            kind="finding",
+            triggers=[{"path": basename}],
         )
         gt.category_by_id[nid] = "weak_offtopic"
         gt.kind_by_id[nid] = "finding"

@@ -74,16 +74,25 @@ def _build_service(db_dir: Path, workspace: str):
 def _tier_for_score(score: float) -> str:
     from agent.config import (
         PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+        PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER,
         PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
         PROACTIVE_STRUCTURAL_SCORE_MENTION,
     )
 
     if math.isclose(score, PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR, abs_tol=1e-6):
         return "A_declared_anchor"
+    # UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL: a note whose only route into
+    # this channel is a declared triggers[].path glob (score 0.95, between
+    # declared_anchor and gotcha_mention). Before this bucket existed, any
+    # item at this score fell through to "unknown(score=...)" below -- a
+    # reporting bug once the fixture started planting such notes, not a
+    # scoring change here.
+    if math.isclose(score, PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER, abs_tol=1e-6):
+        return "B_declared_trigger"
     if math.isclose(score, PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION, abs_tol=1e-6):
-        return "B_gotcha_mention"
+        return "C_gotcha_mention"
     if math.isclose(score, PROACTIVE_STRUCTURAL_SCORE_MENTION, abs_tol=1e-6):
-        return "C_mention"
+        return "D_mention"
     return f"unknown(score={score})"
 
 

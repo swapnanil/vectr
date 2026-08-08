@@ -1193,6 +1193,9 @@ _pro_structural_scores_cfg: dict[str, Any] = _pro_cfg["structural_scores"]
 PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR: float = float(
     _pro_structural_scores_cfg["declared_anchor"]
 )
+PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER: float = float(
+    _pro_structural_scores_cfg["declared_trigger"]
+)
 PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION: float = float(
     _pro_structural_scores_cfg["gotcha_mention"]
 )

@@ -1897,12 +1897,23 @@ proactive:
     # Tier A: the note's OWN declared `anchors` list names this file — the
     # strongest claim a note can make about a file, since it says so itself.
     declared_anchor: 1.0
-    # Tier B: the file is only mentioned in the note's content (not a
-    # declared anchor), but the note's kind is "gotcha" — the exact case
-    # recall_for_path()'s own docstring says it was built for (a caveat
-    # recorded against a file, meant to resurface when that file is touched).
+    # Tier B (UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL): the note's OWN
+    # explicit `triggers[]` declares a 'path' glob that matches this file —
+    # not mentioned in the anchors list, not mentioned in the content, but
+    # just as deliberate an author declaration as an anchor ("this note
+    # concerns this file"). Ranked below declared_anchor (a glob can match
+    # many files, an exact anchor names exactly one) but strictly above both
+    # mention tiers below — UPG-PROXY-WEAK-TIER-TIEBREAK found 16/20 admitted
+    # weak-tier (mention) items were off-topic, so a deliberate declaration
+    # must never be laundered through that same weak score band.
+    declared_trigger: 0.95
+    # Tier C: the file is only mentioned in the note's content (not a
+    # declared anchor or trigger), but the note's kind is "gotcha" — the
+    # exact case recall_for_path()'s own docstring says it was built for (a
+    # caveat recorded against a file, meant to resurface when that file is
+    # touched).
     gotcha_mention: 0.9
-    # Tier C: a content mention only, in any other kind the structural_kinds
+    # Tier D: a content mention only, in any other kind the structural_kinds
     # allowlist admits. Weak evidence — the note merely name-drops the file
     # somewhere in its body — deliberately scored so it no longer
     # automatically outranks a genuine semantic match.

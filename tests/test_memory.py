@@ -653,6 +653,137 @@ class TestRecallForPathUPG96:
         notes = store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha")
         assert len(notes) == 2
 
+    # -- UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL -----------------------------
+    #
+    # A note's EXPLICIT `triggers[].path` glob is just as deliberate a
+    # "this note concerns this file" declaration as `anchors` — before this
+    # fix, recall_for_path()'s SQL/Python narrowing never consulted
+    # `triggers` at all, so a note with a path glob ONLY in `triggers`
+    # (never mentioned in its body, never in `anchors`) was invisible here
+    # even though the identical glob already fires it live via the
+    # PreToolUse hook's trigger engine (`evaluate_note()`/`fire()`).
+
+    def test_matches_note_with_declared_trigger_path_glob_only(self, tmp_path) -> None:
+        """The A/B this task was filed against: an identical note with the
+        path only in a `triggers` glob (never in content, never in
+        `anchors`) must now be found, exactly like a declared anchor is."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the retry loop here needs a backoff cap", kind="gotcha",
+            triggers=[{"path": "gate.py"}],
+        )
+        notes = store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha")
+        assert len(notes) == 1
+        assert "gate.py" not in notes[0].content  # non-vacuity: only the trigger glob matched
+
+    def test_declared_trigger_glob_supports_fnmatch_wildcards(self, tmp_path) -> None:
+        """A trigger's `path` is a glob (fnmatch), not an exact string --
+        the same P-primitive semantics `_trigger_matches()` already uses for
+        live firing, now also consulted for structural relevance."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "package-wide caveat, no filename mentioned anywhere", kind="gotcha",
+            triggers=[{"path": "agent/*.py"}],
+        )
+        notes = store.recall_for_path("/repo", "/repo/agent/gate.py", kind="gotcha")
+        assert len(notes) == 1
+
+    def test_declared_trigger_glob_that_does_not_match_the_file_is_not_returned(
+        self, tmp_path
+    ) -> None:
+        """Negative case (glob semantics, not "any trigger present"): a
+        trigger path glob that does NOT match the recalled file must not
+        inject the note, even though the note does declare a path trigger
+        for some other file."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the retry loop here needs a backoff cap", kind="gotcha",
+            triggers=[{"path": "other/*.py"}],
+        )
+        assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
+
+    def test_declared_trigger_bare_basename_matches_a_nested_file(self, tmp_path) -> None:
+        """A trigger glob of just the bare basename ("gate.py", no directory
+        prefix) must still match a file nested below the workspace root
+        ("/repo/src/gate.py") -- not only a file sitting directly at the
+        workspace root. `_path_trigger_candidates()`'s own candidate set is
+        "as-given plus workspace-relative" only (no separate basename form
+        unless relpath already equals it, e.g. a root-level file), so this
+        exercises the basename explicitly appended to the trigger-matching
+        candidate set in `recall_for_path()` -- the same explicit-basename
+        shape `agent/proactive/matcher.py`'s `_first_anchor()` already uses
+        for the live matcher path. A prior version of this fix passed
+        `path_candidates` (missing the bare basename) straight into
+        `path_trigger_match()` and silently never matched a nested file."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the retry loop here needs a backoff cap", kind="gotcha",
+            triggers=[{"path": "gate.py"}],
+        )
+        notes = store.recall_for_path("/repo", "/repo/src/gate.py", kind="gotcha")
+        assert len(notes) == 1
+
+    def test_kind_default_trigger_bundle_is_not_double_counted_via_triggers_column(
+        self, tmp_path
+    ) -> None:
+        """A note relying on its KIND's default trigger bundle (no explicit
+        `triggers[]` passed at write time) stores `triggers = []` in the DB
+        (`effective_triggers()`'s replace-not-merge contract resolves the
+        default fresh at evaluation time, never bakes it into storage) --
+        so this path only ever sees an EXPLICIT, author-declared glob, never
+        a derived one. A gotcha note with no explicit triggers and no
+        anchors and no content mention of the file must still find nothing
+        here (it was already reachable via the anchor signal if anchored;
+        this is the genuinely-unrelated case)."""
+        store = _store(tmp_path)
+        store.remember("/repo", "an unrelated caveat about auth", kind="gotcha")
+        assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
+
+    def test_declared_trigger_flood_does_not_evict_an_unrelated_anchor_match(
+        self, tmp_path
+    ) -> None:
+        """Regression for the send-back on top of this section's own fix
+        (commit 9356777 introduced this gap while making the harness
+        discriminating for the fix above): `triggers LIKE '%"path"%'` cannot
+        be scoped to one file the way the content/anchors arms are (a
+        trigger's `path` is a glob, evaluated in Python afterward, not a
+        literal SQL LIKE comparison) -- so it is a superset over EVERY note
+        that declares ANY path trigger for ANY file, workspace-wide. Folding
+        that superset into the SAME LIMIT-bounded SQL query as the content/
+        anchors arms meant a workspace with enough OTHER trigger-declaring
+        notes could push a genuinely file-scoped anchor match off the end of
+        the pool before this method's own Python-side narrowing ever ran --
+        a single note declaring a broad glob like "**/*.py" could silently
+        starve every other file's structural recall of its strongest
+        (declared_anchor) evidence, workspace-wide.
+
+        This note is anchored with a BARE basename ("gate.py", not
+        "src/gate.py") and its content never mentions the filename at all,
+        so the ONLY way it can be found is the anchor arm -- isolating this
+        from the bare-basename-anchor-candidate-set fix this same
+        regression fix also required (`_anchors_exact_match()` previously
+        only ever saw `path_candidates`, which never contains a bare
+        basename unless the file sits at the workspace root)."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the pool ceiling here is capped at 25 concurrent handles",
+            kind="gotcha", anchors=["gate.py"],
+        )
+        # 15 NEWER notes, each declaring a path trigger for a DIFFERENT,
+        # unrelated file -- none of them structurally relates to gate.py.
+        # limit=3 here (recall_for_path()'s own pool_size = max(limit,
+        # min(limit*4, 200)) = 12) makes 15 > pool_size, so pre-fix these
+        # alone would already fill the single shared LIMIT-12 pool by
+        # recency, before the anchor note (the oldest note in the store) is
+        # ever reached.
+        for k in range(15):
+            store.remember(
+                "/repo", f"cross-cutting note #{k}, no filename mentioned",
+                kind="finding", triggers=[{"path": f"other_{k:02d}.py"}],
+            )
+        notes = store.recall_for_path("/repo", "/repo/gate.py", limit=3)
+        assert any("pool ceiling" in n.content for n in notes)
+
 
 # ---------------------------------------------------------------------------
 # format_notes_for_llm
