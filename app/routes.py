@@ -359,11 +359,19 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         # the exact same shared resolver the MCP vectr_remember tool calls
         # — both surfaces enforce the identical rule. No stripping applied
         # here, matching this route's existing pass-through-unmodified
-        # handling of an inline `content` body.
+        # handling of an inline `content` body. extra_roots is passed
+        # through so a multi-root instance accepts a content_file path
+        # under ANY served root, not only the primary.
         ws_root = getattr(svc, "_workspace_root", "")
         if not isinstance(ws_root, str):
             ws_root = ""
-        content = resolve_remember_content(ws_root, body.content, body.content_file)
+        extra_roots = getattr(svc, "_extra_roots", [])
+        if not isinstance(extra_roots, list):
+            extra_roots = []
+        extra_roots = [r for r in extra_roots if isinstance(r, str)]
+        content = resolve_remember_content(
+            ws_root, body.content, body.content_file, extra_roots=extra_roots,
+        )
         outcome = await dispatch_chroma_async(
             svc,
             svc.remember_with_extras,

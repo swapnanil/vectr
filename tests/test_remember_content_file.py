@@ -78,7 +78,7 @@ class TestReadContentFile:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         (tmp_path / "secret.txt").write_text("nope", encoding="utf-8")
-        with pytest.raises(ValueError, match="outside the workspace root"):
+        with pytest.raises(ValueError, match="outside every workspace root"):
             read_content_file(str(workspace), "../secret.txt")
 
     def test_absolute_escape_outside_workspace_is_rejected(self, tmp_path, tmp_path_factory) -> None:
@@ -86,7 +86,7 @@ class TestReadContentFile:
         workspace.mkdir()
         outside = tmp_path_factory.mktemp("cf-outside") / "secret.txt"
         outside.write_text("nope", encoding="utf-8")
-        with pytest.raises(ValueError, match="outside the workspace root"):
+        with pytest.raises(ValueError, match="outside every workspace root"):
             read_content_file(str(workspace), str(outside))
 
     def test_missing_file_names_the_resolved_path(self, tmp_path) -> None:
@@ -123,6 +123,68 @@ class TestResolveContentFilePath:
     def test_relative_path_resolves_under_workspace_root(self, tmp_path) -> None:
         resolved = resolve_content_file_path(str(tmp_path), "sub/note.txt")
         assert resolved == (tmp_path / "sub" / "note.txt").resolve()
+
+
+class TestReadContentFileMultiRoot:
+    """UPG-REMEMBER-CONTENT-FILE-EXTRA-ROOTS: a vectr instance can serve a
+    primary workspace root plus one or more extra_roots (a multi-root IDE
+    workspace) — content_file must accept a file under ANY served root, not
+    only the primary, without weakening containment against every root."""
+
+    def test_absolute_path_under_extra_root_is_accepted(self, tmp_path, tmp_path_factory) -> None:
+        primary = tmp_path
+        extra_root = tmp_path_factory.mktemp("extra-root")
+        note_file = extra_root / "note.txt"
+        note_file.write_text("body from an extra root", encoding="utf-8")
+        assert read_content_file(
+            str(primary), str(note_file), extra_roots=[str(extra_root)],
+        ) == "body from an extra root"
+
+    def test_path_outside_every_served_root_is_still_rejected(self, tmp_path, tmp_path_factory) -> None:
+        primary = tmp_path
+        extra_root = tmp_path_factory.mktemp("extra-root")
+        outside = tmp_path_factory.mktemp("cf-outside") / "secret.txt"
+        outside.write_text("nope", encoding="utf-8")
+        with pytest.raises(ValueError, match="outside every workspace root"):
+            read_content_file(str(primary), str(outside), extra_roots=[str(extra_root)])
+
+    def test_dotdot_escape_from_extra_root_is_still_rejected(self, tmp_path, tmp_path_factory) -> None:
+        primary = tmp_path
+        extra_root = tmp_path_factory.mktemp("extra-root")
+        outside_root = tmp_path_factory.mktemp("cf-outside")
+        (outside_root / "secret.txt").write_text("nope", encoding="utf-8")
+        # pytest's tmp_path_factory places every mktemp'd dir as an
+        # immediate sibling under the same base temp dir, so ".." from
+        # inside extra_root reaches outside_root -- exactly the same
+        # escape shape as a ".." escape from the primary root, now
+        # exercised from an extra root instead.
+        escaping = str(extra_root / ".." / outside_root.name / "secret.txt")
+        with pytest.raises(ValueError, match="outside every workspace root"):
+            read_content_file(str(primary), escaping, extra_roots=[str(extra_root)])
+
+    def test_symlink_inside_extra_root_pointing_outside_all_roots_is_rejected(
+        self, tmp_path, tmp_path_factory,
+    ) -> None:
+        primary = tmp_path
+        extra_root = tmp_path_factory.mktemp("extra-root")
+        outside = tmp_path_factory.mktemp("cf-outside") / "secret.txt"
+        outside.write_text("nope", encoding="utf-8")
+        link = extra_root / "link.txt"
+        link.symlink_to(outside)
+        with pytest.raises(ValueError, match="outside every workspace root"):
+            read_content_file(str(primary), str(link), extra_roots=[str(extra_root)])
+
+    def test_relative_path_is_never_resolved_against_extra_roots(self, tmp_path, tmp_path_factory) -> None:
+        """Documented rule: a relative raw_path resolves against the PRIMARY
+        root only -- it is never trial-resolved against extra_roots, so a
+        file that exists ONLY under an extra root is not found by a
+        relative path even though it would be found by the absolute
+        equivalent (see test_absolute_path_under_extra_root_is_accepted)."""
+        primary = tmp_path
+        extra_root = tmp_path_factory.mktemp("extra-root")
+        (extra_root / "note.txt").write_text("only in extra root", encoding="utf-8")
+        with pytest.raises(ValueError, match="does not exist"):
+            read_content_file(str(primary), "note.txt", extra_roots=[str(extra_root)])
 
 
 class TestResolveRememberContent:
@@ -238,7 +300,7 @@ class TestMcpRememberContentFileErrors:
         svc = self._mock_service(str(workspace))
         result = handle_tools_call("vectr_remember", {"content_file": "../secret.txt"}, svc)
         assert result["isError"] is True
-        assert "outside the workspace root" in result["content"][0]["text"]
+        assert "outside every workspace root" in result["content"][0]["text"]
 
     def test_missing_file_is_an_mcp_error(self, tmp_path) -> None:
         svc = self._mock_service(str(tmp_path))
@@ -262,6 +324,39 @@ class TestMcpRememberContentFileErrors:
         result = handle_tools_call("vectr_remember", {"content_file": "bad.txt"}, svc)
         assert result["isError"] is True
         assert "not valid UTF-8" in result["content"][0]["text"]
+
+
+class TestMcpRememberContentFileMultiRoot:
+    """A vectr instance can serve a primary root plus extra_roots (a
+    multi-root IDE workspace) -- content_file must be usable for a file
+    under any served root, end to end through the real vectr_remember tool,
+    not only at the resolver-function level."""
+
+    def test_file_under_extra_root_is_accepted_via_mcp(
+        self, tmp_path, tmp_path_factory, monkeypatch,
+    ) -> None:
+        svc = _make_service(tmp_path, monkeypatch, memory_only=True)
+        extra_root = tmp_path_factory.mktemp("extra-root")
+        svc._extra_roots = [str(extra_root)]
+        note_file = extra_root / "note.txt"
+        note_file.write_text("multi-root body", encoding="utf-8")
+
+        result = handle_tools_call("vectr_remember", {"content_file": str(note_file)}, svc)
+        assert result["isError"] is False
+        note_id = _note_id_from_confirmation(result["content"][0]["text"])
+        stored = svc._context_store.get_note(svc._workspace_root, note_id)
+        assert stored.content == "multi-root body"
+
+    def test_file_outside_every_served_root_is_still_an_mcp_error(
+        self, tmp_path, tmp_path_factory,
+    ) -> None:
+        svc = TestMcpRememberContentFileErrors._mock_service(str(tmp_path))
+        svc._extra_roots = [str(tmp_path_factory.mktemp("extra-root"))]
+        outside = tmp_path_factory.mktemp("cf-outside") / "secret.txt"
+        outside.write_text("nope", encoding="utf-8")
+        result = handle_tools_call("vectr_remember", {"content_file": str(outside)}, svc)
+        assert result["isError"] is True
+        assert "outside every workspace root" in result["content"][0]["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +424,7 @@ class TestRestRememberContentFileErrors:
         outside.write_text("nope", encoding="utf-8")
         resp = client_real_memory.post("/v1/remember", json={"content_file": str(outside)})
         assert resp.status_code == 422
-        assert "outside the workspace root" in resp.json()["detail"]["detail"]
+        assert "outside every workspace root" in resp.json()["detail"]["detail"]
 
     def test_missing_file_returns_422_naming_resolved_path(self, client_real_memory, tmp_path) -> None:
         resp = client_real_memory.post("/v1/remember", json={"content_file": "nope.txt"})
@@ -361,3 +456,37 @@ class TestRestRememberContentFileErrors:
         content_file-only calls."""
         resp = client_real_memory.post("/v1/remember", json={})
         assert resp.status_code == 422
+
+
+class TestRestRememberContentFileMultiRoot:
+    """Mirrors TestMcpRememberContentFileMultiRoot for the REST surface --
+    same multi-root acceptance/rejection behaviour, exercised through the
+    real /v1/remember route rather than assumed from the MCP pass."""
+
+    def test_file_under_extra_root_is_accepted_via_rest(
+        self, client_real_memory, tmp_path_factory,
+    ) -> None:
+        extra_root = tmp_path_factory.mktemp("extra-root")
+        client_real_memory.app.state.service._extra_roots = [str(extra_root)]
+        note_file = extra_root / "note.txt"
+        note_file.write_text("multi-root body", encoding="utf-8")
+
+        resp = client_real_memory.post("/v1/remember", json={"content_file": str(note_file)})
+        assert resp.status_code == 200
+        note_id = resp.json()["note_id"]
+        full = client_real_memory.post(
+            "/v1/recall", json={"note_id": note_id, "detail": "full"},
+        ).json()["notes"]
+        assert "multi-root body" in full
+
+    def test_file_outside_every_served_root_still_returns_422(
+        self, client_real_memory, tmp_path_factory,
+    ) -> None:
+        extra_root = tmp_path_factory.mktemp("extra-root")
+        client_real_memory.app.state.service._extra_roots = [str(extra_root)]
+        outside = tmp_path_factory.mktemp("cf-outside") / "secret.txt"
+        outside.write_text("nope", encoding="utf-8")
+
+        resp = client_real_memory.post("/v1/remember", json={"content_file": str(outside)})
+        assert resp.status_code == 422
+        assert "outside every workspace root" in resp.json()["detail"]["detail"]
