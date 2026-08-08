@@ -215,6 +215,12 @@ class StatusResponse(BaseModel):
     # running. Backed by a non-blocking lock read + in-memory watcher flags —
     # this field is always cheap to compute, even mid-reindex.
     reindex_in_progress: bool = False
+    # UPG-PURPOSE-PASS-DEFERRAL: true while a background purpose-vector pass
+    # is scheduled/running (config `defer_purpose_pass`, default on) — search
+    # still serves results during this window (body-similarity only), so
+    # this makes a possible ranking-quality dip explainable instead of
+    # silent. False once the pass completes, or if deferral never ran.
+    purpose_vectors_pending: bool = False
     # UPG-STDIO-MEMORY-READY: additive warm-up signals. `fully_ready` is True
     # once phase 2 (embedder/indexer/searcher/watcher/symbol-graph) has
     # completed — search/locate/trace/map/fetch are gated on it across every

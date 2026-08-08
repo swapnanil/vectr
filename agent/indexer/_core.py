@@ -28,6 +28,9 @@ from agent.config import (
 from agent.config import (
     INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES as _INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES,
 )
+from agent.config import (
+    INDEX_GOVERNOR_DEFER_PURPOSE_PASS_ENABLED as _INDEX_GOVERNOR_DEFER_PURPOSE_PASS_ENABLED,
+)
 from agent.config import vectr_cache_root as _vectr_cache_root
 from agent.indexer._constants import (
     EXCLUDED_DIRS,
@@ -189,6 +192,36 @@ class CodeIndexer:
         self._total_chunks_cache: int = 0
         self._purpose_chunks_cache: int = 0
         self._refresh_chunk_count_caches()
+
+        # UPG-PURPOSE-PASS-DEFERRAL: a dedicated single-worker executor for
+        # the background purpose-vector pass. max_workers=1 (not the chunk
+        # pool's worker count) is load-bearing, not a tuning choice — it is
+        # what serializes successive deferred passes (one per
+        # index_workspace() call) into the purpose collection instead of
+        # letting two overlapping passes race on the same writes; each
+        # index_workspace() call submits at most one closure and returns
+        # without waiting for it. `_purpose_pending_lock` guards the count
+        # `purpose_vectors_pending` reads, incremented when a pass is
+        # submitted and decremented when it finishes (success or failure).
+        self._purpose_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="vectr-purpose",
+        )
+        self._purpose_pending_lock = threading.Lock()
+        self._purpose_pending_count = 0
+        # Guards `_save_mtime_cache`'s file write. Before UPG-PURPOSE-PASS-
+        # DEFERRAL, every mtime-cache write happened on the single thread
+        # running `index_workspace()`/`index_file()` — never concurrently.
+        # Now a deferred purpose pass can still be writing checkpoints on
+        # `_purpose_executor`'s thread after `index_workspace()` has already
+        # returned, so a *later* call's own writes (on the caller's thread)
+        # can genuinely overlap it. This lock only prevents two threads'
+        # `write_text()` calls from interleaving into corrupt JSON; it does
+        # not resolve the logical lost-update case (one writer's snapshot
+        # overwrites the other's) — that case is self-healing (the
+        # overwritten file simply gets checkpointed again, or its content
+        # safely re-embedded, on a later call), matching this whole
+        # mechanism's at-least-once checkpoint philosophy.
+        self._mtime_cache_lock = threading.Lock()
 
         # Deferred: look up get_embed_provider through the package namespace so that
         # test-time monkeypatching of agent.indexer.get_embed_provider is honoured
@@ -522,6 +555,14 @@ class CodeIndexer:
                 # persist the mtime of every file whose last chunk index is
                 # now <= the highest index processed so far. Always runs —
                 # a correctness guarantee, independent of `governed` below.
+                # This tracks CONTENT completion only; it is intentionally
+                # decoupled from purpose-vector completion (see
+                # UPG-PURPOSE-PASS-DEFERRAL below) — content chunk ids and
+                # purpose chunk ids are separate collections, upserted
+                # idempotently by chunk_id, so a content checkpoint here
+                # never claims more than "this file's body chunks are safely
+                # persisted", which is true regardless of whether its
+                # purpose vectors have been written yet.
                 if batch_num % _INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES == 0:
                     processed_upto = i + len(batch) - 1
                     newly_done = {
@@ -545,14 +586,29 @@ class CodeIndexer:
         logger.info("  content embed+upsert done: %d chunks in %.0fs",
                     total, time.time() - phase_start)
 
-        self._upsert_purpose_vectors(all_chunks, governed=governed)
+        # UPG-PURPOSE-PASS-DEFERRAL: when enabled (default) and not running
+        # under --foreground-fast, the purpose pass is handed to a
+        # single-worker background executor and this call returns without
+        # waiting for it — search serves body-only results in the meantime
+        # via `query_vector_purpose`'s existing empty-collection guard, and
+        # `purpose_vectors_pending` (below) reports the window is open.
+        # Disabled (or --foreground-fast), it runs synchronously exactly as
+        # before this change. Either way, content completion (checkpointed
+        # above) is independent of this — a crash during or after this call
+        # never re-embeds already-persisted content; at worst it re-runs the
+        # (idempotent, upsert-by-chunk_id) purpose pass for files whose
+        # purpose vectors hadn't landed yet.
+        defer_purpose = _INDEX_GOVERNOR_DEFER_PURPOSE_PASS_ENABLED and not _foreground_fast_enabled()
+        if defer_purpose:
+            self._schedule_deferred_purpose_pass(all_chunks, governed=governed)
+        else:
+            self._upsert_purpose_vectors(all_chunks, governed=governed)
 
         logger.info("Indexed %d chunks from %d files", total, len(to_index))
 
         # Final persist: covers any file whose checkpoint above didn't land
-        # on a `checkpoint_every_batches` boundary, plus the purpose-vector
-        # pass having now also completed. The embed-model stamp itself was
-        # already written earlier, right after the mismatch check.
+        # on a `checkpoint_every_batches` boundary. The embed-model stamp
+        # itself was already written earlier, right after the mismatch check.
         mtime_cache.update(new_mtimes)
         self._save_mtime_cache(mtime_cache)
 
@@ -656,7 +712,11 @@ class CodeIndexer:
     # Purpose vectors (ARCH-4 dual-vector pool entry)
     # ------------------------------------------------------------------
 
-    def _upsert_purpose_vectors(self, chunks: list[CodeChunk], governed: bool = False) -> None:
+    def _upsert_purpose_vectors(
+        self,
+        chunks: list[CodeChunk],
+        governed: bool = False,
+    ) -> None:
         """Embed + upsert the body-stripped purpose text for symbol chunks.
 
         Skipped entirely when `DUAL_VECTOR_ENABLED` is False (config, default
@@ -675,10 +735,21 @@ class CodeIndexer:
 
         `governed=True` applies the same priority clamp + duty-cycle pacing
         as Phase 3 (UPG-INDEX-RESOURCE-GOVERNOR) — only `index_workspace`'s
-        bulk call opts in. `index_file`'s single-file call leaves this False:
-        that path is the interactive file-save watcher, already small
-        (well under one embed batch), and latency-sensitive — a saved file
+        bulk call (sync or deferred, see `_schedule_deferred_purpose_pass`)
+        opts in. `index_file`'s single-file call leaves this False: that
+        path is the interactive file-save watcher, already small (well
+        under one embed batch), and latency-sensitive — a saved file
         becoming searchable should never wait on a governor sleep.
+
+        Content (mtime_cache) and purpose-vector completion are deliberately
+        DECOUPLED signals (UPG-PURPOSE-PASS-DEFERRAL) — this method does not
+        touch mtime_cache at all. A file's chunk ids are upserted here
+        idempotently keyed by chunk_id, so a crash before this call runs (or
+        mid-way through it, whether inline or on the deferred background
+        thread) simply leaves that file's purpose vectors missing/partial;
+        nothing here can corrupt or falsely mark content as incomplete, and
+        a retry (next index_workspace(), or `--force`, or a file touch) is
+        always safe to re-run.
         """
         if not _DUAL_VECTOR_ENABLED or not chunks:
             return
@@ -724,6 +795,44 @@ class CodeIndexer:
         logger.info("  purpose embed+upsert done: %d symbol chunks in %.0fs",
                     total, time.time() - phase_start)
 
+    def _schedule_deferred_purpose_pass(
+        self,
+        chunks: list[CodeChunk],
+        governed: bool,
+    ) -> None:
+        """UPG-PURPOSE-PASS-DEFERRAL: hand the purpose-vector pass to
+        `_purpose_executor` (max_workers=1, see __init__) and return
+        immediately — `index_workspace()` does not wait for it. `governed`
+        is threaded through from the caller's own computed value (same
+        priority clamp + duty-cycle pacing decision `index_workspace`'s
+        Phase 3 made, not hardcoded) so `--foreground-fast`/the governor
+        config toggle apply uniformly whether the pass ends up running
+        inline or on this background thread. `purpose_vectors_pending`
+        reads True from the moment this is submitted until the closure's
+        `finally` clears it, whether the pass succeeds, raises, or the
+        process is killed mid-pass (in which case the count is simply lost
+        with the process — nothing to clean up, the next
+        `purpose_vectors_pending` read after restart starts at 0 and a
+        fresh index_workspace() call re-evaluates from scratch)."""
+        with self._purpose_pending_lock:
+            self._purpose_pending_count += 1
+
+        def _run() -> None:
+            try:
+                self._upsert_purpose_vectors(chunks, governed=governed)
+            except Exception:
+                # Best-effort background pass: never let a failure here
+                # surface anywhere but the log. Purpose vectors for the
+                # affected files simply stay unwritten; content is already
+                # safely checkpointed (decoupled, see _upsert_purpose_vectors)
+                # so nothing here is silently lost or double-counted.
+                logger.exception("Deferred purpose-vector pass failed")
+            finally:
+                with self._purpose_pending_lock:
+                    self._purpose_pending_count -= 1
+
+        self._purpose_executor.submit(_run)
+
     # ------------------------------------------------------------------
     # mtime cache — tracks file modification times for incremental indexing
     # ------------------------------------------------------------------
@@ -757,14 +866,15 @@ class CodeIndexer:
         return cache
 
     def _save_mtime_cache(self, cache: dict[str, float]) -> None:
-        path = self._mtime_cache_path()
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            payload = dict(cache)
-            payload[_MTIME_CACHE_SCHEMA_KEY] = INDEXING_SCHEMA_VERSION
-            path.write_text(json.dumps(payload), encoding="utf-8")
-        except OSError:
-            pass
+        with self._mtime_cache_lock:
+            path = self._mtime_cache_path()
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                payload = dict(cache)
+                payload[_MTIME_CACHE_SCHEMA_KEY] = INDEXING_SCHEMA_VERSION
+                path.write_text(json.dumps(payload), encoding="utf-8")
+            except OSError:
+                pass
 
     # ------------------------------------------------------------------
     # Embedding-model version stamp (UPG-EMBEDDER-SWAP-GRANITE) — see
@@ -990,6 +1100,18 @@ class CodeIndexer:
             return self._purpose_chunks_cache
 
     @property
+    def purpose_vectors_pending(self) -> bool:
+        """True while a deferred purpose-vector pass (UPG-PURPOSE-PASS-
+        DEFERRAL) has been scheduled and has not yet finished — surfaced via
+        `/v1/status` so a search-quality dip during the window (results
+        ranked on body similarity alone until purpose vectors backfill) is
+        explainable rather than silent. False whenever nothing is pending,
+        including when deferral is disabled (the pass already completed
+        synchronously before index_workspace() returned)."""
+        with self._purpose_pending_lock:
+            return self._purpose_pending_count > 0
+
+    @property
     def last_indexed_ts(self) -> float:
         return self._last_indexed
 
@@ -1072,6 +1194,15 @@ class CodeIndexer:
         calls this; `__del__` below is a safety net for callers (tests,
         scripts) that construct a `CodeIndexer` directly and let it fall out
         of scope without an explicit shutdown path."""
+        # UPG-PURPOSE-PASS-DEFERRAL: drop any queued-but-not-started deferred
+        # purpose pass and don't wait for one already running — shutdown
+        # must never block on background embedding work. A dropped pass
+        # loses nothing durable: the files it would have covered never had
+        # their mtimes checkpointed (see index_workspace), so the next
+        # index_workspace() call picks them back up.
+        executor = getattr(self, "_purpose_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
         client = getattr(self, "_client", None)
         if client is not None:
             client.close()

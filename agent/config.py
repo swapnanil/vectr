@@ -247,6 +247,13 @@ INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES : int
     purpose-vector pass (UPG-INDEX-RESOURCE-GOVERNOR) — always applies,
     independent of INDEX_GOVERNOR_ENABLED.
 
+INDEX_GOVERNOR_DEFER_PURPOSE_PASS_ENABLED : bool
+    Run the purpose-vector pass as a background phase after content
+    embedding completes rather than blocking index_workspace()'s return on
+    it (UPG-PURPOSE-PASS-DEFERRAL). False (or --foreground-fast /
+    VECTR_FOREGROUND_FAST=1) restores the pre-deferral synchronous
+    behaviour.
+
 SYMBOL_GRAPH_RESERVED_KEYWORDS : dict[str, frozenset[str]]
     Per-language keyword sets that must never be minted as a symbol name or
     call-edge target — guards against a desynced/ERROR-node parse misattributing
@@ -803,6 +810,7 @@ INDEX_GOVERNOR_MACOS_QOS_CLASS: str = str(_ig_cfg["macos_qos_class"])
 INDEX_GOVERNOR_LINUX_NICE_INCREMENT: int = int(_ig_cfg["linux_nice_increment"])
 INDEX_GOVERNOR_MIN_BATCH_SECONDS_FOR_PACING: float = float(_ig_cfg["min_batch_seconds_for_pacing"])
 INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES: int = int(_ig_cfg["checkpoint_every_batches"])
+INDEX_GOVERNOR_DEFER_PURPOSE_PASS_ENABLED: bool = bool(_ig_cfg["defer_purpose_pass"])
 
 # ---------------------------------------------------------------------------
 # Output tunables (UPG-12.1)

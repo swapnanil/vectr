@@ -758,6 +758,20 @@ indexing:
     # flight when it was killed). Raise this on a very large corpus to
     # reduce checkpoint I/O at the cost of more work re-done after a crash.
     checkpoint_every_batches: 1
+    # UPG-PURPOSE-PASS-DEFERRAL: run the purpose-vector pass (ARCH-4's
+    # second, body-stripped embedding of every symbol-bearing chunk) as a
+    # background phase AFTER content (body) embedding finishes, instead of
+    # blocking on it inline. On a large corpus the purpose pass roughly
+    # doubles total embed time; deferring it means content — what search
+    # actually queries first — is ready, and `reindex_in_progress` clears,
+    # in about half the time, while purpose vectors continue to backfill at
+    # idle priority. Search already degrades gracefully to body-only
+    # results while a chunk has no purpose vector yet (query_vector_purpose
+    # empty-collection guard) — deferral only widens the window that
+    # mechanism already covers, it does not introduce a new one. false
+    # restores the pre-deferral synchronous behaviour (purpose finishes
+    # before index_workspace() returns), same as --foreground-fast.
+    defer_purpose_pass: true
 
 output:
   # Number of lines returned as a snippet with each symbol location.
