@@ -481,7 +481,9 @@ def _version_skew_verdict(daemon_stamp: str, local_stamp: str) -> str | None:
     return "version" if daemon_version != local_version else None
 
 
-def _check_version_skew(port: int, daemon_status: dict | None = None) -> None:
+def _check_version_skew(
+    port: int, daemon_status: dict | None = None, registry_entry: dict | None = None,
+) -> None:
     """Warn once, to stderr, when the daemon on `port` is running code that
     differs from this CLI invocation's (UPG-CLI-DAEMON-VERSION-SKEW). This is
     the ONE shared choke point every daemon-talking subcommand calls — the
@@ -493,7 +495,11 @@ def _check_version_skew(port: int, daemon_status: dict | None = None) -> None:
     never as a mismatch. `daemon_status` lets a caller that already fetched
     `/v1/status` (e.g. `vectr status`) reuse that payload instead of a
     second round-trip; otherwise this fetches it directly with a short,
-    best-effort timeout.
+    best-effort timeout. `registry_entry` (optional — this function never
+    looks one up itself, so it never touches the registry on a caller that
+    has none to give) is passed straight through to `_restart_command`,
+    which prefers its `code_workspace_file` for the printed suggestion
+    (UPG-RESTART-DROPS-EXTRA-ROOTS).
     """
     try:
         if daemon_status is None:
@@ -529,14 +535,14 @@ def _check_version_skew(port: int, daemon_status: dict | None = None) -> None:
         print(
             f"vectr: daemon on port {port} is running {difference} "
             f"({daemon_stamp} vs {local_stamp}) — run "
-            f"'{_restart_command(daemon_status)}'",
+            f"'{_restart_command(daemon_status, registry_entry)}'",
             file=sys.stderr,
         )
     except Exception:
         return
 
 
-def _restart_command(daemon_status: dict) -> str:
+def _restart_command(daemon_status: dict, registry_entry: dict | None = None) -> str:
     """The exact `vectr restart` invocation that brings THIS daemon back the
     way it is running now — workspace path plus, for a non-full daemon, its
     mode flag (UPG-RESTART-DROPS-MODE).
@@ -547,8 +553,23 @@ def _restart_command(daemon_status: dict) -> str:
     full indexing + the file watcher back on. The flag is printed even now
     that inheritance exists, because it is also correct when the previous
     instance's registry record is gone (pruned, or a fresh machine).
+
+    UPG-RESTART-DROPS-EXTRA-ROOTS: `cmd_restart` itself now reproduces a
+    multi-root instance's `extra_roots` even from a bare primary-path
+    restart (see `_resolve_restart_roots`), so this banner's suggestion
+    already works either way. `registry_entry`, when given, lets it print
+    the more literal form anyway — the `.code-workspace` file the instance
+    was actually launched from, when the registry recorded one — instead of
+    just the primary folder, since that is the more exact reproduction and
+    doesn't rely on the reader trusting that the bare-path form silently
+    restores every root. Falls back to `daemon_status["workspace_root"]`
+    (the pre-existing behaviour) when no registry entry is available or it
+    has no `code_workspace_file` on record.
     """
-    workspace = daemon_status.get("workspace_root")
+    workspace = (
+        (registry_entry or {}).get("code_workspace_file")
+        or daemon_status.get("workspace_root")
+    )
     mode = daemon_status.get("mode", MODE_FULL)
     # A daemon too old to report its workspace leaves the original
     # fill-in-the-blank placeholder, which must stay unquoted to read as one.
@@ -2166,7 +2187,7 @@ def cmd_index(args: argparse.Namespace) -> None:
 
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
-    _check_version_skew(port)
+    _check_version_skew(port, registry_entry=_resolve_hook_instance(workspace))
     try:
         resp = httpx.post(
             f"{_api_base(port)}/v1/index",
@@ -2191,7 +2212,7 @@ def cmd_search(args: argparse.Namespace) -> None:
 
     workspace = str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())
     port = _get_port_for_workspace(workspace, args.port)
-    _check_version_skew(port)
+    _check_version_skew(port, registry_entry=_resolve_hook_instance(workspace))
     payload: dict = {"query": args.query, "n_results": args.n}
     if args.language:
         payload["language"] = args.language
@@ -2236,7 +2257,7 @@ def cmd_fetch(args: argparse.Namespace) -> None:
 
     workspace = str(Path(os.getenv("VECTR_WORKSPACE", ".")).resolve())
     port = _get_port_for_workspace(workspace, args.port)
-    _check_version_skew(port)
+    _check_version_skew(port, registry_entry=_resolve_hook_instance(workspace))
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/fetch", json={"ids": args.ids}, timeout=30)
         resp.raise_for_status()
@@ -2279,7 +2300,7 @@ def cmd_remember(args: argparse.Namespace) -> None:
 
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
-    _check_version_skew(port)
+    _check_version_skew(port, registry_entry=_resolve_hook_instance(workspace))
     payload: dict = {"content": args.content, "priority": args.priority}
     if getattr(args, "kind", None):
         payload["kind"] = args.kind
@@ -2314,7 +2335,7 @@ def cmd_recall(args: argparse.Namespace) -> None:
 
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
-    _check_version_skew(port)
+    _check_version_skew(port, registry_entry=_resolve_hook_instance(workspace))
     payload: dict = {"limit": args.limit}
     if getattr(args, "boot", False):
         # Boot mode ignores all filters server-side; send only the flag.
@@ -2365,7 +2386,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
 
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
-    _check_version_skew(port)
+    _check_version_skew(port, registry_entry=_resolve_hook_instance(workspace))
     try:
         resp = httpx.get(f"{_api_base(port)}/v1/resume", timeout=30)
         resp.raise_for_status()
@@ -3114,7 +3135,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                 hook_line = _hook_injection_line(d)
                 if hook_line:
                     print(hook_line)
-                _check_version_skew(port, daemon_status=d)
+                _check_version_skew(port, daemon_status=d, registry_entry=entry)
             except httpx.ConnectError:
                 print("  (not listening — not running)")
             except httpx.HTTPError:
@@ -3147,7 +3168,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         cache_line = _artifact_cache_line(data)
         if cache_line:
             print(cache_line)
-        _check_version_skew(port, daemon_status=data)
+        _check_version_skew(port, daemon_status=data, registry_entry=entry)
     except httpx.ConnectError:
         # UPG-CLI-START-READY-RACE: nothing is listening on this port at all
         # — genuinely not running, as opposed to the case below.
@@ -3264,6 +3285,54 @@ def _resolve_restart_mode(
     return False, False, None
 
 
+def _restart_roots_explicit(args: argparse.Namespace) -> bool:
+    """True when `restart`'s caller named an explicit multi-root workspace:
+    a `.code-workspace` file (which enumerates its own full folder list) or
+    one-or-more `--path` flags. False for a bare positional directory or the
+    VECTR_WORKSPACE/cwd default — those name only the PRIMARY root and leave
+    `_resolve_restart_roots` free to reproduce the previous instance's
+    `extra_roots` from the registry, the same "no flag named it, so inherit"
+    rule `_resolve_restart_mode` above already applies to mode
+    (UPG-RESTART-DROPS-EXTRA-ROOTS).
+    """
+    ws = getattr(args, "workspace", None)
+    if ws:
+        return str(ws).endswith(".code-workspace")
+    return bool(getattr(args, "paths", None) or [])
+
+
+def _resolve_restart_roots(
+    entry: dict | None, roots: list[str], roots_explicit: bool,
+) -> tuple[list[str], list[str] | None]:
+    """`(roots, inherited_extra_roots)` for a `restart` — the roots
+    counterpart to `_resolve_restart_mode`, with the same precedence: an
+    explicit caller-given root list always wins outright, with no merge
+    against the registry (silently growing an explicit list back out would
+    be its own surprise). An under-specified one (just the primary
+    workspace — a bare positional directory, or the VECTR_WORKSPACE/cwd
+    default) instead reproduces the `extra_roots` recorded for the previous
+    instance at that same primary path (UPG-RESTART-DROPS-EXTRA-ROOTS — the
+    live bug this fixes: a multi-root instance's own staleness banner told
+    the operator to run `vectr restart <primary-path>`, which came back
+    with only 1 of 9 roots because `cmd_restart` built its root list purely
+    from CLI args and never consulted the registry entry it already had in
+    hand for mode/host). `inherited_extra_roots` is the list that was
+    inherited, or None when the caller was explicit / there was nothing to
+    inherit, so the caller can announce it — never silent, symmetric with
+    `inherited_mode`.
+    """
+    if roots_explicit:
+        return roots, None
+    recorded = (entry or {}).get("extra_roots") or []
+    if not recorded:
+        return roots, None
+    primary = roots[0]
+    inherited = [r for r in recorded if r != primary]
+    if not inherited:
+        return roots, None
+    return [primary, *inherited], inherited
+
+
 def cmd_restart(args: argparse.Namespace) -> None:
     memory_only = getattr(args, "memory_only", False)
     search_only = getattr(args, "search_only", False)
@@ -3280,7 +3349,6 @@ def cmd_restart(args: argparse.Namespace) -> None:
 
     roots = _resolve_workspace_roots(args)
     workspace = roots[0]
-    extra_roots = roots[1:]
     ws_hash = workspace_hash(workspace)
     preferred_port = args.port
     explicit = _is_explicit_workspace(args)
@@ -3290,12 +3358,12 @@ def cmd_restart(args: argparse.Namespace) -> None:
     registry = InstanceRegistry()
     entry = registry.get(ws_hash)
 
-    # Mode and bind host are inherited from the recorded previous instance for
-    # the same reason its port already is (UPG-RESTART-PORT-WALK-BREAKS-MCP):
-    # a restart that quietly changes how the daemon runs breaks whatever was
-    # relying on the old configuration. Resolved before `_enforce_bind_auth`
-    # so an inherited non-loopback bind is authenticated exactly like an
-    # explicitly-passed one.
+    # Mode, bind host, and extra roots are all inherited from the recorded
+    # previous instance for the same reason its port already is
+    # (UPG-RESTART-PORT-WALK-BREAKS-MCP): a restart that quietly changes how
+    # the daemon runs breaks whatever was relying on the old configuration.
+    # Resolved before `_enforce_bind_auth` so an inherited non-loopback bind
+    # is authenticated exactly like an explicitly-passed one.
     memory_only, search_only, inherited_mode = _resolve_restart_mode(
         entry, memory_only, search_only, full,
     )
@@ -3304,6 +3372,18 @@ def cmd_restart(args: argparse.Namespace) -> None:
             f"Restarting in {inherited_mode} mode (inherited from the previous "
             f"instance for this workspace). Pass "
             f"{MODE_RESTART_FLAG[MODE_FULL]} to restart in full mode instead.",
+            file=sys.stderr,
+        )
+    roots, inherited_extra_roots = _resolve_restart_roots(
+        entry, roots, _restart_roots_explicit(args),
+    )
+    extra_roots = roots[1:]
+    if inherited_extra_roots:
+        print(
+            f"Restarting with {len(inherited_extra_roots)} extra root(s) "
+            "inherited from the previous instance for this workspace: "
+            f"{', '.join(inherited_extra_roots)}. Pass --path to give an "
+            "explicit root list instead.",
             file=sys.stderr,
         )
     host = getattr(args, "host", None) or (entry or {}).get("host") or "127.0.0.1"
@@ -3363,7 +3443,7 @@ def cmd_forget(args: argparse.Namespace) -> None:
 
     workspace = str(Path(args.path).resolve())
     port = _get_port_for_workspace(workspace, args.port)
-    _check_version_skew(port)
+    _check_version_skew(port, registry_entry=_resolve_hook_instance(workspace))
     try:
         resp = httpx.post(f"{_api_base(port)}/v1/memory/clear", timeout=10)
         resp.raise_for_status()
@@ -3822,20 +3902,34 @@ def main() -> None:
     p_restart = sub.add_parser(
         "restart",
         help="Stop and restart the daemon for a workspace, reusing its "
-             "recorded mode/port/bind address unless flags override them",
+             "recorded mode/port/bind address/extra roots unless flags "
+             "override them",
         description=(
             "Restart reproduces the configuration of the instance it is "
             "replacing — mode (full / --memory-only / --search-only), port, "
-            "and bind address — so restarting never silently changes how the "
-            "daemon runs. Pass a mode flag (or --full) to change it.\n\n"
+            "bind address, and extra roots — so restarting never silently "
+            "changes how the daemon runs. Pass a mode flag (or --full) to "
+            "change the mode. A bare primary-path positional (or no "
+            "positional at all) also restores every extra root the previous "
+            "instance served; passing a .code-workspace file or one-or-more "
+            "--path flags instead REPLACES the root list outright — it is "
+            "never merged with the previous instance's roots.\n\n"
             + _IDE_CONFIG_WRITES_DISCLOSURE
         ),
     )
     p_restart.add_argument(
         "workspace", nargs="?", default=None,
-        help="Path to a .code-workspace file or a single workspace directory",
+        help="Path to a .code-workspace file or a single workspace directory. "
+             "A single directory restores any extra roots recorded for the "
+             "previous instance at that path; a .code-workspace file replaces "
+             "them with exactly the folders it lists.",
     )
-    p_restart.add_argument("--path", action="append", dest="paths", metavar="DIR")
+    p_restart.add_argument(
+        "--path", action="append", dest="paths", metavar="DIR",
+        help="Additional workspace root (repeatable). Giving one or more "
+             "--path flags REPLACES any extra roots recorded for the "
+             "previous instance — list every root you want restarted.",
+    )
     p_restart.add_argument("--port", type=int, default=_default_port)
     p_restart.add_argument(
         # Default None (not "127.0.0.1") so `cmd_restart` can tell "the caller
