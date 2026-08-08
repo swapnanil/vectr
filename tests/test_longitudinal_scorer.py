@@ -1051,6 +1051,102 @@ def test_censoring_never_imputes_from_session_totals(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# UPG-EVAL-BTF-DOUBLECOUNT: one real, distinctly-billed API call must be counted
+# once in turns_to_fact/output_tokens_to_fact/billable_tokens_to_fact, even when
+# the CLI split its response across multiple `assistant` stream-json events
+# (a `thinking` block followed by a `tool_use` block, sharing one `message.id`
+# and an identical `message.usage`).
+# ---------------------------------------------------------------------------
+
+
+def test_dedupe_assistant_messages_collapses_shared_message_id():
+    events = [
+        {"type": "assistant", "message": {"id": "msg_A", "content": [{"type": "thinking"}], "usage": {}}},
+        {"type": "assistant", "message": {"id": "msg_A", "content": [{"type": "tool_use"}], "usage": {}}},
+        {"type": "assistant", "message": {"id": "msg_B", "content": [{"type": "tool_use"}], "usage": {}}},
+    ]
+    deduped = scorer._dedupe_assistant_messages(events)
+    assert len(deduped) == 2
+    assert deduped[0]["message"]["id"] == "msg_A"
+    assert deduped[1]["message"]["id"] == "msg_B"
+
+
+def test_dedupe_assistant_messages_never_merges_events_with_no_id():
+    """Hand-built fixtures (this file's own `_transcript()`) never set `message.id`
+    -- such events must NOT be merged against each other, or every pre-existing
+    fixture-based test in this file that sums usage over >1 action would silently
+    change behaviour."""
+    events = [
+        {"type": "assistant", "message": {"content": [{"type": "tool_use"}], "usage": {}}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use"}], "usage": {}}},
+    ]
+    assert scorer._dedupe_assistant_messages(events) == events
+
+
+def test_billable_tokens_to_fact_counts_a_split_api_call_once(tmp_path):
+    """The exact bug: one real API call whose response contains a `thinking` block
+    and a `tool_use` block reaches the transcript as TWO `assistant` events sharing
+    one `message.id` and identical usage. Pre-fix, summing over raw events double-
+    bills that one call; post-fix, `_dedupe_assistant_messages` collapses it to a
+    single contribution before `turns_to_fact`/`output_tokens_to_fact`/
+    `billable_tokens_to_fact` are computed."""
+    scenario = scen.get("release_via_ci")
+    leg = scenario.legs[0]  # fact_acquisition: git tag ...v1.4.0 (OR git push --tags)
+
+    usage_a = {
+        "input_tokens": 100, "cache_creation_input_tokens": 50,
+        "cache_read_input_tokens": 200, "output_tokens": 10,
+    }
+    usage_b = {
+        "input_tokens": 5, "cache_creation_input_tokens": 5,
+        "cache_read_input_tokens": 300, "output_tokens": 20,
+    }
+    events = [
+        {"type": "system", "subtype": "init", "mcp_servers": [], "tools": []},
+        # One real API call (msg_A) split across a thinking fragment and a
+        # (non-matching) tool_use fragment -- both carry msg_A's own usage.
+        {
+            "type": "assistant",
+            "message": {"id": "msg_A", "content": [{"type": "thinking"}], "usage": usage_a},
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg_A",
+                "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "echo setup"}}],
+                "usage": usage_a,
+            },
+        },
+        # A second, distinct real API call (msg_B) whose tool_use IS the
+        # fact-acquisition action.
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg_B",
+                "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "git tag v1.4.0 && git push --tags"}}],
+                "usage": usage_b,
+            },
+        },
+        {"type": "result", "subtype": "success", "num_turns": 2, "usage": usage_b},
+    ]
+    actions = scorer.build_action_stream(events)
+    metrics = scorer.leg_metrics(
+        leg, events=events, actions=actions, workspace=tmp_path,
+        leg_start_baselines={}, k=1, origin=scenario.origin,
+    )
+
+    expected_billable = scorer._billable_tokens(usage_a) + scorer._billable_tokens(usage_b)
+    assert metrics["turns_to_fact"] == 2  # 2 real calls, not 3 raw events
+    assert metrics["output_tokens_to_fact"] == usage_a["output_tokens"] + usage_b["output_tokens"]
+    assert metrics["billable_tokens_to_fact"] == pytest.approx(expected_billable)
+    # context_tokens_at_fact reads the acquiring event's own usage directly --
+    # never summed, so it was never affected by this bug either way.
+    assert metrics["context_tokens_at_fact"] == (
+        usage_b["input_tokens"] + usage_b["cache_creation_input_tokens"] + usage_b["cache_read_input_tokens"]
+    )
+
+
+# ---------------------------------------------------------------------------
 # a missing transcript degrades to "not acquired", never raises (DESIGN.md 11.6)
 # ---------------------------------------------------------------------------
 

@@ -329,6 +329,39 @@ def _billable_tokens(usage: Mapping[str, Any]) -> float:
     )
 
 
+# UPG-EVAL-BTF-DOUBLECOUNT: one real, distinctly-billed Anthropic API response can
+# reach the transcript as MORE THAN ONE `assistant` stream-json event -- a response
+# containing a `thinking` block followed by one or more parallel `tool_use` blocks
+# is written as that many separate lines, each carrying an IDENTICAL COPY of that
+# one call's `message.usage` (the API bills usage once per call; the CLI's own
+# event-splitting is a transport/streaming detail, not a second call). Verified
+# against an already-recorded leg transcript: 31 raw `assistant` events collapsed
+# to 14 distinct `message.id` values, and summing weighted usage over the 31 raw
+# events (the pre-fix behaviour) totalled ~1.75x that leg's own
+# `billable_tokens_session` (a single cumulative snapshot off the transcript's
+# final `result` event, cost_metrics() below) -- for a value that only spans a
+# PREFIX of the same leg. Deduplicating by `message.id` before summing counts each
+# real call's usage exactly once, with no assumption about which individual usage
+# fields are "stock" (retained-context) vs "incremental" (this-call-only) -- it
+# fixes the actual event-count bug rather than reformulating around it.
+#
+# Hand-built test fixtures (`tests/test_longitudinal_scorer.py`'s `_transcript()`)
+# model one event as one call and never set `message.id`; events with no id are
+# NOT deduplicated against each other, so existing fixture-based tests keep their
+# original semantics unchanged.
+def _dedupe_assistant_messages(events: Sequence[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for ev in events:
+        mid = ((ev.get("message") or {}).get("id"))
+        if mid is not None:
+            if mid in seen:
+                continue
+            seen.add(mid)
+        out.append(ev)
+    return out
+
+
 def leg_metrics(
     leg: LegSpec,
     *,
@@ -348,6 +381,19 @@ def leg_metrics(
     isolation and has no visibility into sibling legs. `report.py` combines a
     trajectory's sequence of these per-leg records into RDC(k)/RDC(1) ratios,
     cross-arm deltas, and `mistake_rate_post`/`mistake_repetition_rate`.
+
+    UPG-EVAL-BTF-DOUBLECOUNT: `turns_to_fact`, `output_tokens_to_fact` and
+    `billable_tokens_to_fact` are all computed from the SAME `message.id`-deduped
+    prefix event list (`_dedupe_assistant_messages`), so a real API call the CLI
+    happened to split across multiple `assistant` stream events (a `thinking` block
+    plus one or more parallel `tool_use` blocks) is counted once in each of these
+    three fields, not once per content-block fragment. `context_tokens_at_fact`
+    reads a single event's own usage directly and was never affected. Always report
+    `context_tokens_at_fact` alongside `billable_tokens_to_fact`: the former is an
+    exact snapshot of the acquiring turn's own retained-context size; the latter is
+    a weighted aggregate of every distinct billed call up to and including that
+    turn, and the two answer different questions ("how much context is live right
+    now" vs "how much has this leg spent so far").
     """
     a = first_index(actions, leg.fact_acquisition)
     m = first_index(actions, leg.mistake_signature)
@@ -409,9 +455,16 @@ def leg_metrics(
     prefix_events = [
         ev for i, ev in enumerate(events) if i <= e_index and ev.get("type") == "assistant"
     ]
+    # UPG-EVAL-BTF-DOUBLECOUNT: dedupe by `message.id` FIRST -- `turns_to_fact`
+    # (a real conversational-turn count, not a raw stream-event count) and the
+    # output/billable sums below all read from this same deduped list, so a
+    # single real API call whose response the CLI split across multiple
+    # `assistant` stream events counts once everywhere in this function, not
+    # once per content-block fragment (see `_dedupe_assistant_messages` above).
+    deduped_prefix_events = _dedupe_assistant_messages(prefix_events)
     output_tokens = 0
     billable = 0.0
-    for ev in prefix_events:
+    for ev in deduped_prefix_events:
         usage = ((ev.get("message") or {}).get("usage")) or {}
         output_tokens += int(usage.get("output_tokens") or 0)
         billable += _billable_tokens(usage)
@@ -425,7 +478,7 @@ def leg_metrics(
 
     result.update(
         {
-            "turns_to_fact": len(prefix_events),
+            "turns_to_fact": len(deduped_prefix_events),
             "tool_calls_to_fact": a + 1,
             "output_tokens_to_fact": output_tokens,
             "billable_tokens_to_fact": billable,
