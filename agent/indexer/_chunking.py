@@ -485,6 +485,128 @@ def _chunk_markdown(lines: list[str], file_path: str) -> list[CodeChunk]:
     return chunks or _fallback_window_chunks(lines, file_path, "markdown")
 
 
+def _is_rst_adornment_line(line: str) -> bool:
+    """True when `line` is a reStructuredText section-adornment line: a single
+    repeated punctuation character and nothing else (the docutils convention
+    an RST title/section overline or underline follows — ``===...===``,
+    ``---...---``, ``~~~...~~~``; docutils does not restrict the character
+    set, any repeated non-alphanumeric, non-whitespace character qualifies).
+    Purely structural — the same repetition test the docutils reference
+    parser itself applies, not a curated character/keyword list.
+    """
+    s = line.strip()
+    if not s:
+        return False
+    ch = s[0]
+    if ch.isalnum() or ch.isspace():
+        return False
+    return all(c == ch for c in s)
+
+
+def _rst_section_headings(lines: list[str]) -> list[tuple[int, int, str]]:
+    """Locate reStructuredText setext-style section headings: a non-blank
+    title line immediately followed by an adornment line at least as long as
+    the title (docutils' section-title rule), with an optional matching
+    overline of the same character and length directly above the title
+    absorbed into the same heading block rather than misread as a second
+    heading of its own.
+
+    Returns ``(block_start, underline_idx, title)`` 0-indexed triples in
+    document order — ``block_start`` is the title line, or the overline's
+    line when a matching overline is present.
+    """
+    n = len(lines)
+    headings: list[tuple[int, int, str]] = []
+    i = 1
+    while i < n:
+        if _is_rst_adornment_line(lines[i]):
+            title_idx = i - 1
+            title = lines[title_idx].strip()
+            if title and not _is_rst_adornment_line(lines[title_idx]) and len(title) <= len(lines[i].strip()):
+                block_start = title_idx
+                if title_idx > 0 and _is_rst_adornment_line(lines[title_idx - 1]):
+                    over = lines[title_idx - 1].strip()
+                    under = lines[i].strip()
+                    if over[0] == under[0] and len(over) == len(under):
+                        block_start = title_idx - 1
+                headings.append((block_start, i, title))
+        i += 1
+    return headings
+
+
+def _chunk_prose_headings(lines: list[str], file_path: str, language: str) -> list[CodeChunk]:
+    """Split .txt/.rst prose at reStructuredText setext-style section headings
+    — the same per-section splitting `_chunk_markdown` does for the ATX (`#`)
+    heading convention, applied to prose docs that use RST's title-plus-
+    underline convention instead (UPG-TXT-CHUNK-COVERAGE). Structural only:
+    every file is split identically regardless of what will later be searched
+    for.
+
+    Neither "txt" nor "rst" has a tree-sitter grammar, so a multi-hundred-line
+    doc previously fell straight to `_fallback_window_chunks` — 200-line/
+    50-overlap windows sized for 3-5 coherent CODE functions, not prose. That
+    merges every unrelated subsection within a 200-line span into one diluted
+    chunk instead of giving each documented topic (and its own heading text,
+    e.g. a doc's title) its own retrievable chunk. Returns `[]` — triggering
+    the caller's window-chunk fallback, matching `_chunk_markdown`'s own
+    fallback pattern — when the file has no RST heading structure at all
+    (a flat README.txt/LICENSE.txt with no section markers).
+    """
+    headings = _rst_section_headings(lines)
+    if not headings:
+        return []
+
+    chunks: list[CodeChunk] = []
+    first_start = headings[0][0]
+    if first_start > 0:
+        preamble = "\n".join(lines[:first_start]).strip()
+        if preamble:
+            chunks.append(CodeChunk(
+                chunk_id=f"{file_path}:1-{first_start}",
+                content=preamble,
+                file_path=file_path,
+                language=language,
+                node_type="section",
+                start_line=1,
+                end_line=first_start,
+                symbol_name="",
+            ))
+
+    n = len(lines)
+    for idx, (block_start, _underline_idx, title) in enumerate(headings):
+        content_end = headings[idx + 1][0] if idx + 1 < len(headings) else n
+        block_lines = lines[block_start:content_end]
+        # Cap each section at the same budget a code container's body is
+        # capped at (_MAX_CHUNK_LINES, indexing.max_chunk_lines) — a doc
+        # section with no further nested heading can otherwise run to
+        # 1000+ lines, producing an outlier chunk whose embedding cost
+        # dwarfs every normal chunk sharing its batch (measured on the real
+        # django corpus: an uncapped 1191-line section blew a batch encode
+        # past available memory). Sub-splitting on the same cap — rather
+        # than truncating like `_collect_chunks_ast` does for an oversized
+        # code container — keeps the whole section retrievable instead of
+        # silently losing its tail; only oversized SECTIONS are affected,
+        # a normal heading's content still becomes exactly one chunk.
+        for sub_start in range(0, len(block_lines), _MAX_CHUNK_LINES):
+            sub_lines = block_lines[sub_start:sub_start + _MAX_CHUNK_LINES]
+            content = "\n".join(sub_lines).strip()
+            if not content:
+                continue
+            chunk_start = block_start + sub_start
+            chunk_end = min(chunk_start + len(sub_lines), content_end)
+            chunks.append(CodeChunk(
+                chunk_id=f"{file_path}:{chunk_start + 1}-{chunk_end}",
+                content=content,
+                file_path=file_path,
+                language=language,
+                node_type="section",
+                start_line=chunk_start + 1,
+                end_line=chunk_end,
+                symbol_name=title,
+            ))
+    return chunks
+
+
 def _postprocess_chunks(chunks: list[CodeChunk]) -> list[CodeChunk]:
     """Wave 1 chunk hygiene applied to every chunker path.
 
@@ -530,6 +652,10 @@ def chunk_file(file_path: str) -> list[CodeChunk]:
 
     if language == "markdown":
         return _postprocess_chunks(_chunk_markdown(lines, file_path))
+
+    if language in ("txt", "rst"):
+        sections = _chunk_prose_headings(lines, file_path, language)
+        return _postprocess_chunks(sections or _fallback_window_chunks(lines, file_path, language))
 
     if language:
         # UPG-JSFLOW-SYMBOLS: the grammar we PARSE with may differ from `language`
