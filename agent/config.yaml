@@ -292,6 +292,60 @@ ranking:
     # together unrelated chunks that merely share a blank or 1-word header).
     lines: 3
     min_chars: 20
+    # LANE-P1-DEDUP hardening: a matching leading-docstring key alone is
+    # NOT sufficient grounds to collapse two chunks — a trait/interface and
+    # its own impl, or two genuinely different overloads, commonly carry the
+    # identical copy-pasted one-line doc summary while implementing something
+    # different; folding them together would silently destroy a correct
+    # result, which is worse than the wasted result-list slot this dedup key
+    # exists to free up. Two independent, content-only gates run before a
+    # docstring-key match is allowed to actually collapse a candidate into an
+    # existing representative (agent/searcher.py::_is_near_duplicate_body):
+    # (1) a STRUCTURAL gate — when both chunks carry a recorded `node_type`
+    # and the two differ (e.g. `trait_item` vs `impl_item`), never collapse,
+    # full stop, no threshold involved; (2) a CONTENT-SIMILARITY gate — the
+    # two chunks' full normalized bodies (difflib.SequenceMatcher ratio, not
+    # just the leading doc) must be at least `body_similarity_min_ratio`
+    # alike. Measured on realistic fixtures (see
+    # tests/test_indexer_searcher.py::TestNearDuplicateResultSetCollapse):
+    # three near-identical benchmark-script variants sharing one boilerplate
+    # docstring (the uv `Lock` witness shape) measure ~0.85-0.89 pairwise; a
+    # trait and its impl sharing the same doc comment measure ~0.86
+    # (additionally caught by gate 1, since their node_type differs); two
+    # constructors sharing only a one-line doc but doing genuinely different
+    # work measure ~0.53. 0.75 sits with real margin on both sides of that
+    # split without requiring near-byte-identity. Read via
+    # config.DOCSTRING_DEDUP_BODY_SIMILARITY_MIN.
+    body_similarity_min_ratio: 0.75
+    # LANE-P1-DEDUP latency bound: the gate above (SequenceMatcher.ratio on
+    # full normalized bodies) is O(1) per PAIR but the collapse loop that
+    # calls it is O(n^2) in the exact case gate 2 exists for — many chunks
+    # sharing one boilerplate leading doc/comment (a license header,
+    # "Returns a reference to the underlying value.") but with genuinely
+    # different bodies, so nothing collapses and the kept-representative
+    # list under that doc_key grows to n. Each new candidate is compared
+    # against at most this many already-kept representatives (the
+    # earliest/best-ranked ones under its doc_key) instead of the full,
+    # unboundedly-growing list. Fails in the SAFE direction only — a
+    # candidate that would have matched a representative past this bound is
+    # simply never compared against it and becomes its own separate result,
+    # so the worst case this bound can cause is an extra wasted result-list
+    # slot (the pre-existing problem DEF-C exists to reduce), never a false
+    # collapse. What is compared, when it is compared, is unaffected — this
+    # does not truncate content, so it does not change
+    # `body_similarity_min_ratio`'s measured margins above. Measured
+    # (tests/test_indexer_searcher.py::TestNearDuplicateResultSetCollapse
+    # and a throwaway benchmark script, ~2KB bodies, one shared doc_key,
+    # nothing genuinely collapses): uncapped, n=60 candidates costs ~5.6s
+    # and n=200 costs ~69s (SequenceMatcher.ratio on ~2KB bodies measures
+    # ~4ms/pair; comparisons grow O(n^2)); at this default, n=60 costs
+    # ~0.5s and n=200 costs ~2.4s — a ~23-29x reduction, and now bounded
+    # rather than unboundedly quadratic. `n=60` is
+    # `ranking.rerank.top_k_unfiltered`, the realistic common ceiling for
+    # candidates reaching this function; `n=200` is
+    # `ranking.rerank.pre_filter_fetch_k`, the pre-rerank-path ceiling. Read
+    # via config.DOCSTRING_DEDUP_MAX_REPS_COMPARED.
+    max_reps_compared: 3
 
   locate_ranking:
     # UPG-15.10: scope-depth + line-span signals for locate ranking.

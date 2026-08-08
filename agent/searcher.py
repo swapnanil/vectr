@@ -1,6 +1,7 @@
 """Hybrid BM25 + vector search over the indexed codebase."""
 from __future__ import annotations
 
+import difflib
 import math
 import os
 import re
@@ -39,6 +40,8 @@ from agent.config import (
     NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE as _NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE,
     RESULT_FLOOR_ENABLED as _RESULT_FLOOR_ENABLED,
     RESULT_FLOOR_MIN_RELEVANCE as _RESULT_FLOOR_MIN_RELEVANCE,
+    DOCSTRING_DEDUP_BODY_SIMILARITY_MIN as _DOCSTRING_DEDUP_BODY_SIMILARITY_MIN,
+    DOCSTRING_DEDUP_MAX_REPS_COMPARED as _DOCSTRING_DEDUP_MAX_REPS_COMPARED,
     vectr_cache_root as _vectr_cache_root,
 )
 from agent.indexer import CodeIndexer
@@ -288,6 +291,40 @@ class SearchResultList(list):
     """
 
     low_confidence: bool = False
+
+
+def _is_near_duplicate_body(a: SearchResult, b: SearchResult) -> bool:
+    """False-collapse guard for DEF-C's near-duplicate-docstring dedup key
+    (LANE-P1-DEDUP). A matching leading-docstring key alone is evidence the
+    two chunks share a boilerplate header, not that they are the same
+    answer — a trait/interface and its own impl, or two different overloads,
+    routinely carry the identical copy-pasted one-line doc summary over
+    genuinely different implementations. Both signals below are pure chunk
+    PROPERTIES (node_type, content) — never the query — so this is a
+    result-set diversity computation, not query-side classification.
+
+    Gate 1 — structural: when both chunks carry a recorded ``node_type`` and
+    the two differ (e.g. ``trait_item`` vs ``impl_item``, or ``function_item``
+    vs ``impl_item``), never collapse — a chunk of one AST definition kind is
+    categorically not a near-duplicate of a chunk of a different kind,
+    independent of any similarity threshold. A no-op when either side's
+    node_type is unknown/empty (nothing to categorically compare).
+
+    Gate 2 — content: require the two chunks' full normalized bodies (not
+    just the leading doc, which by construction already matched to reach
+    this call) to be substantially alike, via difflib.SequenceMatcher — a
+    deterministic, symmetric ratio in [0, 1]. Threshold is
+    config.DOCSTRING_DEDUP_BODY_SIMILARITY_MIN (ranking.docstring_dedup.
+    body_similarity_min_ratio in config.yaml; see that key's comment for the
+    measured margins on both a true near-duplicate witness and the two
+    false-collapse risk classes above).
+    """
+    if a.node_type and b.node_type and a.node_type != b.node_type:
+        return False
+    ratio = difflib.SequenceMatcher(
+        None, normalized_content(a.content), normalized_content(b.content),
+    ).ratio()
+    return ratio >= _DOCSTRING_DEDUP_BODY_SIMILARITY_MIN
 
 
 # ---------------------------------------------------------------------------
@@ -946,22 +983,61 @@ class CodeSearcher:
         # since `scored` is already sorted best-first). A chunk with no
         # leading docstring (leading_docstring_key returns "") is NEVER
         # collapsed by the docstring key — only the content key can catch it.
+        #
+        # LANE-P1-DEDUP: a doc_key match is a CANDIDATE for collapse, not a
+        # verdict — several distinct chunks can legitimately share the same
+        # doc_key (a trait and its impl; two overloads with the same one-line
+        # summary), so seen_docstring maps a doc_key to the LIST of
+        # already-kept representative indices under it, and a new candidate
+        # collapses into the first one that also passes
+        # _is_near_duplicate_body's structural + content-similarity gates,
+        # else it becomes its own additional representative under that same
+        # key. Deterministic: representative order follows `scored`'s already
+        # deterministic best-first order, and a candidate always matches the
+        # first qualifying representative in that order.
+        #
+        # LATENCY BOUND: each candidate is compared against at most the first
+        # config.DOCSTRING_DEDUP_MAX_REPS_COMPARED representatives under its
+        # doc_key (the earliest-kept, i.e. best-ranked, since `seen_docstring`
+        # is built in `scored`'s deterministic best-first order) rather than
+        # the full, unboundedly-growing list. Comparing against every
+        # already-kept representative sharing a doc_key is O(n^2)
+        # SequenceMatcher calls in exactly the case this guard exists for:
+        # many chunks sharing one boilerplate leading doc/comment (a license
+        # header, "Returns a reference to the underlying value.") but with
+        # genuinely different bodies, so nothing collapses and the
+        # representative list grows to n (measured: ~4ms per ~2KB-body
+        # comparison: uncapped, n=200 candidates sharing one doc_key costs
+        # ~69s; this cap brings the same case to ~2.4s at the default below).
+        # The cap fails in the SAFE direction ONLY: a candidate that would
+        # have matched a representative past the cap is simply never
+        # compared against it and becomes its own separate result — the
+        # worst case is the wasted result-list slot DEF-C exists to reclaim,
+        # never a false collapse (the failure mode this task treats as
+        # strictly worse). What is actually compared, when it is compared,
+        # is unchanged by this cap — content is never truncated, so the
+        # documented similarity margins for
+        # DOCSTRING_DEDUP_BODY_SIMILARITY_MIN are unaffected.
         seen_content: dict[str, int] = {}
-        seen_docstring: dict[str, int] = {}
+        seen_docstring: dict[str, list[int]] = {}
         out: list[SearchResult] = []
         for _final_score, _, _, r in scored:
             content_key = normalized_content(r.content)
             doc_key = leading_docstring_key(r.content, r.language)
             existing_idx = seen_content.get(content_key)
             if existing_idx is None and doc_key:
-                existing_idx = seen_docstring.get(doc_key)
+                reps = seen_docstring.get(doc_key, [])
+                for rep_idx in reps[:_DOCSTRING_DEDUP_MAX_REPS_COMPARED]:
+                    if _is_near_duplicate_body(r, out[rep_idx]):
+                        existing_idx = rep_idx
+                        break
             if existing_idx is not None:
                 out[existing_idx].dup_count += 1
                 continue
             idx = len(out)
             seen_content[content_key] = idx
             if doc_key:
-                seen_docstring[doc_key] = idx
+                seen_docstring.setdefault(doc_key, []).append(idx)
             r.dup_count = 0
             # UPG-SCORE-DISPLAY-FLAT: the displayed score is the absolute
             # per-(query, chunk) relevance — the cross-encoder's judgment when
