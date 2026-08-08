@@ -113,6 +113,7 @@ class ProactiveSettings:
     structural_overfetch_multiplier: int
     structural_overfetch_ceiling: int
     structural_score_declared_anchor: float
+    structural_score_declared_trigger: float
     structural_score_gotcha_mention: float
     structural_score_mention: float
     max_weak_structural_items: int
@@ -204,6 +205,10 @@ class ProactiveSettings:
             structural_score_declared_anchor=_env_float(
                 "VECTR_PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR",
                 _c.PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+            ),
+            structural_score_declared_trigger=_env_float(
+                "VECTR_PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER",
+                _c.PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER,
             ),
             structural_score_gotcha_mention=_env_float(
                 "VECTR_PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION",

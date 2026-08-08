@@ -53,12 +53,25 @@ CANDIDATE_STATE_NOT_APPLICABLE = "n/a"
 # on `kind="note_structural"` candidates (see matcher.py's
 # `_structural_note_candidate`); every other candidate leaves `Candidate.
 # structural_tier` at its default `None`. Each label names HOW a structural
-# match was found — a declared anchor, a content mention in a kind=gotcha
-# note, or a content mention in any other allowed kind — a property of the
-# match itself, never a read of query/window content. `STRUCTURAL_TIER_
-# MENTION` (Tier C, the weakest) is what the gate's per-event weak-item cap
-# (`max_weak_structural_items`) counts against.
+# match was found — a declared anchor, a declared trigger path glob, a
+# content mention in a kind=gotcha note, or a content mention in any other
+# allowed kind — a property of the match itself, never a read of query/
+# window content. `STRUCTURAL_TIER_MENTION` (Tier D, the weakest) is what
+# the gate's per-event weak-item cap (`max_weak_structural_items`) counts
+# against.
+#
+# UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL: `STRUCTURAL_TIER_DECLARED_TRIGGER`
+# ranks directly below `DECLARED_ANCHOR` and above both mention tiers — a
+# `triggers[].path` glob is, like `anchors`, an explicit author declaration
+# ("this note concerns this file"), not an incidental content mention, so it
+# must not collapse into the weak `mention` tier (UPG-PROXY-WEAK-TIER-
+# TIEBREAK found 16/20 admitted weak-tier items were off-topic; reusing that
+# tier for a deliberate declaration would launder a strong signal through a
+# score band designed for a weak one). It ranks below a plain anchor because
+# a glob is inherently less precise per-file than one exact path — many
+# files can satisfy "agent/*.py", only one can satisfy an exact anchor.
 STRUCTURAL_TIER_DECLARED_ANCHOR = "declared_anchor"
+STRUCTURAL_TIER_DECLARED_TRIGGER = "declared_trigger"
 STRUCTURAL_TIER_GOTCHA_MENTION = "gotcha_mention"
 STRUCTURAL_TIER_MENTION = "mention"
 

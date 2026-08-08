@@ -18,6 +18,7 @@ from unittest.mock import patch
 from agent.config import (
     PROACTIVE_MAX_WEAK_STRUCTURAL_ITEMS,
     PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+    PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER,
     PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
     PROACTIVE_STRUCTURAL_SCORE_MENTION,
 )
@@ -35,15 +36,21 @@ from agent.proactive.matcher import (
     _structural_note_candidate,
 )
 from agent.proactive.request_window import append_context_block, cache_prefix_signature
-from agent.proactive.types import Candidate, ProactiveWindow
+from agent.proactive.types import (
+    STRUCTURAL_TIER_DECLARED_ANCHOR,
+    STRUCTURAL_TIER_MENTION,
+    Candidate,
+    ProactiveWindow,
+)
 from agent.working_context_store._types import WorkingNote
 
-# The three tiered structural scores (UPG-PROXY-INJECT-PRECISION), in the
+# The four tiered structural scores (UPG-PROXY-INJECT-PRECISION), in the
 # positional order `_structural_note_candidate` declares them. Sourced from
 # config rather than literals so a default change cannot silently diverge
 # from what these tests exercise.
 _TIERS = (
     PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+    PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER,
     PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
     PROACTIVE_STRUCTURAL_SCORE_MENTION,
 )
@@ -137,8 +144,12 @@ def test_provenance_label_defaults_to_weakest_when_missing_or_invalid():
 def test_structural_candidate_line_carries_provenance_marker():
     n_auto = _note(1, "note body", kind="finding", provenance="auto")
     n_human = _note(2, "note body", kind="finding", provenance="human")
-    line_auto = _structural_note_candidate(n_auto, "resolver.py", True, 800, *_TIERS).line
-    line_human = _structural_note_candidate(n_human, "resolver.py", True, 800, *_TIERS).line
+    line_auto = _structural_note_candidate(
+        n_auto, "resolver.py", STRUCTURAL_TIER_DECLARED_ANCHOR, 800, *_TIERS
+    ).line
+    line_human = _structural_note_candidate(
+        n_human, "resolver.py", STRUCTURAL_TIER_DECLARED_ANCHOR, 800, *_TIERS
+    ).line
     assert "(finding, auto, anchored to resolver.py)" in line_auto
     assert "(finding, human, anchored to resolver.py)" in line_human
     assert line_auto != line_human  # auto-provenance visibly distinct from human-endorsed
@@ -154,8 +165,12 @@ def test_semantic_candidate_line_carries_provenance_marker():
 
 def test_anchored_vs_mentions_still_distinguishable_with_provenance():
     n = _note(4, "resolver.py content mention", provenance="agent")
-    mention_line = _structural_note_candidate(n, "resolver.py", False, 800, *_TIERS).line
-    anchored_line = _structural_note_candidate(n, "resolver.py", True, 800, *_TIERS).line
+    mention_line = _structural_note_candidate(
+        n, "resolver.py", STRUCTURAL_TIER_MENTION, 800, *_TIERS
+    ).line
+    anchored_line = _structural_note_candidate(
+        n, "resolver.py", STRUCTURAL_TIER_DECLARED_ANCHOR, 800, *_TIERS
+    ).line
     assert "mentions resolver.py" in mention_line
     assert "anchored to" not in mention_line
     assert "anchored to resolver.py" in anchored_line
@@ -251,6 +266,7 @@ def test_directive_excluded_at_matcher_is_never_claimed_in_turn_ledger():
         _Source(), min_similarity=0.35, max_chars_per_event=800,
         structural_note=True, semantic_note=False, code_search=False,
         structural_score_declared_anchor=PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+        structural_score_declared_trigger=PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER,
         structural_score_gotcha_mention=PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
         structural_score_mention=PROACTIVE_STRUCTURAL_SCORE_MENTION,
         exclude_directive_notes=True,
@@ -289,6 +305,7 @@ def test_directive_not_excluded_when_toggle_off_is_claimed_normally():
         _Source(), min_similarity=0.35, max_chars_per_event=800,
         structural_note=True, semantic_note=False, code_search=False,
         structural_score_declared_anchor=PROACTIVE_STRUCTURAL_SCORE_DECLARED_ANCHOR,
+        structural_score_declared_trigger=PROACTIVE_STRUCTURAL_SCORE_DECLARED_TRIGGER,
         structural_score_gotcha_mention=PROACTIVE_STRUCTURAL_SCORE_GOTCHA_MENTION,
         structural_score_mention=PROACTIVE_STRUCTURAL_SCORE_MENTION,
         exclude_directive_notes=False,
@@ -316,7 +333,9 @@ def test_revoked_note_deterrent_still_leads_through_new_envelope():
     state = {
         "state": "revoked", "reason": "wrong assumption", "actor": "agent", "ts": time.time(),
     }
-    cand = _structural_note_candidate(n, "resolver.py", True, 800, *_TIERS, state)
+    cand = _structural_note_candidate(
+        n, "resolver.py", STRUCTURAL_TIER_DECLARED_ANCHOR, 800, *_TIERS, state
+    )
     assert "REVOKED" in cand.line
     assert cand.line.index("Do not re-derive") < cand.line.index("Previously believed")
     assert cand.note_provenance == "agent"
@@ -362,7 +381,7 @@ def test_cache_prefix_signature_unaffected_by_new_envelope():
 
 def test_single_human_note_selects_human_envelope():
     n = _note(70, "the retry timeout is 30 seconds", kind="gotcha", provenance="human")
-    cand = _structural_note_candidate(n, "resolver.py", True, 800, *_TIERS)
+    cand = _structural_note_candidate(n, "resolver.py", STRUCTURAL_TIER_DECLARED_ANCHOR, 800, *_TIERS)
     assert cand.note_provenance == "human"
 
     out = _gate().select([cand], session_id="")
@@ -387,7 +406,9 @@ def test_single_agent_note_selects_agent_envelope():
 def test_mixed_provenance_block_falls_back_to_weakest_envelope():
     human_note = _note(72, "human-endorsed fact", kind="gotcha", provenance="human")
     auto_note = _note(73, "auto-recorded fact", kind="finding", provenance="auto")
-    human_cand = _structural_note_candidate(human_note, "resolver.py", True, 800, *_TIERS)
+    human_cand = _structural_note_candidate(
+        human_note, "resolver.py", STRUCTURAL_TIER_DECLARED_ANCHOR, 800, *_TIERS
+    )
     auto_cand = _semantic_note_candidate(auto_note, 0.9, 800)
 
     out = _gate().select([human_cand, auto_cand], session_id="")

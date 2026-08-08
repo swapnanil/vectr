@@ -26,6 +26,7 @@ from agent.trigger_engine import (
     evaluate_note,
     frame_prefix,
     pack_injection,
+    path_trigger_match,
     scope_permits,
     token_estimate,
     total_order_key,
@@ -247,6 +248,68 @@ class TestEffectiveTriggers:
     def test_finding_with_no_explicit_triggers_resolves_to_empty(self) -> None:
         note = _note(kind="finding", triggers=[])
         assert effective_triggers(note) == []
+
+
+# ---------------------------------------------------------------------------
+# path_trigger_match — declared-glob structural relevance signal
+# (UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL)
+# ---------------------------------------------------------------------------
+
+class TestPathTriggerMatch:
+    """`path_trigger_match()` is the declared-glob half of the P primitive,
+    read as a structural RELEVANCE signal (recall_for_path(), matcher.py's
+    _first_anchor()) rather than a live-firing conjunction. It checks ONLY
+    the 'path' key of each trigger, ignoring event/symbol/semantic/command,
+    and only ever consults the note's own EXPLICIT triggers[] (never a
+    kind-default bundle)."""
+
+    def test_matching_glob_returns_the_pattern(self) -> None:
+        triggers = [{"path": "agent/*.py"}]
+        assert path_trigger_match(triggers, ("agent/gate.py",)) == "agent/*.py"
+
+    def test_exact_path_glob_matches(self) -> None:
+        triggers = [{"path": "gate.py"}]
+        assert path_trigger_match(triggers, ("gate.py",)) == "gate.py"
+
+    def test_non_matching_glob_returns_none(self) -> None:
+        triggers = [{"path": "other/*.py"}]
+        assert path_trigger_match(triggers, ("agent/gate.py",)) is None
+
+    def test_matches_against_any_candidate_form(self) -> None:
+        """Same abs/relative dual-candidate contract `_trigger_matches()`'s
+        P primitive already relies on -- a real hook sends an ABSOLUTE
+        file_path while triggers are naturally authored workspace-relative,
+        so the caller passes every equivalent form and a match against ANY
+        one counts."""
+        triggers = [{"path": "gate.py"}]
+        assert path_trigger_match(triggers, ("/abs/repo/gate.py", "gate.py")) == "gate.py"
+
+    def test_trigger_with_no_path_key_never_matches(self) -> None:
+        """An event/symbol/semantic/command-only trigger declares no P axis
+        at all -- this function is path-glob-only by design, matching a
+        declared anchor's own single-axis "about this file" semantics."""
+        triggers = [{"event": "pre-edit"}, {"symbol": "WorkspaceLock"}]
+        assert path_trigger_match(triggers, ("gate.py",)) is None
+
+    def test_other_axes_on_a_path_trigger_are_ignored(self) -> None:
+        """A trigger conjoining 'path' with 'event' still counts here even
+        though its 'event' would not currently match -- unlike
+        `_trigger_matches()`'s full conjunction, this is a structural
+        "did the author declare this file" check, not a live-firing one."""
+        triggers = [{"path": "gate.py", "event": "pre-commit"}]
+        assert path_trigger_match(triggers, ("gate.py",)) == "gate.py"
+
+    def test_first_matching_trigger_wins(self) -> None:
+        triggers = [{"path": "other/*.py"}, {"path": "gate.py"}]
+        assert path_trigger_match(triggers, ("gate.py",)) == "gate.py"
+
+    def test_empty_triggers_returns_none(self) -> None:
+        assert path_trigger_match([], ("gate.py",)) is None
+        assert path_trigger_match(None, ("gate.py",)) is None
+
+    def test_empty_path_candidates_returns_none(self) -> None:
+        assert path_trigger_match([{"path": "gate.py"}], ()) is None
+        assert path_trigger_match([{"path": "gate.py"}], None) is None
 
 
 # ---------------------------------------------------------------------------

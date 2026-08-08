@@ -2690,6 +2690,7 @@ class VectrService:
                 settings.proxy_exclude_directive_notes and channel == "proxy"
             ),
             structural_score_declared_anchor=settings.structural_score_declared_anchor,
+            structural_score_declared_trigger=settings.structural_score_declared_trigger,
             structural_score_gotcha_mention=settings.structural_score_gotcha_mention,
             structural_score_mention=settings.structural_score_mention,
         )

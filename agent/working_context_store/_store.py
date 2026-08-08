@@ -2275,23 +2275,36 @@ class WorkingContextStore:
         """Recall notes anchored to a specific file (UPG-9.6).
 
         Matches notes whose content mentions the file's basename or its
-        workspace-relative path at a genuine path boundary, or whose
-        declared `anchors` list the file exactly — the anchor a typed
-        gotcha actually carries ("index_file in symbol_graph.py takes
-        workspace first"). Combined with `kind="gotcha"` this powers the
-        PreToolUse hook: editing a file surfaces the caveat recorded
-        against it, and an unrelated file matches nothing.
+        workspace-relative path at a genuine path boundary, whose declared
+        `anchors` list the file exactly — the anchor a typed gotcha
+        actually carries ("index_file in symbol_graph.py takes workspace
+        first") — or whose EXPLICIT `triggers[]` declares a 'path' glob
+        that matches the file (UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL:
+        `triggers` is just as deliberate a "this note concerns this file"
+        declaration as `anchors` — before this fix, a note with a path
+        glob ONLY in `triggers`, never mentioned in its body and never in
+        `anchors`, was invisible to this method even though the same glob
+        already fires it live via the PreToolUse hook's trigger engine).
+        Combined with `kind="gotcha"` this powers the PreToolUse hook:
+        editing a file surfaces the caveat recorded against it, and an
+        unrelated file matches nothing.
 
         UPG-PROXY-SUBSTRING-ANCHOR: the SQL LIKE clause is a cheap SUPERSET
         prefilter only (it would match "gate.py" inside "uv_regate.py");
-        `_path_boundary_match()` and `_anchors_exact_match()` narrow it down
-        to genuine matches afterward. Because that narrowing happens after
-        the SQL fetch, the fetch pulls a bounded over-fetched pool (see
-        `memory_recall_for_path` in config.yaml) rather than exactly
-        `limit` rows — otherwise a true match could be discarded before the
-        boundary filter ever saw it, purely because it didn't fit in an
-        under-sized SQL LIMIT. Not semantic — a substring anchor avoids
-        false "nearby file" hits.
+        `_path_boundary_match()`, `_anchors_exact_match()`, and (new)
+        `path_trigger_match()` narrow it down to genuine matches afterward.
+        Because that narrowing happens after the SQL fetch, the fetch
+        pulls a bounded over-fetched pool (see `memory_recall_for_path` in
+        config.yaml) rather than exactly `limit` rows — otherwise a true
+        match could be discarded before the boundary filter ever saw it,
+        purely because it didn't fit in an under-sized SQL LIMIT. Not
+        semantic — a substring anchor avoids false "nearby file" hits. The
+        triggers SQL arm is a superset too: a trigger's `path` value is a
+        glob (e.g. "agent/*.py"), which a SQL LIKE cannot itself evaluate,
+        so the prefilter only checks that the note declares SOME 'path'
+        trigger at all (`triggers LIKE '%"path"%'`) — `path_trigger_match
+        ()` does the real glob evaluation afterward, exactly like the
+        other two arms narrow their own SQL supersets.
 
         session_id: scope="session" enforcement, same as recall(). `file_path`
         (already a parameter here) also enforces scope="path-subtree" — the
@@ -2308,6 +2321,7 @@ class WorkingContextStore:
             MEMORY_RECALL_FOR_PATH_OVERFETCH_CEILING,
             MEMORY_RECALL_FOR_PATH_OVERFETCH_MULTIPLIER,
         )
+        from agent.trigger_engine import path_trigger_match
 
         basename = Path(file_path).name
         if not basename:
@@ -2332,7 +2346,8 @@ class WorkingContextStore:
         # needs to guarantee no true match is excluded from the pool.
         sql = (
             "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL "
-            "AND (content LIKE ? OR content LIKE ? OR anchors LIKE ? OR anchors LIKE ?)"
+            "AND (content LIKE ? OR content LIKE ? OR anchors LIKE ? OR anchors LIKE ?"
+            " OR triggers LIKE ?)"
         )
         params: list = [
             workspace,
@@ -2340,6 +2355,7 @@ class WorkingContextStore:
             f"%{relpath_or_basename}%",
             f"%{basename}%",
             f"%{relpath_or_basename}%",
+            '%"path"%',
         ]
         if kind:
             sql += " AND kind = ?"
@@ -2364,6 +2380,9 @@ class WorkingContextStore:
         matched: list[WorkingNote] = []
         for note in pool:
             if _anchors_exact_match(note.anchors, path_candidates):
+                matched.append(note)
+                continue
+            if path_trigger_match(note.triggers, path_candidates) is not None:
                 matched.append(note)
                 continue
             content = note.content or ""

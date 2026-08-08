@@ -653,6 +653,71 @@ class TestRecallForPathUPG96:
         notes = store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha")
         assert len(notes) == 2
 
+    # -- UPG-TRIGGERS-INERT-ON-PROXY-STRUCTURAL -----------------------------
+    #
+    # A note's EXPLICIT `triggers[].path` glob is just as deliberate a
+    # "this note concerns this file" declaration as `anchors` — before this
+    # fix, recall_for_path()'s SQL/Python narrowing never consulted
+    # `triggers` at all, so a note with a path glob ONLY in `triggers`
+    # (never mentioned in its body, never in `anchors`) was invisible here
+    # even though the identical glob already fires it live via the
+    # PreToolUse hook's trigger engine (`evaluate_note()`/`fire()`).
+
+    def test_matches_note_with_declared_trigger_path_glob_only(self, tmp_path) -> None:
+        """The A/B this task was filed against: an identical note with the
+        path only in a `triggers` glob (never in content, never in
+        `anchors`) must now be found, exactly like a declared anchor is."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the retry loop here needs a backoff cap", kind="gotcha",
+            triggers=[{"path": "gate.py"}],
+        )
+        notes = store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha")
+        assert len(notes) == 1
+        assert "gate.py" not in notes[0].content  # non-vacuity: only the trigger glob matched
+
+    def test_declared_trigger_glob_supports_fnmatch_wildcards(self, tmp_path) -> None:
+        """A trigger's `path` is a glob (fnmatch), not an exact string --
+        the same P-primitive semantics `_trigger_matches()` already uses for
+        live firing, now also consulted for structural relevance."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "package-wide caveat, no filename mentioned anywhere", kind="gotcha",
+            triggers=[{"path": "agent/*.py"}],
+        )
+        notes = store.recall_for_path("/repo", "/repo/agent/gate.py", kind="gotcha")
+        assert len(notes) == 1
+
+    def test_declared_trigger_glob_that_does_not_match_the_file_is_not_returned(
+        self, tmp_path
+    ) -> None:
+        """Negative case (glob semantics, not "any trigger present"): a
+        trigger path glob that does NOT match the recalled file must not
+        inject the note, even though the note does declare a path trigger
+        for some other file."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the retry loop here needs a backoff cap", kind="gotcha",
+            triggers=[{"path": "other/*.py"}],
+        )
+        assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
+
+    def test_kind_default_trigger_bundle_is_not_double_counted_via_triggers_column(
+        self, tmp_path
+    ) -> None:
+        """A note relying on its KIND's default trigger bundle (no explicit
+        `triggers[]` passed at write time) stores `triggers = []` in the DB
+        (`effective_triggers()`'s replace-not-merge contract resolves the
+        default fresh at evaluation time, never bakes it into storage) --
+        so this path only ever sees an EXPLICIT, author-declared glob, never
+        a derived one. A gotcha note with no explicit triggers and no
+        anchors and no content mention of the file must still find nothing
+        here (it was already reachable via the anchor signal if anchored;
+        this is the genuinely-unrelated case)."""
+        store = _store(tmp_path)
+        store.remember("/repo", "an unrelated caveat about auth", kind="gotcha")
+        assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
+
 
 # ---------------------------------------------------------------------------
 # format_notes_for_llm
