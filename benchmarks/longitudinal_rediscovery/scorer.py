@@ -418,19 +418,34 @@ def _billable_tokens(usage: Mapping[str, Any]) -> float:
 # fields are "stock" (retained-context) vs "incremental" (this-call-only) -- it
 # fixes the actual event-count bug rather than reformulating around it.
 #
-# Hand-built test fixtures (`tests/test_longitudinal_scorer.py`'s `_transcript()`)
-# model one event as one call and never set `message.id`; events with no id are
-# NOT deduplicated against each other, so existing fixture-based tests keep their
-# original semantics unchanged.
+# UPG-EVAL-DEDUPE-NO-MESSAGE-ID: an `assistant` event missing `message.id` is a
+# hard error, not a silent pass-through. The earlier version appended an id-less
+# event unconditionally (never deduped against anything, including another
+# id-less event carrying the same real call's other content fragment) -- that
+# fail-open reintroduces the exact double-count this function exists to fix
+# (48e39bc) the moment any real event lacks an id. Verified against every
+# preserved real stream-json transcript in this repo (58 transcripts, 1287
+# assistant events): `message.id` is ALWAYS present in a live CLI transcript.
+# An id-less event reaching this function is therefore a malformed/truncated
+# transcript or a hand-built test fixture that forgot to set one -- both must
+# be reported, never silently under- or over-counted. Test fixtures
+# (`tests/test_longitudinal_scorer.py`'s `_transcript()`) set a synthetic,
+# per-event unique id for exactly this reason.
 def _dedupe_assistant_messages(events: Sequence[dict]) -> list[dict]:
     seen: set[str] = set()
     out: list[dict] = []
     for ev in events:
         mid = ((ev.get("message") or {}).get("id"))
-        if mid is not None:
-            if mid in seen:
-                continue
-            seen.add(mid)
+        if mid is None:
+            raise ValueError(
+                "assistant event missing message.id -- every real stream-json "
+                "assistant event carries one; a fixture or transcript without one "
+                "must set an explicit id rather than being silently merged "
+                "(UPG-EVAL-DEDUPE-NO-MESSAGE-ID)"
+            )
+        if mid in seen:
+            continue
+        seen.add(mid)
         out.append(ev)
     return out
 

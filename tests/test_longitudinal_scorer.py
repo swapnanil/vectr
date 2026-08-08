@@ -85,7 +85,10 @@ def _transcript(
 
     One `assistant` event per action (not batched) so each action's `event_index`
     lands on its own event, matching how `leg_metrics` reads the acquiring event's
-    own usage for `context_tokens_at_fact`.
+    own usage for `context_tokens_at_fact`. Each event gets a synthetic, per-event
+    unique `message.id` -- `_dedupe_assistant_messages` (UPG-EVAL-DEDUPE-NO-
+    MESSAGE-ID) raises on a missing id, and every real event carries one, so a
+    fixture with none would not represent a real transcript shape.
     """
     usage = usage or {"input_tokens": 100, "output_tokens": 50}
     events: list[dict] = [
@@ -96,11 +99,12 @@ def _transcript(
             "tools": tools if tools is not None else [],
         }
     ]
-    for name, input_ in actions:
+    for idx, (name, input_) in enumerate(actions):
         events.append(
             {
                 "type": "assistant",
                 "message": {
+                    "id": f"msg_test_{idx}",
                     "content": [{"type": "tool_use", "name": name, "input": input_}],
                     "usage": usage,
                 },
@@ -1154,16 +1158,24 @@ def test_dedupe_assistant_messages_collapses_shared_message_id():
     assert deduped[1]["message"]["id"] == "msg_B"
 
 
-def test_dedupe_assistant_messages_never_merges_events_with_no_id():
-    """Hand-built fixtures (this file's own `_transcript()`) never set `message.id`
-    -- such events must NOT be merged against each other, or every pre-existing
-    fixture-based test in this file that sums usage over >1 action would silently
-    change behaviour."""
+def test_dedupe_assistant_messages_raises_on_missing_message_id():
+    """UPG-EVAL-DEDUPE-NO-MESSAGE-ID: an `assistant` event with no `message.id` must
+    fail LOUDLY, not be silently appended unconditionally (the old behaviour --
+    fail-open -- reintroduces the exact double-count 48e39bc fixed the moment any
+    real event lacks an id, since an id-less event was never deduped against
+    anything, including another id-less event carrying the same real call split
+    across multiple stream fragments). Verified against every preserved real
+    stream-json transcript in this repo (58 transcripts, 1287 assistant events):
+    `message.id` is always present, so a missing id here means a malformed
+    transcript or a hand-built fixture that forgot to set one -- either way, the
+    caller must be told, not silently under/over-counted. This file's own
+    `_transcript()` helper sets a synthetic id per event for exactly this reason."""
     events = [
         {"type": "assistant", "message": {"content": [{"type": "tool_use"}], "usage": {}}},
         {"type": "assistant", "message": {"content": [{"type": "tool_use"}], "usage": {}}},
     ]
-    assert scorer._dedupe_assistant_messages(events) == events
+    with pytest.raises(ValueError, match="message.id"):
+        scorer._dedupe_assistant_messages(events)
 
 
 def test_billable_tokens_to_fact_counts_a_split_api_call_once(tmp_path):
