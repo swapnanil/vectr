@@ -298,6 +298,9 @@ _MEMORY_WRITE_TOOLS = [
             "Store the actual code or finding — vectr returns it in <50ms; "
             "re-reading the file costs tokens and turns. "
             "Do NOT store obvious or easily re-derivable facts (e.g. 'the main file is main.py'). "
+            "For a body over ~2KB, especially code-heavy with quotes/escapes, write it to a file and pass "
+            "content_file instead of content — long escape-dense strings can be corrupted mid-stream as a "
+            "tool-call argument. "
             "Retrieve with vectr_recall(query='what you need') — any time, same session or later."
         ),
         "inputSchema": {
@@ -310,7 +313,17 @@ _MEMORY_WRITE_TOOLS = [
                         "If you found a function you'll call or modify — paste its signature and body. "
                         "If you found a pattern you'll need to replicate — paste the pattern. "
                         "If you found a location — include the file:line AND the relevant excerpt, not just the pointer. "
-                        "Prose descriptions send the next conversation back to the file; actual code does not."
+                        "Prose descriptions send the next conversation back to the file; actual code does not. "
+                        "Mutually exclusive with content_file (see below); pass exactly one."
+                    ),
+                },
+                "content_file": {
+                    "type": "string",
+                    "description": (
+                        "Path to a UTF-8 file containing the note body — use instead of content for a body over "
+                        "~2KB, especially code-heavy with quotes/escapes, so it never has to stream as a long JSON "
+                        "string argument. Absolute, or relative to the workspace root; rejected if it resolves "
+                        "outside the workspace. Mutually exclusive with content; pass exactly one."
                     ),
                 },
                 "tags": {
@@ -459,7 +472,12 @@ _MEMORY_WRITE_TOOLS = [
                     ),
                 },
             },
-            "required": ["content"],
+            # UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS: content is no longer
+            # unconditionally required at the schema level — content_file is
+            # a valid alternative body source. Exactly one of content /
+            # content_file is enforced server-side (resolve_remember_content),
+            # with an actionable error naming which rule was broken.
+            "required": [],
         },
     },
     {

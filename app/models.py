@@ -289,7 +289,24 @@ _REST_PROVENANCE_VALUES = ("agent", "auto")
 
 
 class RememberRequest(BaseModel):
-    content: str = Field(..., min_length=1, description="Working note to store")
+    content: str | None = Field(
+        default=None,
+        description=(
+            "Working note to store. Mutually exclusive with content_file — "
+            "pass exactly one, not both."
+        ),
+    )
+    content_file: str | None = Field(
+        default=None,
+        description=(
+            "UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS: path to a UTF-8 file "
+            "containing the note body, as an alternative to inline content. "
+            "Absolute, or relative to the workspace root; rejected if it "
+            "resolves outside the workspace, is missing/unreadable, exceeds "
+            "the configured size cap, or is not valid UTF-8. Mutually "
+            "exclusive with content — pass exactly one, not both."
+        ),
+    )
     tags: list[str] | None = Field(default=None, description="Topic tags")
     priority: str = Field(default="medium", description="high | medium | low")
     kind: str = Field(default="finding", description="directive | task | gotcha | finding | reference | decision | operational")

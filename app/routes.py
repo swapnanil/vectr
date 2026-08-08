@@ -9,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 import agent.config as config
 from agent.chroma_dispatch import dispatch_chroma_async
-from agent.working_context_store import bind_user_quote
+from agent.working_context_store import bind_user_quote, resolve_remember_content
 
 from app.models import (
     ArcRecord,
@@ -354,10 +354,28 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         from app.service import _SEARCH_ONLY_MSG
         raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
     try:
+        # UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS: resolve content_file
+        # (mutually exclusive with inline content) before the write, using
+        # the exact same shared resolver the MCP vectr_remember tool calls
+        # — both surfaces enforce the identical rule. No stripping applied
+        # here, matching this route's existing pass-through-unmodified
+        # handling of an inline `content` body. extra_roots is passed
+        # through so a multi-root instance accepts a content_file path
+        # under ANY served root, not only the primary.
+        ws_root = getattr(svc, "_workspace_root", "")
+        if not isinstance(ws_root, str):
+            ws_root = ""
+        extra_roots = getattr(svc, "_extra_roots", [])
+        if not isinstance(extra_roots, list):
+            extra_roots = []
+        extra_roots = [r for r in extra_roots if isinstance(r, str)]
+        content = resolve_remember_content(
+            ws_root, body.content, body.content_file, extra_roots=extra_roots,
+        )
         outcome = await dispatch_chroma_async(
             svc,
             svc.remember_with_extras,
-            content=body.content,
+            content=content,
             tags=body.tags,
             priority=body.priority,
             session_id=body.session_id,

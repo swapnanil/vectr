@@ -19,7 +19,7 @@ from agent.config import (
 )
 from agent.chroma_dispatch import dispatch_chroma_sync
 from agent.render_paths import workspace_relpath
-from agent.working_context_store import USER_STATED_PROVENANCE, bind_user_quote
+from agent.working_context_store import USER_STATED_PROVENANCE, bind_user_quote, resolve_remember_content
 
 
 def _service_ws_root(service) -> str:
@@ -28,6 +28,17 @@ def _service_ws_root(service) -> str:
     leaks into a rendered path or header."""
     root = getattr(service, "_workspace_root", "")
     return root if isinstance(root, str) else ""
+
+
+def _service_extra_roots(service) -> list[str]:
+    """The daemon's additional served workspace roots (multi-root instance)
+    as a plain list of strings, or [] when unavailable/malformed — same
+    mock-safety rationale as `_service_ws_root`: a test MagicMock's
+    auto-attribute must never leak into a containment check."""
+    roots = getattr(service, "_extra_roots", [])
+    if not isinstance(roots, list):
+        return []
+    return [r for r in roots if isinstance(r, str)]
 from integrations.mcp_server._schemas import (
     _EXPLORATION_TOOLS,
     _MEMORY_WRITE_TOOLS,
@@ -607,7 +618,24 @@ def handle_tools_call(
 
     # ---- vectr_remember ----
     if tool_name == "vectr_remember":
-        content = arguments.get("content", "").strip()
+        # UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS: content_file is an
+        # alternative body source read from disk, mutually exclusive with
+        # inline content — see resolve_remember_content's docstring. The
+        # resolved body is then stripped exactly as inline `content` always
+        # was here, so content_file behaves identically to content at this
+        # surface regardless of which one supplied the body. extra_roots is
+        # passed through so a multi-root instance (a primary root plus one
+        # or more extra_roots) accepts a content_file path under ANY served
+        # root, not only the primary — see _service_extra_roots.
+        try:
+            content = resolve_remember_content(
+                _service_ws_root(service),
+                arguments.get("content"),
+                arguments.get("content_file"),
+                extra_roots=_service_extra_roots(service),
+            ).strip()
+        except ValueError as exc:
+            return _mcp_error(str(exc))
         if not content:
             return _mcp_error("content is required")
 
