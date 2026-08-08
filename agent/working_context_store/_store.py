@@ -2329,6 +2329,18 @@ class WorkingContextStore:
         path_candidates = _path_trigger_candidates(workspace, file_path)
         relpath = next((c for c in (path_candidates or ()) if c != file_path), "")
         relpath_or_basename = relpath if relpath else basename
+        # `path_candidates` is only "as-given plus workspace-relative"
+        # (`_path_trigger_candidates()`'s own contract, shared with `fire()`'s
+        # live P-primitive evaluation) — it has no bare-basename form of its
+        # own unless the file happens to sit directly at the workspace root
+        # (where relpath == basename already). The content-mention arm below
+        # sidesteps this by checking `basename` and `relpath` as two SEPARATE
+        # substring probes; `path_trigger_match()`'s glob evaluation instead
+        # needs every candidate in one sequence, so basename is appended
+        # explicitly here — the same explicit-basename-alongside-full-path
+        # shape `agent/proactive/matcher.py`'s `_first_anchor()` already uses
+        # for its own `path_trigger_match()` call over window file paths.
+        trigger_path_candidates = tuple(path_candidates or ()) + (basename,)
 
         pool_size = max(
             limit,
@@ -2382,7 +2394,7 @@ class WorkingContextStore:
             if _anchors_exact_match(note.anchors, path_candidates):
                 matched.append(note)
                 continue
-            if path_trigger_match(note.triggers, path_candidates) is not None:
+            if path_trigger_match(note.triggers, trigger_path_candidates) is not None:
                 matched.append(note)
                 continue
             content = note.content or ""

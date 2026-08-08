@@ -702,6 +702,27 @@ class TestRecallForPathUPG96:
         )
         assert store.recall_for_path("/repo", "/repo/gate.py", kind="gotcha") == []
 
+    def test_declared_trigger_bare_basename_matches_a_nested_file(self, tmp_path) -> None:
+        """A trigger glob of just the bare basename ("gate.py", no directory
+        prefix) must still match a file nested below the workspace root
+        ("/repo/src/gate.py") -- not only a file sitting directly at the
+        workspace root. `_path_trigger_candidates()`'s own candidate set is
+        "as-given plus workspace-relative" only (no separate basename form
+        unless relpath already equals it, e.g. a root-level file), so this
+        exercises the basename explicitly appended to the trigger-matching
+        candidate set in `recall_for_path()` -- the same explicit-basename
+        shape `agent/proactive/matcher.py`'s `_first_anchor()` already uses
+        for the live matcher path. A prior version of this fix passed
+        `path_candidates` (missing the bare basename) straight into
+        `path_trigger_match()` and silently never matched a nested file."""
+        store = _store(tmp_path)
+        store.remember(
+            "/repo", "the retry loop here needs a backoff cap", kind="gotcha",
+            triggers=[{"path": "gate.py"}],
+        )
+        notes = store.recall_for_path("/repo", "/repo/src/gate.py", kind="gotcha")
+        assert len(notes) == 1
+
     def test_kind_default_trigger_bundle_is_not_double_counted_via_triggers_column(
         self, tmp_path
     ) -> None:
