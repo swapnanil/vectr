@@ -211,10 +211,14 @@ class CodeIndexer:
         # Guards `_save_mtime_cache`'s file write. Before UPG-PURPOSE-PASS-
         # DEFERRAL, every mtime-cache write happened on the single thread
         # running `index_workspace()`/`index_file()` — never concurrently.
-        # Now a deferred purpose pass can still be writing checkpoints on
-        # `_purpose_executor`'s thread after `index_workspace()` has already
-        # returned, so a *later* call's own writes (on the caller's thread)
-        # can genuinely overlap it. This lock only prevents two threads'
+        # `_upsert_purpose_vectors()` itself never touches the mtime cache —
+        # all six `_save_mtime_cache()` call sites are on the caller's thread,
+        # by design (content-completion and purpose-completion are decoupled
+        # signals). What deferral changes is that `index_workspace()` now
+        # RETURNS EARLY, while a purpose pass is still running, so a caller —
+        # or the watcher's `index_file()` — is free to start another indexing
+        # pass much sooner than before, and two such passes' writes can
+        # genuinely overlap. This lock only prevents two threads'
         # `write_text()` calls from interleaving into corrupt JSON; it does
         # not resolve the logical lost-update case (one writer's snapshot
         # overwrites the other's) — that case is self-healing (the
