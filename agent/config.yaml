@@ -709,6 +709,56 @@ indexing:
     # still completes normally; this only gives visibility into it.
     slow_call_warn_seconds: 5.0
 
+  # Resource governor for bulk indexing (UPG-INDEX-RESOURCE-GOVERNOR).
+  # Left unclamped, a full-workspace index runs the embed/upsert batch loop
+  # at full multi-core priority, competing with interactive work (the AI
+  # editor itself, its language server, other apps) for the same CPU. These
+  # settings apply an OS-level priority clamp plus a duty-cycle pacing sleep
+  # around each embed batch (both content and purpose-vector passes) so
+  # indexing stays gentle by default. `vectr start --foreground-fast` (or
+  # VECTR_FOREGROUND_FAST=1) bypasses this section entirely and restores
+  # unthrottled full-speed indexing, for dedicated/CI machines where nothing
+  # else is competing for CPU.
+  index_governor:
+    # Master switch for the priority clamp + duty-cycle pacing below.
+    # Checkpointing (never losing already-embedded work across a
+    # kill/restart) is a correctness guarantee and always applies,
+    # independent of this flag.
+    enabled: true
+    # Fraction of wall-clock time the indexing thread spends doing work
+    # rather than sleeping, e.g. 0.5 = work half the time, yield the CPU
+    # the other half. 0.5 is a defensible middle ground: it roughly doubles
+    # a full-workspace index's wall-clock time in exchange for leaving
+    # meaningful CPU headroom for interactive use, without indexing taking
+    # so long it never seems to finish. 1.0 disables pacing without
+    # touching the priority clamp.
+    duty_cycle: 0.5
+    # macOS QoS class (see <sys/qos.h>) the indexing thread is set to for
+    # the duration of each batch loop. "utility" is Apple's own class for
+    # long-running, user-initiated background work with a visible progress
+    # indicator (their example: "importing data, cleaning up caches") —
+    # exactly this workload. One of: user_interactive, user_initiated,
+    # default, utility, background.
+    macos_qos_class: "utility"
+    # Linux per-thread niceness increment (0-19; higher = lower priority).
+    # 10 is the conventional "be nice" renice value — a substantial but not
+    # extreme deprioritization, leaving room to go lower (up to 19) for a
+    # more aggressive clamp if needed.
+    linux_nice_increment: 10
+    # A batch whose own embedding work took less than this many seconds is
+    # never paced (no post-batch sleep) — keeps a tiny batch (a handful of
+    # files, a short tail batch) from paying a pacing sleep that would dwarf
+    # the work it's supposed to be proportional to.
+    min_batch_seconds_for_pacing: 0.05
+    # Persist newly-completed files' mtimes to the on-disk incremental-index
+    # cache every N embed batches during Phase 3 (content embedding) and the
+    # purpose-vector pass, rather than only once at the very end of the run.
+    # 1 = checkpoint after every batch — the strongest guarantee (a
+    # kill/restart re-embeds at most the files in the batch that was in
+    # flight when it was killed). Raise this on a very large corpus to
+    # reduce checkpoint I/O at the cost of more work re-done after a crash.
+    checkpoint_every_batches: 1
+
 output:
   # Number of lines returned as a snippet with each symbol location.
   # Enough for the AI to understand signature + first few lines of the body.

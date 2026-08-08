@@ -2288,6 +2288,252 @@ class TestStreamingEmbedUpsert:
         assert idx.total_chunks == 20
 
 
+class TestIndexResourceGovernor:
+    """UPG-INDEX-RESOURCE-GOVERNOR: priority clamp + duty-cycle pacing around
+    Phase 3 (and the purpose-vector pass), plus file-level checkpointing so a
+    kill/restart mid-index never re-embeds already-completed work. Exercised
+    against a real CodeIndexer + real ChromaDB collection on tiny synthetic
+    corpora only — never a large real repo."""
+
+    def test_default_config_applies_priority_clamp_and_pacing(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        import contextlib
+        import agent.indexer._core as core_module
+
+        calls: list[tuple] = []
+
+        @contextlib.contextmanager
+        def _recording_lowered_priority(enabled, **kwargs):
+            calls.append(("lowered_priority", enabled))
+            yield
+
+        monkeypatch.setattr(core_module, "lowered_priority", _recording_lowered_priority)
+
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+
+        lowered_calls = [c for c in calls if c[0] == "lowered_priority"]
+        assert lowered_calls, "lowered_priority was never invoked around the embed batch loop"
+        assert all(enabled is True for _, enabled in lowered_calls), (
+            f"default config (INDEX_GOVERNOR_ENABLED=True, no foreground-fast) must "
+            f"govern every batch loop: {lowered_calls}"
+        )
+
+    def test_foreground_fast_env_disables_governor(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        import contextlib
+        import agent.indexer._core as core_module
+
+        monkeypatch.setenv("VECTR_FOREGROUND_FAST", "1")
+
+        calls: list[tuple] = []
+
+        @contextlib.contextmanager
+        def _recording_lowered_priority(enabled, **kwargs):
+            calls.append(("lowered_priority", enabled))
+            yield
+
+        monkeypatch.setattr(core_module, "lowered_priority", _recording_lowered_priority)
+
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+
+        lowered_calls = [c for c in calls if c[0] == "lowered_priority"]
+        assert lowered_calls, "lowered_priority was never invoked"
+        assert all(enabled is False for _, enabled in lowered_calls), (
+            f"VECTR_FOREGROUND_FAST=1 must restore unthrottled indexing exactly: {lowered_calls}"
+        )
+
+    def test_governor_disabled_in_config_skips_clamp(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        import contextlib
+        import agent.indexer._core as core_module
+
+        monkeypatch.setattr(core_module, "_INDEX_GOVERNOR_ENABLED", False)
+
+        calls: list[tuple] = []
+
+        @contextlib.contextmanager
+        def _recording_lowered_priority(enabled, **kwargs):
+            calls.append(("lowered_priority", enabled))
+            yield
+
+        monkeypatch.setattr(core_module, "lowered_priority", _recording_lowered_priority)
+
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+
+        lowered_calls = [c for c in calls if c[0] == "lowered_priority"]
+        assert lowered_calls and all(enabled is False for _, enabled in lowered_calls)
+
+    def test_index_file_purpose_pass_never_governed(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        """The single-file watcher path (index_file) must stay ungoverned —
+        small, interactive-latency-sensitive work, unlike a bulk
+        index_workspace() run."""
+        import contextlib
+        import agent.indexer._core as core_module
+
+        calls: list[tuple] = []
+
+        @contextlib.contextmanager
+        def _recording_lowered_priority(enabled, **kwargs):
+            calls.append(("lowered_priority", enabled))
+            yield
+
+        monkeypatch.setattr(core_module, "lowered_priority", _recording_lowered_priority)
+
+        path = make_py(tmp_path, "a.py", "def known_fn(): pass")
+        indexer.index_file(path)
+
+        lowered_calls = [c for c in calls if c[0] == "lowered_priority"]
+        assert lowered_calls, "lowered_priority was never invoked from index_file's purpose pass"
+        assert all(enabled is False for _, enabled in lowered_calls)
+
+    def test_zero_chunk_files_checkpointed_before_batch_loop_runs(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        """A file that chunks to zero chunks (mixed into a run with normal
+        files) must be checkpointed as soon as Phase 3 begins, not only at
+        the very end of the run (previously this mtime was silently
+        discarded whenever `all_chunks` overall was non-empty but this
+        particular file's own chunk list was empty)."""
+        import agent.indexer._core as core_module
+
+        monkeypatch.setattr(core_module, "_EMBED_BATCH_SIZE", 1)
+
+        real_path = make_py(tmp_path, "real.py", "def real_fn(): pass")
+        empty_path = tmp_path / "empty.py"
+        empty_path.write_text("")  # chunks to zero chunks
+
+        saved_snapshots: list[dict] = []
+        real_save = indexer._save_mtime_cache
+
+        def _recording_save(cache):
+            saved_snapshots.append(dict(cache))
+            real_save(cache)
+
+        monkeypatch.setattr(indexer, "_save_mtime_cache", _recording_save)
+
+        indexer.index_workspace()
+
+        assert saved_snapshots, "mtime cache was never persisted"
+        assert str(empty_path) in saved_snapshots[0], (
+            f"zero-chunk file must be in the FIRST mtime-cache persist, "
+            f"before Phase 3's batch loop runs: {saved_snapshots[0]}"
+        )
+        assert str(real_path) not in saved_snapshots[0], (
+            "the real file's chunk had not been embedded yet when the "
+            "zero-chunk pre-checkpoint fired"
+        )
+
+    def test_kill_mid_index_resumes_without_reembedding_completed_files(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Acceptance criterion: killing the daemon mid-index and restarting
+        resumes without re-embedding completed work. Simulated with a real
+        CodeIndexer against a real on-disk ChromaDB collection: the embed
+        provider raises partway through Phase 3 (the crash), and a SECOND
+        CodeIndexer instance against the same db_path must never be asked to
+        re-embed a chunk whose file was already checkpointed before the
+        crash."""
+        import agent.indexer._core as core_module
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        monkeypatch.setattr(core_module, "_EMBED_BATCH_SIZE", 1)
+        monkeypatch.setattr(core_module, "_INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES", 1)
+
+        for i in range(4):
+            make_py(tmp_path, f"m{i}.py", f"def f{i}():\n    return {i}\n")
+
+        embedded_before_crash: list[str] = []
+        call_count = {"n": 0}
+
+        class _CrashingProvider:
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                call_count["n"] += 1
+                if call_count["n"] > 2:
+                    raise RuntimeError("simulated crash")
+                embedded_before_crash.extend(texts)
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts: list[str]) -> list[list[float]]:
+                return self.embed(texts)
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _CrashingProvider())
+
+        db_path = str(tmp_path / "chroma")
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            indexer1.index_workspace()
+
+        class _RecordingProvider:
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                self.calls.append(list(texts))
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts: list[str]) -> list[list[float]]:
+                return self.embed(texts)
+
+        recorder = _RecordingProvider()
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: recorder)
+
+        indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer2.index_workspace()
+
+        reembedded_texts = {t for call in recorder.calls for t in call}
+        assert not (reembedded_texts & set(embedded_before_crash)), (
+            "resume re-embedded a chunk whose file was already checkpointed before the crash"
+        )
+        # Every chunk ends up indexed exactly once across the two runs.
+        assert indexer2.total_chunks == 4
+
+    def test_embed_model_stamp_survives_a_mid_run_crash(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Regression guard for the stamp-timing defect this task fixed: the
+        stamp must be written before Phase 3 begins, not only at the very
+        end of a successful run — otherwise a crashed first-ever index on a
+        brand-new workspace leaves no stamp, and a resumed run reads back
+        None (treated as a mismatch), wiping the checkpointed progress via
+        _recreate_collections()."""
+        import agent.indexer._core as core_module
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        monkeypatch.setattr(core_module, "_EMBED_BATCH_SIZE", 1)
+
+        make_py(tmp_path, "a.py", "def a(): pass")
+        make_py(tmp_path, "b.py", "def b(): pass")
+
+        class _CrashingProvider:
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                raise RuntimeError("simulated crash on the very first batch")
+
+            def embed_query(self, texts: list[str]) -> list[list[float]]:
+                return [[0.1] * 8 for _ in texts]
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _CrashingProvider())
+
+        db_path = str(tmp_path / "chroma")
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        with pytest.raises(RuntimeError):
+            indexer1.index_workspace()
+
+        assert indexer1._stored_embed_model() == indexer1.embed_model, (
+            "the embed-model stamp must be written before Phase 3 begins, "
+            "surviving a crash on the very first embed batch"
+        )
+
+
 class TestFetchChunks:
     """Deterministic re-fetch by chunk id (UPG-CTX-EVICT part a)."""
 

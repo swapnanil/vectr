@@ -113,6 +113,7 @@ class TestCmdStart:
         mock_do_start.assert_called_once_with(
             ws, 8765, wh, extra_roots=[], memory_only=False, search_only=False, workspace_explicit=True,
             code_workspace_file=None, host="127.0.0.1", no_ide_config=False, json_output=False,
+            foreground_fast=False,
         )
 
     def test_prunes_dead_entries_before_starting(self, tmp_path):
@@ -3901,6 +3902,98 @@ class TestDoStartExplicitEnvConstruction:
         _, call_kwargs = mock_do_start.call_args
         assert call_kwargs.get("workspace_explicit") is False
 
+class TestDoStartForegroundFastEnvConstruction:
+    """UPG-INDEX-RESOURCE-GOVERNOR: --foreground-fast must propagate
+    VECTR_FOREGROUND_FAST to the daemon subprocess only when explicitly
+    requested, and must reach _do_start via both cmd_start and cmd_restart."""
+
+    def _mock_popen_factory(self, captured_env: dict):
+        def _mock_popen(cmd, env, **kwargs):
+            captured_env.update(env)
+            proc = MagicMock()
+            proc.pid = 99999
+            return proc
+        return _mock_popen
+
+    def test_foreground_fast_flag_adds_env_var(self, tmp_path):
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        captured_env: dict = {}
+
+        with patch("subprocess.Popen", side_effect=self._mock_popen_factory(captured_env)), \
+             patch("main.InstanceRegistry") as MockReg, \
+             patch("main._migrate_legacy_files"), \
+             patch("builtins.open", MagicMock()):
+            MockReg.return_value.register = MagicMock()
+            m._do_start(ws, 8765, wh, foreground_fast=True)
+
+        assert captured_env.get("VECTR_FOREGROUND_FAST") == "1"
+
+    def test_default_does_not_add_foreground_fast_env_var(self, tmp_path):
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        captured_env: dict = {}
+
+        with patch("subprocess.Popen", side_effect=self._mock_popen_factory(captured_env)), \
+             patch("main.InstanceRegistry") as MockReg, \
+             patch("main._migrate_legacy_files"), \
+             patch("builtins.open", MagicMock()):
+            MockReg.return_value.register = MagicMock()
+            m._do_start(ws, 8765, wh)
+
+        assert captured_env.get("VECTR_FOREGROUND_FAST", "") != "1"
+
+    def test_cmd_start_threads_foreground_fast_flag_to_do_start(self, tmp_path):
+        ws = str(tmp_path)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_start(_make_args(paths=[ws], port=8765, foreground_fast=True))
+
+        _, call_kwargs = mock_do_start.call_args
+        assert call_kwargs.get("foreground_fast") is True
+
+    def test_cmd_start_default_foreground_fast_is_false(self, tmp_path):
+        ws = str(tmp_path)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_start(_make_args(paths=[ws], port=8765))
+
+        _, call_kwargs = mock_do_start.call_args
+        assert call_kwargs.get("foreground_fast") is False
+
+    def test_cmd_restart_threads_foreground_fast_flag_to_do_start(self, tmp_path):
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        reg = InstanceRegistry(registry_path=tmp_path / "instances.json")
+        reg.register(wh, ws, 8765, 12345)
+
+        with patch("main.InstanceRegistry", return_value=reg), \
+             patch("agent.instance_registry._is_pid_alive", return_value=False), \
+             patch("main._is_pid_alive", return_value=False), \
+             patch("agent.instance_registry._port_is_free", return_value=True), \
+             patch("main._write_workspace_config"), \
+             patch("main._stop_server"), \
+             patch("main._warn_on_stale_mcp_configs"), \
+             patch("main._do_start") as mock_do_start:
+            m.cmd_restart(_make_args(paths=[ws], port=8765, foreground_fast=True))
+
+        _, call_kwargs = mock_do_start.call_args
+        assert call_kwargs.get("foreground_fast") is True
+
+
+class TestCmdStartThreadsCodeWorkspaceFile:
     def test_cmd_start_threads_code_workspace_file_to_do_start(self, tmp_path):
         """UPG-CLI-STATUS-MODE: starting from a .code-workspace file records
         that file's path so `vectr status` can show it later."""
@@ -4037,6 +4130,7 @@ class TestMultiRoot:
         mock_do_start.assert_called_once_with(
             ws_a, 8765, wh, extra_roots=[ws_b], memory_only=False, search_only=False, workspace_explicit=True,
             code_workspace_file=None, host="127.0.0.1", no_ide_config=False, json_output=False,
+            foreground_fast=False,
         )
 
 

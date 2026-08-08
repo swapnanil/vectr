@@ -18,6 +18,16 @@ from agent.chunk_quality import build_purpose_text, is_symbol_bearing_chunk
 from agent.config import DUAL_VECTOR_ENABLED as _DUAL_VECTOR_ENABLED
 from agent.config import EMBEDDING_DEFAULT_MODEL as _EMBEDDING_DEFAULT_MODEL
 from agent.config import FETCH_MISALIGN_NEAREST_MAX
+from agent.config import INDEX_GOVERNOR_ENABLED as _INDEX_GOVERNOR_ENABLED
+from agent.config import INDEX_GOVERNOR_DUTY_CYCLE as _INDEX_GOVERNOR_DUTY_CYCLE
+from agent.config import INDEX_GOVERNOR_MACOS_QOS_CLASS as _INDEX_GOVERNOR_MACOS_QOS_CLASS
+from agent.config import INDEX_GOVERNOR_LINUX_NICE_INCREMENT as _INDEX_GOVERNOR_LINUX_NICE_INCREMENT
+from agent.config import (
+    INDEX_GOVERNOR_MIN_BATCH_SECONDS_FOR_PACING as _INDEX_GOVERNOR_MIN_BATCH_SECONDS_FOR_PACING,
+)
+from agent.config import (
+    INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES as _INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES,
+)
 from agent.config import vectr_cache_root as _vectr_cache_root
 from agent.indexer._constants import (
     EXCLUDED_DIRS,
@@ -30,9 +40,22 @@ from agent.indexer._constants import (
     _EMBED_MODEL_STAMP_FILE,
 )
 from agent.indexer._chunking import chunk_file
+from agent.indexer._priority import lowered_priority, pace
 from agent.indexer._types import CodeChunk
 
 logger = logging.getLogger(__name__)
+
+
+def _foreground_fast_enabled() -> bool:
+    """VECTR_FOREGROUND_FAST=1 restores index_workspace()'s pre-governor,
+    unthrottled behaviour exactly — no priority clamp, no duty-cycle pacing
+    (UPG-INDEX-RESOURCE-GOVERNOR). Set by `vectr start --foreground-fast` /
+    `vectr restart --foreground-fast` in the daemon subprocess's env, same
+    mechanism as VECTR_MEMORY_ONLY / VECTR_SEARCH_ONLY (main.py `_do_start`).
+    Checkpointing (mtime-cache persisted incrementally as Phase 3 progresses)
+    is a correctness fix, not a throttle, and is unaffected by this flag.
+    """
+    return os.getenv("VECTR_FOREGROUND_FAST", "") == "1"
 
 
 def _chunk_metadata(c: CodeChunk) -> dict:
@@ -329,6 +352,18 @@ class CodeIndexer:
                 force = True
             self._recreate_collections()
 
+        # Stamp the CURRENT embed model now — right after the collections are
+        # known to be consistent with it — rather than deferring the write to
+        # the very end of a successful run (UPG-INDEX-RESOURCE-GOVERNOR).
+        # Deferring it meant a crash partway through Phase 3 on a brand-new
+        # workspace left no stamp on disk; on restart `_stored_embed_model()`
+        # read back None, which this same check treats as a mismatch, forcing
+        # another `_recreate_collections()` that wiped the checkpointed
+        # progress from the crashed run. Writing it here makes every
+        # subsequent early return and mid-run crash see a correct, matching
+        # stamp instead.
+        self._write_embed_model_stamp()
+
         if force:
             # Clean rebuild: ignore the mtime cache so every file is re-indexed,
             # and (in Phase 2) its existing chunks are deleted first. (UPG-8.6)
@@ -350,7 +385,8 @@ class CodeIndexer:
         if not to_index:
             if pruned:
                 self._save_mtime_cache(mtime_cache)  # persist orphan removals
-            self._write_embed_model_stamp()  # cheap no-op when already current
+            # Embed-model stamp is already written above, right after the
+            # mismatch check — no need to repeat it here.
             logger.info("All %d files up to date — nothing to re-index", len(all_files))
             self._last_indexed = time.time()
             self._refresh_chunk_count_caches()
@@ -390,6 +426,13 @@ class CodeIndexer:
                                 done, len(to_index), len(all_chunks))
 
         if not all_chunks:
+            # Every file in `to_index` chunked to zero chunks (e.g. all
+            # whitespace/binary) — still persist their mtimes, otherwise
+            # `new_mtimes` built during Phase 1 is silently discarded and
+            # these files are needlessly re-chunked on every future run
+            # (UPG-INDEX-RESOURCE-GOVERNOR).
+            mtime_cache.update(new_mtimes)
+            self._save_mtime_cache(mtime_cache)
             self._last_indexed = time.time()
             self._refresh_chunk_count_caches()
             return len(self._indexed_files), self.total_chunks
@@ -421,39 +464,97 @@ class CodeIndexer:
         # corpus, for the same reason.
         total = len(all_chunks)
         phase_start = time.time()
-        for i in range(0, total, _EMBED_BATCH_SIZE):
-            batch = all_chunks[i: i + _EMBED_BATCH_SIZE]
-            batch_ids = [c.chunk_id for c in batch]
-            batch_docs = [c.content for c in batch]
-            batch_metas = [_chunk_metadata(c) for c in batch]
-            batch_embeddings = self._embed_provider.embed(batch_docs)
-            _upsert_in_batches(
-                self._collection, batch_ids, batch_docs, batch_metas,
-                batch_embeddings, _UPSERT_BATCH_SIZE, op_label="upsert (body)",
-            )
-            self._apply_chunk_delta(batch_metas, sign=1)
-            # Refresh after every batch, not just once the whole call
-            # finishes: a bulk/forced reindex can run for minutes, and an
-            # external caller polling `total_chunks`/`last_indexed_ts` to
-            # detect "indexing is still in progress" must see them keep
-            # moving throughout, not sit frozen at their pre-index values
-            # until the very end and then jump straight to a value that
-            # looks settled while the index is actually still incomplete.
-            self._last_indexed = time.time()
-            self._refresh_chunk_count_caches()
-            if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
-                logger.info("  embedded %d/%d chunks...", i, total)
+
+        # UPG-INDEX-RESOURCE-GOVERNOR: checkpoint granularity is per FILE,
+        # not per batch. Chunks for one file are always contiguous in
+        # `all_chunks` (each Phase 1 thread-pool result above appends one
+        # file's chunks as a single block), so the index of a file's LAST
+        # chunk tells us exactly when every one of its chunks has been
+        # embedded + upserted. A file's mtime is only persisted to the
+        # on-disk cache once that point is reached — a crash before then
+        # re-processes the whole file on the next run (safe: chunk ids are
+        # deterministic, so re-upserting is an idempotent superset write,
+        # never a duplicate or an orphan), but a partially-embedded file is
+        # never left recorded as up to date.
+        file_last_chunk_idx: dict[str, int] = {}
+        for idx, c in enumerate(all_chunks):
+            file_last_chunk_idx[c.file_path] = idx
+
+        # Files that chunked to zero chunks have no embed work to wait for —
+        # checkpoint them immediately rather than only at the very end.
+        zero_chunk_mtimes = {
+            fpath: mtime for fpath, mtime in new_mtimes.items()
+            if fpath not in file_last_chunk_idx
+        }
+        if zero_chunk_mtimes:
+            mtime_cache.update(zero_chunk_mtimes)
+            self._save_mtime_cache(mtime_cache)
+
+        governed = _INDEX_GOVERNOR_ENABLED and not _foreground_fast_enabled()
+        with lowered_priority(
+            governed,
+            macos_qos_class=_INDEX_GOVERNOR_MACOS_QOS_CLASS,
+            linux_nice_increment=_INDEX_GOVERNOR_LINUX_NICE_INCREMENT,
+        ):
+            for batch_num, i in enumerate(range(0, total, _EMBED_BATCH_SIZE), start=1):
+                batch_start = time.time()
+                batch = all_chunks[i: i + _EMBED_BATCH_SIZE]
+                batch_ids = [c.chunk_id for c in batch]
+                batch_docs = [c.content for c in batch]
+                batch_metas = [_chunk_metadata(c) for c in batch]
+                batch_embeddings = self._embed_provider.embed(batch_docs)
+                _upsert_in_batches(
+                    self._collection, batch_ids, batch_docs, batch_metas,
+                    batch_embeddings, _UPSERT_BATCH_SIZE, op_label="upsert (body)",
+                )
+                self._apply_chunk_delta(batch_metas, sign=1)
+                # Refresh after every batch, not just once the whole call
+                # finishes: a bulk/forced reindex can run for minutes, and an
+                # external caller polling `total_chunks`/`last_indexed_ts` to
+                # detect "indexing is still in progress" must see them keep
+                # moving throughout, not sit frozen at their pre-index values
+                # until the very end and then jump straight to a value that
+                # looks settled while the index is actually still incomplete.
+                self._last_indexed = time.time()
+                self._refresh_chunk_count_caches()
+
+                # Checkpoint every `checkpoint_every_batches` batches:
+                # persist the mtime of every file whose last chunk index is
+                # now <= the highest index processed so far. Always runs —
+                # a correctness guarantee, independent of `governed` below.
+                if batch_num % _INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES == 0:
+                    processed_upto = i + len(batch) - 1
+                    newly_done = {
+                        fpath: new_mtimes[fpath]
+                        for fpath, last_idx in file_last_chunk_idx.items()
+                        if last_idx <= processed_upto and fpath not in mtime_cache
+                    }
+                    if newly_done:
+                        mtime_cache.update(newly_done)
+                        self._save_mtime_cache(mtime_cache)
+
+                if governed:
+                    pace(
+                        time.time() - batch_start,
+                        _INDEX_GOVERNOR_DUTY_CYCLE,
+                        _INDEX_GOVERNOR_MIN_BATCH_SECONDS_FOR_PACING,
+                    )
+
+                if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
+                    logger.info("  embedded %d/%d chunks...", i, total)
         logger.info("  content embed+upsert done: %d chunks in %.0fs",
                     total, time.time() - phase_start)
 
-        self._upsert_purpose_vectors(all_chunks)
+        self._upsert_purpose_vectors(all_chunks, governed=governed)
 
         logger.info("Indexed %d chunks from %d files", total, len(to_index))
 
-        # Persist mtime cache
+        # Final persist: covers any file whose checkpoint above didn't land
+        # on a `checkpoint_every_batches` boundary, plus the purpose-vector
+        # pass having now also completed. The embed-model stamp itself was
+        # already written earlier, right after the mismatch check.
         mtime_cache.update(new_mtimes)
         self._save_mtime_cache(mtime_cache)
-        self._write_embed_model_stamp()
 
         self._last_indexed = time.time()
         self._refresh_chunk_count_caches()
@@ -555,7 +656,7 @@ class CodeIndexer:
     # Purpose vectors (ARCH-4 dual-vector pool entry)
     # ------------------------------------------------------------------
 
-    def _upsert_purpose_vectors(self, chunks: list[CodeChunk]) -> None:
+    def _upsert_purpose_vectors(self, chunks: list[CodeChunk], governed: bool = False) -> None:
         """Embed + upsert the body-stripped purpose text for symbol chunks.
 
         Skipped entirely when `DUAL_VECTOR_ENABLED` is False (config, default
@@ -571,6 +672,13 @@ class CodeIndexer:
         `all_embeddings`/`documents`/`metadatas` were still live in the
         caller's frame — the two full-corpus embedding lists held concurrently
         were the dominant swap driver on large workspaces.
+
+        `governed=True` applies the same priority clamp + duty-cycle pacing
+        as Phase 3 (UPG-INDEX-RESOURCE-GOVERNOR) — only `index_workspace`'s
+        bulk call opts in. `index_file`'s single-file call leaves this False:
+        that path is the interactive file-save watcher, already small
+        (well under one embed batch), and latency-sensitive — a saved file
+        becoming searchable should never wait on a governor sleep.
         """
         if not _DUAL_VECTOR_ENABLED or not chunks:
             return
@@ -580,27 +688,39 @@ class CodeIndexer:
 
         phase_start = time.time()
         done = 0
-        for i in range(0, len(chunks), _EMBED_BATCH_SIZE):
-            batch = chunks[i: i + _EMBED_BATCH_SIZE]
-            batch_ids: list[str] = []
-            batch_docs: list[str] = []
-            batch_metas: list[dict] = []
-            for c in batch:
-                purpose_text = build_purpose_text(c.content, c.symbol_name, c.node_type, c.language)
-                if purpose_text is None:
-                    continue
-                batch_ids.append(c.chunk_id)
-                batch_docs.append(purpose_text)
-                batch_metas.append(_chunk_metadata(c))
-            if batch_ids:
-                batch_embeddings = self._embed_provider.embed(batch_docs)
-                _upsert_in_batches(
-                    self._purpose_collection, batch_ids, batch_docs, batch_metas,
-                    batch_embeddings, _UPSERT_BATCH_SIZE, op_label="upsert (purpose)",
-                )
-                done += len(batch_ids)
-            if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
-                logger.info("  purpose-embedded %d/%d symbol chunks...", done, total)
+        with lowered_priority(
+            governed,
+            macos_qos_class=_INDEX_GOVERNOR_MACOS_QOS_CLASS,
+            linux_nice_increment=_INDEX_GOVERNOR_LINUX_NICE_INCREMENT,
+        ):
+            for i in range(0, len(chunks), _EMBED_BATCH_SIZE):
+                batch_start = time.time()
+                batch = chunks[i: i + _EMBED_BATCH_SIZE]
+                batch_ids: list[str] = []
+                batch_docs: list[str] = []
+                batch_metas: list[dict] = []
+                for c in batch:
+                    purpose_text = build_purpose_text(c.content, c.symbol_name, c.node_type, c.language)
+                    if purpose_text is None:
+                        continue
+                    batch_ids.append(c.chunk_id)
+                    batch_docs.append(purpose_text)
+                    batch_metas.append(_chunk_metadata(c))
+                if batch_ids:
+                    batch_embeddings = self._embed_provider.embed(batch_docs)
+                    _upsert_in_batches(
+                        self._purpose_collection, batch_ids, batch_docs, batch_metas,
+                        batch_embeddings, _UPSERT_BATCH_SIZE, op_label="upsert (purpose)",
+                    )
+                    done += len(batch_ids)
+                if governed:
+                    pace(
+                        time.time() - batch_start,
+                        _INDEX_GOVERNOR_DUTY_CYCLE,
+                        _INDEX_GOVERNOR_MIN_BATCH_SECONDS_FOR_PACING,
+                    )
+                if i % (10 * _EMBED_BATCH_SIZE) == 0 and i > 0:
+                    logger.info("  purpose-embedded %d/%d symbol chunks...", done, total)
         logger.info("  purpose embed+upsert done: %d symbol chunks in %.0fs",
                     total, time.time() - phase_start)
 

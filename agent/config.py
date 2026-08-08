@@ -217,6 +217,36 @@ INDEXING_VECTOR_STORE_SLOW_CALL_WARN_SECONDS : float
     Seconds a single vector-store call may run before a WARNING is logged
     naming the call and its elapsed time.
 
+INDEX_GOVERNOR_ENABLED : bool
+    Master switch for the bulk-indexing priority clamp + duty-cycle pacing
+    (UPG-INDEX-RESOURCE-GOVERNOR). False (or --foreground-fast /
+    VECTR_FOREGROUND_FAST=1 at the call site) restores unthrottled indexing.
+
+INDEX_GOVERNOR_DUTY_CYCLE : float
+    Fraction of wall-clock time the indexing thread spends working vs
+    sleeping between embed batches (UPG-INDEX-RESOURCE-GOVERNOR). 1.0
+    disables pacing.
+
+INDEX_GOVERNOR_MACOS_QOS_CLASS : str
+    macOS QoS class name the indexing thread is set to for each governed
+    batch loop (UPG-INDEX-RESOURCE-GOVERNOR) — one of user_interactive,
+    user_initiated, default, utility, background.
+
+INDEX_GOVERNOR_LINUX_NICE_INCREMENT : int
+    Linux per-thread niceness increment applied for each governed batch
+    loop (UPG-INDEX-RESOURCE-GOVERNOR).
+
+INDEX_GOVERNOR_MIN_BATCH_SECONDS_FOR_PACING : float
+    A batch whose own work took less than this many seconds is never paced
+    (UPG-INDEX-RESOURCE-GOVERNOR) — avoids a pacing sleep dwarfing a tiny
+    batch's actual work.
+
+INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES : int
+    How often (in embed batches) newly-completed files' mtimes are
+    persisted to the incremental-index cache during Phase 3 / the
+    purpose-vector pass (UPG-INDEX-RESOURCE-GOVERNOR) — always applies,
+    independent of INDEX_GOVERNOR_ENABLED.
+
 SYMBOL_GRAPH_RESERVED_KEYWORDS : dict[str, frozenset[str]]
     Per-language keyword sets that must never be minted as a symbol name or
     call-edge target — guards against a desynced/ERROR-node parse misattributing
@@ -762,6 +792,17 @@ _vsb_cfg: dict[str, Any] = _idx_cfg["vector_store_bridge"]
 
 INDEXING_VECTOR_STORE_DISPATCH_MAX_WORKERS: int = int(_vsb_cfg["dispatch_max_workers"])
 INDEXING_VECTOR_STORE_SLOW_CALL_WARN_SECONDS: float = float(_vsb_cfg["slow_call_warn_seconds"])
+
+# Bulk-indexing resource governor: priority clamp + duty-cycle pacing +
+# checkpoint cadence (UPG-INDEX-RESOURCE-GOVERNOR).
+_ig_cfg: dict[str, Any] = _idx_cfg["index_governor"]
+
+INDEX_GOVERNOR_ENABLED: bool = bool(_ig_cfg["enabled"])
+INDEX_GOVERNOR_DUTY_CYCLE: float = float(_ig_cfg["duty_cycle"])
+INDEX_GOVERNOR_MACOS_QOS_CLASS: str = str(_ig_cfg["macos_qos_class"])
+INDEX_GOVERNOR_LINUX_NICE_INCREMENT: int = int(_ig_cfg["linux_nice_increment"])
+INDEX_GOVERNOR_MIN_BATCH_SECONDS_FOR_PACING: float = float(_ig_cfg["min_batch_seconds_for_pacing"])
+INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES: int = int(_ig_cfg["checkpoint_every_batches"])
 
 # ---------------------------------------------------------------------------
 # Output tunables (UPG-12.1)

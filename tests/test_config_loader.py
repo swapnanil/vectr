@@ -167,6 +167,54 @@ class TestConfigLoaderIndexing:
         assert indexer_mod._CLASS_HEADER_LINES is cfg.INDEXING_CLASS_HEADER_LINES
 
 
+class TestConfigLoaderIndexGovernor:
+    """indexing.index_governor.* values must load correctly from config.yaml
+    (UPG-INDEX-RESOURCE-GOVERNOR)."""
+
+    def test_enabled_default(self) -> None:
+        assert cfg.INDEX_GOVERNOR_ENABLED is True
+
+    def test_duty_cycle_default(self) -> None:
+        assert cfg.INDEX_GOVERNOR_DUTY_CYCLE == 0.5
+
+    def test_duty_cycle_is_float_in_unit_interval(self) -> None:
+        assert isinstance(cfg.INDEX_GOVERNOR_DUTY_CYCLE, float)
+        assert 0.0 < cfg.INDEX_GOVERNOR_DUTY_CYCLE <= 1.0
+
+    def test_macos_qos_class_default(self) -> None:
+        assert cfg.INDEX_GOVERNOR_MACOS_QOS_CLASS == "utility"
+
+    def test_macos_qos_class_is_a_known_name(self) -> None:
+        from agent.indexer._priority import _MACOS_QOS_BY_NAME
+        assert cfg.INDEX_GOVERNOR_MACOS_QOS_CLASS in _MACOS_QOS_BY_NAME
+
+    def test_linux_nice_increment_default(self) -> None:
+        assert cfg.INDEX_GOVERNOR_LINUX_NICE_INCREMENT == 10
+
+    def test_linux_nice_increment_in_valid_range(self) -> None:
+        # POSIX niceness range is -20..19; a governor only ever lowers
+        # priority, so the increment must be a positive value in 0..19.
+        assert 0 <= cfg.INDEX_GOVERNOR_LINUX_NICE_INCREMENT <= 19
+
+    def test_min_batch_seconds_for_pacing_default(self) -> None:
+        assert cfg.INDEX_GOVERNOR_MIN_BATCH_SECONDS_FOR_PACING == 0.05
+
+    def test_checkpoint_every_batches_default(self) -> None:
+        assert cfg.INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES == 1
+
+    def test_checkpoint_every_batches_is_positive_int(self) -> None:
+        assert isinstance(cfg.INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES, int)
+        assert cfg.INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES >= 1
+
+    def test_missing_key_raises_keyerror(self) -> None:
+        """No .get()-with-default fallback anywhere in this wiring — a config
+        missing indexing.index_governor.duty_cycle must fail loudly at
+        import, not silently default."""
+        stripped = {k: v for k, v in cfg._cfg["indexing"].items() if k != "index_governor"}
+        with pytest.raises(KeyError):
+            _ = stripped["index_governor"]["duty_cycle"]
+
+
 class TestConfigLoaderOutput:
     """output.* values must load correctly from config.yaml (UPG-12.1)."""
 
