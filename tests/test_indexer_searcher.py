@@ -1894,6 +1894,204 @@ to a SQL WHERE clause. Custom lookups can be registered via ``register_lookup``.
 
 
 # ---------------------------------------------------------------------------
+# UPG-TXT-CHUNK-COVERAGE — .txt/.rst prose split at RST setext-style section
+# headings instead of always falling to 200-line window chunks
+# ---------------------------------------------------------------------------
+
+class TestRstSectionHeadingDetection:
+    """Coverage of the RST setext-heading detector (title line + repeated-
+    punctuation underline, with an optional matching overline for a document
+    title) exercised through the public `chunk_file()` entry point — never
+    importing the new private helpers directly, so these assertions fail for
+    a real behavioral reason on unmodified main (still window-only for .txt),
+    not an ImportError proving only that a name is new."""
+
+    def _chunks(self, tmp_path, text: str, name: str = "doc.txt"):
+        from agent.indexer import chunk_file
+        p = tmp_path / name
+        p.write_text(text)
+        return chunk_file(str(p))
+
+    def test_title_plus_underline_detected(self, tmp_path) -> None:
+        chunks = self._chunks(tmp_path, "Installation\n============\n\nRun pip install.\n")
+        assert [c.node_type for c in chunks] == ["section"]
+        assert chunks[0].symbol_name == "Installation"
+
+    def test_overline_and_underline_absorbed_as_one_heading(self, tmp_path) -> None:
+        text = "==========\nDoc Title\n==========\n\nBody text.\n"
+        chunks = self._chunks(tmp_path, text)
+        # exactly one heading — the overline must not itself be misread as a
+        # second, title-less heading alongside the real one.
+        assert [c.symbol_name for c in chunks] == ["Doc Title"]
+
+    def test_underline_shorter_than_title_is_not_a_heading(self, tmp_path) -> None:
+        # docutils requires the adornment be at least as long as the title;
+        # a short divider under a long line of prose is not a heading, so the
+        # file has no RST structure at all and must use the window fallback.
+        text = "This is a long line of ordinary prose text\n---\nMore text.\n"
+        chunks = self._chunks(tmp_path, text)
+        assert all(c.node_type == "window" for c in chunks), chunks
+
+    def test_two_adornment_lines_in_a_row_is_not_a_heading(self, tmp_path) -> None:
+        # a horizontal-rule-style divider (two adornment lines back to back,
+        # no real title text between them) must not be misread as a heading —
+        # with no other heading in the file, this must fall back to windows.
+        text = "----\n----\nSome text.\n"
+        chunks = self._chunks(tmp_path, text)
+        assert all(c.node_type == "window" for c in chunks), chunks
+
+    def test_multiple_sibling_headings_in_document_order(self, tmp_path) -> None:
+        text = (
+            "Section One\n"
+            "===========\n"
+            "First body.\n\n"
+            "Section Two\n"
+            "===========\n"
+            "Second body.\n"
+        )
+        chunks = self._chunks(tmp_path, text)
+        assert [c.symbol_name for c in chunks] == ["Section One", "Section Two"]
+
+    def test_tilde_and_caret_adornment_characters_both_work(self, tmp_path) -> None:
+        # docutils does not restrict the adornment character — any repeated
+        # non-alphanumeric character is valid, verified structurally rather
+        # than against a fixed character allowlist.
+        text = "Sub A\n~~~~~\nbody\n\nSub B\n^^^^^\nbody\n"
+        chunks = self._chunks(tmp_path, text)
+        assert [c.symbol_name for c in chunks] == ["Sub A", "Sub B"]
+
+
+class TestTxtRstSectionHeadingChunking:
+    """chunk_file() splits .txt/.rst prose at RST heading boundaries instead
+    of merging every subsection within a 200-line window into one diluted
+    chunk (UPG-TXT-CHUNK-COVERAGE)."""
+
+    @staticmethod
+    def _rst_doc(n_sections: int, paragraph_lines: int, title: str) -> str:
+        """A realistic multi-section RST doc: an overlined document title
+        followed by `n_sections` dash-underlined subsections — mirrors the
+        shape of a real docs/howto/*.txt page (one title, many independent
+        subsections, no further nesting within each)."""
+        lines = ["=" * len(title), title, "=" * len(title), "",
+                 "Introductory paragraph line about the topic overall.", ""]
+        for i in range(n_sections):
+            heading = f"Section heading number {i}"
+            lines.append(heading)
+            lines.append("-" * len(heading))
+            lines.append("")
+            for j in range(paragraph_lines):
+                lines.append(f"Prose sentence {j} inside section {i} describing behavior in detail.")
+            lines.append("")
+        return "\n".join(lines)
+
+    def _write_txt(self, tmp_path, content: str, name: str = "howto.txt") -> str:
+        p = tmp_path / name
+        p.write_text(content)
+        return str(p)
+
+    def test_multi_section_doc_gets_one_chunk_per_heading(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        title = "How to create custom template tags and filters"
+        content = self._rst_doc(n_sections=10, paragraph_lines=20, title=title)
+        n_lines = len(content.splitlines())
+        assert n_lines > 200, "fixture must exceed one fallback window to be a meaningful witness"
+        chunks = chunk_file(self._write_txt(tmp_path, content))
+        section_chunks = [c for c in chunks if c.node_type == "section"]
+        # one chunk for the doc title + one per subsection heading
+        assert len(section_chunks) == 11, (
+            f"expected 11 section chunks (title + 10 subsections), got "
+            f"{len(section_chunks)}: {[c.symbol_name for c in chunks]}"
+        )
+        assert not any(c.node_type == "window" for c in chunks), (
+            "a heading-structured prose doc must not fall back to window chunking"
+        )
+
+    def test_doc_verbatim_title_is_its_own_retrievable_chunk(self, tmp_path) -> None:
+        """The T12 gate query is the document's own verbatim title. It must
+        become a small, first-class chunk on its own — not buried inside a
+        200-line merged window carrying nine unrelated subsections too."""
+        from agent.indexer import chunk_file
+        title = "How to create custom template tags and filters"
+        content = self._rst_doc(n_sections=10, paragraph_lines=20, title=title)
+        chunks = chunk_file(self._write_txt(tmp_path, content))
+        title_chunks = [c for c in chunks if c.symbol_name == title]
+        assert len(title_chunks) == 1, (
+            f"expected the title as its own chunk symbol_name, got "
+            f"{[c.symbol_name for c in chunks]}"
+        )
+        # the title chunk must not also carry the other sections' content
+        assert len(title_chunks[0].content.splitlines()) < 20
+
+    def test_more_chunks_than_pre_fix_window_only_baseline(self, tmp_path) -> None:
+        """Direct before/after comparison on the same content: the old
+        window-only path (window=200/overlap=50) undercounts a
+        heading-structured doc relative to one chunk per heading."""
+        from agent.indexer import chunk_file
+        from agent.indexer._chunking import _fallback_window_chunks, _postprocess_chunks
+        title = "How to create custom template tags and filters"
+        content = self._rst_doc(n_sections=10, paragraph_lines=20, title=title)
+        path = self._write_txt(tmp_path, content)
+        after = chunk_file(path)
+        before = _postprocess_chunks(_fallback_window_chunks(content.splitlines(), path, "txt"))
+        assert len(after) > len(before), (
+            f"expected more chunks after heading-aware chunking: before={len(before)}, after={len(after)}"
+        )
+        assert len(before) <= 3, f"sanity: 380-line doc should be ~2-3 windows pre-fix, got {len(before)}"
+
+    def test_window_fallback_preserved_for_headingless_txt(self, tmp_path) -> None:
+        """A .txt file with no RST heading structure at all (flat prose, a
+        LICENSE.txt, a CHANGELOG with no section markers) must still use the
+        window fallback — this is a coverage IMPROVEMENT for structured docs,
+        not a behavior change for unstructured ones."""
+        from agent.indexer import chunk_file
+        flat = "\n".join(
+            f"Plain unstructured prose line {i} with no section markers at all."
+            for i in range(300)
+        )
+        chunks = chunk_file(self._write_txt(tmp_path, flat))
+        assert all(c.node_type == "window" for c in chunks), (
+            f"a .txt file with no RST heading structure must use the window fallback, "
+            f"got node_types={[c.node_type for c in chunks]}"
+        )
+        assert len(chunks) >= 2  # 300 lines / window=200,overlap=50 -> multiple windows
+
+    def test_oversized_section_is_capped_not_left_unbounded(self, tmp_path) -> None:
+        """A single heading with no further nested heading (e.g. a long
+        release-notes 'Miscellaneous' section) must still be capped at
+        indexing.max_chunk_lines, same budget a code container body respects
+        — an unbounded prose section produced an outlier chunk whose
+        embedding cost dwarfed every normal chunk sharing its batch (measured
+        against the real django corpus: an uncapped 1191-line section)."""
+        from agent.indexer import chunk_file
+        from agent.config import INDEXING_MAX_CHUNK_LINES
+        title = "Big Section"
+        lines = [title, "=" * len(title), ""]
+        lines += [f"Prose line {i} with no further subsection heading at all." for i in range(400)]
+        content = "\n".join(lines)
+        chunks = chunk_file(self._write_txt(tmp_path, content))
+        section_chunks = [c for c in chunks if c.node_type == "section"]
+        assert len(section_chunks) > 1, "a 400-line unsubdivided section must be split into multiple capped chunks"
+        for c in section_chunks:
+            n_lines = c.end_line - c.start_line + 1
+            assert n_lines <= INDEXING_MAX_CHUNK_LINES, (
+                f"chunk {c.chunk_id} has {n_lines} lines, exceeds cap {INDEXING_MAX_CHUNK_LINES}"
+            )
+        # no content lost: every sub-chunk still carries the same heading name
+        assert all(c.symbol_name == title for c in section_chunks)
+
+    def test_rst_language_uses_same_section_splitting_as_txt(self, tmp_path) -> None:
+        from agent.indexer import chunk_file
+        title = "Custom Lookup Reference"
+        content = f"{title}\n{'=' * len(title)}\n\nIntro.\n\nSub One\n-------\n\nBody one.\n\nSub Two\n-------\n\nBody two.\n"
+        p = tmp_path / "ref.rst"
+        p.write_text(content)
+        chunks = chunk_file(str(p))
+        section_chunks = [c for c in chunks if c.node_type == "section"]
+        assert len(section_chunks) == 3, [c.symbol_name for c in chunks]
+        assert all(c.language == "rst" for c in chunks)
+
+
+# ---------------------------------------------------------------------------
 # Indexing hygiene — orphan pruning, mtime-cache colocation, force rebuild
 # (UPG-8.4 / UPG-8.5 / UPG-8.6)
 # ---------------------------------------------------------------------------
