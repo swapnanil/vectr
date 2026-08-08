@@ -315,6 +315,50 @@ class TestEditMediatedVsFlaky:
         )
         assert arcs == []
 
+    def test_leading_cd_prefix_different_targets_never_matches(self) -> None:
+        """UPG-ARC-CWD-VS-EFFECTIVE-DIR: the episode's `cwd` FIELD is only
+        where the harness started the command, not necessarily where it
+        actually ran — an agent that writes `cd /other/repo && cmd` inside
+        `cmd_raw` changes the EFFECTIVE directory without changing the
+        episode's own cwd field. A failure and a success recorded under the
+        SAME episode cwd but with DIFFERENT leading `cd` targets in
+        cmd_raw must land in different buckets, exactly like
+        test_cross_cwd_mutation_candidate_never_matches above but with the
+        directory divergence hidden inside cmd_raw instead of the cwd
+        field."""
+        d = ArcDetector()
+        d.observe(
+            make_episode(
+                ts=0, cwd="/harness", cmd_raw="cd /repo-a && mvn test -Dtest=Foo", outcome="failure"
+            )
+        )
+        arcs = d.observe(
+            make_episode(
+                ts=1, cwd="/harness", cmd_raw="cd /repo-b && mvn test -Dtest=Bar", outcome="success"
+            )
+        )
+        assert arcs == []
+
+    def test_leading_cd_prefix_same_target_still_matches(self) -> None:
+        """Companion to the test above: when the leading `cd` target is the
+        SAME across the failure and the success (the common real-world
+        case — an agent that always `cd`s into the repo before running a
+        command), the mutation-band match must still fire exactly as it
+        does with no `cd` prefix at all."""
+        d = ArcDetector()
+        d.observe(
+            make_episode(
+                ts=0, cwd="/harness", cmd_raw="cd /repo-a && mvn test -Dtest=Foo", outcome="failure"
+            )
+        )
+        arcs = d.observe(
+            make_episode(
+                ts=1, cwd="/harness", cmd_raw="cd /repo-a && mvn test -Dtest=Bar", outcome="success"
+            )
+        )
+        assert len(arcs) == 1
+        assert arcs[0].mutation_diff == {"flag": (("-Dtest=Foo",), ("-Dtest=Bar",))}
+
     def test_identical_retry_with_env_delta_is_not_flaky(self) -> None:
         d = ArcDetector()
         d.observe(make_episode(ts=0, cmd_raw="make build", outcome="failure", env_delta_names=[]))

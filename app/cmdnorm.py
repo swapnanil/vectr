@@ -111,12 +111,71 @@ def _split_on_any(tokens: list[str], seps: frozenset[str]) -> list[list[str]]:
     return [s for s in segments if s]
 
 
+def _consume_leading_cd(segments: list[list[str]]) -> tuple[list[list[str]], str | None]:
+    """Strip leading `cd <path> &&`/`cd <path>;` segments and return the
+    stripped segments together with the LAST leading `cd`'s target —
+    repeatedly, so `cd a && cd b && real-cmd` reduces to `(real-cmd, "b")`:
+    the last `cd` is the one whose target is the directory the primary
+    command actually runs in. A bare `cd` (no argument, meaning $HOME)
+    resets the running target to None — there is no concrete path in argv
+    for $HOME — but a later `cd <path>` in the same chain still overrides
+    it, matching real shell semantics."""
+    target: str | None = None
+    while segments and segments[0][0] == "cd" and len(segments[0]) <= 2:
+        seg = segments[0]
+        target = seg[1] if len(seg) == 2 else None
+        segments = segments[1:]
+    return segments, target
+
+
 def _strip_leading_cd(segments: list[list[str]]) -> list[list[str]]:
     """Strip leading `cd <path> &&` segments (semantics-neutral decoration)
     — repeatedly, so `cd a && cd b && real-cmd` reduces to `real-cmd`."""
-    while segments and segments[0][0] == "cd" and len(segments[0]) <= 2:
-        segments = segments[1:]
-    return segments
+    stripped, _ = _consume_leading_cd(segments)
+    return stripped
+
+
+def leading_cd_target(cmd_raw: str) -> str | None:
+    """Return the directory a leading `cd <path> &&` / `cd <path>;` chain
+    in `cmd_raw` sets before the real command runs, or None when there is
+    no such leading chain (or the chain ends in a bare `cd` to $HOME).
+
+    Used by `app.arcs._bucket_key` (UPG-ARC-CWD-VS-EFFECTIVE-DIR): an
+    episode's `cwd` field is only the directory the harness started the
+    command from, but agents routinely write `cd /other/repo && cmd`
+    inside `cmd_raw`, so the command's EFFECTIVE directory can differ from
+    that field — two episodes sharing a harness cwd can still run in
+    unrelated repos. This mirrors `_strip_leading_cd`'s exact shape
+    recognition (same tokenize/split, same `len(segment) <= 2` gate) via
+    the shared `_consume_leading_cd` helper, so bucket-key extraction and
+    verb-normalization stripping can never disagree on what counts as a
+    leading `cd`.
+
+    Deliberately NOT handled — returns None, caller falls back to the
+    episode's own `cwd` field, i.e. today's behavior, for:
+      - a bare `cd` with no argument (`$HOME` has no concrete argv path);
+      - a flagged `cd` (`cd -- <path>`, `cd -L <path>`  — `len(segment) >
+        2`, same shape `_strip_leading_cd` already leaves alone);
+      - `pushd`/`popd` (directory-STACK semantics, not a linear prefix);
+      - a `cd` appearing anywhere other than leading (`mkdir -p d && cd d
+        && x`) — only a LEADING cd is unambiguous prefix decoration, a
+        later one could be conditional on an earlier command's own
+        output/exit code;
+      - `cd <path>;real-cmd` with the `;` glued onto the preceding token
+        rather than whitespace-separated (`cd <path> ; real-cmd`) — a
+        pre-existing `tokenize()`/shlex limitation shared by every
+        compound-separator split in this module (`;`/`&&`/`||` are only
+        recognized as their own token), not specific to this function.
+    Returned as-is, NOT resolved, when present:
+      - a relative target (`cd ../other && x`) or one containing an
+        unexpanded env var / `~` (`cd "$OLDPWD"`, `cd ~other`) — still
+        changes the bucket key correctly whenever two commands' targets
+        differ textually, which is the property this function exists for;
+        resolving against the episode cwd would require that cwd to
+        already be correct, begging the question this fix addresses."""
+    segments = _split_on_any(tokenize(cmd_raw or ""), _COMPOUND_SEPARATORS)
+    _, target = _consume_leading_cd(segments)
+    return target
 
 
 def _is_display_only_stage(stage: list[str]) -> bool:

@@ -45,7 +45,7 @@ from agent.config import (
     ARC_WINDOW_MAX_PENDING_PER_VERB_FAMILY,
     ARC_WINDOW_TTL_SECONDS,
 )
-from app.cmdnorm import NormalizedCommand, classify_arg, normalize_command
+from app.cmdnorm import NormalizedCommand, classify_arg, leading_cd_target, normalize_command
 
 _PENDING_OUTCOMES = frozenset({"failure", "soft_failure"})
 _IGNORED_OUTCOMES = frozenset({"interrupted", "unknown", None})
@@ -69,10 +69,12 @@ class Arc:
     `failures_chain` is oldest-first; `mutation_diff` maps a subset of
     {verb, flag, arg, env, files} to an (old, new) pair — only the axes
     that actually changed are present. `cwd` is never a mutation_diff axis:
-    it is a pending-bucket key (review 2026-07-22), so it cannot differ
-    between a chain's failures and its resolving success by construction.
-    `confidence` is "normal" or "low" (a chained failure's stderr matched a
-    transient-error marker).
+    it is a pending-bucket key (review 2026-07-22; refined to the command's
+    EFFECTIVE directory, not just the raw `cwd` field, by
+    UPG-ARC-CWD-VS-EFFECTIVE-DIR — see `_effective_cwd`), so it cannot
+    differ between a chain's failures and its resolving success by
+    construction. `confidence` is "normal" or "low" (a chained failure's
+    stderr matched a transient-error marker).
     """
 
     session_id: str
@@ -182,17 +184,37 @@ def _verb_family(n: NormalizedCommand) -> str:
     return n.verb.split(" ", 1)[0] if n.verb else ""
 
 
+def _effective_cwd(n: NormalizedCommand, episode: dict[str, Any]) -> Any:
+    """The directory a command actually ran in, for bucket-key purposes
+    (UPG-ARC-CWD-VS-EFFECTIVE-DIR): the episode's `cwd` FIELD is only
+    where the harness started the command, not necessarily where it ran —
+    an agent that writes `cd /other/repo && cmd` inside `cmd_raw` changes
+    the effective directory without changing the episode's own `cwd`
+    field, so two episodes sharing a harness cwd can still execute in
+    unrelated repos. A leading `cd <path> &&` in `cmd_raw` (structural
+    command-shape parsing — same category as the rest of app.cmdnorm's
+    verb/flag/arg normalization, not query-content classification) always
+    wins when present; only when there is no leading `cd` (or it is a
+    shape `app.cmdnorm.leading_cd_target` deliberately does not resolve,
+    see its docstring) does this fall back to the episode `cwd` field,
+    which is today's pre-fix behavior."""
+    cd_target = leading_cd_target(n.cmd_raw)
+    return cd_target if cd_target is not None else episode.get("cwd")
+
+
 def _bucket_key(n: NormalizedCommand, episode: dict[str, Any]) -> tuple[str, Any]:
-    """Pending-failure bucket key (review 2026-07-22): `(verb-family,
-    cwd)`. cwd is a BUCKET KEY, not a mutation axis — the original draft
+    """Pending-failure bucket key (review 2026-07-22, refined
+    UPG-ARC-CWD-VS-EFFECTIVE-DIR): `(verb-family, effective_cwd)`.
+    effective_cwd is a BUCKET KEY, not a mutation axis — the original draft
     listed cwd on both sides, which is contradictory: cwd-as-mutation-axis
     binds unrelated repos' builds into false arcs (the same command failing
     in `/work/serviceA` and succeeding in `/work/serviceB` must never
     match), while the genuine "cd to the right dir fixed it" case normally
     has the `cd` inside the same invocation, where normalization already
     strips it (`app.cmdnorm._strip_leading_cd`) — so cross-cwd matching is
-    nearly all downside."""
-    return (_verb_family(n), episode.get("cwd"))
+    nearly all downside. See `_effective_cwd` for why the bucket key is
+    derived from `cmd_raw`'s leading `cd`, not the raw `cwd` field alone."""
+    return (_verb_family(n), _effective_cwd(n, episode))
 
 
 # ---------------------------------------------------------------------------
