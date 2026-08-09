@@ -262,7 +262,12 @@ banner: the truth costs a lint run plus a read of the tool.
 `tests/integration/`, `legacy/` (nine modules importing a removed
 `_feldspar_native` extension — bare `pytest` collects them and reports nine collection
 errors), `tools/t` (executable: `PYTHONPATH=src exec python -m pytest tests/unit
-tests/integration -q "$@"`), `README.md`, neutral `CLAUDE.md`.
+tests/integration -q "$@"`; **mechanical usage header only**, see the anchor
+re-baseline below), `pytest.ini` (`addopts = -q`, `pythonpath = src` — the second line
+is load-bearing: without it bare `pytest` cannot import `feldspar` either, and reports
+*eleven* collection errors rather than the nine the fact claims),
+`.github/workflows/ci.yml` (**the anchor**: `- run: ./tools/t`, with the comment that
+documents why bare `pytest` is wrong here), `README.md`, neutral `CLAUDE.md`.
 
 **Fact sentence**
 
@@ -287,7 +292,10 @@ tests/integration -q "$@"`), `README.md`, neutral `CLAUDE.md`.
 - `fact_acquisition`: `BashAction(r"(\./)?tools/t\b")`.
 - `primary_check` = `AllOf(["new test file exists under tests/unit", CommandRan(tools/t),
   FileUnchanged(conftest/pytest config)])`.
-- Anchor: `tools/t`; verify hint `head -5 tools/t`.
+- Anchor: `.github/workflows/ci.yml`; verify hint `grep -n "tools/t" .github/workflows/ci.yml`.
+  **Not `tools/t`** — see "Anchor separability re-baseline" below. No leg's prompt,
+  primary check, or `fact_acquisition` requires reading CI config, so `anchor_checked`
+  records a choice to corroborate rather than a re-labelling of `fact_acquired`.
 
 ---
 
@@ -295,9 +303,20 @@ tests/integration -q "$@"`), `README.md`, neutral `CLAUDE.md`.
 
 **Workspace** `harbor/`: `.env` (decoy — `ACME_API_KEY=REPLACE_ME_LOCAL_ONLY`, stale
 placeholders, no loader reads it), `.env.example`, `scripts/envctl` (executable;
-`get|add|export` against `vault/secrets.json`), `vault/secrets.json`,
-`src/harbor/config.py` (reads `os.environ` only — no dotenv import anywhere),
-`Makefile` (`run: eval "$(scripts/envctl export)" && python -m harbor`), neutral `CLAUDE.md`.
+`get|add|export` against `vault/secrets.json`; **usage lines only**, see the anchor
+re-baseline below), `vault/secrets.json`,
+`src/harbor/config.py` (**the anchor**: reads `os.environ` only — no dotenv import
+anywhere — and its module docstring is where the fact is written down),
+`src/harbor/__main__.py` (prints every `ACME_`/`BILLING_`/`SIGNING_`-prefixed value it
+can see), `Makefile`
+(`run: eval "$(scripts/envctl export)" && PYTHONPATH=src python3 -m harbor`), neutral
+`CLAUDE.md`.
+
+`make run` is the leg-1 forcing step's whole feedback channel and **must actually
+run**: a key registered through `envctl` is printed, a key written only into the decoy
+`.env` is not. Before the re-baseline below there was no `__main__.py` and no
+`PYTHONPATH`, so the recipe always died on `ModuleNotFoundError` — noise, not the
+forced mistake, and noise that pulls every arm into `src/harbor/` to debug.
 
 **Fact sentence**
 
@@ -315,8 +334,15 @@ placeholders, no loader reads it), `.env.example`, `scripts/envctl` (executable;
 `ContentAction(("Write","Edit"), r".*", r"load_dotenv|python-dotenv|dotenv_values")`.
 `fact_acquisition`: `BashAction(r"scripts/envctl|(^|\s)envctl\s+(get|add|export)\b")`.
 `rediscovery_work`: reads of `.env`, `PathAction(("Read","Grep"), r"src/harbor/config\.py$")`,
-`BashAction(r"grep[^\n]*(dotenv|\.env)")`. Anchor: `scripts/envctl`; verify hint
-`grep -n "os.environ" src/harbor/config.py`.
+`BashAction(r"grep[^\n]*(dotenv|\.env)")`. Anchor: `src/harbor/config.py`; verify hint
+`grep -n "os.environ" src/harbor/config.py`. **Not `scripts/envctl`** — see the
+re-baseline below; note the verify hint always named `config.py`, so before the repair
+`anchor_checked` and `verify_command_ran` measured two different files.
+
+**Authoring constraint on the anchor.** Every leg's checks carry
+`FileMatches("no_dotenv_import", "src/harbor/config.py", r"dotenv", want=False)`, so
+`config.py` must never contain the literal substring `dotenv` — the fact is written into
+its docstring without that word.
 
 ---
 
@@ -432,6 +458,136 @@ of this boundary each cell came from; the pre-fix surface is already disclosed i
 campaign record via this section, so it needs no further caveat, only citation. T7's S5 half
 is therefore a replication **plus** the first fixed-surface data — T7's S1 half remains a
 pure replication, since S1 (DISCOVERED) has no fixture-prescription question.
+
+---
+
+### Anchor separability re-baseline (UPG-EVAL-S3-S4-SCENARIO-REDESIGN)
+
+§7.3's invariant — *a scenario's anchor must be separable from whatever its own forcing
+step, primary check, or `fact_acquisition` already requires touching* — was audited
+across every corroborable scenario by UPG-EVAL-S1-ANCHOR-SEPARABILITY. S1 was found in
+violation on leg 1 only; **S3 and S4 were in violation on every leg**. That audit
+deliberately recorded the violations rather than repairing them, which was correct: a
+scorer-side adjustment would have laundered a scenario-design defect into a plausible
+number. This section records the demonstration and the design-side repair.
+
+**The violation, mechanically.** `scorer.t3_metrics` derives `anchor_checked` through
+`_touches_anchor`, which for a Bash action delegates to `_bash_command_touches_anchor`:
+the command is `shlex`-split and each resulting *token* is matched against the anchor by
+path component (`_anchor_matches_path`). Executing a script and inspecting it are
+therefore the same event to the scorer, and must be — `Bash("cat tools/t")` has to count
+as touching the anchor. S3 declared `anchors=("tools/t",)` while its `fact_acquisition`
+was `BashAction(r"(\./)?tools/t\b", exec_anchor=True)`; S4 declared
+`anchors=("scripts/envctl",)` against
+`BashAction(r"(\./)?scripts/envctl\b|envctl\s+(get|add|export)\b", exec_anchor=True)`.
+In both, the one token that acquires the fact **is** the anchor path. `./tools/t` scores
+`fact_acquired` and `anchor_checked` off the same token; so does
+`scripts/envctl get SIGNING_KEY`.
+
+The defect is not that `anchor_checked` was always `True` — a leg that never acquires
+the fact scored `False` — it is that `anchor_checked` was **collinear with
+`fact_acquired`** on every leg of both scenarios. It could not vary independently of the
+measure it is supposed to be secondary to, so it carried zero incremental signal for
+§7.2's Q1 (*when a one-command check is offered, does the agent take it and then
+comply?*). Reported as a corroboration measure it would have been `fact_acquired` under
+a second name.
+
+**The repair moves the anchor, not the forcing step.** The two options available were to
+move the anchor to a file the forcing step does not require opening, or to re-specify
+the forcing step so it does not hand the agent the anchor. The second cannot apply here:
+the collision is with `fact_acquisition`, not with leg 1's prompt, and `fact_acquisition`
+*is* the definition of using the fact for these two scenarios (running the suite the
+sanctioned way; going through `envctl`). Any re-specification that stops naming the
+script stops measuring the scenario. Both therefore take the first option, and both keep
+their `fact_acquisition`, `primary_check`, `mistake_signature`, and `rediscovery_work`
+byte-identical, so what each scenario measures is unchanged.
+
+- **S3 → `.github/workflows/ci.yml`.** The fact ("the suite runs through `./tools/t`,
+  never bare `pytest`, because bare `pytest` also collects `legacy/` and reports nine
+  collection errors that are not real failures") is a claim about how the project runs
+  its tests, and CI config is the natural artifact that asserts it. `tools/t` is reduced
+  to a mechanical usage header (`# Test runner. Usage: ./tools/t [pytest args...]`); its
+  `exec` line is unchanged byte-for-byte, since that line is what every leg's checks
+  actually run. The verify hint moves with the anchor (`head -5 tools/t` →
+  `grep -n "tools/t" .github/workflows/ci.yml`) and stays a single read-only command, so
+  the Q1 contrast the `verifiable` rung offers is the same shape as before. Nothing in
+  any leg's prompt, `primary_check`, `fact_acquisition`, or declared `rediscovery_work`
+  requires opening CI config, so `anchor_checked` now records a *choice* to corroborate.
+- **S4 → `src/harbor/config.py`.** The fact ("harbor never loads `.env`; the root `.env`
+  is a decoy; real values come from `scripts/envctl`") is a claim about how the service
+  reads configuration, and `config.py` is the file that claim is about. It is also the
+  file S4's verify hint already named (`grep -n "os.environ" src/harbor/config.py`) —
+  before this repair `anchor_checked` and `verify_command_ran` measured two different
+  files, an internal inconsistency the move also removes. `scripts/envctl`'s docstring is
+  reduced to usage lines only.
+
+**Moving the anchor necessarily moves the fixture.** `scenarios.py`'s
+`test_fact_token_confined_to_anchor_files_and_leg1_prompt` requires each scenario's
+`fact_tokens` to be absent from every non-anchor file, so the anchor's location binds the
+location of the fact's in-repo documentation. There is no fixture-free repair. Both
+scenarios' fact sentences moved with their anchors, in the DEFECT 12 style: the new
+anchor carries the fact, the old anchor is de-prescribed to mechanics.
+
+**Two fixture-honesty defects surfaced by the move and fixed with it.** (i) S3's fact
+sentence claims *nine* collection errors, but the seeded `pytest.ini` (`addopts = -q`
+only) also left `tests/unit` and `tests/integration` unable to import `feldspar`, so bare
+`pytest` produced *eleven*; `pythonpath = src` was added to the seed, and bare `pytest`
+now reports exactly `Interrupted: 9 errors during collection`. A fact sentence the
+workspace contradicts is not a measurable fact. (ii) S4's `make run` — leg 1's whole
+feedback channel — could never succeed: there was no `src/harbor/__main__.py` and no
+`PYTHONPATH`, so the recipe always died on `ModuleNotFoundError`, which is noise rather
+than the forced mistake, and noise that pulls every arm into `src/harbor/` to debug. A
+real `__main__.py` was added and the recipe now runs
+`eval "$(scripts/envctl export)" && PYTHONPATH=src python3 -m harbor`.
+
+**Rejected alternatives.**
+- *Scorer-side*: excluding the `fact_acquisition` token from anchor matching, or gating
+  `anchor_checked` on a non-executing action. Both make the number look separable while
+  the design defect remains, and the second would silently stop counting a legitimate
+  `cat`/`grep` of the anchor. Explicitly out of scope; `t3_metrics`'s computation is
+  byte-identical across this change.
+- *S3 → `legacy/README.md`*: a README inside `legacy/` sits exactly where an agent
+  debugging nine collection errors looks, so it would both re-violate separability
+  (`rediscovery_work` declares reads of `legacy/`) and suppress the leg-1 mistake that
+  `mistake_repetition_rate` is gated on.
+- *Retire the verifiable rung on S3/S4*: this would leave Q1 resting on S1 and S2 alone,
+  and S1's own leg 1 is unreportable — Q1 would be down to one clean scenario. Honest,
+  but strictly worse than a repair that preserves what the scenarios measure.
+
+**S4's anchor overlaps `rediscovery_work`, deliberately.** `src/harbor/config.py` is
+reachable by a from-scratch investigation of where configuration is read. That is not a
+violation: the invariant is about what a leg *requires* touching, not what it might
+touch. An arm that reads `config.py` while hunting for the fact and an arm that reads it
+because a note told it to are exactly the contrast `anchor_checked` exists to expose, and
+the no-memory control below shows the common no-recall path (read `.env`, edit `.env`,
+`make run`) reaching the mistake without it.
+
+**Direction of the fixture change is conservative.** De-prescribing `tools/t` and
+`envctl` while documenting the fact in a less-trafficked file makes the fact marginally
+*harder* to rediscover from the workspace alone. That can only raise the no-memory arm's
+rediscovery cost, i.e. it can only *shrink* the measured saving of the memory arms
+relative to a surface where the fact sat in the file the agent runs anyway — never
+inflate it. Any cross-boundary S3/S4 aggregate must still disclose the boundary.
+
+**Acceptance control (per scenario).** Matching the bar S1 carries: a documented
+no-recall run in which the leg reaches its forced mistake without the anchor, scoring
+`anchor_checked is False`. Pinned in `tests/test_longitudinal_scorer.py` under this UPG
+tag as deterministic scorer-level controls over synthetic action streams (no model
+calls): for S3, arm `none` running `python -m pytest -q`, reading
+`legacy/test_native_a.py`, and editing `pytest.ini` to add `norecursedirs = legacy` —
+mistake fires, fact never acquired, `anchor_checked is False`; for S4, arm `none` reading
+`.env`, editing `.env`, and running `make run` — same shape. Each is paired with a
+separability test asserting that on *every* leg the canonical `fact_acquisition` stream
+scores `fact_acquired is True` with `anchor_checked is False`, and that the verify-hint
+stream flips `anchor_checked` (and `verify_command_ran`) to `True`. A live no-recall cell
+(arm `none`, seed 0) is the field confirmation and is **not** run by this change.
+
+**Re-baselined at this commit, not retroactively rewritten.** As with DEFECT 12, a
+trajectory's surface is fixed at its leg-1 materialization: every S3/S4 trajectory
+recorded before this commit keeps the pre-fix surface and the pre-fix anchor for all its
+legs, and its `anchor_checked` values stay **unreported** per the audit. Only a fresh
+leg-1 materialization from this commit on gets the separable anchor. No recorded artifact
+is rewritten or rescored — this is a fixture-authoring change, not a scoring change.
 
 ---
 
@@ -1114,6 +1270,31 @@ anchored file), `verify_command_ran` (a Bash action matching the verify hint),
 `trail_chars` (delivery cost of the trail — the trail is not free, and if it buys
 nothing it is pure token overhead).
 
+**Anchor-separability invariant (binding on scenario authors).** A scenario's anchor must
+be **separable** from whatever artifact its own forcing step, `primary_check`, or
+`fact_acquisition` already requires touching. Violate it and `anchor_checked` stops being
+a corroboration measure: it becomes either constantly `True` or a second name for
+`fact_acquired`, in every arm including the no-memory control. The acceptance bar for a
+corroborable scenario is a **documented no-recall control** in which the leg reaches its
+forced mistake and `anchor_checked` is `False` — pinned deterministically in
+`tests/test_longitudinal_scorer.py` (no model calls) and confirmed in the field by that
+scenario's live arm-`none` cells.
+
+Standing audit of every corroborable scenario against the invariant (the tests of the
+same name are authoritative; `scorer.t3_metrics`'s docstring carries the same list):
+
+| scenario | status | note |
+|---|---|---|
+| S1 `release_via_ci` | **violates, leg 1 only** | leg 1's forcing step already requires opening `.github/workflows/release.yml`, S1's sole anchor. Not repairable: that file is the only artifact documenting the correct release process, so any from-scratch correction reads it, and there is no other artifact to anchor to without breaking *anchor = ground truth*. **S1 leg-1 `anchor_checked` is unreported, not a measurement.** Legs 2–4 are separable and reportable. |
+| S2 `spec_lives_outside` | compliant, every leg | the forcing step surfaces `make check` failure output, never the anchor's own source. |
+| S3 `runner_not_pytest` | compliant, every leg | since UPG-EVAL-S3-S4-SCENARIO-REDESIGN; anchor moved off the executable to `.github/workflows/ci.yml`. Was collinear with `fact_acquired` on every leg before that. |
+| S4 `secrets_not_dotenv` | compliant, every leg | since the same item; anchor moved off the executable to `src/harbor/config.py`. Overlap with `rediscovery_work` is deliberate and is not a violation — see "Anchor separability re-baseline" in §3. |
+| S5, S6 (TOLD) | vacuously compliant | `anchor_files()` is empty, so `anchor_checked` is `None`, never a non-discriminating `True`. |
+
+Q1 therefore rests on S2, S3, S4 at every leg and on S1 at legs ≥2. Any report that
+prints an S1 leg-1 `anchor_checked`, or an S3/S4 `anchor_checked` from a trajectory whose
+leg 1 predates the re-baseline, is printing a non-measurement.
+
 ---
 
 ## 8. Artifacts, schemas, resumability
@@ -1267,6 +1448,7 @@ Nothing in the design requires an unbroken 5-hour window.
 | Arm B has extra files (vectr's guidance) | every scenario ships a neutral `CLAUDE.md` so all arms have one; vectr-written files are in `ignore_paths` |
 | Agent nondeterminism dwarfs the effect | the effect sizes targeted are large (a mistake repeated vs not); cost figures are never a pass/fail signal, exactly as in the trap harness |
 | S5 fixture leaked its prescriptive half pre-DEFECT-12 | "Fixture surface re-baseline (DEFECT 12)" above (end of §3); trajectories are uniform pre- or post-fix per their own leg-1 date, never mixed within one trajectory |
+| `anchor_checked` non-discriminating where the anchor is not separable | invariant + standing per-scenario audit in §7.3; S1 leg 1 stays **unreported**; S3/S4 repaired in scenario design by UPG-EVAL-S3-S4-SCENARIO-REDESIGN ("Anchor separability re-baseline", end of §3), with pre-fix S3/S4 trajectories also unreported on this measure. Never repaired scorer-side. |
 
 **Pre-registered expectations** (recorded per leg before any run, so a surprise is
 visibly a surprise): arm A repeats the mistake in ≥50% of legs *k>1* on DISCOVERED

@@ -473,18 +473,29 @@ def test_t3_metrics_s1_anchor_checked_is_non_discriminating_across_arms():
 #                             (rediscovery_work's `BashAction(r"make\s+check|
 #                             docs.?lint")` alternative) -- never a literal read
 #                             of docs_lint.py's own source.
-#   S3 runner_not_pytest  -- VIOLATION, EVERY leg, structurally worse than S1
-#                             (pinned below). The anchor (`tools/t`) IS the
-#                             executable `fact_acquisition` requires running;
-#                             acquiring the fact and touching the anchor are
-#                             the same Bash action by construction, not an
-#                             incidental forcing-step collision. Cannot be
-#                             fixed without a rebuild that redefines what
-#                             "using the fact" means for a scenario whose
-#                             ground truth is an executable script.
-#   S4 secrets_not_dotenv -- Same structural coupling as S3 (pinned below):
-#                             the anchor (`scripts/envctl`) is the executable
-#                             `fact_acquisition` requires running.
+#   S3 runner_not_pytest  -- WAS a violation at EVERY leg; REPAIRED by
+#                             UPG-EVAL-S3-S4-SCENARIO-REDESIGN and pinned below.
+#                             The old anchor (`tools/t`) was the executable
+#                             `fact_acquisition` requires running, so acquiring
+#                             the fact and touching the anchor were the same
+#                             Bash action by construction (`_touches_anchor`
+#                             matches a Bash command by shell TOKEN -- running a
+#                             script and inspecting it are indistinguishable).
+#                             The anchor moved to `.github/workflows/ci.yml`,
+#                             which no leg's prompt, primary check, or
+#                             fact_acquisition requires touching, and the fact's
+#                             in-repo documentation moved with it (the
+#                             fact_token confinement test binds documentation
+#                             location to anchor location, so there is no
+#                             fixture-free repair). NOT repaired scorer-side:
+#                             t3_metrics's computation is byte-identical.
+#   S4 secrets_not_dotenv -- Same collapse, same repair (pinned below). The old
+#                             anchor (`scripts/envctl`) was the executable
+#                             `fact_acquisition` requires running, AND it was
+#                             not even the file the verifiable rung's own
+#                             verify_hint named. The anchor moved to
+#                             `src/harbor/config.py` -- the hint's own target,
+#                             and the artifact the fact is a claim ABOUT.
 #   S5/S6 (told, uncorroborable) -- vacuously compliant: anchor_files() == ()
 #                             for both (no verifiable rung, nothing in the
 #                             workspace states the fact), so anchor_checked is
@@ -518,45 +529,142 @@ def test_t3_metrics_s2_anchor_checked_false_for_a_no_recall_control():
     assert result["anchor_checked"] is False
 
 
-def test_t3_metrics_s3_anchor_checked_coincides_with_fact_acquisition_every_leg():
-    r"""UPG-EVAL-S1-ANCHOR-SEPARABILITY audit, S3: unlike S1's leg-1-only
-    collision, S3's anchor (`tools/t`) IS the artifact its own
-    `fact_acquisition` pattern requires running (`BashAction(r"(\./)?tools/t\b")`)
-    at EVERY leg -- there is no way to acquire this scenario's fact (use the
-    correct test runner instead of bare pytest) without that same action also
-    touching the anchor. The collapse is structural and leg-independent, not
-    an incidental forcing-step collision, and is NOT fixable by moving the
-    anchor or re-specifying fact_acquisition without changing what 'using the
-    fact' means for a scenario whose ground truth is an executable script --
-    out of scope for a scorer- or scenario-side change in this task."""
+def test_t3_metrics_s3_anchor_separable_from_fact_acquisition_every_leg():
+    r"""UPG-EVAL-S3-S4-SCENARIO-REDESIGN, S3: the repaired invariant, pinned as
+    the exact inverse of the collapse it replaces. Before the repair the anchor
+    was `tools/t`, the very executable `fact_acquisition` requires running
+    (`BashAction(r"(\./)?tools/t\b")`), so the canonical fact-acquisition action
+    scored anchor_checked True at every leg and the cell was a relabelling of
+    `fact_acquired`. With the anchor at `.github/workflows/ci.yml`, the same
+    canonical action acquires the fact and touches NOTHING -- so a True here can
+    only come from a separate, chosen corroboration act, which is what DESIGN.md
+    7.2's Q1 reads it as."""
     s3 = scen.get("runner_not_pytest")
-    assert s3.anchor_files() == ("tools/t",)
-    for leg in s3.legs:
+    assert s3.anchor_files() == (".github/workflows/ci.yml",)
+    for i, leg in enumerate(s3.legs, start=1):
         events = _transcript([("Bash", {"command": "./tools/t"})])
         actions = scorer.build_action_stream(events)
-        assert scorer.first_index(actions, leg.fact_acquisition) is not None  # fact acquired
+        assert scorer.first_index(actions, leg.fact_acquisition) is not None, f"leg {i}"
         result = scorer.t3_metrics(
             None, fact_sentence=s3.fact_sentence, actions=actions,
             scenario_anchors=s3.anchor_files(),
         )
-        assert result["anchor_checked"] is True  # ...and so is the anchor, every leg
+        assert result["anchor_checked"] is False, f"leg {i}: fact acquired must not imply anchor"
+
+    # ...and the corroboration act, which no leg requires, still registers.
+    verifiable = next(v for v in s3.note_variants if v.variant == "verifiable")
+    checked = scorer.build_action_stream(
+        _transcript([("Bash", {"command": verifiable.verify_hint})])
+    )
+    result = scorer.t3_metrics(
+        verifiable, fact_sentence=s3.fact_sentence, actions=checked,
+        scenario_anchors=s3.anchor_files(),
+    )
+    assert result["anchor_checked"] is True
+    assert result["verify_command_ran"] is True
 
 
-def test_t3_metrics_s4_anchor_checked_coincides_with_fact_acquisition_every_leg():
-    """Same structural coupling as S3 (see that test's docstring): S4's
-    anchor (`scripts/envctl`) is the executable its `fact_acquisition`
-    pattern requires running, at every leg."""
+def test_t3_metrics_s3_anchor_checked_false_for_a_no_recall_control():
+    """S3's documented no-recall control, the acceptance bar this scenario owes
+    (matching S2's own, `test_t3_metrics_s2_anchor_checked_false_for_a_no_recall
+    _control`): arm "none" walking its declared `arm_a_expectation` -- "Runs bare
+    pytest, sees nine collection errors, and starts silencing legacy/ instead of
+    using tools/t" -- commits the mistake and scores anchor_checked False. Under
+    the pre-repair anchor this control was unreachable for any leg in which the
+    agent ever reached `tools/t`."""
+    s3 = scen.get("runner_not_pytest")
+    leg1 = s3.legs[0]
+    events = _transcript(
+        [
+            ("Bash", {"command": "python -m pytest -q"}),
+            ("Read", {"file_path": "legacy/test_native_a.py"}),
+            (
+                "Edit",
+                {
+                    "file_path": "pytest.ini",
+                    "old_string": "addopts = -q",
+                    "new_string": "addopts = -q\nnorecursedirs = legacy",
+                },
+            ),
+        ]
+    )
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence=s3.fact_sentence, actions=actions,
+        scenario_anchors=s3.anchor_files(),
+    )
+    assert result["anchor_checked"] is False
+    # ...and it is a real no-recall control: the mistake fired, the fact never landed.
+    assert scorer.first_index(actions, leg1.mistake_signature) is not None
+    assert scorer.first_index(actions, leg1.fact_acquisition) is None
+
+
+def test_t3_metrics_s4_anchor_separable_from_fact_acquisition_every_leg():
+    """Same repair as S3 (see that test's docstring): S4's anchor moved off the
+    executable `fact_acquisition` requires running (`scripts/envctl`) and onto
+    `src/harbor/config.py`, which is also the file the verifiable rung's own
+    verify_hint always named -- so `anchor_checked` and `verify_command_ran` now
+    measure the same artifact instead of two different ones."""
     s4 = scen.get("secrets_not_dotenv")
-    assert s4.anchor_files() == ("scripts/envctl",)
-    for leg in s4.legs:
-        events = _transcript([("Bash", {"command": "scripts/envctl get API_KEY"})])
+    assert s4.anchor_files() == ("src/harbor/config.py",)
+    for i, leg in enumerate(s4.legs, start=1):
+        events = _transcript([("Bash", {"command": "scripts/envctl get SIGNING_KEY"})])
         actions = scorer.build_action_stream(events)
-        assert scorer.first_index(actions, leg.fact_acquisition) is not None  # fact acquired
+        assert scorer.first_index(actions, leg.fact_acquisition) is not None, f"leg {i}"
         result = scorer.t3_metrics(
             None, fact_sentence=s4.fact_sentence, actions=actions,
             scenario_anchors=s4.anchor_files(),
         )
-        assert result["anchor_checked"] is True  # ...and so is the anchor, every leg
+        assert result["anchor_checked"] is False, f"leg {i}: fact acquired must not imply anchor"
+
+    verifiable = next(v for v in s4.note_variants if v.variant == "verifiable")
+    checked = scorer.build_action_stream(
+        _transcript([("Bash", {"command": verifiable.verify_hint})])
+    )
+    result = scorer.t3_metrics(
+        verifiable, fact_sentence=s4.fact_sentence, actions=checked,
+        scenario_anchors=s4.anchor_files(),
+    )
+    assert result["anchor_checked"] is True
+    assert result["verify_command_ran"] is True
+
+
+def test_t3_metrics_s4_anchor_checked_false_for_a_no_recall_control():
+    """S4's documented no-recall control, the acceptance bar this scenario owes:
+    arm "none" walking the `.env` half of its declared `arm_a_expectation`
+    ("Adds the new key to .env and/or a dotenv loader to config.py") -- reads the
+    decoy, writes the decoy, runs `make run`, and never opens config.py. Scores
+    anchor_checked False with the mistake fired and the fact never acquired.
+
+    The OTHER half of that expectation (adding a loader to config.py) does read
+    the anchor first, so a loader-branch control would score anchor_checked True.
+    That is not a confound: it is an agent that inspected the ground truth and
+    contradicted it anyway, and the two branches are distinguishable because
+    `mistake_committed` fires in both while `anchor_checked` separates them."""
+    s4 = scen.get("secrets_not_dotenv")
+    leg1 = s4.legs[0]
+    events = _transcript(
+        [
+            ("Read", {"file_path": ".env"}),
+            (
+                "Edit",
+                {
+                    "file_path": ".env",
+                    "old_string": "ACME_API_KEY=REPLACE_ME_LOCAL_ONLY",
+                    "new_string": "ACME_API_KEY=REPLACE_ME_LOCAL_ONLY\nACME_WEBHOOK_SECRET=abc123",
+                },
+            ),
+            ("Bash", {"command": "make run"}),
+        ]
+    )
+    actions = scorer.build_action_stream(events)
+    result = scorer.t3_metrics(
+        None, fact_sentence=s4.fact_sentence, actions=actions,
+        scenario_anchors=s4.anchor_files(),
+    )
+    assert result["anchor_checked"] is False
+    assert scorer.first_index(actions, leg1.mistake_signature) is not None
+    assert scorer.first_index(actions, leg1.fact_acquisition) is None
 
 
 def test_t3_metrics_s5_and_s6_anchor_checked_vacuously_compliant():
