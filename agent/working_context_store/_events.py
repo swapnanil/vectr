@@ -33,22 +33,31 @@ from typing import Iterable, TypedDict
 # log is a complete history with no implicit first row). `promoted` mirrors
 # WorkingContextStore.promote()'s existing provenance step-up; it changes
 # provenance, not lifecycle state, so the fold does not treat it as a
-# state-changing event. `stale_flagged` is the one system-actor transition
-# (deterministic anchor-drift, never a judgment call) and is likewise
-# orthogonal to lifecycle state: staleness is re-derived fresh against live
-# anchor hashes on every check_staleness() call (see that method), so a
-# fixed anchor simply stops being flagged on the next check with no
-# corresponding "un-stale" event needed — this is what makes it "automatic,
-# reversible" per the design doc, as distinct from revoked/reinstated, whose
-# reversal is always one more explicit event.
+# state-changing event. `stale_flagged` and `expired` are the two
+# system-actor transitions (deterministic, never a judgment call) and are
+# each handled differently by the fold: staleness is re-derived fresh
+# against live anchor hashes on every check_staleness() call (see that
+# method), so a fixed anchor simply stops being flagged on the next check
+# with no corresponding "un-stale" event needed — this is what makes it
+# "automatic, reversible" per the design doc. `expired` (UPG-MEMORY-DECAY-
+# KIND-SCOPED) is a genuine state-changing transition instead — a note
+# whose kind's configured TTL has elapsed (`purge_expired_notes()`) is
+# appended one `expired` event rather than deleted (UPG-MEMORY-STATE-
+# MACHINE's append-only invariant: the row, its note_events history, and
+# its deterrent rendering all survive; only proactive/default recall()/
+# fire() listing excludes it) — reversed the same way `revoked` is, by
+# appending a `reinstated` event (no separate "un-expire" event kind
+# needed; `reinstated` already means "return to active" regardless of
+# which terminal state preceded it).
 NOTE_EVENT_KINDS: tuple[str, ...] = (
-    "created", "superseded", "revoked", "stale_flagged", "reinstated", "promoted",
+    "created", "superseded", "revoked", "stale_flagged", "reinstated", "promoted", "expired",
 )
 
 # Who proposed a transition. Vectr never decides a revocation/reinstatement
 # itself (judgment stays caller-side, per the design doc) — "system" is
-# reserved for the one deterministic, non-judgment transition
-# (stale_flagged: a content-hash mismatch either happened or it didn't).
+# reserved for the deterministic, non-judgment transitions: `stale_flagged`
+# (a content-hash mismatch either happened or it didn't) and `expired` (a
+# note's age either crossed its kind's configured TTL or it didn't).
 NOTE_EVENT_ACTORS: tuple[str, ...] = ("agent", "human", "system")
 
 # The subset of NOTE_EVENT_KINDS that changes fold()'s lifecycle state, and
@@ -59,11 +68,12 @@ _LIFECYCLE_STATE_AFTER: dict[str, str] = {
     "superseded": "superseded",
     "revoked": "revoked",
     "reinstated": "active",
+    "expired": "expired",
 }
 
 # The fold's possible lifecycle states — every note is exactly one of these
 # at any point in its history.
-NOTE_LIFECYCLE_STATES: tuple[str, ...] = ("active", "superseded", "revoked")
+NOTE_LIFECYCLE_STATES: tuple[str, ...] = ("active", "superseded", "revoked", "expired")
 
 
 class NoteEventRow(TypedDict, total=False):

@@ -701,9 +701,14 @@ class VectrService:
 
         In memory-only mode, the index thread and file watcher are skipped.
         In search-only mode, indexing and the watcher run normally, but the
-        notes-TTL purge is skipped — there is no context store to purge.
-        Otherwise, the notes-TTL purge runs so expired notes are cleaned up at
-        startup.
+        two startup memory-maintenance passes below are skipped — there is
+        no context store to run them against. Otherwise both run:
+        decay_old_notes() (UPG-MEMORY-DECAY-KIND-SCOPED) unconditionally —
+        it never deletes or hides anything, only recomputes the ranking-only
+        decay_score kind-scoped from each note's age — and
+        purge_expired_notes() only when VECTR_NOTES_TTL_DAYS is set, same as
+        before this fix (it is the one of the two with an observable effect
+        on default recall()/fire() listings, so it stays opt-in).
         """
         if self._watcher is None:
             raise RuntimeError(
@@ -714,17 +719,32 @@ class VectrService:
             return
         self._indexing = True
 
-        # apply TTL to working notes at startup if VECTR_NOTES_TTL_DAYS is set.
-        # Search-only mode has no context store — nothing to purge.
-        ttl_days_str = os.getenv("VECTR_NOTES_TTL_DAYS", "")
-        if ttl_days_str and self._context_store is not None:
+        if self._context_store is not None:
+            # decay_old_notes() is non-destructive (ranking signal only —
+            # see UPG-MEMORY-DECAY-KIND-SCOPED) so it runs unconditionally,
+            # unlike the TTL purge below which stays behind an explicit
+            # opt-in env var since it changes what's visible by default.
             try:
-                ttl = float(ttl_days_str)
-                deleted = self._context_store.purge_expired_notes(self._workspace_root, ttl)
-                if deleted:
-                    logger.info("purged %d expired notes (TTL=%.1f days)", deleted, ttl)
-            except (ValueError, Exception):
-                logger.warning("VECTR_NOTES_TTL_DAYS is not a valid float: %r", ttl_days_str)
+                decayed = self._context_store.decay_old_notes(self._workspace_root)
+                if decayed:
+                    logger.info("recomputed decay_score for %d notes at startup", decayed)
+            except Exception:
+                logger.exception("decay_old_notes failed at startup")
+
+            # apply TTL to working notes at startup if VECTR_NOTES_TTL_DAYS is set.
+            ttl_days_str = os.getenv("VECTR_NOTES_TTL_DAYS", "")
+            if ttl_days_str:
+                try:
+                    ttl = float(ttl_days_str)
+                except ValueError:
+                    logger.warning("VECTR_NOTES_TTL_DAYS is not a valid float: %r", ttl_days_str)
+                else:
+                    try:
+                        expired = self._context_store.purge_expired_notes(self._workspace_root, ttl)
+                        if expired:
+                            logger.info("flagged %d notes expired (TTL=%.1f days)", expired, ttl)
+                    except Exception:
+                        logger.exception("purge_expired_notes failed at startup")
 
         if self._memory_only:
             logger.info(
