@@ -642,13 +642,31 @@ def test_run_agent_flat_counter_yields_zero_delta_for_usps_arm(tmp_path, monkeyp
 
 
 def test_run_agent_does_not_capture_usps_delta_for_other_arms(tmp_path, monkeypatch):
-    """Zero behavior change for every other arm: `run_agent()` must not touch
-    `/v1/status` at all (not even for hook-sessionstart/hook-full, whose own
-    diagnostic snapshot happens later in `capture_and_teardown()`, not here),
-    and must never write the USPS delta keys into `self.record`."""
+    """arm "proxy" (and every other non-hook arm) is completely untouched:
+    `run_agent()` must not call `/v1/status` at all for it, and must never
+    write any hook-delta key (USPS or SessionStart) into `self.record`.
+
+    UPG-EVAL-HOOKCOUNT-CUMULATIVE revision: arms "hook-sessionstart"/
+    "hook-full" are no longer "other arms" for this specific purpose --
+    `run_agent()` now DOES bracket its own subprocess with before/after
+    `/v1/status` snapshots for these two arms too (see the dedicated
+    `hook_injection_counts` delta tests above), so this test only asserts
+    they never pick up the USPS-SPECIFIC keys, which stay scoped to arm
+    "hook-userpromptsubmit" alone.
+    """
+    status_responses = iter([
+        {"hook_injection_counts": {"SessionStart": 1}},  # hook-sessionstart: before
+        {"hook_injection_counts": {"SessionStart": 1}},  # hook-sessionstart: after (flat -> delta 0)
+        {"hook_injection_counts": {"SessionStart": 1}},  # hook-full: before
+        {"hook_injection_counts": {"SessionStart": 1}},  # hook-full: after (flat -> delta 0)
+    ])
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        assert method == "GET" and url.endswith("/v1/status")
+        return next(status_responses)
 
     def fail_http(*a, **k):
-        raise AssertionError("run_agent() must not call /v1/status for a non-usps arm")
+        raise AssertionError("run_agent() must not call /v1/status for arm 'proxy'")
 
     class _FakeProc:
         returncode = 0
@@ -656,20 +674,23 @@ def test_run_agent_does_not_capture_usps_delta_for_other_arms(tmp_path, monkeypa
         def communicate(self, timeout=None):
             return "", ""
 
-    monkeypatch.setattr(run_leg, "_http_json", fail_http)
     monkeypatch.setattr(run_leg.subprocess, "Popen", lambda cmd, **kwargs: _FakeProc())
     monkeypatch.setattr(run_leg.shutil, "which", lambda name: "/usr/bin/claude" if name == "claude" else None)
 
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
     for arm in ("hook-sessionstart", "hook-full"):
         runner = _make_hook_runner(tmp_path, arm=arm)
         runner.run_agent()
         assert "user_prompt_submit_injection_delta" not in runner.record
+        assert runner.record["hook_injection_counts"] == {"SessionStart": 0}
 
+    monkeypatch.setattr(run_leg, "_http_json", fail_http)
     proxy_runner = _make_runner(tmp_path)  # arm="proxy"
     proxy_runner.workspace.mkdir(parents=True, exist_ok=True)
     proxy_runner.artifacts.mkdir(parents=True, exist_ok=True)
     proxy_runner.run_agent()
     assert "user_prompt_submit_injection_delta" not in proxy_runner.record
+    assert "hook_injection_counts" not in proxy_runner.record
 
 
 # ---------------------------------------------------------------------------
@@ -2057,3 +2078,147 @@ def test_reset_note_store_calls_memory_clear_and_records_deleted_count(tmp_path,
 
     assert ("POST", f"http://127.0.0.1:{runner.daemon_port}/v1/memory/clear") in calls
     assert runner.record["note_store_reset_before_plant"] == 5
+
+
+# ---------------------------------------------------------------------------
+# UPG-EVAL-HOOKCOUNT-CUMULATIVE: `capture_and_teardown()` used to read
+# end-of-leg CUMULATIVE `hook_injection_counts` straight off `/v1/status` for
+# arms "hook-sessionstart"/"hook-full" -- which also carries this leg's own
+# pre-agent `hook_preflight()` subprocess call and (in the real `main()` call
+# order) `probe()`'s `_session_start_probe()` daemon-side reachability check,
+# both of which legitimately fire the same counters before the real agent
+# session (`run_agent()`) ever starts. `run_agent()` now brackets ITS OWN
+# subprocess with before/after `/v1/status` snapshots for these two arms too
+# (the same pattern it already used for arm "hook-userpromptsubmit"'s
+# `user_prompt_submit_injection_delta`) and records the per-event DELTA as
+# `record["hook_injection_counts"]`; `capture_and_teardown()` no longer
+# overwrites that field with the raw end-of-leg cumulative snapshot.
+# `hook_preflight()` also re-settles `self.audit_offset` after its own hook
+# subprocess call runs, so the "post-offset" measured window `scorer.
+# leg_non_vacuity` reads from `audit_since_offset` excludes hook_preflight's
+# own traffic too, not just `probe()`'s.
+# ---------------------------------------------------------------------------
+
+
+def test_run_agent_records_hook_injection_counts_delta_excluding_preflight_traffic(tmp_path, monkeypatch):
+    """A leg where `hook_preflight()` already bumped the daemon's SessionStart
+    counter by 1 (1 -> 2, simulating `probe()`'s own earlier `1` from
+    `_session_start_probe()`) before `run_agent()` ever runs, and the real
+    agent session bumps it by 1 more (2 -> 3): the leg's recorded
+    `hook_injection_counts` must be the AGENT-SESSION-ONLY delta
+    ({"SessionStart": 1}), never the end-of-leg cumulative (3)
+    `capture_and_teardown()`'s own final `/v1/status` snapshot shows.
+    """
+    runner = _make_hook_runner(tmp_path, arm="hook-sessionstart")
+    content = _note_content(runner)
+
+    status_responses = iter([
+        {"hook_injection_counts": {"SessionStart": 1}},  # hook_preflight(): before
+        {"hook_injection_counts": {"SessionStart": 2}},  # hook_preflight(): after (preflight passes)
+        {"hook_injection_counts": {"SessionStart": 2}},  # run_agent(): before
+        {"hook_injection_counts": {"SessionStart": 3}},  # run_agent(): after (real session fired once)
+        {"hook_injection_counts": {"SessionStart": 3}},  # capture_and_teardown(): final diagnostic read
+    ])
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        if method == "GET" and url.endswith("/v1/status"):
+            return next(status_responses)
+        if method == "GET" and url.endswith("/__vectr_proxy/health"):
+            return {"metrics": {"injected": 0}}
+        raise AssertionError(f"unexpected call {method} {url}")
+
+    def fake_run_hook_command(command, *, cwd, stdin, env, timeout=60.0):
+        stdout = json.dumps({
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": content}
+        })
+        return 0, stdout, "", False
+
+    class _FakeProc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fake_run_hook_command)
+    monkeypatch.setattr(run_leg.subprocess, "Popen", lambda cmd, **kwargs: _FakeProc())
+    monkeypatch.setattr(run_leg.shutil, "which", lambda name: "/usr/bin/claude" if name == "claude" else None)
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 0)
+    monkeypatch.setattr(run_leg, "_hard_stop_port", lambda port: [])
+    monkeypatch.setattr(run_leg, "_stop_daemon", lambda *a, **k: [])
+
+    runner.hook_preflight()
+    runner.run_agent()
+    runner.capture_and_teardown()
+
+    assert runner.record["hook_injection_counts"] == {"SessionStart": 1}
+
+
+def test_capture_and_teardown_still_records_cumulative_final_as_diagnostic(tmp_path, monkeypatch):
+    """The raw end-of-leg cumulative snapshot is still captured somewhere for
+    post-mortem/diagnostic purposes -- just no longer under the
+    `hook_injection_counts` key `scorer.leg_non_vacuity` actually reads."""
+    runner = _make_hook_runner(tmp_path, arm="hook-full")
+    runner.record["hook_injection_counts"] = {"SessionStart": 1}  # simulate run_agent()'s own delta
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        if method == "GET" and url.endswith("/v1/status"):
+            return {"hook_injection_counts": {"SessionStart": 9, "UserPromptSubmit": 4}}
+        if method == "GET" and url.endswith("/__vectr_proxy/health"):
+            return {"metrics": {"injected": 0}}
+        raise AssertionError(f"unexpected call {method} {url}")
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg, "_hard_stop_port", lambda port: [])
+    monkeypatch.setattr(run_leg, "_stop_daemon", lambda *a, **k: [])
+
+    runner.capture_and_teardown()
+
+    # The delta recorded by run_agent() is untouched by teardown...
+    assert runner.record["hook_injection_counts"] == {"SessionStart": 1}
+    # ...while the raw cumulative is still visible under a diagnostic-only key.
+    assert runner.record["hook_injection_counts_cumulative_final"] == {
+        "SessionStart": 9, "UserPromptSubmit": 4,
+    }
+
+
+def test_hook_preflight_resettles_audit_offset_so_measured_window_excludes_its_own_traffic(tmp_path, monkeypatch):
+    """`probe()` (run strictly before `hook_preflight()` in `main()`'s call
+    order) already settles `self.audit_offset` once, but that settle cannot
+    account for traffic `hook_preflight()` itself generates afterwards.
+    `hook_preflight()` must re-settle the offset on its own successful exit so
+    `scorer.leg_non_vacuity`'s `audit_since_offset` genuinely starts at the
+    real agent session, not somewhere inside this leg's own preflight.
+    """
+    runner = _make_hook_runner(tmp_path, arm="hook-sessionstart")
+    content = _note_content(runner)
+    runner.audit_offset = 100  # simulates probe()'s own earlier settle
+    runner.record["audit_offset_after_preflight"] = 100
+
+    status_calls = {"n": 0}
+
+    def fake_http_json(method, url, payload=None, timeout=30):
+        assert method == "GET" and url.endswith("/v1/status")
+        status_calls["n"] += 1
+        # Before the hook call: 0 injections; after: 1 -- a real delta, so
+        # this preflight PASSES and execution reaches the re-settle code.
+        count = 0 if status_calls["n"] == 1 else 1
+        return {"hook_injection_counts": {"SessionStart": count}}
+
+    def fake_run_hook_command(command, *, cwd, stdin, env, timeout=60.0):
+        stdout = json.dumps({
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": content}
+        })
+        return 0, stdout, "", False
+
+    monkeypatch.setattr(run_leg, "_http_json", fake_http_json)
+    monkeypatch.setattr(run_leg, "_run_hook_command", fake_run_hook_command)
+    # `_settled_audit_size` re-polls the real audit.log file; stub it to prove
+    # `hook_preflight()` calls it AGAIN (with a distinct return value) rather
+    # than trusting the value stale-cached from `probe()`.
+    monkeypatch.setattr(runner, "_settled_audit_size", lambda **k: 250)
+
+    runner.hook_preflight()
+
+    assert runner.audit_offset == 250
+    assert runner.record["audit_offset_after_preflight"] == 250
