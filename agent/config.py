@@ -1345,6 +1345,42 @@ MEMORY_HYGIENE_STALE_TASK_WARN_COUNT: int = int(_hygiene_cfg["stale_task_warn_co
 MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS: int = int(_hygiene_cfg["stale_task_warn_age_days"])
 
 # ---------------------------------------------------------------------------
+# UPG-MEMORY-DECAY-KIND-SCOPED: per-kind decay half-life (decay_old_notes(),
+# ranking-only) and TTL (purge_expired_notes(), visibility-only — a
+# note_events 'expired' transition, never a row DELETE) — see the
+# memory_decay config.yaml comment for the full contract. `null` in
+# config.yaml maps to `None` here, meaning "exempt from this path at any
+# age"; the only kind exempt from both today is "directive".
+#
+# The seven kind names are duplicated here as a literal tuple rather than
+# imported from agent.working_context_store._types.VALID_KINDS, because
+# that package's __init__ (via _store.py -> _user_quote.py/_content_file.py)
+# already imports names FROM agent.config at module level — importing
+# VALID_KINDS the other way round here creates a genuine circular import
+# (verified: `agent.config` would be "partially initialized" when
+# working_context_store tries to read MEMORY_WRITE_USER_QUOTE_MIN_CHARS off
+# it). Same closed-vocabulary-duplication reasoning _events.py's
+# NOTE_EVENT_KINDS docstring already gives for not reusing EVENT_VALUES.
+# ---------------------------------------------------------------------------
+
+_MEMORY_DECAY_KINDS: tuple[str, ...] = (
+    "directive", "task", "gotcha", "finding", "reference", "decision", "operational",
+)
+
+_decay_cfg: dict[str, Any] = _cfg["memory_decay"]
+_decay_half_life_cfg: dict[str, Any] = _decay_cfg["half_life_days_by_kind"]
+_decay_ttl_cfg: dict[str, Any] = _decay_cfg["ttl_days_by_kind"]
+
+MEMORY_DECAY_HALF_LIFE_DAYS_BY_KIND: dict[str, float | None] = {
+    kind: (None if _decay_half_life_cfg[kind] is None else float(_decay_half_life_cfg[kind]))
+    for kind in _MEMORY_DECAY_KINDS
+}
+MEMORY_DECAY_TTL_DAYS_BY_KIND: dict[str, float | None] = {
+    kind: (None if _decay_ttl_cfg[kind] is None else float(_decay_ttl_cfg[kind]))
+    for kind in _MEMORY_DECAY_KINDS
+}
+
+# ---------------------------------------------------------------------------
 # UPG-PROXY-SUBSTRING-ANCHOR: recall_for_path() SQL over-fetch pool sizing.
 # See agent/working_context_store/_store.py:recall_for_path() and the
 # memory_recall_for_path config.yaml comment for why the SQL prefilter must

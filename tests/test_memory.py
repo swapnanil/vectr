@@ -265,7 +265,9 @@ class TestTeamModeConcurrency:
 
         assert errors == []
         remaining = store.recall(ws, limit=50)
-        # All 5 expired notes purged; all 10 fresh notes intact.
+        # All 5 expired notes flagged 'expired' (excluded from default
+        # recall(), never deleted — UPG-MEMORY-DECAY-KIND-SCOPED); all 10
+        # fresh notes intact.
         assert len(remaining) == 10
         assert all("fresh note" in n.content for n in remaining)
 
@@ -845,16 +847,28 @@ class TestDecay:
         if notes:
             assert notes[0].decay_score < 1.0
 
-    def test_decay_deletes_very_old_notes(self, tmp_path) -> None:
-        """Notes with decay_score < 0.1 are auto-deleted."""
+    def test_decay_never_deletes_notes_regardless_of_score(self, tmp_path) -> None:
+        """decay_old_notes() is a RANKING-ONLY signal (UPG-MEMORY-DECAY-
+        KIND-SCOPED) — even a note with a very low decay_score must never
+        be deleted. Replaces the old test_decay_deletes_very_old_notes,
+        which asserted a note WAS deleted once its decay_score dropped
+        below 0.1 — that assertion directly encoded the defect this fix
+        removes (the pre-fix implementation ran `DELETE FROM notes WHERE
+        decay_score < 0.1`, violating UPG-MEMORY-STATE-MACHINE §4.1's
+        append-only invariant; `forget()` is the one true hard-delete
+        escape hatch, not an automatic score threshold)."""
         import sqlite3
         store = _store(tmp_path)
-        store.remember("/repo", "ancient note")
-        # Manually set decay_score to just above deletion threshold
+        note_id = store.remember("/repo", "ancient note")
+        # Manually set decay_score well below the old 0.1 deletion
+        # threshold, to prove that threshold no longer triggers a delete.
         with sqlite3.connect(str(tmp_path / "working_context.sqlite")) as conn:
             conn.execute("UPDATE notes SET decay_score = 0.05 WHERE workspace = ?", ("/repo",))
         store.decay_old_notes("/repo", half_life_days=14)
-        assert store.recall("/repo") == []
+        assert store.count_notes("/repo") == 1
+        notes = store.recall("/repo")
+        assert len(notes) == 1
+        assert notes[0].note_id == note_id
 
     def test_fresh_notes_not_deleted_by_decay(self, tmp_path) -> None:
         store = _store(tmp_path)
@@ -863,6 +877,121 @@ class TestDecay:
         notes = store.recall("/repo")
         assert len(notes) == 1
         assert notes[0].decay_score > 0.9
+
+
+# ---------------------------------------------------------------------------
+# UPG-MEMORY-DECAY-KIND-SCOPED: per-kind, append-only, idempotent decay/TTL.
+# One test class per acceptance clause quoted in the task item:
+#   (1) a directive survives both purge_expired_notes() and decay_old_notes()
+#       at any age, even under an explicit operator override;
+#   (2) an expired note stops being a recall()/fire() candidate, but its
+#       note_events log and deterrent rendering survive via get_note();
+#   (3) decay_old_notes() is idempotent — computed from elapsed time, not
+#       multiplied onto a note's existing decay_score.
+# ---------------------------------------------------------------------------
+
+class TestMemoryDecayKindScoped:
+    def test_directive_survives_purge_and_decay_at_any_age_even_with_override(self, tmp_path) -> None:
+        """kind='directive' is the one kind configured `null` (exempt) in
+        both memory_decay.ttl_days_by_kind and .half_life_days_by_kind
+        (agent/config.yaml) — it must never expire or lose rank by age, and
+        that exemption must win even over an explicit operator TTL/
+        half-life override (VECTR_NOTES_TTL_DAYS maps straight onto
+        purge_expired_notes()'s ttl_days argument)."""
+        store = _store(tmp_path)
+        nid = store.remember("/repo", "standing rule", kind="directive")
+        ancient = time.time() - 100_000 * 86400  # ~274 years old
+        with store._conn() as conn:
+            conn.execute("UPDATE notes SET created_at = ? WHERE note_id = ?", (ancient, nid))
+
+        # Aggressive 1-day TTL override — a directive must still be exempt.
+        expired = store.purge_expired_notes("/repo", ttl_days=1.0)
+        assert expired == 0
+        note = store.get_note("/repo", nid)
+        assert note is not None
+        states = store.note_event_states("/repo", [note])
+        assert states.get(nid, {}).get("state", "active") == "active"
+
+        # Aggressive near-zero half-life override — decay_score must stay 1.0.
+        store.decay_old_notes("/repo", half_life_days=0.0001)
+        note = store.get_note("/repo", nid)
+        assert note.decay_score == 1.0
+
+    def test_expired_note_stops_injection_but_log_and_deterrent_survive(self, tmp_path) -> None:
+        """The full contract from the task's acceptance clause: an expired
+        note (1) stops appearing in default recall() output, (2) keeps its
+        note_events log with a folded 'expired' state, (3) keeps its row
+        (get_note() still resolves it), and (4) renders a deterrent-style
+        block instead of raw content on the explicit expand path."""
+        store = _store(tmp_path)
+        nid = store.remember("/repo", "old operational fact", kind="operational")
+        ancient = time.time() - 9_999 * 86400
+        with store._conn() as conn:
+            conn.execute("UPDATE notes SET created_at = ? WHERE note_id = ?", (ancient, nid))
+
+        expired = store.purge_expired_notes("/repo", ttl_days=1.0)
+        assert expired == 1
+
+        # (1) stops being injected: excluded from default recall()
+        assert all(n.note_id != nid for n in store.recall("/repo", limit=50))
+
+        # (2) + (3) row and note_events log survive (never deleted)
+        note = store.get_note("/repo", nid)
+        assert note is not None, (
+            "expired note's row must survive purge (state machine is "
+            "append-only, never DELETE)"
+        )
+        states = store.note_event_states("/repo", [note])
+        assert states.get(nid, {}).get("state") == "expired", (
+            f"expected folded state 'expired', got {states.get(nid)}"
+        )
+
+        # (4) deterrent rendering survives on explicit expand
+        text = store.format_notes_for_llm([note], detail="full")
+        assert "[EXPIRED]" in text, text
+
+    def test_decay_idempotent_absolute_not_cumulative(self, tmp_path) -> None:
+        """decay_old_notes() must compute decay_score purely from elapsed
+        time, never multiply onto the row's PRIOR decay_score — otherwise
+        two calls at the same clock reading (or, in production, two calls
+        close enough together that elapsed time barely moves) silently
+        compound (0.5 then 0.25 instead of 0.5 both times). Seeding a stale
+        prior decay_score (0.3) and asserting the post-call score depends
+        only on elapsed age (~0.5 after exactly one half-life) is a
+        timing-robust way to pin this without needing two real back-to-back
+        calls to land at an identical wall-clock instant."""
+        store = _store(tmp_path)
+        nid = store.remember("/repo", "note", kind="finding")
+        half_life_s = 5.0
+        with store._conn() as conn:
+            conn.execute(
+                "UPDATE notes SET created_at = ?, decay_score = ? WHERE note_id = ?",
+                (time.time() - half_life_s, 0.3, nid),
+            )
+        store.decay_old_notes("/repo", half_life_days=half_life_s / 86400)
+        note = store.get_note("/repo", nid)
+        assert note.decay_score == pytest.approx(0.5, rel=0.05), (
+            "decay_score must be recomputed purely from elapsed time "
+            "(~0.5 expected after exactly one half-life), not multiplied "
+            f"onto a pre-existing decay_score of 0.3 (got {note.decay_score})"
+        )
+
+    def test_decay_two_calls_same_clock_produce_identical_score(self, tmp_path) -> None:
+        """The literal acceptance clause: decay_old_notes() called twice
+        with the SAME clock reading (the `now` argument added by this fix)
+        must produce the same decay_score both times — bitwise equality,
+        since the score is a pure function of (now - created_at)."""
+        store = _store(tmp_path)
+        nid = store.remember("/repo", "note", kind="finding")
+        fixed_now = time.time() + 20 * 86400
+
+        store.decay_old_notes("/repo", now=fixed_now)
+        first = store.get_note("/repo", nid).decay_score
+
+        store.decay_old_notes("/repo", now=fixed_now)
+        second = store.get_note("/repo", nid).decay_score
+
+        assert first == second
 
 
 # ---------------------------------------------------------------------------
@@ -1277,7 +1406,15 @@ class TestT17DataRetention:
         ws = str(tmp_path)
         return store, ws
 
-    def test_purge_expired_notes_removes_old_notes(self, tmp_path) -> None:
+    def test_purge_expired_notes_flags_old_notes_without_deleting(self, tmp_path) -> None:
+        """purge_expired_notes() marks an old note 'expired' via an
+        append-only note_events transition (UPG-MEMORY-DECAY-KIND-SCOPED)
+        rather than deleting its row — replaces the old
+        test_purge_expired_notes_removes_old_notes, whose final assertion
+        (`count_notes(ws) == 0`) directly encoded the disallowed row-DELETE
+        behavior (UPG-MEMORY-STATE-MACHINE §4.1's append-only invariant;
+        `forget()` is the one true hard-delete escape hatch, not an
+        automatic TTL sweep)."""
         store, ws = self._store(tmp_path)
         import time as _time
         # Store a note and back-date its created_at to 10 days ago
@@ -1286,9 +1423,17 @@ class TestT17DataRetention:
         with store._conn() as conn:
             conn.execute("UPDATE notes SET created_at = ? WHERE note_id = ?", (cutoff - 1, note_id))
 
-        deleted = store.purge_expired_notes(ws, ttl_days=9.0)
-        assert deleted == 1
-        assert store.count_notes(ws) == 0
+        expired = store.purge_expired_notes(ws, ttl_days=9.0)
+        assert expired == 1
+        # Row survives (never deleted) ...
+        assert store.count_notes(ws) == 1
+        note = store.get_note(ws, note_id)
+        assert note is not None
+        # ... but stops being a default recall() candidate ...
+        assert all(n.note_id != note_id for n in store.recall(ws, limit=50))
+        # ... and its note_events log records the transition.
+        states = store.note_event_states(ws, [note])
+        assert states[note_id]["state"] == "expired"
 
     def test_purge_expired_notes_keeps_recent_notes(self, tmp_path) -> None:
         store, ws = self._store(tmp_path)

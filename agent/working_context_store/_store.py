@@ -373,6 +373,15 @@ def _format_index_line(
     revoked_marker = (
         " [REVOKED]" if note_states and note_states.get(n.note_id, {}).get("state") == "revoked" else ""
     )
+    # UPG-MEMORY-DECAY-KIND-SCOPED: same signal shape as revoked_marker
+    # above, for a note whose kind's TTL elapsed (`purge_expired_notes()`).
+    # An expired note is excluded from default recall()/fire() listings
+    # (`_exclude_expired()`), so this marker only ever renders on an
+    # explicit `include_superseded`-style or single-note-expand path that
+    # bypasses that filter — never on a fresh default listing.
+    expired_marker = (
+        " [EXPIRED]" if note_states and note_states.get(n.note_id, {}).get("state") == "expired" else ""
+    )
     id_str = f"#{n.note_id}" if surface == "mcp" else f"{n.note_id}"
     # UPG-SUBAGENT-MEMORY: caller-declared agent/subagent attribution
     # (author_id) — never inferred. Absent renders exactly as before.
@@ -380,11 +389,11 @@ def _format_index_line(
     if sort_by == "chronological":
         return (
             f"[{id_str}] {_date_str(n.created_at)} {kind_label}/{n.priority}{agent_marker}"
-            f" · {title}{stale_marker}{revoked_marker}"
+            f" · {title}{stale_marker}{revoked_marker}{expired_marker}"
         )
     return (
         f"[{id_str}] {kind_label}/{n.priority}{agent_marker} · {title}"
-        f"  ({_age_str(n.created_at)}){stale_marker}{revoked_marker}"
+        f"  ({_age_str(n.created_at)}){stale_marker}{revoked_marker}{expired_marker}"
     )
 
 
@@ -399,6 +408,20 @@ _ANTI_MEMORY_TEMPLATE = (
     'Previously believed (recorded {created_date}, revoked {revoked_date}, '
     'reason: {reason}): "{summary}". Do not re-derive this from other '
     'sources without verification.'
+)
+
+
+# Expiry deterrent framing (UPG-MEMORY-DECAY-KIND-SCOPED) — same category as
+# _ANTI_MEMORY_TEMPLATE above (an output template, not a query-
+# classification list), but a distinct wording: expiry is an age-based
+# noise-reduction signal, not a correctness verdict the way revocation is,
+# so this deliberately does NOT say "do not re-derive" — the content may
+# still be true, it has simply aged out of default injection and is worth a
+# fresh look rather than a warning against re-deriving it.
+_EXPIRED_TEMPLATE = (
+    'Expired by age (recorded {created_date}, expired {expired_date}, '
+    'reason: {reason}): "{summary}". Row and event history retained — '
+    'use vectr_reinstate to bring it back into active recall.'
 )
 
 
@@ -546,6 +569,28 @@ def _format_full_block(
         return "\n".join([
             f"[{n.note_id}] [REVOKED]{tag_str}{author_str}",
             f"  {anti_memory}",
+            "",
+        ])
+
+    # Expiry deterrent (UPG-MEMORY-DECAY-KIND-SCOPED) — same shape as the
+    # revoked branch above, checked next so a note whose LATEST folded
+    # transition is 'expired' (not 'revoked') renders this block instead.
+    # Never reached via default recall()/fire() (those exclude expired
+    # notes entirely via _exclude_expired()) — only via get_note()'s
+    # unfiltered single-note expand path, which is exactly what "deterrent
+    # rendering survives" requires.
+    if state_info is not None and state_info["state"] == "expired":
+        expired_date = _date_str(state_info["ts"]) if state_info["ts"] else _date_str(n.created_at)
+        reason = state_info["reason"] or "ttl exceeded"
+        deterrent = _EXPIRED_TEMPLATE.format(
+            created_date=_date_str(n.created_at),
+            expired_date=expired_date,
+            reason=reason,
+            summary=_note_title(n),
+        )
+        return "\n".join([
+            f"[{n.note_id}] [EXPIRED]{tag_str}{author_str}",
+            f"  {deterrent}",
             "",
         ])
 
@@ -1490,14 +1535,18 @@ class WorkingContextStore:
         actor: str = "agent",
         reason: str | None = None,
     ) -> bool:
-        """Revert a revocation (UPG-MEMORY-STATE-MACHINE §4.2,
-        `vectr_reinstate`) — appends a `reinstated` event, always legal
-        regardless of the note's current folded state (a no-op-in-spirit
-        reinstate on an already-active note is harmless, same "just append,
-        let the fold decide" philosophy as a repeat revoke). Returns True if
-        the note exists, False if it does not exist in this workspace.
-        Raises ValueError if `actor` is invalid (same restriction as
-        `revoke_note` — reinstatement is always a judgment call, never
+        """Revert a revocation OR an expiry (UPG-MEMORY-STATE-MACHINE §4.2,
+        UPG-MEMORY-DECAY-KIND-SCOPED; `vectr_reinstate`) — appends a
+        `reinstated` event, always legal regardless of the note's current
+        folded state (a no-op-in-spirit reinstate on an already-active note
+        is harmless, same "just append, let the fold decide" philosophy as
+        a repeat revoke). The SAME event kind reverses both terminal states
+        — `reinstated` means "return to active" regardless of whether the
+        note got there via `revoke_note()` or `purge_expired_notes()`'s
+        automatic TTL expiry, so no separate "un-expire" call is needed.
+        Returns True if the note exists, False if it does not exist in this
+        workspace. Raises ValueError if `actor` is invalid (same restriction
+        as `revoke_note` — reinstatement is always a judgment call, never
         `actor='system'`).
         """
         if actor not in NOTE_EVENT_ACTORS or actor == "system":
@@ -1532,19 +1581,47 @@ class WorkingContextStore:
         """
         if not notes:
             return {}
-        note_ids = [n.note_id for n in notes]
+        return self._note_event_states_by_ids(workspace, [n.note_id for n in notes])
+
+    def _note_event_states_by_ids(self, workspace: str, note_ids: list[int]) -> dict[int, dict]:
+        """Batched fold of `note_events` for a list of note IDs directly
+        (UPG-MEMORY-DECAY-KIND-SCOPED) — the same query/fold `note_event_
+        states()` performs, factored out so a caller with only IDs in hand
+        (no `WorkingNote` objects yet — `purge_expired_notes()`'s
+        idempotency check, `_exclude_expired()`'s post-fetch filter) doesn't
+        need to construct them first. `note_event_states()` is now a thin
+        wrapper over this for its existing `list[WorkingNote]` callers.
+        """
+        if not note_ids:
+            return {}
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT note_id, event, actor, reason, payload, ts, id FROM note_events "
                 "WHERE workspace = ? AND note_id IN ({}) ORDER BY note_id, id ASC".format(
                     ",".join("?" * len(note_ids))
                 ),
-                [workspace] + note_ids,
+                [workspace] + list(note_ids),
             ).fetchall()
         by_note: dict[int, list[dict]] = {}
         for r in rows:
             by_note.setdefault(r["note_id"], []).append(dict(r))
         return {nid: _fold_note_events(evs) for nid, evs in by_note.items()}
+
+    def _exclude_expired(self, workspace: str, notes: list[WorkingNote]) -> list[WorkingNote]:
+        """Drop notes whose current folded lifecycle state (UPG-MEMORY-
+        STATE-MACHINE §4.1) is 'expired' from a candidate pool (UPG-MEMORY-
+        DECAY-KIND-SCOPED) — the "stops being injected" half of expiry's
+        contract. The row itself, its note_events log, and its deterrent
+        rendering all survive untouched (`get_note()` and
+        `format_notes_for_llm()` never call this — only the default/
+        proactive listing surfaces below do). Applied as a post-fetch
+        filter, the same "may return fewer than `limit` results" trade-off
+        `_scope_filter()` already accepts on every one of these same call
+        sites."""
+        if not notes:
+            return notes
+        states = self._note_event_states_by_ids(workspace, [n.note_id for n in notes])
+        return [n for n in notes if states.get(n.note_id, {}).get("state") != "expired"]
 
     def recall(
         self,
@@ -1680,6 +1757,10 @@ class WorkingContextStore:
 
         notes = [self._row_to_note(r) for r in rows]
         notes = _scope_filter(notes, session_id=session_id)
+        # UPG-MEMORY-DECAY-KIND-SCOPED: an expired note stops being a default
+        # recall() candidate (its row/log/deterrent rendering survive via
+        # get_note()/format_notes_for_llm() — see _exclude_expired()).
+        notes = self._exclude_expired(workspace, notes)
 
         if notes:
             ids = [n.note_id for n in notes]
@@ -1843,6 +1924,9 @@ class WorkingContextStore:
             notes = all_notes[:limit]
 
         notes = _scope_filter(notes, session_id=session_id)
+        # UPG-MEMORY-DECAY-KIND-SCOPED: same expiry exclusion as recall()'s
+        # SQL path — see that method's comment and _exclude_expired().
+        notes = self._exclude_expired(workspace, notes)
 
         if notes:
             ids = [n.note_id for n in notes]
@@ -2476,6 +2560,9 @@ class WorkingContextStore:
         notes = [note for _, note in matched[:limit]]
 
         notes = _scope_filter(notes, session_id=session_id, file_path=path_candidates)
+        # UPG-MEMORY-DECAY-KIND-SCOPED: same expiry exclusion as recall()'s
+        # SQL path — see that method's comment and _exclude_expired().
+        notes = self._exclude_expired(workspace, notes)
         audit("RECALL", workspace=workspace, query=basename, notes_returned=len(notes), method="path")
         return notes
 
@@ -2607,43 +2694,150 @@ class WorkingContextStore:
         audit("FORGET_ALL_WORKSPACES", deleted=deleted)
         return deleted
 
-    def purge_expired_notes(self, workspace: str, ttl_days: float) -> int:
-        """Delete notes older than ttl_days regardless of decay_score.
+    def purge_expired_notes(
+        self, workspace: str, ttl_days: float | None = None, now: float | None = None,
+    ) -> int:
+        """Flag notes older than their kind's TTL as expired (UPG-MEMORY-
+        DECAY-KIND-SCOPED) — an append-only `expired` note_events
+        transition (actor='system', a deterministic non-judgment call, same
+        class as `stale_flagged`), never a row DELETE (UPG-MEMORY-STATE-
+        MACHINE §4.1's append-only invariant — the pre-fix implementation's
+        `DELETE FROM notes WHERE created_at < cutoff` directly violated it,
+        and was also kind-blind, deleting directives on the same schedule
+        as scratch findings).
 
-        Called at startup when VECTR_NOTES_TTL_DAYS is set. Returns the number
-        of notes deleted.
-        """
-        cutoff = time.time() - ttl_days * 86400
-        with self._conn() as conn:
-            deleted = conn.execute(
-                "DELETE FROM notes WHERE workspace = ? AND created_at < ?",
-                (workspace, cutoff),
-            ).rowcount
-        if deleted:
-            audit("PURGE_EXPIRED", workspace=workspace, ttl_days=ttl_days, deleted=deleted)
-        return deleted
+        Called at startup when VECTR_NOTES_TTL_DAYS is set (the live path,
+        wired from `app/service.py`'s `start_background_index()`). `ttl_days`,
+        when given, is that operator override — applied to every kind's TTL
+        EXCEPT a kind whose baseline TTL is `null` in config.yaml's
+        `memory_decay.ttl_days_by_kind` (`MEMORY_DECAY_TTL_DAYS_BY_KIND`) —
+        that exemption ALWAYS wins over the override, so kind='directive'
+        (and any future kind marked null) never expires regardless of what
+        an operator sets VECTR_NOTES_TTL_DAYS to. `ttl_days=None` (the
+        default) uses each kind's own configured TTL with no override.
 
-    def decay_old_notes(self, workspace: str, half_life_days: float = 14.0) -> None:
+        Idempotent: skips any note whose CURRENT folded lifecycle state
+        (`note_event_states()`) is already 'expired' (a repeat call is a
+        no-op for it, never a duplicate event) or 'revoked' (a revoked
+        note's anti-memory deterrent must stay visible in default recall()/
+        fire() forever, per its own contract — expiry must never
+        additionally hide it).
+
+        Returns the number of notes newly transitioned to 'expired' this
+        call — NOT a delete count; nothing is ever deleted here (`forget()`
+        remains the one true hard-delete escape hatch).
         """
-        Apply time-based decay to note relevance scores.
-        Notes older than half_life_days have their decay_score halved.
-        Notes with decay_score < 0.1 are deleted automatically.
-        """
-        now = time.time()
-        half_life_s = half_life_days * 86400
+        from agent.config import MEMORY_DECAY_TTL_DAYS_BY_KIND
+
+        if now is None:
+            now = time.time()
         with self._conn() as conn:
-            conn.execute(
-                """
-                UPDATE notes
-                SET decay_score = decay_score * pow(0.5, (? - created_at) / ?)
-                WHERE workspace = ?
-                """,
-                (now, half_life_s, workspace),
-            )
-            conn.execute(
-                "DELETE FROM notes WHERE workspace = ? AND decay_score < 0.1",
+            rows = conn.execute(
+                "SELECT note_id, kind, created_at FROM notes WHERE workspace = ?",
                 (workspace,),
-            )
+            ).fetchall()
+        if not rows:
+            return 0
+
+        candidate_ids: list[int] = []
+        for r in rows:
+            kind = r["kind"] or DEFAULT_KIND
+            baseline = MEMORY_DECAY_TTL_DAYS_BY_KIND[kind]
+            if baseline is None:
+                continue  # kind exempt from expiry at any age (e.g. directive)
+            effective_ttl = ttl_days if ttl_days is not None else baseline
+            cutoff = now - effective_ttl * 86400
+            if r["created_at"] < cutoff:
+                candidate_ids.append(r["note_id"])
+        if not candidate_ids:
+            return 0
+
+        states = self._note_event_states_by_ids(workspace, candidate_ids)
+        expired_count = 0
+        with self._conn() as conn:
+            for note_id in candidate_ids:
+                state = states.get(note_id, {}).get("state", "active")
+                if state in ("expired", "revoked"):
+                    continue
+                _append_event(
+                    conn, workspace, note_id, "expired", actor="system",
+                    reason="ttl exceeded", ts=now,
+                )
+                expired_count += 1
+        if expired_count:
+            audit("PURGE_EXPIRED", workspace=workspace, ttl_days=ttl_days, expired=expired_count)
+        return expired_count
+
+    def decay_old_notes(
+        self, workspace: str, half_life_days: float | None = None, now: float | None = None,
+    ) -> int:
+        """Recompute every note's `decay_score` from its age (UPG-MEMORY-
+        DECAY-KIND-SCOPED) — a pure, idempotent function of elapsed time
+        (`pow(0.5, elapsed / half_life)`), ASSIGNED fresh on every call
+        rather than multiplied onto the row's existing value. The pre-fix
+        implementation did `decay_score = decay_score * pow(...)`, so
+        calling it twice at the same clock reading silently double-decayed
+        a note (0.5 then 0.25) instead of leaving it at 0.5 both times —
+        this version depends only on `now` and the note's unchanging
+        `created_at`, so two calls at an identical `now` always produce an
+        identical decay_score.
+
+        `half_life_days`, when given, overrides every kind's configured
+        half-life EXCEPT a kind whose baseline half-life is `null` in
+        config.yaml's `memory_decay.half_life_days_by_kind`
+        (`MEMORY_DECAY_HALF_LIFE_DAYS_BY_KIND`) — kind='directive' today —
+        mirroring `purge_expired_notes()`'s exemption contract exactly; an
+        exempt note's decay_score is left untouched (stays at its existing
+        value, 1.0 for a note that has never been touched by this method)
+        regardless of age or override. `half_life_days=None` (the default —
+        what the unconditional startup caller in `app/service.py` uses)
+        applies each kind's own configured half-life with no override.
+
+        decay_score is a ranking signal ONLY — the tie-break in recall()'s
+        default `ORDER BY`. This method NEVER deletes a note regardless of
+        how low its decay_score falls; the pre-fix implementation's
+        `DELETE FROM notes WHERE decay_score < 0.1` violated UPG-MEMORY-
+        STATE-MACHINE §4.1's append-only invariant exactly the same way
+        `purge_expired_notes()`'s old DELETE did — `forget()` remains the
+        one true hard-delete escape hatch.
+
+        Returns the number of notes whose decay_score was recomputed
+        (exempt-kind notes are skipped without a write and don't count).
+        """
+        from agent.config import MEMORY_DECAY_HALF_LIFE_DAYS_BY_KIND
+
+        if now is None:
+            now = time.time()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT note_id, kind, created_at FROM notes WHERE workspace = ?",
+                (workspace,),
+            ).fetchall()
+        if not rows:
+            return 0
+
+        updated = 0
+        with self._conn() as conn:
+            for r in rows:
+                kind = r["kind"] or DEFAULT_KIND
+                baseline = MEMORY_DECAY_HALF_LIFE_DAYS_BY_KIND[kind]
+                if baseline is None:
+                    continue  # kind exempt from decay at any age (e.g. directive)
+                effective_half_life = half_life_days if half_life_days is not None else baseline
+                half_life_s = effective_half_life * 86400
+                elapsed_s = now - r["created_at"]
+                # Clamp to 1.0 for elapsed_s <= 0 (a note created at/after
+                # `now`, e.g. clock skew) — pow(0.5, negative) is > 1.0,
+                # which would rank a skewed note ABOVE a genuinely fresh one.
+                score = pow(0.5, elapsed_s / half_life_s) if elapsed_s > 0 else 1.0
+                conn.execute(
+                    "UPDATE notes SET decay_score = ? WHERE workspace = ? AND note_id = ?",
+                    (score, workspace, r["note_id"]),
+                )
+                updated += 1
+        if updated:
+            audit("DECAY_NOTES", workspace=workspace, half_life_days=half_life_days, updated=updated)
+        return updated
 
     # ------------------------------------------------------------------
     # Snapshots — vectr_snapshot / vectr_restore
@@ -3075,6 +3269,11 @@ class WorkingContextStore:
                 (workspace,),
             ).fetchall()
         notes = [self._row_to_note(row) for row in rows]
+        # UPG-MEMORY-DECAY-KIND-SCOPED: an expired note never fires (same
+        # exclusion recall() applies) — filtered before check_staleness() so
+        # no wasted anchor-hash work happens on a note that can't fire
+        # anyway.
+        notes = self._exclude_expired(workspace, notes)
         notes_by_id = {n.note_id: n for n in notes}
 
         stale = self.check_staleness(notes, workspace)

@@ -939,15 +939,58 @@ behavior:
     - symbol
     - symbol_name
 
+memory_decay:
+  # UPG-MEMORY-DECAY-KIND-SCOPED: per-kind policy for the two age-based
+  # memory mechanisms.
+  #
+  # half_life_days_by_kind feeds decay_old_notes() — a RANKING-ONLY signal
+  # (recall()'s default ORDER BY tie-break). Never deletes or hides a note;
+  # a low decay_score just sorts a note later among equally-trusted peers.
+  #
+  # ttl_days_by_kind feeds purge_expired_notes() — a VISIBILITY-ONLY
+  # transition. A note whose age crosses its kind's TTL is appended one
+  # `expired` note_events row (UPG-MEMORY-STATE-MACHINE §4.1's append-only
+  # invariant — never a row DELETE); it stops appearing in default recall()/
+  # fire() listings, but its row, event history, and deterrent rendering
+  # (`vectr_recall(note_id=N)`) all survive, and `vectr_reinstate` reverses
+  # it at any time.
+  #
+  # `null` in either table means EXEMPT from that path at any age. The only
+  # kind exempt from both today is "directive" — a standing rule must never
+  # silently lose rank or stop being injected just because it's old. Every
+  # kind in VALID_KINDS (agent/working_context_store/_types.py) must have an
+  # entry in both tables — a kind missing here is a KeyError at import, not
+  # a silently-assumed default (agent/config.py's direct-subscript rule).
+
+  half_life_days_by_kind:
+    directive: null    # exempt — a standing rule never loses rank by age
+    operational: 14     # env/process facts drift fastest of the ranked kinds
+    task: 21              # current-work checkpoints age out with the work itself
+    gotcha: 30              # file-anchored caveats stay relevant longer than a checkpoint
+    finding: 30               # general learnings — same horizon as gotcha
+    reference: 45              # pointers (URLs/tickets) outlive ranked findings
+    decision: 60                 # architectural rationale — meant to read as a long timeline
+
+  ttl_days_by_kind:
+    directive: null    # exempt — never stops being injected regardless of age
+    operational: 60      # stale env/process facts should stop surfacing soonest
+    task: 90               # an un-superseded checkpoint older than a quarter is dead weight
+    gotcha: 120              # caveats stay live roughly half a year
+    finding: 120               # same horizon as gotcha
+    reference: 180              # pointers outlive ranked findings
+    decision: 240                 # decision history is meant to persist longest
+
 memory_hygiene:
   # UPG-TASK-SUPERSEDES-HYGIENE: kind="task" notes are current-work
   # checkpoints, not relevance-ranked learnings, and (per KIND_DEFAULT_SCOPES)
   # they keep firing at every session-start until explicitly superseded or
   # forgotten — a task note left un-superseded after the work moves on is
-  # dead weight that never decays (decay/auto-expiry is out of scope by
-  # design; this is a nudge, not a lifecycle change). `vectr_status` surfaces
-  # a one-line warning, driven by these two thresholds, when stale task notes
-  # accumulate — the caller decides whether to supersede or forget.
+  # dead weight that neither this nudge nor memory_decay above removes on
+  # its own (memory_decay only reorders/hides by AGE — a task note that's
+  # merely young stays fully live and un-nudged no matter how many stale
+  # siblings pile up). `vectr_status` surfaces a one-line warning, driven by
+  # these two thresholds, when stale task notes accumulate — the caller
+  # decides whether to supersede or forget.
 
   # Minimum number of live (non-superseded, non-tombstoned) kind="task" notes
   # older than stale_task_warn_age_days before the vectr_status warning fires.
