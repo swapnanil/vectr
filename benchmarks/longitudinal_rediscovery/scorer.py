@@ -625,18 +625,28 @@ def t3_metrics(
         check` failure output is what a from-scratch investigation surfaces
         (`rediscovery_work`'s own `BashAction(r"make\s+check|docs.?lint")`
         alternative), never a literal read of the anchor's own source.
-      - S3 (`runner_not_pytest`), S4 (`secrets_not_dotenv`): VIOLATION, EVERY leg --
-        structurally worse than S1. Each scenario's anchor (`tools/t`,
-        `scripts/envctl`) IS the executable its own `fact_acquisition` pattern
-        requires running, so acquiring the fact and touching the anchor are the same
-        Bash action by construction, not an incidental forcing-step collision. NOT
-        fixable without a rebuild that redefines what "using the fact" means for a
-        scenario whose ground truth is an executable script.
+      - S3 (`runner_not_pytest`), S4 (`secrets_not_dotenv`): WERE a violation at EVERY
+        leg -- structurally worse than S1. Each scenario's anchor (`tools/t`,
+        `scripts/envctl`) WAS the executable its own `fact_acquisition` pattern
+        requires running, so acquiring the fact and touching the anchor were the same
+        Bash action by construction (this function matches a Bash command by shell
+        TOKEN, so running a script and inspecting it are indistinguishable), not an
+        incidental forcing-step collision. `anchor_checked` was therefore collinear
+        with `fact_acquired` and carried no incremental corroboration signal.
+        REPAIRED in scenario design by UPG-EVAL-S3-S4-SCENARIO-REDESIGN: S3's anchor
+        moved to `.github/workflows/ci.yml` and S4's to `src/harbor/config.py` (which
+        was already its own verify hint's target), each with the fact's in-repo
+        documentation moved along with it, since the fact-token confinement test binds
+        documentation location to anchor location. Both now satisfy the invariant at
+        every leg, each with a pinned no-recall control scoring `False`
+        (`tests/test_longitudinal_scorer.py`, same UPG tag). Nothing in this function
+        changed for that repair, by design.
       - S5/S6 (told, uncorroborable): vacuously compliant -- `anchor_files()` is empty
         for both, so `anchor_checked` is `None`, never a non-discriminating `True`.
-    None of the above is retroactively repaired by a scorer-side change -- these are
-    scenario-design properties, not a matching bug, and are out of scope for a
-    scorer.py fix.
+    None of the above is repaired by a scorer-side change -- these are scenario-design
+    properties, not a matching bug, and are out of scope for a scorer.py fix. S1's
+    residual leg-1 violation stands: `anchor_checked` on S1 leg 1 is unreported, not a
+    measurement.
 
     `verify_command_ran`/`trail_chars` stay properties of the PLANTED note itself (a
     verify hint and a trail's extra length only exist once something specific was

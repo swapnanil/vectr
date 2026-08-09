@@ -1000,6 +1000,22 @@ S2_SPEC_LIVES_OUTSIDE = LongitudinalScenario(
 # The expensive error is not running bare `pytest` once; it is "fixing" the fake
 # `legacy/` collection errors it reports. mistake_signature and rediscovery_work are
 # separated deliberately to keep those two apart (DESIGN.md section 3, S3).
+#
+# UPG-EVAL-S3-S4-SCENARIO-REDESIGN: this scenario's anchor is `.github/workflows/
+# ci.yml`, NOT `tools/t`. `tools/t` was the anchor until this commit, and it is the
+# executable `fact_acquisition` requires running -- `scorer._touches_anchor` matches a
+# Bash command by shell TOKEN, so `./tools/t` (running it) and `head -5 tools/t`
+# (inspecting it) are the same event, and `anchor_checked` was a relabelling of
+# `fact_acquired` at every leg rather than a corroboration measure (DESIGN.md 7.2 Q1).
+# The fact's in-repo documentation moved with the anchor: `tools/t`'s header is now
+# mechanical usage only and the explanation lives in the CI workflow, which is what
+# `test_fact_token_confined_to_anchor_files_and_leg1_prompt` requires (a fact_token may
+# live in the anchor file and nowhere else). `.github/workflows/ci.yml` is deliberately
+# OFF this scenario's own declared rediscovery path (bare `pytest`, reads of `legacy/`,
+# greps for `_feldspar_native`): an agent chasing the nine fake collection errors walks
+# into `legacy/`, not into CI config, so making CI the corroborating artifact leaves the
+# leg-1 mistake rate -- which `mistake_repetition_rate` is gated on -- least perturbed.
+# See DESIGN.md "Anchor separability re-baseline" for the rejected alternatives.
 # ---------------------------------------------------------------------------
 
 _S3_FACT = (
@@ -1009,13 +1025,40 @@ _S3_FACT = (
     "PYTHONPATH and selects the maintained roots."
 )
 
+# UPG-EVAL-S3-S4-SCENARIO-REDESIGN: mechanical usage header only. The explanatory
+# block that used to live here (and carried both of this scenario's fact_tokens) moved
+# to the anchor, `.github/workflows/ci.yml` -- a fact_token may appear in the anchor
+# file and in no other scenario file. The executable line is unchanged, so what
+# `fact_acquisition` observes and what the leg VerifyCommands run are byte-identical to
+# before; only the prose moved.
 _S3_TOOLS_T = (
     "#!/bin/sh\n"
-    "# Runs the maintained suite only. legacy/ imports the removed _feldspar_native\n"
-    "# extension; a bare `pytest` collects it anyway and reports nine collection\n"
-    "# errors that are not real failures. This script sets PYTHONPATH and selects\n"
-    "# the maintained roots so that doesn't happen.\n"
+    "# Test runner. Usage: ./tools/t [pytest args...]\n"
     'PYTHONPATH=src exec python -m pytest tests/unit tests/integration -q "$@"\n'
+)
+
+# The anchor (UPG-EVAL-S3-S4-SCENARIO-REDESIGN). CI is the project's own authoritative
+# statement of how the suite is run, and reading it is never required by any leg's
+# prompt, primary check, or fact_acquisition -- so `anchor_checked` records a CHOICE to
+# corroborate, which is what DESIGN.md 7.2's Q1 needs it to mean. Both fact_tokens are
+# kept intact on a single line each; reflowing this comment across a line boundary would
+# silently break the confinement test's own premise that the anchor documents the fact.
+_S3_CI_WORKFLOW = (
+    "name: ci\n"
+    "on: [push, pull_request]\n"
+    "jobs:\n"
+    "  test:\n"
+    "    runs-on: ubuntu-latest\n"
+    "    steps:\n"
+    "      - uses: actions/checkout@v4\n"
+    "      - uses: actions/setup-python@v5\n"
+    "        with:\n"
+    '          python-version: "3.12"\n'
+    "      # The suite runs through ./tools/t, never bare pytest: a bare `pytest` also\n"
+    "      # collects legacy/ (which imports the removed _feldspar_native extension) and\n"
+    "      # reports nine collection errors that are not real failures.\n"
+    "      # tools/t sets PYTHONPATH and selects the maintained roots.\n"
+    "      - run: ./tools/t\n"
 )
 
 _S3_PIPELINE = (
@@ -1108,13 +1151,25 @@ S3_RUNNER_NOT_PYTEST = LongitudinalScenario(
     files={
         "README.md": "# feldspar\n\nRow processing pipeline. See CLAUDE.md.\n",
         "CLAUDE.md": "# feldspar\n\nRow processing pipeline.\n",
-        "pytest.ini": "[pytest]\naddopts = -q\n",
+        # UPG-EVAL-S3-S4-SCENARIO-REDESIGN: `pythonpath = src` is load-bearing for this
+        # scenario's own fact. Without it a bare `pytest` cannot import `feldspar` at
+        # all, so tests/unit and tests/integration ALSO fail to collect and the run
+        # reports ELEVEN collection errors, not the nine the fact sentence claims. That
+        # was tolerable while the fact's documentation lived in `tools/t`; it is not
+        # tolerable now that the anchor exists to CORROBORATE the note, because an agent
+        # that takes the offered check would read a count the workspace contradicts.
+        # With this line, bare `pytest` reports exactly the nine `legacy/` errors and the
+        # only difference between it and `tools/t` is the fact itself. This is the seed;
+        # `_s3_restraint()`'s FileUnchanged compares against the LEG-START baseline, so
+        # changing the seed does not weaken the restraint check.
+        "pytest.ini": "[pytest]\naddopts = -q\npythonpath = src\n",
         "src/feldspar/__init__.py": '"""feldspar."""\n',
         "src/feldspar/rows.py": _S3_ROWS,
         "src/feldspar/pipeline.py": _S3_PIPELINE,
         "tests/unit/test_pipeline.py": _S3_TEST_PIPELINE,
         "tests/integration/test_smoke.py": _S3_TEST_SMOKE,
         "tools/t": _S3_TOOLS_T,
+        ".github/workflows/ci.yml": _S3_CI_WORKFLOW,
         **_s3_legacy_files(),
     },
     note_variants=(
@@ -1141,11 +1196,11 @@ S3_RUNNER_NOT_PYTEST = LongitudinalScenario(
                 _S3_FACT
                 + "\nEstablished 2026-07-16 in session 1 of this workspace, after a bare "
                 "`pytest` run reported nine collection errors from legacy/."
-                + "\nVerify: head -5 tools/t"
+                + '\nVerify: grep -n "tools/t" .github/workflows/ci.yml'
             ),
-            anchors=("tools/t",),
-            verify_hint="head -5 tools/t",
-            trigger_paths=("**/tools/t", "**/legacy/**"),
+            anchors=(".github/workflows/ci.yml",),
+            verify_hint='grep -n "tools/t" .github/workflows/ci.yml',
+            trigger_paths=("**/tools/t", "**/legacy/**", "**/.github/workflows/ci.yml"),
         ),
     ),
     legs=(
@@ -1260,6 +1315,31 @@ S3_RUNNER_NOT_PYTEST = LongitudinalScenario(
 
 # ---------------------------------------------------------------------------
 # S4 secrets_not_dotenv -- DISCOVERED, corroborable
+#
+# UPG-EVAL-S3-S4-SCENARIO-REDESIGN: this scenario's anchor is `src/harbor/config.py`,
+# NOT `scripts/envctl`. Three things were wrong with the old declaration:
+#   1. `scripts/envctl` is the executable `fact_acquisition` requires running, and
+#      `scorer._touches_anchor` matches a Bash command by shell TOKEN -- so running it
+#      and inspecting it were the same event and `anchor_checked` was a relabelling of
+#      `fact_acquired` at every leg (DESIGN.md 7.2 Q1 needs it to record a CHOICE to
+#      corroborate).
+#   2. The verifiable rung's own verify_hint already pointed at `src/harbor/config.py`,
+#      so `verify_command_ran` and `anchor_checked` were measuring different files: an
+#      agent that took the offered check scored anchor_checked False unless it also,
+#      separately, ran envctl.
+#   3. The fact's load-bearing claim ("harbor never loads .env; config.py reads
+#      os.environ only") is a claim ABOUT config.py, and config.py is where reading it
+#      settles the question. `anchor_files()` is defined as "where the recovery
+#      happens", so the fact's in-repo documentation moved into config.py's module
+#      docstring and `scripts/envctl`'s docstring was de-prescribed to usage lines only
+#      -- the same treatment DEFECT 12 gave S5's `deploy/README.md`.
+# config.py IS on this scenario's declared rediscovery path (`rediscovery_work` already
+# lists Read/Grep of it), which is deliberate and is NOT a separability violation: the
+# invariant is about what a leg REQUIRES touching (forcing step, primary check,
+# fact_acquisition), not about what an investigating agent may choose to touch. A
+# verifiable-rung agent that follows the hint therefore also increments
+# `rediscovery_actions` -- accurate accounting (corroboration is real work), not a
+# confound; the primary RDC components count that action either way.
 # ---------------------------------------------------------------------------
 
 _S4_FACT = (
@@ -1269,13 +1349,12 @@ _S4_FACT = (
     "`envctl export`), and a new key is registered with `scripts/envctl add NAME`."
 )
 
+# UPG-EVAL-S3-S4-SCENARIO-REDESIGN: mechanical usage only. The explanatory paragraph
+# that used to live in this docstring (and carried both of this scenario's fact_tokens)
+# moved to the anchor, `src/harbor/config.py`. Same treatment DEFECT 12 gave S5's
+# `deploy/README.md`: the tool documents how it is CALLED, never why it is the channel.
 _S4_ENVCTL = '''#!/usr/bin/env python3
-"""envctl -- the only source of secrets for harbor.
-
-harbor never loads .env: src/harbor/config.py reads os.environ only, and no dotenv
-loader exists anywhere in this project. The .env file at the repo root is a decoy of
-stale placeholders kept around for a retired tool -- it is not read by anything. Real
-secrets live in vault/secrets.json and are reached through this script:
+"""envctl -- read and register harbor's secrets, stored in vault/secrets.json.
 
     envctl get NAME         print a secret's value
     envctl add NAME VALUE   register a new secret
@@ -1324,11 +1403,67 @@ if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 '''
 
-_S4_CONFIG = '"""harbor runtime configuration."""\nimport os\n\n\ndef get(name, default=None):\n    return os.environ.get(name, default)\n'
+# The anchor (UPG-EVAL-S3-S4-SCENARIO-REDESIGN). CAREFUL: every leg's checks carry
+# `FileMatches("no_dotenv_import", "src/harbor/config.py", r"dotenv", want=False)`, so
+# this file must never contain the literal substring "dotenv" -- including in prose.
+# The docstring below states the fact without it. Both fact_tokens ("harbor never loads
+# .env", "decoy of stale placeholders") are kept intact on a single line each.
+_S4_CONFIG = (
+    '"""harbor runtime configuration -- the only place this service reads config from.\n'
+    "\n"
+    "harbor never loads .env: every value comes from os.environ, and nothing in this\n"
+    "project parses a .env file at any point. The .env at the repo root is a\n"
+    "decoy of stale placeholders kept for a retired sync tool, read by nothing. Real\n"
+    "values are supplied by scripts/envctl (`envctl export`, see the Makefile).\n"
+    '"""\n'
+    "import os\n"
+    "\n"
+    "\n"
+    "def get(name, default=None):\n"
+    "    return os.environ.get(name, default)\n"
+)
 
+# UPG-EVAL-S3-S4-SCENARIO-REDESIGN: `make run` could not work before this commit --
+# `python -m harbor` with the package under src/ and no PYTHONPATH, and no
+# `src/harbor/__main__.py` at all, so leg 1's forcing step ("show it loading by running
+# make run") always died on a ModuleNotFoundError. That failure is not the failure the
+# scenario wants to force: it drags every arm into src/harbor/ to debug the package
+# layout, which is exactly where the new anchor lives, re-creating the separability
+# violation this task exists to repair. With the entrypoint present, the forcing step
+# produces the intended feedback instead: a key registered via envctl is printed, a key
+# written only into the decoy .env is not.
+_S4_MAIN = (
+    '"""harbor entrypoint -- print the configuration the service starts with."""\n'
+    "import os\n"
+    "\n"
+    "from harbor import config\n"
+    "\n"
+    "# harbor's own configuration namespace: every name the service reads is prefixed.\n"
+    'CONFIG_PREFIXES = ("ACME_", "BILLING_", "SIGNING_")\n'
+    "\n"
+    "\n"
+    "def main():\n"
+    "    names = sorted(n for n in os.environ if n.startswith(CONFIG_PREFIXES))\n"
+    "    if not names:\n"
+    '        print("no harbor configuration present in the environment")\n'
+    "        return 0\n"
+    "    for name in names:\n"
+    '        print(f"{name}={config.get(name)}")\n'
+    "    return 0\n"
+    "\n"
+    "\n"
+    'if __name__ == "__main__":\n'
+    "    raise SystemExit(main())\n"
+)
+
+# `python3`, not `python`: a stock macOS/Linux box provides `python3` and frequently no
+# `python` at all, and this recipe is the only thing leg 1's forcing step depends on
+# actually running. (`tools/t` in S3 and `scripts/preflight.sh` in S1 still say
+# `python` -- filed separately, deliberately not changed here: their exec lines are what
+# every leg's own VerifyCommand runs.)
 _S4_MAKEFILE = (
     "run:\n"
-    '\teval "$$(scripts/envctl export)" && python -m harbor\n'
+    '\teval "$$(scripts/envctl export)" && PYTHONPATH=src python3 -m harbor\n'
     "\n"
     "# legacy: the old sync tool used to read ACME_API_KEY from .env directly (retired)\n"
 )
@@ -1376,6 +1511,7 @@ S4_SECRETS_NOT_DOTENV = LongitudinalScenario(
         "scripts/envctl": _S4_ENVCTL,
         "vault/secrets.json": '{\n  "SIGNING_KEY": "s3cr3t-baseline-value"\n}\n',
         "src/harbor/__init__.py": '"""harbor."""\n',
+        "src/harbor/__main__.py": _S4_MAIN,
         "src/harbor/config.py": _S4_CONFIG,
         "Makefile": _S4_MAKEFILE,
         "CLAUDE.md": "# harbor\n\nA small service.\n",
@@ -1406,9 +1542,9 @@ S4_SECRETS_NOT_DOTENV = LongitudinalScenario(
                 "confirming src/harbor/config.py never imports a dotenv loader."
                 + "\nVerify: grep -n \"os.environ\" src/harbor/config.py"
             ),
-            anchors=("scripts/envctl",),
+            anchors=("src/harbor/config.py",),
             verify_hint='grep -n "os.environ" src/harbor/config.py',
-            trigger_paths=("**/.env", "**/envctl"),
+            trigger_paths=("**/.env", "**/envctl", "**/src/harbor/config.py"),
         ),
     ),
     legs=(
