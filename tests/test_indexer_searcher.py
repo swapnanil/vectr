@@ -450,21 +450,29 @@ class TestCodeIndexer:
         ids, docs, _ = indexer.get_all_documents()
         assert any("v2" in d for d in docs), "Modified file was not re-indexed"
 
-    def test_mtime_cache_persists_across_instances(self, tmp_path) -> None:
-        """A new CodeIndexer pointed at the same workspace must respect the mtime cache."""
+    def test_mtime_cache_persists_across_instances(self, tmp_path, monkeypatch) -> None:
+        """A new CodeIndexer pointed at the same workspace must respect the mtime cache.
+
+        Patches the provider factory rather than assigning `_embed_provider`
+        after construction: `CodeIndexer.__init__` builds a provider eagerly, so
+        post-hoc assignment still pays a real Hugging Face model download first
+        (which made CI fail on an HF 429).
+        """
+        import agent.indexer as idx_module
         from agent.indexer import CodeIndexer
         from tests.conftest import _DummyEmbedProvider
 
+        monkeypatch.setattr(
+            idx_module, "get_embed_provider", lambda _model: _DummyEmbedProvider()
+        )
         db = str(tmp_path / "db")
         make_py(tmp_path, "cached.py", "def cached(): pass")
 
         idx1 = CodeIndexer(str(tmp_path), db_path=db)
-        idx1._embed_provider = _DummyEmbedProvider()
         idx1.index_workspace()
         count_after_first = idx1.total_chunks
 
         idx2 = CodeIndexer(str(tmp_path), db_path=db)
-        idx2._embed_provider = _DummyEmbedProvider()
         idx2.index_workspace()
         assert idx2.total_chunks == count_after_first
 
