@@ -94,6 +94,21 @@ def iter_result_paths(runs_dir: Path):
     non-poisoned) trajectory's `state.json`, plus every `_shared/leg1/*/result.json`
     not already reached that way -- deduplicated by resolved path, since a single
     shared leg 1 is referenced by every arm-trajectory at the same scenario+seed.
+
+    UPG-EVAL-RESCORE-RUNSDIR-ESCAPE: for k>=2, the path is reconstructed
+    structurally as `traj_dir / "legs" / k / "artifacts" / "result.json"` --
+    `traj_dir` itself already resolved under this call's own `runs_dir` --
+    rather than trusting `leg["result_path"]` from `state.json`. That field is an
+    ABSOLUTE path `run_plan.py` recorded at the run's original invocation, under
+    whatever `--runs-dir` that run used; it goes stale the moment the tree is
+    relocated or copied (`results/longitudinal/README.md`'s own "This is a copy
+    of the private run directory" -- observed 2026-08-17: rescoring the released
+    copy silently escaped into the original private directory instead, because
+    every k>=2 `result_path` still pointed there). The reconstruction mirrors
+    `run_plan.py`'s own `leg_dir / "artifacts" / "result.json"` construction
+    (also documented in `_resolve_artifact_paths` below), so it is exact, not a
+    guess. k==1 entries are skipped here and left to the dedicated
+    `_shared/leg1` scan below, which already resolves relative to `runs_dir`.
     """
     seen: set[Path] = set()
 
@@ -105,10 +120,10 @@ def iter_result_paths(runs_dir: Path):
             continue
         state = json.loads(state_path.read_text())
         for leg in state.get("legs", []):
-            rp = leg.get("result_path")
-            if not rp:
+            k = leg.get("k")
+            if not isinstance(k, int) or k < 2:
                 continue
-            p = Path(rp)
+            p = traj_dir / "legs" / str(k) / "artifacts" / "result.json"
             if _is_excluded(p) or not p.is_file():
                 continue
             resolved = p.resolve()
