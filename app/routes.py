@@ -47,6 +47,7 @@ from app.models import (
     RememberRequest,
     RememberResponse,
     ResumeResponse,
+    RevokedRelatedNoteModel,
     RevokeRequest,
     RevokeResponse,
     SearchRequest,
@@ -440,6 +441,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         processing_ms=int((time.monotonic() - t0) * 1000),
         distilled=distilled,
         related=[RelatedNoteModel(**r) for r in outcome.related],
+        revoked_related=[RevokedRelatedNoteModel(**r) for r in outcome.revoked_related],
         proxy_anchor_suggestions=outcome.proxy_anchor_suggestions,
     )
 

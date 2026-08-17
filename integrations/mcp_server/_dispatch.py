@@ -856,6 +856,32 @@ def handle_tools_call(
                 f"judgment): {', '.join(rendered)}. If one is now wrong, pass "
                 "supersedes=<id> on a corrected note or call vectr_revoke."
             )
+        # Write-time REVOKED-related offer (UPG-RELATED-REVOKED-DETERRENT,
+        # agent/working_context_store/_related.py::revoked_related_notes) —
+        # deliberately distinct from `related_suffix` above: this is a
+        # deterrent, not a similarity nudge, and the caller LLM is writing
+        # something similar to a note the user already marked wrong, right
+        # now. Never repeats the revoked note's raw content, only its
+        # bounded title plus the revocation's own date/reason. Empty unless
+        # `outcome.revoked_related` is non-empty (config-gated in
+        # remember_with_extras).
+        revoked_suffix = ""
+        if outcome.revoked_related:
+            rendered = []
+            for r in outcome.revoked_related:
+                revoked_title = r["title"]
+                if len(revoked_title) > 60:
+                    revoked_title = revoked_title[:57] + "..."
+                rendered.append(
+                    f"#{r['note_id']} \"{revoked_title}\" (similarity {r['similarity']:.2f}, "
+                    f"revoked {r['revoked_date']}, reason: {r['reason']})"
+                )
+            revoked_suffix = (
+                "\nDETERRENT — an existing note like this one was already revoked: "
+                f"{'; '.join(rendered)}. Do not re-derive or restate it without "
+                "verification; if this write repeats what was revoked, reconsider "
+                "before storing."
+            )
         # Write-time proxy-anchor offer (agent/proxy_anchors.py): glob presence
         # only, never a claim that the note is stale. Empty unless
         # `outcome.proxy_anchor_suggestions` is non-empty (config- and
@@ -869,7 +895,7 @@ def handle_tools_call(
                 "changed, never that the note is wrong."
             )
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}{quote_suffix}{distill_suffix}{related_suffix}{proxy_suffix}"}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}{quote_suffix}{distill_suffix}{related_suffix}{revoked_suffix}{proxy_suffix}"}],
             "isError": False,
         }
 

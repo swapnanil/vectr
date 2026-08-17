@@ -1803,6 +1803,30 @@ memory_write:
     # CLOSENESS (is this candidate worth the caller's attention at all),
     # never for correctness (that judgment always stays caller-side).
     min_similarity: 0.75
+    # UPG-RELATED-REVOKED-DETERRENT: separately from the ACTIVE candidates
+    # above, additionally surface the nearest REVOKED near-duplicate (if any
+    # clears min_similarity above) as a deterrent line naming its id, title,
+    # similarity, revocation date and reason — a pointer to look at, not the
+    # note's raw content (the existing _ANTI_MEMORY_TEMPLATE in
+    # agent/working_context_store/_store.py is for a DIFFERENT delivery
+    # path: injecting a revoked note's own content inline with a warning;
+    # this is a nearest-neighbour pointer alongside a fresh write, same
+    # shape as the active-candidate rendering above, so it reuses THAT
+    # rendering's shape instead). This is the single highest-value case the
+    # whole related-notes feature can surface: it catches an agent about to
+    # re-assert a belief the user already marked wrong, at the moment of
+    # writing rather than only when the new note happens to be recalled
+    # later. A separate flag from `enabled` above because it renders
+    # materially different content (a deterrent, not a similarity nudge)
+    # and an operator may want the ordinary near-duplicate nudge without
+    # the revoked-note callout.
+    revoked_enabled: true
+    # Capped at 1 by design, not a ranked list like the active candidates
+    # above: this is a deterrent flag ("you already revoked something like
+    # this"), not a browsing surface — one match is enough to make the
+    # point without turning a routine write into a multi-item warning
+    # digest.
+    revoked_limit: 1
 
   user_quote:
     # UPG-MEM-PROVENANCE-USER-STATED: a note may carry a verbatim excerpt of
@@ -1838,6 +1862,45 @@ memory_write:
     # time between the user's message and the resulting `vectr_remember`
     # call, without reaching into the previous conversational turn.
     auto_bind_max_age_seconds: 600
+
+    # UPG-PROVENANCE-AUTOBIND-SPAN: measured reach limit of the whole-content
+    # check above on a live 742-note corpus was "at most 1 of 45" directives,
+    # because a real directive is routinely wrapped in agent-authored framing
+    # the user never typed (e.g. `USER DIRECTIVE 2026-07-12: "<the user's
+    # actual words>"`) — whole-body containment can never match that, only a
+    # SPAN can. bind_user_quote_auto() therefore searches for the longest
+    # contiguous run of the note's content that appears verbatim in the
+    # captured user turn, rather than requiring the entire body to match.
+    # This floor applies to that SPAN's length and is intentionally HIGHER
+    # than min_chars above: a derived span is a weaker signal than a
+    # caller-declared excerpt at the same length, because the caller made no
+    # claim at all — an incidental shared technical phrase between two
+    # unrelated pieces of text can clear a low floor by coincidence (measured
+    # against this exact risk: "the venv interpreter" is 21 characters, "run
+    # the linter" is 15 — both plausible incidental overlaps between a note
+    # and an unrelated user message about the same tool). 30 was chosen
+    # because it clears both of those measured false-bind examples while
+    # still comfortably admitting the real, much longer motivating quote
+    # above (74 characters) — a coincidental overlap this long, that is also
+    # a full clause of a real user turn, is not the same class of event.
+    span_bind_min_chars: 30
+
+    # Longest-common-substring search is worst-case O(len(content) *
+    # len(turn)) (pathological inputs only — e.g. long runs of a repeated
+    # character after whitespace normalization; ordinary text is far cheaper
+    # in practice via difflib's matching-block algorithm, but nothing here
+    # should depend on that holding for every possible input). This search
+    # runs inline on every remember() call whose explicit user_quote (if any)
+    # did not already bind, so a pathological pair of inputs must not be
+    # allowed to stall a write. Bounds the PRODUCT of the two
+    # (whitespace-normalized) lengths, not either length alone, because the
+    # realistic risk is a short note quoting a fragment of a very long pasted
+    # user turn — capping the turn's length alone would refuse exactly that
+    # case even though the product stays small. Above this product the
+    # search is skipped outright (never truncated-and-searched, which could
+    # silently miss the real match and produce a wrong bind) and the note
+    # keeps its ordinary provenance.
+    span_bind_max_product_chars: 4000000
 
   proxy_anchor_suggestions:
     # Surfaces which protocol-level proxy-anchor files (agent/

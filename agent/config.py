@@ -1324,11 +1324,17 @@ _related_notes_cfg: dict[str, Any] = _mem_write_cfg["related_notes"]
 MEMORY_WRITE_RELATED_ENABLED: bool = bool(_related_notes_cfg["enabled"])
 MEMORY_WRITE_RELATED_LIMIT: int = int(_related_notes_cfg["limit"])
 MEMORY_WRITE_RELATED_MIN_SIMILARITY: float = float(_related_notes_cfg["min_similarity"])
+MEMORY_WRITE_RELATED_REVOKED_ENABLED: bool = bool(_related_notes_cfg["revoked_enabled"])
+MEMORY_WRITE_RELATED_REVOKED_LIMIT: int = int(_related_notes_cfg["revoked_limit"])
 
 _user_quote_cfg: dict[str, Any] = _mem_write_cfg["user_quote"]
 MEMORY_WRITE_USER_QUOTE_MIN_CHARS: int = int(_user_quote_cfg["min_chars"])
 MEMORY_WRITE_USER_QUOTE_AUTO_BIND_MAX_AGE_SECONDS: float = float(
     _user_quote_cfg["auto_bind_max_age_seconds"]
+)
+MEMORY_WRITE_USER_QUOTE_SPAN_BIND_MIN_CHARS: int = int(_user_quote_cfg["span_bind_min_chars"])
+MEMORY_WRITE_USER_QUOTE_SPAN_BIND_MAX_PRODUCT_CHARS: int = int(
+    _user_quote_cfg["span_bind_max_product_chars"]
 )
 
 _proxy_suggest_cfg: dict[str, Any] = _mem_write_cfg["proxy_anchor_suggestions"]

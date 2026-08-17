@@ -291,7 +291,7 @@ def _base_mock_service():
     # the confirmation message. Return the REAL outcome type.
     from app.service import RememberOutcome
     svc.remember_with_extras.return_value = RememberOutcome(
-        note_id=1, related=[], proxy_anchor_suggestions=[],
+        note_id=1, related=[], revoked_related=[], proxy_anchor_suggestions=[],
     )
     svc.promote_note.return_value = True
     svc.revoke_note.return_value = True
@@ -397,7 +397,8 @@ def client_real_memory(tmp_path):
         if MEMORY_WRITE_PROXY_SUGGEST_ENABLED and kind == "operational" and not anchors:
             proxy_anchor_suggestions = suggest_proxy_anchors(ws, MEMORY_WRITE_PROXY_SUGGEST_LIMIT)
         return RememberOutcome(
-            note_id=note_id, related=related, proxy_anchor_suggestions=proxy_anchor_suggestions,
+            note_id=note_id, related=related, revoked_related=[],
+            proxy_anchor_suggestions=proxy_anchor_suggestions,
         )
 
     svc.remember.side_effect = _remember

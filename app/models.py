@@ -475,6 +475,22 @@ class RelatedNoteModel(BaseModel):
     created_at: float
 
 
+class RevokedRelatedNoteModel(BaseModel):
+    """The nearest EXISTING note to a fresh write whose folded lifecycle
+    state is currently `revoked` (agent/working_context_store/_related.py
+    `revoked_related_notes()`, UPG-RELATED-REVOKED-DETERRENT) — a deterrent,
+    not a similarity nudge like `RelatedNoteModel` above: it means an agent
+    is about to write something close to a note the user or a prior agent
+    turn already marked wrong. `revoked_date`/`reason` come from the
+    revocation event itself, not the note's original metadata."""
+
+    note_id: int
+    title: str
+    similarity: float
+    revoked_date: str
+    reason: str
+
+
 class RememberResponse(BaseModel):
     note_id: int
     message: str
@@ -491,6 +507,18 @@ class RememberResponse(BaseModel):
             "memory_write.related_notes.enabled and at least one candidate clears "
             "the configured similarity floor. Similarity is closeness, never a "
             "contradiction verdict; the caller judges whether one is now stale."
+        ),
+    )
+    revoked_related: list[RevokedRelatedNoteModel] = Field(
+        default_factory=list,
+        description=(
+            "The nearest EXISTING note to the one just written whose folded "
+            "lifecycle state is currently 'revoked' (agent/working_context_store/"
+            "_related.py revoked_related_notes(), UPG-RELATED-REVOKED-DETERRENT) — "
+            "empty unless memory_write.related_notes.revoked_enabled and a "
+            "candidate clears the configured similarity floor. A deterrent, not a "
+            "similarity nudge: it means this write is close to something already "
+            "marked wrong."
         ),
     )
     proxy_anchor_suggestions: list[str] = Field(

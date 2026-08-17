@@ -167,6 +167,41 @@ class TestRememberRoute:
         assert resp.status_code == 422
         assert resp.json()["detail"]["error"] == "invalid_memory_object"
 
+    # -- UPG-RELATED-REVOKED-DETERRENT ---------------------------------------
+
+    def test_remember_response_carries_revoked_related_field(self, client) -> None:
+        """`/v1/remember`'s response model exposes `revoked_related`
+        end-to-end from `RememberOutcome.revoked_related` (app/routes.py),
+        distinct from and alongside `related` — a REST-layer test, not just
+        the MCP dispatch/service-layer coverage in test_mcp_server.py and
+        test_remember_extras.py (MCP-green is not REST-green)."""
+        from api import app
+        from app.service import RememberOutcome
+        app.state.service.remember_with_extras.return_value = RememberOutcome(
+            note_id=42,
+            related=[],
+            revoked_related=[{
+                "note_id": 7, "title": "an older note that was revoked",
+                "similarity": 0.86, "revoked_date": "2026-08-01",
+                "reason": "turned out to be wrong",
+            }],
+            proxy_anchor_suggestions=[],
+        )
+        resp = client.post("/v1/remember", json={"content": "a new note"})
+        assert resp.status_code == 200
+        revoked = resp.json()["revoked_related"]
+        assert len(revoked) == 1
+        assert revoked[0] == {
+            "note_id": 7, "title": "an older note that was revoked",
+            "similarity": 0.86, "revoked_date": "2026-08-01",
+            "reason": "turned out to be wrong",
+        }
+
+    def test_remember_response_revoked_related_defaults_to_empty_list(self, client) -> None:
+        resp = client.post("/v1/remember", json={"content": "a plain note"})
+        assert resp.status_code == 200
+        assert resp.json()["revoked_related"] == []
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/recall
