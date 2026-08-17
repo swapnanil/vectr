@@ -1816,8 +1816,28 @@ memory_write:
     # nothing while still upgrading the note's trust class — the floor is what
     # keeps "bound" evidential rather than automatic. Raise it to demand more
     # of the user's actual wording; there is no value at which an excerpt is
-    # accepted without being contained.
+    # accepted without being contained. Also the evidence floor for the
+    # auto-bind path just below (a note's whole content must reach this many
+    # normalized characters to be worth comparing at all).
     min_chars: 12
+
+    # UPG-PROVENANCE-NEVER-RISES: `remember()` only reaches `user-stated`
+    # provenance above when the WRITING AGENT remembers to pass an explicit
+    # `user_quote=` argument — on a live 719-note production corpus this
+    # voluntary step was never once taken, so the class was unreachable in
+    # practice. This is the harness-driven fallback: when a `remember()` call
+    # carries no `user_quote` of its own, the daemon compares the note's
+    # content against the most recently captured `UserPromptSubmit` prompt
+    # for this workspace (agent/working_context_store/_user_quote.py's
+    # `bind_user_quote_auto()` — a deterministic whole-content substring
+    # check, never semantic) and binds automatically on a match. This value
+    # bounds how old that captured prompt may be, in seconds, before it is
+    # considered a different turn and the fallback is skipped rather than
+    # correlating a note to a stale, unrelated prompt. 600s (10 minutes) is
+    # generous enough to cover the writing agent's own thinking/tool-call
+    # time between the user's message and the resulting `vectr_remember`
+    # call, without reaching into the previous conversational turn.
+    auto_bind_max_age_seconds: 600
 
   proxy_anchor_suggestions:
     # Surfaces which protocol-level proxy-anchor files (agent/

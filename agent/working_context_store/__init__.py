@@ -63,11 +63,16 @@ from agent.working_context_store._types import (
     WorkingNote,
 )
 
-# Verbatim user-excerpt binding (UPG-MEM-PROVENANCE-USER-STATED)
+# Verbatim user-excerpt binding (UPG-MEM-PROVENANCE-USER-STATED) and its
+# harness-driven auto-bind counterpart (UPG-PROVENANCE-NEVER-RISES)
 from agent.working_context_store._user_quote import (
+    AUTO_QUOTE_NOT_CONTAINED,
+    AUTO_QUOTE_NO_RECENT_TURN,
+    AUTO_QUOTE_TOO_SHORT,
     USER_QUOTE_NOT_CONTAINED,
     USER_QUOTE_TOO_SHORT,
     bind_user_quote,
+    bind_user_quote_auto,
     normalize_for_binding,
 )
 
@@ -127,6 +132,11 @@ __all__ = [
     "USER_QUOTE_TOO_SHORT",
     "bind_user_quote",
     "normalize_for_binding",
+    # Harness-driven auto-bind counterpart (UPG-PROVENANCE-NEVER-RISES)
+    "AUTO_QUOTE_NOT_CONTAINED",
+    "AUTO_QUOTE_NO_RECENT_TURN",
+    "AUTO_QUOTE_TOO_SHORT",
+    "bind_user_quote_auto",
     # content_file resolution (UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS)
     "read_content_file",
     "resolve_content_file_path",

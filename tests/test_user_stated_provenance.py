@@ -31,6 +31,7 @@ from agent.working_context_store import (
     USER_STATED_PROVENANCE,
     WorkingContextStore,
     bind_user_quote,
+    bind_user_quote_auto,
     normalize_for_binding,
 )
 
@@ -98,6 +99,85 @@ class TestBindUserQuote:
 
     def test_is_pure_and_repeatable(self) -> None:
         assert bind_user_quote(CONTENT, QUOTE) == bind_user_quote(CONTENT, QUOTE)
+
+
+# ---------------------------------------------------------------------------
+# bind_user_quote_auto — the harness-driven counterpart
+# (UPG-PROVENANCE-NEVER-RISES). `bind_user_quote` checks excerpt ⊆ content;
+# this checks the MIRROR direction, content ⊆ recent_user_message — the
+# note's whole content must appear verbatim inside the raw captured user
+# turn, not the other way around.
+# ---------------------------------------------------------------------------
+
+class TestBindUserQuoteAuto:
+    def test_content_contained_in_recent_message_binds(self) -> None:
+        bound, reason = bind_user_quote_auto(
+            QUOTE, f"the user said: {QUOTE} and nothing else",
+        )
+        assert bound == QUOTE
+        assert reason == ""
+
+    def test_bound_value_is_the_content_not_the_recent_message(self) -> None:
+        """The evidence returned is what gets stored as `user_quote` on the
+        note — it must be the note's OWN content (stripped), not the longer
+        captured turn it was found inside, mirroring `bind_user_quote`
+        returning the excerpt rather than the whole content."""
+        recent = f"lots of preamble here. {QUOTE} and a trailing remark too."
+        bound, _ = bind_user_quote_auto(QUOTE, recent)
+        assert bound == QUOTE
+
+    def test_rewrapped_content_still_binds(self) -> None:
+        bound, reason = bind_user_quote_auto(
+            "always run the tests\nthrough the venv interpreter",
+            "The user said: always run the tests through the venv interpreter, ok.",
+        )
+        assert bound == "always run the tests\nthrough the venv interpreter"
+        assert reason == ""
+
+    def test_paraphrased_recent_message_does_not_bind(self) -> None:
+        bound, reason = bind_user_quote_auto(
+            QUOTE, "the user wants the venv interpreter used for tests",
+        )
+        assert bound == ""
+        assert "does not appear verbatim" in reason
+
+    def test_direction_is_genuinely_mirrored_not_symmetric(self) -> None:
+        """`bind_user_quote(content, excerpt)` requires excerpt ⊆ content.
+        `bind_user_quote_auto(content, recent_message)` requires the OPPOSITE
+        containment, content ⊆ recent_message. A short note whose content is
+        itself only a fragment of a much longer captured turn must still
+        bind here even though the equivalent `bind_user_quote` call (with
+        the arguments in the non-mirrored order) would not."""
+        long_turn = f"context before. {QUOTE}. context after, unrelated words."
+        bound, _ = bind_user_quote_auto(QUOTE, long_turn)
+        assert bound == QUOTE
+        # The non-mirrored direction (QUOTE as content, long_turn as the
+        # thing that must be contained in it) correctly fails to bind.
+        non_mirrored_bound, _ = bind_user_quote(QUOTE, long_turn)
+        assert non_mirrored_bound == ""
+
+    def test_check_is_case_sensitive(self) -> None:
+        bound, reason = bind_user_quote_auto(QUOTE, QUOTE.upper())
+        assert bound == ""
+        assert reason != ""
+
+    def test_trivial_content_is_rejected_before_containment(self) -> None:
+        bound, reason = bind_user_quote_auto("a", "a note that certainly contains an a")
+        assert bound == ""
+        assert str(MEMORY_WRITE_USER_QUOTE_MIN_CHARS) in reason
+
+    @pytest.mark.parametrize("recent_message", [None, "", "   ", "\n\t "])
+    def test_no_recent_message_is_no_bind_and_a_distinct_reason(self, recent_message) -> None:
+        bound, reason = bind_user_quote_auto(QUOTE, recent_message)
+        assert bound == ""
+        assert reason != ""
+
+    def test_empty_content_is_no_claim_and_no_rejection(self) -> None:
+        assert bind_user_quote_auto("", f"the user said: {QUOTE}") == ("", "")
+
+    def test_is_pure_and_repeatable(self) -> None:
+        recent = f"the user said: {QUOTE}"
+        assert bind_user_quote_auto(QUOTE, recent) == bind_user_quote_auto(QUOTE, recent)
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +305,150 @@ class TestStoreUserQuoteBinding:
 
 
 # ---------------------------------------------------------------------------
+# WorkingContextStore.remember — the harness-driven auto-bind fallback
+# (UPG-PROVENANCE-NEVER-RISES). Same write-time upgrade as
+# TestStoreUserQuoteBinding above, reached without any explicit `user_quote`
+# argument — the caller instead supplies `recent_user_message`, the raw text
+# of the most recently captured user turn.
+# ---------------------------------------------------------------------------
+
+class TestAutoBindStoreBinding:
+    def test_content_contained_in_recent_message_binds_to_user_stated(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note_id = store.remember(ws, QUOTE, recent_user_message=f"the user said: {QUOTE}")
+        note = store.get_note(ws, note_id)
+        assert note.provenance == USER_STATED_PROVENANCE
+        assert note.user_quote == QUOTE
+
+    def test_paraphrased_recent_message_keeps_agent_provenance(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note_id = store.remember(
+            ws, QUOTE, recent_user_message="the user wants the venv interpreter used",
+        )
+        note = store.get_note(ws, note_id)
+        assert note.provenance == "agent"
+        assert note.user_quote == ""
+
+    def test_no_recent_message_keeps_agent_provenance(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note = store.get_note(ws, store.remember(ws, QUOTE))
+        assert note.provenance == "agent"
+        assert note.user_quote == ""
+
+    def test_explicit_user_quote_wins_over_auto_bind_when_both_would_succeed(self, tmp_path) -> None:
+        """An explicit claim is a deliberate act by the caller; the harness
+        cache is a fallback for callers that made no claim at all. When both
+        would independently bind, the explicit one is what gets stored —
+        confirmed by using a DIFFERENT (still-valid) excerpt for each, so a
+        wrong precedence is observable in which text ends up as user_quote."""
+        other_excerpt = "global python lacks the C grammars."
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note_id = store.remember(
+            ws, CONTENT,
+            user_quote=other_excerpt,
+            recent_user_message=f"the user said: {CONTENT}",
+        )
+        note = store.get_note(ws, note_id)
+        assert note.provenance == USER_STATED_PROVENANCE
+        assert note.user_quote == other_excerpt
+
+    def test_failed_explicit_quote_still_falls_back_to_auto_bind(self, tmp_path) -> None:
+        """A `user_quote` that does not bind is not a hard failure of the
+        upgrade path as a whole — it only means the EXPLICIT claim did not
+        check out; the harness-cache fallback still gets its own chance."""
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note_id = store.remember(
+            ws, QUOTE,
+            user_quote="the user definitely said something else entirely",
+            recent_user_message=f"the user said: {QUOTE}",
+        )
+        note = store.get_note(ws, note_id)
+        assert note.provenance == USER_STATED_PROVENANCE
+        assert note.user_quote == QUOTE
+
+    def test_human_provenance_outranks_auto_bind(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note = store.get_note(ws, store.remember(
+            ws, QUOTE, provenance="human", recent_user_message=f"the user said: {QUOTE}",
+        ))
+        assert note.provenance == "human"
+        assert note.user_quote == QUOTE
+
+    def test_auto_bind_makes_an_auto_directive_writable(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note_id = store.remember(
+            ws, QUOTE, kind="directive", provenance="auto",
+            recent_user_message=f"the user said: {QUOTE}",
+        )
+        assert store.get_note(ws, note_id).provenance == USER_STATED_PROVENANCE
+
+    def test_short_content_is_rejected_before_containment(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note = store.get_note(ws, store.remember(
+            ws, "hi", recent_user_message="hi there, the user said hi",
+        ))
+        assert note.provenance == "agent"
+
+
+# ---------------------------------------------------------------------------
+# VectrService — recall(hook_event="UserPromptSubmit") populates the cache
+# remember()'s auto-bind fallback reads (UPG-PROVENANCE-NEVER-RISES). Uses
+# the real (non-mocked) VectrService construction pattern from
+# tests/test_memory_only_mode.py (_make_service), memory_only=True and a
+# dummy embed provider so no real model loads.
+# ---------------------------------------------------------------------------
+
+class TestAutoBindServiceIntegration:
+    def test_hook_recall_then_remember_auto_binds(self, tmp_path, monkeypatch) -> None:
+        from tests.test_memory_only_mode import _make_service
+
+        svc = _make_service(tmp_path, monkeypatch, memory_only=True)
+        svc.recall(query=f"the user said: {QUOTE}", hook_event="UserPromptSubmit")
+        note = svc.get_note(svc.remember(QUOTE))
+        assert note.provenance == USER_STATED_PROVENANCE
+        assert note.user_quote == QUOTE
+
+    def test_direct_recall_call_does_not_populate_the_cache(self, tmp_path, monkeypatch) -> None:
+        """A plain vectr_recall call (hook_event=None) is not harness-captured
+        user input — it must never seed the auto-bind cache."""
+        from tests.test_memory_only_mode import _make_service
+
+        svc = _make_service(tmp_path, monkeypatch, memory_only=True)
+        svc.recall(query=f"the user said: {QUOTE}")
+        note = svc.get_note(svc.remember(QUOTE))
+        assert note.provenance == "agent"
+
+    def test_stale_cached_prompt_does_not_auto_bind(self, tmp_path, monkeypatch) -> None:
+        from tests.test_memory_only_mode import _make_service
+        from agent.config import MEMORY_WRITE_USER_QUOTE_AUTO_BIND_MAX_AGE_SECONDS
+
+        svc = _make_service(tmp_path, monkeypatch, memory_only=True)
+        svc.recall(query=f"the user said: {QUOTE}", hook_event="UserPromptSubmit")
+        # Backdate the cache past the recency gate without a real sleep.
+        svc._last_user_prompt_ts -= MEMORY_WRITE_USER_QUOTE_AUTO_BIND_MAX_AGE_SECONDS + 1
+        note = svc.get_note(svc.remember(QUOTE))
+        assert note.provenance == "agent"
+
+    def test_explicit_user_quote_still_wins_at_the_service_layer(self, tmp_path, monkeypatch) -> None:
+        other_excerpt = "global python lacks the C grammars."
+        from tests.test_memory_only_mode import _make_service
+
+        svc = _make_service(tmp_path, monkeypatch, memory_only=True)
+        svc.recall(query=f"the user said: {CONTENT}", hook_event="UserPromptSubmit")
+        note = svc.get_note(svc.remember(CONTENT, user_quote=other_excerpt))
+        assert note.provenance == USER_STATED_PROVENANCE
+        assert note.user_quote == other_excerpt
+
+
+# ---------------------------------------------------------------------------
 # Promotion ladder — a derived class is a source, never a target
 # ---------------------------------------------------------------------------
 
@@ -335,19 +559,51 @@ class TestVocabularyInvariants:
 # MCP surface
 # ---------------------------------------------------------------------------
 
-def _mcp_service():
+def _mcp_service(*, recent_user_message: str | None = None):
+    """A MagicMock VectrService for the MCP dispatch tests below.
+
+    `get_note()` is NOT a fixed stub: `integrations/mcp_server/_dispatch.py`'s
+    vectr_remember handler now reads the stored note's OWN provenance back
+    (via `service.get_note(note_id)`) to decide whether to render the
+    "auto-bound" confirmation message (UPG-PROVENANCE-NEVER-RISES), on top of
+    the pre-existing explicit-`user_quote` recompute it already did. A fixed
+    `provenance=USER_STATED_PROVENANCE` return, regardless of what a given
+    test actually passed to `remember_with_extras`, would make every test
+    below spuriously see "auto-bound" -- so `get_note()` instead replays the
+    same two-path binding logic (`bind_user_quote` then, on failure,
+    `bind_user_quote_auto`) that `WorkingContextStore.remember()` itself runs,
+    against the LAST call actually made to `svc.remember_with_extras` -- the
+    same derivation, not a second guess at it. `recent_user_message` defaults
+    to None (no recently captured user turn), matching a freshly constructed
+    mock service with nothing populating its prompt cache; pass it explicitly
+    to simulate a harness-captured turn for the auto-bind test below.
+    """
     from app.service import RememberOutcome
-    from agent.working_context_store import WorkingNote
+    from agent.working_context_store import WorkingNote, bind_user_quote_auto
 
     svc = MagicMock()
     svc.remember_with_extras.return_value = RememberOutcome(
         note_id=7, related=[], proxy_anchor_suggestions=[],
     )
-    svc.get_note.return_value = WorkingNote(
-        note_id=7, workspace="/repo", content=CONTENT, tags=[], priority="medium",
-        created_at=0.0, last_accessed=0.0, kind="finding", scope="workspace",
-        provenance=USER_STATED_PROVENANCE, user_quote=QUOTE,
-    )
+
+    def _get_note(_note_id):
+        call = svc.remember_with_extras.call_args
+        kwargs = call.kwargs if call is not None else {}
+        content = kwargs.get("content", CONTENT)
+        note_provenance = kwargs.get("provenance") or "agent"
+        explicit_quote = kwargs.get("user_quote")
+        bound, _ = bind_user_quote(content, explicit_quote) if explicit_quote else ("", "")
+        if not bound:
+            bound, _ = bind_user_quote_auto(content, recent_user_message)
+        if bound and note_provenance != "human":
+            note_provenance = USER_STATED_PROVENANCE
+        return WorkingNote(
+            note_id=7, workspace="/repo", content=content, tags=[], priority="medium",
+            created_at=0.0, last_accessed=0.0, kind="finding", scope="workspace",
+            provenance=note_provenance, user_quote=bound,
+        )
+
+    svc.get_note.side_effect = _get_note
     svc.search_only = False
     return svc
 
@@ -392,6 +648,23 @@ class TestMcpRememberUserQuote:
         text = result["content"][0]["text"]
         assert "user_quote" not in text
         assert USER_STATED_PROVENANCE not in text
+
+    def test_auto_bound_note_reports_auto_bind_in_the_confirmation(self) -> None:
+        """UPG-PROVENANCE-NEVER-RISES: no explicit user_quote argument, but
+        the harness recently captured a user turn containing this note's
+        content verbatim -- the confirmation must say so, distinctly from
+        the explicit-user_quote wording asserted in
+        `test_bound_quote_is_reported_in_the_confirmation` above."""
+        from integrations.mcp_server import handle_tools_call
+
+        recent_turn = f"earlier in this turn the user said: {CONTENT} -- noted."
+        result = handle_tools_call(
+            "vectr_remember", {"content": CONTENT}, _mcp_service(recent_user_message=recent_turn),
+        )
+        text = result["content"][0]["text"]
+        assert result["isError"] is False
+        assert USER_STATED_PROVENANCE in text
+        assert "auto-bound" in text
 
     def test_non_string_user_quote_is_a_caller_error(self) -> None:
         from integrations.mcp_server import handle_tools_call
@@ -452,6 +725,27 @@ class TestRestRememberUserQuote:
     def test_omitted_quote_leaves_the_message_unchanged(self, client_real_memory) -> None:
         resp = client_real_memory.post("/v1/remember", json={"content": CONTENT})
         assert "user_quote" not in resp.json()["message"]
+
+    def test_auto_bound_note_reports_auto_bind_in_the_message(self, client) -> None:
+        """UPG-PROVENANCE-NEVER-RISES at the REST route: no `user_quote` in
+        the request body at all, but the stored note (as the mocked
+        `get_note` reports it — `client_real_memory`'s closures do not
+        thread a harness prompt cache, so this route-level behaviour is
+        exercised with a plain mocked service instead, same as the MCP
+        surface's `_mcp_service()`) came back at provenance='user-stated' —
+        the message must say auto-bound, distinctly from the explicit-bind
+        wording covered by `client_real_memory` above."""
+        from agent.working_context_store import WorkingNote
+
+        client.app.state.service.get_note.return_value = WorkingNote(
+            note_id=1, workspace="/repo", content=CONTENT, tags=[], priority="medium",
+            created_at=0.0, last_accessed=0.0, kind="finding", scope="workspace",
+            provenance=USER_STATED_PROVENANCE, user_quote=CONTENT,
+        )
+        resp = client.post("/v1/remember", json={"content": CONTENT})
+        assert resp.status_code == 200
+        assert USER_STATED_PROVENANCE in resp.json()["message"]
+        assert "auto-bound" in resp.json()["message"]
 
     def test_declared_user_stated_provenance_is_rejected_at_the_schema(self, client) -> None:
         resp = client.post("/v1/remember", json={

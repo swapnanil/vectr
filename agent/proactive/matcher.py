@@ -92,10 +92,8 @@ def _cap(text: str, max_chars: int) -> str:
     summary. The cut backs off to the nearest SENTENCE boundary (". ")
     within the allowed budget when one exists there; failing that, to the
     nearest WORD boundary (" "); failing that (a single token longer than
-    the whole budget), a hard character cut — the same fallback shape
-    `_revoked_summary()`'s own `rpartition(". ")` split already uses
-    elsewhere in this module, applied here to truncation instead of clause
-    reordering. A boundary is only used when it still keeps at least
+    the whole budget), a hard character cut. A boundary is only used when
+    it still keeps at least
     `PROACTIVE_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION` (config.yaml
     `proactive.body_truncation_min_boundary_fraction`) of the budget —
     backing off further than that would throw away most of the content
@@ -166,27 +164,23 @@ def _revoked_summary(note: WorkingNote, state: dict) -> str:
     (`_format_full_block()`), so this single-line proxy injection agrees
     with it.
 
-    The template's own trailing "Do not re-derive this from other sources
-    without verification." clause is relocated to the FRONT of the
-    rendered text — a physical substring of the template's own output, not
-    new wording — so that `_cap()`'s right-truncation can only ever cut
-    the tail (the quoted raw claim) and can never remove the deterrent
-    warning itself. `rpartition(". ")` finds this split point exactly:
-    the deterrent sentence has no internal ". " of its own, so whatever
-    occurs in `reason`/`summary` text, the LAST ". " in the formatted
-    string is always the boundary right before it."""
+    UPG-DETERRENT-TITLE-ONLY: `_ANTI_MEMORY_TEMPLATE` itself now puts the
+    "Do not re-derive..." warning FIRST and the free-text `reason` ahead of
+    the (already short, `_note_title()`-bounded) quoted summary, so
+    `_cap()`'s right-truncation naturally sacrifices the quote before the
+    reason, and the reason before the warning, with no reordering needed
+    here — this function used to relocate the warning to the front at
+    render time via `rpartition(". ")`; that is now redundant since the
+    template's own field order already does it, uniformly across every
+    surface that renders this template (not just this one)."""
     revoked_date = _date_str(state["ts"]) if state.get("ts") else _date_str(note.created_at)
     reason = state.get("reason") or "no reason given"
-    anti_memory = _ANTI_MEMORY_TEMPLATE.format(
+    return _ANTI_MEMORY_TEMPLATE.format(
         created_date=_date_str(note.created_at),
         revoked_date=revoked_date,
         reason=reason,
         summary=_note_title(note),
     )
-    prefix, sep, clause = anti_memory.rpartition(". ")
-    if not sep:
-        return anti_memory
-    return f"{clause} {prefix}."
 
 
 def _note_summary(note: WorkingNote, state: dict | None = None) -> str:

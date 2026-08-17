@@ -33,7 +33,7 @@ from agent.working_context_store._types import (
     SnapshotEntry,
     WorkingNote,
 )
-from agent.working_context_store._user_quote import bind_user_quote
+from agent.working_context_store._user_quote import bind_user_quote, bind_user_quote_auto
 
 logger = logging.getLogger(__name__)
 
@@ -402,12 +402,43 @@ def _format_index_line(
 # constant rather than in config.yaml (same precedent as trigger_engine.py's
 # _HUMAN_FRAME/_AGENT_FRAME/_AUTO_FRAME provenance-framing templates: fixed
 # text shaping how a fact is PRESENTED, never text that inspects or reroutes
-# on prompt/query content). Field order and wording follow the design doc's
-# literal template.
+# on prompt/query content). Wording is the design doc's literal template
+# (memoization-l1-capture-design.md §4.3); field ORDER is not — the design
+# doc writes the warning last, but every surface that renders this template
+# truncates from the right under a budget (agent/proactive/matcher.py's
+# `_cap()` for the proxy channel; agent/trigger_engine.py's
+# `_trim_full_text_to_cap()` for the hook full-tier channel), so a
+# right-truncation can only ever remove trailing text.
+#
+# UPG-DETERRENT-TITLE-ONLY: the warning clause is placed FIRST so it can
+# never be the thing a tight budget cuts — before this, only the proxy
+# channel protected it, via a runtime `rpartition(". ")` reorder local to
+# `_revoked_summary()`; the hook channel's `_trim_full_text_to_cap()` ran
+# the RAW (unreordered) template through a generic right-truncation with no
+# template awareness at all, so a revoked note routed through a tight
+# per-kind cap (e.g. `gotcha`'s 100-token/400-char cap) could lose the
+# warning clause ENTIRELY while still rendering "Previously believed: ..."
+# — the exact silent-caveat-loss the design doc's poisoning-mitigation row
+# rules out ("visible caveat, never silent suppression"). Putting the
+# warning first in the template itself (rather than reordering it per
+# caller) protects it on every surface uniformly, and lets
+# `_revoked_summary()`'s runtime reorder be deleted as redundant.
+#
+# `reason` is placed second (ahead of the quoted summary) for the same
+# right-truncation reason: `summary` is already a bounded one-line title-or-
+# first-line excerpt (`_note_title()`, <=80 chars, itself the design doc's
+# literal "<one-line content summary>" field — full multi-line content is
+# deliberately never rendered here, see tests/test_note_events.py::
+# TestAntiMemoryRendering::test_revoked_note_renders_deterrent_not_raw_content),
+# while `reason` is free text with no cap of its own — ordering it before
+# the already-small summary means a right-truncation sacrifices the summary
+# first, matching benchmarks/anti_memory/DESIGN.md §13's T0-4 probe (reason
+# must survive verbatim on the proxy surface) by construction instead of by
+# accident of today's generous default budgets.
 _ANTI_MEMORY_TEMPLATE = (
+    'Do not re-derive this from other sources without verification. '
     'Previously believed (recorded {created_date}, revoked {revoked_date}, '
-    'reason: {reason}): "{summary}". Do not re-derive this from other '
-    'sources without verification.'
+    'reason: {reason}): "{summary}".'
 )
 
 
@@ -1054,6 +1085,7 @@ class WorkingContextStore:
         supersedes: int | None = None,
         contradicts: int | None = None,
         user_quote: str | None = None,
+        recent_user_message: str | None = None,
     ) -> int:
         """Store a working note. Returns the note_id.
 
@@ -1100,6 +1132,27 @@ class WorkingContextStore:
         with the same pure function to tell the caller why. A binding never
         overrides provenance="human" — a person's own endorsement already
         outranks a transcription.
+
+        `recent_user_message` (UPG-PROVENANCE-NEVER-RISES): the harness-layer
+        fallback for the exact same "user-stated" upgrade above, tried ONLY
+        when `user_quote` did not already bind — `user_quote` is an explicit
+        caller claim and always takes priority. `bind_user_quote` requires the
+        WRITING AGENT to remember to pass `user_quote=` on every call; on a
+        live production corpus this voluntary step was essentially never
+        taken, leaving "user-stated" unreachable in practice — the identical
+        adoption gap hook-injected recall was built to close on the read
+        side. This is the write-side counterpart: the caller (`VectrService.
+        remember()`) passes the raw text of the most recently captured
+        `UserPromptSubmit` prompt for this workspace, ALREADY recency-checked
+        against `memory_write.user_quote.auto_bind_max_age_seconds` before it
+        ever reaches here (this method does no clock work of its own — a
+        `None` here just means "no recent-enough turn to compare against,"
+        indistinguishable from one that was never captured). Bound by
+        `_user_quote.bind_user_quote_auto()` — the MIRROR containment check
+        (`content` ⊆ `recent_user_message`, not `user_quote` ⊆ `content`),
+        same whitespace-normalized deterministic substring comparison, same
+        "user-stated" provenance outcome, same never-overrides-"human"
+        ceiling, same discard-on-no-bind behaviour.
 
         `scope`: one of SCOPE_VALUES, or None (the default) to mean OMITTED.
         An explicitly passed scope — including the literal string
@@ -1205,6 +1258,13 @@ class WorkingContextStore:
         # reviewed directive the guard exists to require, not the unreviewed
         # one it exists to reject.
         bound_quote, _ = bind_user_quote(content, user_quote)
+        # UPG-PROVENANCE-NEVER-RISES: the harness-driven fallback, tried only
+        # when the caller made no explicit (and successful) `user_quote`
+        # claim of its own — an explicit claim always wins over the
+        # automatic one, same precedence a caller-declared `title` has over
+        # the content-derived fallback below.
+        if not bound_quote:
+            bound_quote, _ = bind_user_quote_auto(content, recent_user_message)
         if bound_quote and provenance != "human":
             provenance = USER_STATED_PROVENANCE
         if provenance == "auto" and kind == "directive":
