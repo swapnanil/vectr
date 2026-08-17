@@ -1005,6 +1005,25 @@ memory_hygiene:
   # note from last month's finished work gets surfaced.
   stale_task_warn_age_days: 7
 
+memory_export:
+  # UPG-MEMORY-LEGIBLE-FILE-PROJECTION part (a): `vectr memory export` renders
+  # the live working-memory notes to a read-only markdown mirror (default
+  # MEMORY.md) so a human — or an agent without MCP tool access — can open,
+  # grep, and `git diff` memory the way they already do for a hand-written
+  # notes file. Nothing ever reads the rendered file back; the database stays
+  # the sole source of truth. The mirror is re-rendered from a debounced
+  # post-write hook (`_bump_notes_epoch()` in app/service.py) so it never
+  # falls far behind, but a write must never be slowed or failed by export
+  # work — hence the debounce rather than a synchronous render on every call.
+
+  # Seconds of write-quiet before a scheduled export actually runs, per
+  # workspace. A burst of several remember()/revoke()/etc calls in quick
+  # succession (e.g. an agent recording multiple findings back-to-back)
+  # collapses into a single re-render instead of one per write. 3 seconds is
+  # short enough that the file is current well within one human glance at a
+  # terminal, long enough to coalesce a realistic same-turn burst.
+  debounce_seconds: 3.0
+
 memory_recall_for_path:
   # UPG-PROXY-SUBSTRING-ANCHOR: recall_for_path() answers "which notes are
   # relevant to this file path" for the PreToolUse hook and the proactive

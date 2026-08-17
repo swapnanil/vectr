@@ -145,6 +145,11 @@ MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS : int
     Age in days after which a kind="task" note counts toward the stale count
     above (UPG-TASK-SUPERSEDES-HYGIENE).
 
+MEMORY_EXPORT_DEBOUNCE_SECONDS : float
+    Seconds of write-quiet, per workspace, before a scheduled `vectr memory
+    export` re-render actually runs (UPG-MEMORY-LEGIBLE-FILE-PROJECTION part
+    (a)). Coalesces a same-turn burst of writes into a single re-render.
+
 LOCATE_LARGE_SPAN_THRESHOLD : int
     Line-span (end_line - start_line) at or above which a located symbol is
     considered "large" — typically a canonical library class or function (UPG-15.10).
@@ -1353,6 +1358,9 @@ MEMORY_WRITE_CONTENT_FILE_MAX_BYTES: int = int(_content_file_cfg["max_bytes"])
 _hygiene_cfg: dict[str, Any] = _cfg["memory_hygiene"]
 MEMORY_HYGIENE_STALE_TASK_WARN_COUNT: int = int(_hygiene_cfg["stale_task_warn_count"])
 MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS: int = int(_hygiene_cfg["stale_task_warn_age_days"])
+
+_memory_export_cfg: dict[str, Any] = _cfg["memory_export"]
+MEMORY_EXPORT_DEBOUNCE_SECONDS: float = float(_memory_export_cfg["debounce_seconds"])
 
 # ---------------------------------------------------------------------------
 # UPG-MEMORY-DECAY-KIND-SCOPED: per-kind decay half-life (decay_old_notes(),

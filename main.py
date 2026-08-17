@@ -3490,6 +3490,50 @@ def cmd_cache(args: argparse.Namespace) -> None:
             print(f"  {d.name}")
 
 
+def cmd_memory(args: argparse.Namespace) -> None:
+    """`vectr memory export` — render a workspace's working-memory notes to a
+    read-only markdown mirror (UPG-MEMORY-LEGIBLE-FILE-PROJECTION part (a)).
+
+    Operates directly on the workspace's SQLite database, the same "no
+    running server required" pattern as `cmd_forget --all`/`cmd_cache
+    prune` — WAL mode lets this read safely even while a daemon has the
+    same file open. After the first successful export, the target path is
+    recorded in `.vectr/memory_export_path` so subsequent note writes
+    (through a running daemon) keep the mirror current via a debounced
+    post-write hook; this command itself always renders synchronously so
+    the file is current the moment it returns."""
+    action = getattr(args, "memory_command", None)
+    if action != "export":
+        print("usage: vectr memory export [--path FILE] [--workspace DIR]", file=sys.stderr)
+        return
+
+    from app.service import _default_db_dir
+    from agent.fs_permissions import secure_dir
+    from agent.working_context_store import WorkingContextStore
+    from agent.working_context_store._export import export_memory, write_export_target
+
+    workspace = str(Path(args.workspace).resolve())
+    out_path = Path(getattr(args, "export_path", None) or "MEMORY.md")
+    if not out_path.is_absolute():
+        out_path = Path(workspace) / out_path
+    out_path = out_path.resolve()
+
+    # Same resolution VectrService.__init__ uses (VECTR_DB_DIR override, else
+    # _default_db_dir), so `vectr memory export` always reads the identical
+    # database a running daemon for this workspace writes to. _default_db_dir
+    # deliberately never creates the per-workspace cache dir (UPG-CACHE-LITTER
+    # — a bare resolution must not litter the cache root); a real service (or,
+    # here, an export request) is the point a durable dir is warranted, so
+    # secure_dir() mirrors the same call VectrService.__init__ makes before
+    # its first store write.
+    db_dir = os.getenv("VECTR_DB_DIR") or _default_db_dir(workspace)
+    secure_dir(db_dir)
+    store = WorkingContextStore(db_dir)
+    export_memory(store, workspace, out_path)
+    write_export_target(workspace, out_path)
+    print(f"Exported working memory for {workspace} to {out_path}")
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     workspace = str(Path(args.path).resolve())
 
@@ -4202,6 +4246,32 @@ def main() -> None:
         help="List the dirs that would be removed without deleting anything",
     )
 
+    p_memory = sub.add_parser(
+        "memory",
+        help="Render working memory to a read-only markdown mirror",
+        description=(
+            "UPG-MEMORY-LEGIBLE-FILE-PROJECTION part (a). `vectr memory export` "
+            "renders this workspace's notes to a deterministic markdown file "
+            "(default MEMORY.md) so memory is greppable/git-diffable without "
+            "MCP tool access. Read-only: nothing ever reads the file back — "
+            "the database stays the source of truth. After the first export, "
+            "subsequent note writes through a running daemon keep the mirror "
+            "current via a debounced background re-render."
+        ),
+    )
+    memory_sub = p_memory.add_subparsers(dest="memory_command")
+    p_memory_export = memory_sub.add_parser(
+        "export", help="Render notes to a markdown file (default MEMORY.md)"
+    )
+    p_memory_export.add_argument(
+        "--path", dest="export_path", default="MEMORY.md",
+        help="Output markdown file (default MEMORY.md, resolved relative to --workspace)",
+    )
+    p_memory_export.add_argument(
+        "--workspace", default=_default_path,
+        help="Workspace whose notes to export (default: $VECTR_WORKSPACE or cwd)",
+    )
+
     p_connect = sub.add_parser(
         "connect",
         help="Configure this workspace's editor to use a REMOTE vectr instance "
@@ -4271,6 +4341,7 @@ def main() -> None:
         "hook":    cmd_hook,
         "key":     cmd_key,
         "cache":   cmd_cache,
+        "memory":  cmd_memory,
         "connect": cmd_connect,
         "proxy":   cmd_proxy,
     }

@@ -2557,9 +2557,21 @@ class VectrService:
 
     def _bump_notes_epoch(self) -> None:
         """Advance the notes-mutation sequence so any recall artifact cached
-        under the previous notes epoch can never be served after a change."""
+        under the previous notes epoch can never be served after a change.
+
+        Also the single choke point every note-write path already passes
+        through (remember/promote/revoke/reinstate/forget), so it doubles as
+        the post-write hook for the debounced `vectr memory export` mirror
+        (UPG-MEMORY-LEGIBLE-FILE-PROJECTION part (a)) — a workspace with no
+        export configured (the default) pays only the cost of a no-op marker-
+        file read; a configured one gets a debounced re-render. Errors inside
+        the export scheduler are swallowed there, never here: a note write
+        must never fail or slow down because export machinery misbehaved."""
         with self._notes_mutation_lock:
             self._notes_mutation_seq += 1
+        if self._context_store is not None:
+            from agent.working_context_store._export import schedule_export_if_configured
+            schedule_export_if_configured(self._workspace_root, self._context_store)
 
     def _index_epoch(self, scope: str) -> str:
         """Identity of the current index state for a cache scope. A change here
