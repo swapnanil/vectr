@@ -9,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 import agent.config as config
 from agent.chroma_dispatch import dispatch_chroma_async
-from agent.working_context_store import bind_user_quote, resolve_remember_content
+from agent.working_context_store import USER_STATED_PROVENANCE, bind_user_quote, resolve_remember_content
 
 from app.models import (
     ArcRecord,
@@ -398,14 +398,32 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
         # not exist — all caller input errors, never a server fault.
         raise HTTPException(status_code=422, detail={"error": "invalid_memory_object", "detail": str(exc)})
     note_id = outcome.note_id
-    # UPG-MEM-PROVENANCE-USER-STATED: a user_quote that did not bind never
-    # fails the write — it is discarded and the caller is told why, in the
-    # same response, recomputed with the same pure function the store used
-    # (no second write path, no stored rejection state).
+    # UPG-MEM-PROVENANCE-USER-STATED / UPG-PROVENANCE-NEVER-RISES: a
+    # user_quote that did not bind never fails the write — it is discarded
+    # and the caller is told why, in the same response, recomputed with the
+    # same pure function the store used (no second write path, no stored
+    # rejection state). That recompute alone is blind to the harness-driven
+    # auto-bind fallback (tried server-side whenever the explicit quote did
+    # not bind), so the actual stored provenance is checked too — a note can
+    # land at provenance='user-stated' with no body.user_quote at all, or
+    # with one that itself failed to bind, when it was auto-bound instead.
     quote_suffix = ""
-    if body.user_quote:
-        _bound, reason = bind_user_quote(body.content, body.user_quote)
-        quote_suffix = f" {reason}" if reason else " Bound the user_quote: provenance='user-stated'."
+    _bound, reason = bind_user_quote(body.content, body.user_quote) if body.user_quote else ("", "")
+    if _bound:
+        quote_suffix = " Bound the user_quote: provenance='user-stated'."
+    else:
+        note_is_user_stated = False
+        try:
+            note_is_user_stated = svc.get_note(note_id).provenance == USER_STATED_PROVENANCE
+        except Exception:
+            note_is_user_stated = False
+        if note_is_user_stated:
+            quote_suffix = (
+                " No user_quote bound explicitly, but this note auto-bound to the "
+                "most recently captured user turn: provenance='user-stated'."
+            )
+        elif body.user_quote and reason:
+            quote_suffix = f" {reason}"
     distilled = None
     if body.distilled_from:
         # Distillation write-back: the note write

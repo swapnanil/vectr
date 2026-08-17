@@ -1327,6 +1327,9 @@ MEMORY_WRITE_RELATED_MIN_SIMILARITY: float = float(_related_notes_cfg["min_simil
 
 _user_quote_cfg: dict[str, Any] = _mem_write_cfg["user_quote"]
 MEMORY_WRITE_USER_QUOTE_MIN_CHARS: int = int(_user_quote_cfg["min_chars"])
+MEMORY_WRITE_USER_QUOTE_AUTO_BIND_MAX_AGE_SECONDS: float = float(
+    _user_quote_cfg["auto_bind_max_age_seconds"]
+)
 
 _proxy_suggest_cfg: dict[str, Any] = _mem_write_cfg["proxy_anchor_suggestions"]
 MEMORY_WRITE_PROXY_SUGGEST_ENABLED: bool = bool(_proxy_suggest_cfg["enabled"])

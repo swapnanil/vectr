@@ -46,6 +46,7 @@ from agent.config import (
     MEMORY_WRITE_RELATED_MIN_SIMILARITY,
     MEMORY_WRITE_PROXY_SUGGEST_ENABLED,
     MEMORY_WRITE_PROXY_SUGGEST_LIMIT,
+    MEMORY_WRITE_USER_QUOTE_AUTO_BIND_MAX_AGE_SECONDS,
     vectr_cache_root,
 )
 from agent.eviction_advisor import EvictionAdvisor
@@ -397,6 +398,27 @@ class VectrService:
         # surfaced in `status()` / `vectr status`.
         self._hook_injection_counts: dict[str, int] = {}
         self._hook_injection_lock = threading.Lock()
+
+        # Most recently captured `UserPromptSubmit` prompt for this workspace
+        # (UPG-PROVENANCE-NEVER-RISES) — the harness-driven fallback for
+        # `remember()`'s `user_quote` binding (see `bind_user_quote_auto` in
+        # agent/working_context_store/_user_quote.py). Written verbatim in
+        # `recall(hook_event="UserPromptSubmit")` below, straight from the raw
+        # hook payload, never from any interpretation of it. Workspace-scoped
+        # rather than session_id-keyed by necessity, not preference: the
+        # harness's own session_id (captured on this same hook call) and the
+        # MCP transport's session_id (generated fresh per stdio process — see
+        # integrations/mcp_server/_stdio.py) are different identifier spaces
+        # with no shared key to correlate a `vectr_remember` call back to the
+        # `UserPromptSubmit` call that preceded it in the same turn; "most
+        # recent prompt in this workspace, if recent enough" is the strongest
+        # available proxy for "same turn" given one VectrService instance
+        # normally serves one active agent session at a time. `remember()`
+        # applies the actual recency gate (`auto_bind_max_age_seconds`) — this
+        # is a plain last-write-wins cache with no TTL logic of its own.
+        self._last_user_prompt: str = ""
+        self._last_user_prompt_ts: float = 0.0
+        self._last_user_prompt_lock = threading.Lock()
 
         # Proactive context (UPG-PRO) — per-channel injection counters (like the
         # hook counters above) + a per-session dedup ledger shared across the
@@ -957,6 +979,25 @@ class VectrService:
     def get_hook_injection_counts(self) -> dict[str, int]:
         with self._hook_injection_lock:
             return dict(self._hook_injection_counts)
+
+    def _recent_user_message_for_auto_bind(self) -> str | None:
+        """The most recently captured `UserPromptSubmit` prompt for this
+        workspace (UPG-PROVENANCE-NEVER-RISES), or `None` if none was
+        captured within `MEMORY_WRITE_USER_QUOTE_AUTO_BIND_MAX_AGE_SECONDS`
+        — the recency gate `remember()` relies on before ever passing a
+        candidate down to `WorkingContextStore.remember()`'s own
+        `recent_user_message` parameter (itself pure/clock-free; see its
+        docstring). `None` covers both "never captured" and "captured but
+        stale" identically — `bind_user_quote_auto` treats them the same
+        way (no recent turn to compare against)."""
+        with self._last_user_prompt_lock:
+            prompt = self._last_user_prompt
+            ts = self._last_user_prompt_ts
+        if not prompt or not ts:
+            return None
+        if time.time() - ts > MEMORY_WRITE_USER_QUOTE_AUTO_BIND_MAX_AGE_SECONDS:
+            return None
+        return prompt
 
     # ------------------------------------------------------------------
     # L3 — search and index operations
@@ -1689,7 +1730,18 @@ class VectrService:
         successful bind, stores the note at provenance="user-stated"; a
         failed bind never fails the write. No validation here — the store
         stays the single source of truth for that rule, like every parameter
-        above.
+        above. When this is omitted (or fails to bind), the store still
+        tries the harness-driven fallback below before giving up — see
+        `recent_user_message`.
+
+        `recent_user_message` is NOT a caller parameter — this method always
+        supplies it itself, from `_recent_user_message_for_auto_bind()`
+        (UPG-PROVENANCE-NEVER-RISES): the raw text of the most recently
+        captured `UserPromptSubmit` prompt for this workspace, already
+        recency-gated against `auto_bind_max_age_seconds`, or `None` when
+        there is no recent-enough one. The store tries this ONLY when
+        `user_quote` did not already bind, and it never overrides an
+        explicit caller claim.
 
         `scope`: None (the default) means OMITTED — the store resolves it to
         this note's kind's default scope at write time
@@ -1712,6 +1764,7 @@ class VectrService:
             supersedes=supersedes,
             contradicts=contradicts,
             user_quote=user_quote,
+            recent_user_message=self._recent_user_message_for_auto_bind(),
         )
         self._bump_notes_epoch()
         return note_id
@@ -2216,6 +2269,17 @@ class VectrService:
             turn_counter_ledger = self._ledger_for(session_id)
             if turn_counter_ledger is not None:
                 turn_counter_ledger.advance_turn()
+        if hook_event == "UserPromptSubmit" and query:
+            # UPG-PROVENANCE-NEVER-RISES: capture the raw prompt text verbatim
+            # (never anything derived from it) for remember()'s harness-driven
+            # user_quote auto-bind fallback — see `_last_user_prompt`'s own
+            # comment at __init__ for why this is workspace-scoped rather than
+            # session_id-keyed. Unconditional on session_id (unlike the ledger
+            # block just above, which needs it) since the cache itself only
+            # needs the prompt text and a timestamp.
+            with self._last_user_prompt_lock:
+                self._last_user_prompt = query
+                self._last_user_prompt_ts = time.time()
         if hook_event is not None and min_similarity is None:
             min_similarity = HOOKS_MIN_SIMILARITY
         notes = self._recall_impl(

@@ -33,7 +33,7 @@ from agent.working_context_store._types import (
     SnapshotEntry,
     WorkingNote,
 )
-from agent.working_context_store._user_quote import bind_user_quote
+from agent.working_context_store._user_quote import bind_user_quote, bind_user_quote_auto
 
 logger = logging.getLogger(__name__)
 
@@ -1085,6 +1085,7 @@ class WorkingContextStore:
         supersedes: int | None = None,
         contradicts: int | None = None,
         user_quote: str | None = None,
+        recent_user_message: str | None = None,
     ) -> int:
         """Store a working note. Returns the note_id.
 
@@ -1131,6 +1132,27 @@ class WorkingContextStore:
         with the same pure function to tell the caller why. A binding never
         overrides provenance="human" — a person's own endorsement already
         outranks a transcription.
+
+        `recent_user_message` (UPG-PROVENANCE-NEVER-RISES): the harness-layer
+        fallback for the exact same "user-stated" upgrade above, tried ONLY
+        when `user_quote` did not already bind — `user_quote` is an explicit
+        caller claim and always takes priority. `bind_user_quote` requires the
+        WRITING AGENT to remember to pass `user_quote=` on every call; on a
+        live production corpus this voluntary step was essentially never
+        taken, leaving "user-stated" unreachable in practice — the identical
+        adoption gap hook-injected recall was built to close on the read
+        side. This is the write-side counterpart: the caller (`VectrService.
+        remember()`) passes the raw text of the most recently captured
+        `UserPromptSubmit` prompt for this workspace, ALREADY recency-checked
+        against `memory_write.user_quote.auto_bind_max_age_seconds` before it
+        ever reaches here (this method does no clock work of its own — a
+        `None` here just means "no recent-enough turn to compare against,"
+        indistinguishable from one that was never captured). Bound by
+        `_user_quote.bind_user_quote_auto()` — the MIRROR containment check
+        (`content` ⊆ `recent_user_message`, not `user_quote` ⊆ `content`),
+        same whitespace-normalized deterministic substring comparison, same
+        "user-stated" provenance outcome, same never-overrides-"human"
+        ceiling, same discard-on-no-bind behaviour.
 
         `scope`: one of SCOPE_VALUES, or None (the default) to mean OMITTED.
         An explicitly passed scope — including the literal string
@@ -1236,6 +1258,13 @@ class WorkingContextStore:
         # reviewed directive the guard exists to require, not the unreviewed
         # one it exists to reject.
         bound_quote, _ = bind_user_quote(content, user_quote)
+        # UPG-PROVENANCE-NEVER-RISES: the harness-driven fallback, tried only
+        # when the caller made no explicit (and successful) `user_quote`
+        # claim of its own — an explicit claim always wins over the
+        # automatic one, same precedence a caller-declared `title` has over
+        # the content-derived fallback below.
+        if not bound_quote:
+            bound_quote, _ = bind_user_quote_auto(content, recent_user_message)
         if bound_quote and provenance != "human":
             provenance = USER_STATED_PROVENANCE
         if provenance == "auto" and kind == "directive":

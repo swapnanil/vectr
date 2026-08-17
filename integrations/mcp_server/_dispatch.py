@@ -810,19 +810,35 @@ def handle_tools_call(
                 parts.append(f"first line: {first_line}")
             if parts:
                 echo = "\n  Stored — " + " · ".join(parts)
-        # UPG-MEM-PROVENANCE-USER-STATED: report what the binding check
-        # decided, in the same response as the write. A failed bind is not a
-        # failed write (the note is stored at its ordinary provenance), so the
-        # reason has to be surfaced here or the caller would silently believe
-        # it recorded a user statement. Recomputed with the same pure function
-        # the store used — no rejection state is persisted anywhere.
+        # UPG-MEM-PROVENANCE-USER-STATED / UPG-PROVENANCE-NEVER-RISES: report
+        # what the binding check decided, in the same response as the write.
+        # A failed bind is not a failed write (the note is stored at its
+        # ordinary provenance), so the reason has to be surfaced here or the
+        # caller would silently believe it recorded a user statement.
+        # `_bound_quote`/`quote_reason` are recomputed with the same pure
+        # function the store used for the EXPLICIT `user_quote` argument (no
+        # rejection state is persisted anywhere) — but that recompute alone
+        # is blind to the harness-driven auto-bind fallback
+        # (`bind_user_quote_auto`, tried server-side whenever the explicit
+        # quote did not bind), so the actual STORED provenance is checked too:
+        # a note may land at provenance='user-stated' with no `user_quote`
+        # argument at all, or with one that itself failed to bind, when it
+        # was auto-bound instead — this must still be surfaced, or the
+        # calling LLM would have no way to learn its note's real trust class
+        # without a separate vectr_recall round trip.
         quote_suffix = ""
-        if user_quote:
-            _bound_quote, quote_reason = bind_user_quote(content, user_quote)
+        _bound_quote, quote_reason = bind_user_quote(content, user_quote) if user_quote else ("", "")
+        note_is_user_stated = stored_note is not None and stored_note.provenance == USER_STATED_PROVENANCE
+        if _bound_quote:
+            quote_suffix = f"\n  user_quote bound — stored as provenance='{USER_STATED_PROVENANCE}'."
+        elif note_is_user_stated:
             quote_suffix = (
-                f"\n  {quote_reason}" if quote_reason
-                else f"\n  user_quote bound — stored as provenance='{USER_STATED_PROVENANCE}'."
+                "\n  No user_quote argument bound, but this note auto-bound to the "
+                f"most recently captured user turn — stored as provenance="
+                f"'{USER_STATED_PROVENANCE}'."
             )
+        elif user_quote and quote_reason:
+            quote_suffix = f"\n  {quote_reason}"
         # Write-time related-notes offer (agent/working_context_store/_related.py):
         # nearest-by-similarity only, never a contradiction verdict — the caller
         # LLM judges whether one is now stale. Empty unless `outcome.related` is
