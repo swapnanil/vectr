@@ -450,6 +450,35 @@ def _dedupe_assistant_messages(events: Sequence[dict]) -> list[dict]:
     return out
 
 
+# UPG-EVAL-TURNS-UNITS: `turns_to_fact` (below) counts DISTINCT LLM API calls
+# (message.id-deduped `assistant` events) -- an API-call-count unit. The CLI's
+# own `result.num_turns` (`cost_metrics()`'s `session_turns`) counts something
+# else: verified exactly against every one of this repo's 48 preserved real
+# stream-json transcripts that carry a `result` event, with zero exceptions,
+# `num_turns == count(all "user"-type events in the session) + 1` -- one turn
+# per tool-result round-trip, plus one for the final turn (which has no
+# trailing `user` event of its own, whether that final turn used a tool or
+# was a plain text reply). `turns_to_fact` is routinely SMALLER than
+# `session_turns` for the same reason `session_turns` is session-total and
+# `turns_to_fact` is fact-acquisition-prefix, but the two were never
+# comparable in the first place -- they are different units, not the same
+# quantity measured at different scopes. `_conversational_turns_before`
+# reproduces the CLI's own counting rule restricted to a prefix, giving a
+# `turns_to_fact` analogue in the SAME unit `session_turns` is in.
+def _conversational_turns_before(events: Sequence[dict], event_index: int) -> int:
+    """CLI-native turn number of the turn that produced `events[event_index]`:
+    every `user`-type event at a strictly earlier position (each one a
+    completed round-trip) counts as one prior turn, plus one for the turn
+    ending in `event_index` itself. See the UPG-EVAL-TURNS-UNITS comment above
+    for the exact-match evidence this reproduces `result.num_turns`'s own
+    counting rule.
+    """
+    prior_user_turns = sum(
+        1 for i, ev in enumerate(events) if i < event_index and ev.get("type") == "user"
+    )
+    return prior_user_turns + 1
+
+
 def leg_metrics(
     leg: LegSpec,
     *,
@@ -482,6 +511,24 @@ def leg_metrics(
     a weighted aggregate of every distinct billed call up to and including that
     turn, and the two answer different questions ("how much context is live right
     now" vs "how much has this leg spent so far").
+
+    UPG-EVAL-TURNS-UNITS: `turns_to_fact` and `conversational_turns_to_fact` are
+    DIFFERENT UNITS, both reported, neither redefining the other. `turns_to_fact`
+    is an API-call count (distinct `message.id`s, DESIGN.md's original 6.3
+    definition -- unchanged here). `conversational_turns_to_fact` is the CLI's
+    own `result.num_turns` unit (see `_conversational_turns_before`'s docstring
+    for the exact-match evidence), the unit DESIGN.md's preregistered
+    `turns_to_fact <= 2` expectation was actually measured against. It is
+    typically LARGER than or equal to `turns_to_fact`, never smaller: dedup-by-
+    `message.id` only ever MERGES stream-event fragments of one real call, and
+    a preserved transcript audit found the CLI itself sometimes reuses one
+    `message.id` across a CHAIN of several sequential tool_use/tool_result
+    round-trips, so one deduped API-call entry can span more than one CLI-
+    native turn. (The originally-reported 33-vs-20 mismatch that opened
+    UPG-EVAL-TURNS-UNITS predates UPG-EVAL-BTF-DOUBLECOUNT's dedup fix, when
+    `turns_to_fact` was a raw, undeduped stream-event count and could exceed
+    `session_turns` in the other direction; post-fix, the two are simply
+    different units, not the same quantity at different scopes.)
     """
     a = first_index(actions, leg.fact_acquisition)
     m = first_index(actions, leg.mistake_signature)
@@ -521,6 +568,7 @@ def leg_metrics(
         "censored": a is None,
         "censor_reason": "fact never acquired" if a is None else None,
         "turns_to_fact": None,
+        "conversational_turns_to_fact": None,
         "tool_calls_to_fact": None,
         "output_tokens_to_fact": None,
         "billable_tokens_to_fact": None,
@@ -544,11 +592,13 @@ def leg_metrics(
         ev for i, ev in enumerate(events) if i <= e_index and ev.get("type") == "assistant"
     ]
     # UPG-EVAL-BTF-DOUBLECOUNT: dedupe by `message.id` FIRST -- `turns_to_fact`
-    # (a real conversational-turn count, not a raw stream-event count) and the
-    # output/billable sums below all read from this same deduped list, so a
-    # single real API call whose response the CLI split across multiple
-    # `assistant` stream events counts once everywhere in this function, not
-    # once per content-block fragment (see `_dedupe_assistant_messages` above).
+    # (a real, distinct-API-call count, not a raw stream-event count; see
+    # UPG-EVAL-TURNS-UNITS above for why this is NOT the same unit as a
+    # CLI-native conversational turn) and the output/billable sums below all
+    # read from this same deduped list, so a single real API call whose
+    # response the CLI split across multiple `assistant` stream events counts
+    # once everywhere in this function, not once per content-block fragment
+    # (see `_dedupe_assistant_messages` above).
     deduped_prefix_events = _dedupe_assistant_messages(prefix_events)
     output_tokens = 0
     billable = 0.0
@@ -567,6 +617,7 @@ def leg_metrics(
     result.update(
         {
             "turns_to_fact": len(deduped_prefix_events),
+            "conversational_turns_to_fact": _conversational_turns_before(events, e_index),
             "tool_calls_to_fact": a + 1,
             "output_tokens_to_fact": output_tokens,
             "billable_tokens_to_fact": billable,

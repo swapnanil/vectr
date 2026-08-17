@@ -195,7 +195,8 @@ absent from every scenario file except `release.yml`, and absent from prompts 2-
 
 **Pre-registered expectations.** Arm A: leg 1 attempts a local upload before finding
 the workflow (`k1_mistake=true`); legs 2-3 repeat it at ≥50%, since nothing carries the
-correction forward. Memory arms: legs 2-3 tag directly, `turns_to_fact` ≤ 2, mistake
+correction forward. Memory arms: legs 2-3 tag directly, `turns_to_fact` ≤ 2 (stated in
+conversational-turn units — see `conversational_turns_to_fact`, §6.3), mistake
 rate 0.
 
 ---
@@ -1030,12 +1031,34 @@ With `E = actions[a].event_index` and `P = [assistant events with index <= E]`:
 
 | field | definition |
 |---|---|
-| `turns_to_fact` | `len(P)` |
+| `turns_to_fact` | `len(P)` — distinct LLM API calls (`message.id`-deduped `assistant` events) |
+| `conversational_turns_to_fact` | count of `user`-type events at index `< E`, plus 1 |
 | `tool_calls_to_fact` | `a + 1` |
 | `output_tokens_to_fact` | `Σ usage.output_tokens over P` |
 | `billable_tokens_to_fact` | `Σ over P of (1.0·input + 1.25·cache_creation + 0.1·cache_read + 5.0·output)` |
 | `context_tokens_at_fact` | `input + cache_creation + cache_read` of the single event `E` |
 | `usd_to_fact_alloc` | `session_usd · billable_tokens_to_fact / billable_tokens_session` |
+
+**`turns_to_fact` and `conversational_turns_to_fact` are different units of the same
+prefix, both reported, and neither redefines the other (UPG-EVAL-TURNS-UNITS).**
+`turns_to_fact` counts distinct API calls after `message.id` deduplication — this is
+the field named in RDC(k) below and its definition is unchanged. `cost.session_turns`
+(from the CLI's own `result.num_turns`) is a different unit again: verified across
+every preserved stream-json transcript carrying a `result` event,
+`num_turns == count(all "user"-type events in the session) + 1` — one turn per
+completed tool-result round-trip, plus one for the session's final turn.
+`conversational_turns_to_fact` is that same CLI-native unit, restricted to the prefix
+ending at the fact-acquiring event, so it is directly comparable to
+`cost.session_turns` the way `turns_to_fact` is not. It is typically **greater than or
+equal to** `turns_to_fact`, never smaller: `message.id` dedup only ever *merges*
+stream-event fragments of one real call, and the CLI has been observed to reuse a
+single `message.id` across a *chain* of several sequential tool_use/tool_result
+round-trips, which dedup collapses into one API call but which still cost several
+conversational turns. Both fields are reported on every leg record and every report
+row (`report.py`'s per-leg rows carry `conversational_turns_to_fact` and
+`session_turns` alongside `rdc["turns_to_fact"]`); neither is folded into RDC(k)
+itself, matching how `context_tokens_at_fact` is already reported alongside
+`billable_tokens_to_fact` without becoming an RDC component.
 
 Three deliberate choices, each of which is a place a naive implementation would lie:
 
@@ -1467,7 +1490,10 @@ visibly a surprise): arm A repeats the mistake in ≥50% of legs *k>1* on DISCOV
 scenarios and ~100% on TOLD scenarios; memory arms reach `turns_to_fact ≤ 2` with
 `mistake_rate_post = 0`. The design's success criterion for "the channel works" is a
 ≥50% reduction in `mistake_rate_post` **and** a ≥40% reduction in `turns_to_fact`
-versus arm A, on both headline scenarios.
+versus arm A, on both headline scenarios. (UPG-EVAL-TURNS-UNITS: both figures above
+were stated in conversational-turn units at pre-registration time — evaluate them
+against `conversational_turns_to_fact`, not the RDC vector's `turns_to_fact`
+component, which is a distinct-API-call count and was never redefined; see §6.3.)
 
 ---
 
