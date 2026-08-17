@@ -2418,6 +2418,27 @@ class WorkingContextStore:
             ).fetchone()
         return self._row_to_note(row) if row is not None else None
 
+    def notes_for_export(self, workspace: str) -> list[WorkingNote]:
+        """Every note still in this workspace's table (not hard-deleted via
+        forget), in a fixed note_id-ascending order — the deterministic
+        source list for `vectr memory export`
+        (UPG-MEMORY-LEGIBLE-FILE-PROJECTION part (a)).
+
+        Unlike recall()/format_notes_for_llm(), this is deliberately
+        unfiltered: it includes superseded and revoked notes (the export
+        mirror is meant to read as a full audit log of what memory learned,
+        not a ranked or narrowed view) and is never relevance-ranked, so
+        calling this twice with no intervening write returns the identical
+        list in the identical order every time — the property the export
+        file's byte-identical-re-export acceptance bar depends on.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM notes WHERE workspace = ? ORDER BY note_id ASC",
+                (workspace,),
+            ).fetchall()
+        return [self._row_to_note(r) for r in rows]
+
     def recall_for_path(
         self,
         workspace: str,
