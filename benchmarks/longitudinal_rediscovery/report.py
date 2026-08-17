@@ -295,7 +295,14 @@ def trajectory_report(
             # context at the acquiring turn answers a different question and must
             # not silently enter a ratio/delta component it was never designed for.
             "context_tokens_at_fact": metrics.get("context_tokens_at_fact"),
+            # UPG-EVAL-TURNS-UNITS: reported alongside `rdc["turns_to_fact"]`, never
+            # folded into RDC(k) itself -- DESIGN.md 6.4's preregistered RDC vector
+            # names turns_to_fact specifically, and this is a DIFFERENT unit (the
+            # CLI's own result.num_turns unit; see scorer.leg_metrics's docstring).
+            # Directly comparable to session_turns below.
+            "conversational_turns_to_fact": metrics.get("conversational_turns_to_fact"),
             "session_usd": (rec.get("cost") or {}).get("session_usd"),
+            "session_turns": (rec.get("cost") or {}).get("session_turns"),
             "contradictions": (rec.get("score") or {}).get("contradictions") or [],
         }
         per_leg_rows.append(row)
@@ -465,6 +472,8 @@ def format_human_readable(report: dict[str, Any]) -> str:
                 lines.append(
                     f"      k={row['k']}  mistake={row['mistake_committed']}  "
                     f"censored={row['censored']}  turns_to_fact={row['rdc'].get('turns_to_fact')}  "
+                    f"conversational_turns_to_fact={row.get('conversational_turns_to_fact')}  "
+                    f"session_turns={row.get('session_turns')}  "
                     f"usd={row['session_usd']}"
                 )
                 # Loud, never silently folded into mistake_committed (DEFECT 9): a

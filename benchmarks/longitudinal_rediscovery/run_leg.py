@@ -76,6 +76,7 @@ import signal
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -379,6 +380,34 @@ def _stop_daemon(vectr_bin: str, workspace: Path, port: int, env: dict[str, str]
     return _hard_stop_port(port)
 
 
+def _synthetic_global_gitconfig_path() -> Path:
+    """Materialize (idempotently, overwriting any stale copy) a `[user]`-only git
+    config file the spawned agent's `GIT_CONFIG_GLOBAL` points at.
+
+    UPG-EVAL-IDENTITY-ENV-ISOLATION (observed 2026-08-03 on the deploy s1 shared
+    leg1): `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars and
+    `scenarios.pin_synthetic_git_identity`'s repo-LOCAL config (the two DEFECT 11
+    layers below) both only affect a git repo that exists and either (a) is being
+    committed to (env vars are read for commit authorship only, never for a
+    `git config` query) or (b) already has local config pinned. Neither covers a
+    workspace with no `.git` at all -- e.g. S5 (`deploy_reverted_by_reconciler`),
+    where `deploy/queue.yaml`'s `requested_by` field is filled in by the agent's
+    own judgment, not a commit -- so a `git config user.email` (or `--global`)
+    query made from inside such a workspace falls straight through to the
+    operator's real global config. Pointing `GIT_CONFIG_GLOBAL` (git >= 2.32) at
+    this synthetic file makes every git config resolution level the agent's
+    process can reach -- local (when pinned), global (always, via this env var),
+    and any ad hoc repo it inits mid-session -- resolve to the same synthetic
+    identity, with no dependency on a `.git` directory existing yet.
+    """
+    path = Path(tempfile.gettempdir()) / "vectr-longitudinal-eval-synthetic-gitconfig"
+    path.write_text(
+        f"[user]\n\tname = {scen.SYNTHETIC_GIT_USER_NAME}\n\temail = {scen.SYNTHETIC_GIT_USER_EMAIL}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _spawn_env_for_agent(base_url: str) -> dict[str, str]:
     """Env for the spawned eval agent: every CLAUDE*/ANTHROPIC* var is stripped
     first so the child looks like a fresh user invocation rather than a nested
@@ -392,15 +421,24 @@ def _spawn_env_for_agent(base_url: str) -> dict[str, str]:
     the layer that covers a git repo the agent inits fresh mid-session (no
     local config pinned yet) -- `scenarios.pin_synthetic_git_identity` is the
     repo-config half of this same defense, applied at materialize/restore time.
+
+    UPG-EVAL-IDENTITY-ENV-ISOLATION: `GIT_CONFIG_GLOBAL` is also stripped from
+    the inherited environment and re-pointed at a synthetic config file
+    (`_synthetic_global_gitconfig_path`) so a `git config` READ (as opposed to a
+    commit, which the two layers above already cover) can never resolve the
+    operator's real `~/.gitconfig` -- see that function's docstring for the
+    concrete leak this closes (deploy/queue.yaml's `requested_by` field).
     """
     env = {k: v for k, v in os.environ.items()
            if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC")
-                   or k.startswith("GIT_AUTHOR_") or k.startswith("GIT_COMMITTER_"))}
+                   or k.startswith("GIT_AUTHOR_") or k.startswith("GIT_COMMITTER_")
+                   or k == "GIT_CONFIG_GLOBAL")}
     env["ANTHROPIC_BASE_URL"] = base_url
     env["GIT_AUTHOR_NAME"] = scen.SYNTHETIC_GIT_USER_NAME
     env["GIT_AUTHOR_EMAIL"] = scen.SYNTHETIC_GIT_USER_EMAIL
     env["GIT_COMMITTER_NAME"] = scen.SYNTHETIC_GIT_USER_NAME
     env["GIT_COMMITTER_EMAIL"] = scen.SYNTHETIC_GIT_USER_EMAIL
+    env["GIT_CONFIG_GLOBAL"] = str(_synthetic_global_gitconfig_path())
     return env
 
 

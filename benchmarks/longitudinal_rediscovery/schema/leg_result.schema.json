@@ -130,7 +130,8 @@
         "censored": { "type": "boolean" },
         "censor_reason": { "type": ["string", "null"], "enum": ["fact never acquired", null] },
 
-        "turns_to_fact": { "type": ["integer", "null"] },
+        "turns_to_fact": { "type": ["integer", "null"], "description": "Distinct LLM API calls (message.id-deduped assistant events) up to and including fact acquisition. NOT the same unit as cost.session_turns/conversational_turns_to_fact — see UPG-EVAL-TURNS-UNITS." },
+        "conversational_turns_to_fact": { "type": ["integer", "null"], "description": "The CLI's own result.num_turns unit, restricted to a fact-acquisition prefix (count of user-type events before the acquiring event, plus 1). This is the unit DESIGN.md's preregistered turns_to_fact<=2 expectation was actually stated in; directly comparable to cost.session_turns. Typically >= turns_to_fact, never redefines it." },
         "tool_calls_to_fact": { "type": ["integer", "null"] },
         "output_tokens_to_fact": { "type": ["integer", "null"] },
         "billable_tokens_to_fact": {
