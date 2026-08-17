@@ -936,6 +936,18 @@ note names.
   Otherwise an agent's own `git commit` falls through to the operator's real global
   `~/.gitconfig`, and the operator's name/email end up baked into a scenario's git log —
   a real leak this harness had until UPG-EVAL-PATH-SLUG-LEAK's PII-hygiene fix.
+- UPG-EVAL-IDENTITY-ENV-ISOLATION (observed 2026-08-03, deploy s1 shared leg1): the two
+  layers above cover a git *commit* (env vars) and a git repo that already exists with
+  local config pinned, but neither covers a plain `git config` *read* from a workspace
+  with no `.git` at all — S5 has none, and its `deploy/queue.yaml`'s `requested_by`
+  field is filled in by agent judgment, not a commit, so the agent's own `git config
+  user.email` fell through to the operator's real global config. `_spawn_env_for_agent`
+  now also strips any inherited `GIT_CONFIG_GLOBAL` and points it at a synthetic
+  `[user]`-only config file (`_synthetic_global_gitconfig_path`, git >= 2.32's
+  `GIT_CONFIG_GLOBAL` override), so every config-resolution level the agent's process
+  can reach — local when pinned, global always, or a repo it inits itself mid-session —
+  resolves to the synthetic identity regardless of whether a `.git` directory exists yet.
+  Release-time substitution remains the guarantee for pre-fix preserved artifacts.
 
 **Contamination prevention across arms/variants/seeds.** Trajectory id
 `<scenario>-<arm>-<variant>-s<seed>` is unique per trajectory and appears in the result
