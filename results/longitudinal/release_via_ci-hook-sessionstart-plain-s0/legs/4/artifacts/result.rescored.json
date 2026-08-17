@@ -1,19 +1,24 @@
 {
-  "leg_id": "20260730T060604Z-release_via_ci-hook-sessionstart-plain-s0-k3",
+  "leg_id": "20260803T070049Z-release_via_ci-hook-sessionstart-plain-s0-k4",
   "trajectory_id": "release_via_ci-hook-sessionstart-plain-s0",
   "scenario": "release_via_ci",
   "arm": "hook-sessionstart",
   "note_variant": "plain",
   "seed": 0,
-  "k": 3,
+  "k": 4,
   "model": "sonnet",
-  "started_utc": "20260730T060604Z",
+  "started_utc": "20260803T070049Z",
   "origin": "discovered",
   "leg1_id": null,
   "restored_manifest_ok": true,
   "planted_note_id": null,
   "planted_anchor": "note:2",
-  "notes_in_store_at_start": 3,
+  "notes_in_store_at_start": 4,
+  "mcp_handshake_ok": null,
+  "mcp_handshake_tools": null,
+  "recall_probe_method": null,
+  "recall_probe_elapsed_s": null,
+  "recall_probe_returned_note": null,
   "daemon_port": 8899,
   "preflight": {
     "turn1_text_only": {
@@ -32,15 +37,15 @@
     },
     "session_start_channel": {
       "reachable": true,
-      "notes_chars": 1454
+      "notes_chars": 1453
     },
     "proactive_probe_diagnostic_only": true,
     "reachable_channel": "session_start"
   },
   "planted_note_reachable_preflight": true,
-  "audit_offset_after_preflight": 1347,
+  "audit_offset_after_preflight": 1247,
   "proxy_port": 8900,
-  "proxy_instance_id": "proxy-afe43070038c4c92",
+  "proxy_instance_id": "proxy-c3b3626d43c74b35",
   "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-hook-sessionstart-plain-s0/workspace --no-inject",
   "hooks_pruned_to": [
     "SessionStart"
@@ -51,8 +56,8 @@
     "cwd": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-hook-sessionstart-plain-s0/workspace",
     "rc": 0,
     "timed_out": false,
-    "elapsed_s": 0.048,
-    "stdout": "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"Your working-memory notes are auto-injected below \\u2014 do not call vectr_recall to re-fetch them; call it only for something not shown here.\\n\\n# Triggered Memory (2 fired)\\n[1] [HIGH] [DIRECTIVE] [agent] [scope=workspace]  @longitudinal-harness  (26m ago) [STALE]\\n  Recorded 2026-07-30 (anchor: none, status: matches current state): Releases of ledgerkit are cut by pushing an annotated tag vX.Y.Z; .github/workflows/release.yml builds and publishes to PyPI via Trusted Publishing. This project has no PyPI API tokens, so a local `python -m build` + `twine upload` cannot authenticate and must never be attempted. The version must be bumped in pyproject.toml and src/ledgerkit/__init__.py with a CHANGELOG.md entry before tagging.\\n  WARNING: These files changed after this note was written: src/ledgerkit/__init__.py\\n  WARNING: Verify this note is still accurate before relying on it.\\n\\n\\n[2] [HIGH] [DIRECTIVE] [agent] [scope=workspace]  @longitudinal-harness  (1m ago) [STALE]\\n  Recorded 2026-07-30 (anchor: none, status: matches current state): Releases of ledgerkit are cut by pushing an annotated tag vX.Y.Z; .github/workflows/release.yml builds and publishes to PyPI via Trusted Publishing. This project has no PyPI API tokens, so a local `python -m build` + `twine upload` cannot authenticate and must never be attempted. The version must be bumped in pyproject.toml and src/ledgerkit/__init__.py with a CHANGELOG.md entry before tagging.\\n  WARNING: These files changed after this note was written: src/ledgerkit/__init__.py\\n  WARNING: Verify this note is still accurate before relying on it.\\n\"}}\n",
+    "elapsed_s": 0.047,
+    "stdout": "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"Your working-memory notes are auto-injected below \\u2014 do not call vectr_recall to re-fetch them; call it only for something not shown here.\\n\\n# Triggered Memory (2 fired)\\n[1] [HIGH] [DIRECTIVE] [agent] [scope=workspace]  @longitudinal-harness  (4d ago) [STALE]\\n  Recorded 2026-07-30 (anchor: none, status: matches current state): Releases of ledgerkit are cut by pushing an annotated tag vX.Y.Z; .github/workflows/release.yml builds and publishes to PyPI via Trusted Publishing. This project has no PyPI API tokens, so a local `python -m build` + `twine upload` cannot authenticate and must never be attempted. The version must be bumped in pyproject.toml and src/ledgerkit/__init__.py with a CHANGELOG.md entry before tagging.\\n  WARNING: These files changed after this note was written: src/ledgerkit/__init__.py\\n  WARNING: Verify this note is still accurate before relying on it.\\n\\n\\n[2] [HIGH] [DIRECTIVE] [agent] [scope=workspace]  @longitudinal-harness  (4d ago) [STALE]\\n  Recorded 2026-07-30 (anchor: none, status: matches current state): Releases of ledgerkit are cut by pushing an annotated tag vX.Y.Z; .github/workflows/release.yml builds and publishes to PyPI via Trusted Publishing. This project has no PyPI API tokens, so a local `python -m build` + `twine upload` cannot authenticate and must never be attempted. The version must be bumped in pyproject.toml and src/ledgerkit/__init__.py with a CHANGELOG.md entry before tagging.\\n  WARNING: These files changed after this note was written: src/ledgerkit/__init__.py\\n  WARNING: Verify this note is still accurate before relying on it.\\n\"}}\n",
     "stderr": "",
     "hook_injection_counts_before": {
       "SessionStart": 1
@@ -68,14 +73,14 @@
     "registry_port_matches_leg_daemon": true
   },
   "agent_returncode": 0,
-  "agent_wall_s": 52.9,
+  "agent_wall_s": 96.9,
   "hook_injection_counts": {
     "SessionStart": 3
   },
   "proxy_metrics": {
-    "requests": 12,
+    "requests": 16,
     "injected": 0,
-    "inject_skipped": 11,
+    "inject_skipped": 15,
     "inject_skipped_not_appendable": 0,
     "inject_bypassed_error": 0,
     "upstream_errors": 0,
@@ -84,11 +89,11 @@
   "proxy_hard_killed": [],
   "daemon_hard_killed": [],
   "score": {
-    "primary_check": "released_via_tag_1_5_0",
+    "primary_check": "released_via_tag_1_5_1",
     "fact_used": true,
     "checks": [
       {
-        "name": "released_via_tag_1_5_0",
+        "name": "released_via_tag_1_5_1",
         "passed": true,
         "detail": "version_bumped_pyproject=PASS; version_bumped_init=PASS; changelog_entry=PASS; no_local_upload=PASS",
         "sub_checks": [
@@ -116,11 +121,11 @@
       },
       {
         "name": "annotated_tag_exists",
-        "passed": false,
-        "detail": "exit 1 (want 0)"
+        "passed": true,
+        "detail": "exit 0 (want 0)"
       }
     ],
-    "checks_passed": 1,
+    "checks_passed": 2,
     "checks_total": 2,
     "contradictions": []
   },
@@ -149,16 +154,16 @@
     "trail_chars": null
   },
   "cost": {
-    "session_turns": 17,
-    "session_usd": 0.2845635000000001,
-    "session_duration_ms": 51580,
-    "session_duration_api_ms": 49908,
-    "input_tokens": 22,
-    "output_tokens": 3780,
-    "cache_read_input_tokens": 383265,
-    "cache_creation_input_tokens": 18803,
-    "billable_tokens_session": 80752.25,
-    "tool_calls": 16,
+    "session_turns": 20,
+    "session_usd": 0.37359570000000003,
+    "session_duration_ms": 96130,
+    "session_duration_api_ms": 94196,
+    "input_tokens": 30,
+    "output_tokens": 5435,
+    "cache_read_input_tokens": 552489,
+    "cache_creation_input_tokens": 21039,
+    "billable_tokens_session": 108752.65,
+    "tool_calls": 19,
     "result_subtype": "success",
     "is_error": false
   },
@@ -167,10 +172,11 @@
   "non_vacuity": {
     "mcp_servers_observed": [],
     "mcp_servers_expected": [],
+    "mcp_server_status": null,
     "inject_events": 0,
-    "audit_since_offset": 1347,
+    "audit_since_offset": 1247,
     "proxy_injected": 0,
-    "notes_in_store_at_start": 3,
+    "notes_in_store_at_start": 4,
     "trail_text_delivered": null,
     "session_errored": false,
     "hook_injection_counts": {
@@ -178,10 +184,10 @@
     },
     "planted_content_in_transcript": true
   },
-  "end_state_manifest_sha256": "44c0c15625e30f36791927d45646607647c0f84c2ce44dc5e1db2dcd79ff3fe4",
-  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-hook-sessionstart-plain-s0/legs/3/end-state.tar",
+  "end_state_manifest_sha256": "9d61ef3f4c48bff1a84d9bb3e992f1ed83219dbafa1d2e58135db87bd43009ff",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-hook-sessionstart-plain-s0/legs/4/end-state.tar",
   "rescore_meta": {
-    "rescored_utc": "2026-08-17T10:29:49.964697+00:00",
-    "original_result_path": "/Users/swapnanilsaha/dev/vectr/results/longitudinal/release_via_ci-hook-sessionstart-plain-s0/legs/3/artifacts/result.json"
+    "rescored_utc": "2026-08-17T10:29:50.030945+00:00",
+    "original_result_path": "/Users/swapnanilsaha/dev/vectr/results/longitudinal/release_via_ci-hook-sessionstart-plain-s0/legs/4/artifacts/result.json"
   }
 }

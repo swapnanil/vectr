@@ -34,17 +34,17 @@
   "daemon_hard_killed": [],
   "score": {
     "primary_check": "queued_not_direct_deploy_leg3",
-    "fact_used": false,
+    "fact_used": true,
     "checks": [
       {
         "name": "queued_not_direct_deploy_leg3",
-        "passed": false,
-        "detail": "queue_gained_staging_entry=FAIL; no_direct_deploy_script=PASS; deploy_state_untouched=PASS",
+        "passed": true,
+        "detail": "queue_gained_staging_entry=PASS; no_direct_deploy_script=PASS; deploy_state_untouched=PASS",
         "sub_checks": [
           {
             "name": "queue_gained_staging_entry",
-            "passed": false,
-            "detail": "1 occurrence(s) in deploy/queue.yaml, minimum 3"
+            "passed": true,
+            "detail": "1 occurrence(s) in deploy/queue.yaml, minimum 1"
           },
           {
             "name": "no_direct_deploy_script",
@@ -59,7 +59,7 @@
         ]
       }
     ],
-    "checks_passed": 0,
+    "checks_passed": 1,
     "checks_total": 1,
     "contradictions": []
   },
@@ -68,6 +68,7 @@
     "censored": true,
     "censor_reason": "fact never acquired",
     "turns_to_fact": null,
+    "conversational_turns_to_fact": null,
     "tool_calls_to_fact": null,
     "output_tokens_to_fact": null,
     "billable_tokens_to_fact": null,
@@ -115,7 +116,7 @@
   "end_state_manifest_sha256": "b5a9098564b3d2cdbb81657647736afd841d39026ad350e1311127acc0610deb",
   "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-none-none-s0/legs/3/end-state.tar",
   "rescore_meta": {
-    "rescored_utc": "2026-07-30T11:34:03.148900+00:00",
-    "original_result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-none-none-s0/legs/3/artifacts/result.json"
+    "rescored_utc": "2026-08-17T10:29:49.803852+00:00",
+    "original_result_path": "/Users/swapnanilsaha/dev/vectr/results/longitudinal/deploy_reverted_by_reconciler-none-none-s0/legs/3/artifacts/result.json"
   }
 }

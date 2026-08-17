@@ -98,12 +98,13 @@
     "acquisition_action_index": 17,
     "censored": false,
     "censor_reason": null,
-    "turns_to_fact": 33,
+    "turns_to_fact": 15,
+    "conversational_turns_to_fact": 18,
     "tool_calls_to_fact": 18,
-    "output_tokens_to_fact": 224,
-    "billable_tokens_to_fact": 156152.64999999997,
+    "output_tokens_to_fact": 158,
+    "billable_tokens_to_fact": 75555.0,
     "context_tokens_at_fact": 45342,
-    "usd_to_fact_alloc": 0.5036336202902881,
+    "usd_to_fact_alloc": 0.2436848697798771,
     "usd_to_fact_basis": "billable_token_share",
     "mistake_committed": false,
     "first_mistake_action_index": null,
@@ -148,7 +149,7 @@
   "end_state_manifest_sha256": "6b2b029bedb7a46838edb0848547ec49864f61b176c86764ab1ab2534133366d",
   "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/legs/2/end-state.tar",
   "rescore_meta": {
-    "rescored_utc": "2026-07-30T11:34:03.610522+00:00",
-    "original_result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-verifiable-s0/legs/2/artifacts/result.json"
+    "rescored_utc": "2026-08-17T10:29:50.562445+00:00",
+    "original_result_path": "/Users/swapnanilsaha/dev/vectr/results/longitudinal/release_via_ci-proxy-verifiable-s0/legs/2/artifacts/result.json"
   }
 }

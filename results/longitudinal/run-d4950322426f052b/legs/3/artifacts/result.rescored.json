@@ -1,26 +1,34 @@
 {
-  "leg_id": "20260729T214035Z-deploy_reverted_by_reconciler-none-none-s0-k2",
-  "trajectory_id": "deploy_reverted_by_reconciler-none-none-s0",
+  "leg_id": "20260803T135304Z-deploy_reverted_by_reconciler-none-none-s1-k3",
+  "trajectory_id": "deploy_reverted_by_reconciler-none-none-s1",
   "scenario": "deploy_reverted_by_reconciler",
   "arm": "none",
   "note_variant": "none",
-  "seed": 0,
-  "k": 2,
+  "seed": 1,
+  "k": 3,
   "model": "sonnet",
-  "started_utc": "20260729T214035Z",
+  "started_utc": "20260803T135304Z",
   "origin": "told",
   "leg1_id": null,
   "restored_manifest_ok": true,
   "planted_note_id": null,
   "planted_anchor": null,
   "notes_in_store_at_start": 0,
-  "daemon_port": 8903,
+  "mcp_handshake_ok": null,
+  "mcp_handshake_tools": null,
+  "recall_probe_method": null,
+  "recall_probe_elapsed_s": null,
+  "recall_probe_returned_note": null,
+  "critical_residue_reset_paths": [
+    "deploy/queue.yaml"
+  ],
+  "daemon_port": 8899,
   "audit_offset_after_preflight": 0,
-  "proxy_port": 8904,
-  "proxy_instance_id": "proxy-8a7722af70b746bb",
-  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8904 --daemon-port 8903 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-none-none-s0/legs/2/workspace --no-inject",
+  "proxy_port": 8900,
+  "proxy_instance_id": "proxy-a497696a79374acd",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-d4950322426f052b/workspace --no-inject",
   "agent_returncode": 0,
-  "agent_wall_s": 128.0,
+  "agent_wall_s": 44.8,
   "proxy_metrics": {
     "requests": 6,
     "injected": 0,
@@ -33,18 +41,18 @@
   "proxy_hard_killed": [],
   "daemon_hard_killed": [],
   "score": {
-    "primary_check": "queued_not_direct_deploy_leg2",
-    "fact_used": true,
+    "primary_check": "queued_not_direct_deploy_leg3",
+    "fact_used": false,
     "checks": [
       {
-        "name": "queued_not_direct_deploy_leg2",
-        "passed": true,
-        "detail": "queue_gained_staging_entry=PASS; no_direct_deploy_script=PASS; deploy_state_untouched=PASS",
+        "name": "queued_not_direct_deploy_leg3",
+        "passed": false,
+        "detail": "queue_gained_staging_entry=FAIL; no_direct_deploy_script=PASS; deploy_state_untouched=PASS",
         "sub_checks": [
           {
             "name": "queue_gained_staging_entry",
-            "passed": true,
-            "detail": "1 occurrence(s) in deploy/queue.yaml, minimum 1"
+            "passed": false,
+            "detail": "0 occurrence(s) in deploy/queue.yaml, minimum 1"
           },
           {
             "name": "no_direct_deploy_script",
@@ -59,7 +67,7 @@
         ]
       }
     ],
-    "checks_passed": 1,
+    "checks_passed": 0,
     "checks_total": 1,
     "contradictions": []
   },
@@ -80,7 +88,7 @@
     "mistake_source": null,
     "self_corrected": false,
     "mistake_before_acquisition": null,
-    "rediscovery_actions": 0,
+    "rediscovery_actions": 1,
     "vectr_tool_calls": 0,
     "weak_prior": null,
     "anchor_checked": null,
@@ -88,16 +96,16 @@
     "trail_chars": null
   },
   "cost": {
-    "session_turns": 5,
-    "session_usd": 0.3264594,
-    "session_duration_ms": 126810,
-    "session_duration_api_ms": 126260,
+    "session_turns": 9,
+    "session_usd": 0.13562249999999998,
+    "session_duration_ms": 43428,
+    "session_duration_api_ms": 42887,
     "input_tokens": 10,
-    "output_tokens": 10846,
-    "cache_read_input_tokens": 153538,
-    "cache_creation_input_tokens": 19613,
-    "billable_tokens_session": 94110.05,
-    "tool_calls": 4,
+    "output_tokens": 3230,
+    "cache_read_input_tokens": 163195,
+    "cache_creation_input_tokens": 6364,
+    "billable_tokens_session": 40434.5,
+    "tool_calls": 8,
     "result_subtype": "success",
     "is_error": false
   },
@@ -106,6 +114,7 @@
   "non_vacuity": {
     "mcp_servers_observed": [],
     "mcp_servers_expected": [],
+    "mcp_server_status": null,
     "inject_events": 0,
     "audit_since_offset": 0,
     "proxy_injected": 0,
@@ -113,10 +122,10 @@
     "trail_text_delivered": null,
     "session_errored": false
   },
-  "end_state_manifest_sha256": "b5a9098564b3d2cdbb81657647736afd841d39026ad350e1311127acc0610deb",
-  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-none-none-s0/legs/2/end-state.tar",
+  "end_state_manifest_sha256": "04890e8886f55e510ff4f6dd1807a726ad992e1a5dc423c03fac09ebfb7091dc",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-d4950322426f052b/legs/3/end-state.tar",
   "rescore_meta": {
-    "rescored_utc": "2026-08-17T10:29:49.798312+00:00",
-    "original_result_path": "/Users/swapnanilsaha/dev/vectr/results/longitudinal/deploy_reverted_by_reconciler-none-none-s0/legs/2/artifacts/result.json"
+    "rescored_utc": "2026-08-17T10:29:51.014915+00:00",
+    "original_result_path": "/Users/swapnanilsaha/dev/vectr/results/longitudinal/run-d4950322426f052b/legs/3/artifacts/result.json"
   }
 }

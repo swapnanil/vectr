@@ -99,6 +99,7 @@
     "censored": true,
     "censor_reason": "fact never acquired",
     "turns_to_fact": null,
+    "conversational_turns_to_fact": null,
     "tool_calls_to_fact": null,
     "output_tokens_to_fact": null,
     "billable_tokens_to_fact": null,
@@ -113,7 +114,7 @@
     "rediscovery_actions": 0,
     "vectr_tool_calls": 0,
     "weak_prior": null,
-    "anchor_checked": null,
+    "anchor_checked": true,
     "verify_command_ran": null,
     "trail_chars": null
   },
@@ -148,7 +149,7 @@
   "end_state_manifest_sha256": "03f905936c3cc356b5e96ded9298db5e410de8dbcbb89b2b805e80ca21aa27f0",
   "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-provenance-s0/legs/2/end-state.tar",
   "rescore_meta": {
-    "rescored_utc": "2026-07-30T11:34:03.521713+00:00",
-    "original_result_path": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/release_via_ci-proxy-provenance-s0/legs/2/artifacts/result.json"
+    "rescored_utc": "2026-08-17T10:29:50.447464+00:00",
+    "original_result_path": "/Users/swapnanilsaha/dev/vectr/results/longitudinal/release_via_ci-proxy-provenance-s0/legs/2/artifacts/result.json"
   }
 }

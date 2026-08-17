@@ -1,19 +1,27 @@
 {
-  "leg_id": "20260730T061550Z-deploy_reverted_by_reconciler-proxy-provenance-s0-k3",
-  "trajectory_id": "deploy_reverted_by_reconciler-proxy-provenance-s0",
+  "leg_id": "20260803T135515Z-deploy_reverted_by_reconciler-proxy-plain-s1-k3",
+  "trajectory_id": "deploy_reverted_by_reconciler-proxy-plain-s1",
   "scenario": "deploy_reverted_by_reconciler",
   "arm": "proxy",
-  "note_variant": "provenance",
-  "seed": 0,
+  "note_variant": "plain",
+  "seed": 1,
   "k": 3,
   "model": "sonnet",
-  "started_utc": "20260730T061550Z",
+  "started_utc": "20260803T135515Z",
   "origin": "told",
   "leg1_id": null,
   "restored_manifest_ok": true,
   "planted_note_id": null,
   "planted_anchor": "note:1",
   "notes_in_store_at_start": 1,
+  "mcp_handshake_ok": null,
+  "mcp_handshake_tools": null,
+  "recall_probe_method": null,
+  "recall_probe_elapsed_s": null,
+  "recall_probe_returned_note": null,
+  "critical_residue_reset_paths": [
+    "deploy/queue.yaml"
+  ],
   "daemon_port": 8899,
   "preflight": {
     "turn1_text_only": {
@@ -24,7 +32,7 @@
     },
     "turn2_with_file_anchor": {
       "item_count": 1,
-      "chars": 791,
+      "chars": 640,
       "anchor_ids": [
         "note:1"
       ],
@@ -34,17 +42,16 @@
     "reachable_channel": "proactive"
   },
   "planted_note_reachable_preflight": true,
-  "trail_text_delivered": true,
-  "audit_offset_after_preflight": 875,
+  "audit_offset_after_preflight": 759,
   "proxy_port": 8900,
-  "proxy_instance_id": "proxy-341284c5f2b64379",
-  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-provenance-s0/workspace",
+  "proxy_instance_id": "proxy-c1e9cf3995134cc0",
+  "proxy_command": "/Users/swapnanilsaha/Library/Python/3.14/bin/vectr proxy --port 8900 --daemon-port 8899 --path /Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/workspace",
   "agent_returncode": 0,
-  "agent_wall_s": 66.3,
+  "agent_wall_s": 40.3,
   "proxy_metrics": {
-    "requests": 7,
+    "requests": 5,
     "injected": 1,
-    "inject_skipped": 5,
+    "inject_skipped": 3,
     "inject_skipped_not_appendable": 1,
     "inject_bypassed_error": 0,
     "upstream_errors": 0,
@@ -54,17 +61,17 @@
   "daemon_hard_killed": [],
   "score": {
     "primary_check": "queued_not_direct_deploy_leg3",
-    "fact_used": true,
+    "fact_used": false,
     "checks": [
       {
         "name": "queued_not_direct_deploy_leg3",
-        "passed": true,
-        "detail": "queue_gained_staging_entry=PASS; no_direct_deploy_script=PASS; deploy_state_untouched=PASS",
+        "passed": false,
+        "detail": "queue_gained_staging_entry=FAIL; no_direct_deploy_script=PASS; deploy_state_untouched=PASS",
         "sub_checks": [
           {
             "name": "queue_gained_staging_entry",
-            "passed": true,
-            "detail": "1 occurrence(s) in deploy/queue.yaml, minimum 1"
+            "passed": false,
+            "detail": "0 occurrence(s) in deploy/queue.yaml, minimum 1"
           },
           {
             "name": "no_direct_deploy_script",
@@ -79,7 +86,7 @@
         ]
       }
     ],
-    "checks_passed": 1,
+    "checks_passed": 0,
     "checks_total": 1,
     "contradictions": []
   },
@@ -100,7 +107,7 @@
     "mistake_source": null,
     "self_corrected": false,
     "mistake_before_acquisition": null,
-    "rediscovery_actions": 0,
+    "rediscovery_actions": 1,
     "vectr_tool_calls": 0,
     "weak_prior": null,
     "anchor_checked": null,
@@ -108,16 +115,16 @@
     "trail_chars": null
   },
   "cost": {
-    "session_turns": 6,
-    "session_usd": 0.1709442,
-    "session_duration_ms": 64959,
-    "session_duration_api_ms": 64266,
-    "input_tokens": 282,
-    "output_tokens": 4972,
-    "cache_read_input_tokens": 196474,
-    "cache_creation_input_tokens": 6096,
-    "billable_tokens_session": 52409.4,
-    "tool_calls": 5,
+    "session_turns": 5,
+    "session_usd": 0.1217904,
+    "session_duration_ms": 38863,
+    "session_duration_api_ms": 38345,
+    "input_tokens": 230,
+    "output_tokens": 3024,
+    "cache_read_input_tokens": 128928,
+    "cache_creation_input_tokens": 6177,
+    "billable_tokens_session": 35964.05,
+    "tool_calls": 4,
     "result_subtype": "success",
     "is_error": false
   },
@@ -126,19 +133,20 @@
   "non_vacuity": {
     "mcp_servers_observed": [],
     "mcp_servers_expected": [],
+    "mcp_server_status": null,
     "inject_events": 1,
-    "audit_since_offset": 875,
+    "audit_since_offset": 759,
     "proxy_injected": 1,
     "notes_in_store_at_start": 1,
-    "trail_text_delivered": true,
+    "trail_text_delivered": null,
     "session_errored": false,
     "planted_anchor_injections": 1,
     "planted_note_retrieved": true
   },
-  "end_state_manifest_sha256": "b5a9098564b3d2cdbb81657647736afd841d39026ad350e1311127acc0610deb",
-  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/deploy_reverted_by_reconciler-proxy-provenance-s0/legs/3/end-state.tar",
+  "end_state_manifest_sha256": "3f374e3d539b3cda33ab0ecc921d3e84066636700a8deb317f2779fa4a23f649",
+  "end_state_tar": "/Users/swapnanilsaha/vectr-eval-runs/longitudinal-s0/run-6c18632a382cc8c4/legs/3/end-state.tar",
   "rescore_meta": {
-    "rescored_utc": "2026-08-17T10:29:49.847959+00:00",
-    "original_result_path": "/Users/swapnanilsaha/dev/vectr/results/longitudinal/deploy_reverted_by_reconciler-proxy-provenance-s0/legs/3/artifacts/result.json"
+    "rescored_utc": "2026-08-17T10:29:50.812644+00:00",
+    "original_result_path": "/Users/swapnanilsaha/dev/vectr/results/longitudinal/run-6c18632a382cc8c4/legs/3/artifacts/result.json"
   }
 }
