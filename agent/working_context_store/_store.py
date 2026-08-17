@@ -402,12 +402,43 @@ def _format_index_line(
 # constant rather than in config.yaml (same precedent as trigger_engine.py's
 # _HUMAN_FRAME/_AGENT_FRAME/_AUTO_FRAME provenance-framing templates: fixed
 # text shaping how a fact is PRESENTED, never text that inspects or reroutes
-# on prompt/query content). Field order and wording follow the design doc's
-# literal template.
+# on prompt/query content). Wording is the design doc's literal template
+# (memoization-l1-capture-design.md §4.3); field ORDER is not — the design
+# doc writes the warning last, but every surface that renders this template
+# truncates from the right under a budget (agent/proactive/matcher.py's
+# `_cap()` for the proxy channel; agent/trigger_engine.py's
+# `_trim_full_text_to_cap()` for the hook full-tier channel), so a
+# right-truncation can only ever remove trailing text.
+#
+# UPG-DETERRENT-TITLE-ONLY: the warning clause is placed FIRST so it can
+# never be the thing a tight budget cuts — before this, only the proxy
+# channel protected it, via a runtime `rpartition(". ")` reorder local to
+# `_revoked_summary()`; the hook channel's `_trim_full_text_to_cap()` ran
+# the RAW (unreordered) template through a generic right-truncation with no
+# template awareness at all, so a revoked note routed through a tight
+# per-kind cap (e.g. `gotcha`'s 100-token/400-char cap) could lose the
+# warning clause ENTIRELY while still rendering "Previously believed: ..."
+# — the exact silent-caveat-loss the design doc's poisoning-mitigation row
+# rules out ("visible caveat, never silent suppression"). Putting the
+# warning first in the template itself (rather than reordering it per
+# caller) protects it on every surface uniformly, and lets
+# `_revoked_summary()`'s runtime reorder be deleted as redundant.
+#
+# `reason` is placed second (ahead of the quoted summary) for the same
+# right-truncation reason: `summary` is already a bounded one-line title-or-
+# first-line excerpt (`_note_title()`, <=80 chars, itself the design doc's
+# literal "<one-line content summary>" field — full multi-line content is
+# deliberately never rendered here, see tests/test_note_events.py::
+# TestAntiMemoryRendering::test_revoked_note_renders_deterrent_not_raw_content),
+# while `reason` is free text with no cap of its own — ordering it before
+# the already-small summary means a right-truncation sacrifices the summary
+# first, matching benchmarks/anti_memory/DESIGN.md §13's T0-4 probe (reason
+# must survive verbatim on the proxy surface) by construction instead of by
+# accident of today's generous default budgets.
 _ANTI_MEMORY_TEMPLATE = (
+    'Do not re-derive this from other sources without verification. '
     'Previously believed (recorded {created_date}, revoked {revoked_date}, '
-    'reason: {reason}): "{summary}". Do not re-derive this from other '
-    'sources without verification.'
+    'reason: {reason}): "{summary}".'
 )
 
 

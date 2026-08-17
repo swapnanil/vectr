@@ -316,6 +316,33 @@ class TestAntiMemoryRendering:
         assert note_id in fired_ids
         assert "Previously believed" in formatted
 
+    def test_revoked_note_deterrent_warning_survives_hook_channel_trim(self, tmp_path) -> None:
+        """UPG-DETERRENT-TITLE-ONLY: agent/trigger_engine.py's
+        `_trim_full_text_to_cap()` (the hook full-tier channel's own
+        per-kind cap trim, e.g. gotcha's 100-token/400-char cap) truncates
+        the raw `_format_full_block()` text with no template awareness at
+        all -- unlike the proxy channel, which used to reorder the
+        deterrent clause itself at render time. A long free-text
+        revocation `reason` (unbounded, no cap of its own) could previously
+        push the trim's right-truncation past the entire "Previously
+        believed (...)" clause and lose the "Do not re-derive..." warning
+        entirely -- exactly the silent-caveat-loss the design doc's
+        poisoning-mitigation row forbids ("visible caveat, never silent
+        suppression"). `_ANTI_MEMORY_TEMPLATE` now puts the warning FIRST,
+        so it survives any right-truncation as long as the cap fits the
+        warning sentence alone (~65 chars, far under every configured
+        per-kind cap)."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        long_reason = "this note was wrong because " + "the underlying assumption changed " * 12
+        note_id = store.remember(
+            ws, "a gotcha about retry timeouts", kind="gotcha",
+            triggers=[{"event": "session-start"}],
+        )
+        store.revoke_note(ws, note_id, long_reason)
+        formatted, fired_ids = store.fire_and_format(ws, event="session-start")
+        assert note_id in fired_ids
+        assert "Do not re-derive this from other sources without verification." in formatted
+
 
 class TestProxyAnchorDrift:
     def test_anchor_drift_appends_stale_flagged_event(self, tmp_path) -> None:
