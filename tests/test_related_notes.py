@@ -601,3 +601,137 @@ class TestRevokedRelatedNotesOverFetch:
         revoked = store.revoked_related_notes(WS, base_id, limit=2, min_similarity=0.5)
 
         assert [r["note_id"] for r in revoked] == [revoked_a_id, revoked_b_id]
+
+
+class TestRevokedRelatedNotesOverFetchDepth:
+    """UPG-RELATED-REVOKED-OVERFETCH-DEPTH: the revoked-path candidate pool
+    (`n_query`) must be sized off `revoked_query_floor`, NOT off
+    `limit * 3` — with the shipped `revoked_limit: 1`, `limit * 3` is only
+    3, so as few as three closer ACTIVE near-duplicates on the same
+    now-corrected topic can crowd a real revoked near-duplicate out of the
+    pool before the lifecycle-state filter even runs. This is a materially
+    different scenario from `TestRevokedRelatedNotesOverFetch` above (which
+    uses only two active neighbours and a `limit=2` pool of 5 — already
+    wide enough to hold the whole 5-note collection under the OLD formula
+    too, so it does not exercise this defect).
+    """
+
+    def test_several_closer_active_near_duplicates_do_not_hide_a_real_revoked_one(
+        self, tmp_path
+    ) -> None:
+        """Mirrors the shipped defaults: `revoked_limit=1`,
+        `min_similarity=0.75` (see agent/config.yaml
+        memory_write.related_notes). Three active near-duplicates all rank
+        ABOVE the revoked one and all clear the similarity floor. Against
+        the pre-fix `n_query = min(max(limit * 3, limit + 1), col_count)`
+        formula (limit=1 -> n_query=3), the vector query only ever returns
+        the three active notes and the revoked one is never fetched at all
+        — this assertion fails on that code and passes once `n_query` is
+        floored by `revoked_query_floor` instead.
+        """
+        base = "WorkspaceLock.acquire takes a PID-scoped lock depth"
+        revoked = "WorkspaceLock.acquire grabs a PID-scoped lock depth (revoked)"
+        active_a = "WorkspaceLock.acquire holds a PID-scoped lock depth a"
+        active_b = "WorkspaceLock.acquire keeps a PID-scoped lock depth b"
+        active_c = "WorkspaceLock.acquire retains a PID-scoped lock depth c"
+        embedder = _ControlledEmbedder({
+            base: BASE_VEC,
+            # Three ACTIVE neighbours all rank closer than the revoked one.
+            active_a: _unit_vector_at_cosine(0.99),
+            active_b: _unit_vector_at_cosine(0.98),
+            active_c: _unit_vector_at_cosine(0.97),
+            # The revoked near-duplicate is real (clears min_similarity
+            # 0.75) but ranks 4th — outside a pool of 3.
+            revoked: _unit_vector_at_cosine(0.90),
+        })
+        store = _store(tmp_path, embedder)
+        store.remember(WS, active_a)
+        store.remember(WS, active_b)
+        store.remember(WS, active_c)
+        revoked_id = store.remember(WS, revoked)
+        base_id = store.remember(WS, base)
+
+        assert store.revoke_note(WS, revoked_id, reason="was wrong") is True
+
+        found = store.revoked_related_notes(WS, base_id, limit=1, min_similarity=0.75)
+
+        assert [r["note_id"] for r in found] == [revoked_id]
+
+
+class TestRevokedRelatedNotesQueryDepthFormula:
+    """Pins the exact `n_query` formula at the smallest possible level —
+    the literal `n_results` value passed to the ChromaDB query — rather
+    than only inferring it indirectly through which notes come back."""
+
+    @staticmethod
+    def _padding_content_and_vectors(n: int) -> dict[str, list[float]]:
+        """`n` distinct note contents, each mapped to one of a small set of
+        one-hot 4-d unit vectors (repeats across distinct note_ids are fine
+        — ChromaDB dedups by id, not by vector). Only used to inflate
+        `col_count`; these notes' actual similarity to anything else is
+        irrelevant to the tests that use this helper."""
+        one_hots = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        return {f"padding note {i}": one_hots[i % len(one_hots)] for i in range(n)}
+
+    def test_n_query_uses_the_configured_floor_not_limit_times_three(self, tmp_path) -> None:
+        from agent.config import MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR
+
+        base = "n_query formula base"
+        # Pad the collection well past the floor so `col_count` never caps
+        # `n_query` below it — that would make this test pass by accident.
+        pad_n = MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR + 50
+        vectors = self._padding_content_and_vectors(pad_n)
+        vectors[base] = BASE_VEC
+        embedder = _ControlledEmbedder(vectors)
+        store = _store(tmp_path, embedder)
+        for i in range(pad_n):
+            store.remember(WS, f"padding note {i}")
+        base_id = store.remember(WS, base)
+
+        captured: dict[str, int] = {}
+        real_query = store._notes_col.query
+
+        def _spy_query(*args, **kwargs):
+            captured["n_results"] = kwargs.get("n_results")
+            return real_query(*args, **kwargs)
+
+        store._notes_col.query = _spy_query
+
+        # limit=1 -> limit * 3 == 3, far below the floor: the floor must win.
+        store.revoked_related_notes(WS, base_id, limit=1, min_similarity=0.5)
+        assert captured["n_results"] == MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR
+
+        # A large enough limit makes `limit * 3` exceed the floor: the
+        # formula's `max()` must still pick it up rather than clamping to
+        # the floor unconditionally.
+        big_limit = (MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR // 3) + 5
+        store.revoked_related_notes(WS, base_id, limit=big_limit, min_similarity=0.5)
+        assert captured["n_results"] == big_limit * 3
+
+    def test_active_path_formula_is_unchanged(self, tmp_path) -> None:
+        """UPG-RELATED-REVOKED-OVERFETCH-DEPTH deliberately touches only the
+        revoked path — `related_active_notes`'s pool still tracks the
+        active target class (~99% of a typical corpus), which the pre-fix
+        `limit * 3` over-fetch already served correctly. This pins that the
+        active path's formula was NOT changed alongside the revoked path's."""
+        base = "active n_query formula base"
+        vectors = self._padding_content_and_vectors(200)
+        vectors = {k.replace("padding note", "active padding note"): v for k, v in vectors.items()}
+        vectors[base] = BASE_VEC
+        embedder = _ControlledEmbedder(vectors)
+        store = _store(tmp_path, embedder)
+        for i in range(200):
+            store.remember(WS, f"active padding note {i}")
+        base_id = store.remember(WS, base)
+
+        captured: dict[str, int] = {}
+        real_query = store._notes_col.query
+
+        def _spy_query(*args, **kwargs):
+            captured["n_results"] = kwargs.get("n_results")
+            return real_query(*args, **kwargs)
+
+        store._notes_col.query = _spy_query
+
+        store.related_active_notes(WS, base_id, limit=3, min_similarity=0.5)
+        assert captured["n_results"] == 9  # unchanged limit * 3 formula

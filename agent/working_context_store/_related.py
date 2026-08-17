@@ -15,6 +15,7 @@ import logging
 from typing import Any, TYPE_CHECKING, TypedDict
 
 from agent.chroma_dispatch import timed_chroma_call
+from agent.config import MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR
 
 if TYPE_CHECKING:
     from agent.working_context_store._store import WorkingContextStore
@@ -228,13 +229,26 @@ def revoked_related_notes(
     happens to be recalled later. Folding this into `related_active_notes`
     would force one function to answer two different questions behind one
     boolean, and would require every existing caller of that function to
-    add revoked-state handling it doesn't want. Same query shape as
-    `related_active_notes` (see that function's docstring for the
-    single-worker chroma-executor constraint this also respects, and the
-    over-fetch rationale), filtering for state == 'revoked' instead of
-    'active', and returning the revocation's own date/reason instead of
-    kind/priority/created_at — a caller rendering this as a deterrent
-    needs WHEN and WHY it was revoked, not the note's original metadata.
+    add revoked-state handling it doesn't want. Otherwise the same shape
+    as `related_active_notes` (see that function's docstring for the
+    single-worker chroma-executor constraint this also respects), filtering
+    for state == 'revoked' instead of 'active', and returning the
+    revocation's own date/reason instead of kind/priority/created_at — a
+    caller rendering this as a deterrent needs WHEN and WHY it was revoked,
+    not the note's original metadata.
+
+    The candidate-pool depth (`n_query` below) is DELIBERATELY NOT the same
+    formula as `related_active_notes` (UPG-RELATED-REVOKED-OVERFETCH-DEPTH):
+    that function's `limit * 3` over-fetch is sized for a target class
+    (active notes) that is ~99% of a typical corpus, so a handful of extra
+    candidates reliably absorbs whatever the post-search SQL filters drop.
+    Revoked notes are the opposite: rare by design (measured at 0.35% of a
+    live 565-note corpus) and exactly the case where several closer ACTIVE
+    notes on the same now-corrected topic are likely to exist and would
+    otherwise crowd a real revoked near-duplicate out of a shallow pool
+    entirely — the config key doc for `revoked_query_floor` (agent/
+    config.yaml, memory_write.related_notes) has the full numeric
+    justification and the measured latency cost of searching deeper.
 
     Returns [] immediately (never raises) when there is no embedder/notes
     collection attached, when `limit <= 0`, or on ANY internal failure —
@@ -264,7 +278,11 @@ def revoked_related_notes(
         if col_count == 0:
             return []
 
-        n_query = min(max(limit * 3, limit + 1), col_count)
+        # Decoupled from `limit` on purpose — see this function's
+        # docstring and the `revoked_query_floor` config comment for why a
+        # rare target class needs a much deeper pool than a small render
+        # limit would otherwise imply.
+        n_query = min(max(limit * 3, MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR), col_count)
         with timed_chroma_call("query"):
             results = col.query(query_embeddings=[vec], n_results=n_query)
 
