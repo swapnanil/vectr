@@ -1326,6 +1326,7 @@ MEMORY_WRITE_RELATED_LIMIT: int = int(_related_notes_cfg["limit"])
 MEMORY_WRITE_RELATED_MIN_SIMILARITY: float = float(_related_notes_cfg["min_similarity"])
 MEMORY_WRITE_RELATED_REVOKED_ENABLED: bool = bool(_related_notes_cfg["revoked_enabled"])
 MEMORY_WRITE_RELATED_REVOKED_LIMIT: int = int(_related_notes_cfg["revoked_limit"])
+MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR: int = int(_related_notes_cfg["revoked_query_floor"])
 
 _user_quote_cfg: dict[str, Any] = _mem_write_cfg["user_quote"]
 MEMORY_WRITE_USER_QUOTE_MIN_CHARS: int = int(_user_quote_cfg["min_chars"])

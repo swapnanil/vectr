@@ -1827,6 +1827,37 @@ memory_write:
     # point without turning a routine write into a multi-item warning
     # digest.
     revoked_limit: 1
+    # UPG-RELATED-REVOKED-OVERFETCH-DEPTH: how many nearest-neighbour
+    # candidates the revoked-path vector query pulls BEFORE the folded-
+    # lifecycle-state filter runs, independent of `revoked_limit` above.
+    # `revoked_limit` bounds what gets RENDERED; this bounds what gets
+    # SEARCHED — the two must not share one number. On a measured live
+    # 565-note corpus, notes in the `revoked` state were 0.35% of the
+    # corpus (2 of 565) while active notes were ~99% — so a revoked
+    # near-duplicate is exactly the rare case that several closer ACTIVE
+    # notes on the same (now-corrected) topic can crowd out of a shallow
+    # candidate pool entirely, even though it is the single highest-value
+    # thing this offer can surface. Deriving the pool size from
+    # `revoked_limit * 3` (the active path's formula, appropriate there
+    # because its target class is ~99% of the corpus) gives a pool of only
+    # 3 for the shipped `revoked_limit: 1` — three closer active near-
+    # duplicates are then enough to hide a real revoked one every time.
+    # This floor is a flat number, not a multiple of the collection size:
+    # the crowding-out risk comes from how many active notes cluster
+    # around ONE topic a user revisited, which is bounded by realistic
+    # human note-taking volume on a single subject, not by how large the
+    # whole corpus has grown — so the same floor is sane whether the
+    # collection holds 5 notes (this floor collapses to `col_count` via
+    # the `min()` below, i.e. "search everything", trivially cheap) or
+    # 50,000 (this floor keeps the query bounded and cheap regardless of
+    # corpus growth). 100 is a generous multiple of any measured or
+    # plausible single-topic active-note cluster size, while measured
+    # latency cost stays negligible for a query that already runs inline
+    # on every remember() call: on a synthetic 50,000-vector collection,
+    # ChromaDB .query() at n_results=100 costs ~0.94ms mean versus ~0.59ms
+    # at n_results=3 — under 0.4ms of added latency for roughly 33x the
+    # search depth.
+    revoked_query_floor: 100
 
   user_quote:
     # UPG-MEM-PROVENANCE-USER-STATED: a note may carry a verbatim excerpt of
