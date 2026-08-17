@@ -98,7 +98,7 @@ def _mock_service():
     # tests below override this per-case (return_value or side_effect) when
     # they need a specific note_id or an error path.
     svc.remember_with_extras.return_value = RememberOutcome(
-        note_id=42, related=[], proxy_anchor_suggestions=[],
+        note_id=42, related=[], revoked_related=[], proxy_anchor_suggestions=[],
     )
     # UPG-SCOPE-SURFACE-BACK: the MCP remember confirmation looks up the
     # resolved note via get_note() to surface its scope — a real WorkingNote
@@ -355,7 +355,7 @@ class TestAdaptiveToolRegistration:
         sid = "sess-remember-005"
         svc = MagicMock()
         svc.remember_with_extras.return_value = RememberOutcome(
-            note_id=1, related=[], proxy_anchor_suggestions=[],
+            note_id=1, related=[], revoked_related=[], proxy_anchor_suggestions=[],
         )
         svc.search_only = False
 
@@ -1597,6 +1597,7 @@ class TestVectrRememberWriteTimeOffersSuffixRendering:
                 "kind": "finding", "priority": "medium", "similarity": 0.81,
                 "created_at": 0.0,
             }],
+            revoked_related=[],
             proxy_anchor_suggestions=[],
         )
         result = handle_tools_call("vectr_remember", {"content": "a new note"}, svc)
@@ -1617,6 +1618,7 @@ class TestVectrRememberWriteTimeOffersSuffixRendering:
                 "note_id": 7, "title": long_title, "kind": "finding",
                 "priority": "medium", "similarity": 0.9, "created_at": 0.0,
             }],
+            revoked_related=[],
             proxy_anchor_suggestions=[],
         )
         result = handle_tools_call("vectr_remember", {"content": "a new note"}, svc)
@@ -1629,10 +1631,56 @@ class TestVectrRememberWriteTimeOffersSuffixRendering:
         result = handle_tools_call("vectr_remember", {"content": "a new note"}, svc)
         assert "Related existing notes" not in result["content"][0]["text"]
 
+    def test_revoked_suffix_present_with_data(self) -> None:
+        svc = _mock_service()
+        svc.remember_with_extras.return_value = RememberOutcome(
+            note_id=42,
+            related=[],
+            revoked_related=[{
+                "note_id": 9, "title": "a belief already marked wrong",
+                "similarity": 0.88, "revoked_date": "2026-08-01",
+                "reason": "turned out to be wrong",
+            }],
+            proxy_anchor_suggestions=[],
+        )
+        result = handle_tools_call("vectr_remember", {"content": "a new note"}, svc)
+        text = result["content"][0]["text"]
+        assert (
+            "DETERRENT — an existing note like this one was already revoked:"
+        ) in text
+        assert (
+            '#9 "a belief already marked wrong" (similarity 0.88, '
+            "revoked 2026-08-01, reason: turned out to be wrong)"
+        ) in text
+        assert "Do not re-derive or restate it without verification" in text
+
+    def test_revoked_suffix_truncates_long_titles_around_60_chars(self) -> None:
+        svc = _mock_service()
+        long_title = "B" * 80
+        svc.remember_with_extras.return_value = RememberOutcome(
+            note_id=42,
+            related=[],
+            revoked_related=[{
+                "note_id": 9, "title": long_title,
+                "similarity": 0.9, "revoked_date": "2026-08-01",
+                "reason": "wrong",
+            }],
+            proxy_anchor_suggestions=[],
+        )
+        result = handle_tools_call("vectr_remember", {"content": "a new note"}, svc)
+        text = result["content"][0]["text"]
+        assert "B" * 57 + "..." in text
+        assert "B" * 80 not in text
+
+    def test_revoked_suffix_absent_when_revoked_related_is_empty(self) -> None:
+        svc = _mock_service()  # default RememberOutcome from _mock_service has revoked_related=[]
+        result = handle_tools_call("vectr_remember", {"content": "a new note"}, svc)
+        assert "DETERRENT" not in result["content"][0]["text"]
+
     def test_proxy_suffix_present_with_data(self) -> None:
         svc = _mock_service()
         svc.remember_with_extras.return_value = RememberOutcome(
-            note_id=42, related=[],
+            note_id=42, related=[], revoked_related=[],
             proxy_anchor_suggestions=["Dockerfile", ".github/workflows/ci.yml"],
         )
         result = handle_tools_call(
@@ -1664,6 +1712,7 @@ class TestVectrRememberWriteTimeOffersSuffixRendering:
                 "note_id": 7, "title": "x", "kind": "finding",
                 "priority": "medium", "similarity": 0.9, "created_at": 0.0,
             }],
+            revoked_related=[],
             proxy_anchor_suggestions=["Dockerfile"],
         )
         result = handle_tools_call(

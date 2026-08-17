@@ -314,7 +314,7 @@ class TestMcpDispatchMemoryOnly:
         from app.service import RememberOutcome
         svc = self._make_mock_service(memory_only=True)
         svc.remember_with_extras.return_value = RememberOutcome(
-            note_id=7, related=[], proxy_anchor_suggestions=[],
+            note_id=7, related=[], revoked_related=[], proxy_anchor_suggestions=[],
         )
 
         result = handle_tools_call("vectr_remember", {"content": "important finding"}, svc)

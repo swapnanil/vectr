@@ -44,6 +44,8 @@ from agent.config import (
     MEMORY_WRITE_RELATED_ENABLED,
     MEMORY_WRITE_RELATED_LIMIT,
     MEMORY_WRITE_RELATED_MIN_SIMILARITY,
+    MEMORY_WRITE_RELATED_REVOKED_ENABLED,
+    MEMORY_WRITE_RELATED_REVOKED_LIMIT,
     MEMORY_WRITE_PROXY_SUGGEST_ENABLED,
     MEMORY_WRITE_PROXY_SUGGEST_LIMIT,
     MEMORY_WRITE_USER_QUOTE_AUTO_BIND_MAX_AGE_SECONDS,
@@ -53,7 +55,7 @@ from agent.eviction_advisor import EvictionAdvisor
 from agent.proxy_anchors import suggest_proxy_anchors
 from agent.trigger_engine import TriggerFireLedger, TurnInjectionLedger, token_estimate
 from agent.version_stamp import compute_version_stamp
-from agent.working_context_store._related import RelatedNote
+from agent.working_context_store._related import RelatedNote, RevokedRelatedNote
 
 logger = logging.getLogger(__name__)
 
@@ -205,13 +207,14 @@ def _format_commit_note_content(
 @dataclass(frozen=True)
 class RememberOutcome:
     """Return shape of `VectrService.remember_with_extras()` — the write
-    itself (`note_id`) plus two strictly-additive write-time offers
+    itself (`note_id`) plus three strictly-additive write-time offers
     computed alongside it (see that method's docstring for the exact
     gating). Never replaces the plain `remember()` -> int contract: this is
     a NEW method, kept separate so existing callers (and the 495+ test call
     sites against `remember()`) are untouched."""
     note_id: int
     related: list[RelatedNote]
+    revoked_related: list[RevokedRelatedNote]
     proxy_anchor_suggestions: list[str]
 
 
@@ -1804,6 +1807,16 @@ class VectrService:
         `agent/working_context_store/_related.py` for the exact contract
         (nearest-by-similarity only, never a contradiction judgment).
 
+        `revoked_related` (UPG-RELATED-REVOKED-DETERRENT): separately, the
+        nearest existing REVOKED note to this one, computed only when
+        `MEMORY_WRITE_RELATED_REVOKED_ENABLED` — the deliberate exception to
+        "active only" above, because a revoked near-duplicate is the single
+        highest-value thing this offer can surface: it catches the caller
+        about to re-assert a belief the user already marked wrong, at write
+        time rather than only when the new note happens to be recalled
+        later. See `agent/working_context_store/_related.py` for why this is
+        a separate lookup rather than a filter change to `related` above.
+
         `proxy_anchor_suggestions`: workspace-relative paths of proxy-anchor
         files present in this workspace (see `agent/proxy_anchors.py`),
         computed only when ALL of: `MEMORY_WRITE_PROXY_SUGGEST_ENABLED`,
@@ -1830,6 +1843,7 @@ class VectrService:
         )
 
         related: list[RelatedNote] = []
+        revoked_related: list[RevokedRelatedNote] = []
         proxy_anchor_suggestions: list[str] = []
         try:
             if MEMORY_WRITE_RELATED_ENABLED and self._context_store is not None:
@@ -1837,6 +1851,13 @@ class VectrService:
                     self._workspace_root,
                     note_id,
                     limit=MEMORY_WRITE_RELATED_LIMIT,
+                    min_similarity=MEMORY_WRITE_RELATED_MIN_SIMILARITY,
+                )
+            if MEMORY_WRITE_RELATED_REVOKED_ENABLED and self._context_store is not None:
+                revoked_related = self._context_store.revoked_related_notes(
+                    self._workspace_root,
+                    note_id,
+                    limit=MEMORY_WRITE_RELATED_REVOKED_LIMIT,
                     min_similarity=MEMORY_WRITE_RELATED_MIN_SIMILARITY,
                 )
             if (
@@ -1853,11 +1874,13 @@ class VectrService:
                 note_id, exc_info=True,
             )
             related = []
+            revoked_related = []
             proxy_anchor_suggestions = []
 
         return RememberOutcome(
             note_id=note_id,
             related=related,
+            revoked_related=revoked_related,
             proxy_anchor_suggestions=proxy_anchor_suggestions,
         )
 

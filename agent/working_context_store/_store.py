@@ -18,7 +18,12 @@ from agent.chroma_dispatch import timed_chroma_call
 from agent.working_context_store._audit import audit
 from agent.working_context_store._encryption import _build_encryptor, _extract_file_paths, _NoteEncryptor
 from agent.working_context_store._events import NOTE_EVENT_ACTORS, NOTE_EVENT_KINDS, fold as _fold_note_events
-from agent.working_context_store._related import RelatedNote, related_active_notes as _related_active_notes
+from agent.working_context_store._related import (
+    RelatedNote,
+    RevokedRelatedNote,
+    related_active_notes as _related_active_notes,
+    revoked_related_notes as _revoked_related_notes,
+)
 from agent.working_context_store._types import (
     DEFAULT_KIND,
     DEFAULT_PROVENANCE,
@@ -3801,5 +3806,24 @@ class WorkingContextStore:
         asserts a contradiction, never mutates anything, and never raises).
         """
         return _related_active_notes(
+            self, workspace, note_id, limit=limit, min_similarity=min_similarity,
+        )
+
+    def revoked_related_notes(
+        self,
+        workspace: str,
+        note_id: int,
+        *,
+        limit: int,
+        min_similarity: float,
+    ) -> list[RevokedRelatedNote]:
+        """Write-time deterrent lookup (UPG-RELATED-REVOKED-DETERRENT) — the
+        `limit` nearest EXISTING notes to `note_id` whose folded lifecycle
+        state is `revoked`, above `min_similarity`. Thin delegate to
+        `agent.working_context_store._related` (see that module's docstring
+        for the full contract and why this is a separate function from
+        `related_active_notes` rather than a filter change to it).
+        """
+        return _revoked_related_notes(
             self, workspace, note_id, limit=limit, min_similarity=min_similarity,
         )

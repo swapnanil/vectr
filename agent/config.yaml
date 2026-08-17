@@ -1803,6 +1803,30 @@ memory_write:
     # CLOSENESS (is this candidate worth the caller's attention at all),
     # never for correctness (that judgment always stays caller-side).
     min_similarity: 0.75
+    # UPG-RELATED-REVOKED-DETERRENT: separately from the ACTIVE candidates
+    # above, additionally surface the nearest REVOKED near-duplicate (if any
+    # clears min_similarity above) as a deterrent line naming its id, title,
+    # similarity, revocation date and reason — a pointer to look at, not the
+    # note's raw content (the existing _ANTI_MEMORY_TEMPLATE in
+    # agent/working_context_store/_store.py is for a DIFFERENT delivery
+    # path: injecting a revoked note's own content inline with a warning;
+    # this is a nearest-neighbour pointer alongside a fresh write, same
+    # shape as the active-candidate rendering above, so it reuses THAT
+    # rendering's shape instead). This is the single highest-value case the
+    # whole related-notes feature can surface: it catches an agent about to
+    # re-assert a belief the user already marked wrong, at the moment of
+    # writing rather than only when the new note happens to be recalled
+    # later. A separate flag from `enabled` above because it renders
+    # materially different content (a deterrent, not a similarity nudge)
+    # and an operator may want the ordinary near-duplicate nudge without
+    # the revoked-note callout.
+    revoked_enabled: true
+    # Capped at 1 by design, not a ranked list like the active candidates
+    # above: this is a deterrent flag ("you already revoked something like
+    # this"), not a browsing surface — one match is enough to make the
+    # point without turning a routine write into a multi-item warning
+    # digest.
+    revoked_limit: 1
 
   user_quote:
     # UPG-MEM-PROVENANCE-USER-STATED: a note may carry a verbatim excerpt of

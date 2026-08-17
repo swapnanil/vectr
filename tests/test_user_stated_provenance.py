@@ -826,7 +826,7 @@ def _mcp_service(*, recent_user_message: str | None = None):
 
     svc = MagicMock()
     svc.remember_with_extras.return_value = RememberOutcome(
-        note_id=7, related=[], proxy_anchor_suggestions=[],
+        note_id=7, related=[], revoked_related=[], proxy_anchor_suggestions=[],
     )
 
     def _get_note(_note_id):

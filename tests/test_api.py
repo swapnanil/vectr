@@ -708,7 +708,7 @@ class TestClientAttributionHeader:
         from app.service import RememberOutcome
         app.state.service.search_only = False
         app.state.service.remember_with_extras.return_value = RememberOutcome(
-            note_id=7, related=[], proxy_anchor_suggestions=[],
+            note_id=7, related=[], revoked_related=[], proxy_anchor_suggestions=[],
         )
         return client.post(
             "/mcp",
