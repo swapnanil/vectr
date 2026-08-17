@@ -68,9 +68,12 @@ from agent.working_context_store._types import (
 from agent.working_context_store._user_quote import (
     AUTO_QUOTE_NOT_CONTAINED,
     AUTO_QUOTE_NO_RECENT_TURN,
+    AUTO_QUOTE_TOO_LARGE_TO_SEARCH,
     AUTO_QUOTE_TOO_SHORT,
     USER_QUOTE_NOT_CONTAINED,
     USER_QUOTE_TOO_SHORT,
+    _longest_common_span,
+    _normalize_with_offsets,
     bind_user_quote,
     bind_user_quote_auto,
     normalize_for_binding,
@@ -137,6 +140,10 @@ __all__ = [
     "AUTO_QUOTE_NO_RECENT_TURN",
     "AUTO_QUOTE_TOO_SHORT",
     "bind_user_quote_auto",
+    # Longest-verbatim-span auto-bind (UPG-PROVENANCE-AUTOBIND-SPAN)
+    "AUTO_QUOTE_TOO_LARGE_TO_SEARCH",
+    "_normalize_with_offsets",
+    "_longest_common_span",
     # content_file resolution (UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS)
     "read_content_file",
     "resolve_content_file_path",

@@ -659,7 +659,12 @@ def _format_full_block(
         # Provenance framing (§5): only a human-provenance directive ever
         # renders as an unhedged imperative; agent-provenance is framed as
         # memory to verify; auto-provenance carries the weakest framing.
-        content_line = f"  {frame_prefix(n.provenance, n.kind)}{n.content}"
+        # UPG-PROVENANCE-AUTOBIND-SPAN: passing user_quote/content lets
+        # frame_prefix distinguish a user-stated note whose bound quote IS
+        # its whole body (unqualified framing, unchanged) from one where the
+        # quote is only a sub-span of a larger agent-authored body (the
+        # qualified span framing) — a no-op for every other provenance.
+        content_line = f"  {frame_prefix(n.provenance, n.kind, user_quote=n.user_quote, content=n.content)}{n.content}"
 
     lines = [
         f"[{n.note_id}] [{n.priority.upper()}]{kind_marker}{provenance_marker}{scope_marker}{tag_str}{author_str}  ({age_str})"

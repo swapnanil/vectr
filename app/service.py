@@ -205,11 +205,11 @@ def _format_commit_note_content(
 @dataclass(frozen=True)
 class RememberOutcome:
     """Return shape of `VectrService.remember_with_extras()` — the write
-    itself (`note_id`) plus two strictly-additive write-time offers computed
-    alongside it (see that method's docstring for the exact gating). Never
-    replaces the plain `remember()` -> int contract: this is a NEW method,
-    kept separate so existing callers (and the 495+ test call sites against
-    `remember()`) are untouched."""
+    itself (`note_id`) plus two strictly-additive write-time offers
+    computed alongside it (see that method's docstring for the exact
+    gating). Never replaces the plain `remember()` -> int contract: this is
+    a NEW method, kept separate so existing callers (and the 495+ test call
+    sites against `remember()`) are untouched."""
     note_id: int
     related: list[RelatedNote]
     proxy_anchor_suggestions: list[str]
@@ -1786,18 +1786,18 @@ class VectrService:
         contradicts: int | None = None,
         user_quote: str | None = None,
     ) -> RememberOutcome:
-        """Same parameters and same write as `remember()`, plus two
+        """Same parameters and same write as `remember()`, plus three
         strictly-additive write-time offers for the caller LLM — never a
         second write, never a gate on the first one.
 
         The write always succeeds or raises exactly as `remember()` does
         (this method calls it directly, so every existing validation error
-        propagates unchanged). Once `note_id` exists, computing the two
-        offers below is wrapped in one `try/except Exception`: any failure
-        there — including one offer succeeding and the other raising — logs
-        at debug and degrades the WHOLE extras computation to empty lists.
-        A related-notes/proxy-anchor lookup must never turn a successful
-        write into a failed response.
+        propagates unchanged). Once `note_id` exists, computing the offers
+        below is wrapped in one `try/except Exception`: any failure there —
+        including one offer succeeding and another raising — logs at debug
+        and degrades the WHOLE extras computation to empty lists. A
+        related-notes/proxy-anchor lookup must never turn a successful write
+        into a failed response.
 
         `related`: the nearest existing ACTIVE notes to this one, computed
         only when `MEMORY_WRITE_RELATED_ENABLED` — see

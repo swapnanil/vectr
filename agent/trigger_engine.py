@@ -771,20 +771,67 @@ _HUMAN_FRAME = "Recorded by the user: "
 # words is bound to this note's content) and lets the reader draw the
 # conclusion, rather than asserting endorsement nobody verified.
 _USER_STATED_FRAME = "User-stated (verbatim excerpt bound, transcribed by an AI session): "
+# UPG-PROVENANCE-AUTOBIND-SPAN: the counterpart frame for a note whose bound
+# `user_quote` is a SUB-SPAN of a larger, agent-authored body (e.g. `USER
+# DIRECTIVE 2026-07-12: "<the user's actual words>"`, where the label and
+# quotation marks are the writing agent's, only the inner clause the user's)
+# rather than the note's whole content. `_USER_STATED_FRAME` above applies
+# that same unqualified "user-stated" reading to the ENTIRE line that
+# follows it; doing that here would launder the agent-authored framing
+# around the quote into user authority — exactly the trust-laundering this
+# frame exists to prevent. Names the bound span explicitly and states in the
+# frame itself, not just in the note body, that the remainder is agent
+# context.
+_USER_STATED_SPAN_FRAME_TEMPLATE = (
+    "User-stated in part — only this exact excerpt is confirmed the user's "
+    'own words, bound verbatim by an AI session: "{quote}". The rest of '
+    "this note is agent-added context around that excerpt, not itself "
+    "user-endorsed: "
+)
 _AGENT_FRAME = "Memory to verify (recorded by an AI session, not human-endorsed): "
 _AUTO_FRAME = "Auto-captured (weakest confidence, no reviewing judgment applied — verify before relying on this): "
 
 
-def frame_prefix(provenance: str, kind: str) -> str:
+def _is_whole_note_quote(user_quote: str, content: str) -> bool:
+    """True when the bound `user_quote` covers the note's ENTIRE content
+    (whitespace-normalized) rather than a genuine sub-span of it — the
+    boundary between `_USER_STATED_FRAME` (unqualified — the whole line
+    really is the user's transcribed words) and
+    `_USER_STATED_SPAN_FRAME_TEMPLATE` (qualified — only the named excerpt
+    is). Deferred import: agent/working_context_store/_user_quote.py is
+    imported here rather than at module load time for the same reason
+    `_format_full_block()` already imports `frame_prefix` lazily —
+    agent/working_context_store/_store.py imports this module at load time,
+    so a top-level import back would cycle."""
+    from agent.working_context_store._user_quote import normalize_for_binding
+
+    return normalize_for_binding(user_quote) == normalize_for_binding(content)
+
+
+def frame_prefix(provenance: str, kind: str, *, user_quote: str = "", content: str = "") -> str:
     """The imperative/hedged framing prefix for one injected memory block.
     Only human-provenance directives ever render as an unhedged imperative;
     user-stated provenance names its bound verbatim excerpt; agent-provenance
     is framed as memory to verify; auto-provenance carries the weakest framing
     (bm2-design-skeleton.md §5). Immutable per note — this is a pure function
-    of the note's own stored (provenance, kind)."""
+    of the note's own stored (provenance, kind), plus the two new optional
+    keyword arguments below.
+
+    `user_quote`/`content` (UPG-PROVENANCE-AUTOBIND-SPAN, both optional,
+    default "" — every existing 2-argument call keeps today's framing
+    unchanged): disambiguate the two shapes a `user-stated` note can take.
+    When the bound quote covers the note's entire (whitespace-normalized)
+    content, the whole line genuinely is the user's transcribed words and
+    keeps the unqualified `_USER_STATED_FRAME`. When the quote is a strict
+    sub-span of a larger, agent-authored body (the harness's span auto-bind
+    — see `bind_user_quote_auto()`), `_USER_STATED_SPAN_FRAME_TEMPLATE`
+    names the bound span explicitly and states the remainder is agent
+    context, not user-endorsed."""
     if provenance == "human":
         return _HUMAN_DIRECTIVE_FRAME if kind == "directive" else _HUMAN_FRAME
     if provenance == USER_STATED_PROVENANCE:
+        if user_quote and content and not _is_whole_note_quote(user_quote, content):
+            return _USER_STATED_SPAN_FRAME_TEMPLATE.format(quote=user_quote)
         return _USER_STATED_FRAME
     if provenance == "auto":
         return _AUTO_FRAME
