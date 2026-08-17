@@ -2257,9 +2257,23 @@ class TestDualVectorPurposeCollection:
         indexer.delete_file(path)
         assert indexer._purpose_collection.count() == 0
 
+    def _wait_until_purpose_pass_done(self, idx, timeout: float = 5.0) -> None:
+        """index_workspace() defers the purpose-vector pass to a background
+        executor by default (UPG-PURPOSE-PASS-DEFERRAL) and returns before it
+        lands; `purpose_vectors_pending` is the documented signal for a
+        caller that needs the collection to be caught up before asserting on
+        it — mirrors `TestPurposePassDeferral._wait_until_not_pending`
+        above. Without this wait, assertions immediately after
+        index_workspace() race the deferred pass and are flaky by
+        construction, not by clock resolution."""
+        deadline = time.time() + timeout
+        while idx.purpose_vectors_pending and time.time() < deadline:
+            time.sleep(0.01)
+
     def test_reindex_prunes_stale_purpose_chunks(self, indexer, tmp_path) -> None:
         path = Path(make_py(tmp_path, "evolving.py", "def v1(): pass"))
         indexer.index_workspace()
+        self._wait_until_purpose_pass_done(indexer)
         first_purpose_ids = set(indexer._purpose_collection.get()["ids"])
         assert first_purpose_ids
 
@@ -2267,6 +2281,7 @@ class TestDualVectorPurposeCollection:
         import os as _os
         _os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 1))
         indexer.index_workspace()
+        self._wait_until_purpose_pass_done(indexer)
 
         purpose_docs = indexer._purpose_collection.get(include=["documents"])["documents"]
         assert any("v2" in d for d in purpose_docs)
