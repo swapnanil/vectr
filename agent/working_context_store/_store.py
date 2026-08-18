@@ -318,15 +318,28 @@ def _title_token_set(text: str, min_len: int) -> set[str]:
     return {t.lower() for t in _TOKEN_RE.findall(text) if len(t) >= min_len}
 
 
-def _note_matches_declared_metadata(note: WorkingNote, query: str) -> bool:
-    """True if `note`'s OWN declared tag, anchor, trigger-symbol, or title
-    metadata is found in `query`'s text — deterministic containment tested
-    against this note's stored metadata, never a classification of what
-    kind of query `query` is (UPG-RECALL-MISS-FLOOR part (c); see the
-    no-query-heuristics rail in the module's callers). Every note in a
-    workspace is checked the same uniform way regardless of the query's
-    content — the branches below are channels over one note's declared
-    fields, not a lookup table of query patterns.
+def _declared_metadata_match_specificity(note: WorkingNote, query: str) -> tuple[int, int]:
+    """(channels_matched, total_matched_chars) for how strongly `note`'s OWN
+    declared tag/anchor/trigger-symbol/title metadata is found in `query`'s
+    text — deterministic containment tested against this note's stored
+    metadata, never a classification of what kind of query `query` is
+    (UPG-RECALL-MISS-FLOOR part (c); see the no-query-heuristics rail in
+    the module's callers). Every note in a workspace is checked the same
+    uniform way regardless of the query's content — the branches below are
+    channels over one note's declared fields, not a lookup table of query
+    patterns. (0, 0) means no channel matched at all.
+
+    This is used two ways by callers: membership (`channels_matched > 0`,
+    via `_note_matches_declared_metadata()` below) and, once a note has
+    already independently matched, ORDER among matches
+    (`_recall_floor_notes()`'s deterministic channel — UPG-RECALL-MISS-
+    FLOOR F2 fix). channels_matched counts how many of the four distinct
+    declared-metadata FIELDS (tag/anchor/symbol/title) matched at all;
+    total_matched_chars is the combined length of the specific text that
+    matched within those fields — a longer, more specific matched string is
+    less likely to be a coincidental overlap than a short generic one.
+    Both are properties of the NOTE's own metadata and how much of it
+    overlaps `query`, never of the query's content/intent/type on its own.
     """
     from agent.config import (
         RECALL_FLOOR_TITLE_MIN_OVERLAP_TOKENS,
@@ -334,29 +347,43 @@ def _note_matches_declared_metadata(note: WorkingNote, query: str) -> bool:
     )
 
     q_lower = query.lower()
+    channels_matched = 0
+    total_chars = 0
 
-    # Tag channel: one of THIS note's own declared tags appears verbatim
-    # in the query text.
-    for tag in note.tags:
-        norm = (tag or "").strip().lower()
+    # Tag channel: one or more of THIS note's own declared tags appear
+    # verbatim in the query text.
+    tag_hits = []
+    for t in note.tags:
+        norm = (t or "").strip().lower()
         if norm and norm in q_lower:
-            return True
+            tag_hits.append(norm)
+    if tag_hits:
+        channels_matched += 1
+        total_chars += sum(len(t) for t in tag_hits)
 
     # Anchor channel: the basename (no extension) of a file THIS note is
     # anchored to appears verbatim in the query text.
+    anchor_hits = []
     for anchor in note.anchors:
         path = anchor[0] if anchor else ""
         stem = Path(path).stem.lower() if path else ""
         if stem and stem in q_lower:
-            return True
+            anchor_hits.append(stem)
+    if anchor_hits:
+        channels_matched += 1
+        total_chars += sum(len(s) for s in anchor_hits)
 
     # Symbol channel: a code symbol name THIS note declared via an
     # explicit trigger's 'symbol' key appears verbatim in the query text.
     # Case-sensitive: symbol names are code identifiers, not prose.
+    symbol_hits = []
     for trig in note.triggers or []:
         sym = trig.get("symbol") if isinstance(trig, dict) else None
         if sym and sym in query:
-            return True
+            symbol_hits.append(sym)
+    if symbol_hits:
+        channels_matched += 1
+        total_chars += sum(len(s) for s in symbol_hits)
 
     # Title channel: THIS note's own title, tokenized the same uniform way
     # as the query, overlaps the query's tokens by at least the configured
@@ -365,10 +392,20 @@ def _note_matches_declared_metadata(note: WorkingNote, query: str) -> bool:
         title_tokens = _title_token_set(note.title, RECALL_FLOOR_TITLE_MIN_TOKEN_LEN)
         if title_tokens:
             query_tokens = _title_token_set(query, RECALL_FLOOR_TITLE_MIN_TOKEN_LEN)
-            if len(title_tokens & query_tokens) >= RECALL_FLOOR_TITLE_MIN_OVERLAP_TOKENS:
-                return True
+            overlap = title_tokens & query_tokens
+            if len(overlap) >= RECALL_FLOOR_TITLE_MIN_OVERLAP_TOKENS:
+                channels_matched += 1
+                total_chars += sum(len(t) for t in overlap)
 
-    return False
+    return channels_matched, total_chars
+
+
+def _note_matches_declared_metadata(note: WorkingNote, query: str) -> bool:
+    """True if `note`'s OWN declared tag, anchor, trigger-symbol, or title
+    metadata is found in `query`'s text at all — see
+    `_declared_metadata_match_specificity()` above for the full channel
+    definitions; this is just its membership test (channels_matched > 0)."""
+    return _declared_metadata_match_specificity(note, query)[0] > 0
 
 
 def _merge_recall_floor(
@@ -1877,54 +1914,88 @@ class WorkingContextStore:
         limit: int,
     ) -> tuple[list[WorkingNote], list[WorkingNote]]:
         """Tier 0 (directive + pinned, unconditional) and deterministic
-        tag/anchor/symbol/title channel hits for `query`, each bounded by
-        its own agent/config.yaml `recall_floor` count AND by a share of
-        the caller's own `limit` (UPG-RECALL-MISS-FLOOR parts (b)/(c)).
-        Returns (tier0, deterministic) — `recall()` merges both ahead of
-        the ranked result via `_merge_recall_floor()`. Tier 0 needs no
-        `query` at all (directives/pins are unconditional); the
-        deterministic channels return [] when `query` is empty since there
-        is nothing to check containment against.
+        tag/anchor/symbol/title channel hits for `query` (UPG-RECALL-MISS-
+        FLOOR parts (b)/(c)). Returns (tier0, deterministic) — `recall()`
+        merges both ahead of the ranked result via `_merge_recall_floor()`.
+        Tier 0 needs no `query` at all (directives/pins are unconditional);
+        the deterministic channel returns [] when `query` is empty since
+        there is nothing to check containment against.
 
-        Each channel's absolute `*_max_notes` config count is sized for a
-        caller passing a generous `limit` — on its own it does not scale
-        down for a small `limit`, and at recall()'s own default (limit=10)
-        the two absolute counts alone (5 + 5) can equal the whole budget,
-        displacing the ranked/semantic result entirely. Each channel is
-        additionally bounded to `floor(limit * <channel>_max_fraction_of_
-        limit)`. The two fractions differ (RECALL_FLOOR_TIER0_MAX_FRACTION_
-        OF_LIMIT is smaller than the deterministic one) because Tier 0 is
-        unconditional — a directive/pinned note is injected whether or not
-        it has anything to do with `query` — while the deterministic
-        channels only fire when the note's OWN metadata textually overlaps
-        `query`, so they carry more relevance signal and are worth a
-        larger guaranteed slice of a tight budget."""
+        Tier 0's cap (UPG-RECALL-MISS-FLOOR F1 fix) is
+        `min(tier0_max_notes, max(tier0_min_notes, floor(limit *
+        tier0_max_share_of_limit)))` — the configured MINIMUM always wins
+        over the share when the share would ask for less, so the
+        guarantee ("a directive AND a pinned note are injected at 100%
+        regardless of query") holds at any `limit` that leaves room for
+        it, not only a generously large one. The share is an upper bound
+        only, letting Tier 0 grow past the minimum toward its absolute
+        cap once `limit` is generous enough (see agent/config.yaml's
+        recall_floor comments for the exact crossover reasoning).
+
+        The deterministic channel's cap (UPG-RECALL-MISS-FLOOR F3 fix) is
+        `min(deterministic_max_notes, floor((limit - len(tier0)) *
+        deterministic_max_share_of_remaining))` — bounded by a share of
+        what Tier 0 did NOT use, not a share of `limit` directly, so it is
+        the direct statement of "the deterministic channel never takes
+        more than the ranked group": at most an equal split of whatever
+        Tier 0 left behind, guaranteeing ranked fill at least as many
+        slots as the deterministic channel claims.
+
+        When more notes match the deterministic channel than fit its cap,
+        the matched set is ranked by its own match specificity (UPG-
+        RECALL-MISS-FLOOR F2 fix — `_declared_metadata_match_specificity()`
+        above) before truncating, so a note matching MORE of its own
+        declared fields, or matching them with a longer/more-specific
+        string, wins a scarce slot over one that merely happens to be the
+        most recently written among dozens of equally-valid matches."""
         from agent.config import (
-            RECALL_FLOOR_DETERMINISTIC_MAX_FRACTION_OF_LIMIT,
             RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
-            RECALL_FLOOR_TIER0_MAX_FRACTION_OF_LIMIT,
+            RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING,
             RECALL_FLOOR_TIER0_MAX_NOTES,
+            RECALL_FLOOR_TIER0_MAX_SHARE_OF_LIMIT,
+            RECALL_FLOOR_TIER0_MIN_NOTES,
         )
 
         pool = self._floor_candidate_pool(workspace, tags, priority, max_age_days, session_id)
 
-        tier0_cap = min(RECALL_FLOOR_TIER0_MAX_NOTES, int(limit * RECALL_FLOOR_TIER0_MAX_FRACTION_OF_LIMIT))
+        tier0_guaranteed = min(RECALL_FLOOR_TIER0_MIN_NOTES, max(limit, 0))
+        tier0_share_cap = int(limit * RECALL_FLOOR_TIER0_MAX_SHARE_OF_LIMIT)
+        tier0_cap = min(RECALL_FLOOR_TIER0_MAX_NOTES, max(tier0_guaranteed, tier0_share_cap))
+        # `pool` is ordered created_at DESC, note_id DESC (see
+        # _floor_candidate_pool) — slicing to `tier0_cap` here means Tier 0
+        # is, in practice, "the tier0_cap MOST RECENT directive/pinned
+        # notes" in the workspace. A workspace holding more directive/
+        # pinned notes than the cap will never surface an older one via
+        # this tier; that is a deliberate, stated bound of the design
+        # (recency is a reasonable deterministic tie-break for an
+        # otherwise-unconditional guarantee), not an accident of pool
+        # order.
         tier0 = [n for n in pool if n.kind == "directive" or n.pinned][:tier0_cap]
         tier0_ids = {n.note_id for n in tier0}
 
+        remaining_after_tier0 = max(limit - len(tier0), 0)
         det_cap = min(
             RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
-            int(limit * RECALL_FLOOR_DETERMINISTIC_MAX_FRACTION_OF_LIMIT),
+            int(remaining_after_tier0 * RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING),
         )
         deterministic: list[WorkingNote] = []
         if query and det_cap > 0:
+            scored: list[tuple[tuple[int, int], WorkingNote]] = []
             for n in pool:
                 if n.note_id in tier0_ids:
                     continue
-                if _note_matches_declared_metadata(n, query):
-                    deterministic.append(n)
-                    if len(deterministic) >= det_cap:
-                        break
+                specificity = _declared_metadata_match_specificity(n, query)
+                if specificity[0] > 0:
+                    scored.append((specificity, n))
+            # Order the already-matched set by its own match specificity,
+            # strongest first; Python's sort is stable, so notes tied on
+            # specificity keep the pool's created_at DESC order as the
+            # final, deterministic tie-break. This orders WHICH matches
+            # win a scarce slot — it never decides membership, which
+            # already happened above via containment against each note's
+            # own declared metadata (UPG-RECALL-MISS-FLOOR F2 fix).
+            scored.sort(key=lambda pair: pair[0], reverse=True)
+            deterministic = [n for _, n in scored[:det_cap]]
         return tier0, deterministic
 
     def recall(
@@ -1991,18 +2062,26 @@ class WorkingContextStore:
         unconditional) first, then the deterministic tag/anchor/symbol/
         title channels (`_note_matches_declared_metadata()` — matched
         against each candidate note's OWN stored metadata, never a
-        classification of `query`), then the ranked result fills whatever
-        budget remains. Both guarantees are bounded (agent/config.yaml
-        recall_floor.tier0_max_notes / deterministic_max_notes) AND each
-        is additionally capped to its own fraction of THIS call's own
-        `limit` (recall_floor.tier0_max_fraction_of_limit /
-        deterministic_max_fraction_of_limit — see `_recall_floor_notes()`),
-        so the two floor channels combined can never claim the whole
-        budget and displace ranked fill entirely, at any `limit` a caller
-        passes. The combined, de-duplicated result is always truncated to
-        `limit` — this method never returns more than `limit` notes
-        regardless of how many candidates the floor and the ranked result
-        each contribute.
+        classification of `query`, ranked among themselves by match
+        specificity when more match than fit — UPG-RECALL-MISS-FLOOR F2
+        fix), then the ranked result fills whatever budget remains.
+        Tier 0 is bounded by a guaranteed MINIMUM (recall_floor.
+        tier0_min_notes — enough room for one directive AND one pinned
+        note whenever `limit` leaves any room at all) with an absolute
+        ceiling (tier0_max_notes) and a share-of-`limit` ceiling
+        (tier0_max_share_of_limit) on top of that minimum; the
+        deterministic channel is bounded by its own absolute ceiling
+        (deterministic_max_notes) and a share of whatever Tier 0 did NOT
+        use (deterministic_max_share_of_remaining — never more than the
+        ranked group gets from what's left). See `_recall_floor_notes()`
+        for the exact formulas. Together these mean the two floor
+        channels combined can never claim the whole budget and displace
+        ranked fill entirely, at any `limit` a caller passes, while Tier
+        0's own guarantee cannot silently shrink to zero at a small
+        `limit` either. The combined, de-duplicated result is always
+        truncated to `limit` — this method never returns more than
+        `limit` notes regardless of how many candidates the floor and the
+        ranked result each contribute.
         Ignored (no floor notes computed) when `kind` narrows the query to
         one specific kind — a caller that explicitly asked for one kind
         gets exactly that kind, unmodified, same as apply_floor=False.

@@ -1060,7 +1060,14 @@ recall_floor:
   #     basename, trigger symbol, or title token set is found in the
   #     query's text (containment checked against that note's stored
   #     metadata, never a classification of the query) is guaranteed a
-  #     slot ahead of pure semantic fill.
+  #     slot ahead of pure semantic fill. When more notes match than fit
+  #     the channel's cap, the matched set is ranked by its OWN match
+  #     specificity (how many distinct declared-metadata fields matched,
+  #     then how long/specific the matched text was) before truncating —
+  #     never by recency alone, which otherwise arbitrarily keeps whichever
+  #     3-5 of dozens of equally-valid matches happen to be newest (UPG-
+  #     RECALL-MISS-FLOOR F2 fix; see _declared_metadata_match_specificity()
+  #     in agent/working_context_store/_store.py).
   # Both tiers are bounded by count so neither can crowd out the ranked
   # result entirely, and the combined result is always truncated to the
   # caller's `limit` (see benchmarks/recall_miss/harness.py's STEP 0
@@ -1068,15 +1075,36 @@ recall_floor:
 
   # Max notes Tier 0 (directives + pinned, combined) contributes per
   # recall() call, regardless of how many directive/pinned notes exist in
-  # the workspace. Ordered by recency (created_at DESC) when the count
-  # exceeds this bound — deterministic, never query-dependent.
+  # the workspace. The candidate pool is ordered by recency (created_at
+  # DESC, note_id DESC — see _floor_candidate_pool()); when a workspace
+  # holds more directive/pinned notes than this bound, Tier 0 is, in
+  # practice, "the tier0_max_notes MOST RECENT directive/pinned notes" —
+  # an older one can never enter Tier 0 no matter how long it has stood.
+  # This is a DELIBERATE, stated bound of the design (recency is a
+  # reasonable, deterministic tie-break for an otherwise-unconditional
+  # guarantee), not an accident of pool order — see tier0_min_notes below
+  # for the separate guarantee this cap must never fall below.
   tier0_max_notes: 5
 
   # Max notes the deterministic tag/anchor/symbol/title channels
   # contribute per recall() call, on top of (and excluding) whatever
-  # Tier 0 already filled — the remaining floor budget still leaves room
-  # for genuine semantic fill even at a small `limit`.
+  # Tier 0 already filled.
   deterministic_max_notes: 5
+
+  # UPG-RECALL-MISS-FLOOR F1 fix: Tier 0's guaranteed MINIMUM slot count,
+  # independent of `limit` and independent of tier0_max_share_of_limit
+  # below, whenever `limit` leaves any room at all (min(this, limit)).
+  # Acceptance criterion 1 for this tier is "a directive AND a pinned note
+  # are injected at 100% regardless of query" — that needs room for BOTH
+  # at once, hence 2. Before this key existed, a caller passing the
+  # production default (limit=10) got tier0_cap = int(10 * 0.1) = 1 (a
+  # fraction-only cap), so only ONE of the two could ever fit — the
+  # guarantee silently halved itself at the exact limit real callers use,
+  # and at limit=5 it floored to 0 (measured live against the real
+  # 38-query labeled corpus with a deliberately off-topic query). A share
+  # constant must always be a ceiling on top of this minimum, never the
+  # sole source of the cap.
+  tier0_min_notes: 2
 
   # Upper bound on how many of the workspace's own notes are scanned as
   # Tier 0 / deterministic-channel candidates per call (ordered by
@@ -1097,34 +1125,42 @@ recall_floor:
   # count as a deterministic hit for that note.
   title_min_overlap_tokens: 2
 
-  # Per-channel ceilings relative to the CALLER's own `limit`, applied on
-  # top of (as an additional min() with) tier0_max_notes/
-  # deterministic_max_notes above. Those two are absolute counts, sized
-  # for a caller passing a generous `limit` (e.g. 50) -- on their own they
-  # do not scale down for a small `limit`, and at recall()'s own default
-  # (limit=10) tier0_max_notes + deterministic_max_notes (5 + 5 = 10)
-  # exactly equals the whole budget, so the ranked/semantic result could
-  # be displaced entirely (measured live: recall@10 fell from 0.725 to
-  # 0.100 with both absolute caps alone, uncapped by `limit`). Each
-  # channel's per-call cap is `min(<channel>_max_notes,
-  # floor(limit * <this channel's> _max_fraction_of_limit))`.
-  #
-  # The two channels get DIFFERENT fractions because they carry different
-  # relevance signal: Tier 0 is unconditional (a directive/pinned note is
-  # injected regardless of whether it has anything to do with this
-  # query), so it gets a small guaranteed slice; the deterministic
-  # channels only fire when the note's OWN declared metadata textually
-  # overlaps the query, so they get a larger one. Measured live against
-  # the recall-miss harness (benchmarks/recall_miss/run_live.py
-  # --apply-floor): tier0=0.1/deterministic=0.3 recovers a genuine miss
-  # at k=10 (recall@10 0.725 -> 0.750) with zero regressions at either
-  # k=10 or k=5 against the no-floor baseline; tier0=0.3/deterministic=0.3
-  # (both equal) recovered the same k=10 miss but additionally displaced
-  # 3 previously-hit notes at the tighter k=5 budget, a net regression
-  # -- confirming Tier 0's zero-relevance guarantee needs the smaller
-  # share once the budget gets tight.
-  tier0_max_fraction_of_limit: 0.1
-  deterministic_max_fraction_of_limit: 0.3
+  # UPG-RECALL-MISS-FLOOR F1/F3 fix: an earlier version of this section
+  # picked tier0_max_fraction_of_limit=0.1 / deterministic_max_fraction_
+  # of_limit=0.3 by scanning several (tier0, deterministic) combinations
+  # against the labeled recall-miss corpus and keeping the pair that
+  # scored best — that made the corpus's own measured recall a SELECTED
+  # number, not a measured one, and review correctly rejected it (see
+  # UPG-RECALL-MISS-FLOOR working notes). Also, at recall()'s own default
+  # (limit=10), 0.1 alone gave Tier 0 exactly ONE slot — not enough room
+  # for the tier's own acceptance bar ("a directive AND a pinned note are
+  # injected at 100%"). The two constants below are instead each a direct
+  # restatement of a stated STRUCTURAL principle, independent of any
+  # particular query set; see `tier0_min_notes` above for the guaranteed
+  # minimum that now always takes precedence over the ceiling below it.
+
+  # Tier 0's upper bound, as a share of the caller's own `limit` — a
+  # ceiling only; tier0_min_notes above always wins when it would ask for
+  # more (_recall_floor_notes: tier0_cap = min(tier0_max_notes,
+  # max(tier0_min_notes, floor(limit * this)))). Chosen so this share
+  # only starts to exceed, and so take over from, tier0_min_notes once
+  # `limit` passes the crossover point tier0_min_notes / this = 2 / 0.2 =
+  # 10 — recall()'s own production default. A caller asking for exactly
+  # the default result count gets exactly the guaranteed minimum (2); a
+  # caller asking for meaningfully more lets Tier 0 grow, still capped by
+  # tier0_max_notes, toward its full absolute allowance.
+  tier0_max_share_of_limit: 0.2
+
+  # The deterministic channel's upper bound, as a share of whatever
+  # budget Tier 0 did NOT actually use (limit minus the ACTUAL number of
+  # Tier 0 notes returned — which can be below tier0_min_notes/tier0_cap
+  # in a workspace with few or no directive/pinned notes), never a share
+  # of `limit` directly. 0.5 is the direct arithmetic statement of "the
+  # deterministic channel never takes more than the ranked group": at
+  # most an equal split of what Tier 0 left behind, so ranked fill is
+  # guaranteed at least as many slots as the deterministic channel
+  # claims, at any `limit`.
+  deterministic_max_share_of_remaining: 0.5
 
 symbol_graph:
   # UPG-JSFLOW-SYMBOLS: language keywords that must never be minted as a

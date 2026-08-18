@@ -1422,8 +1422,11 @@ RECALL_FLOOR_DETERMINISTIC_MAX_NOTES: int = int(_recall_floor_cfg["deterministic
 RECALL_FLOOR_METADATA_SCAN_CEILING: int = int(_recall_floor_cfg["metadata_scan_ceiling"])
 RECALL_FLOOR_TITLE_MIN_TOKEN_LEN: int = int(_recall_floor_cfg["title_min_token_len"])
 RECALL_FLOOR_TITLE_MIN_OVERLAP_TOKENS: int = int(_recall_floor_cfg["title_min_overlap_tokens"])
-RECALL_FLOOR_TIER0_MAX_FRACTION_OF_LIMIT: float = float(_recall_floor_cfg["tier0_max_fraction_of_limit"])
-RECALL_FLOOR_DETERMINISTIC_MAX_FRACTION_OF_LIMIT: float = float(_recall_floor_cfg["deterministic_max_fraction_of_limit"])
+RECALL_FLOOR_TIER0_MIN_NOTES: int = int(_recall_floor_cfg["tier0_min_notes"])
+RECALL_FLOOR_TIER0_MAX_SHARE_OF_LIMIT: float = float(_recall_floor_cfg["tier0_max_share_of_limit"])
+RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING: float = float(
+    _recall_floor_cfg["deterministic_max_share_of_remaining"]
+)
 
 # ---------------------------------------------------------------------------
 # UPG-TEST-CACHE-ISOLATION: single override point for vectr's on-disk cache

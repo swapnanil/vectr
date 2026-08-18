@@ -300,13 +300,13 @@ class TestFloorReservesRankedRoom:
     let the combined floor claim the entire budget and displace the
     ranked result completely -- measured live, recall@10 fell from 0.725
     to 0.100 (29/40 hits collapsed to 4/40) with the two absolute caps
-    alone. Each channel is now ALSO capped to its own fraction of the
-    caller's `limit` (recall_floor.tier0_max_fraction_of_limit /
-    deterministic_max_fraction_of_limit -- see `_recall_floor_notes()` in
-    agent/working_context_store/_store.py), so a genuinely relevant
-    ranked-only note always keeps room in the composed result, at any
-    `limit` a caller passes -- not just the ones this was measured
-    against."""
+    alone. Each channel is now ALSO capped -- Tier 0 to
+    max(tier0_min_notes, a share of `limit`), the deterministic channel to
+    a share of whatever budget Tier 0 did NOT use (see
+    `_recall_floor_notes()` in agent/working_context_store/_store.py) --
+    so a genuinely relevant ranked-only note always keeps room in the
+    composed result, at any `limit` a caller passes -- not just the ones
+    this was measured against."""
 
     def test_ranked_note_survives_when_floor_channels_are_saturated(self, tmp_path) -> None:
         from agent.config import (
@@ -336,20 +336,151 @@ class TestFloorReservesRankedRoom:
 
     def test_floor_channels_combined_never_reach_default_limit(self, tmp_path) -> None:
         """Symbolic invariant (config values, not a specific note count):
-        at recall()'s own default limit=10, the two channels' fraction-
-        scaled caps must sum to strictly less than 10, so ranked fill
-        always has room left -- this is exactly the relationship whose
+        at recall()'s own default limit=10, with BOTH channels' caps
+        computed the same way `_recall_floor_notes()` does (Tier 0's
+        worst case -- it fully claims its own cap -- feeding the
+        deterministic channel's "share of what's left" cap), the two
+        caps combined must sum to strictly less than 10, so ranked fill
+        always has room left. This is exactly the relationship whose
         violation (5 + 5 == 10) caused the regression above. Guards
         against a future config edit silently reintroducing it."""
         from agent.config import (
-            RECALL_FLOOR_DETERMINISTIC_MAX_FRACTION_OF_LIMIT,
-            RECALL_FLOOR_TIER0_MAX_FRACTION_OF_LIMIT,
+            RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
+            RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING,
+            RECALL_FLOOR_TIER0_MAX_NOTES,
+            RECALL_FLOOR_TIER0_MAX_SHARE_OF_LIMIT,
+            RECALL_FLOOR_TIER0_MIN_NOTES,
         )
 
         default_limit = 10
-        tier0_cap = int(default_limit * RECALL_FLOOR_TIER0_MAX_FRACTION_OF_LIMIT)
-        det_cap = int(default_limit * RECALL_FLOOR_DETERMINISTIC_MAX_FRACTION_OF_LIMIT)
+        tier0_cap = min(
+            RECALL_FLOOR_TIER0_MAX_NOTES,
+            max(RECALL_FLOOR_TIER0_MIN_NOTES, int(default_limit * RECALL_FLOOR_TIER0_MAX_SHARE_OF_LIMIT)),
+        )
+        det_cap = min(
+            RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
+            int((default_limit - tier0_cap) * RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING),
+        )
         assert tier0_cap + det_cap < default_limit
+        # And Tier 0's own guarantee holds at the production default: room
+        # for both a directive and a pinned note (UPG-RECALL-MISS-FLOOR F1).
+        assert tier0_cap >= RECALL_FLOOR_TIER0_MIN_NOTES
+
+
+class TestTier0GuaranteedMinimum:
+    """UPG-RECALL-MISS-FLOOR F1 fix: Tier 0's own acceptance bar is "a
+    directive AND a pinned note are injected at 100% regardless of query"
+    -- that needs room for BOTH at once. A fraction-of-`limit` cap alone
+    (the first version of this mechanism) gave Tier 0 only ONE slot at
+    `limit=10` (recall()'s own default and the one production call site)
+    and ZERO at `limit=5` -- measured live against the real 38-query
+    labeled corpus with a deliberately off-topic query. Proven here at
+    both limit=5 and limit=10 specifically, not only a generously large
+    limit=50 where the absolute cap alone happens to leave enough room
+    regardless of how the guarantee is computed."""
+
+    @pytest.mark.parametrize("limit", [5, 10])
+    def test_directive_and_pinned_both_survive_off_topic_query(self, tmp_path, limit) -> None:
+        store = _store(tmp_path)
+        ws = "/ws"
+        directive_nid = store.remember(ws, "never push straight to main", kind="directive")
+        pinned_nid = store.remember(ws, "workspace lock acquisition pattern", pin=True)
+        store.remember(ws, "an unrelated note about zebras")
+        notes = store.recall(ws, query="zebras", apply_floor=True, limit=limit)
+        ids = {n.note_id for n in notes}
+        assert directive_nid in ids
+        assert pinned_nid in ids
+
+
+class TestMatchSpecificityScore:
+    """Offline, no-store unit coverage of
+    `_declared_metadata_match_specificity()` itself -- the smallest-level
+    encoding of the F2 fix, independent of pool composition/ordering."""
+
+    def _note(self, **kwargs):
+        from agent.working_context_store._types import WorkingNote
+
+        base = dict(
+            note_id=1, workspace="/ws", kind="finding", content="c", title="",
+            tags=[], anchors=[], triggers=[], priority="medium", provenance="agent",
+            created_at=0.0, last_accessed=0.0, author_trust_score=1.0,
+            decay_score=1.0, scope="workspace", session_id=None, pinned=False,
+        )
+        base.update(kwargs)
+        from agent.working_context_store._types import WorkingNote as WN
+        import inspect
+        valid = set(inspect.signature(WN).parameters)
+        return WN(**{k: v for k, v in base.items() if k in valid})
+
+    def test_no_match_is_zero_zero(self) -> None:
+        from agent.working_context_store._store import _declared_metadata_match_specificity
+
+        note = self._note(tags=["unrelated-tag"])
+        assert _declared_metadata_match_specificity(note, "totally different query") == (0, 0)
+
+    def test_two_channel_match_outranks_one_channel_match(self) -> None:
+        from agent.working_context_store._store import _declared_metadata_match_specificity
+
+        two_channel = self._note(tags=["shared-tag"], anchors=[("agent/resolver.py", None)])
+        one_channel = self._note(tags=["shared-tag"])
+        query = "shared-tag resolver.py"
+        assert _declared_metadata_match_specificity(two_channel, query)[0] == 2
+        assert _declared_metadata_match_specificity(one_channel, query)[0] == 1
+        assert _declared_metadata_match_specificity(two_channel, query) > _declared_metadata_match_specificity(
+            one_channel, query
+        )
+
+
+class TestDeterministicChannelOrdering:
+    """UPG-RECALL-MISS-FLOOR F2 fix: when more notes match the
+    deterministic channel than fit its cap, the matched set is ranked by
+    its own match specificity (how many distinct declared-metadata fields
+    matched, then how long the matched text was) before truncating --
+    never by recency alone. Measured live: a query typically matches
+    68-100 notes on a 750-note corpus against a channel cap of ~3-5, and
+    recency-only truncation buried a genuinely correct, more-specific
+    match around rank ~40 behind dozens of weaker single-channel matches
+    that merely happened to be written more recently."""
+
+    def test_stronger_specificity_match_beats_weaker_more_recent_matches(self, tmp_path) -> None:
+        from agent.config import RECALL_FLOOR_DETERMINISTIC_MAX_NOTES
+
+        store = _store(tmp_path)
+        ws = "/ws"
+        # A two-channel match (tag AND anchor), inserted FIRST so it is
+        # the OLDEST / lowest note_id in the pool -- recency-only
+        # ordering would rank it dead last among matches.
+        strong_nid = store.remember(
+            ws, "content with no lexical overlap to the query below",
+            tags=["shared-tag"], anchors=["agent/resolver.py"], title="x",
+        )
+        # More single-channel (tag-only) matches than the channel's cap,
+        # all inserted AFTER the strong match -- recency-only ordering
+        # fills the whole cap from this group alone.
+        for i in range(RECALL_FLOOR_DETERMINISTIC_MAX_NOTES + 3):
+            store.remember(
+                ws, f"content {i} with no lexical overlap", tags=["shared-tag"], title="x",
+            )
+        notes = store.recall(ws, query="shared-tag resolver.py", apply_floor=True, limit=10)
+        assert strong_nid in {n.note_id for n in notes}
+
+    def test_ordering_never_changes_membership(self, tmp_path) -> None:
+        """The ordering fix only decides WHICH already-matched notes win a
+        scarce slot -- it must never make a genuinely non-matching note
+        appear, or a genuinely matching one vanish below the cap."""
+        store = _store(tmp_path)
+        ws = "/ws"
+        matching_nid = store.remember(
+            ws, "content with no lexical overlap to the query below",
+            tags=["shared-tag"], title="x",
+        )
+        nonmatching_nid = store.remember(
+            ws, "an entirely unrelated note", title="x",
+        )
+        notes = store.recall(ws, query="something about shared-tag", apply_floor=True, limit=10)
+        ids = {n.note_id for n in notes}
+        assert matching_nid in ids
+        assert nonmatching_nid not in ids
 
 
 class TestApplyFloorIgnoredWhenKindNarrows:
