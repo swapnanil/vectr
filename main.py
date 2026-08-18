@@ -3490,23 +3490,54 @@ def cmd_cache(args: argparse.Namespace) -> None:
             print(f"  {d.name}")
 
 
-def cmd_memory(args: argparse.Namespace) -> None:
-    """`vectr memory export` — render a workspace's working-memory notes to a
-    read-only markdown mirror (UPG-MEMORY-LEGIBLE-FILE-PROJECTION part (a)).
+def _memory_db_dir(workspace: str) -> str:
+    """Same resolution VectrService.__init__ uses (VECTR_DB_DIR override,
+    else _default_db_dir), so every `vectr memory` subcommand always reads
+    the identical database a running daemon for this workspace writes to.
+    _default_db_dir deliberately never creates the per-workspace cache dir
+    (UPG-CACHE-LITTER — a bare resolution must not litter the cache root);
+    a real service (or, here, an export/edit request) is the point a
+    durable dir is warranted, so secure_dir() mirrors the same call
+    VectrService.__init__ makes before its first store write."""
+    from app.service import _default_db_dir
+    from agent.fs_permissions import secure_dir
 
-    Operates directly on the workspace's SQLite database, the same "no
+    db_dir = os.getenv("VECTR_DB_DIR") or _default_db_dir(workspace)
+    secure_dir(db_dir)
+    return db_dir
+
+
+def cmd_memory(args: argparse.Namespace) -> None:
+    """`vectr memory export` / `vectr memory edit` — read-only markdown
+    mirror and transactional check-out/check-in editing of a workspace's
+    working memory (UPG-MEMORY-LEGIBLE-FILE-PROJECTION parts (a) and (b)).
+
+    Both operate directly on the workspace's SQLite database, the same "no
     running server required" pattern as `cmd_forget --all`/`cmd_cache
-    prune` — WAL mode lets this read safely even while a daemon has the
-    same file open. After the first successful export, the target path is
+    prune` — WAL mode lets this read (and, for `edit`, write) safely even
+    while a daemon has the same file open.
+
+    `export`: after the first successful export, the target path is
     recorded in `.vectr/memory_export_path` so subsequent note writes
     (through a running daemon) keep the mirror current via a debounced
     post-write hook; this command itself always renders synchronously so
     the file is current the moment it returns. `--disable` (UPG-MEMORY-
     EXPORT-DISABLE) reverses that opt-in by removing the marker, without
-    touching the previously exported file."""
+    touching the previously exported file.
+
+    `edit`: renders ACTIVE notes only to a temp file, opens `$EDITOR` on
+    it, and on save translates the diff into note writes (see
+    agent/working_context_store/_memory_edit.py for the exact mapping and
+    the conflict-detection contract). Exits non-zero and writes nothing if
+    a note the buffer touches drifted concurrently.
+    """
     action = getattr(args, "memory_command", None)
+    if action == "edit":
+        _cmd_memory_edit(args)
+        return
     if action != "export":
         print("usage: vectr memory export [--path FILE] [--workspace DIR] [--disable]", file=sys.stderr)
+        print("       vectr memory edit [--workspace DIR]", file=sys.stderr)
         return
 
     from agent.working_context_store._export import remove_export_target
@@ -3522,8 +3553,6 @@ def cmd_memory(args: argparse.Namespace) -> None:
             print("The previously exported file is left in place; re-run `vectr memory export` to turn auto-refresh back on.")
         return
 
-    from app.service import _default_db_dir
-    from agent.fs_permissions import secure_dir
     from agent.working_context_store import WorkingContextStore
     from agent.working_context_store._export import export_memory, write_export_target
 
@@ -3532,22 +3561,44 @@ def cmd_memory(args: argparse.Namespace) -> None:
         out_path = Path(workspace) / out_path
     out_path = out_path.resolve()
 
-    # Same resolution VectrService.__init__ uses (VECTR_DB_DIR override, else
-    # _default_db_dir), so `vectr memory export` always reads the identical
-    # database a running daemon for this workspace writes to. _default_db_dir
-    # deliberately never creates the per-workspace cache dir (UPG-CACHE-LITTER
-    # — a bare resolution must not litter the cache root); a real service (or,
-    # here, an export request) is the point a durable dir is warranted, so
-    # secure_dir() mirrors the same call VectrService.__init__ makes before
-    # its first store write.
-    db_dir = os.getenv("VECTR_DB_DIR") or _default_db_dir(workspace)
-    secure_dir(db_dir)
-    store = WorkingContextStore(db_dir)
+    store = WorkingContextStore(_memory_db_dir(workspace))
     export_memory(store, workspace, out_path)
     write_export_target(workspace, out_path)
     print(f"Exported working memory for {workspace} to {out_path}")
     print("Auto-refresh is now on: future note writes will keep this file current. "
           "Run `vectr memory export --disable` to stop that.")
+
+
+def _cmd_memory_edit(args: argparse.Namespace) -> None:
+    from agent.working_context_store import WorkingContextStore
+    from agent.working_context_store._memory_edit import (
+        MemoryEditConflict,
+        edit_memory_interactive,
+    )
+
+    workspace = str(Path(args.workspace).resolve())
+    store = WorkingContextStore(_memory_db_dir(workspace))
+
+    try:
+        result = edit_memory_interactive(store, workspace)
+    except MemoryEditConflict as exc:
+        print(f"vectr memory edit: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if result.is_empty():
+        print("No changes.")
+        return
+
+    for old_id, new_id in result.supersedes:
+        print(f"Superseded #{old_id} -> #{new_id} (body changed)")
+    for note_id in result.field_updates:
+        print(f"Updated fields on #{note_id} (kind/priority/tags)")
+    for note_id in result.remembers:
+        print(f"Remembered new note #{note_id}")
+    for note_id in result.revokes:
+        print(f"Revoked #{note_id} (reversible with vectr_reinstate)")
+    for note_id in result.forgets:
+        print(f"Permanently deleted #{note_id}")
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -4264,15 +4315,16 @@ def main() -> None:
 
     p_memory = sub.add_parser(
         "memory",
-        help="Render working memory to a read-only markdown mirror",
+        help="Render or edit working memory as markdown",
         description=(
-            "UPG-MEMORY-LEGIBLE-FILE-PROJECTION part (a). `vectr memory export` "
-            "renders this workspace's notes to a deterministic markdown file "
-            "(default MEMORY.md) so memory is greppable/git-diffable without "
-            "MCP tool access. Read-only: nothing ever reads the file back — "
-            "the database stays the source of truth. After the first export, "
-            "subsequent note writes through a running daemon keep the mirror "
-            "current via a debounced background re-render."
+            "UPG-MEMORY-LEGIBLE-FILE-PROJECTION. `vectr memory export` renders "
+            "this workspace's notes to a deterministic, read-only markdown "
+            "file (default MEMORY.md) so memory is greppable/git-diffable "
+            "without MCP tool access — nothing ever reads that file back; the "
+            "database stays the source of truth. `vectr memory edit` opens the "
+            "same buffer grammar in $EDITOR for a real check-out/check-in "
+            "round trip: on save, changes are translated into note writes "
+            "(body edits become supersedes, never in-place mutations)."
         ),
     )
     memory_sub = p_memory.add_subparsers(dest="memory_command")
@@ -4293,6 +4345,26 @@ def main() -> None:
              "so future note writes no longer re-render the mirror. Does not "
              "delete the previously exported file. A no-op (not an error) if "
              "auto-refresh was never configured for this workspace.",
+    )
+    p_memory_edit = memory_sub.add_parser(
+        "edit",
+        help="Open ACTIVE notes in $EDITOR; translate the saved diff into note writes",
+        description=(
+            "UPG-MEMORY-LEGIBLE-FILE-PROJECTION part (b). Renders this "
+            "workspace's ACTIVE notes (superseded/revoked notes are omitted — "
+            "use `vectr memory export` for the full audit mirror) to a temp "
+            "file carrying stable [#N] anchors, opens $EDITOR on it, and on "
+            "save translates the diff: a changed body becomes a supersedes "
+            "write (the original row is never mutated in place); changed "
+            "kind/priority/tags become a field update; a deleted block "
+            "becomes a revoke (reversible with vectr_reinstate); a new block "
+            "with no [#N] becomes a fresh note. Exits non-zero and writes "
+            "nothing if a touched note changed concurrently since render."
+        ),
+    )
+    p_memory_edit.add_argument(
+        "--workspace", default=_default_path,
+        help="Workspace whose notes to edit (default: $VECTR_WORKSPACE or cwd)",
     )
 
     p_connect = sub.add_parser(

@@ -2853,6 +2853,97 @@ class WorkingContextStore:
             ).fetchall()
         return [self._row_to_note(r) for r in rows]
 
+    def notes_for_edit(self, workspace: str) -> list[WorkingNote]:
+        """Every note in `workspace` whose folded lifecycle state (UPG-
+        MEMORY-STATE-MACHINE §4.1) is `active` — the candidate set for
+        `vectr memory edit` (UPG-MEMORY-LEGIBLE-FILE-PROJECTION part (b)),
+        in the same note_id-ascending order `notes_for_export()` uses.
+
+        Deliberately NARROWER than `notes_for_export()`, which renders
+        superseded and revoked notes too because the export mirror is a
+        full audit log — an edit buffer must offer only notes a caller
+        could sensibly change: editing a revoked note's anti-memory
+        deterrent text is meaningless, and presenting a superseded note's
+        stale content as "deletable" invites deleting the wrong half of a
+        supersession pair (the supersession itself already IS that note's
+        retirement).
+
+        `valid_until IS NULL` alone is not a sufficient filter here (unlike
+        `_floor_candidate_pool`'s use of it, where a revoked note is fine to
+        include): it excludes superseded notes, but a revoked note keeps
+        `valid_until` NULL too — only the `note_events` fold distinguishes
+        "revoked" from "active". This method's own filtering step below is
+        the same fold `_exclude_expired()` already performs, just inverted
+        to KEEP `active` instead of dropping `expired`.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL ORDER BY note_id ASC",
+                (workspace,),
+            ).fetchall()
+        notes = [self._row_to_note(r) for r in rows]
+        if not notes:
+            return notes
+        states = self._note_event_states_by_ids(workspace, [n.note_id for n in notes])
+        return [n for n in notes if states.get(n.note_id, {}).get("state", "active") == "active"]
+
+    def update_note_fields(
+        self,
+        workspace: str,
+        note_id: int,
+        kind: str | None = None,
+        priority: str | None = None,
+        tags: list[str] | None = None,
+    ) -> bool:
+        """In-place metadata update for `kind`/`priority`/`tags` — mutable
+        columns, unlike `content` (protected by the append-only lifecycle
+        invariant; a content change is always a `remember(supersedes=...)`
+        write, never a mutation of an existing row — see `remember()`'s
+        docstring). Powers `vectr memory edit`'s field-update mapping
+        (UPG-MEMORY-LEGIBLE-FILE-PROJECTION part (b)): body unchanged,
+        kind/priority/tags changed. Same "plain UPDATE + one `audit()` call,
+        no `note_events` row" shape `set_pinned()` already uses for its own
+        directly-mutable column — kind/priority/tags carry no lifecycle-
+        state meaning of their own, so there is nothing here for the
+        append-only fold to need to reverse.
+
+        Only the fields actually passed (not None) are written; at least
+        one must be given. An unrecognised `kind` falls back to
+        `DEFAULT_KIND`, matching `remember()`'s own silent-fallback
+        behaviour for the same input. Returns False if the note does not
+        exist in this workspace.
+        """
+        if kind is None and priority is None and tags is None:
+            raise ValueError("update_note_fields requires at least one of kind/priority/tags")
+        if kind is not None and kind not in VALID_KINDS:
+            kind = DEFAULT_KIND
+        note = self.get_note(workspace, note_id)
+        if note is None:
+            return False
+        set_clauses: list[str] = []
+        params: list = []
+        if kind is not None:
+            set_clauses.append("kind = ?")
+            params.append(kind)
+        if priority is not None:
+            set_clauses.append("priority = ?")
+            params.append(priority)
+        if tags is not None:
+            set_clauses.append("tags = ?")
+            params.append(json.dumps(tags))
+        params.extend([workspace, note_id])
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE notes SET {', '.join(set_clauses)} WHERE workspace = ? AND note_id = ?",
+                params,
+            )
+        audit(
+            "MEMORY_EDIT_FIELD_UPDATE", workspace=workspace, note_id=note_id,
+            kind=kind or "", priority=priority or "",
+            tags=",".join(tags) if tags is not None else "",
+        )
+        return True
+
     def recall_for_path(
         self,
         workspace: str,
