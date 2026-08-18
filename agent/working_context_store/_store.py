@@ -421,9 +421,10 @@ def _merge_recall_floor(
     benchmarks/recall_miss/harness.py depends on that being true by
     construction here, not by convention at each call site. When neither
     `tier0` nor `deterministic` contributed anything (the common case —
-    apply_floor=False, or a workspace with no directive/pinned/matching
-    notes), this returns `ranked` unchanged, truncated to `limit` exactly
-    like the pre-existing behavior it replaces."""
+    apply_floor=False, a workspace with no pinned notes and the
+    deterministic channel at its shipped default-off, or simply no
+    matching notes), this returns `ranked` unchanged, truncated to
+    `limit` exactly like the pre-existing behavior it replaces."""
     if not tier0 and not deterministic:
         return ranked[:limit]
     combined: list[WorkingNote] = []
@@ -1196,8 +1197,11 @@ class WorkingContextStore:
                 # alongside content/title when encryption is on (it is by
                 # construction a substring of content).
                 "user_quote":            "TEXT NOT NULL DEFAULT ''",
-                # UPG-RECALL-MISS-FLOOR part (b): explicit pin — Tier 0
-                # unconditional-injection membership alongside kind='directive'.
+                # UPG-RECALL-MISS-FLOOR part (b), round 4: explicit pin — the
+                # SOLE Tier 0 unconditional-injection membership test in
+                # recall() (directive notes were dropped from Tier 0 in
+                # round 4; they still get their own unconditional delivery
+                # via boot_recall(), which is unrelated to this column).
                 # Existing rows default to unpinned (0/False), unchanged behavior.
                 "pinned":                "INTEGER NOT NULL DEFAULT 0",
             }
@@ -1239,12 +1243,14 @@ class WorkingContextStore:
         """Store a working note. Returns the note_id.
 
         `pin` (UPG-RECALL-MISS-FLOOR part (b)): explicit, caller-declared
-        Tier 0 membership at write time — equivalent to `kind='directive'`
-        for the unconditional-injection guarantee in `recall()`, but
-        orthogonal to `kind` (a pinned note keeps its own kind; a task note
-        can be pinned without becoming a directive). Never inferred from
-        content or usage. Use `set_pinned()` to pin/unpin an EXISTING note
-        instead of at write time.
+        Tier 0 membership at write time — the unconditional-injection
+        guarantee in `recall()`, orthogonal to `kind` (a pinned note keeps
+        its own kind; a task note can be pinned without becoming a
+        directive). As of round 4, pinning is the ONLY way into Tier 0 —
+        directive notes no longer enter it (they already have their own
+        unconditional, uncapped-per-query delivery via `boot_recall()`).
+        Never inferred from content or usage. Use `set_pinned()` to
+        pin/unpin an EXISTING note instead of at write time.
 
         If code_hash is provided and another non-superseded note exists for the
         same workspace + code_hash (same code anchor), the older note is marked
@@ -1709,12 +1715,14 @@ class WorkingContextStore:
         """Pin or unpin an existing note (UPG-RECALL-MISS-FLOOR part (b),
         `vectr_pin`): explicit Tier 0 membership, set/cleared entirely by
         caller decision — never inferred from content, usage, or query
-        history. A pinned note joins `kind='directive'` notes in `recall()`'s
-        unconditional-injection tier (bounded by `recall_floor.
-        tier0_max_notes`, see agent/config.yaml). Idempotent: pinning an
-        already-pinned note (or unpinning an already-unpinned one) is a
-        no-op write that still returns True. Returns False if the note does
-        not exist in this workspace."""
+        history. As of round 4, a pinned note is the ONLY way into
+        `recall()`'s unconditional-injection Tier 0 (bounded by
+        `recall_floor.tier0_max_notes`, see agent/config.yaml) — directive
+        notes no longer enter this tier; they have their own unconditional,
+        uncapped-per-query delivery via `boot_recall()` instead. Idempotent:
+        pinning an already-pinned note (or unpinning an already-unpinned
+        one) is a no-op write that still returns True. Returns False if the
+        note does not exist in this workspace."""
         note = self.get_note(workspace, note_id)
         if note is None:
             return False
@@ -1913,23 +1921,28 @@ class WorkingContextStore:
         session_id: str | None,
         limit: int,
     ) -> tuple[list[WorkingNote], list[WorkingNote]]:
-        """Tier 0 (directive + pinned, unconditional) and deterministic
+        """Tier 0 (pinned notes, unconditional) and deterministic
         tag/anchor/symbol/title channel hits for `query` (UPG-RECALL-MISS-
-        FLOOR parts (b)/(c)). Returns (tier0, deterministic) — `recall()`
-        merges both ahead of the ranked result via `_merge_recall_floor()`.
-        Tier 0 needs no `query` at all (directives/pins are unconditional);
-        the deterministic channel returns [] when `query` is empty since
-        there is nothing to check containment against.
+        FLOOR parts (b)/(c), revised round 4). Returns (tier0,
+        deterministic) — `recall()` merges both ahead of the ranked
+        result via `_merge_recall_floor()`. Tier 0 needs no `query` at
+        all (a pin is unconditional by definition); the deterministic
+        channel returns [] when `query` is empty since there is nothing
+        to check containment against, and also returns [] whenever
+        `RECALL_FLOOR_DETERMINISTIC_ENABLED` is false (see below).
 
-        Tier 0 is a SECOND, budget-constrained delivery of directive notes
-        on top of `boot_recall()`'s own dedicated, uncapped-per-query
-        channel (all directives up to config.BOOT_MAX_DIRECTIVE_NOTES,
-        every session, unconditional on any query at all). Because that
-        stronger guarantee already exists, Tier 0's genuinely new
-        capability is the PIN (a note kind with no other guaranteed-
-        delivery path), not re-delivering directives a second time — so
-        Tier 0 is deliberately small, and prefers pinned notes over
-        directives when its cap forces a choice (see the sort below).
+        Tier 0 is PINNED-ONLY as of round 4 (it used to also include
+        every `kind == 'directive'` note). Directive notes were dropped
+        from its candidate predicate because `boot_recall()` already
+        returns ALL directive notes unconditionally every session
+        (capped by config.BOOT_MAX_DIRECTIVE_NOTES, default 100) —
+        including them here a second time only charged query budget for
+        a guarantee that already exists on a stronger, dedicated
+        channel. The pin is the only note kind with NO other guaranteed-
+        delivery path, so it is the only kind Tier 0 still carries; the
+        pin-vs-directive priority sort this method used to need is gone
+        along with the directive branch — pinned is now the sole
+        candidate kind, so there is nothing left to choose between.
 
         Tier 0's cap (UPG-RECALL-MISS-FLOOR F1 fix, revised per review) is
         `min(tier0_max_notes, max(tier0_guaranteed, floor(limit *
@@ -1938,21 +1951,37 @@ class WorkingContextStore:
         never 0 for any `limit >= 1` (F1's requirement), but scaled by the
         same share as the ceiling rather than flat-taxing a tight budget
         at the full `tier0_min_notes` count. At the production default
-        (limit=10) this still yields 2 (room for one pinned note AND one
-        directive), but at limit=3 or limit=5 it yields 1 (a single
-        guaranteed slot, pin-preferred) — the "pinned AND directive at
-        100%" acceptance bar holds at limit>=10, degrading to "one
-        guaranteed slot" below that; see agent/config.yaml's recall_floor
-        comments for the exact crossover reasoning.
+        (limit=10) this yields 2 (room for more than one pinned note to
+        survive at once); at limit=3 or limit=5 it yields 1 (a single
+        guaranteed slot — the most recently pinned note). "A pinned note
+        is returned regardless of query" holds at every limit >= 1; room
+        for a SECOND simultaneous pin only opens up at limit>=10; see
+        agent/config.yaml's recall_floor comments for the exact crossover
+        reasoning.
 
-        The deterministic channel's cap (UPG-RECALL-MISS-FLOOR F3 fix) is
-        `min(deterministic_max_notes, floor((limit - len(tier0)) *
-        deterministic_max_share_of_remaining))` — bounded by a share of
-        what Tier 0 did NOT use, not a share of `limit` directly, so it is
-        the direct statement of "the deterministic channel never takes
-        more than the ranked group": at most an equal split of whatever
-        Tier 0 left behind, guaranteeing ranked fill at least as many
-        slots as the deterministic channel claims.
+        The deterministic channel is OFF BY DEFAULT
+        (`RECALL_FLOOR_DETERMINISTIC_ENABLED`, config key
+        `recall_floor.deterministic_enabled`). Measured against the live
+        38-query labeled corpus, its declared-metadata containment
+        predicate is too loose to act as a guarantee (mean ~50 candidate
+        notes matched per query against ~1 labeled-relevant note; a
+        floor-cap sweep showed its effect on measured recall is NOT
+        monotonic in budget — see the config.yaml comment on
+        `deterministic_enabled` for the full numbers). This is evidence-
+        gating, not deletion: the code below, its cap formula (F3 fix),
+        and its match-specificity ordering (F2 fix) are unchanged and
+        still fully tested — a future task can tighten the predicate
+        (e.g. require 2+ matched channels for pool membership, not just
+        to win a tie) and flip the flag back on with fresh evidence.
+
+        The deterministic channel's cap (UPG-RECALL-MISS-FLOOR F3 fix),
+        when enabled, is `min(deterministic_max_notes, floor((limit -
+        len(tier0)) * deterministic_max_share_of_remaining))` — bounded
+        by a share of what Tier 0 did NOT use, not a share of `limit`
+        directly, so it is the direct statement of "the deterministic
+        channel never takes more than the ranked group": at most an
+        equal split of whatever Tier 0 left behind, guaranteeing ranked
+        fill at least as many slots as the deterministic channel claims.
 
         When more notes match the deterministic channel than fit its cap,
         the matched set is ranked by its own match specificity (UPG-
@@ -1963,6 +1992,7 @@ class WorkingContextStore:
         most recently written among dozens of equally-valid matches.
         """
         from agent.config import (
+            RECALL_FLOOR_DETERMINISTIC_ENABLED,
             RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
             RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING,
             RECALL_FLOOR_TIER0_MAX_NOTES,
@@ -1977,40 +2007,34 @@ class WorkingContextStore:
         # limit >= 1. min(TIER0_MIN_NOTES, share) rather than flat
         # TIER0_MIN_NOTES: at a tight `limit` the guarantee scales down
         # to a single slot instead of unconditionally spending
-        # TIER0_MIN_NOTES worth of budget on a channel that already has a
-        # stronger backstop in boot_recall() (see the docstring above).
+        # TIER0_MIN_NOTES worth of budget.
         tier0_guaranteed = max(1, min(RECALL_FLOOR_TIER0_MIN_NOTES, tier0_share_cap))
         tier0_cap = min(RECALL_FLOOR_TIER0_MAX_NOTES, max(tier0_guaranteed, tier0_share_cap))
         # `pool` is ordered created_at DESC, note_id DESC (see
         # _floor_candidate_pool) — slicing to `tier0_cap` here means Tier 0
-        # is, in practice, "the tier0_cap MOST RECENT directive/pinned
-        # notes" in the workspace, PINNED-FIRST. A workspace holding more
-        # directive/pinned notes than the cap will never surface an older
-        # one via this tier; that is a deliberate, stated bound of the
-        # design (recency is a reasonable deterministic tie-break for an
-        # otherwise-unconditional guarantee), not an accident of pool
-        # order.
-        tier0_candidates = [n for n in pool if n.kind == "directive" or n.pinned]
-        # Pinned notes win the scarce slot over plain directives when the
-        # cap forces a choice: directives already have their own
-        # dedicated, uncapped-per-query channel in boot_recall() (every
-        # session, unconditional on any query), so a pinned note — which
-        # has NO other guaranteed-delivery path — is the kind that
-        # genuinely needs this one. `sort()` is stable, so within each
-        # group (pinned / directive-only) the pool's own created_at DESC
-        # order is preserved unchanged; this reorders WHICH notes win a
-        # slot by each note's OWN declared state (its `pinned` field),
-        # never by anything about the query.
-        tier0_candidates.sort(key=lambda n: not n.pinned)
+        # is, in practice, "the tier0_cap MOST RECENTLY PINNED notes" in
+        # the workspace. A workspace holding more pinned notes than the
+        # cap will never surface an older one via this tier; that is a
+        # deliberate, stated bound of the design (recency is a reasonable
+        # deterministic tie-break for an otherwise-unconditional
+        # guarantee), not an accident of pool order. Pinned-only as of
+        # round 4 (see the docstring above for why directives were
+        # dropped) — no ordering is needed among candidates beyond the
+        # pool's own recency order, since there is only one candidate
+        # kind left.
+        tier0_candidates = [n for n in pool if n.pinned]
         tier0 = tier0_candidates[:tier0_cap]
         tier0_ids = {n.note_id for n in tier0}
+
+        deterministic: list[WorkingNote] = []
+        if not RECALL_FLOOR_DETERMINISTIC_ENABLED:
+            return tier0, deterministic
 
         remaining_after_tier0 = max(limit - len(tier0), 0)
         det_cap = min(
             RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
             int(remaining_after_tier0 * RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING),
         )
-        deterministic: list[WorkingNote] = []
         if query and det_cap > 0:
             scored: list[tuple[tuple[int, int], WorkingNote]] = []
             for n in pool:
@@ -2087,33 +2111,42 @@ class WorkingContextStore:
         a post-filter after the SQL LIMIT, so it may return fewer than
         `limit` results — the same trade-off min_similarity already accepts.
 
-        apply_floor (UPG-RECALL-MISS-FLOOR parts (b)/(c)): compose the
-        ordinary ranked result (semantic or SQL, above/below unchanged)
-        with two never-scored guarantees, in this fixed precedence —
-        Tier 0 (every kind='directive' note plus every pinned note,
-        unconditional) first, then the deterministic tag/anchor/symbol/
+        apply_floor (UPG-RECALL-MISS-FLOOR parts (b)/(c), revised round
+        4): compose the ordinary ranked result (semantic or SQL, above/
+        below unchanged) with two never-scored guarantees, in this fixed
+        precedence — Tier 0 (every explicitly PINNED note, unconditional;
+        directive notes were dropped from this tier in round 4 — see
+        `_recall_floor_notes()`'s docstring for why: they already have
+        their own unconditional, uncapped-per-query channel in
+        `boot_recall()`) first, then the deterministic tag/anchor/symbol/
         title channels (`_note_matches_declared_metadata()` — matched
         against each candidate note's OWN stored metadata, never a
         classification of `query`, ranked among themselves by match
         specificity when more match than fit — UPG-RECALL-MISS-FLOOR F2
-        fix), then the ranked result fills whatever budget remains.
-        Tier 0 is bounded by a guaranteed MINIMUM (recall_floor.
-        tier0_min_notes — enough room for one directive AND one pinned
-        note whenever `limit` leaves any room at all) with an absolute
-        ceiling (tier0_max_notes) and a share-of-`limit` ceiling
+        fix; OFF BY DEFAULT as of round 4, see `recall_floor.
+        deterministic_enabled` in agent/config.yaml for the measured
+        evidence gate), then the ranked result fills whatever budget
+        remains. Tier 0 is bounded by a guaranteed MINIMUM (recall_floor.
+        tier0_min_notes — room for more than one simultaneous pin
+        whenever `limit` leaves enough room) with an absolute ceiling
+        (tier0_max_notes) and a share-of-`limit` ceiling
         (tier0_max_share_of_limit) on top of that minimum; the
-        deterministic channel is bounded by its own absolute ceiling
-        (deterministic_max_notes) and a share of whatever Tier 0 did NOT
-        use (deterministic_max_share_of_remaining — never more than the
-        ranked group gets from what's left). See `_recall_floor_notes()`
-        for the exact formulas. Together these mean the two floor
-        channels combined can never claim the whole budget and displace
-        ranked fill entirely, at any `limit` a caller passes, while Tier
-        0's own guarantee cannot silently shrink to zero at a small
-        `limit` either. The combined, de-duplicated result is always
-        truncated to `limit` — this method never returns more than
-        `limit` notes regardless of how many candidates the floor and the
-        ranked result each contribute.
+        deterministic channel, when enabled, is bounded by its own
+        absolute ceiling (deterministic_max_notes) and a share of
+        whatever Tier 0 did NOT use (deterministic_max_share_of_remaining
+        — never more than the ranked group gets from what's left). See
+        `_recall_floor_notes()` for the exact formulas. Together these
+        mean the two floor channels combined can never claim the whole
+        budget and displace ranked fill entirely, at any `limit` a caller
+        passes, while Tier 0's own guarantee cannot silently shrink to
+        zero at a small `limit` either. With zero pinned notes in a
+        workspace and the deterministic channel at its shipped default of
+        off, apply_floor=True and apply_floor=False produce byte-
+        identical output — nothing is consumed unconditionally unless a
+        caller actually opted in via a pin. The combined, de-duplicated
+        result is always truncated to `limit` — this method never returns
+        more than `limit` notes regardless of how many candidates the
+        floor and the ranked result each contribute.
         Ignored (no floor notes computed) when `kind` narrows the query to
         one specific kind — a caller that explicitly asked for one kind
         gets exactly that kind, unmodified, same as apply_floor=False.

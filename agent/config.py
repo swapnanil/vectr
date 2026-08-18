@@ -1427,6 +1427,7 @@ RECALL_FLOOR_TIER0_MAX_SHARE_OF_LIMIT: float = float(_recall_floor_cfg["tier0_ma
 RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING: float = float(
     _recall_floor_cfg["deterministic_max_share_of_remaining"]
 )
+RECALL_FLOOR_DETERMINISTIC_ENABLED: bool = bool(_recall_floor_cfg["deterministic_enabled"])
 
 # ---------------------------------------------------------------------------
 # UPG-TEST-CACHE-ISOLATION: single override point for vectr's on-disk cache

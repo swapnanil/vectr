@@ -1,13 +1,28 @@
-"""Tests for UPG-RECALL-MISS-FLOOR parts (b) and (c):
+"""Tests for UPG-RECALL-MISS-FLOOR parts (b) and (c), round 4 revision:
 
-  (b) Tier 0 — kind='directive' notes plus explicitly pinned notes, injected
-      unconditionally on every WorkingContextStore.recall(apply_floor=True)
-      call, never scored against the query, bounded by
-      agent/config.yaml's recall_floor.tier0_max_notes.
+  (b) Tier 0 — explicitly PINNED notes ONLY, injected unconditionally on
+      every WorkingContextStore.recall(apply_floor=True) call, never
+      scored against the query, bounded by agent/config.yaml's
+      recall_floor.tier0_max_notes. Directive notes were DROPPED from
+      this tier in round 4 -- they already have their own unconditional,
+      uncapped-per-query delivery via boot_recall() (UPG-9.2), so
+      including them here a second time only charged query budget for an
+      already-existing guarantee. See TestTier0UnconditionalInjection's
+      first test for the explicit regression guard.
   (c) Deterministic channels — a note whose OWN declared tag, anchor
       basename, trigger symbol, or title token set is found (containment)
       in the query text is guaranteed a slot ahead of the ranked
       (semantic/SQL) result, bounded by recall_floor.deterministic_max_notes.
+      OFF BY DEFAULT as of round 4 (recall_floor.deterministic_enabled:
+      false) -- measured against the live labeled corpus, the predicate
+      is too loose to act as a guarantee (mean ~50 candidate matches per
+      query vs ~1 labeled-relevant note; a floor-cap sweep showed the
+      effect on measured recall is not monotonic in budget). Evidence-
+      gating, not deletion: the code and its tests are unchanged, they
+      just now explicitly flip `agent.config.RECALL_FLOOR_DETERMINISTIC_
+      ENABLED` on via monkeypatch to exercise the channel, matching how a
+      future task would re-enable it in agent/config.yaml once the
+      predicate is tightened.
 
 Every channel here matches a NOTE's OWN stored metadata against the query
 string (symmetric containment) — never a classification of the query's
@@ -79,17 +94,25 @@ class TestApplyFloorDefaultOff:
 
 
 class TestTier0UnconditionalInjection:
-    """Part (b): directive + pinned notes surface on EVERY query, including
+    """Part (b), round 4: PINNED notes surface on EVERY query, including
     one that shares no vocabulary with the note at all, only when
-    apply_floor=True."""
+    apply_floor=True. Directive notes do NOT -- they are delivered by
+    boot_recall() instead (UPG-9.2), unconditionally every session on a
+    separate, stronger channel; this class's first test is the explicit
+    regression guard against re-adding them to Tier 0."""
 
-    def test_directive_injected_regardless_of_query(self, tmp_path) -> None:
+    def test_directive_not_injected_via_tier0(self, tmp_path) -> None:
+        """Round-4 regression guard: a directive note must NOT be
+        surfaced by the in-query floor for an off-topic query, even with
+        apply_floor=True -- Tier 0 is pinned-only now. boot_recall()
+        (UPG-9.2, tested separately) is the channel that actually
+        guarantees directive delivery, unconditionally, every session."""
         store = _store(tmp_path)
         ws = "/ws"
-        store.remember(ws, "never push straight to main", kind="directive")
+        directive_nid = store.remember(ws, "never push straight to main", kind="directive")
         store.remember(ws, "some other completely unrelated finding about zebras")
         notes = store.recall(ws, query="zebras", apply_floor=True)
-        assert any(n.kind == "directive" for n in notes)
+        assert directive_nid not in {n.note_id for n in notes}
 
     def test_pinned_note_injected_regardless_of_query(self, tmp_path) -> None:
         store = _store(tmp_path)
@@ -144,29 +167,53 @@ class TestTier0UnconditionalInjection:
 
         store = _store(tmp_path)
         ws = "/ws"
+        pinned_ids = set()
         for i in range(RECALL_FLOOR_TIER0_MAX_NOTES + 5):
-            store.remember(ws, f"standing rule number {i}", kind="directive")
+            pinned_ids.add(store.remember(ws, f"standing note number {i}", pin=True))
         store.remember(ws, "unrelated content about penguins")
         notes = store.recall(ws, query="penguins", apply_floor=True, limit=50)
-        directive_count = sum(1 for n in notes if n.kind == "directive")
-        assert directive_count <= RECALL_FLOOR_TIER0_MAX_NOTES
+        pinned_count = sum(1 for n in notes if n.note_id in pinned_ids)
+        assert pinned_count <= RECALL_FLOOR_TIER0_MAX_NOTES
 
     def test_semantic_path_also_composes_tier0(self, tmp_path) -> None:
         store = _semantic_store(tmp_path)
         ws = "/ws"
-        store.remember(ws, "never push straight to main", kind="directive")
+        pinned_nid = store.remember(ws, "workspace lock acquisition pattern", pin=True)
         store.remember(ws, "some other finding about database connection pooling")
         notes = store.recall(ws, query="something entirely unrelated to either note", apply_floor=True)
-        assert any(n.kind == "directive" for n in notes)
+        assert pinned_nid in {n.note_id for n in notes}
 
 
 class TestDeterministicChannels:
     """Part (c): a note whose own tag/anchor/symbol/title metadata is found
     in the query text is guaranteed a slot, even when its content shares no
     vocabulary with the query (so plain SQL LIKE / semantic similarity would
-    otherwise miss it)."""
+    otherwise miss it) -- WHEN the channel is enabled. Shipped default is
+    OFF (recall_floor.deterministic_enabled: false, round 4 evidence gate),
+    so every test below that exercises the channel through recall()
+    explicitly flips `agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED` on
+    via monkeypatch first -- `_recall_floor_notes()` re-imports that name
+    from `agent.config` on every call (a local import, not a module-level
+    constant baked in at import time), so patching the attribute on the
+    `agent.config` module object takes effect immediately."""
 
-    def test_tag_channel(self, tmp_path) -> None:
+    def test_disabled_by_default_even_with_a_matching_tag(self, tmp_path) -> None:
+        """The evidence gate itself: with the shipped config (unpatched),
+        a tag-matching note must NOT be surfaced by the floor, even though
+        it would be if the channel were enabled -- this is the round-4
+        regression guard for `deterministic_enabled: false`."""
+        store = _store(tmp_path)
+        ws = "/ws"
+        nid = store.remember(
+            ws, "some content with no lexical overlap to the query below",
+            tags=["workspace-lock"],
+        )
+        store.remember(ws, "an unrelated note")
+        notes = store.recall(ws, query="explain the workspace-lock behavior", apply_floor=True)
+        assert nid not in {n.note_id for n in notes}
+
+    def test_tag_channel(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         store = _store(tmp_path)
         ws = "/ws"
         nid = store.remember(
@@ -177,7 +224,8 @@ class TestDeterministicChannels:
         notes = store.recall(ws, query="explain the workspace-lock behavior", apply_floor=True)
         assert nid in {n.note_id for n in notes}
 
-    def test_anchor_channel(self, tmp_path) -> None:
+    def test_anchor_channel(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         store = _store(tmp_path)
         ws = "/ws"
         nid = store.remember(
@@ -188,7 +236,8 @@ class TestDeterministicChannels:
         notes = store.recall(ws, query="what does resolver.py do", apply_floor=True)
         assert nid in {n.note_id for n in notes}
 
-    def test_symbol_channel(self, tmp_path) -> None:
+    def test_symbol_channel(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         store = _store(tmp_path)
         ws = "/ws"
         nid = store.remember(
@@ -199,7 +248,8 @@ class TestDeterministicChannels:
         notes = store.recall(ws, query="how is WorkspaceLock constructed", apply_floor=True)
         assert nid in {n.note_id for n in notes}
 
-    def test_symbol_channel_is_case_sensitive(self, tmp_path) -> None:
+    def test_symbol_channel_is_case_sensitive(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         store = _store(tmp_path)
         ws = "/ws"
         nid = store.remember(
@@ -212,7 +262,8 @@ class TestDeterministicChannels:
         notes = store.recall(ws, query="how is workspacelock constructed", apply_floor=True)
         assert nid not in {n.note_id for n in notes}
 
-    def test_title_channel_requires_min_overlap(self, tmp_path) -> None:
+    def test_title_channel_requires_min_overlap(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         from agent.config import RECALL_FLOOR_TITLE_MIN_OVERLAP_TOKENS
 
         store = _store(tmp_path)
@@ -231,7 +282,8 @@ class TestDeterministicChannels:
             notes_single = store.recall(ws, query="workspace unrelated single token", apply_floor=True)
             assert nid not in {n.note_id for n in notes_single}
 
-    def test_no_channel_matches_no_declared_metadata(self, tmp_path) -> None:
+    def test_no_channel_matches_no_declared_metadata(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         store = _store(tmp_path)
         ws = "/ws"
         store.remember(ws, "some content with no lexical overlap to the query below")
@@ -239,7 +291,8 @@ class TestDeterministicChannels:
         notes = store.recall(ws, query="explain the workspace-lock behavior", apply_floor=True)
         assert notes == []
 
-    def test_deterministic_bounded_by_config(self, tmp_path) -> None:
+    def test_deterministic_bounded_by_config(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         from agent.config import RECALL_FLOOR_DETERMINISTIC_MAX_NOTES
 
         store = _store(tmp_path)
@@ -249,7 +302,8 @@ class TestDeterministicChannels:
         notes = store.recall(ws, query="something about shared-tag", apply_floor=True, limit=50)
         assert len(notes) <= RECALL_FLOOR_DETERMINISTIC_MAX_NOTES
 
-    def test_semantic_path_also_composes_deterministic_channel(self, tmp_path) -> None:
+    def test_semantic_path_also_composes_deterministic_channel(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         store = _semantic_store(tmp_path)
         ws = "/ws"
         nid = store.remember(
@@ -267,11 +321,12 @@ class TestLimitInvariant:
     exact invariant benchmarks/recall_miss/harness.py's STEP 0 assertion
     guards against a regression in."""
 
-    def test_never_exceeds_limit_with_many_candidates(self, tmp_path) -> None:
+    def test_never_exceeds_limit_with_many_candidates(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         store = _store(tmp_path)
         ws = "/ws"
         for i in range(10):
-            store.remember(ws, f"standing rule {i}", kind="directive")
+            store.remember(ws, f"standing note {i}", pin=True)
         for i in range(10):
             store.remember(ws, f"content {i} about shared-topic", tags=["shared-topic"])
         for i in range(10):
@@ -279,12 +334,14 @@ class TestLimitInvariant:
         notes = store.recall(ws, query="tell me about shared-topic", apply_floor=True, limit=5)
         assert len(notes) <= 5
 
-    def test_dedup_no_double_counting_across_tiers(self, tmp_path) -> None:
-        """A note that is BOTH a directive AND tag-matches the query must
-        only ever appear once in the composed result."""
+    def test_dedup_no_double_counting_across_tiers(self, tmp_path, monkeypatch) -> None:
+        """A note that is BOTH pinned (Tier 0) AND tag-matches the query
+        (deterministic) must only ever appear once in the composed
+        result."""
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         store = _store(tmp_path)
         ws = "/ws"
-        nid = store.remember(ws, "a standing rule", kind="directive", tags=["shared-tag"])
+        nid = store.remember(ws, "a standing note", pin=True, tags=["shared-tag"])
         notes = store.recall(ws, query="something about shared-tag", apply_floor=True, limit=10)
         ids = [n.note_id for n in notes]
         assert ids.count(nid) == 1
@@ -308,7 +365,8 @@ class TestFloorReservesRankedRoom:
     composed result, at any `limit` a caller passes -- not just the ones
     this was measured against."""
 
-    def test_ranked_note_survives_when_floor_channels_are_saturated(self, tmp_path) -> None:
+    def test_ranked_note_survives_when_floor_channels_are_saturated(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         from agent.config import (
             RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
             RECALL_FLOOR_TIER0_MAX_NOTES,
@@ -316,10 +374,12 @@ class TestFloorReservesRankedRoom:
 
         store = _store(tmp_path)
         ws = "/ws"
-        # Saturate Tier 0's absolute cap with directive notes...
+        # Saturate Tier 0's absolute cap with pinned notes...
         for i in range(RECALL_FLOOR_TIER0_MAX_NOTES + 3):
-            store.remember(ws, f"standing rule {i}", kind="directive")
-        # ...and the deterministic tag channel's absolute cap...
+            store.remember(ws, f"standing note {i}", pin=True)
+        # ...and the deterministic tag channel's absolute cap (enabled via
+        # monkeypatch above; shipped default is off, see
+        # TestDeterministicChannels.test_disabled_by_default_even_with_a_matching_tag)...
         for i in range(RECALL_FLOOR_DETERMINISTIC_MAX_NOTES + 3):
             store.remember(ws, f"content {i} unrelated topic", tags=["shared-tag"])
         # ...while a single note only reachable via the ranked (SQL LIKE
@@ -370,63 +430,64 @@ class TestFloorReservesRankedRoom:
 
 
 class TestTier0GuaranteedMinimum:
-    """UPG-RECALL-MISS-FLOOR F1 fix, revised after review: Tier 0's
-    guaranteed slot count must never truncate to 0 at any `limit >= 1` --
-    a fraction-of-`limit` cap alone (the first version of this mechanism)
-    gave Tier 0 only ONE slot at `limit=10` (recall()'s own default) and
-    ZERO at `limit=5`, measured live against the real 38-query labeled
-    corpus. But directives already have their own dedicated, uncapped-
-    per-query channel (`boot_recall()`, config.BOOT_MAX_DIRECTIVE_NOTES,
-    every session unconditional on any query) -- Tier 0 inside query
-    recall is a SECOND delivery of something already guaranteed, so it
-    is deliberately scaled down rather than flat-taxing a tight budget,
-    and prefers PINNED notes (no other guaranteed-delivery path) over
-    directives when its cap forces a choice. The combined acceptance bar
-    ("a directive AND a pinned note both survive") only holds once
-    `limit` reaches the production default (10) or above; below that,
-    Tier 0 degrades to ONE guaranteed slot and pin-priority decides which
-    note gets it -- proven explicitly here rather than left implicit."""
+    """UPG-RECALL-MISS-FLOOR F1 fix, revised after review and again in
+    round 4 (Tier 0 became pinned-only -- see TestTier0UnconditionalInjection
+    and the module docstring): Tier 0's guaranteed slot count must never
+    truncate to 0 at any `limit >= 1` -- a fraction-of-`limit` cap alone
+    (the first version of this mechanism) gave Tier 0 only ONE slot at
+    `limit=10` (recall()'s own default) and ZERO at `limit=5`, measured
+    live against the real 38-query labeled corpus. `tier0_min_notes=2`
+    gives room for MORE THAN ONE simultaneous pin once `limit` reaches the
+    production default (10) or above; below that, Tier 0 degrades to ONE
+    guaranteed slot, and the pool's own recency order (most-recently-
+    pinned first) decides which single pin survives -- proven explicitly
+    here rather than left implicit. Directive notes are never candidates
+    for this tier at all as of round 4; they have their own unconditional,
+    uncapped-per-query channel in boot_recall() instead."""
 
-    def test_directive_and_pinned_both_survive_at_default_limit(self, tmp_path) -> None:
+    def test_two_pinned_notes_both_survive_at_default_limit(self, tmp_path) -> None:
         store = _store(tmp_path)
         ws = "/ws"
-        directive_nid = store.remember(ws, "never push straight to main", kind="directive")
-        pinned_nid = store.remember(ws, "workspace lock acquisition pattern", pin=True)
+        first_pinned_nid = store.remember(ws, "workspace lock acquisition pattern", pin=True)
+        second_pinned_nid = store.remember(ws, "database connection pooling rule", pin=True)
         store.remember(ws, "an unrelated note about zebras")
         notes = store.recall(ws, query="zebras", apply_floor=True, limit=10)
         ids = {n.note_id for n in notes}
-        assert directive_nid in ids
-        assert pinned_nid in ids
+        assert first_pinned_nid in ids
+        assert second_pinned_nid in ids
 
-    def test_pinned_note_wins_the_single_slot_at_a_tight_limit(self, tmp_path) -> None:
+    def test_most_recent_pinned_note_wins_the_single_slot_at_a_tight_limit(self, tmp_path) -> None:
         """At limit=5, Tier 0's guarantee is exactly ONE slot (see the
-        class docstring) -- the pinned note, which has no other
-        guaranteed-delivery path, must win it over the directive, which
-        does (boot_recall())."""
+        class docstring). With two pinned notes competing for it, the pool
+        order (created_at DESC, note_id DESC -- see _floor_candidate_pool)
+        decides: the more-recently-pinned note wins, the older one does
+        not survive via Tier 0."""
         store = _store(tmp_path)
         ws = "/ws"
-        directive_nid = store.remember(ws, "never push straight to main", kind="directive")
-        pinned_nid = store.remember(ws, "workspace lock acquisition pattern", pin=True)
+        older_pinned_nid = store.remember(ws, "workspace lock acquisition pattern", pin=True)
+        newer_pinned_nid = store.remember(ws, "database connection pooling rule", pin=True)
         store.remember(ws, "an unrelated note about zebras")
         notes = store.recall(ws, query="zebras", apply_floor=True, limit=5)
         ids = {n.note_id for n in notes}
-        assert pinned_nid in ids
-        assert directive_nid not in ids
+        assert newer_pinned_nid in ids
+        assert older_pinned_nid not in ids
 
     @pytest.mark.parametrize("limit", list(range(1, 11)))
     def test_tier0_never_empty_across_limit_1_to_10(self, tmp_path, limit) -> None:
         """F1's guarantee restated so it cannot silently regress: with a
-        single standing directive and an off-topic query, Tier 0 must
-        surface it at every `limit` from 1 through 10 inclusive -- never
-        truncated to zero, regardless of how small `limit` is (as long as
-        it is >= 1)."""
+        single pinned note and an off-topic query, Tier 0 must surface it
+        at every `limit` from 1 through 10 inclusive -- never truncated to
+        zero, regardless of how small `limit` is (as long as it is >= 1).
+        Adapted to pinned-only in round 4 -- a directive note would no
+        longer exercise this path at all (see
+        TestTier0UnconditionalInjection.test_directive_not_injected_via_tier0)."""
         store = _store(tmp_path)
         ws = "/ws"
-        directive_nid = store.remember(ws, "never push straight to main", kind="directive")
+        pinned_nid = store.remember(ws, "workspace lock acquisition pattern", pin=True)
         store.remember(ws, "an unrelated note about zebras")
         notes = store.recall(ws, query="zebras", apply_floor=True, limit=limit)
         ids = {n.note_id for n in notes}
-        assert directive_nid in ids
+        assert pinned_nid in ids
 
 
 class TestMatchSpecificityScore:
@@ -479,7 +540,8 @@ class TestDeterministicChannelOrdering:
     match around rank ~40 behind dozens of weaker single-channel matches
     that merely happened to be written more recently."""
 
-    def test_stronger_specificity_match_beats_weaker_more_recent_matches(self, tmp_path) -> None:
+    def test_stronger_specificity_match_beats_weaker_more_recent_matches(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         from agent.config import RECALL_FLOOR_DETERMINISTIC_MAX_NOTES
 
         store = _store(tmp_path)
@@ -501,10 +563,11 @@ class TestDeterministicChannelOrdering:
         notes = store.recall(ws, query="shared-tag resolver.py", apply_floor=True, limit=10)
         assert strong_nid in {n.note_id for n in notes}
 
-    def test_ordering_never_changes_membership(self, tmp_path) -> None:
+    def test_ordering_never_changes_membership(self, tmp_path, monkeypatch) -> None:
         """The ordering fix only decides WHICH already-matched notes win a
         scarce slot -- it must never make a genuinely non-matching note
         appear, or a genuinely matching one vanish below the cap."""
+        monkeypatch.setattr("agent.config.RECALL_FLOOR_DETERMINISTIC_ENABLED", True)
         store = _store(tmp_path)
         ws = "/ws"
         matching_nid = store.remember(
@@ -536,6 +599,55 @@ class TestApplyFloorIgnoredWhenKindNarrows:
         nid = store.remember(ws, "a regular finding", kind="finding")
         notes = store.recall(ws, query="regular finding", kind="finding", apply_floor=True)
         assert {n.note_id for n in notes} == {nid}
+
+
+class TestApplyFloorNoOpWithNothingOptedIn:
+    """ROUND-4 FALSIFIABLE ACCEPTANCE BAR: with zero pinned notes and the
+    deterministic channel at its shipped default (off), apply_floor=True
+    must produce output BYTE-IDENTICAL to apply_floor=False -- nothing may
+    consume query budget unconditionally unless a caller actually opted in
+    via a pin. Directive notes, tags, anchors, trigger symbols and titles
+    that would all have mattered under the pre-round-4 design are present
+    in the fixture below specifically to prove none of them still do."""
+
+    def test_apply_floor_true_matches_apply_floor_false_with_no_pins(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = "/ws"
+        # A directive -- used to enter Tier 0 unconditionally; must not
+        # any more (boot_recall() delivers it instead, on a separate
+        # channel this test does not exercise).
+        store.remember(ws, "never push straight to main", kind="directive")
+        # A note that would satisfy the deterministic tag/anchor/symbol/
+        # title channels if they were enabled -- they are not, by default.
+        store.remember(
+            ws, "content with no lexical overlap to the query below",
+            tags=["shared-tag"], anchors=["agent/resolver.py"],
+            triggers=[{"symbol": "WorkspaceLock"}], title="shared-tag resolver workspace",
+        )
+        # Ordinary notes the ranked (SQL LIKE fallback) path can actually
+        # find via the query itself.
+        for i in range(5):
+            store.remember(ws, f"ranked content {i} mentions shared-tag directly")
+        query = "shared-tag"
+        with_floor = store.recall(ws, query=query, apply_floor=True, limit=10)
+        without_floor = store.recall(ws, query=query, apply_floor=False, limit=10)
+        assert [n.note_id for n in with_floor] == [n.note_id for n in without_floor]
+
+    def test_apply_floor_true_matches_apply_floor_false_off_topic_query(self, tmp_path) -> None:
+        """Same bar, restated for a query that shares no vocabulary with
+        anything in the workspace at all -- both calls should degrade to
+        the identical empty (or ranked-fallback) result."""
+        store = _store(tmp_path)
+        ws = "/ws"
+        store.remember(ws, "never push straight to main", kind="directive")
+        store.remember(
+            ws, "content with no lexical overlap to the query below",
+            tags=["shared-tag"], anchors=["agent/resolver.py"],
+        )
+        query = "an entirely off-topic query about giraffes"
+        with_floor = store.recall(ws, query=query, apply_floor=True, limit=10)
+        without_floor = store.recall(ws, query=query, apply_floor=False, limit=10)
+        assert [n.note_id for n in with_floor] == [n.note_id for n in without_floor]
 
 
 class TestPinServiceLayer:

@@ -1048,51 +1048,61 @@ memory_recall_for_path:
   overfetch_ceiling: 200
 
 recall_floor:
-  # UPG-RECALL-MISS-FLOOR parts (b)/(c): a floor that does not depend on
-  # matching at all. MEMORY.md-style unconditional injection is not
-  # BETTER retrieval, it is NO retrieval — it only works because the file
-  # is ~40 lines. At hundreds of notes that stops scaling, so instead of
-  # tuning semantic matching further, `WorkingContextStore.recall()`
-  # composes two guarantees ahead of the ranked (semantic/SQL) result:
-  #   Tier 0 — every kind='directive' note plus every explicitly pinned
-  #     note, injected unconditionally, never scored against the query.
-  #     NOTE: directives already have their OWN dedicated, unbounded-per-
-  #     query channel in boot_recall() (behavior.boot.max_directive_notes,
-  #     every session, unconditional on any query at all) — Tier 0's
-  #     directive membership is a SECOND net, not the guarantee itself.
-  #     The genuinely new capability Tier 0 provides is the PIN (a note
-  #     kind with no other guaranteed-delivery path), so when Tier 0's
-  #     own cap forces a choice between a pinned note and a directive,
-  #     the pinned note wins (see tier0_min_notes below and the pin-
-  #     priority sort in _recall_floor_notes()).
-  #   Deterministic channels — a note whose OWN declared tag, anchor
-  #     basename, trigger symbol, or title token set is found in the
-  #     query's text (containment checked against that note's stored
-  #     metadata, never a classification of the query) is guaranteed a
-  #     slot ahead of pure semantic fill. When more notes match than fit
-  #     the channel's cap, the matched set is ranked by its OWN match
-  #     specificity (how many distinct declared-metadata fields matched,
-  #     then how long/specific the matched text was) before truncating —
-  #     never by recency alone, which otherwise arbitrarily keeps whichever
-  #     3-5 of dozens of equally-valid matches happen to be newest (UPG-
-  #     RECALL-MISS-FLOOR F2 fix; see _declared_metadata_match_specificity()
-  #     in agent/working_context_store/_store.py).
+  # UPG-RECALL-MISS-FLOOR parts (b)/(c), revised round 4: a floor that
+  # does not depend on matching at all. MEMORY.md-style unconditional
+  # injection is not BETTER retrieval, it is NO retrieval — it only works
+  # because the file is ~40 lines. At hundreds of notes that stops
+  # scaling, so instead of tuning semantic matching further,
+  # `WorkingContextStore.recall()` composes two guarantees ahead of the
+  # ranked (semantic/SQL) result:
+  #   Tier 0 — every explicitly PINNED note, injected unconditionally,
+  #     never scored against the query. Round-4 change: directive notes
+  #     were DROPPED from Tier 0's candidate predicate (it used to be
+  #     `kind == 'directive' or pinned`, now just `pinned`). Reason:
+  #     boot_recall() already returns ALL directive notes unconditionally
+  #     every session (capped by behavior.boot.max_directive_notes,
+  #     default 100) — including them here a second time only charged
+  #     query budget for a guarantee that already exists on a stronger,
+  #     dedicated channel. The pin is the only note kind with NO other
+  #     guaranteed-delivery path, so it is the only kind Tier 0 still
+  #     carries; the pin-priority sort this used to need (to pick between
+  #     a pinned note and a directive) is gone along with the directive
+  #     branch — there is only one candidate kind left to order.
+  #   Deterministic channels — OFF BY DEFAULT as of round 4 (see
+  #     deterministic_enabled below); when enabled, a note whose OWN
+  #     declared tag, anchor basename, trigger symbol, or title token set
+  #     is found in the query's text (containment checked against that
+  #     note's stored metadata, never a classification of the query) is
+  #     guaranteed a slot ahead of pure semantic fill. When more notes
+  #     match than fit the channel's cap, the matched set is ranked by
+  #     its OWN match specificity (how many distinct declared-metadata
+  #     fields matched, then how long/specific the matched text was)
+  #     before truncating — never by recency alone (UPG-RECALL-MISS-FLOOR
+  #     F2 fix; see _declared_metadata_match_specificity() in
+  #     agent/working_context_store/_store.py). See deterministic_enabled
+  #     below for why this channel is gated off pending a tighter
+  #     predicate.
   # Both tiers are bounded by count so neither can crowd out the ranked
   # result entirely, and the combined result is always truncated to the
   # caller's `limit` (see benchmarks/recall_miss/harness.py's STEP 0
-  # guard: a composition may never return more than `limit` notes).
+  # guard: a composition may never return more than `limit` notes). With
+  # zero pinned notes and deterministic_enabled: false (the shipped
+  # default in a workspace that has never pinned anything), `recall()`
+  # with apply_floor=True is required to produce byte-identical output to
+  # apply_floor=False — nothing may consume budget unconditionally unless
+  # a user actually opted into it via a pin.
 
-  # Max notes Tier 0 (directives + pinned, combined) contributes per
-  # recall() call, regardless of how many directive/pinned notes exist in
-  # the workspace. The candidate pool is ordered by recency (created_at
-  # DESC, note_id DESC — see _floor_candidate_pool()); when a workspace
-  # holds more directive/pinned notes than this bound, Tier 0 is, in
-  # practice, "the tier0_max_notes MOST RECENT directive/pinned notes" —
-  # an older one can never enter Tier 0 no matter how long it has stood.
-  # This is a DELIBERATE, stated bound of the design (recency is a
-  # reasonable, deterministic tie-break for an otherwise-unconditional
-  # guarantee), not an accident of pool order — see tier0_min_notes below
-  # for the separate guarantee this cap must never fall below.
+  # Max notes Tier 0 (pinned notes only, as of round 4) contributes per
+  # recall() call, regardless of how many pinned notes exist in the
+  # workspace. The candidate pool is ordered by recency (created_at DESC,
+  # note_id DESC — see _floor_candidate_pool()); when a workspace holds
+  # more pinned notes than this bound, Tier 0 is, in practice, "the
+  # tier0_max_notes MOST RECENTLY pinned notes" — an older one can never
+  # enter Tier 0 no matter how long it has stood. This is a DELIBERATE,
+  # stated bound of the design (recency is a reasonable, deterministic
+  # tie-break for an otherwise-unconditional guarantee), not an accident
+  # of pool order — see tier0_min_notes below for the separate guarantee
+  # this cap must never fall below.
   tier0_max_notes: 5
 
   # Max notes the deterministic tag/anchor/symbol/title channels
@@ -1100,25 +1110,21 @@ recall_floor:
   # Tier 0 already filled.
   deterministic_max_notes: 5
 
-  # UPG-RECALL-MISS-FLOOR F1 fix, revised after review: Tier 0's
+  # UPG-RECALL-MISS-FLOOR F1 fix, revised after review, and again round 4
+  # (Tier 0 became pinned-only, this key's shape is unchanged): Tier 0's
   # guaranteed slot count is `max(1, min(this, floor(limit *
   # tier0_max_share_of_limit)))` — never 0 for any `limit >= 1`, but
   # scaled by the SAME share as the ceiling below rather than flat-taxing
-  # a tight budget at this full count. Acceptance criterion for this
-  # tier is "a directive AND a pinned note are injected at 100% regardless
-  # of query" — that needs room for BOTH at once, hence 2 as the cap this
-  # value can grow to. It reaches exactly 2 at recall()'s own production
-  # default (limit=10); below that (e.g. limit=5) it degrades to a single
-  # guaranteed slot, which the pin-priority ordering in
-  # _recall_floor_notes() always gives to a pinned note over a directive
-  # — directives already have their own unbounded-per-query channel in
-  # boot_recall(), so a pinned note (no other guaranteed-delivery path)
-  # is the kind that actually needs the scarce in-query slot. Before this
-  # key existed (first version of this mechanism), a caller passing
-  # limit=10 got tier0_cap = int(10 * 0.1) = 1 and limit=5 got 0 (measured
-  # live against the real 38-query labeled corpus with a deliberately
-  # off-topic query) — both silent failures of the "never 0" requirement,
-  # not merely a smaller guarantee than intended.
+  # a tight budget at this full count. 2 gives room for more than one
+  # pinned note to survive at once (rather than only ever guaranteeing
+  # the single most recent pin); it reaches exactly 2 at recall()'s own
+  # production default (limit=10), below that (e.g. limit=5) it degrades
+  # to a single guaranteed slot. Before this key existed (first version
+  # of this mechanism), a caller passing limit=10 got tier0_cap =
+  # int(10 * 0.1) = 1 and limit=5 got 0 (measured live against the real
+  # 38-query labeled corpus with a deliberately off-topic query) — both
+  # silent failures of the "never 0" requirement, not merely a smaller
+  # guarantee than intended.
   tier0_min_notes: 2
 
   # Upper bound on how many of the workspace's own notes are scanned as
@@ -1164,7 +1170,7 @@ recall_floor:
   # reaches tier0_min_notes exactly at the crossover point tier0_min_notes
   # / this = 2 / 0.2 = 10 — recall()'s own production default. A caller
   # asking for exactly the default result count gets the full guaranteed
-  # minimum (2, room for a directive AND a pinned note); a caller asking
+  # minimum (2, room for more than one pinned note); a caller asking
   # for meaningfully more lets Tier 0 grow, still capped by
   # tier0_max_notes, toward its full absolute allowance; a caller asking
   # for meaningfully less degrades toward a single guaranteed slot
@@ -1195,6 +1201,28 @@ recall_floor:
   # bug; do not retune either share to chase a specific corpus's numbers
   # (see the F3 note above this section on why that was rejected once).
   deterministic_max_share_of_remaining: 0.5
+
+  # UPG-RECALL-MISS-FLOOR round-4 evidence gate: the deterministic channel
+  # ships OFF by default. Measured against the live 38-query labeled
+  # corpus, its membership predicate (containment of a note's own tag,
+  # anchor basename, trigger symbol, or title-token-overlap against the
+  # query text) is too loose to act as a guarantee — mean 50.2 candidate
+  # notes matched per query (min 6, max 111) against a mean of ~1 labeled-
+  # relevant note; per-channel precision was tag 1.6%, title 4.6%, anchor
+  # 0%, symbol 0 matches across the run. A cap-sweep (total floor cap 0..6
+  # slots, endpoints reproduced the harness exactly) showed the channel's
+  # effect on recall is NOT monotonic in budget (k=5: cap1 +0, cap2 -1,
+  # cap3 -2, cap4 -2, cap5 -2, cap6 -2; k=10: cap1 +0, cap2 +0, cap3 +1,
+  # cap4 +0, cap5 +0, cap6 +2) — a channel carrying real signal should be
+  # roughly monotonic; a jagged walk means the +2 measured at k=10 in an
+  # earlier round was noise from a loose predicate consuming budget, not
+  # an effect. This is evidence-gating, not deletion: the code, its ranked
+  # match-specificity ordering, and its test coverage are all still
+  # present and correct (tests flip this flag true to exercise the
+  # channel) — a future task can revisit the predicate itself (e.g.
+  # requiring 2+ matched channels to enter the pool at all, not just to
+  # win a tie) and flip this back on with fresh evidence.
+  deterministic_enabled: false
 
 symbol_graph:
   # UPG-JSFLOW-SYMBOLS: language keywords that must never be minted as a
