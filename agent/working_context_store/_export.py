@@ -170,12 +170,21 @@ def _render_note_block(note: "WorkingNote", state_info: dict | None) -> str:
 
 def render_memory_markdown(
     notes: list["WorkingNote"], note_states: dict[int, dict],
+    header_comment: str = _HEADER_COMMENT,
 ) -> str:
     """Top-level render entry point: header comment + title + one `##`
     section per non-empty kind bucket, each holding its notes' blocks in
     note_id-ascending order. Deterministic given the same (notes,
-    note_states) input — no wall-clock-dependent content anywhere."""
-    parts = [_HEADER_COMMENT, "# Working Memory"]
+    note_states) input — no wall-clock-dependent content anywhere.
+
+    `header_comment` defaults to this module's own read-only-mirror notice
+    (`vectr memory export`, part (a)) but is overridable so a second caller
+    with a different contract for the SAME buffer grammar — `vectr memory
+    edit`, part (b), `agent/working_context_store/_memory_edit.py` — can
+    reuse this exact block-rendering path (heading/metadata/body shape,
+    kind-section grouping, note_id ordering) with its own header instead of
+    forking a second renderer that would drift from this one over time."""
+    parts = [header_comment, "# Working Memory"]
     for kind, kind_notes in _group_by_kind(notes):
         label = _KIND_SECTION_LABELS.get(kind, kind.title())
         blocks = [_render_note_block(n, note_states.get(n.note_id)) for n in kind_notes]
