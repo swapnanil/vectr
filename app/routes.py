@@ -35,6 +35,8 @@ from app.models import (
     LocateResponse,
     MapSaveRequest,
     MapSaveResponse,
+    PinRequest,
+    PinResponse,
     ProactiveRequest,
     ProactiveResponse,
     PromoteRequest,
@@ -390,6 +392,7 @@ async def remember(body: RememberRequest, request: Request) -> RememberResponse:
             supersedes=body.supersedes,
             contradicts=body.contradicts,
             user_quote=body.user_quote,
+            pin=body.pin,
         )
     except ValueError as exc:
         # TRIGGER-ENGINE wave 1: malformed triggers, an unrecognised
@@ -529,6 +532,32 @@ async def promote(body: PromoteRequest, request: Request) -> PromoteResponse:
     return PromoteResponse(
         note_id=body.note_id,
         provenance=body.to,
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/pin", response_model=PinResponse)
+async def pin(body: PinRequest, request: Request) -> PinResponse:
+    """Explicit Tier 0 membership toggle (UPG-RECALL-MISS-FLOOR part (b)):
+    set or clear a note's `pinned` flag. Pinned notes join kind='directive'
+    notes in the unconditional-injection tier of every
+    vectr_recall(query=...) call, up to the configured Tier 0 bound
+    (recall_floor.tier0_max_notes) — never scored against the query, never
+    inferred. Idempotent: pinning an already-pinned note (or unpinning an
+    already-unpinned one) still returns 200."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    changed = svc.pin_note(body.note_id, body.pinned)
+    if not changed:
+        raise HTTPException(status_code=404, detail={"error": "note_not_found", "detail": f"Note #{body.note_id} not found."})
+    verb = "pinned" if body.pinned else "unpinned"
+    return PinResponse(
+        note_id=body.note_id,
+        pinned=body.pinned,
+        message=f"Note #{body.note_id} {verb}.",
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

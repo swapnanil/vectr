@@ -1303,7 +1303,7 @@ class TestRelativePathRender:
 # for the write-time resolution itself).
 _DEFAULT_TRIGGER_PARAMS = dict(
     triggers=None, provenance="agent", scope=None, anchors=None, supersedes=None,
-    contradicts=None, session_id=None, user_quote=None,
+    contradicts=None, session_id=None, user_quote=None, pin=False,
 )
 
 
@@ -1460,7 +1460,7 @@ class TestVectrRemember:
             kind="gotcha", title="", agent="",
             triggers=[{"path": "src/auth.py", "event": "pre-edit"}],
             provenance="auto", scope="repo", anchors=["src/auth.py"], supersedes=None,
-            contradicts=None, session_id=None, user_quote=None,
+            contradicts=None, session_id=None, user_quote=None, pin=False,
         )
 
     def test_remember_passes_supersedes_as_int(self) -> None:
@@ -1470,7 +1470,7 @@ class TestVectrRemember:
             content="corrected finding", tags=None, priority="medium",
             kind="finding", title="", agent="",
             triggers=None, provenance="agent", scope=None, anchors=None, supersedes=7,
-            contradicts=None, session_id=None, user_quote=None,
+            contradicts=None, session_id=None, user_quote=None, pin=False,
         )
 
     def test_remember_non_integer_supersedes_returns_error(self) -> None:
@@ -1490,7 +1490,7 @@ class TestVectrRemember:
             content="the API actually returns a dict", tags=None, priority="medium",
             kind="finding", title="", agent="",
             triggers=None, provenance="agent", scope=None, anchors=None, supersedes=None,
-            contradicts=7, session_id=None, user_quote=None,
+            contradicts=7, session_id=None, user_quote=None, pin=False,
         )
 
     def test_remember_non_integer_contradicts_returns_error(self) -> None:
@@ -2188,11 +2188,12 @@ class TestVectrForget:
         tools = handle_tools_list(session_id="fresh-session-no-notes")["tools"]
         names = {t["name"] for t in tools}
         # UPG-MEMORY-STATE-MACHINE §4.2 added vectr_revoke/vectr_reinstate (18 = 16 + 2);
-        # memoization-l3-distiller-design added vectr_distill (19 = 18 + 1).
-        assert len(tools) == 19
+        # memoization-l3-distiller-design added vectr_distill (19 = 18 + 1);
+        # UPG-RECALL-MISS-FLOOR part (b) added vectr_pin (20 = 19 + 1).
+        assert len(tools) == 20
         assert {
             "vectr_recall", "vectr_forget", "vectr_promote", "vectr_revoke", "vectr_reinstate",
-            "vectr_snapshot", "vectr_snapshot_list", "vectr_resume", "vectr_distill",
+            "vectr_snapshot", "vectr_snapshot_list", "vectr_resume", "vectr_distill", "vectr_pin",
         } <= names
 
     def test_all_tools_env_flag_off_keeps_gating(self, monkeypatch) -> None:
@@ -2393,6 +2394,61 @@ class TestVectrReinstate:
         assert "vectr_reinstate" in {t["name"] for t in _MEMORY_TOOLS}
         write_names = {t["name"] for t in _MEMORY_WRITE_TOOLS}
         assert "vectr_reinstate" not in write_names
+
+
+class TestVectrPin:
+    """vectr_pin (UPG-RECALL-MISS-FLOOR part (b)): explicit Tier 0
+    membership toggle. Same MCP-surface conventions as vectr_promote/
+    vectr_revoke/vectr_reinstate above."""
+
+    def test_pin_calls_service(self) -> None:
+        svc = _mock_service()
+        svc.pin_note.return_value = True
+        result = handle_tools_call("vectr_pin", {"note_id": 12}, svc)
+        svc.pin_note.assert_called_once_with(12, True)
+        assert result["isError"] is False
+        assert "#12" in result["content"][0]["text"]
+
+    def test_pin_defaults_pinned_true(self) -> None:
+        svc = _mock_service()
+        svc.pin_note.return_value = True
+        handle_tools_call("vectr_pin", {"note_id": 12}, svc)
+        svc.pin_note.assert_called_once_with(12, True)
+
+    def test_unpin_calls_service_with_false(self) -> None:
+        svc = _mock_service()
+        svc.pin_note.return_value = True
+        result = handle_tools_call("vectr_pin", {"note_id": 12, "pinned": False}, svc)
+        svc.pin_note.assert_called_once_with(12, False)
+        assert result["isError"] is False
+
+    def test_pin_missing_note_id_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_pin", {}, svc)
+        assert result["isError"] is True
+        svc.pin_note.assert_not_called()
+
+    def test_pin_non_integer_note_id_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_pin", {"note_id": "abc"}, svc)
+        assert result["isError"] is True
+        svc.pin_note.assert_not_called()
+
+    def test_pin_not_found_returns_error(self) -> None:
+        svc = _mock_service()
+        svc.pin_note.return_value = False
+        result = handle_tools_call("vectr_pin", {"note_id": 999}, svc)
+        assert result["isError"] is True
+        assert "not found" in result["content"][0]["text"].lower()
+
+    def test_pin_in_tools_list(self) -> None:
+        names = {t["name"] for t in handle_tools_list()["tools"]}
+        assert "vectr_pin" in names
+
+    def test_pin_gated_with_other_memory_read_tools(self) -> None:
+        assert "vectr_pin" in {t["name"] for t in _MEMORY_TOOLS}
+        write_names = {t["name"] for t in _MEMORY_WRITE_TOOLS}
+        assert "vectr_pin" not in write_names
 
 
 # ---------------------------------------------------------------------------

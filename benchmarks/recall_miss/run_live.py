@@ -173,6 +173,16 @@ def main() -> None:
     ap.add_argument("--labels", required=True, type=Path)
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--skip-snapshot", action="store_true", help="Reuse an existing --snapshot-dir instead of re-copying the source.")
+    ap.add_argument(
+        "--apply-floor", action="store_true",
+        help=(
+            "Exercise WorkingContextStore.recall(apply_floor=True) (UPG-RECALL-"
+            "MISS-FLOOR parts (b)/(c): Tier 0 directive+pinned notes plus the "
+            "deterministic tag/anchor/symbol/title channels) instead of the "
+            "plain ranked-only path, for a before/after comparison against the "
+            "same label set."
+        ),
+    )
     args = ap.parse_args()
 
     snapshot_dir = _require_under_tmp(args.snapshot_dir)
@@ -181,8 +191,12 @@ def main() -> None:
 
     store = build_snapshot_store(snapshot_dir)
     queries, key_to_note = load_labels(args.labels, snapshot_dir)
-    report = evaluate_recall(store, args.workspace, queries, key_to_note, k=args.k)
-    print(report.format_text(title="Live-corpus recall-miss harness (snapshot, read-only)"))
+    recall_kwargs = {"apply_floor": True} if args.apply_floor else None
+    report = evaluate_recall(store, args.workspace, queries, key_to_note, k=args.k, recall_kwargs=recall_kwargs)
+    title = "Live-corpus recall-miss harness (snapshot, read-only)"
+    if args.apply_floor:
+        title += " [apply_floor=True]"
+    print(report.format_text(title=title))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import threading
@@ -304,6 +305,100 @@ def _scope_filter(
                 continue
         out.append(note)
     return out
+
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _title_token_set(text: str, min_len: int) -> set[str]:
+    """Lowercased alphanumeric tokens of `text`, dropping anything shorter
+    than `min_len` — the same uniform tokenization applied to a note's own
+    title and to the incoming query text (UPG-RECALL-MISS-FLOOR part (c)),
+    never a fixed vocabulary of interesting/uninteresting words."""
+    return {t.lower() for t in _TOKEN_RE.findall(text) if len(t) >= min_len}
+
+
+def _note_matches_declared_metadata(note: WorkingNote, query: str) -> bool:
+    """True if `note`'s OWN declared tag, anchor, trigger-symbol, or title
+    metadata is found in `query`'s text — deterministic containment tested
+    against this note's stored metadata, never a classification of what
+    kind of query `query` is (UPG-RECALL-MISS-FLOOR part (c); see the
+    no-query-heuristics rail in the module's callers). Every note in a
+    workspace is checked the same uniform way regardless of the query's
+    content — the branches below are channels over one note's declared
+    fields, not a lookup table of query patterns.
+    """
+    from agent.config import (
+        RECALL_FLOOR_TITLE_MIN_OVERLAP_TOKENS,
+        RECALL_FLOOR_TITLE_MIN_TOKEN_LEN,
+    )
+
+    q_lower = query.lower()
+
+    # Tag channel: one of THIS note's own declared tags appears verbatim
+    # in the query text.
+    for tag in note.tags:
+        norm = (tag or "").strip().lower()
+        if norm and norm in q_lower:
+            return True
+
+    # Anchor channel: the basename (no extension) of a file THIS note is
+    # anchored to appears verbatim in the query text.
+    for anchor in note.anchors:
+        path = anchor[0] if anchor else ""
+        stem = Path(path).stem.lower() if path else ""
+        if stem and stem in q_lower:
+            return True
+
+    # Symbol channel: a code symbol name THIS note declared via an
+    # explicit trigger's 'symbol' key appears verbatim in the query text.
+    # Case-sensitive: symbol names are code identifiers, not prose.
+    for trig in note.triggers or []:
+        sym = trig.get("symbol") if isinstance(trig, dict) else None
+        if sym and sym in query:
+            return True
+
+    # Title channel: THIS note's own title, tokenized the same uniform way
+    # as the query, overlaps the query's tokens by at least the configured
+    # floor.
+    if note.title:
+        title_tokens = _title_token_set(note.title, RECALL_FLOOR_TITLE_MIN_TOKEN_LEN)
+        if title_tokens:
+            query_tokens = _title_token_set(query, RECALL_FLOOR_TITLE_MIN_TOKEN_LEN)
+            if len(title_tokens & query_tokens) >= RECALL_FLOOR_TITLE_MIN_OVERLAP_TOKENS:
+                return True
+
+    return False
+
+
+def _merge_recall_floor(
+    tier0: list[WorkingNote],
+    deterministic: list[WorkingNote],
+    ranked: list[WorkingNote],
+    limit: int,
+) -> list[WorkingNote]:
+    """Compose Tier 0, the deterministic channels, and the ranked
+    (semantic/SQL) result into one de-duplicated list, in that fixed
+    precedence, truncated to `limit` (UPG-RECALL-MISS-FLOOR parts (b)/(c)).
+    Never returns more than `limit` notes — the STEP 0 guard in
+    benchmarks/recall_miss/harness.py depends on that being true by
+    construction here, not by convention at each call site. When neither
+    `tier0` nor `deterministic` contributed anything (the common case —
+    apply_floor=False, or a workspace with no directive/pinned/matching
+    notes), this returns `ranked` unchanged, truncated to `limit` exactly
+    like the pre-existing behavior it replaces."""
+    if not tier0 and not deterministic:
+        return ranked[:limit]
+    combined: list[WorkingNote] = []
+    seen: set[int] = set()
+    for group in (tier0, deterministic, ranked):
+        for note in group:
+            if len(combined) >= limit:
+                return combined
+            if note.note_id not in seen:
+                seen.add(note.note_id)
+                combined.append(note)
+    return combined
 
 
 def _age_str(created_at: float) -> str:
@@ -955,7 +1050,8 @@ class WorkingContextStore:
                     valid_until         REAL,
                     code_hash           TEXT NOT NULL DEFAULT '',
                     superseded_by       TEXT,
-                    superseded_at       REAL
+                    superseded_at       REAL,
+                    pinned              INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_notes_workspace ON notes(workspace);
@@ -1063,6 +1159,10 @@ class WorkingContextStore:
                 # alongside content/title when encryption is on (it is by
                 # construction a substring of content).
                 "user_quote":            "TEXT NOT NULL DEFAULT ''",
+                # UPG-RECALL-MISS-FLOOR part (b): explicit pin — Tier 0
+                # unconditional-injection membership alongside kind='directive'.
+                # Existing rows default to unpinned (0/False), unchanged behavior.
+                "pinned":                "INTEGER NOT NULL DEFAULT 0",
             }
             for col, typedef in p4_cols.items():
                 if col not in existing_cols:
@@ -1072,6 +1172,7 @@ class WorkingContextStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_code_hash ON notes(code_hash)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_valid ON notes(valid_until)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_kind ON notes(kind)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(workspace, pinned)")
 
     # ------------------------------------------------------------------
     # Notes — vectr_remember / vectr_recall / vectr_forget
@@ -1096,8 +1197,17 @@ class WorkingContextStore:
         contradicts: int | None = None,
         user_quote: str | None = None,
         recent_user_message: str | None = None,
+        pin: bool = False,
     ) -> int:
         """Store a working note. Returns the note_id.
+
+        `pin` (UPG-RECALL-MISS-FLOOR part (b)): explicit, caller-declared
+        Tier 0 membership at write time — equivalent to `kind='directive'`
+        for the unconditional-injection guarantee in `recall()`, but
+        orthogonal to `kind` (a pinned note keeps its own kind; a task note
+        can be pinned without becoming a directive). Never inferred from
+        content or usage. Use `set_pinned()` to pin/unpin an EXISTING note
+        instead of at write time.
 
         If code_hash is provided and another non-superseded note exists for the
         same workspace + code_hash (same code anchor), the older note is marked
@@ -1406,13 +1516,13 @@ class WorkingContextStore:
                                    author_id, author_trust_score, valid_from,
                                    valid_until, code_hash, title,
                                    triggers, provenance, scope, anchors, supersedes, branch,
-                                   user_quote)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   user_quote, pinned)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0, ?, 1.0, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (workspace, stored_content, tags_json, priority, kind, now, now, session_id,
                  author_id, now, code_hash, stored_title,
                  triggers_json, provenance, scope, anchors_json, supersedes, branch_value,
-                 stored_user_quote),
+                 stored_user_quote, 1 if pin else 0),
             )
             note_id = cur.lastrowid
 
@@ -1558,6 +1668,27 @@ class WorkingContextStore:
         audit("PROMOTE", workspace=workspace, note_id=note_id, provenance=to)
         return True
 
+    def set_pinned(self, workspace: str, note_id: int, pinned: bool) -> bool:
+        """Pin or unpin an existing note (UPG-RECALL-MISS-FLOOR part (b),
+        `vectr_pin`): explicit Tier 0 membership, set/cleared entirely by
+        caller decision — never inferred from content, usage, or query
+        history. A pinned note joins `kind='directive'` notes in `recall()`'s
+        unconditional-injection tier (bounded by `recall_floor.
+        tier0_max_notes`, see agent/config.yaml). Idempotent: pinning an
+        already-pinned note (or unpinning an already-unpinned one) is a
+        no-op write that still returns True. Returns False if the note does
+        not exist in this workspace."""
+        note = self.get_note(workspace, note_id)
+        if note is None:
+            return False
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE notes SET pinned = ? WHERE workspace = ? AND note_id = ?",
+                (1 if pinned else 0, workspace, note_id),
+            )
+        audit("PIN", workspace=workspace, note_id=note_id, pinned=pinned)
+        return True
+
     def revoke_note(
         self,
         workspace: str,
@@ -1693,6 +1824,109 @@ class WorkingContextStore:
         states = self._note_event_states_by_ids(workspace, [n.note_id for n in notes])
         return [n for n in notes if states.get(n.note_id, {}).get("state") != "expired"]
 
+    def _floor_candidate_pool(
+        self,
+        workspace: str,
+        tags: list[str] | None,
+        priority: str | None,
+        max_age_days: float | None,
+        session_id: str | None,
+    ) -> list[WorkingNote]:
+        """Every non-superseded, non-expired, scope-eligible note in
+        `workspace` (respecting the same tags/priority/max_age_days filters
+        an ordinary `recall()` call would apply), most-recent-first,
+        capped at `recall_floor.metadata_scan_ceiling` (UPG-RECALL-MISS-
+        FLOOR parts (b)/(c)). This is the candidate pool Tier 0 membership
+        and the deterministic tag/anchor/symbol/title channels are checked
+        against — unlike the ranked result, there is no relevance-ranked
+        shortcut for "does this note's own metadata mention the query", so
+        the whole eligible set (bounded by the ceiling) has to be scanned."""
+        from agent.config import RECALL_FLOOR_METADATA_SCAN_CEILING
+
+        sql = "SELECT * FROM notes WHERE workspace = ? AND valid_until IS NULL"
+        params: list = [workspace]
+        if priority:
+            sql += " AND priority = ?"
+            params.append(priority)
+        if tags:
+            tag_clauses = " OR ".join(["tags LIKE ?" for _ in tags])
+            sql += f" AND ({tag_clauses})"
+            params.extend([f'%"{t}"%' for t in tags])
+        if max_age_days is not None:
+            cutoff = time.time() - max_age_days * 86400
+            sql += " AND created_at >= ?"
+            params.append(cutoff)
+        sql += " ORDER BY created_at DESC, note_id DESC LIMIT ?"
+        params.append(RECALL_FLOOR_METADATA_SCAN_CEILING)
+
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        notes = [self._row_to_note(r) for r in rows]
+        notes = _scope_filter(notes, session_id=session_id)
+        notes = self._exclude_expired(workspace, notes)
+        return notes
+
+    def _recall_floor_notes(
+        self,
+        workspace: str,
+        query: str | None,
+        tags: list[str] | None,
+        priority: str | None,
+        max_age_days: float | None,
+        session_id: str | None,
+        limit: int,
+    ) -> tuple[list[WorkingNote], list[WorkingNote]]:
+        """Tier 0 (directive + pinned, unconditional) and deterministic
+        tag/anchor/symbol/title channel hits for `query`, each bounded by
+        its own agent/config.yaml `recall_floor` count AND by a share of
+        the caller's own `limit` (UPG-RECALL-MISS-FLOOR parts (b)/(c)).
+        Returns (tier0, deterministic) — `recall()` merges both ahead of
+        the ranked result via `_merge_recall_floor()`. Tier 0 needs no
+        `query` at all (directives/pins are unconditional); the
+        deterministic channels return [] when `query` is empty since there
+        is nothing to check containment against.
+
+        Each channel's absolute `*_max_notes` config count is sized for a
+        caller passing a generous `limit` — on its own it does not scale
+        down for a small `limit`, and at recall()'s own default (limit=10)
+        the two absolute counts alone (5 + 5) can equal the whole budget,
+        displacing the ranked/semantic result entirely. Each channel is
+        additionally bounded to `floor(limit * <channel>_max_fraction_of_
+        limit)`. The two fractions differ (RECALL_FLOOR_TIER0_MAX_FRACTION_
+        OF_LIMIT is smaller than the deterministic one) because Tier 0 is
+        unconditional — a directive/pinned note is injected whether or not
+        it has anything to do with `query` — while the deterministic
+        channels only fire when the note's OWN metadata textually overlaps
+        `query`, so they carry more relevance signal and are worth a
+        larger guaranteed slice of a tight budget."""
+        from agent.config import (
+            RECALL_FLOOR_DETERMINISTIC_MAX_FRACTION_OF_LIMIT,
+            RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
+            RECALL_FLOOR_TIER0_MAX_FRACTION_OF_LIMIT,
+            RECALL_FLOOR_TIER0_MAX_NOTES,
+        )
+
+        pool = self._floor_candidate_pool(workspace, tags, priority, max_age_days, session_id)
+
+        tier0_cap = min(RECALL_FLOOR_TIER0_MAX_NOTES, int(limit * RECALL_FLOOR_TIER0_MAX_FRACTION_OF_LIMIT))
+        tier0 = [n for n in pool if n.kind == "directive" or n.pinned][:tier0_cap]
+        tier0_ids = {n.note_id for n in tier0}
+
+        det_cap = min(
+            RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
+            int(limit * RECALL_FLOOR_DETERMINISTIC_MAX_FRACTION_OF_LIMIT),
+        )
+        deterministic: list[WorkingNote] = []
+        if query and det_cap > 0:
+            for n in pool:
+                if n.note_id in tier0_ids:
+                    continue
+                if _note_matches_declared_metadata(n, query):
+                    deterministic.append(n)
+                    if len(deterministic) >= det_cap:
+                        break
+        return tier0, deterministic
+
     def recall(
         self,
         workspace: str,
@@ -1706,6 +1940,7 @@ class WorkingContextStore:
         max_age_days: float | None = None,
         sort_by: str = "relevance",
         session_id: str | None = None,
+        apply_floor: bool = False,
     ) -> list[WorkingNote]:
         """Retrieve working notes.
 
@@ -1748,7 +1983,42 @@ class WorkingContextStore:
         session_id is omitted here) is excluded from the result. Applied as
         a post-filter after the SQL LIMIT, so it may return fewer than
         `limit` results — the same trade-off min_similarity already accepts.
+
+        apply_floor (UPG-RECALL-MISS-FLOOR parts (b)/(c)): compose the
+        ordinary ranked result (semantic or SQL, above/below unchanged)
+        with two never-scored guarantees, in this fixed precedence —
+        Tier 0 (every kind='directive' note plus every pinned note,
+        unconditional) first, then the deterministic tag/anchor/symbol/
+        title channels (`_note_matches_declared_metadata()` — matched
+        against each candidate note's OWN stored metadata, never a
+        classification of `query`), then the ranked result fills whatever
+        budget remains. Both guarantees are bounded (agent/config.yaml
+        recall_floor.tier0_max_notes / deterministic_max_notes) AND each
+        is additionally capped to its own fraction of THIS call's own
+        `limit` (recall_floor.tier0_max_fraction_of_limit /
+        deterministic_max_fraction_of_limit — see `_recall_floor_notes()`),
+        so the two floor channels combined can never claim the whole
+        budget and displace ranked fill entirely, at any `limit` a caller
+        passes. The combined, de-duplicated result is always truncated to
+        `limit` — this method never returns more than `limit` notes
+        regardless of how many candidates the floor and the ranked result
+        each contribute.
+        Ignored (no floor notes computed) when `kind` narrows the query to
+        one specific kind — a caller that explicitly asked for one kind
+        gets exactly that kind, unmodified, same as apply_floor=False.
+        Defaults False, preserving this method's exact pre-existing
+        behavior for every caller that predates this parameter (including
+        every other call site in this codebase); `VectrService._recall_impl
+        ()`'s ordinary query branch — the code path `vectr_recall`/`vectr
+        recall` actually hits for a plain query — passes True.
         """
+        floor_tier0: list[WorkingNote] = []
+        floor_det: list[WorkingNote] = []
+        if apply_floor and kind is None:
+            floor_tier0, floor_det = self._recall_floor_notes(
+                workspace, query, tags, priority, max_age_days, session_id, limit,
+            )
+
         # Semantic path: embed the query, find cosine-nearest notes, then fetch from SQLite.
         if query and self._notes_col is not None and self._embed_fn is not None:
             try:
@@ -1758,7 +2028,7 @@ class WorkingContextStore:
                 )
                 audit("RECALL", workspace=workspace, query=query, notes_returned=len(notes),
                       method="semantic")
-                return notes
+                return _merge_recall_floor(floor_tier0, floor_det, notes, limit)
             except Exception:
                 pass  # fall through to SQL LIKE
 
@@ -1842,7 +2112,7 @@ class WorkingContextStore:
 
         audit("RECALL", workspace=workspace, query=query or "", notes_returned=len(notes),
               method="sql")
-        return notes
+        return _merge_recall_floor(floor_tier0, floor_det, notes, limit)
 
     def recall_scored(
         self,
@@ -3718,6 +3988,8 @@ class WorkingContextStore:
             branch=row["branch"] if "branch" in keys and row["branch"] else "",
             # UPG-MEM-PROVENANCE-USER-STATED — guarded for pre-migration DBs.
             user_quote=user_quote or "",
+            # UPG-RECALL-MISS-FLOOR part (b) — guarded for pre-migration DBs.
+            pinned=bool(row["pinned"]) if "pinned" in keys and row["pinned"] is not None else False,
         )
 
     def format_notes_for_llm(

@@ -130,6 +130,7 @@ def evaluate_recall(
     queries: list[LabeledQuery],
     key_to_note: dict[str, NoteInfo],
     k: int = 10,
+    recall_kwargs: dict | None = None,
 ) -> RecallMissReport:
     """Run every labeled query through `store.recall(workspace, query=...,
     limit=k)` and score the real result against the hand-labeled relevant
@@ -143,7 +144,14 @@ def evaluate_recall(
     Raises KeyError if a query references a key absent from `key_to_note`
     — a labeling bug (a stale key after the corpus changed), not a
     retrieval-side condition to swallow.
+
+    `recall_kwargs`: optional extra keyword arguments merged into every
+    `store.recall(...)` call below (e.g. `{"apply_floor": True}`). This
+    measurement layer stays product-agnostic — it names no product-specific
+    flag itself — while still letting a caller exercise a specific
+    `WorkingContextStore.recall()` code path for a before/after comparison.
     """
+    extra_kwargs = recall_kwargs or {}
     total_relevant = 0
     total_hits = 0
     per_query_recalls: list[float] = []
@@ -163,7 +171,7 @@ def evaluate_recall(
         if not relevant_infos:
             continue
 
-        returned = store.recall(workspace, query=lq.query, limit=k)
+        returned = store.recall(workspace, query=lq.query, limit=k, **extra_kwargs)
         assert len(returned) <= k, (
             f"store.recall() returned {len(returned)} notes for query {lq.query!r}, "
             f"exceeding limit={k} — a deterministic-channel composition that appends "

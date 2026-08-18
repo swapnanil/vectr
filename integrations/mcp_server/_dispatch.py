@@ -723,6 +723,10 @@ def handle_tools_call(
                 contradicts = int(contradicts)
             except (TypeError, ValueError):
                 return _mcp_error("contradicts must be an integer note_id")
+        # UPG-RECALL-MISS-FLOOR part (b): pin this note into Tier 0 at write
+        # time — equivalent to a separate vectr_pin call right after this
+        # write. Default false changes nothing about existing callers.
+        pin = bool(arguments.get("pin", False))
         try:
             outcome = dispatch_chroma_sync(
                 service,
@@ -730,7 +734,7 @@ def handle_tools_call(
                 content=content, tags=tags, priority=priority, kind=kind, title=title, agent=agent,
                 triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
                 supersedes=supersedes, contradicts=contradicts, session_id=session_id,
-                user_quote=user_quote,
+                user_quote=user_quote, pin=pin,
             )
         except ValueError as exc:
             # Malformed triggers, an unrecognised provenance/scope, a
@@ -1162,6 +1166,34 @@ def handle_tools_call(
             return _mcp_error(f"Note #{nid} not found.")
         return {
             "content": [{"type": "text", "text": f"Reinstated note #{nid}. Its original content will surface again."}],
+            "isError": False,
+        }
+
+    # ---- vectr_pin ----
+    if tool_name == "vectr_pin":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
+        note_id = arguments.get("note_id")
+        pinned = arguments.get("pinned", True)
+        if note_id is None:
+            return _mcp_error("note_id is required (the [#N] id shown by vectr_recall)")
+        try:
+            nid = int(note_id)
+        except (TypeError, ValueError):
+            return _mcp_error("note_id must be an integer (the [#N] id shown by vectr_recall)")
+        changed = service.pin_note(nid, bool(pinned))
+        if not changed:
+            return _mcp_error(f"Note #{nid} not found.")
+        verb = "Pinned" if pinned else "Unpinned"
+        return {
+            "content": [{"type": "text", "text": f"{verb} note #{nid}. " + (
+                "It will now be injected on every vectr_recall(query=...) call, regardless of the query."
+                if pinned else
+                "It will no longer be injected unconditionally — it now recalls the same as any other note."
+            )}],
             "isError": False,
         }
 

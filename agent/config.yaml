@@ -1047,6 +1047,85 @@ memory_recall_for_path:
   # note count while keeping the query cheap.
   overfetch_ceiling: 200
 
+recall_floor:
+  # UPG-RECALL-MISS-FLOOR parts (b)/(c): a floor that does not depend on
+  # matching at all. MEMORY.md-style unconditional injection is not
+  # BETTER retrieval, it is NO retrieval — it only works because the file
+  # is ~40 lines. At hundreds of notes that stops scaling, so instead of
+  # tuning semantic matching further, `WorkingContextStore.recall()`
+  # composes two guarantees ahead of the ranked (semantic/SQL) result:
+  #   Tier 0 — every kind='directive' note plus every explicitly pinned
+  #     note, injected unconditionally, never scored against the query.
+  #   Deterministic channels — a note whose OWN declared tag, anchor
+  #     basename, trigger symbol, or title token set is found in the
+  #     query's text (containment checked against that note's stored
+  #     metadata, never a classification of the query) is guaranteed a
+  #     slot ahead of pure semantic fill.
+  # Both tiers are bounded by count so neither can crowd out the ranked
+  # result entirely, and the combined result is always truncated to the
+  # caller's `limit` (see benchmarks/recall_miss/harness.py's STEP 0
+  # guard: a composition may never return more than `limit` notes).
+
+  # Max notes Tier 0 (directives + pinned, combined) contributes per
+  # recall() call, regardless of how many directive/pinned notes exist in
+  # the workspace. Ordered by recency (created_at DESC) when the count
+  # exceeds this bound — deterministic, never query-dependent.
+  tier0_max_notes: 5
+
+  # Max notes the deterministic tag/anchor/symbol/title channels
+  # contribute per recall() call, on top of (and excluding) whatever
+  # Tier 0 already filled — the remaining floor budget still leaves room
+  # for genuine semantic fill even at a small `limit`.
+  deterministic_max_notes: 5
+
+  # Upper bound on how many of the workspace's own notes are scanned as
+  # Tier 0 / deterministic-channel candidates per call (ordered by
+  # created_at DESC, most recent first) — the deterministic channels must
+  # check every eligible note's OWN metadata against the query, which has
+  # no relevance-ranked shortcut, so this ceiling keeps a single recall()
+  # call bounded on a workspace with a very large note count.
+  metadata_scan_ceiling: 2000
+
+  # Title channel: a note's title is tokenized the same uniform way as
+  # the query (lowercased, split on non-alphanumeric runs); a token
+  # shorter than this is dropped from both sides before comparing, so
+  # short connector words never count toward the overlap below.
+  title_min_token_len: 4
+
+  # Title channel: minimum number of surviving title tokens that must
+  # also appear in the query's own token set for the title channel to
+  # count as a deterministic hit for that note.
+  title_min_overlap_tokens: 2
+
+  # Per-channel ceilings relative to the CALLER's own `limit`, applied on
+  # top of (as an additional min() with) tier0_max_notes/
+  # deterministic_max_notes above. Those two are absolute counts, sized
+  # for a caller passing a generous `limit` (e.g. 50) -- on their own they
+  # do not scale down for a small `limit`, and at recall()'s own default
+  # (limit=10) tier0_max_notes + deterministic_max_notes (5 + 5 = 10)
+  # exactly equals the whole budget, so the ranked/semantic result could
+  # be displaced entirely (measured live: recall@10 fell from 0.725 to
+  # 0.100 with both absolute caps alone, uncapped by `limit`). Each
+  # channel's per-call cap is `min(<channel>_max_notes,
+  # floor(limit * <this channel's> _max_fraction_of_limit))`.
+  #
+  # The two channels get DIFFERENT fractions because they carry different
+  # relevance signal: Tier 0 is unconditional (a directive/pinned note is
+  # injected regardless of whether it has anything to do with this
+  # query), so it gets a small guaranteed slice; the deterministic
+  # channels only fire when the note's OWN declared metadata textually
+  # overlaps the query, so they get a larger one. Measured live against
+  # the recall-miss harness (benchmarks/recall_miss/run_live.py
+  # --apply-floor): tier0=0.1/deterministic=0.3 recovers a genuine miss
+  # at k=10 (recall@10 0.725 -> 0.750) with zero regressions at either
+  # k=10 or k=5 against the no-floor baseline; tier0=0.3/deterministic=0.3
+  # (both equal) recovered the same k=10 miss but additionally displaced
+  # 3 previously-hit notes at the tighter k=5 budget, a net regression
+  # -- confirming Tier 0's zero-relevance guarantee needs the smaller
+  # share once the budget gets tight.
+  tier0_max_fraction_of_limit: 0.1
+  deterministic_max_fraction_of_limit: 0.3
+
 symbol_graph:
   # UPG-JSFLOW-SYMBOLS: language keywords that must never be minted as a
   # symbol name or call-edge target. A desynced parse (e.g. Flow syntax

@@ -163,6 +163,7 @@ class WorkingNote:
     superseded_by_note_id: int | None = None  # reciprocal: set on the OLD note by the explicit-supersedes path (distinct from `superseded_by`'s code_hash-conflict/author_id semantics)
     last_fired: float | None = None    # last time the trigger engine actually fired this note (T:cooldown + total-order tie-break)
     branch: str = ""                   # git branch recorded at write time when scope=="branch" (TRIGGER-ENGINE wave 2a); "" for every other scope or when git is unavailable
+    pinned: bool = False               # UPG-RECALL-MISS-FLOOR part (b): explicit user/agent pin — Tier 0 unconditional-injection membership alongside kind='directive', set/cleared via vectr_pin (or vectr_remember(pin=True) at write time), never inferred
 
     def __post_init__(self) -> None:
         if self.triggers is None:
