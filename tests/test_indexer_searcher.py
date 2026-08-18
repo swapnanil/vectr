@@ -3566,6 +3566,10 @@ class TestPurposeResumeHole:
 
         assert indexer.total_chunks == 3
         assert indexer._purpose_collection.count() == 3
+        assert purpose_cache_path.exists(), (
+            "purpose_cache.json was never written — the final-batch "
+            "checkpoint guarantee did not fire"
+        )
         on_disk = json.loads(purpose_cache_path.read_text(encoding="utf-8"))
         for p in paths:
             assert str(p) in on_disk, (
