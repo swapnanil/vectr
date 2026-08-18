@@ -1,5 +1,170 @@
 # Changelog
 
+## 1.10.0 - 2026-08-18
+
+Expiry stops deleting notes and becomes a kind-scoped state transition that
+directives are exempt from; a note can be pinned so recall returns it whatever
+the query says; working memory renders to a read-only `MEMORY.md` a human can
+actually read; a revoked near-duplicate warns you at write time instead of on
+some later recall; prose docs stop being chunked with a window sized for code;
+and bulk indexing yields to interactive work instead of saturating every core.
+
+### Working memory
+- Note expiry is a state transition, not a delete. `purge_expired_notes()` ran a
+  flat `DELETE FROM notes WHERE created_at < cutoff` regardless of kind, which
+  could remove directives and revoked-note deterrents, and destroyed the
+  `note_events` audit trail the append-only state machine depends on. It now
+  appends a system-actor `expired` transition and leaves the row in place, is
+  kind-scoped through `MEMORY_DECAY_TTL_DAYS_BY_KIND` (directives exempt at any
+  age, including under an explicit `ttl_days` override), and is idempotent: a
+  note already `expired` or `revoked` is skipped, so a revoked note's deterrent
+  stays visible in default `recall()` and `fire()` forever.
+- Ranking decay is wired up and no longer compounds. `decay_old_notes()` had no
+  production caller and multiplied `decay_score` onto its own prior value on
+  every call, so two calls at the same clock reading silently produced 0.5 then
+  0.25. It now computes `decay_score = 0.5 ** (elapsed / half_life)` fresh from
+  elapsed time, is kind-scoped through `MEMORY_DECAY_HALF_LIFE_DAYS_BY_KIND`,
+  and runs from `start_background_index()`. It is a ranking tie-break only and
+  never removes anything.
+
+### Recall floor and pinning
+- New pin surface: `vectr_pin` (MCP), `POST /v1/pin`, a `pin=` parameter on
+  `remember`, and a `notes.pinned` column. A pinned note comes back from
+  `recall(apply_floor=True)` unconditionally, bounded by the
+  `recall_floor.tier0_*` caps, whether or not the query matches it. Verified end
+  to end at limits 1, 3, 5 and 10.
+- Directive notes are deliberately **not** part of the floor. `boot_recall()`
+  already returns every directive unconditionally at each session start, so a
+  second delivery charged query budget for a guarantee that already existed.
+- The deterministic tag/anchor/symbol/title channel ships **default-off**
+  (`recall_floor.deterministic_enabled: false`) as a measured negative result.
+  Against a 38-query hand-labeled corpus its predicate matched a mean of 50.2
+  notes per query against roughly one labeled-relevant note (tag 1.6% precision,
+  title 4.6%, anchor 0%), and a floor-budget sweep showed its effect on recall
+  is not monotonic in budget, which is the signature of noise rather than
+  signal. The code, cap formula and specificity ordering are retained and tested
+  behind the flag pending a tighter predicate.
+- `benchmarks/recall_miss/` measures `WorkingContextStore.recall()` against a
+  hand-labeled query set over a read-only snapshot of a real note corpus, and
+  reports recall@k with misses grouped by note kind. It asserts `recall()` never
+  returns more than `limit` notes, so a composition that appends past the
+  caller's limit cannot inflate recall@k without improving ranking.
+
+### Memory legibility
+- `vectr memory export` renders a workspace's notes to a deterministic,
+  read-only `MEMORY.md`, and a debounced post-write hook keeps it current once
+  configured. Nothing reads the file back: the database stays canonical.
+- `vectr memory export --disable` removes the marker so subsequent note writes
+  stop scheduling a re-render. The already-exported file is left in place.
+
+### Provenance and trust
+- `bind_user_quote_auto()` binds the longest verbatim span of the captured user
+  turn that appears in the note content, instead of requiring the note's whole
+  body to appear in the prompt. Whole-body containment bound at most 1 of 45
+  directives on the live corpus. The span floor is 30 characters with search
+  cost bounded on the length product, and `frame_prefix()` renders a qualified
+  attribution frame when the bound quote is a strict sub-span. Explicit
+  `user_quote` binding still takes precedence, and human provenance remains
+  reachable only by explicit promotion.
+- A revoked near-duplicate is surfaced at write time. `revoked_related_notes()`
+  reports the nearest revoked match through `RememberOutcome`, REST, and the MCP
+  confirmation suffix, so you learn a claim was already disproven while writing
+  it rather than on a later recall.
+- The revoked-note deterrent survives truncation. `_ANTI_MEMORY_TEMPLATE` field
+  order puts the warning first, so right-truncation on both rendering surfaces
+  drops the quoted summary before the reason, and the reason before the warning.
+- `revoked_related_notes()` takes its candidate-pool depth from
+  `memory_write.related_notes.revoked_query_floor` (default 100) instead of
+  `limit * 3`, so a rare target class is not starved by a render limit of 1.
+
+### Proactive delivery
+- Declared `triggers[].path` globs are honored on the structural channel, and a
+  bare-basename trigger glob now matches nested files rather than top-level ones
+  only.
+- The `recall_for_path()` declared-trigger arm can no longer starve the content
+  and anchor arms out of the candidate pool.
+
+### Indexing
+- Bulk indexing has a resource governor (`indexing.index_governor`). A
+  restore-on-exit context manager lowers the indexing thread's OS scheduling
+  priority for the duration of a governed block (macOS QoS, Linux per-thread
+  niceness), and a pacing helper sleeps after each batch in proportion to
+  measured work time to hold a configured duty cycle. Both degrade to a no-op on
+  an unsupported platform, and neither can abort indexing. It is a context
+  manager rather than a permanent mutation because bulk `/v1/index` runs on
+  Starlette's shared threadpool, where a permanent priority change would leak
+  onto unrelated later work on a recycled thread.
+- The purpose-vector pass runs in the background. It roughly doubles total embed
+  time on a large corpus, so `index_workspace()` hands it to a single-worker
+  executor and returns once content embedding is checkpointed. Search degrades
+  gracefully to body-only scoring while a chunk has no purpose vector, and the
+  pass is idempotent by `chunk_id`, so a crash never re-embeds already-persisted
+  content.
+- `.txt` and `.rst` prose is chunked at reStructuredText setext headings.
+  Documentation with no tree-sitter grammar previously fell to 200-line window
+  chunks sized for code, merging unrelated subsections into one diluted chunk.
+  Oversized sections sub-split at `INDEXING_MAX_CHUNK_LINES` rather than being
+  truncated, and a file with no heading structure still falls back to window
+  chunks. On the django corpus (724 `.txt`/`.rst` files) this goes from 1603 to
+  6666 chunks. `INDEXING_SCHEMA_VERSION` 4 -> 5, so existing indexes re-chunk on
+  upgrade.
+- A schema-version bump now forces a full re-chunk. `index_workspace()` cleared
+  the mtime cache on a mismatch but never set `force=True`, so Phase 2's
+  delete-before-reinsert check was False for every file, and a chunking-logic
+  bump left stale chunks as orphans alongside freshly chunked content instead of
+  performing a clean rebuild.
+- Near-duplicate docstring dedup no longer collapses distinct code. Chunks
+  sharing a leading docstring key are collapsed only when their normalized
+  bodies also exceed `ranking.docstring_dedup.body_similarity_min_ratio` (0.75)
+  and their `node_type` agrees; key-alone collapse merged a trait declaration
+  with its impl, and distinct constructors sharing a copy-pasted doc summary.
+  Each candidate is compared against at most
+  `ranking.docstring_dedup.max_reps_compared` (3) already-kept representatives
+  per doc_key: unbounded, the loop is O(n^2) `SequenceMatcher` calls, measured
+  3.1s at n=60 and 35.0s at n=200, and bounded it is 0.30s and 1.07s. The cap
+  fails only toward under-collapse, never toward a false collapse, and does not
+  truncate content.
+- Embed-model selection is a real three-tier mechanism: explicit
+  `VECTR_EMBED_MODEL` > an evidence-table row keyed on the corpus fingerprint >
+  the configured default. The evidence table ships **empty**, because the C/C++
+  row it was designed for was invalidated by a same-index A/B. This removes the
+  unmeasured "the default is optimal" rationale `vectr_status` used to surface.
+
+### CLI and API
+- `vectr restart` no longer drops extra roots. `cmd_restart` built its root list
+  purely from the resolved arguments and never consulted the registry entry it
+  already held for mode and host inheritance, so a bare
+  `vectr restart <primary-path>` on a multi-root instance came back with only
+  the primary root. Precedence mirrors mode inheritance: an explicit
+  `.code-workspace` file or any `--path` flag wins outright with no merge, while
+  a bare positional directory or the `VECTR_WORKSPACE`/cwd default inherits the
+  previous instance's recorded `extra_roots`. Inheritance is announced on
+  stderr, never silent. The staleness banner's suggested restart command now
+  reproduces every root literally.
+- `vectr_remember` accepts a `content_file` parameter (MCP and REST), so a large
+  or escape-dense note body is read from a file instead of streaming as one long
+  JSON argument. Containment is checked against every served workspace root
+  rather than the primary root alone, which had rejected legitimate paths under
+  a multi-root instance's extra roots. Resolution order is unchanged, so a
+  symlink inside a served root pointing outside every served root is still
+  rejected: the security property applies per-root now, it does not weaken.
+
+### Internals
+- Failure-to-success arcs bucket pending failures on the effective working
+  directory rather than the recorded cwd.
+- The eval harness got a correctness batch: assistant messages are deduped
+  before summing token usage, `anchor_checked` is computed for every arm and
+  variant, anchors match by path component or shell token instead of by raw
+  substring, hook injection counts are recorded as an agent-session delta rather
+  than an end-of-leg cumulative, `conversational_turns_to_fact` is reported
+  alongside `turns_to_fact`, S3/S4 scenario anchors moved off their own
+  fact-acquisition executables, and git identity is isolated to a synthetic
+  config file. All 48 eligible longitudinal legs were rescored with the current
+  scorer.
+- Two test-isolation fixes: a session-scoped fixture leaking `VECTR_EMBED_MODEL`
+  into every later test file, and a purpose-vector prune test that asserted on
+  the purpose collection without waiting for the now-deferred background pass.
+
 ## 1.9.0 - 2026-08-07
 
 A trace answer stops hiding real callers behind a same-named one and becomes

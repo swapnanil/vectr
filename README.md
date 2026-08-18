@@ -11,10 +11,10 @@
 [![CI](https://github.com/swapnanil/vectr/actions/workflows/ci.yml/badge.svg)](https://github.com/swapnanil/vectr/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version 1.9.0](https://img.shields.io/badge/version-1.9.0-blue.svg)](CHANGELOG.md)
+[![Version 1.10.0](https://img.shields.io/badge/version-1.10.0-blue.svg)](CHANGELOG.md)
 [![MCP: 19 tools](https://img.shields.io/badge/MCP-19%20tools-blue.svg)](#19-mcp-tools)
 
-Version 1.9.0 · Last updated 2026-08-07 · [CHANGELOG](CHANGELOG.md)
+Version 1.10.0 · Last updated 2026-08-18 · [CHANGELOG](CHANGELOG.md)
 
 ## In 30 seconds
 
