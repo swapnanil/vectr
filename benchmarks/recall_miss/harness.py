@@ -164,6 +164,12 @@ def evaluate_recall(
             continue
 
         returned = store.recall(workspace, query=lq.query, limit=k)
+        assert len(returned) <= k, (
+            f"store.recall() returned {len(returned)} notes for query {lq.query!r}, "
+            f"exceeding limit={k} — a deterministic-channel composition that appends "
+            "past the caller's limit inflates recall@k without improving ranking; "
+            "fix the composition in WorkingContextStore.recall(), never this assertion"
+        )
         returned_ids = {n.note_id for n in returned}
 
         relevant_ids = {info.note_id for _key, info in relevant_infos}
