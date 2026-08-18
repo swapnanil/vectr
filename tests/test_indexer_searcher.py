@@ -3371,8 +3371,11 @@ class TestPurposeResumeHole:
             def embed_query(self, texts):
                 return self.embed(texts)
 
-        make_py(tmp_path, "reexport.py", "import os\n")  # chunks to []
+        import json
+
+        fpath = make_py(tmp_path, "reexport.py", "import os\n")  # chunks to []
         db_path = str(tmp_path / "chroma")
+        purpose_cache_path = tmp_path / "chroma" / "purpose_cache.json"
 
         monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
         indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
@@ -3383,15 +3386,47 @@ class TestPurposeResumeHole:
             "a workspace whose only file chunks to zero body chunks has "
             "nothing to backfill on its own run"
         )
+        # Direct on-disk check: a file that chunked to zero body chunks
+        # must still get a purpose_cache entry, or it silently falls back
+        # to the (indirect, unobservable via purpose_backfill_pending_files
+        # since a re-detected gap with zero fetchable chunks is a silent
+        # no-op) "re-detected as a gap on every future run forever" state —
+        # harmless but wasteful, and specifically what this checkpoint
+        # exists to prevent.
+        assert purpose_cache_path.exists()
+        on_disk = json.loads(purpose_cache_path.read_text(encoding="utf-8"))
+        assert str(fpath) in on_disk, (
+            "a file that chunked to zero body chunks must be checkpointed "
+            "into purpose_cache.json on its own run, exactly like "
+            "mtime_cache — otherwise it is silently re-added to gap_paths "
+            "on every future ordinary run forever"
+        )
         indexer1.close()
 
         monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
         indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        # A correctly-checkpointed file must never re-enter gap detection —
+        # spy on the backfill-fetch helper to prove it, since
+        # purpose_backfill_pending_files reads 0 either way (a wrongly
+        # re-detected gap with nothing fetchable is itself a silent no-op
+        # by design, so that alone can't distinguish correct from broken).
+        fetch_calls: list[set[str]] = []
+        real_fetch = indexer2._fetch_body_chunks_for_files
+
+        def _spy_fetch(file_paths):
+            fetch_calls.append(set(file_paths))
+            return real_fetch(file_paths)
+
+        monkeypatch.setattr(indexer2, "_fetch_body_chunks_for_files", _spy_fetch)
         indexer2.index_workspace()
         self._wait_until_not_pending(indexer2)
         assert indexer2.purpose_backfill_pending_files == 0, (
             "a file that chunked to zero body chunks must never be "
             "re-offered as a purpose gap on a later ordinary run"
+        )
+        assert not any(str(fpath) in calls for calls in fetch_calls), (
+            "a correctly-checkpointed zero-body-chunk file must not be "
+            "re-swept into gap detection on a later ordinary run"
         )
         indexer2.close()
 
