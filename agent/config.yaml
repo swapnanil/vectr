@@ -1182,6 +1182,18 @@ recall_floor:
   # most an equal split of what Tier 0 left behind, so ranked fill is
   # guaranteed at least as many slots as the deterministic channel
   # claims, at any `limit`.
+  #
+  # NOTED PROPERTY (UPG-RECALL-MISS-FLOOR, measured against the live
+  # labeled corpus after the tier0_max_share_of_limit fix above): because
+  # this cap is a share of REMAINING, shrinking Tier 0's actual count
+  # grows this channel's own cap by roughly the same amount, so the
+  # combined tier0+deterministic budget can stay unchanged even when
+  # tier0_min_notes/tier0_max_share_of_limit shrink Tier 0 itself — the
+  # freed capacity is not guaranteed to reach the ranked group unless a
+  # matching deterministic note actually exists to claim it. This is an
+  # observed structural consequence of the two formulas composing, not a
+  # bug; do not retune either share to chase a specific corpus's numbers
+  # (see the F3 note above this section on why that was rejected once).
   deterministic_max_share_of_remaining: 0.5
 
 symbol_graph:
