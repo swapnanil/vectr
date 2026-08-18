@@ -34,6 +34,7 @@ from agent.working_context_store import WorkingContextStore
 from agent.working_context_store._export import (
     _read_export_target,
     export_memory,
+    remove_export_target,
     render_memory_markdown,
     schedule_export_if_configured,
     write_export_target,
@@ -279,6 +280,50 @@ class TestExportTargetMarker:
 
 
 # ---------------------------------------------------------------------------
+# remove_export_target — UPG-MEMORY-EXPORT-DISABLE
+# ---------------------------------------------------------------------------
+
+class TestRemoveExportTarget:
+    def test_removes_marker_and_returns_previous_target(self, tmp_path):
+        target = tmp_path / "MEMORY.md"
+        write_export_target(str(tmp_path), target)
+        assert (tmp_path / ".vectr" / "memory_export_path").exists()
+
+        removed = remove_export_target(str(tmp_path))
+
+        assert removed == target
+        assert not (tmp_path / ".vectr" / "memory_export_path").exists()
+
+    def test_unconfigured_workspace_is_a_clean_noop(self, tmp_path):
+        # No write_export_target() call first -- marker was never written.
+        assert remove_export_target(str(tmp_path)) is None
+        # Still a no-op on a second call: idempotent, never raises.
+        assert remove_export_target(str(tmp_path)) is None
+
+    def test_after_removal_schedule_export_if_configured_is_a_noop(self, tmp_path, monkeypatch):
+        """The actual bug this whole task exists to fix: before
+        remove_export_target(), there was no way to make
+        schedule_export_if_configured() stop firing on every future note
+        write once a workspace had opted in once. Proves the marker's
+        removal, not just its absence from disk, is what the scheduler
+        reads."""
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        target = tmp_path / "MEMORY.md"
+        write_export_target(ws, target)
+        remove_export_target(ws)
+
+        monkeypatch.setattr(
+            "agent.working_context_store._export.MEMORY_EXPORT_DEBOUNCE_SECONDS", 0.05,
+        )
+        with patch("agent.working_context_store._export.export_memory") as mock_export:
+            store.remember(ws, "a note after disabling export", priority="medium", kind="finding")
+            schedule_export_if_configured(ws, store)
+            time.sleep(0.2)
+        mock_export.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # schedule_export_if_configured — debounced post-write hook
 # ---------------------------------------------------------------------------
 
@@ -347,9 +392,9 @@ class TestScheduleExportIfConfigured:
 # ---------------------------------------------------------------------------
 
 class TestCmdMemoryExport:
-    def _args(self, workspace: str, export_path: str = "MEMORY.md", command: str = "export"):
+    def _args(self, workspace: str, export_path: str = "MEMORY.md", command: str = "export", disable: bool = False):
         return argparse.Namespace(
-            memory_command=command, workspace=workspace, export_path=export_path,
+            memory_command=command, workspace=workspace, export_path=export_path, disable=disable,
         )
 
     def test_export_writes_file_and_marker(self, tmp_path, monkeypatch, capsys):
@@ -386,6 +431,92 @@ class TestCmdMemoryExport:
 
         m.cmd_memory(self._args(str(tmp_path), export_path="docs/notes.md"))
         assert (tmp_path / "docs" / "notes.md").exists()
+
+    def test_export_success_output_names_the_disable_flag(self, tmp_path, monkeypatch, capsys):
+        """Response-packing: the command that turns auto-refresh ON must also
+        say how to turn it back off, in the same output, not just in
+        --help."""
+        import main as m
+
+        db_dir = tmp_path / "cache_db"
+        db_dir.mkdir()
+        WorkingContextStore(str(db_dir))
+        monkeypatch.setenv("VECTR_DB_DIR", str(db_dir))
+
+        m.cmd_memory(self._args(str(tmp_path)))
+        assert "--disable" in capsys.readouterr().out
+
+
+class TestCmdMemoryExportDisable:
+    def _args(self, workspace: str):
+        return argparse.Namespace(
+            memory_command="export", workspace=workspace, export_path="MEMORY.md", disable=True,
+        )
+
+    def test_disable_on_configured_workspace_removes_marker(self, tmp_path, monkeypatch, capsys):
+        import main as m
+
+        db_dir = tmp_path / "cache_db"
+        db_dir.mkdir()
+        store = WorkingContextStore(str(db_dir))
+        store.remember(str(tmp_path), "seeded via test", priority="medium", kind="finding")
+        monkeypatch.setenv("VECTR_DB_DIR", str(db_dir))
+
+        # First export configures auto-refresh (writes the marker).
+        m.cmd_memory(argparse.Namespace(
+            memory_command="export", workspace=str(tmp_path), export_path="MEMORY.md", disable=False,
+        ))
+        marker = tmp_path / ".vectr" / "memory_export_path"
+        assert marker.exists()
+        exported_file = tmp_path / "MEMORY.md"
+        before = exported_file.read_text()
+
+        m.cmd_memory(self._args(str(tmp_path)))
+
+        assert not marker.exists()
+        assert "Disabled" in capsys.readouterr().out
+        # The previously exported file is untouched by --disable.
+        assert exported_file.read_text() == before
+
+    def test_disable_on_unconfigured_workspace_is_a_clean_noop(self, tmp_path, monkeypatch, capsys):
+        import main as m
+
+        db_dir = tmp_path / "cache_db"
+        db_dir.mkdir()
+        WorkingContextStore(str(db_dir))
+        monkeypatch.setenv("VECTR_DB_DIR", str(db_dir))
+
+        # Never exported before -- no marker, no MEMORY.md.
+        m.cmd_memory(self._args(str(tmp_path)))  # must not raise
+
+        out = capsys.readouterr().out
+        assert "nothing to disable" in out.lower()
+        assert not (tmp_path / ".vectr" / "memory_export_path").exists()
+
+    def test_disable_does_not_stop_a_subsequent_note_write_from_scheduling_nothing(self, tmp_path, monkeypatch):
+        """End-to-end acceptance case: after `vectr memory export --disable`,
+        a note write through the real store schedules no re-render."""
+        import main as m
+        from agent.working_context_store._export import schedule_export_if_configured
+
+        db_dir = tmp_path / "cache_db"
+        db_dir.mkdir()
+        store = WorkingContextStore(str(db_dir))
+        monkeypatch.setenv("VECTR_DB_DIR", str(db_dir))
+
+        m.cmd_memory(argparse.Namespace(
+            memory_command="export", workspace=str(tmp_path), export_path="MEMORY.md", disable=False,
+        ))
+        m.cmd_memory(self._args(str(tmp_path)))
+
+        monkeypatch.setattr(
+            "agent.working_context_store._export.MEMORY_EXPORT_DEBOUNCE_SECONDS", 0.05,
+        )
+        with patch("agent.working_context_store._export.export_memory") as mock_export:
+            store.remember(str(tmp_path), "written after disable", priority="medium", kind="finding")
+            schedule_export_if_configured(str(tmp_path), store)
+            time.sleep(0.2)
+        mock_export.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
