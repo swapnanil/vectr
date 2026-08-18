@@ -1056,6 +1056,15 @@ recall_floor:
   # composes two guarantees ahead of the ranked (semantic/SQL) result:
   #   Tier 0 — every kind='directive' note plus every explicitly pinned
   #     note, injected unconditionally, never scored against the query.
+  #     NOTE: directives already have their OWN dedicated, unbounded-per-
+  #     query channel in boot_recall() (behavior.boot.max_directive_notes,
+  #     every session, unconditional on any query at all) — Tier 0's
+  #     directive membership is a SECOND net, not the guarantee itself.
+  #     The genuinely new capability Tier 0 provides is the PIN (a note
+  #     kind with no other guaranteed-delivery path), so when Tier 0's
+  #     own cap forces a choice between a pinned note and a directive,
+  #     the pinned note wins (see tier0_min_notes below and the pin-
+  #     priority sort in _recall_floor_notes()).
   #   Deterministic channels — a note whose OWN declared tag, anchor
   #     basename, trigger symbol, or title token set is found in the
   #     query's text (containment checked against that note's stored
@@ -1091,19 +1100,25 @@ recall_floor:
   # Tier 0 already filled.
   deterministic_max_notes: 5
 
-  # UPG-RECALL-MISS-FLOOR F1 fix: Tier 0's guaranteed MINIMUM slot count,
-  # independent of `limit` and independent of tier0_max_share_of_limit
-  # below, whenever `limit` leaves any room at all (min(this, limit)).
-  # Acceptance criterion 1 for this tier is "a directive AND a pinned note
-  # are injected at 100% regardless of query" — that needs room for BOTH
-  # at once, hence 2. Before this key existed, a caller passing the
-  # production default (limit=10) got tier0_cap = int(10 * 0.1) = 1 (a
-  # fraction-only cap), so only ONE of the two could ever fit — the
-  # guarantee silently halved itself at the exact limit real callers use,
-  # and at limit=5 it floored to 0 (measured live against the real
-  # 38-query labeled corpus with a deliberately off-topic query). A share
-  # constant must always be a ceiling on top of this minimum, never the
-  # sole source of the cap.
+  # UPG-RECALL-MISS-FLOOR F1 fix, revised after review: Tier 0's
+  # guaranteed slot count is `max(1, min(this, floor(limit *
+  # tier0_max_share_of_limit)))` — never 0 for any `limit >= 1`, but
+  # scaled by the SAME share as the ceiling below rather than flat-taxing
+  # a tight budget at this full count. Acceptance criterion for this
+  # tier is "a directive AND a pinned note are injected at 100% regardless
+  # of query" — that needs room for BOTH at once, hence 2 as the cap this
+  # value can grow to. It reaches exactly 2 at recall()'s own production
+  # default (limit=10); below that (e.g. limit=5) it degrades to a single
+  # guaranteed slot, which the pin-priority ordering in
+  # _recall_floor_notes() always gives to a pinned note over a directive
+  # — directives already have their own unbounded-per-query channel in
+  # boot_recall(), so a pinned note (no other guaranteed-delivery path)
+  # is the kind that actually needs the scarce in-query slot. Before this
+  # key existed (first version of this mechanism), a caller passing
+  # limit=10 got tier0_cap = int(10 * 0.1) = 1 and limit=5 got 0 (measured
+  # live against the real 38-query labeled corpus with a deliberately
+  # off-topic query) — both silent failures of the "never 0" requirement,
+  # not merely a smaller guarantee than intended.
   tier0_min_notes: 2
 
   # Upper bound on how many of the workspace's own notes are scanned as
@@ -1139,16 +1154,23 @@ recall_floor:
   # particular query set; see `tier0_min_notes` above for the guaranteed
   # minimum that now always takes precedence over the ceiling below it.
 
-  # Tier 0's upper bound, as a share of the caller's own `limit` — a
-  # ceiling only; tier0_min_notes above always wins when it would ask for
-  # more (_recall_floor_notes: tier0_cap = min(tier0_max_notes,
-  # max(tier0_min_notes, floor(limit * this)))). Chosen so this share
-  # only starts to exceed, and so take over from, tier0_min_notes once
-  # `limit` passes the crossover point tier0_min_notes / this = 2 / 0.2 =
-  # 10 — recall()'s own production default. A caller asking for exactly
-  # the default result count gets exactly the guaranteed minimum (2); a
-  # caller asking for meaningfully more lets Tier 0 grow, still capped by
-  # tier0_max_notes, toward its full absolute allowance.
+  # Tier 0's upper bound, as a share of the caller's own `limit`, used
+  # BOTH to scale tier0_min_notes' guaranteed floor down at a tight
+  # `limit` (see tier0_min_notes above) AND as the ceiling
+  # tier0_min_notes cannot itself exceed once `limit` grows
+  # (_recall_floor_notes: tier0_guaranteed = max(1, min(tier0_min_notes,
+  # floor(limit * this))); tier0_cap = min(tier0_max_notes,
+  # max(tier0_guaranteed, floor(limit * this)))). Chosen so this share
+  # reaches tier0_min_notes exactly at the crossover point tier0_min_notes
+  # / this = 2 / 0.2 = 10 — recall()'s own production default. A caller
+  # asking for exactly the default result count gets the full guaranteed
+  # minimum (2, room for a directive AND a pinned note); a caller asking
+  # for meaningfully more lets Tier 0 grow, still capped by
+  # tier0_max_notes, toward its full absolute allowance; a caller asking
+  # for meaningfully less degrades toward a single guaranteed slot
+  # (pin-priority) rather than spending tier0_min_notes' full count
+  # unconditionally on a channel that already has a stronger backstop in
+  # boot_recall().
   tier0_max_share_of_limit: 0.2
 
   # The deterministic channel's upper bound, as a share of whatever

@@ -353,10 +353,12 @@ class TestFloorReservesRankedRoom:
         )
 
         default_limit = 10
-        tier0_cap = min(
-            RECALL_FLOOR_TIER0_MAX_NOTES,
-            max(RECALL_FLOOR_TIER0_MIN_NOTES, int(default_limit * RECALL_FLOOR_TIER0_MAX_SHARE_OF_LIMIT)),
-        )
+        # Mirrors _recall_floor_notes()'s exact formula (UPG-RECALL-MISS-
+        # FLOOR F1 fix, revised per review): tier0_guaranteed is itself
+        # scaled by the share rather than a flat minimum, and never below 1.
+        tier0_share_cap = int(default_limit * RECALL_FLOOR_TIER0_MAX_SHARE_OF_LIMIT)
+        tier0_guaranteed = max(1, min(RECALL_FLOOR_TIER0_MIN_NOTES, tier0_share_cap))
+        tier0_cap = min(RECALL_FLOOR_TIER0_MAX_NOTES, max(tier0_guaranteed, tier0_share_cap))
         det_cap = min(
             RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
             int((default_limit - tier0_cap) * RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING),
@@ -368,28 +370,63 @@ class TestFloorReservesRankedRoom:
 
 
 class TestTier0GuaranteedMinimum:
-    """UPG-RECALL-MISS-FLOOR F1 fix: Tier 0's own acceptance bar is "a
-    directive AND a pinned note are injected at 100% regardless of query"
-    -- that needs room for BOTH at once. A fraction-of-`limit` cap alone
-    (the first version of this mechanism) gave Tier 0 only ONE slot at
-    `limit=10` (recall()'s own default and the one production call site)
-    and ZERO at `limit=5` -- measured live against the real 38-query
-    labeled corpus with a deliberately off-topic query. Proven here at
-    both limit=5 and limit=10 specifically, not only a generously large
-    limit=50 where the absolute cap alone happens to leave enough room
-    regardless of how the guarantee is computed."""
+    """UPG-RECALL-MISS-FLOOR F1 fix, revised after review: Tier 0's
+    guaranteed slot count must never truncate to 0 at any `limit >= 1` --
+    a fraction-of-`limit` cap alone (the first version of this mechanism)
+    gave Tier 0 only ONE slot at `limit=10` (recall()'s own default) and
+    ZERO at `limit=5`, measured live against the real 38-query labeled
+    corpus. But directives already have their own dedicated, uncapped-
+    per-query channel (`boot_recall()`, config.BOOT_MAX_DIRECTIVE_NOTES,
+    every session unconditional on any query) -- Tier 0 inside query
+    recall is a SECOND delivery of something already guaranteed, so it
+    is deliberately scaled down rather than flat-taxing a tight budget,
+    and prefers PINNED notes (no other guaranteed-delivery path) over
+    directives when its cap forces a choice. The combined acceptance bar
+    ("a directive AND a pinned note both survive") only holds once
+    `limit` reaches the production default (10) or above; below that,
+    Tier 0 degrades to ONE guaranteed slot and pin-priority decides which
+    note gets it -- proven explicitly here rather than left implicit."""
 
-    @pytest.mark.parametrize("limit", [5, 10])
-    def test_directive_and_pinned_both_survive_off_topic_query(self, tmp_path, limit) -> None:
+    def test_directive_and_pinned_both_survive_at_default_limit(self, tmp_path) -> None:
         store = _store(tmp_path)
         ws = "/ws"
         directive_nid = store.remember(ws, "never push straight to main", kind="directive")
         pinned_nid = store.remember(ws, "workspace lock acquisition pattern", pin=True)
         store.remember(ws, "an unrelated note about zebras")
-        notes = store.recall(ws, query="zebras", apply_floor=True, limit=limit)
+        notes = store.recall(ws, query="zebras", apply_floor=True, limit=10)
         ids = {n.note_id for n in notes}
         assert directive_nid in ids
         assert pinned_nid in ids
+
+    def test_pinned_note_wins_the_single_slot_at_a_tight_limit(self, tmp_path) -> None:
+        """At limit=5, Tier 0's guarantee is exactly ONE slot (see the
+        class docstring) -- the pinned note, which has no other
+        guaranteed-delivery path, must win it over the directive, which
+        does (boot_recall())."""
+        store = _store(tmp_path)
+        ws = "/ws"
+        directive_nid = store.remember(ws, "never push straight to main", kind="directive")
+        pinned_nid = store.remember(ws, "workspace lock acquisition pattern", pin=True)
+        store.remember(ws, "an unrelated note about zebras")
+        notes = store.recall(ws, query="zebras", apply_floor=True, limit=5)
+        ids = {n.note_id for n in notes}
+        assert pinned_nid in ids
+        assert directive_nid not in ids
+
+    @pytest.mark.parametrize("limit", list(range(1, 11)))
+    def test_tier0_never_empty_across_limit_1_to_10(self, tmp_path, limit) -> None:
+        """F1's guarantee restated so it cannot silently regress: with a
+        single standing directive and an off-topic query, Tier 0 must
+        surface it at every `limit` from 1 through 10 inclusive -- never
+        truncated to zero, regardless of how small `limit` is (as long as
+        it is >= 1)."""
+        store = _store(tmp_path)
+        ws = "/ws"
+        directive_nid = store.remember(ws, "never push straight to main", kind="directive")
+        store.remember(ws, "an unrelated note about zebras")
+        notes = store.recall(ws, query="zebras", apply_floor=True, limit=limit)
+        ids = {n.note_id for n in notes}
+        assert directive_nid in ids
 
 
 class TestMatchSpecificityScore:

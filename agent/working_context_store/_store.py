@@ -1921,16 +1921,29 @@ class WorkingContextStore:
         the deterministic channel returns [] when `query` is empty since
         there is nothing to check containment against.
 
-        Tier 0's cap (UPG-RECALL-MISS-FLOOR F1 fix) is
-        `min(tier0_max_notes, max(tier0_min_notes, floor(limit *
-        tier0_max_share_of_limit)))` — the configured MINIMUM always wins
-        over the share when the share would ask for less, so the
-        guarantee ("a directive AND a pinned note are injected at 100%
-        regardless of query") holds at any `limit` that leaves room for
-        it, not only a generously large one. The share is an upper bound
-        only, letting Tier 0 grow past the minimum toward its absolute
-        cap once `limit` is generous enough (see agent/config.yaml's
-        recall_floor comments for the exact crossover reasoning).
+        Tier 0 is a SECOND, budget-constrained delivery of directive notes
+        on top of `boot_recall()`'s own dedicated, uncapped-per-query
+        channel (all directives up to config.BOOT_MAX_DIRECTIVE_NOTES,
+        every session, unconditional on any query at all). Because that
+        stronger guarantee already exists, Tier 0's genuinely new
+        capability is the PIN (a note kind with no other guaranteed-
+        delivery path), not re-delivering directives a second time — so
+        Tier 0 is deliberately small, and prefers pinned notes over
+        directives when its cap forces a choice (see the sort below).
+
+        Tier 0's cap (UPG-RECALL-MISS-FLOOR F1 fix, revised per review) is
+        `min(tier0_max_notes, max(tier0_guaranteed, floor(limit *
+        tier0_max_share_of_limit)))`, where `tier0_guaranteed = max(1,
+        min(tier0_min_notes, floor(limit * tier0_max_share_of_limit)))` —
+        never 0 for any `limit >= 1` (F1's requirement), but scaled by the
+        same share as the ceiling rather than flat-taxing a tight budget
+        at the full `tier0_min_notes` count. At the production default
+        (limit=10) this still yields 2 (room for one pinned note AND one
+        directive), but at limit=3 or limit=5 it yields 1 (a single
+        guaranteed slot, pin-preferred) — the "pinned AND directive at
+        100%" acceptance bar holds at limit>=10, degrading to "one
+        guaranteed slot" below that; see agent/config.yaml's recall_floor
+        comments for the exact crossover reasoning.
 
         The deterministic channel's cap (UPG-RECALL-MISS-FLOOR F3 fix) is
         `min(deterministic_max_notes, floor((limit - len(tier0)) *
@@ -1947,7 +1960,8 @@ class WorkingContextStore:
         above) before truncating, so a note matching MORE of its own
         declared fields, or matching them with a longer/more-specific
         string, wins a scarce slot over one that merely happens to be the
-        most recently written among dozens of equally-valid matches."""
+        most recently written among dozens of equally-valid matches.
+        """
         from agent.config import (
             RECALL_FLOOR_DETERMINISTIC_MAX_NOTES,
             RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING,
@@ -1958,19 +1972,37 @@ class WorkingContextStore:
 
         pool = self._floor_candidate_pool(workspace, tags, priority, max_age_days, session_id)
 
-        tier0_guaranteed = min(RECALL_FLOOR_TIER0_MIN_NOTES, max(limit, 0))
         tier0_share_cap = int(limit * RECALL_FLOOR_TIER0_MAX_SHARE_OF_LIMIT)
+        # max(1, ...) is F1's guarantee: never truncate to 0 for any
+        # limit >= 1. min(TIER0_MIN_NOTES, share) rather than flat
+        # TIER0_MIN_NOTES: at a tight `limit` the guarantee scales down
+        # to a single slot instead of unconditionally spending
+        # TIER0_MIN_NOTES worth of budget on a channel that already has a
+        # stronger backstop in boot_recall() (see the docstring above).
+        tier0_guaranteed = max(1, min(RECALL_FLOOR_TIER0_MIN_NOTES, tier0_share_cap))
         tier0_cap = min(RECALL_FLOOR_TIER0_MAX_NOTES, max(tier0_guaranteed, tier0_share_cap))
         # `pool` is ordered created_at DESC, note_id DESC (see
         # _floor_candidate_pool) — slicing to `tier0_cap` here means Tier 0
         # is, in practice, "the tier0_cap MOST RECENT directive/pinned
-        # notes" in the workspace. A workspace holding more directive/
-        # pinned notes than the cap will never surface an older one via
-        # this tier; that is a deliberate, stated bound of the design
-        # (recency is a reasonable deterministic tie-break for an
+        # notes" in the workspace, PINNED-FIRST. A workspace holding more
+        # directive/pinned notes than the cap will never surface an older
+        # one via this tier; that is a deliberate, stated bound of the
+        # design (recency is a reasonable deterministic tie-break for an
         # otherwise-unconditional guarantee), not an accident of pool
         # order.
-        tier0 = [n for n in pool if n.kind == "directive" or n.pinned][:tier0_cap]
+        tier0_candidates = [n for n in pool if n.kind == "directive" or n.pinned]
+        # Pinned notes win the scarce slot over plain directives when the
+        # cap forces a choice: directives already have their own
+        # dedicated, uncapped-per-query channel in boot_recall() (every
+        # session, unconditional on any query), so a pinned note — which
+        # has NO other guaranteed-delivery path — is the kind that
+        # genuinely needs this one. `sort()` is stable, so within each
+        # group (pinned / directive-only) the pool's own created_at DESC
+        # order is preserved unchanged; this reorders WHICH notes win a
+        # slot by each note's OWN declared state (its `pinned` field),
+        # never by anything about the query.
+        tier0_candidates.sort(key=lambda n: not n.pinned)
+        tier0 = tier0_candidates[:tier0_cap]
         tier0_ids = {n.note_id for n in tier0}
 
         remaining_after_tier0 = max(limit - len(tier0), 0)
