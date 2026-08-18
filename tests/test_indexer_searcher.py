@@ -3469,6 +3469,61 @@ class TestPurposeResumeHole:
         assert indexer2._purpose_collection.count() == 1
         indexer2.close()
 
+    def test_mixed_workspace_zero_chunk_file_checkpoints_purpose_cache(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Distinct from test_entirely_trivial_workspace_checkpoints_
+        purpose_cache_too: there, EVERY file in to_index chunks to zero
+        (all_chunks is empty, an early-return branch). Here, one file in
+        the SAME run chunks to >=1 body chunk while another chunks to
+        zero — a separate mid-function checkpoint (`zero_chunk_mtimes`)
+        exists specifically because such a file never appears in
+        `all_chunks` and so is invisible to the main per-file checkpoint
+        loop below it."""
+        import json
+
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        zero_fpath = make_py(tmp_path, "reexport.py", "import os\n")  # chunks to []
+        db_path = str(tmp_path / "chroma")
+        purpose_cache_path = tmp_path / "chroma" / "purpose_cache.json"
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer1.index_workspace()
+        self._wait_until_not_pending(indexer1)
+        assert indexer1.total_chunks == 1
+        assert indexer1._purpose_collection.count() == 1
+
+        on_disk = json.loads(purpose_cache_path.read_text(encoding="utf-8"))
+        assert str(zero_fpath) in on_disk, (
+            "a file that chunked to zero body chunks in a mixed run (other "
+            "files in the same run did chunk) must still be checkpointed "
+            "into purpose_cache.json, exactly like mtime_cache — it never "
+            "appears in all_chunks, so it is invisible to the main "
+            "per-file checkpoint loop and needs this separate write"
+        )
+        indexer1.close()
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer2.index_workspace()
+        self._wait_until_not_pending(indexer2)
+        assert indexer2.purpose_backfill_pending_files == 0, (
+            "the zero-body-chunk file from a mixed run must never be "
+            "re-offered as a purpose gap on a later ordinary run"
+        )
+        indexer2.close()
+
 
 class TestFetchChunks:
     """Deterministic re-fetch by chunk id (UPG-CTX-EVICT part a)."""
