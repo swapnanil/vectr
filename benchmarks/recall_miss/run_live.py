@@ -138,16 +138,23 @@ def load_labels(labels_path: Path, snapshot_dir: Path) -> tuple[list[LabeledQuer
             if key in key_to_note:
                 continue
             row = conn.execute(
-                "SELECT kind, content, superseded_by, superseded_by_note_id "
+                "SELECT kind, content, valid_until, superseded_by, superseded_by_note_id "
                 "FROM notes WHERE note_id = ?",
                 (nid,),
             ).fetchone()
             if row is None:
                 raise SystemExit(f"labels reference note_id={nid} not present in the snapshot")
-            if row["superseded_by"] or row["superseded_by_note_id"]:
+            # valid_until is the column recall() actually filters on
+            # (WHERE ... AND valid_until IS NULL, agent/working_context_store/_store.py);
+            # superseded_by / superseded_by_note_id are carried below purely as
+            # diagnostics -- a legacy code_hash auto-supersede path has historically
+            # set valid_until without always going through the same event-log write
+            # that sets superseded_by, so valid_until is the authoritative check.
+            if row["valid_until"] is not None:
                 raise SystemExit(
                     f"labels reference note_id={nid}, which is SUPERSEDED "
-                    f"(superseded_by={row['superseded_by']!r}, "
+                    f"(valid_until={row['valid_until']!r}, "
+                    f"superseded_by={row['superseded_by']!r}, "
                     f"superseded_by_note_id={row['superseded_by_note_id']!r}). "
                     "recall() excludes superseded notes by default, so this label "
                     "can never be hit -- fix the label to point at the current note "

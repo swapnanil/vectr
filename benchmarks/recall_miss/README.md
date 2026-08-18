@@ -26,7 +26,12 @@ this number existing.
   anything itself.
 - **`run_fixture.py`** — runs the harness against the fixture corpus with
   the real production embedder by default (`--dummy` for the fast
-  deterministic hash embedder used by the CI regression test).
+  deterministic hash embedder used by the CI regression test). At fixture
+  scale (~30 notes, one clearly-worded label per note) the real-embedder
+  run scores 1.000/1.000 recall@k — a ceiling effect from the corpus being
+  too small and too unambiguous to separate a working retriever from a
+  broken one, not a meaningful recall number. Never quote it as a recall
+  result; use `run_live.py` against a real, larger corpus for that.
 - **`run_live.py`** — OPT-IN script mode: snapshots a real working-memory
   database read-only (sqlite backup API, never a raw copy of a live WAL
   file) under `<repo>/tmp/`, then runs the harness against an operator-

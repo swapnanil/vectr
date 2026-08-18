@@ -243,17 +243,22 @@ class TestFixtureCorpusEndToEnd:
 def _build_notes_snapshot(db_path, rows):
     """Minimal sqlite `notes` table — only the columns
     run_live.load_labels() actually reads — for testing the
-    superseded-label guard without a full WorkingContextStore."""
+    superseded-label guard without a full WorkingContextStore.
+
+    Each row is (note_id, kind, content, valid_until, superseded_by,
+    superseded_by_note_id) — same column order/names as the real store
+    (agent/working_context_store/_store.py), so `valid_until` and the
+    `superseded_by*` columns can be set independently in a test."""
     import sqlite3
 
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "CREATE TABLE notes (note_id INTEGER PRIMARY KEY, kind TEXT, content TEXT, "
-        "superseded_by TEXT, superseded_by_note_id INTEGER)"
+        "valid_until REAL, superseded_by TEXT, superseded_by_note_id INTEGER)"
     )
     conn.executemany(
-        "INSERT INTO notes (note_id, kind, content, superseded_by, superseded_by_note_id) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO notes (note_id, kind, content, valid_until, superseded_by, superseded_by_note_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
         rows,
     )
     conn.commit()
@@ -262,11 +267,19 @@ def _build_notes_snapshot(db_path, rows):
 
 class TestLoadLabelsSupersededGuard:
     """run_live.py's load_labels() must refuse a label that points at a
-    superseded note: recall() excludes superseded notes by default (see
-    WorkingContextStore.recall()'s include_superseded=False), so such a
-    label can never be hit and would silently inflate the measured miss
-    rate rather than reflect a real retrieval failure. Guards
-    benchmarks/recall_miss/run_live.py:load_labels()."""
+    superseded note: recall() excludes superseded notes by default via
+    `valid_until IS NULL` (see WorkingContextStore.recall() /
+    agent/working_context_store/_store.py), so such a label can never be
+    hit and would silently inflate the measured miss rate rather than
+    reflect a real retrieval failure. Guards
+    benchmarks/recall_miss/run_live.py:load_labels().
+
+    `valid_until` is the AUTHORITATIVE column (the one recall() actually
+    filters on) — superseded_by / superseded_by_note_id are carried only
+    as diagnostics in the error message. A legacy code_hash auto-supersede
+    path has historically set valid_until without always going through the
+    same event-log write that sets superseded_by, so the two columns can
+    diverge; the guard must key off valid_until, not superseded_by."""
 
     def test_superseded_note_id_raises(self, tmp_path) -> None:
         import json
@@ -279,7 +292,7 @@ class TestLoadLabelsSupersededGuard:
         snapshot_dir.mkdir()
         _build_notes_snapshot(
             snapshot_dir / "working_context.sqlite",
-            rows=[(1, "task", "old content", None, 2)],  # superseded by note 2
+            rows=[(1, "task", "old content", 1700000000.0, None, 2)],  # superseded by note 2
         )
         labels_path = tmp_path / "labels.json"
         labels_path.write_text(json.dumps([
@@ -300,7 +313,7 @@ class TestLoadLabelsSupersededGuard:
         snapshot_dir.mkdir()
         _build_notes_snapshot(
             snapshot_dir / "working_context.sqlite",
-            rows=[(1, "task", "current content", None, None)],
+            rows=[(1, "task", "current content", None, None, None)],
         )
         labels_path = tmp_path / "labels.json"
         labels_path.write_text(json.dumps([
@@ -312,3 +325,47 @@ class TestLoadLabelsSupersededGuard:
         assert len(queries) == 1
         assert queries[0].relevant_keys == ("1",)
         assert key_to_note["1"] == NoteInfo(note_id=1, kind="task", content="current content")
+
+    def test_valid_until_is_authoritative_not_superseded_by(self, tmp_path) -> None:
+        """The exact gap sentinel flagged: a row where superseded_by* and
+        valid_until DISAGREE must be judged by valid_until, since that is
+        the column recall() actually filters on. Two sub-cases in one row
+        each: (a) valid_until NULL but superseded_by set (legacy/stale
+        superseded_by write with no accompanying valid_until) -> recall()
+        would still surface this note, so the label must resolve, NOT
+        raise; (b) valid_until set but superseded_by* both NULL (the
+        legacy code_hash auto-supersede path) -> recall() would still
+        exclude it, so the label must raise."""
+        import json
+        import sys as _sys
+
+        _sys.path.insert(0, str(REPO_ROOT / "benchmarks" / "recall_miss"))
+        from run_live import load_labels  # noqa: PLC0415
+
+        # (a) valid_until NULL, superseded_by set -> must resolve (not raise).
+        snapshot_dir = tmp_path / "snapshot_a"
+        snapshot_dir.mkdir()
+        _build_notes_snapshot(
+            snapshot_dir / "working_context.sqlite",
+            rows=[(1, "task", "still live per recall()", None, "some-legacy-value", None)],
+        )
+        labels_path = tmp_path / "labels_a.json"
+        labels_path.write_text(json.dumps([
+            {"query": "q", "relevant_note_ids": [1], "basis": "b", "source": "live-session"},
+        ]))
+        queries, key_to_note = load_labels(labels_path, snapshot_dir)
+        assert key_to_note["1"] == NoteInfo(note_id=1, kind="task", content="still live per recall()")
+
+        # (b) valid_until set, superseded_by* both NULL -> must raise.
+        snapshot_dir_b = tmp_path / "snapshot_b"
+        snapshot_dir_b.mkdir()
+        _build_notes_snapshot(
+            snapshot_dir_b / "working_context.sqlite",
+            rows=[(2, "task", "actually excluded by recall()", 1700000000.0, None, None)],
+        )
+        labels_path_b = tmp_path / "labels_b.json"
+        labels_path_b.write_text(json.dumps([
+            {"query": "q", "relevant_note_ids": [2], "basis": "b", "source": "live-session"},
+        ]))
+        with pytest.raises(SystemExit, match="SUPERSEDED"):
+            load_labels(labels_path_b, snapshot_dir_b)
