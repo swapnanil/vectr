@@ -57,6 +57,12 @@ def _make_service():
         # UPG-HOOK-INJECT-OBSERVABILITY: hook injection counters are always
         # present in the real service.status() output — mock the real shape.
         "hook_injection_counts": {"SessionStart": 3, "PreToolUse": 2},
+        # UPG-PURPOSE-RESUME-HOLE: ARCH-4 dual-vector purpose-chunk count and
+        # per-run backfill-gap count are always present in the real
+        # service.status() output — mock the real shape.
+        "total_purpose_chunks": 480,
+        "purpose_backfill_pending_files": 0,
+        "purpose_vectors_pending": False,
     }
     svc.get_map.return_value = "# Codebase Passport\nFastAPI service."
     # UPG-6.2: save_map returns a shaped result — real shape.

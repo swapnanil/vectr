@@ -2969,21 +2969,22 @@ class TestPurposePassDeferral:
             f"deferred={deferred_ids}"
         )
 
-    def test_purpose_pass_failure_leaves_content_durable_and_purpose_retryable(
+    def test_purpose_pass_failure_is_healed_by_next_ordinary_run(
         self, tmp_path, monkeypatch,
     ) -> None:
-        """Content-completion (mtime_cache) and purpose-completion (the
-        purpose collection) are decoupled signals: a purpose pass that
-        crashes (simulated) never rolls back or blocks the content
-        checkpoint that already landed in Phase 3 — content is upserted by
-        chunk_id independently of the purpose collection, so there is
-        nothing for a purpose-pass failure to invalidate. The file is
-        therefore also considered up to date by Phase 1's mtime check on a
-        plain next run (no re-embed of unchanged content, matching pre-
-        UPG-PURPOSE-PASS-DEFERRAL incremental-index behaviour) — the
-        crashed file's purpose vector is only re-attempted via `--force` or
-        by touching the file so it re-enters `to_index`, at which point the
-        (idempotent, upsert-by-chunk_id) purpose pass lands it correctly."""
+        """UPG-PURPOSE-RESUME-HOLE: content-completion (mtime_cache) and
+        purpose-completion (the purpose-completion cache / purpose
+        collection) are decoupled signals — a purpose pass that crashes
+        (simulated) never rolls back or blocks the content checkpoint that
+        already landed in Phase 3, and a plain next `index_workspace()`
+        call correctly skips re-chunking/re-embedding the file's unchanged
+        BODY content (Phase 1 still sees it as up to date). But unlike the
+        pre-fix behaviour, that same ordinary next run now DOES detect and
+        close the purpose-vector gap it left behind — no `--force` and no
+        file touch required. This is the exact mechanism the historic bug
+        exploited: a purpose pass lost between the content checkpoint and
+        completion (crash, or here, a raised exception inside it) used to
+        leave the gap permanent because nothing ever re-detected it."""
         import agent.indexer as idx_module
         from agent.indexer import CodeIndexer
 
@@ -3019,30 +3020,48 @@ class TestPurposePassDeferral:
         )
         indexer1.close()
 
-        # A plain next run with no changes: content is unchanged, so Phase 1
-        # correctly skips the file — this run does no work at all, and the
-        # purpose vector the crashed run lost stays lost until forced.
+        # A plain next run with no content changes and the REAL (non-
+        # crashing) purpose pass restored: Phase 1 still correctly skips
+        # re-chunking the file's unchanged body (chunk_file must not be
+        # called for it), but the run must detect last time's purpose gap
+        # and back it in from the already-stored body chunks.
+        import agent.indexer._core as core_module
+
+        real_chunk_file = core_module.chunk_file
+
+        def _chunk_file_forbidding_a_py(fpath):
+            assert "a.py" not in fpath, (
+                "an ordinary run backfilling a purpose gap must not re-chunk "
+                "the file's unchanged body content — only the purpose-only "
+                "backfill path (_fetch_body_chunks_for_files) may touch it"
+            )
+            return real_chunk_file(fpath)
+
+        monkeypatch.setattr(core_module, "chunk_file", _chunk_file_forbidding_a_py)
         monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
         indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
         indexer2.index_workspace()
         self._wait_until_not_pending(indexer2)
         assert indexer2.total_chunks == 1
-        assert indexer2._purpose_collection.count() == 0, (
-            "an unforced, no-op incremental run must not re-embed unchanged "
-            "content just to retry a stale purpose gap"
+        assert indexer2._purpose_collection.count() == 1, (
+            "an ordinary, unforced next run must close a purpose-vector gap "
+            "left by a prior interrupted/crashed pass — this is the actual "
+            "defect UPG-PURPOSE-RESUME-HOLE fixes"
         )
         indexer2.close()
 
-        # Forcing (or touching the file) re-enters it into `to_index` and
-        # the purpose pass lands it correctly this time.
+        # A further ordinary run finds nothing left to backfill — the gap
+        # stays closed, not re-discovered every run.
         monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
         indexer3 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
-        indexer3.index_workspace(force=True)
+        indexer3.index_workspace()
         self._wait_until_not_pending(indexer3)
         assert indexer3.total_chunks == 1
         assert indexer3._purpose_collection.count() == 1, (
-            "a forced re-run must land the purpose vector the crashed run lost"
+            "a purpose vector correctly checkpointed as complete must not "
+            "be re-embedded/duplicated by a later ordinary run"
         )
+        assert indexer3.purpose_backfill_pending_files == 0
         indexer3.close()
 
     def test_close_does_not_block_on_pending_deferred_pass(
@@ -3077,6 +3096,297 @@ class TestPurposePassDeferral:
         )
 
         release.set()  # unblock the background thread so it doesn't leak past the test
+
+
+class TestPurposeResumeHole:
+    """UPG-PURPOSE-RESUME-HOLE: an interrupted index (content checkpointed,
+    purpose pass never run — a daemon stop/crash exactly between the two)
+    must not leave a workspace permanently short of purpose vectors while
+    every status surface reports it healthy. `index_workspace()` tracks
+    per-file purpose completion in a separate on-disk cache
+    (`purpose_cache.json`, decoupled from mtime_cache the same way the
+    purpose pass itself is decoupled from content indexing —
+    UPG-PURPOSE-PASS-DEFERRAL) and, on every ORDINARY (non-force) run,
+    detects and backfills any file whose body content is current but whose
+    purpose vectors are not. Exercised against a real CodeIndexer + real
+    ChromaDB collection on tiny synthetic corpora only."""
+
+    def _wait_until_not_pending(self, idx, timeout: float = 5.0) -> None:
+        deadline = time.time() + timeout
+        while idx.purpose_vectors_pending and time.time() < deadline:
+            time.sleep(0.01)
+
+    def test_ordinary_run_backfills_gap_left_by_never_dispatched_deferred_pass(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Simulates the exact bug mechanism: a process kill between the
+        content checkpoint (Phase 3, always synchronous) and the purpose
+        pass ever being dispatched to the background executor (not merely
+        a pass that started and raised — one that never ran at all)."""
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        db_path = str(tmp_path / "chroma")
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        # Never dispatch the purpose pass at all (content still checkpoints
+        # normally in Phase 3, independent of this) — this is the "crash
+        # between checkpoint and dispatch" window from the bug report.
+        monkeypatch.setattr(indexer1, "_schedule_deferred_purpose_pass", lambda *a, **k: None)
+        indexer1.index_workspace()
+        assert indexer1.total_chunks == 1
+        assert indexer1._purpose_collection.count() == 0
+        indexer1.close()
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer2.index_workspace()
+        self._wait_until_not_pending(indexer2)
+        assert indexer2._purpose_collection.count() == 1, (
+            "an ordinary next run must detect and backfill a purpose gap "
+            "left by a pass that was never dispatched, with no --force and "
+            "no file touch"
+        )
+        indexer2.close()
+
+    def test_ordinary_run_backfills_gap_inline_foreground_fast(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Same scenario as above, but with --foreground-fast (synchronous,
+        non-deferred) — the backfill dispatch itself must also work through
+        the inline `_upsert_purpose_vectors` call, not only the deferred
+        scheduling path."""
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        db_path = str(tmp_path / "chroma")
+        monkeypatch.setenv("VECTR_FOREGROUND_FAST", "1")
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        monkeypatch.setattr(indexer1, "_upsert_purpose_vectors", lambda *a, **k: None)
+        indexer1.index_workspace()
+        assert indexer1.total_chunks == 1
+        assert indexer1._purpose_collection.count() == 0
+        indexer1.close()
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer2.index_workspace()
+        assert indexer2.purpose_vectors_pending is False
+        assert indexer2._purpose_collection.count() == 1, (
+            "the inline (--foreground-fast) path must also backfill an "
+            "ordinary-run purpose gap"
+        )
+        indexer2.close()
+
+    def test_purpose_backfill_idempotent_across_repeated_ordinary_runs(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Running the repair more than once must not duplicate or corrupt
+        vectors — chunk_id upsert is already idempotent, and the
+        completion cache must not re-offer an already-closed gap."""
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        db_path = str(tmp_path / "chroma")
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        monkeypatch.setattr(indexer1, "_schedule_deferred_purpose_pass", lambda *a, **k: None)
+        indexer1.index_workspace()
+        indexer1.close()
+
+        for _ in range(3):
+            monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+            idx = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+            idx.index_workspace()
+            self._wait_until_not_pending(idx)
+            assert idx._purpose_collection.count() == 1, (
+                "repeated ordinary runs must not duplicate purpose vectors"
+            )
+            assert idx.total_chunks == 1, (
+                "repeated ordinary runs must not duplicate body chunks"
+            )
+            assert idx.purpose_backfill_pending_files == 0
+            idx.close()
+
+    def test_migration_seed_marks_pre_existing_healthy_index_complete_without_reembedding(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A workspace whose purpose vectors are already fully written (a
+        healthy index built before this cache existed, so `purpose_cache.
+        json` is absent) must NOT be treated as a corpus-wide gap on the
+        first run after upgrading — that would force an unnecessary
+        purpose-only reindex on every existing user. The one-time
+        migration seed reconciles against the actual purpose collection
+        instead."""
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        db_path = str(tmp_path / "chroma")
+
+        # Build a fully-healthy index the normal way (purpose vectors land).
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer1.index_workspace()
+        self._wait_until_not_pending(indexer1)
+        assert indexer1._purpose_collection.count() == 1
+        indexer1.close()
+
+        # Simulate "built before this mechanism existed": the completed
+        # index's own run already wrote purpose_cache.json (this fix
+        # writes it as it goes) — delete it to reproduce the pre-upgrade
+        # state of a real user's existing workspace: mtime_cache present,
+        # purpose collection fully populated, but no purpose_cache.json.
+        purpose_cache_path = tmp_path / "chroma" / "purpose_cache.json"
+        assert purpose_cache_path.exists()
+        purpose_cache_path.unlink()
+
+        embed_calls: list[list[str]] = []
+
+        class _RecordingEmbedProvider:
+            def embed(self, texts):
+                embed_calls.append(list(texts))
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _RecordingEmbedProvider())
+        indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer2.index_workspace()
+        self._wait_until_not_pending(indexer2)
+
+        assert not embed_calls, (
+            "a healthy pre-existing workspace must not be re-embedded just "
+            "because purpose_cache.json didn't exist yet — the migration "
+            "seed must reconcile against the actual purpose collection "
+            f"instead of assuming a gap: embed() was called with {embed_calls}"
+        )
+        assert indexer2._purpose_collection.count() == 1
+        assert indexer2.purpose_backfill_pending_files == 0
+        assert purpose_cache_path.exists(), (
+            "the migration seed must persist purpose_cache.json so this "
+            "reconciliation only ever runs once"
+        )
+        indexer2.close()
+
+    def test_zero_symbol_chunk_file_does_not_become_a_permanent_gap(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A file with content chunks but zero symbol-bearing chunks (e.g.
+        prose) is vacuously purpose-complete — it must be checkpointed as
+        such on its first run, not re-offered as a gap on every subsequent
+        ordinary run forever."""
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        (tmp_path / "notes.md").write_text(
+            "# Notes\n\nSome prose with no code symbols at all.\n", encoding="utf-8",
+        )
+        db_path = str(tmp_path / "chroma")
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer1.index_workspace()
+        self._wait_until_not_pending(indexer1)
+        assert indexer1.total_chunks >= 1
+        assert indexer1._purpose_collection.count() == 0
+        assert indexer1.purpose_backfill_pending_files == 0, (
+            "a file with zero symbol-bearing chunks must checkpoint as "
+            "complete on its own run, not surface as a pending gap"
+        )
+        indexer1.close()
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer2.index_workspace()
+        self._wait_until_not_pending(indexer2)
+        assert indexer2.purpose_backfill_pending_files == 0, (
+            "a zero-symbol file must never be re-offered as a purpose gap "
+            "on later ordinary runs"
+        )
+        indexer2.close()
+
+    def test_purpose_backfill_pending_files_reflects_detected_gap(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Direct property-level check: the count reflects the gap found at
+        the start of the run that detects it, and reads 0 once dispatch for
+        that backfill has been sent."""
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        make_py(tmp_path, "a.py", "def known_fn():\n    return 1\n")
+        db_path = str(tmp_path / "chroma")
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        assert indexer1.purpose_backfill_pending_files == 0, (
+            "a brand-new workspace has nothing to backfill"
+        )
+        monkeypatch.setattr(indexer1, "_schedule_deferred_purpose_pass", lambda *a, **k: None)
+        indexer1.index_workspace()
+        indexer1.close()
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer2.index_workspace()
+        # Dispatch for the detected gap has already been sent by the time
+        # index_workspace() returns (sync call, or deferred submit) — see
+        # CodeIndexer.purpose_backfill_pending_files docstring.
+        assert indexer2.purpose_backfill_pending_files == 0
+        self._wait_until_not_pending(indexer2)
+        assert indexer2._purpose_collection.count() == 1
+        indexer2.close()
 
 
 class TestFetchChunks:
