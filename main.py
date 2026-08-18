@@ -3501,10 +3501,25 @@ def cmd_memory(args: argparse.Namespace) -> None:
     recorded in `.vectr/memory_export_path` so subsequent note writes
     (through a running daemon) keep the mirror current via a debounced
     post-write hook; this command itself always renders synchronously so
-    the file is current the moment it returns."""
+    the file is current the moment it returns. `--disable` (UPG-MEMORY-
+    EXPORT-DISABLE) reverses that opt-in by removing the marker, without
+    touching the previously exported file."""
     action = getattr(args, "memory_command", None)
     if action != "export":
-        print("usage: vectr memory export [--path FILE] [--workspace DIR]", file=sys.stderr)
+        print("usage: vectr memory export [--path FILE] [--workspace DIR] [--disable]", file=sys.stderr)
+        return
+
+    from agent.working_context_store._export import remove_export_target
+
+    workspace = str(Path(args.workspace).resolve())
+
+    if getattr(args, "disable", False):
+        previous_target = remove_export_target(workspace)
+        if previous_target is None:
+            print(f"No memory export auto-refresh was configured for {workspace}; nothing to disable.")
+        else:
+            print(f"Disabled memory export auto-refresh for {workspace} (was mirroring to {previous_target}).")
+            print("The previously exported file is left in place; re-run `vectr memory export` to turn auto-refresh back on.")
         return
 
     from app.service import _default_db_dir
@@ -3512,7 +3527,6 @@ def cmd_memory(args: argparse.Namespace) -> None:
     from agent.working_context_store import WorkingContextStore
     from agent.working_context_store._export import export_memory, write_export_target
 
-    workspace = str(Path(args.workspace).resolve())
     out_path = Path(getattr(args, "export_path", None) or "MEMORY.md")
     if not out_path.is_absolute():
         out_path = Path(workspace) / out_path
@@ -3532,6 +3546,8 @@ def cmd_memory(args: argparse.Namespace) -> None:
     export_memory(store, workspace, out_path)
     write_export_target(workspace, out_path)
     print(f"Exported working memory for {workspace} to {out_path}")
+    print("Auto-refresh is now on: future note writes will keep this file current. "
+          "Run `vectr memory export --disable` to stop that.")
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -4270,6 +4286,13 @@ def main() -> None:
     p_memory_export.add_argument(
         "--workspace", default=_default_path,
         help="Workspace whose notes to export (default: $VECTR_WORKSPACE or cwd)",
+    )
+    p_memory_export.add_argument(
+        "--disable", action="store_true",
+        help="Turn off auto-refresh: remove the .vectr/memory_export_path marker "
+             "so future note writes no longer re-render the mirror. Does not "
+             "delete the previously exported file. A no-op (not an error) if "
+             "auto-refresh was never configured for this workspace.",
     )
 
     p_connect = sub.add_parser(

@@ -240,6 +240,27 @@ def write_export_target(workspace_root: str, resolved_path: Path) -> None:
     marker.write_text(str(resolved_path), encoding="utf-8")
 
 
+def remove_export_target(workspace_root: str) -> Path | None:
+    """Turn off auto-refresh for this workspace (`vectr memory export
+    --disable`, UPG-MEMORY-EXPORT-DISABLE): delete the opt-in marker written
+    by `write_export_target`, so `schedule_export_if_configured` goes back to
+    its no-marker no-op on every subsequent note write. Written once by the
+    first export and otherwise permanent (`_bump_notes_epoch()` reads it
+    forever), this was the only way to stop it before this function existed.
+
+    Returns the target path the marker held, resolved exactly as
+    `_read_export_target` would (absolute, or relative-to-workspace), so the
+    caller can report what auto-refresh was pointed at. Returns None if no
+    marker was present — a clean no-op, not an error, so disabling an
+    already-unconfigured workspace is always safe to call."""
+    target = _read_export_target(workspace_root)
+    if target is None:
+        return None
+    marker = Path(workspace_root) / _EXPORT_MARKER_REL
+    marker.unlink(missing_ok=True)
+    return target
+
+
 # Debounce state: one pending threading.Timer per workspace root. A
 # self-contained equivalent of agent/watcher.py's _DebounceTimer rather than
 # a cross-import of it — that class lives in the code-watching concern
