@@ -3524,6 +3524,58 @@ class TestPurposeResumeHole:
         )
         indexer2.close()
 
+    def test_final_batch_checkpoints_even_when_not_a_periodic_multiple(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """`_upsert_purpose_vectors`'s per-file checkpoint fires on two
+        conditions (mirroring Phase 3's own content checkpoint): every
+        `checkpoint_every_batches` batches, AND unconditionally on the
+        final batch. With `checkpoint_every_batches` set larger than the
+        total batch count, the periodic condition never fires at all in
+        this run — only the final-batch guarantee can checkpoint anything.
+        Without it, a purpose pass over a corpus smaller than one
+        checkpoint interval would silently checkpoint nothing, ever,
+        leaving every file in it a permanent gap."""
+        import json
+
+        import agent.indexer._core as core_module
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        monkeypatch.setattr(core_module, "_EMBED_BATCH_SIZE", 1)
+        monkeypatch.setattr(core_module, "_INDEX_GOVERNOR_CHECKPOINT_EVERY_BATCHES", 10)
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        paths = [
+            make_py(tmp_path, f"m{i}.py", f"def f{i}():\n    return {i}\n")
+            for i in range(3)
+        ]
+        db_path = str(tmp_path / "chroma")
+        purpose_cache_path = tmp_path / "chroma" / "purpose_cache.json"
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer.index_workspace()
+        self._wait_until_not_pending(indexer)
+
+        assert indexer.total_chunks == 3
+        assert indexer._purpose_collection.count() == 3
+        on_disk = json.loads(purpose_cache_path.read_text(encoding="utf-8"))
+        for p in paths:
+            assert str(p) in on_disk, (
+                f"{p} was never checkpointed into purpose_cache.json — the "
+                "periodic checkpoint never fires in this run "
+                "(checkpoint_every_batches=10 > 3 total batches), so only "
+                "the final-batch guarantee can have written it"
+            )
+        indexer.close()
+
 
 class TestFetchChunks:
     """Deterministic re-fetch by chunk id (UPG-CTX-EVICT part a)."""
