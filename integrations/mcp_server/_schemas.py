@@ -471,6 +471,16 @@ _MEMORY_WRITE_TOOLS = [
                         "never an error and never silently dropped."
                     ),
                 },
+                "pin": {
+                    "type": "boolean",
+                    "description": (
+                        "Optional: pin this note into Tier 0 at write time — injected on "
+                        "EVERY future vectr_recall(query=...) call regardless of the query, "
+                        "same effect as a separate vectr_pin call right after this write. "
+                        "Bounded, so pin sparingly. Default false."
+                    ),
+                    "default": False,
+                },
             },
             # UPG-REMEMBER-MCP-LONG-PAYLOAD-PARSE-LOSS: content is no longer
             # unconditionally required at the schema level — content_file is
@@ -834,6 +844,40 @@ _MEMORY_TOOLS = [
             "required": ["note_id"],
         },
     },
+    {
+        "name": "vectr_pin",
+        "annotations": {
+            "title": "Pin/unpin a note into Tier 0",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        "description": (
+            "Pin a note so it is injected on EVERY future vectr_recall(query=...) call, "
+            "regardless of the query — never relevance-scored, never dropped for being "
+            "off-topic. Use for a note that must never be missed by an unlucky query "
+            "(the same standing-rule role kind='directive' already plays, but for a note "
+            "you don't want to reclassify as a directive). Pass pinned=false to unpin. "
+            "Bounded: only a small configured number of directive+pinned notes ever "
+            "occupy this unconditional tier, so pin sparingly. Equivalent to passing "
+            "pin=true directly to vectr_remember at write time."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "integer",
+                    "description": "ID of the note to pin/unpin (the [#N] id from vectr_recall)",
+                },
+                "pinned": {
+                    "type": "boolean",
+                    "description": "true to pin (default), false to unpin",
+                },
+            },
+            "required": ["note_id"],
+        },
+    },
 ]  # end _MEMORY_TOOLS
 
 # ingest_traces — not gated by session memory (always available)
@@ -899,6 +943,7 @@ MEMORY_READY_TOOLS = frozenset(
         "vectr_promote",
         "vectr_revoke",
         "vectr_reinstate",
+        "vectr_pin",
         "vectr_status",
         "vectr_snapshot",
         "vectr_snapshot_list",

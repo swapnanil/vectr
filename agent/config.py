@@ -1410,6 +1410,26 @@ MEMORY_RECALL_FOR_PATH_OVERFETCH_MULTIPLIER: int = int(_recall_for_path_cfg["ove
 MEMORY_RECALL_FOR_PATH_OVERFETCH_CEILING: int = int(_recall_for_path_cfg["overfetch_ceiling"])
 
 # ---------------------------------------------------------------------------
+# UPG-RECALL-MISS-FLOOR parts (b)/(c): Tier 0 (directive + pinned) unconditional
+# injection and the deterministic tag/anchor/symbol/title channels composed
+# with the ranked (semantic/SQL) result in WorkingContextStore.recall().
+# See the recall_floor config.yaml comment for the full rationale.
+# ---------------------------------------------------------------------------
+
+_recall_floor_cfg: dict[str, Any] = _cfg["recall_floor"]
+RECALL_FLOOR_TIER0_MAX_NOTES: int = int(_recall_floor_cfg["tier0_max_notes"])
+RECALL_FLOOR_DETERMINISTIC_MAX_NOTES: int = int(_recall_floor_cfg["deterministic_max_notes"])
+RECALL_FLOOR_METADATA_SCAN_CEILING: int = int(_recall_floor_cfg["metadata_scan_ceiling"])
+RECALL_FLOOR_TITLE_MIN_TOKEN_LEN: int = int(_recall_floor_cfg["title_min_token_len"])
+RECALL_FLOOR_TITLE_MIN_OVERLAP_TOKENS: int = int(_recall_floor_cfg["title_min_overlap_tokens"])
+RECALL_FLOOR_TIER0_MIN_NOTES: int = int(_recall_floor_cfg["tier0_min_notes"])
+RECALL_FLOOR_TIER0_MAX_SHARE_OF_LIMIT: float = float(_recall_floor_cfg["tier0_max_share_of_limit"])
+RECALL_FLOOR_DETERMINISTIC_MAX_SHARE_OF_REMAINING: float = float(
+    _recall_floor_cfg["deterministic_max_share_of_remaining"]
+)
+RECALL_FLOOR_DETERMINISTIC_ENABLED: bool = bool(_recall_floor_cfg["deterministic_enabled"])
+
+# ---------------------------------------------------------------------------
 # UPG-TEST-CACHE-ISOLATION: single override point for vectr's on-disk cache
 # root. Every module that resolves a cache path (workspace DB dirs, the
 # Hugging Face model cache, cache-maintenance sweeps) calls vectr_cache_root()

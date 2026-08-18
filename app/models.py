@@ -419,6 +419,17 @@ class RememberRequest(BaseModel):
             "the response, never an error (idempotent)."
         ),
     )
+    pin: bool = Field(
+        default=False,
+        description=(
+            "UPG-RECALL-MISS-FLOOR part (b): pin this note into Tier 0 at "
+            "write time — equivalent to a separate POST /v1/pin call right "
+            "after this write. Pinned notes are injected unconditionally "
+            "on every vectr_recall(query=...) call, alongside "
+            "kind='directive' notes, up to the configured Tier 0 bound. "
+            "Default False changes nothing about existing callers."
+        ),
+    )
 
     @field_validator("priority")
     @classmethod
@@ -693,6 +704,26 @@ class PromoteRequest(BaseModel):
 class PromoteResponse(BaseModel):
     note_id: int
     provenance: str
+    processing_ms: int
+
+
+class PinRequest(BaseModel):
+    """Explicit Tier 0 membership toggle (UPG-RECALL-MISS-FLOOR part (b)):
+    set or clear a note's `pinned` flag. Pinned notes are injected
+    unconditionally alongside kind='directive' notes on every
+    vectr_recall(query=...) call, regardless of query content, up to the
+    configured Tier 0 bound (recall_floor.tier0_max_notes). Never inferred
+    from content, usage, or query history — always an explicit caller
+    decision."""
+
+    note_id: int = Field(..., description="Note to pin/unpin")
+    pinned: bool = Field(default=True, description="True to pin (join Tier 0), False to unpin")
+
+
+class PinResponse(BaseModel):
+    note_id: int
+    pinned: bool
+    message: str
     processing_ms: int
 
 

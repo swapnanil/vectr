@@ -296,6 +296,7 @@ def _base_mock_service():
     svc.promote_note.return_value = True
     svc.revoke_note.return_value = True
     svc.reinstate_note.return_value = True
+    svc.pin_note.return_value = True
     svc.recall.return_value = "# Working Notes (1 entries)\n\n[1] [HIGH] test content\n"
     svc.snapshot_session.return_value = "snap_abc123"
     svc.list_snapshots.return_value = [{"snapshot_id": "snap_abc123", "label": "test", "created_at": 0.0}]
@@ -355,17 +356,17 @@ def client_real_memory(tmp_path):
 
     def _remember(content, tags=None, priority="medium", session_id=None, kind="finding", title="",
                   agent="", triggers=None, provenance="agent", scope=None, anchors=None,
-                  supersedes=None, contradicts=None, user_quote=None):
+                  supersedes=None, contradicts=None, user_quote=None, pin=False):
         return real_store.remember(
             ws, content, tags, priority, session_id, kind=kind, title=title, author_id=agent,
             triggers=triggers, provenance=provenance, scope=scope, anchors=anchors,
-            supersedes=supersedes, contradicts=contradicts, user_quote=user_quote,
+            supersedes=supersedes, contradicts=contradicts, user_quote=user_quote, pin=pin,
         )
 
     def _remember_with_extras(content, tags=None, priority="medium", session_id=None,
                                kind="finding", title="", agent="", triggers=None,
                                provenance="agent", scope=None, anchors=None,
-                               supersedes=None, contradicts=None, user_quote=None):
+                               supersedes=None, contradicts=None, user_quote=None, pin=False):
         """Mirrors VectrService.remember_with_extras's own gating (app/
         service.py) against this fixture's real store, so /v1/remember
         REST tests routed through this fixture get a REAL RememberOutcome
@@ -373,7 +374,9 @@ def client_real_memory(tmp_path):
         MagicMock return. This store has no embedder attached, so `related`
         is always [] here (the same real fail-open path a genuinely
         embedder-less store takes in production); `proxy_anchor_suggestions`
-        is real glob presence against `tmp_path`, needing no embedder."""
+        is real glob presence against `tmp_path`, needing no embedder.
+        `pin` (UPG-RECALL-MISS-FLOOR part (b)) is threaded straight through
+        to the real store's own `remember(pin=...)`, same as production."""
         from app.service import RememberOutcome
         from agent.proxy_anchors import suggest_proxy_anchors
         from agent.config import (
@@ -385,7 +388,7 @@ def client_real_memory(tmp_path):
         )
         note_id = _remember(
             content, tags, priority, session_id, kind, title, agent, triggers,
-            provenance, scope, anchors, supersedes, contradicts, user_quote,
+            provenance, scope, anchors, supersedes, contradicts, user_quote, pin,
         )
         related = []
         if MEMORY_WRITE_RELATED_ENABLED:
@@ -410,6 +413,7 @@ def client_real_memory(tmp_path):
     svc.reinstate_note.side_effect = lambda note_id, actor="agent", reason=None: real_store.reinstate_note(
         ws, note_id, actor=actor, reason=reason
     )
+    svc.pin_note.side_effect = lambda note_id, pinned=True: real_store.set_pinned(ws, note_id, pinned)
 
     # TRIGGER-ENGINE wave 2a: a minimal per-session ledger registry mirroring
     # `VectrService._ledger_for`/`reset_trigger_ledger` so REST-level tests

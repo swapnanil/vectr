@@ -1705,6 +1705,7 @@ class VectrService:
         supersedes: int | None = None,
         contradicts: int | None = None,
         user_quote: str | None = None,
+        pin: bool = False,
     ) -> int:
         """`agent` (UPG-SUBAGENT-MEMORY): optional caller-declared identifier
         for the agent/subagent authoring this note (e.g. "coder-2") — never
@@ -1749,7 +1750,13 @@ class VectrService:
         `scope`: None (the default) means OMITTED — the store resolves it to
         this note's kind's default scope at write time
         (UPG-TRIGGER-SCOPE-KIND-DEFAULTS). An explicitly passed scope,
-        including the literal string "workspace", always wins verbatim."""
+        including the literal string "workspace", always wins verbatim.
+
+        `pin` (UPG-RECALL-MISS-FLOOR part (b)): explicit Tier 0 membership at
+        write time — equivalent to calling `pin_note(note_id, True)`
+        immediately after this write, offered inline so a caller doesn't
+        need the note_id back for the common "remember and pin" case.
+        Default False changes nothing about existing callers."""
         self._require_memory_layer()
         note_id = self._context_store.remember(
             workspace=self._workspace_root,
@@ -1768,6 +1775,7 @@ class VectrService:
             contradicts=contradicts,
             user_quote=user_quote,
             recent_user_message=self._recent_user_message_for_auto_bind(),
+            pin=pin,
         )
         self._bump_notes_epoch()
         return note_id
@@ -1788,6 +1796,7 @@ class VectrService:
         supersedes: int | None = None,
         contradicts: int | None = None,
         user_quote: str | None = None,
+        pin: bool = False,
     ) -> RememberOutcome:
         """Same parameters and same write as `remember()`, plus three
         strictly-additive write-time offers for the caller LLM — never a
@@ -1840,6 +1849,7 @@ class VectrService:
             supersedes=supersedes,
             contradicts=contradicts,
             user_quote=user_quote,
+            pin=pin,
         )
 
         related: list[RelatedNote] = []
@@ -2213,6 +2223,23 @@ class VectrService:
             self._bump_notes_epoch()
         return reinstated
 
+    def pin_note(self, note_id: int, pinned: bool = True) -> bool:
+        """Explicit Tier 0 membership toggle (UPG-RECALL-MISS-FLOOR part
+        (b)): set/clear a note's `pinned` flag. Pinned notes are injected
+        unconditionally alongside `kind="directive"` notes on every
+        `vectr_recall(query=...)` call, regardless of query content, up to
+        `RECALL_FLOOR_TIER0_MAX_NOTES` — see
+        `WorkingContextStore.set_pinned()` for the exact contract (returns
+        False if the note does not exist). Idempotent: pinning an
+        already-pinned note (or unpinning an already-unpinned one) still
+        returns True and bumps the epoch, matching `promote_note()`'s
+        no-op-is-still-a-success semantics."""
+        self._require_memory_layer()
+        changed = self._context_store.set_pinned(self._workspace_root, note_id, pinned)
+        if changed:
+            self._bump_notes_epoch()
+        return changed
+
     def get_note(self, note_id: int):
         """Fetch a single note by ID (UPG-RECALL-HIERARCHY expand path)."""
         self._require_memory_layer()
@@ -2497,6 +2524,16 @@ class VectrService:
             max_age_days=max_age_days,
             sort_by=sort_by,
             session_id=session_id,
+            # UPG-RECALL-MISS-FLOOR parts (b)/(c): this is the ordinary
+            # query-recall branch `vectr_recall`/`vectr recall` actually
+            # hits (boot/file_path/command each have their own branch
+            # above) — the one call site where Tier 0 (directive + pinned,
+            # unconditional) and the deterministic tag/anchor/symbol/title
+            # channels should always compose with the ranked result. See
+            # WorkingContextStore.recall()'s apply_floor docstring for why
+            # every OTHER caller of recall() in this codebase keeps the
+            # parameter's False default unchanged.
+            apply_floor=True,
         )
         # Same cross-surface leak the file_path branch above guards
         # against, but ONLY when `events` is given — i.e. this call is

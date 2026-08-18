@@ -921,6 +921,62 @@ class TestReinstateRoute:
 
 
 # ---------------------------------------------------------------------------
+# POST /v1/pin (UPG-RECALL-MISS-FLOOR part (b)) — explicit Tier 0 membership
+# ---------------------------------------------------------------------------
+
+class TestPinRoute:
+    def test_pin_returns_200_with_mocked_service(self, client) -> None:
+        resp = client.post("/v1/pin", json={"note_id": 1})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["note_id"] == 1
+        assert data["pinned"] is True
+        assert "processing_ms" in data
+
+    def test_pin_defaults_pinned_true(self, client) -> None:
+        resp = client.post("/v1/pin", json={"note_id": 1})
+        assert resp.status_code == 200
+        assert resp.json()["pinned"] is True
+
+    def test_unpin_via_rest(self, client) -> None:
+        resp = client.post("/v1/pin", json={"note_id": 1, "pinned": False})
+        assert resp.status_code == 200
+        assert resp.json()["pinned"] is False
+
+    def test_pin_via_rest_with_real_store(self, client_real_memory) -> None:
+        client = client_real_memory
+        note_id = client.post("/v1/remember", json={"content": "a finding to pin"}).json()["note_id"]
+        resp = client.post("/v1/pin", json={"note_id": note_id})
+        assert resp.status_code == 200
+        assert resp.json()["pinned"] is True
+
+    def test_unpin_via_rest_with_real_store(self, client_real_memory) -> None:
+        client = client_real_memory
+        note_id = client.post("/v1/remember", json={"content": "a finding to pin"}).json()["note_id"]
+        client.post("/v1/pin", json={"note_id": note_id})
+        resp = client.post("/v1/pin", json={"note_id": note_id, "pinned": False})
+        assert resp.status_code == 200
+        assert resp.json()["pinned"] is False
+
+    def test_pin_at_write_time_via_remember(self, client_real_memory) -> None:
+        """pin=True on /v1/remember is equivalent to a separate /v1/pin call
+        right after the write (UPG-RECALL-MISS-FLOOR part (b))."""
+        client = client_real_memory
+        resp = client.post("/v1/remember", json={"content": "pinned at write time", "pin": True})
+        assert resp.status_code == 200
+        # A second, independent /v1/pin(False) call must actually flip it back
+        # -- proof the write-time pin landed on the real note, not a no-op.
+        note_id = resp.json()["note_id"]
+        unpin = client.post("/v1/pin", json={"note_id": note_id, "pinned": False})
+        assert unpin.status_code == 200
+        assert unpin.json()["pinned"] is False
+
+    def test_pin_nonexistent_note_returns_404(self, client_real_memory) -> None:
+        resp = client_real_memory.post("/v1/pin", json={"note_id": 999999})
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # UPG-SUPERSEDES-GUARD-E2E — a non-human-provenance write may never supersedes-
 # tombstone a human-provenance note, end-to-end through the real REST write
 # surfaces. No write surface mints provenance='human' directly (by design), so
