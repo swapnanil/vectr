@@ -3349,6 +3349,52 @@ class TestPurposeResumeHole:
         )
         indexer2.close()
 
+    def test_entirely_trivial_workspace_checkpoints_purpose_cache_too(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Distinct from test_zero_symbol_chunk_file_does_not_become_a_
+        permanent_gap: there, the file chunks to >=1 non-symbol body chunk
+        and the gap is closed by _upsert_purpose_vectors' own total==0
+        early return. Here, EVERY file in a run's `to_index` chunks to
+        literally zero body chunks at all (all_chunks itself is empty),
+        which is a separate early-return branch in index_workspace() —
+        it must persist purpose_cache the same way mtime_cache is
+        persisted, or this file looks like a permanent purpose gap on
+        every subsequent ordinary run."""
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+
+        class _DummyEmbedProvider:
+            def embed(self, texts):
+                return [[0.1] * 8 for _ in texts]
+
+            def embed_query(self, texts):
+                return self.embed(texts)
+
+        make_py(tmp_path, "reexport.py", "import os\n")  # chunks to []
+        db_path = str(tmp_path / "chroma")
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer1 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer1.index_workspace()
+        self._wait_until_not_pending(indexer1)
+        assert indexer1.total_chunks == 0
+        assert indexer1.purpose_backfill_pending_files == 0, (
+            "a workspace whose only file chunks to zero body chunks has "
+            "nothing to backfill on its own run"
+        )
+        indexer1.close()
+
+        monkeypatch.setattr(idx_module, "get_embed_provider", lambda _m: _DummyEmbedProvider())
+        indexer2 = CodeIndexer(workspace_root=str(tmp_path), db_path=db_path)
+        indexer2.index_workspace()
+        self._wait_until_not_pending(indexer2)
+        assert indexer2.purpose_backfill_pending_files == 0, (
+            "a file that chunked to zero body chunks must never be "
+            "re-offered as a purpose gap on a later ordinary run"
+        )
+        indexer2.close()
+
     def test_purpose_backfill_pending_files_reflects_detected_gap(
         self, tmp_path, monkeypatch,
     ) -> None:
