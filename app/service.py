@@ -1449,6 +1449,24 @@ class VectrService:
         return {
             "indexed_files": self._indexer.indexed_file_count if self._indexer else 0,
             "total_chunks": self._indexer.total_chunks if self._indexer else 0,
+            # UPG-PURPOSE-RESUME-HOLE: purpose (ARCH-4 dual-vector) chunk
+            # count, surfaced alongside total_chunks so a gap this large
+            # (an interrupted deferred pass leaving most of the corpus
+            # without purpose vectors) cannot hide behind a green status —
+            # previously computed (CodeIndexer.total_purpose_chunks) but
+            # never rendered on any status surface.
+            "total_purpose_chunks": self._indexer.total_purpose_chunks if self._indexer else 0,
+            # Count of files this workspace's most recent index_workspace()
+            # run found with current body content but incomplete purpose
+            # vectors, as of the START of that run — 0 once dispatch for
+            # that backfill has been sent (see
+            # CodeIndexer.purpose_backfill_pending_files docstring for the
+            # exact "cleared at dispatch, not at completion" semantics;
+            # `purpose_vectors_pending` below covers the in-flight window
+            # for the deferred/background case).
+            "purpose_backfill_pending_files": (
+                self._indexer.purpose_backfill_pending_files if self._indexer else 0
+            ),
             "last_indexed": self.last_indexed,
             "embed_model": self._embed_model,
             "workspace_root": self._workspace_root,

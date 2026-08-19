@@ -355,6 +355,7 @@ def handle_tools_call(
             f"  Mode           : {mode}",
             f"  Indexed files  : {status['indexed_files']}",
             f"  Total chunks   : {status['total_chunks']}",
+            f"  Purpose vectors: {status.get('total_purpose_chunks', 0)}",
             f"  Symbols indexed: {status.get('symbol_count', 'n/a')}",
             f"  Prior notes    : {notes_count}{recall_hint}",
             f"  Episodes       : {episodes_count}",
@@ -405,6 +406,26 @@ def handle_tools_call(
                 "  → purpose vectors are backfilling in the background: "
                 "search results are ranked on body similarity only until this "
                 "finishes — no action needed, this clears automatically"
+            )
+
+        # UPG-PURPOSE-RESUME-HOLE: an explicit warning rather than leaving
+        # the reader to divide "Total chunks" by "Purpose vectors" (a ratio
+        # that is ALWAYS < 1 even when nothing is wrong — only symbol-
+        # bearing chunks get a purpose vector at all). This count is instead
+        # the exact number of files the most recent index run found with
+        # current body content but a purpose-vector gap — e.g. a deferred
+        # purpose pass interrupted by a daemon stop/crash. Fires only while
+        # a gap was actually detected and its backfill dispatch is still
+        # pending; a dispatched-but-still-running backfill is already
+        # covered by the purpose_vectors_pending line above.
+        purpose_gap_files = status.get("purpose_backfill_pending_files", 0)
+        if purpose_gap_files > 0:
+            lines.append(
+                f"  WARNING        : {purpose_gap_files} file(s) have body "
+                "content indexed but incomplete purpose vectors — search "
+                "ranking for their symbols may be body-similarity-only until "
+                "this backfills; the next index run closes this "
+                "automatically, no action needed"
             )
 
         # UPG-NOTES-EMBED-MIGRATION: surfaces a mid-failure state only — the

@@ -122,3 +122,34 @@ _MTIME_CACHE_SCHEMA_KEY = "__vectr_index_schema_version__"
 # this mechanism) is treated as a mismatch too, since we cannot know what
 # model produced those vectors.
 _EMBED_MODEL_STAMP_FILE = "embed_model_stamp.json"
+
+# ---------------------------------------------------------------------------
+# Purpose-vector completion cache (UPG-PURPOSE-RESUME-HOLE)
+# ---------------------------------------------------------------------------
+
+# A separate small JSON file (same per-workspace cache dir as the mtime cache
+# and the embed-model stamp) recording, per file, the content mtime as of
+# which that file's purpose vectors (ARCH-4's dual-vector pool-entry signal)
+# are known fully written to `code_chunks_purpose` — idempotently upserted by
+# chunk_id, so "fully written" here means every one of that file's candidate
+# chunks has actually been considered (embedded+upserted, or determined not
+# symbol-bearing) at least once.
+#
+# Deliberately a SEPARATE file/cache from `index_cache.json` (mtime_cache),
+# not another key inside it: content-completion and purpose-completion are
+# decoupled signals by design (UPG-PURPOSE-PASS-DEFERRAL) — a file can be
+# content-complete (in mtime_cache) while its purpose vectors are still
+# missing (an interrupted deferred pass, or a first run after upgrading to
+# this mechanism). CodeIndexer.index_workspace() diffs mtime_cache against
+# this cache on every ordinary (non-force) run to find files needing a
+# purpose-only backfill, closing the hole where such a gap could previously
+# persist forever until --force or a file touch. See
+# `_load_purpose_cache`/`_save_purpose_cache`/`_seed_purpose_cache_from_collection`.
+_PURPOSE_CACHE_FILE = "purpose_cache.json"
+
+# Sentinel key inside the purpose-cache JSON, same convention and purpose as
+# `_MTIME_CACHE_SCHEMA_KEY` above — a purpose cache written by an older
+# INDEXING_SCHEMA_VERSION (e.g. before purpose-text distillation changed) is
+# treated as cold, so every file's completion is re-derived rather than
+# trusted stale.
+_PURPOSE_CACHE_SCHEMA_KEY = "__vectr_purpose_schema_version__"

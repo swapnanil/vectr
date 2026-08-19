@@ -221,6 +221,19 @@ class StatusResponse(BaseModel):
     # this makes a possible ranking-quality dip explainable instead of
     # silent. False once the pass completes, or if deferral never ran.
     purpose_vectors_pending: bool = False
+    # UPG-PURPOSE-RESUME-HOLE: purpose (ARCH-4 dual-vector) chunk count,
+    # surfaced alongside total_chunks so a caller can see the two diverge
+    # instead of a green status hiding a gap (e.g. an interrupted deferred
+    # pass leaving most of the corpus without purpose vectors). Was already
+    # computed (CodeIndexer.total_purpose_chunks) but never rendered on any
+    # status surface before this field existed.
+    total_purpose_chunks: int = 0
+    # Count of files the most recent index_workspace() run found with
+    # current body content but incomplete purpose vectors, as of the START
+    # of that run — 0 once dispatch for that backfill has been sent (not
+    # necessarily landed for the deferred/background case; see
+    # purpose_vectors_pending above for "still in flight").
+    purpose_backfill_pending_files: int = 0
     # UPG-STDIO-MEMORY-READY: additive warm-up signals. `fully_ready` is True
     # once phase 2 (embedder/indexer/searcher/watcher/symbol-graph) has
     # completed — search/locate/trace/map/fetch are gated on it across every

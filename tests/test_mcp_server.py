@@ -83,6 +83,11 @@ def _mock_service():
         # UPG-HOOK-INJECT-OBSERVABILITY: hook injection counters are always
         # present in the real service.status() output — mock the real shape.
         "hook_injection_counts": {},
+        # UPG-PURPOSE-RESUME-HOLE: ARCH-4 purpose-chunk count and per-run
+        # backfill-gap count are always present in the real service.status()
+        # output — mock the real shape.
+        "total_purpose_chunks": 80,
+        "purpose_backfill_pending_files": 0,
     }
     svc.get_map.return_value = "# Passport\nA FastAPI service."
     # UPG-6.2: save_map returns a shaped result, not None — real shape.
@@ -862,6 +867,46 @@ class TestVectrStatus:
         assert "Hook injections" in text
         assert "SessionStart 3" in text
         assert "PreToolUse 2" in text
+
+    def test_purpose_vectors_count_in_output(self) -> None:
+        # UPG-PURPOSE-RESUME-HOLE: total_purpose_chunks must render on its
+        # own line, not just be inferable from total_chunks.
+        svc = _mock_service()
+        svc.status.return_value = {**svc.status.return_value, "total_purpose_chunks": 80}
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "Purpose vectors: 80" in text
+
+    def test_purpose_backfill_warning_absent_when_no_gap(self) -> None:
+        # UPG-PURPOSE-RESUME-HOLE: a workspace with no open purpose-vector
+        # gap (the common case) stays terse, same as Watcher/Hook injections.
+        svc = _mock_service()
+        svc.status.return_value = {**svc.status.return_value, "purpose_backfill_pending_files": 0}
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "WARNING" not in text
+
+    def test_purpose_backfill_warning_shown_with_gap_count(self) -> None:
+        # UPG-PURPOSE-RESUME-HOLE: when the most recent index run found
+        # files with current body content but incomplete purpose vectors,
+        # vectr_status must say so explicitly with the exact file count,
+        # not leave the caller to divide total_chunks by total_purpose_chunks
+        # (a ratio that is always < 1 even when nothing is wrong).
+        svc = _mock_service()
+        svc.status.return_value = {
+            **svc.status.return_value,
+            "purpose_backfill_pending_files": 7,
+        }
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "WARNING" in text
+        assert "7 file(s)" in text
+
+    def test_purpose_vectors_pending_line_shown_during_background_backfill(self) -> None:
+        # UPG-PURPOSE-PASS-DEFERRAL: distinct from the gap warning above —
+        # this covers the in-flight window where a backfill has already
+        # been dispatched to the background thread and is still running.
+        svc = _mock_service()
+        svc.status.return_value = {**svc.status.return_value, "purpose_vectors_pending": True}
+        text = handle_tools_call("vectr_status", {}, svc)["content"][0]["text"]
+        assert "backfilling in the background" in text
 
     def test_notes_count_zero_shows_skip_hint(self) -> None:
         svc = _mock_service()
