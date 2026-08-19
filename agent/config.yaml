@@ -379,6 +379,47 @@ ranking:
     # fetched). Fetch a deeper pool in that case so the quality prior has code to surface.
     top_k_unfiltered: 60
 
+    # Cross-encoder max sequence length in tokens. A (query, chunk) pair
+    # longer than this is truncated before scoring. Sibling of model/top_k
+    # above — was hardcoded in agent/searcher.py before UPG-RERANK-LATENCY-BUDGET.
+    max_length: 512
+
+    # predict() batch_size for the reranker cross-encoder, keyed by the
+    # resolved torch device (agent/searcher.py reads CrossEncoder.device.type
+    # after load -- the SAME attribute sentence_transformers itself populates
+    # when device is left unset; this is not a second device-detection path).
+    # UPG-RERANK-LATENCY-BUDGET measured a 40-query sweep with realistic
+    # 59-92-pair candidate pools (benchmarks/reranker_spike/, branch
+    # upg/reranker-swap-spike) against both shipped reranker models
+    # (BAAI/bge-reranker-base, Alibaba-NLP/gte-reranker-modernbert-base).
+    # Rank order (top-1 and top-5 set) was verified IDENTICAL to batch_size 32
+    # at every tested value on mps -- batch_size only changes wall-clock time,
+    # never which chunks come back or in what order.
+    #   mps (Apple M1, measured): batch_size 32 (the previous unconfigured
+    #     sentence_transformers default) is the WORST value in the sweep --
+    #     smaller batches parallelize better under Metal for this pool-size
+    #     range. batch_size 4 is 1.97x faster than 32 for bge-reranker-base
+    #     (2471ms -> 1252ms median per call) and 1.53x faster for
+    #     gte-reranker-modernbert-base (4067ms -> 2656ms).
+    #   cpu (Apple M1, measured, 5-thread cap matching embedding.thread_cap):
+    #     see UPG-RERANK-LATENCY-BUDGET note for the measured curve --
+    #     the direction of the effect is the same as mps but smaller in
+    #     magnitude; value below is the measured optimum.
+    #   cuda: UNMEASURED -- no CUDA hardware was available to verify this.
+    #     Larger batches are normally faster on CUDA, the opposite direction
+    #     from the mps/cpu result above, so guessing a small value here would
+    #     risk silently regressing CUDA throughput with no local way to catch
+    #     it. Keeps sentence_transformers' own unconfigured default (32)
+    #     until someone measures it on real CUDA hardware.
+    #   default: fallback for any other/unrecognized resolved device string
+    #     (npu, xpu, hpu, or a future torch backend) -- same reasoning as
+    #     cuda above, preserve the library default rather than guess.
+    batch_size:
+      mps: 4
+      cpu: 4
+      cuda: 32
+      default: 32
+
     # Over-fetch depth for the pool-entry trivial filter (UPG-15.7).
     # Before trimming to top_k_unfiltered, the hybrid retrieval fetches this many raw
     # candidates, drops any that are trivial (is_trivial_chunk == True) and not

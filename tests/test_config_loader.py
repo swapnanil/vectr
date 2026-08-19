@@ -133,6 +133,44 @@ class TestConfigLoaderRerank:
         assert searcher_mod._RERANK_TOP_K_UNFILTERED is cfg.RERANK_TOP_K_UNFILTERED
         assert searcher_mod._RERANK_PRE_FILTER_FETCH_K is cfg.RERANK_PRE_FILTER_FETCH_K
 
+    def test_max_length_default(self) -> None:
+        # UPG-RERANK-LATENCY-BUDGET: was hardcoded in agent/searcher.py.
+        assert cfg.RERANK_MAX_LENGTH == 512, (
+            f"RERANK_MAX_LENGTH should be 512, got {cfg.RERANK_MAX_LENGTH}"
+        )
+
+    def test_max_length_is_int(self) -> None:
+        assert isinstance(cfg.RERANK_MAX_LENGTH, int)
+
+    def test_batch_size_by_device_is_dict_of_int(self) -> None:
+        assert isinstance(cfg.RERANK_BATCH_SIZE_BY_DEVICE, dict)
+        assert cfg.RERANK_BATCH_SIZE_BY_DEVICE, "batch_size map must not be empty"
+        for device, bs in cfg.RERANK_BATCH_SIZE_BY_DEVICE.items():
+            assert isinstance(device, str)
+            assert isinstance(bs, int) and bs > 0
+
+    def test_batch_size_by_device_has_required_keys(self) -> None:
+        """"default" is the runtime fallback for a resolved torch device
+        the config doesn't name (agent/searcher.py._Reranker._batch_size) —
+        it must always be present, along with the measured mps/cpu entries
+        and the untested cuda entry (UPG-RERANK-LATENCY-BUDGET)."""
+        for key in ("mps", "cpu", "cuda", "default"):
+            assert key in cfg.RERANK_BATCH_SIZE_BY_DEVICE, (
+                f"ranking.rerank.batch_size missing required key {key!r}"
+            )
+
+    def test_cuda_batch_size_preserves_library_default(self) -> None:
+        """No CUDA hardware was available to measure a device-specific value
+        (UPG-RERANK-LATENCY-BUDGET) — cuda must keep sentence_transformers'
+        own unconfigured predict() default (32) rather than guess from the
+        mps/cpu measurements, which were both taken on Apple Silicon."""
+        assert cfg.RERANK_BATCH_SIZE_BY_DEVICE["cuda"] == 32
+
+    def test_searcher_rerank_batch_size_and_max_length_alias_from_config(self) -> None:
+        import agent.searcher as searcher_mod
+        assert searcher_mod._RERANK_MAX_LENGTH is cfg.RERANK_MAX_LENGTH
+        assert searcher_mod._RERANK_BATCH_SIZE_BY_DEVICE is cfg.RERANK_BATCH_SIZE_BY_DEVICE
+
 
 class TestConfigLoaderIndexing:
     """indexing.* values must load correctly from config.yaml (UPG-12.1)."""
