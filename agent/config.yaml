@@ -401,10 +401,17 @@ ranking:
     #     range. batch_size 4 is 1.97x faster than 32 for bge-reranker-base
     #     (2471ms -> 1252ms median per call) and 1.53x faster for
     #     gte-reranker-modernbert-base (4067ms -> 2656ms).
-    #   cpu (Apple M1, measured, 5-thread cap matching embedding.thread_cap):
-    #     see UPG-RERANK-LATENCY-BUDGET note for the measured curve --
-    #     the direction of the effect is the same as mps but smaller in
-    #     magnitude; value below is the measured optimum.
+    #   cpu (Apple M1 / ARM, measured, 5-thread cap matching
+    #     embedding.thread_cap -- the same torch.set_num_threads applied
+    #     process-wide by LocalEmbedProvider construction, so this mirrors
+    #     production CPU-path threading): same direction as mps -- batch_size
+    #     32 is again the WORST value, batch_size 4 the best -- but a smaller
+    #     magnitude effect. batch_size 4 is 1.70x faster than 32 for
+    #     bge-reranker-base (4450ms -> 2610ms mean-of-medians) and 1.49x
+    #     faster for gte-reranker-modernbert-base (6297ms -> 4219ms).
+    #     Measured on Apple Silicon (ARM) only -- not verified on x86/Intel/
+    #     AMD CPU hardware, so the magnitude (not necessarily the direction)
+    #     could differ there.
     #   cuda: UNMEASURED -- no CUDA hardware was available to verify this.
     #     Larger batches are normally faster on CUDA, the opposite direction
     #     from the mps/cpu result above, so guessing a small value here would
