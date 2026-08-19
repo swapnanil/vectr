@@ -6227,7 +6227,9 @@ class TestRerankerOfflineLoading:
     def test_cached_model_loads_with_local_files_only_no_network_path(self) -> None:
         """When the reranker model is already cached, CrossEncoder must be
         constructed with local_files_only=True — no live huggingface.co call
-        path is exercised."""
+        path is exercised. Also pins UPG-RERANK-LATENCY-BUDGET: max_length
+        must come from config.RERANK_MAX_LENGTH, not a hardcoded literal."""
+        from agent.config import RERANK_MAX_LENGTH
         from agent.searcher import _Reranker
 
         calls: list[dict] = []
@@ -6240,6 +6242,8 @@ class TestRerankerOfflineLoading:
              patch("sentence_transformers.CrossEncoder", _FakeCrossEncoder):
             reranker = _Reranker("fake/model")
             reranker._load()
+
+        assert calls[0]["max_length"] == RERANK_MAX_LENGTH
 
         assert reranker._failed is False
         assert reranker._model is not None
