@@ -68,6 +68,19 @@ RERANK_PRE_FILTER_FETCH_K : int
     via is_trivial_chunk(), then trims to top_k_unfiltered before the cross-encoder
     runs. Ensures the rerank pool is filled with real code on fixture-heavy corpora.
 
+RERANK_MAX_LENGTH : int
+    Cross-encoder max sequence length in tokens (UPG-RERANK-LATENCY-BUDGET).
+    Was hardcoded in agent/searcher.py; now a config sibling of model/top_k.
+
+RERANK_BATCH_SIZE_BY_DEVICE : dict[str, int]
+    predict() batch_size for the reranker cross-encoder, keyed by the
+    resolved torch device type (CrossEncoder.device.type — the same
+    attribute sentence_transformers itself populates when no device is
+    given). See agent/config.yaml's ranking.rerank.batch_size comment for
+    the measured per-device evidence (UPG-RERANK-LATENCY-BUDGET); batch_size
+    only changes wall-clock latency, never rank order. The "default" key is
+    the fallback for any device this hasn't been measured on.
+
 INDEXING_MAX_CHUNK_LINES : int
     Hard cap on lines per chunk — prevents single huge chunks diluting embeddings (UPG-12.1).
 
@@ -796,6 +809,16 @@ RERANK_MODEL: str = str(_rr_cfg["model"])
 RERANK_TOP_K: int = int(_rr_cfg["top_k"])
 RERANK_TOP_K_UNFILTERED: int = int(_rr_cfg["top_k_unfiltered"])
 RERANK_PRE_FILTER_FETCH_K: int = int(_rr_cfg["pre_filter_fetch_k"])
+RERANK_MAX_LENGTH: int = int(_rr_cfg["max_length"])
+# Per-device predict() batch_size (UPG-RERANK-LATENCY-BUDGET). Every entry is
+# read directly (no .get() default) so a missing device key fails loudly at
+# import time; the "default" key itself is the intentional runtime fallback
+# for a resolved torch device the config doesn't name (see agent/searcher.py).
+RERANK_BATCH_SIZE_BY_DEVICE: dict[str, int] = {
+    str(_device): int(_bs) for _device, _bs in _rr_cfg["batch_size"].items()
+}
+if "default" not in RERANK_BATCH_SIZE_BY_DEVICE:
+    raise KeyError("ranking.rerank.batch_size must define a 'default' entry")
 
 # ---------------------------------------------------------------------------
 # Indexing tunables (UPG-12.1)

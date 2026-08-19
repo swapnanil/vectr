@@ -25,6 +25,8 @@ from agent.config import (
     RERANK_TOP_K as _RERANK_TOP_K,
     RERANK_TOP_K_UNFILTERED as _RERANK_TOP_K_UNFILTERED,
     RERANK_PRE_FILTER_FETCH_K as _RERANK_PRE_FILTER_FETCH_K,
+    RERANK_MAX_LENGTH as _RERANK_MAX_LENGTH,
+    RERANK_BATCH_SIZE_BY_DEVICE as _RERANK_BATCH_SIZE_BY_DEVICE,
     IMPORTANCE_PRIOR_LAMBDA as _IMPORTANCE_PRIOR_LAMBDA,
     CLASS_IMPORTANCE_PRIOR_LAMBDA as _CLASS_IMPORTANCE_PRIOR_LAMBDA,
     PURPOSE_RANK_PRIOR_LAMBDA as _PURPOSE_RANK_PRIOR_LAMBDA,
@@ -150,7 +152,7 @@ class _Reranker:
             self._model = load_with_offline_preference(
                 lambda local_only: CrossEncoder(
                     self._model_name,
-                    max_length=512,
+                    max_length=_RERANK_MAX_LENGTH,
                     automodel_args={"ignore_mismatched_sizes": True},
                     cache_folder=cache_dir,
                     local_files_only=local_only,
@@ -160,6 +162,19 @@ class _Reranker:
             )
         except Exception:
             self._failed = True
+
+    def _batch_size(self) -> int:
+        """predict() batch_size, keyed by the reranker's own resolved torch
+        device (UPG-RERANK-LATENCY-BUDGET). ``CrossEncoder.device`` is the
+        same attribute sentence_transformers itself populates when no device
+        is given — this reads it rather than re-detecting hardware. Falls
+        back to the config's "default" entry for a device this hasn't been
+        measured on, or for a test stub exposing no ``.device`` at all.
+        batch_size only changes wall-clock latency; it never changes rank
+        order (see TestRerankerBatchSize).
+        """
+        device_type = getattr(getattr(self._model, "device", None), "type", None)
+        return _RERANK_BATCH_SIZE_BY_DEVICE.get(device_type, _RERANK_BATCH_SIZE_BY_DEVICE["default"])
 
     def rerank(self, query: str, candidates: list[tuple[str, object]]) -> list[object]:
         """Score (query, doc) pairs, stamp each candidate's ``ce_relevance`` with
@@ -177,7 +192,7 @@ class _Reranker:
         if self._model is None or not candidates:
             return [c for _, c in candidates]
         pairs = [(query, doc) for doc, _ in candidates]
-        raw_scores = self._model.predict(pairs)
+        raw_scores = self._model.predict(pairs, batch_size=self._batch_size())
         scores = self._normalize_scores(raw_scores)
         for score, (_, c) in zip(scores, candidates):
             c.ce_relevance = score

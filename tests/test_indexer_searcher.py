@@ -6049,12 +6049,18 @@ class TestScoreSourceUniformScale:
 
 class _FakeCrossEncoderModel:
     """Stands in for sentence_transformers.CrossEncoder — same predict() shape:
-    takes a list of (query, doc) pairs, returns one float score per pair."""
+    takes a list of (query, doc) pairs plus a batch_size kwarg (the real
+    predict() signature), returns one float score per pair. No .device
+    attribute (real CrossEncoder always has one; rerank()'s batch-size
+    lookup must tolerate a stub that doesn't via getattr — see
+    TestRerankerBatchSize for the .device-bearing case)."""
     def __init__(self, scores: list[float]):
         self._scores = scores
+        self.last_batch_size = None
 
-    def predict(self, pairs):
+    def predict(self, pairs, batch_size=None):
         assert len(pairs) == len(self._scores)
+        self.last_batch_size = batch_size
         return list(self._scores)
 
 
@@ -6120,6 +6126,95 @@ class TestRerankerCeRelevance:
 
 
 # ---------------------------------------------------------------------------
+# _Reranker batch_size selection (UPG-RERANK-LATENCY-BUDGET)
+#
+# batch_size is resolved from the reranker's OWN already-loaded torch device
+# (CrossEncoder.device.type), never from query content, and must change only
+# wall-clock latency -- never which candidates come back or in what order.
+# The invariant test below is the guard for that: two different resolved
+# devices (-> two different configured batch sizes) must still produce
+# identical rank order and identical ce_relevance stamps for identical
+# scores.
+# ---------------------------------------------------------------------------
+
+class _DeviceStub:
+    """Stands in for a torch.device -- only the .type attribute rerank()
+    reads is modeled."""
+    def __init__(self, device_type):
+        self.type = device_type
+
+
+class TestRerankerBatchSize:
+    def _reranker_with_model(self, model):
+        from agent.searcher import _Reranker
+        r = _Reranker("fake/model")
+        r._model = model  # bypass _load(): no real model download in tests
+        return r
+
+    def test_batch_size_selected_by_resolved_device(self) -> None:
+        from agent.config import RERANK_BATCH_SIZE_BY_DEVICE
+        model = _FakeCrossEncoderModel([0.5])
+        model.device = _DeviceStub("mps")
+        r = _sr("def a(): pass")
+        reranker = self._reranker_with_model(model)
+        reranker.rerank("q", [(r.content, r)])
+        assert model.last_batch_size == RERANK_BATCH_SIZE_BY_DEVICE["mps"]
+
+    def test_unknown_device_falls_back_to_default_batch_size(self) -> None:
+        """A resolved device type this config doesn't name (npu/xpu/hpu/a
+        future backend) must fall back to the config's explicit "default"
+        entry, not raise and not silently pick an arbitrary configured value."""
+        from agent.config import RERANK_BATCH_SIZE_BY_DEVICE
+        model = _FakeCrossEncoderModel([0.5])
+        model.device = _DeviceStub("xpu")
+        r = _sr("def a(): pass")
+        reranker = self._reranker_with_model(model)
+        reranker.rerank("q", [(r.content, r)])
+        assert model.last_batch_size == RERANK_BATCH_SIZE_BY_DEVICE["default"]
+
+    def test_no_device_attribute_falls_back_to_default_batch_size(self) -> None:
+        """A stub model exposing no .device at all (as _FakeCrossEncoderModel
+        does in every other test in this file) must not raise -- getattr
+        degrades to None, which resolves to the config's default batch_size."""
+        from agent.config import RERANK_BATCH_SIZE_BY_DEVICE
+        model = _FakeCrossEncoderModel([0.5])  # no .device attribute
+        r = _sr("def a(): pass")
+        reranker = self._reranker_with_model(model)
+        reranker.rerank("q", [(r.content, r)])
+        assert model.last_batch_size == RERANK_BATCH_SIZE_BY_DEVICE["default"]
+
+    def test_batch_size_never_changes_rank_order_or_scores(self) -> None:
+        """The core invariant (UPG-RERANK-LATENCY-BUDGET rail): batch_size is
+        purely a latency lever. Same query, same per-candidate scores, two
+        different resolved devices (-> two different configured batch sizes,
+        confirmed distinct below) must produce IDENTICAL result order and
+        IDENTICAL ce_relevance stamps."""
+        from agent.config import RERANK_BATCH_SIZE_BY_DEVICE
+        assert RERANK_BATCH_SIZE_BY_DEVICE["mps"] != RERANK_BATCH_SIZE_BY_DEVICE["cuda"], (
+            "fixture assumes mps and cuda batch sizes differ in config.yaml"
+        )
+        scores = [0.20, 0.95, 0.55]
+
+        a, b, c = _sr("def alpha(): pass"), _sr("def beta(): pass"), _sr("def gamma(): pass")
+        model_mps = _FakeCrossEncoderModel(list(scores))
+        model_mps.device = _DeviceStub("mps")
+        ranked_mps = self._reranker_with_model(model_mps).rerank(
+            "q", [(a.content, a), (b.content, b), (c.content, c)]
+        )
+
+        a2, b2, c2 = _sr("def alpha(): pass"), _sr("def beta(): pass"), _sr("def gamma(): pass")
+        model_cuda = _FakeCrossEncoderModel(list(scores))
+        model_cuda.device = _DeviceStub("cuda")
+        ranked_cuda = self._reranker_with_model(model_cuda).rerank(
+            "q", [(a2.content, a2), (b2.content, b2), (c2.content, c2)]
+        )
+
+        assert model_mps.last_batch_size != model_cuda.last_batch_size
+        assert [r.content for r in ranked_mps] == [r.content for r in ranked_cuda]
+        assert [r.ce_relevance for r in ranked_mps] == [r.ce_relevance for r in ranked_cuda]
+
+
+# ---------------------------------------------------------------------------
 # _Reranker._load() — offline-when-cached model loading (UPG-RERANKER-HF-NETWORK)
 #
 # Mocks sentence_transformers.CrossEncoder itself (never a real download) to
@@ -6132,7 +6227,9 @@ class TestRerankerOfflineLoading:
     def test_cached_model_loads_with_local_files_only_no_network_path(self) -> None:
         """When the reranker model is already cached, CrossEncoder must be
         constructed with local_files_only=True — no live huggingface.co call
-        path is exercised."""
+        path is exercised. Also pins UPG-RERANK-LATENCY-BUDGET: max_length
+        must come from config.RERANK_MAX_LENGTH, not a hardcoded literal."""
+        from agent.config import RERANK_MAX_LENGTH
         from agent.searcher import _Reranker
 
         calls: list[dict] = []
@@ -6145,6 +6242,8 @@ class TestRerankerOfflineLoading:
              patch("sentence_transformers.CrossEncoder", _FakeCrossEncoder):
             reranker = _Reranker("fake/model")
             reranker._load()
+
+        assert calls[0]["max_length"] == RERANK_MAX_LENGTH
 
         assert reranker._failed is False
         assert reranker._model is not None
