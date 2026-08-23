@@ -369,7 +369,19 @@ ranking:
     # env var overrides this key (test fixtures rely on that); an empty value
     # disables reranking entirely. Swapping this model needs no reindex —
     # the reranker scores (query, chunk) pairs at query time only.
-    model: "BAAI/bge-reranker-base"
+    #
+    # UPG-RERANKER-SWAP-SPIKE (2026-08-19): swapped from BAAI/bge-reranker-base
+    # after a full-pipeline A/B on the django acceptance corpus. bge is an NL
+    # passage ranker that inverts relevance on code — it scored QuerySet.get at
+    # 0.0275 on "get object by primary key" while scoring SingleObjectMixin.
+    # get_object 0.9258, and BaseCache 0.0019 on "caching framework
+    # implementation". Truncation was ruled out (all chunks under the 512 cap),
+    # so this was model miscalibration on the code domain, not a context-length
+    # artifact. At the shipped pool depth below, gte scores 43/57 auto-verdict
+    # cases and 5 of the must-pass six against bge's 35/57 and 3/6.
+    # Costs ~1957ms median rerank vs bge's ~1634ms on M1 MPS at batch_size 4.
+    # 574MB on disk (bge: 1.1GB), ~4.6s warm load, no trust_remote_code needed.
+    model: "Alibaba-NLP/gte-reranker-modernbert-base"
 
     # rerank this many hybrid candidates before trimming to n_results
     top_k: 40
@@ -377,7 +389,23 @@ ranking:
     # When no language filter is set, doc prose dominates the shallow hybrid pool and
     # real implementation chunks fall outside it (audit: extractor.py / chunk_file never
     # fetched). Fetch a deeper pool in that case so the quality prior has code to surface.
-    top_k_unfiltered: 60
+    #
+    # THIS, not top_k above, is the knob that governs almost every real query:
+    # top_k applies only to the language/path-filtered branch, and 0 of 65 django
+    # acceptance cases set a language filter (UPG-RERANK-LATENCY-BUDGET, 2026-08-19).
+    # Cross-encoder cost is linear in pairs, and the effective pool runs ~1.2x this
+    # cap because it is a union of the vector-order and BM25-order arms.
+    #
+    # Lowered 60 -> 40 alongside the reranker swap. Measured frontier for the
+    # shipped model across {10,20,30,40,60}: 599/1074/1580/1957/2681 ms median
+    # against 40/41/41/43/44 cases passing and 4/5/4/5/5 of the must-pass six.
+    # 40 rather than 20 deliberately: must-pass-six is NON-MONOTONIC because F22
+    # flips across the sweep (verified deterministic by a byte-identical rerun on
+    # a fresh daemon), so 20's 5/6 is an isolated peak between two 4/6 dips while
+    # 40 and 60 form a contiguous 5/6 plateau. Robustness over the better headline.
+    # All of this is django-only evidence; pool depth interacts with corpus chunk
+    # density in a way model choice does not, so cross-corpus validation is open.
+    top_k_unfiltered: 40
 
     # Cross-encoder max sequence length in tokens. A (query, chunk) pair
     # longer than this is truncated before scoring. Sibling of model/top_k

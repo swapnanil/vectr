@@ -1,0 +1,546 @@
+{
+  "model": "Alibaba-NLP/gte-reranker-modernbert-base",
+  "top_k_unfiltered": 40,
+  "n_queries": 44,
+  "n_scored": 44,
+  "rank1": {
+    "min": 0.7256,
+    "p10": 0.856,
+    "p25": 0.8877,
+    "median": 0.91545,
+    "p75": 0.9417,
+    "p90": 0.9613,
+    "max": 0.9742,
+    "mean": 0.9055
+  },
+  "rows": [
+    {
+      "query": "Field deconstruct base class name path args kwargs migration",
+      "top1": 0.9453,
+      "source": "reranker",
+      "top5": [
+        0.9453,
+        0.9381,
+        0.9472,
+        0.9423,
+        0.938
+      ]
+    },
+    {
+      "query": "from_db_value convert database value to python object on a model field",
+      "top1": 0.9351,
+      "source": "reranker",
+      "top5": [
+        0.9351,
+        0.9363,
+        0.9106,
+        0.8969,
+        0.933
+      ]
+    },
+    {
+      "query": "how to write a custom model field with deconstruct and from_db_value",
+      "top1": 0.9234,
+      "source": "reranker",
+      "top5": [
+        0.9234,
+        0.8932,
+        0.9232,
+        0.8769,
+        0.868
+      ]
+    },
+    {
+      "query": "understand the base Field class lifecycle and validation",
+      "top1": 0.9051,
+      "source": "reranker",
+      "top5": [
+        0.9051,
+        0.9139,
+        0.9142,
+        0.8764,
+        0.9022
+      ]
+    },
+    {
+      "query": "list all database migrations for a project",
+      "top1": 0.899,
+      "source": "reranker",
+      "top5": [
+        0.899,
+        0.8764,
+        0.8611,
+        0.8708,
+        0.8702
+      ]
+    },
+    {
+      "query": "read lines from a text file",
+      "top1": 0.8882,
+      "source": "reranker",
+      "top5": [
+        0.8882,
+        0.9113,
+        0.8753,
+        0.8799,
+        0.9014
+      ]
+    },
+    {
+      "query": "connect to database and execute query",
+      "top1": 0.9231,
+      "source": "reranker",
+      "top5": [
+        0.9231,
+        0.9209,
+        0.9127,
+        0.905,
+        0.9363
+      ]
+    },
+    {
+      "query": "render template context in view",
+      "top1": 0.9595,
+      "source": "reranker",
+      "top5": [
+        0.9595,
+        0.9237,
+        0.9141,
+        0.9113,
+        0.9109
+      ]
+    },
+    {
+      "query": "save a model instance to the database",
+      "top1": 0.9742,
+      "source": "reranker",
+      "top5": [
+        0.9742,
+        0.9643,
+        0.9383,
+        0.9272,
+        0.9269
+      ]
+    },
+    {
+      "query": "exclude certain records from a queryset",
+      "top1": 0.9195,
+      "source": "reranker",
+      "top5": [
+        0.9195,
+        0.9031,
+        0.877,
+        0.8819,
+        0.8796
+      ]
+    },
+    {
+      "query": "login password",
+      "top1": 0.829,
+      "source": "reranker",
+      "top5": [
+        0.829,
+        0.831,
+        0.8461,
+        0.8305,
+        0.802
+      ]
+    },
+    {
+      "query": "email send message backend smtp",
+      "top1": 0.9519,
+      "source": "reranker",
+      "top5": [
+        0.9519,
+        0.9429,
+        0.9381,
+        0.9527,
+        0.9463
+      ]
+    },
+    {
+      "query": "ForeignKey on_delete CASCADE related_name",
+      "top1": 0.92,
+      "source": "reranker",
+      "top5": [
+        0.92,
+        0.9015,
+        0.9396,
+        0.9447,
+        0.9311
+      ]
+    },
+    {
+      "query": "session expired logout",
+      "top1": 0.8825,
+      "source": "reranker",
+      "top5": [
+        0.8825,
+        0.8734,
+        0.8702,
+        0.8632,
+        0.8643
+      ]
+    },
+    {
+      "query": "configure Django settings for production deployment",
+      "top1": 0.9232,
+      "source": "reranker",
+      "top5": [
+        0.9232,
+        0.9101,
+        0.9094,
+        0.9394,
+        0.9339
+      ]
+    },
+    {
+      "query": "delete rows from database table",
+      "top1": 0.892,
+      "source": "reranker",
+      "top5": [
+        0.892,
+        0.8868,
+        0.8721,
+        0.8885,
+        0.8764
+      ]
+    },
+    {
+      "query": "get object by primary key",
+      "top1": 0.9151,
+      "source": "reranker",
+      "top5": [
+        0.9151,
+        0.8992,
+        0.886,
+        0.8639,
+        0.9107
+      ]
+    },
+    {
+      "query": "how to create a custom management command",
+      "top1": 0.9321,
+      "source": "reranker",
+      "top5": [
+        0.9321,
+        0.9184,
+        0.9604,
+        0.9245,
+        0.8976
+      ]
+    },
+    {
+      "query": "what is a model Meta class",
+      "top1": 0.9411,
+      "source": "reranker",
+      "top5": [
+        0.9411,
+        0.9401,
+        0.9394,
+        0.938,
+        0.9377
+      ]
+    },
+    {
+      "query": "view class based generic list create update destroy",
+      "top1": 0.8339,
+      "source": "reranker",
+      "top5": [
+        0.8339,
+        0.8286,
+        0.817,
+        0.807,
+        0.7973
+      ]
+    },
+    {
+      "query": "parse query string url parameters request GET POST data",
+      "top1": 0.8825,
+      "source": "reranker",
+      "top5": [
+        0.8825,
+        0.9079,
+        0.8588,
+        0.8391,
+        0.8309
+      ]
+    },
+    {
+      "query": "signals",
+      "top1": 0.9158,
+      "source": "reranker",
+      "top5": [
+        0.9158,
+        0.9025,
+        0.8639,
+        0.9312,
+        0.8565
+      ]
+    },
+    {
+      "query": "Model",
+      "top1": 0.8721,
+      "source": "reranker",
+      "top5": [
+        0.8721,
+        0.8691,
+        0.8662,
+        0.8599,
+        0.8429
+      ]
+    },
+    {
+      "query": "filter queryset by field value where clause",
+      "top1": 0.896,
+      "source": "reranker",
+      "top5": [
+        0.896,
+        0.9059,
+        0.8719,
+        0.8846,
+        0.8767
+      ]
+    },
+    {
+      "query": "authenticate user login check credentials",
+      "top1": 0.9417,
+      "source": "reranker",
+      "top5": [
+        0.9417,
+        0.9184,
+        0.8965,
+        0.9219,
+        0.8852
+      ]
+    },
+    {
+      "query": "delete",
+      "top1": 0.8877,
+      "source": "reranker",
+      "top5": [
+        0.8877,
+        0.8977,
+        0.8885,
+        0.8932,
+        0.8881
+      ]
+    },
+    {
+      "query": "url pattern",
+      "top1": 0.9444,
+      "source": "reranker",
+      "top5": [
+        0.9444,
+        0.8984,
+        0.8862,
+        0.8669,
+        0.9019
+      ]
+    },
+    {
+      "query": "CharField max_length string field model",
+      "top1": 0.9623,
+      "source": "reranker",
+      "top5": [
+        0.9623,
+        0.9467,
+        0.9335,
+        0.9443,
+        0.9706
+      ]
+    },
+    {
+      "query": "QuerySet",
+      "top1": 0.9641,
+      "source": "reranker",
+      "top5": [
+        0.9641,
+        0.9377,
+        0.9148,
+        0.9125,
+        0.9027
+      ]
+    },
+    {
+      "query": "run arbitrary python code in a migration",
+      "top1": 0.9219,
+      "source": "reranker",
+      "top5": [
+        0.9219,
+        0.934,
+        0.9298,
+        0.9264,
+        0.9507
+      ]
+    },
+    {
+      "query": "QuerySet delete ORM method",
+      "top1": 0.9613,
+      "source": "reranker",
+      "top5": [
+        0.9613,
+        0.9487,
+        0.955,
+        0.9463,
+        0.8755
+      ]
+    },
+    {
+      "query": "signal dispatcher implementation",
+      "top1": 0.9254,
+      "source": "reranker",
+      "top5": [
+        0.9254,
+        0.8889,
+        0.8901,
+        0.8893,
+        0.8779
+      ]
+    },
+    {
+      "query": "caching framework implementation",
+      "top1": 0.9007,
+      "source": "reranker",
+      "top5": [
+        0.9007,
+        0.8892,
+        0.8918,
+        0.8952,
+        0.8887
+      ]
+    },
+    {
+      "query": "CORS handling implementation",
+      "top1": 0.894,
+      "source": "reranker",
+      "top5": [
+        0.894,
+        0.8892,
+        0.9161,
+        0.9018,
+        0.9308
+      ]
+    },
+    {
+      "query": "SQL query construction code",
+      "top1": 0.9007,
+      "source": "reranker",
+      "top5": [
+        0.9007,
+        0.9074,
+        0.9202,
+        0.8999,
+        0.9184
+      ]
+    },
+    {
+      "query": "shortcut to get an object or raise 404",
+      "top1": 0.9643,
+      "source": "reranker",
+      "top5": [
+        0.9643,
+        0.9533,
+        0.9481,
+        0.9063,
+        0.893
+      ]
+    },
+    {
+      "query": "render",
+      "top1": 0.9063,
+      "source": "reranker",
+      "top5": [
+        0.9063,
+        0.9192,
+        0.9074,
+        0.9023,
+        0.9072
+      ]
+    },
+    {
+      "query": "signel dispathcer",
+      "top1": 0.8581,
+      "source": "reranker",
+      "top5": [
+        0.8581,
+        0.7974,
+        0.7809,
+        0.7774,
+        0.763
+      ]
+    },
+    {
+      "query": "quryset fitler by feild",
+      "top1": 0.8663,
+      "source": "reranker",
+      "top5": [
+        0.8663,
+        0.865,
+        0.8585,
+        0.8538,
+        0.8652
+      ]
+    },
+    {
+      "query": "verify username and password credentials",
+      "top1": 0.885,
+      "source": "reranker",
+      "top5": [
+        0.885,
+        0.8808,
+        0.8824,
+        0.8788,
+        0.875
+      ]
+    },
+    {
+      "query": "override_settings context manager temporarily change a setting",
+      "top1": 0.952,
+      "source": "reranker",
+      "top5": [
+        0.952,
+        0.9792,
+        0.9489,
+        0.9159,
+        0.8874
+      ]
+    },
+    {
+      "query": "where is request_started signal defined",
+      "top1": 0.7668,
+      "source": "reranker",
+      "top5": [
+        0.7668,
+        0.7187,
+        0.9074,
+        0.9574,
+        0.6606
+      ]
+    },
+    {
+      "query": "request_started",
+      "top1": 0.856,
+      "source": "reranker",
+      "top5": [
+        0.856,
+        0.7564,
+        0.7511,
+        0.7521,
+        0.8897
+      ]
+    },
+    {
+      "query": "evict_hint",
+      "top1": 0.7256,
+      "source": "reranker",
+      "top5": [
+        0.7256,
+        0.7414,
+        0.7684,
+        0.7051,
+        0.6895
+      ]
+    }
+  ]
+}
