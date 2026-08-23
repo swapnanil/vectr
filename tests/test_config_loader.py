@@ -88,11 +88,17 @@ class TestConfigLoaderRerank:
         assert cfg.RERANK_TOP_K == 40, f"RERANK_TOP_K should be 40, got {cfg.RERANK_TOP_K}"
 
     def test_top_k_unfiltered_default(self) -> None:
-        # UPG-15.7: top_k_unfiltered reverted to 60 (the reranker pool size).
-        # Trivial HTML/TXT flooding is now prevented by the pool-entry filter
-        # (pre_filter_fetch_k over-fetches, drops trivial, trims to top_k_unfiltered).
-        assert cfg.RERANK_TOP_K_UNFILTERED == 60, (
-            f"RERANK_TOP_K_UNFILTERED should be 60 (UPG-15.7), got {cfg.RERANK_TOP_K_UNFILTERED}"
+        # UPG-RERANKER-SWAP-SPIKE (2026-08-19): lowered 60 -> 40 alongside the
+        # reranker swap. This is the knob that governs almost every real query
+        # (top_k covers only the language-filtered branch), and it was swept
+        # across {10,20,30,40,60} against the django acceptance corpus for the
+        # shipped model: 43/57 cases and 5/6 must-pass at 40, versus 44/57 and
+        # 5/6 at 60 for 37% more rerank latency. 40 was chosen over the even
+        # cheaper 20 because must-pass-six is non-monotonic across the sweep
+        # (4/5/4/5/5) — 20 is an isolated peak, 40-60 is a contiguous plateau.
+        assert cfg.RERANK_TOP_K_UNFILTERED == 40, (
+            f"RERANK_TOP_K_UNFILTERED should be 40 (UPG-RERANKER-SWAP-SPIKE), "
+            f"got {cfg.RERANK_TOP_K_UNFILTERED}"
         )
 
     def test_top_k_is_int(self) -> None:
@@ -101,11 +107,42 @@ class TestConfigLoaderRerank:
     def test_top_k_unfiltered_is_int(self) -> None:
         assert isinstance(cfg.RERANK_TOP_K_UNFILTERED, int)
 
-    def test_unfiltered_exceeds_filtered(self) -> None:
-        """Unfiltered pool must be strictly larger than the filtered pool."""
-        assert cfg.RERANK_TOP_K_UNFILTERED > cfg.RERANK_TOP_K, (
-            f"RERANK_TOP_K_UNFILTERED ({cfg.RERANK_TOP_K_UNFILTERED}) must exceed "
-            f"RERANK_TOP_K ({cfg.RERANK_TOP_K})"
+    def test_unfiltered_pool_not_shallower_than_filtered(self) -> None:
+        """The unfiltered path must never get a SHALLOWER rerank pool than the
+        filtered path.
+
+        Relaxed from strict `>` to `>=` by UPG-RERANKER-SWAP-SPIKE (2026-08-19),
+        deliberately and with the reasoning recorded here rather than silently.
+        The original intent is that an unfiltered query, which has no language
+        narrowing and so admits more doc prose, must not be handicapped with a
+        smaller pool than a filtered one. That intent is `>=`; the strictness was
+        incidental to the old pair of values (60 > 40), not a designed margin.
+
+        The measured sweep lowered top_k_unfiltered to 40, which now coincides
+        with top_k. `top_k` was deliberately NOT lowered to restore the strict
+        inequality: it governs only the language-filtered branch, which the
+        acceptance corpus does not exercise at all (0 of 65 django cases set a
+        language filter), so there is no evidence for a value and guessing one
+        would change unmeasured behaviour to satisfy a test.
+        """
+        assert cfg.RERANK_TOP_K_UNFILTERED >= cfg.RERANK_TOP_K, (
+            f"RERANK_TOP_K_UNFILTERED ({cfg.RERANK_TOP_K_UNFILTERED}) must not be "
+            f"smaller than RERANK_TOP_K ({cfg.RERANK_TOP_K})"
+        )
+
+    def test_pre_filter_fetch_k_exceeds_rerank_pool(self) -> None:
+        """The over-fetch depth must leave real room to drop trivial chunks and
+        still fill the rerank pool.
+
+        `test_pre_filter_fetch_k_default` below has asserted only `>= 200` while
+        its own comment claimed "must be strictly larger than top_k_unfiltered" —
+        an invariant described but never checked. Added here (UPG-RERANKER-SWAP-
+        SPIKE) so lowering either knob cannot silently invert the relationship.
+        """
+        assert cfg.RERANK_PRE_FILTER_FETCH_K > cfg.RERANK_TOP_K_UNFILTERED, (
+            f"RERANK_PRE_FILTER_FETCH_K ({cfg.RERANK_PRE_FILTER_FETCH_K}) must exceed "
+            f"RERANK_TOP_K_UNFILTERED ({cfg.RERANK_TOP_K_UNFILTERED}) so the pool-entry "
+            "trivial filter has candidates to spare"
         )
 
     def test_pre_filter_fetch_k_default(self) -> None:

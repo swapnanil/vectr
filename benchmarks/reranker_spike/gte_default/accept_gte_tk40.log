@@ -1,0 +1,216 @@
+================================================================================
+Acceptance replay — product_cases.jsonl
+Daemon: http://localhost:8799  (4137 files / 51009 chunks)
+================================================================================
+
+[FAIL] F1  'Field deconstruct base class name path args kwargs migration'
+  [FAIL] top_k_contains(k=3, file='django/db/models/fields/__init__.py', symbol='Field.deconstruct')
+  [PASS] top_k_absent(k=3, symbol='RemoveField.deconstruct', file=None) [leaf-match]
+  [FAIL] sorted_by_score  scores=[0.9453, 0.9381, 0.9472, 0.9423, 0.938]
+
+[PASS] F1b  'from_db_value convert database value to python object on a model field'
+  [PASS] top_k_contains(k=3, file='django/db/models/fields/json.py', symbol='JSONField.from_db_value')
+  [PASS] top_k_absent(k=3, symbol='Field.get_db_prep_value', file=None) [leaf-match]
+
+[PASS] F1c  'Field deconstruct base class name path args kwargs migration'
+  [PASS] scores_in_unit_interval  scores=[0.9453, 0.9381, 0.9472, 0.9423, 0.938]
+  [PASS] uniform_score_source  sources=['reranker', 'reranker', 'reranker', 'reranker', 'reranker']
+
+[FAIL] F2  'how to write a custom model field with deconstruct and from_db_value'
+  [FAIL] top_k_contains(k=5, file='docs/howto/custom-model-fields.txt', symbol=None)
+  [PASS] status_languages_include 'txt'  (indexed: ['html', 'javascript', 'markdown', 'python', 'rst', 'txt'])
+
+[PASS] F3  'understand the base Field class lifecycle and validation'
+  [PASS] affordance_expand_to_symbol
+
+[FAIL] F4-sym-name-storage  'Field deconstruct base class name path args kwargs migration'
+  [FAIL] top_k_contains(k=3, file='django/db/models/fields/__init__.py', symbol='Field.deconstruct')
+  [FAIL] sorted_by_score  scores=[0.9453, 0.9381, 0.9472, 0.9423, 0.938]
+
+[FAIL] F5-candidate-pool-miss  'Field deconstruct base class name path args kwargs migration'
+  [FAIL] top_k_contains(k=5, file='django/db/models/fields/__init__.py', symbol='Field.deconstruct')
+
+[PASS] F6-common-word-leaf-boost  'list all database migrations for a project'
+  [PASS] top_k_absent(k=5, symbol='all', file=None) [leaf-match]
+
+[PASS] F7-f1b-wrong-expectation  'from_db_value convert database value to python object on a model field'
+  [PASS] top_k_contains(k=3, file='django/db/models/fields/json.py', symbol='JSONField.from_db_value')
+
+[PASS] F8-4letter-word-leaf-boost  'read lines from a text file'
+  [PASS] top_k_absent(k=3, symbol='read', file=None) [leaf-match]
+
+[PASS] F9-forced-inclusion-common-word-7char  'list all database migrations for a project'
+  [PASS] top_k_absent(k=3, symbol='LinearGeometryMixin.project', file=None) [leaf-match]
+
+[FAIL] F10-forced-inclusion-execute-prose  'connect to database and execute query'
+  [FAIL] top_k_contains(k=5, file='django/db/backends/utils.py', symbol='CursorWrapper.execute')
+
+[PASS] F11-forced-inclusion-context-prose  'render template context in view'
+  [PASS] top_k_absent(k=3, symbol='DecimalField.context', file=None) [leaf-match]
+
+[PASS] F12-score-exceeds-unity  'Field deconstruct base class name path args kwargs migration'
+  [PASS] scores_in_unit_interval  scores=[0.9453, 0.9381, 0.9472, 0.9423, 0.938]
+  [PASS] uniform_score_source  sources=['reranker', 'reranker', 'reranker', 'reranker', 'reranker']
+
+[PASS] F13-model-save-natural-language-miss  'save a model instance to the database'
+  [PASS] top_k_contains(k=5, file='django/db/models/base.py', symbol='Model.save')
+
+[PASS] F14-queryset-noun-floods-filter-exclude  'exclude certain records from a queryset'
+  [PASS] top_k_contains(k=3, file='django/db/models/query.py', symbol='QuerySet.exclude')
+
+[PASS] F15-trivial-stub-not-filtered  'login password'
+  [PASS] top_k_absent(k=3, symbol='Style', file=None) [leaf-match]
+
+[FAIL] F16-short-query-catastrophic-miss  'email send message backend smtp'
+  [FAIL] top_k_contains(k=5, file='django/core/mail/message.py', symbol='EmailMessage.send')
+
+[PASS] F17-shortverb-FI-subtoken-flooding  'ForeignKey on_delete CASCADE related_name'
+  [PASS] top_k_contains(k=5, file='django/db/models/fields/related.py', symbol=None)
+
+[FAIL] F18-doc-intent-not-boosted-enough  'how to write a custom model field with deconstruct and from_db_value'
+  [FAIL] top_k_contains(k=5, file='docs/howto/custom-model-fields.txt', symbol=None)
+
+[PASS] F19-one-line-fixture-file-flood  'session expired logout'
+  [PASS] top_k_contains(k=5, file='django/contrib/sessions/backends/base.py', symbol=None)
+  [PASS] top_k_absent(k=5, symbol=None, file=None) [leaf-match]
+
+[FAIL] F20-settings-plural-false-FI  'configure Django settings for production deployment'
+  [FAIL] top_k_contains(k=5, file='django/conf/__init__.py', symbol='LazySettings.configure')
+  [PASS] top_k_absent(k=2, symbol='MailersHandler.settings', file=None) [leaf-match]
+
+[PASS] F21-top200-pool-read-leaf-regression  'read lines from a text file'
+  [PASS] top_k_absent(k=3, symbol='read', file=None) [leaf-match]
+
+[PASS] F22-shortverb-delete-floods-cache-not-db  'delete rows from database table'
+  [PASS] top_k_contains(k=5, file='django/db/models/query.py', symbol='QuerySet.delete')
+  [PASS] top_k_contains_any_of(k=3, candidates=['django/db/models/query.py':'QuerySet.delete' | 'django/db/models/base.py':'Model.delete'])
+
+[FAIL] F23-shortverb-get-floods-cache-not-queryset  'get object by primary key'
+  [FAIL] top_k_contains(k=5, file='django/db/models/query.py', symbol='QuerySet.get')
+
+[PASS] F24-SOURCES-txt-flood-doc-intent  'how to create a custom management command'
+  [PASS] top_k_contains(k=5, file='docs/howto/custom-management-commands.txt', symbol=None)
+
+[FAIL] F25-test-inner-class-flood-what-is  'what is a model Meta class'
+  [FAIL] top_k_contains(k=5, file='docs/ref/models/options.txt', symbol=None)
+
+[PASS] F26-cbv-update-create-verb-flood  'view class based generic list create update destroy'
+  [PASS] top_k_contains(k=5, file='django/views/generic', symbol=None)
+
+[PASS] F27-get-verb-floods-http-request-query  'parse query string url parameters request GET POST data'
+  [PASS] top_k_contains(k=5, file='django/http/request.py', symbol=None)
+
+[PASS] F28-SOURCES-txt-flood-generic-query  'signals'
+  [PASS] top_k_contains(k=5, file='django/dispatch', symbol=None)
+
+[PASS] F29-locate-Model-test-files-flood  'Model'
+  [PASS] top_k_contains(k=5, file='django/db/models/base.py', symbol='Model')
+
+[FAIL] F30-queryset-filter-absent-natural-language  'filter queryset by field value where clause'
+  [FAIL] top_k_contains(k=5, file='django/db/models/query.py', symbol='QuerySet.filter')
+
+[FAIL] F31-clean-slate-F1-regression  'Field deconstruct base class name path args kwargs migration'
+  [FAIL] top_k_contains(k=3, file='django/db/models/fields/__init__.py', symbol='Field.deconstruct')
+
+[PASS] F32-authenticate-invisible-natural-language  'authenticate user login check credentials'
+  [PASS] top_k_contains(k=5, file='django/contrib/auth/__init__.py', symbol='authenticate')
+
+[MANUAL] F33-vectr-trace-qualified-name-silent-failure  'delete'
+  [MANUAL] 'expect' has no key this harness evaluates (keys present: ['notes']) — verify by hand
+
+[PASS] F34-harness-substring-absent-false-positive  'read lines from a text file'
+  [PASS] top_k_absent(k=5, symbol='StreamingBuffer.read', file=None) [leaf-match]
+
+[PASS] F35-i18n-catalog-js-trivial-stub-noise  'url pattern'
+  [PASS] top_k_absent(k=5, symbol=None, file='django/views/templates/i18n_catalog.js') [leaf-match]
+
+[FAIL] F36-connect-execute-fullresultset-catastrophic  'connect to database and execute query'
+  [FAIL] top_k_contains(k=5, file='django/db/backends/utils.py', symbol='CursorWrapper.execute')
+
+[PASS] F37-lazysettings-configure-embedding-gap  'configure Django settings for production deployment'
+  [PASS] top_k_absent(k=2, symbol='MailersHandler.settings', file=None) [leaf-match]
+
+[PASS] F38-charfield-test-model-flood  'CharField max_length string field model'
+  [PASS] top_k_contains(k=10, file='django/db/models/fields/__init__.py', symbol='CharField')
+
+[PASS] F39-arch1b-delete-natural-language-miss  'delete rows from database table'
+  [PASS] top_k_contains(k=5, file='django/db/models/query.py', symbol='QuerySet.delete')
+
+[MANUAL] F40-locate-wrong-param-name-in-tool-description  'QuerySet'
+  [MANUAL] 'expect' has no key this harness evaluates (keys present: ['notes']) — verify by hand
+
+[PASS] F41-runpython-migration-invisible  'run arbitrary python code in a migration'
+  [PASS] top_k_contains(k=8, file='django/db/migrations/operations/special.py', symbol='RunPython')
+
+[MANUAL] F42-mcp-absolute-path-ergonomics  'QuerySet delete ORM method'
+  [MANUAL] 'expect' has no key this harness evaluates (keys present: ['notes']) — verify by hand
+
+[PASS] F43-harness-absent-leaf-matching-too-broad  'Field deconstruct base class name path args kwargs migration'
+  [PASS] top_k_absent(k=3, symbol='RemoveField.deconstruct', file=None) [leaf-match]
+
+[PASS] F44-signal-class-buried-under-reexport-stubs  'signal dispatcher implementation'
+  [PASS] top_k_contains(k=5, file='django/dispatch/dispatcher.py', symbol='Signal')
+
+[PASS] F45-basecache-invisible-to-conceptual-cache-query  'caching framework implementation'
+  [PASS] top_k_contains(k=5, file='django/core/cache/backends/base.py', symbol='BaseCache')
+  [PASS] top_k_contains_any_of(k=3, candidates=['django/core/cache/backends/base.py':'BaseCache' | 'django/core/cache/__init__.py':'CacheHandler'])
+
+[MANUAL] F46-no-not-found-floor-confident-junk-for-absent-topic  'CORS handling implementation'
+  [MANUAL] 'expect' has no key this harness evaluates (keys present: ['notes']) — verify by hand
+
+[PASS] F47-query-class-def-misses-on-nl-builder-query  'SQL query construction code'
+  [PASS] top_k_contains(k=5, file='django/db/models/sql/query.py', symbol='Query')
+  [PASS] top_k_contains_any_of(k=3, candidates=['django/db/models/sql/query.py':'Query' | 'django/db/models/sql/compiler.py':'SQLCompiler.as_sql'])
+
+[PASS] F48-get-object-or-404-shortcut-absent  'shortcut to get an object or raise 404'
+  [PASS] top_k_contains(k=5, file='django/shortcuts.py', symbol='get_object_or_404')
+
+[PASS] F49-locate-common-leaf-noncanonical-first  'render'
+  [PASS] top_k_contains(k=3, file='django/shortcuts.py', symbol='render')
+
+[PASS] F50-router-implementation-word-misrouted-callgraph  'caching framework implementation'
+  [PASS] top_k_absent(k=1, symbol=None, file=None) [leaf-match]
+
+[PASS] F51-misspelling-catastrophic-pool-miss  'signel dispathcer'
+  [PASS] top_k_contains(k=5, file='django/dispatch/dispatcher.py', symbol='Signal')
+
+[PASS] F52-notfound-floor-threshold-miscalibrated-never-fires  'CORS handling implementation'
+  [PASS] top_k_absent(k=5, symbol=None, file=None) [leaf-match]
+
+[PASS] F53-gate4-signal-regression-reexport-stub-return  'signal dispatcher implementation'
+  [PASS] top_k_contains(k=5, file='django/dispatch/dispatcher.py', symbol='Signal')
+
+[PASS] F54-gate4-sources-signals-regression  'signals'
+  [PASS] top_k_contains(k=5, file='django/dispatch', symbol=None)
+
+[FAIL] F55-typo-queryset-filter-catastrophic-miss  'quryset fitler by feild'
+  [FAIL] top_k_contains(k=5, file='django/db/models/query.py', symbol='QuerySet.filter')
+
+[PASS] F56-passwordhasher-verify-override-flood-over-check-password  'verify username and password credentials'
+  [PASS] top_k_contains_any_of(k=5, candidates=['django/contrib/auth/hashers.py':'check_password' | 'django/contrib/auth/backends.py':'ModelBackend.authenticate'])
+
+[MANUAL] F57-gate4-score-ceiling-tie-widening  'Field deconstruct base class name path args kwargs migration'
+  [MANUAL] 'expect' has no key this harness evaluates (keys present: ['notes']) — verify by hand
+
+[PASS] F58-django-test-package-misclassified-as-test-file  'override_settings context manager temporarily change a setting'
+  [PASS] top_k_contains(k=5, file='django/test/utils.py', symbol='override_settings')
+
+[PASS] F59-navigational-overdemote-hides-signal-declaration  'where is request_started signal defined'
+  [PASS] top_k_contains(k=10, file='django/core/signals.py', symbol=None)
+
+[MANUAL] F60-trace-leaf-graph-missing-queryset-delete  'delete'
+  [MANUAL] 'expect' has no key this harness evaluates (keys present: ['notes']) — verify by hand
+
+[MANUAL] F61-trace-empty-result-no-fallback-hint  'request_started'
+  [MANUAL] 'expect' has no key this harness evaluates (keys present: ['notes']) — verify by hand
+
+[MANUAL] F62-evict-hint-not-session-scoped  'evict_hint'
+  [MANUAL] 'expect' has no key this harness evaluates (keys present: ['notes']) — verify by hand
+
+[PASS] F63-score-display-mixed-scale  'Field deconstruct base class name path args kwargs migration'
+  [PASS] scores_in_unit_interval  scores=[0.9453, 0.9381, 0.9472, 0.9423, 0.938]
+  [PASS] uniform_score_source  sources=['reranker', 'reranker', 'reranker', 'reranker', 'reranker']
+
+================================================================================
+Results: 43 pass / 14 fail / 0 error / 8 manual / 0 skip  (65 total)
+================================================================================
