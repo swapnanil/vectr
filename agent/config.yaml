@@ -641,25 +641,63 @@ ranking:
     # low confidence overall. Gated on ce_relevance ONLY, never the raw
     # dense-cosine fallback — a bi-encoder cosine cannot separate
     # absent-topic from on-topic queries (UPG-NOTFOUND-FLOOR-2), so it
-    # cannot anchor a per-result floor either; when reranking did not run,
-    # every result's ce_relevance is None and every result still renders as
-    # a plain pointer, identical to pre-fix behaviour. Deterministic,
+    # cannot anchor a per-result floor either. Deterministic,
     # score-property-based; no query-content logic.
     enabled: true
-    # Reuses the same absolute bar the SET-LEVEL low-confidence gate itself
-    # uses (ranking.notfound_floor.min_top_relevance) — "individually strong"
-    # means clearing the identical floor a set-leading result would need to
-    # avoid the low-confidence flag in the first place. Independently
-    # tunable from that key.
+    # UPG-BANNER-CALIBRATION: previously this reused the exact same scalar as
+    # ranking.notfound_floor.min_top_relevance (0.30) — which is a structural
+    # deadlock, not a coincidence, for the one sub-signal that most needs the
+    # escape hatch. When low_confidence fires via that sub-signal, it is
+    # BECAUSE the top (rank-1) result's own ce_relevance is < min_top_relevance
+    # — so a retain floor set >= min_top_relevance can mathematically never
+    # pass for the exact result that triggered the flag, on any reranker or
+    # corpus (F47 measured: rank-1 correct, ce_relevance 0.024, banner fired,
+    # zero code delivered, forcing a second vectr_fetch round trip — the
+    # inverse of vectr's core promise). Lowering this constant on its own
+    # widens the escape hatch for OTHER ranks whose score falls between the
+    # two floors, but cannot rescue rank-1 by construction. This value is now
+    # genuinely independent of notfound_floor.min_top_relevance rather than
+    # deliberately tied to it, and governs ranks 2+ only; rank-1 is exempted
+    # below via retain_rank1_always regardless of this number.
+    # UPG-BANNER-CALIBRATION Phase 1 measurement (django + tigerbeetle, 65
+    # queries, current default reranker gte-reranker-modernbert-base): no
+    # single absolute value in [0, 1] cleanly separates known-good from
+    # known-miss or known-absent CE scores under either the current reranker
+    # (all three classes overlap in a narrow 0.5-0.97 band) or the prior
+    # bge-reranker-base default (all three classes overlap in a 0.02-0.99
+    # band per the pre-existing config comment on ce_override_min_relevance).
+    # That measurement is precisely why this constant is LEFT AT 0.30. The
+    # deadlock above is fixed structurally, by rank, via retain_rank1_always
+    # below; it needs no new number, and this lane's own distribution study
+    # supports no particular value for ranks 2+. Moving it without separation
+    # evidence would replace one uncalibrated constant with another and call
+    # it a fix. Recalibrating this bar is UPG-BANNER-CALIBRATION Phase 3, and
+    # depends on whichever cross-encoder is the default at calibration time.
     min_relevance: 0.30
+    # UPG-BANNER-CALIBRATION: the composite-top (rank-1) result of a
+    # low-confidence set always keeps its excerpt, regardless of
+    # min_relevance above. Mirrors the existing result_floor precedent
+    # ("the single strongest result is always kept so the low-confidence
+    # banner always leads a best guess") but extends it from "stays in the
+    # list" to "keeps its body" — a rank-based, CE-scale-agnostic exemption
+    # that needs no calibrated absolute number, so it survives untouched
+    # across any future reranker swap or recalibration of min_relevance
+    # above. Deterministic, rank-property-based; no query-content logic.
+    retain_rank1_always: true
     # Bounded excerpt length (lines) for a retained result — deliberately
     # smaller than the normal 80-line display cap (UPG-11.4-b) so a
     # low-confidence set with several individually-strong results still
     # stays token-bounded; vectr_fetch(ids=[...]) restores the rest.
     excerpt_lines: 20
-    # Phrase attached to a retained result's pointer line, so the caller LLM
-    # knows why this one entry differs from its low-confidence neighbours.
+    # Phrase attached to a retained result's pointer line when it clears
+    # min_relevance above, so the caller LLM knows why this entry differs
+    # from its low-confidence neighbours.
     label: "individually strong — clears the confidence floor despite the low-confidence set"
+    # UPG-BANNER-CALIBRATION: separate phrase for the retain_rank1_always
+    # case, which is not a "clears the floor" claim (the result may score
+    # under min_relevance, or have no ce_relevance at all when reranking
+    # didn't run) — it is retained purely because it is the set's best guess.
+    rank1_label: "top-ranked result — always shown as a best guess despite the low-confidence set"
 
 strategy:
   # Fallback hybrid-search weights used before the first index-time codebase

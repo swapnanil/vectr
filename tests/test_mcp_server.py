@@ -637,7 +637,13 @@ class TestVectrSearch:
         text = result["content"][0]["text"]
         assert "Symbol graph (exact matches for query identifiers)" in text
 
-    def test_refetchable_footer_suppressed_in_pointer_mode(self) -> None:
+    def test_refetchable_footer_suppressed_in_pointer_mode(self, monkeypatch) -> None:
+        # UPG-BANNER-CALIBRATION: rank-1 of a low-confidence set is retained
+        # by default now, so a genuinely all-pointer (nothing shown) response
+        # requires disabling the rank-1 exemption for this test — it isolates
+        # the pre-existing footer-suppression path (UPG-LOWCONF-SLIM-DEDUPE),
+        # which still applies whenever retain_body is all False.
+        monkeypatch.setattr("integrations.mcp_server._dispatch.POINTER_MODE_RETAIN_RANK1_ALWAYS", False)
         from agent.searcher import SearchResult, SearchResultList
         r = SearchResult(file_path="auth.py", lines="10-20", symbol_name="login",
                          language="python", score=0.01, content="BODY",
@@ -2581,18 +2587,43 @@ class TestFormatSearchResults:
 
     def test_low_confidence_renders_pointer_mode(self) -> None:
         # UPG-LOWCONF-OUTPUT-SLIM / UPG-FLOOR-SLIM-PAYLOAD (B4): the low-confidence
-        # result set ships pointers, not full bodies.
+        # result set ships pointers, not full bodies, for a non-top-ranked
+        # result. UPG-BANNER-CALIBRATION: rank-1 is now always retained (see
+        # test_rank1_always_retained_in_low_confidence_set below), so this
+        # test uses a two-result set and asserts stripping on rank 2.
         from agent.searcher import SearchResult, SearchResultList
+        top = SearchResult(file_path="top.py", lines="1-5", symbol_name="top_fn",
+                           language="python", score=0.5, content="TOP_BODY_TOKEN",
+                           score_source="reranker", ce_relevance=0.5)
         r = SearchResult(file_path="auth.py", lines="10-20", symbol_name="login",
                          language="python", score=0.01, content="SECRET_BODY_TOKEN in here",
-                         score_source="reranker")
-        rl = SearchResultList([r])
+                         score_source="reranker", ce_relevance=0.01)
+        rl = SearchResultList([top, r])
         rl.low_confidence = True
         text = _format_search_results(rl, "unrelated", 5, 100)
         assert "auth.py" in text          # pointer present
         assert "login" in text
-        assert "SECRET_BODY_TOKEN" not in text   # body omitted
+        assert "SECRET_BODY_TOKEN" not in text   # rank-2 body omitted
         assert "pointers only" in text
+
+    def test_rank1_always_retained_in_low_confidence_set(self) -> None:
+        # UPG-BANNER-CALIBRATION / F47: a retain floor set >= the ce-floor
+        # that triggered low_confidence can never pass for the exact result
+        # that triggered it (rank-1's own ce_relevance is what was compared
+        # against notfound_floor.min_top_relevance). Rank-1 is exempted by
+        # RANK, not score, so it always keeps its body/excerpt in a
+        # low-confidence set — this is the F47 acceptance case: rank-1
+        # correct, ce_relevance far below any absolute floor, body must
+        # still ship (no forced vectr_fetch round trip).
+        from agent.searcher import SearchResult, SearchResultList
+        r = SearchResult(file_path="query.py", lines="1-40", symbol_name="Query",
+                         language="python", score=0.024, content="F47_CORRECT_BODY_TOKEN",
+                         score_source="reranker", ce_relevance=0.024)
+        rl = SearchResultList([r])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "SQL query construction code", 5, 100)
+        assert "F47_CORRECT_BODY_TOKEN" in text, "rank-1's body must ship even at ce_relevance 0.024"
+        assert "top-ranked result" in text
 
     def test_full_mode_still_shows_body(self) -> None:
         from agent.searcher import SearchResult, SearchResultList
@@ -2607,6 +2638,10 @@ class TestFormatSearchResults:
     # the retention floor keeps a body/excerpt even when the SET is flagged
     # low confidence.
     def test_individually_strong_result_keeps_excerpt_in_low_confidence_set(self) -> None:
+        # UPG-BANNER-CALIBRATION: `strong` placed at rank-1 (also independently
+        # clears the floor) and `weak` at rank-2 — isolates the floor
+        # mechanism from the separate, unconditional rank-1 exemption (see
+        # test_rank1_always_retained_in_low_confidence_set for that case).
         from agent.searcher import SearchResult, SearchResultList
         strong = SearchResult(
             file_path="payments.py", lines="10-20", symbol_name="charge_card",
@@ -2618,48 +2653,90 @@ class TestFormatSearchResults:
             language="python", score=0.05, content="WEAK_BODY_TOKEN here",
             score_source="reranker", ce_relevance=0.05,
         )
-        rl = SearchResultList([weak, strong])
+        rl = SearchResultList([strong, weak])
         rl.low_confidence = True
         text = _format_search_results(rl, "unrelated", 5, 100)
         assert "STRONG_BODY_TOKEN" in text, "an individually-strong result must keep its body"
-        assert "WEAK_BODY_TOKEN" not in text, "a genuinely weak result stays pointer-only"
+        assert "WEAK_BODY_TOKEN" not in text, "a genuinely weak, non-rank-1 result stays pointer-only"
         assert "individually strong" in text, "the retained result must be labeled"
         assert "0.531" in text
 
-    def test_all_weak_low_confidence_set_still_pointer_only(self) -> None:
-        """No result clears the retention floor — every result stays a bare
-        pointer, identical to pre-fix behaviour."""
+    def test_all_weak_non_rank1_result_still_pointer_only(self) -> None:
+        """No result clears the retention floor and it is not rank-1 — stays
+        a bare pointer. UPG-BANNER-CALIBRATION: rank-1 of a low-confidence
+        set is always retained now (see test_rank1_always_retained_in_low_
+        confidence_set), so this asserts stripping on a weak rank-2 instead.
+        rank-1's own ce_relevance (0.10) is also kept below the retention
+        floor here so it is exempted by RANK alone, not by the floor — the
+        "individually strong" (floor) label must not appear at all."""
         from agent.searcher import SearchResult, SearchResultList
+        top = SearchResult(
+            file_path="top.py", lines="1-5", symbol_name="top_fn",
+            language="python", score=0.10, content="TOP_BODY_TOKEN",
+            score_source="reranker", ce_relevance=0.10,
+        )
         r = SearchResult(
             file_path="auth.py", lines="10-20", symbol_name="login",
             language="python", score=0.05, content="SECRET_BODY_TOKEN in here",
             score_source="reranker", ce_relevance=0.05,
         )
-        rl = SearchResultList([r])
+        rl = SearchResultList([top, r])
         rl.low_confidence = True
         text = _format_search_results(rl, "unrelated", 5, 100)
         assert "SECRET_BODY_TOKEN" not in text
         assert "individually strong" not in text
 
-    def test_no_reranker_low_confidence_set_still_pointer_only(self) -> None:
+    def test_no_reranker_non_rank1_result_still_pointer_only(self) -> None:
         """Zero-DF-triggered low_confidence with no reranker run (ce_relevance
-        None on every result) must not retain any body — there is no
-        calibrated score to clear the floor with."""
+        None on every result): a non-top-ranked result must not retain any
+        body — there is no calibrated score to clear the floor with, and it
+        is not exempted by rank either. Rank-1 retains regardless (rank-based
+        exemption, not score-based) — see test_rank1_always_retained_in_
+        low_confidence_set / test_rank1_retained_without_reranker."""
         from agent.searcher import SearchResult, SearchResultList
+        top = SearchResult(
+            file_path="top.py", lines="1-5", symbol_name="top_fn",
+            language="python", score=0.9, content="TOP_DENSE_BODY_TOKEN",
+        )  # ce_relevance defaults to None (no reranker)
         r = SearchResult(
             file_path="auth.py", lines="10-20", symbol_name="login",
-            language="python", score=0.9, content="DENSE_ONLY_BODY_TOKEN",
+            language="python", score=0.8, content="DENSE_ONLY_BODY_TOKEN",
         )  # ce_relevance defaults to None (no reranker)
-        rl = SearchResultList([r])
+        rl = SearchResultList([top, r])
         rl.low_confidence = True
         text = _format_search_results(rl, "unrelated", 5, 100)
         assert "DENSE_ONLY_BODY_TOKEN" not in text
 
+    def test_rank1_retained_without_reranker(self) -> None:
+        """UPG-BANNER-CALIBRATION: rank-1's rank-based exemption does not
+        require a ce_relevance judgment at all — a zero-DF-triggered
+        low_confidence set with no reranker run still ships rank-1's body,
+        labeled without a ce_relevance number (there is none to show)."""
+        from agent.searcher import SearchResult, SearchResultList
+        top = SearchResult(
+            file_path="top.py", lines="1-5", symbol_name="top_fn",
+            language="python", score=0.9, content="TOP_DENSE_BODY_TOKEN",
+        )  # ce_relevance defaults to None (no reranker)
+        rl = SearchResultList([top])
+        rl.low_confidence = True
+        text = _format_search_results(rl, "unrelated", 5, 100)
+        assert "TOP_DENSE_BODY_TOKEN" in text
+        assert "ce_relevance" not in text  # nothing to show — no reranker ran
+
     def test_retention_floor_boundary(self) -> None:
         """ce_relevance exactly at the configured floor retains; just below
-        does not (matches ranking.pointer_mode_retain.min_relevance = 0.30)."""
+        does not. UPG-BANNER-CALIBRATION: min_relevance is now decoupled from
+        notfound_floor.min_top_relevance; both cases below are placed at
+        rank-2 (behind an always-retained rank-1 filler) so the boundary
+        check isolates the floor mechanism from the rank-1 exemption."""
         from agent.config import POINTER_MODE_RETAIN_MIN_RELEVANCE
         from agent.searcher import SearchResult, SearchResultList
+
+        filler_top = SearchResult(
+            file_path="top.py", lines="1-5", symbol_name="top_fn",
+            language="python", score=0.9, content="FILLER_TOP_BODY",
+            score_source="reranker", ce_relevance=0.9,
+        )
 
         at_floor = SearchResult(
             file_path="a.py", lines="1-5", symbol_name="a",
@@ -2667,7 +2744,7 @@ class TestFormatSearchResults:
             content="AT_FLOOR_BODY", score_source="reranker",
             ce_relevance=POINTER_MODE_RETAIN_MIN_RELEVANCE,
         )
-        rl = SearchResultList([at_floor])
+        rl = SearchResultList([filler_top, at_floor])
         rl.low_confidence = True
         text = _format_search_results(rl, "unrelated", 5, 100)
         assert "AT_FLOOR_BODY" in text, "a result exactly at the floor must retain its body"
@@ -2678,7 +2755,7 @@ class TestFormatSearchResults:
             content="BELOW_FLOOR_BODY", score_source="reranker",
             ce_relevance=POINTER_MODE_RETAIN_MIN_RELEVANCE - 0.01,
         )
-        rl2 = SearchResultList([below_floor])
+        rl2 = SearchResultList([filler_top, below_floor])
         rl2.low_confidence = True
         text2 = _format_search_results(rl2, "unrelated", 5, 100)
         assert "BELOW_FLOOR_BODY" not in text2, "a result just below the floor must stay pointer-only"
