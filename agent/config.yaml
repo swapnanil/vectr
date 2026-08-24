@@ -656,9 +656,9 @@ ranking:
     # inverse of vectr's core promise). Lowering this constant on its own
     # widens the escape hatch for OTHER ranks whose score falls between the
     # two floors, but cannot rescue rank-1 by construction. This value is now
-    # a genuinely independent, deliberately lower bar (half of
-    # notfound_floor.min_top_relevance) for ranks 2+; rank-1 is additionally
-    # exempted below via retain_rank1_always regardless of this number.
+    # genuinely independent of notfound_floor.min_top_relevance rather than
+    # deliberately tied to it, and governs ranks 2+ only; rank-1 is exempted
+    # below via retain_rank1_always regardless of this number.
     # UPG-BANNER-CALIBRATION Phase 1 measurement (django + tigerbeetle, 65
     # queries, current default reranker gte-reranker-modernbert-base): no
     # single absolute value in [0, 1] cleanly separates known-good from
@@ -666,11 +666,14 @@ ranking:
     # (all three classes overlap in a narrow 0.5-0.97 band) or the prior
     # bge-reranker-base default (all three classes overlap in a 0.02-0.99
     # band per the pre-existing config comment on ce_override_min_relevance).
-    # This number is therefore a provisional, deliberately-conservative
-    # halving, not a calibrated bar — full recalibration is out of scope for
-    # this change (tracked in UPG-BANNER-CALIBRATION Phase 3) and depends on
-    # whichever cross-encoder is the default at calibration time.
-    min_relevance: 0.15
+    # That measurement is precisely why this constant is LEFT AT 0.30. The
+    # deadlock above is fixed structurally, by rank, via retain_rank1_always
+    # below; it needs no new number, and this lane's own distribution study
+    # supports no particular value for ranks 2+. Moving it without separation
+    # evidence would replace one uncalibrated constant with another and call
+    # it a fix. Recalibrating this bar is UPG-BANNER-CALIBRATION Phase 3, and
+    # depends on whichever cross-encoder is the default at calibration time.
+    min_relevance: 0.30
     # UPG-BANNER-CALIBRATION: the composite-top (rank-1) result of a
     # low-confidence set always keeps its excerpt, regardless of
     # min_relevance above. Mirrors the existing result_floor precedent
