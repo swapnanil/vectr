@@ -1094,11 +1094,17 @@ RESULT_FLOOR_MIN_RELEVANCE: float = float(_rf_cfg["min_relevance"])
 # pointer mode — a result whose own ce_relevance clears this floor keeps a
 # bounded excerpt of its body instead of a bare pointer, even while the
 # surrounding result set is still flagged low confidence.
+# UPG-BANNER-CALIBRATION: min_relevance is now an independently-calibrated
+# constant, deliberately lower than notfound_floor.min_top_relevance (see
+# config.yaml comment) — retain_rank1_always/RANK1_LABEL add a second,
+# rank-based (not score-based) exemption for the set's top result alone.
 _pmr_cfg: dict[str, Any] = _cfg["ranking"]["pointer_mode_retain"]
 POINTER_MODE_RETAIN_ENABLED: bool = bool(_pmr_cfg["enabled"])
 POINTER_MODE_RETAIN_MIN_RELEVANCE: float = float(_pmr_cfg["min_relevance"])
 POINTER_MODE_RETAIN_EXCERPT_LINES: int = int(_pmr_cfg["excerpt_lines"])
 POINTER_MODE_RETAIN_LABEL: str = str(_pmr_cfg["label"])
+POINTER_MODE_RETAIN_RANK1_ALWAYS: bool = bool(_pmr_cfg["retain_rank1_always"])
+POINTER_MODE_RETAIN_RANK1_LABEL: str = str(_pmr_cfg["rank1_label"])
 
 # ---------------------------------------------------------------------------
 # Search — additive identifier-shape symbol-graph hint (UPG-QUERYTYPE-REROUTE)

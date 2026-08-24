@@ -14,6 +14,8 @@ from agent.config import (
     POINTER_MODE_RETAIN_MIN_RELEVANCE,
     POINTER_MODE_RETAIN_EXCERPT_LINES,
     POINTER_MODE_RETAIN_LABEL,
+    POINTER_MODE_RETAIN_RANK1_ALWAYS,
+    POINTER_MODE_RETAIN_RANK1_LABEL,
     EPISODES_DISTILL_MAX_ARCS_RENDERED,
     EPISODES_DISTILL_RENDER_TOKEN_CAP,
 )
@@ -1307,7 +1309,24 @@ def _format_search_results(
     # (per result) so both the header wording and the per-result render below
     # agree on which results are retained. See agent/config.py
     # POINTER_MODE_RETAIN_* / config.yaml ranking.pointer_mode_retain.
-    retain_body = [
+    #
+    # UPG-BANNER-CALIBRATION: two independent exemptions, tracked separately
+    # so the render below can label each correctly. (1) rank1_retained — the
+    # set's composite-top result, exempted purely by RANK, never by score
+    # (mirrors result_floor's "always keep the top result" precedent). This
+    # is the fix for the case an absolute floor structurally cannot reach:
+    # when low_confidence fired because rank-1's own ce_relevance is below
+    # notfound_floor.min_top_relevance, no retain floor >= that same bar can
+    # ever pass for rank-1 (F47: rank-1 correct, ce_relevance 0.024, banner
+    # fired, zero code delivered). (2) floor_retained — any result (including
+    # rank-1) whose own ce_relevance clears the independently-calibrated
+    # POINTER_MODE_RETAIN_MIN_RELEVANCE bar, unchanged in mechanism from
+    # before this fix, just decoupled in value.
+    rank1_retained = [
+        bool(low_conf and i == 0 and POINTER_MODE_RETAIN_ENABLED and POINTER_MODE_RETAIN_RANK1_ALWAYS)
+        for i in range(len(results))
+    ]
+    floor_retained = [
         bool(
             low_conf
             and POINTER_MODE_RETAIN_ENABLED
@@ -1316,11 +1335,18 @@ def _format_search_results(
         )
         for r in results
     ]
+    retain_body = [a or b for a, b in zip(rank1_retained, floor_retained)]
     header = f"Found {len(results)} results for '{query}' ({query_ms}ms, {chunks_searched} chunks searched)"
     if low_conf:
         header += " — low confidence: pointers only (vectr_fetch(ids=[...]) to expand)"
         if any(retain_body):
-            header += f"; {sum(retain_body)} result(s) individually clear the confidence floor and keep an excerpt below"
+            if any(rank1_retained):
+                extra = sum(floor_retained[1:])
+                header += "; the top-ranked result below keeps an excerpt as a best guess"
+                if extra:
+                    header += f", plus {extra} more that individually clear the confidence floor"
+            else:
+                header += f"; {sum(retain_body)} result(s) individually clear the confidence floor and keep an excerpt below"
     # UPG-RELATIVE-PATH-RENDER: print the absolute workspace root ONCE here; every
     # path/chunk-id below is rendered relative to it, so the ~21-token absolute
     # prefix stops riding every result line. vectr_fetch accepts the relative ids.
@@ -1367,12 +1393,19 @@ def _format_search_results(
             lines.append("")
             continue
         if low_conf:
-            # UPG-POINTER-MODE-UNIFORM-STRIP: this result's own ce_relevance
-            # clears the retention floor even though the SET is flagged low
-            # confidence — keep a bounded excerpt (never the full body) and
-            # say why, so the caller can trust this one entry without a
-            # vectr_fetch round trip first.
-            lines.append(f"    ({POINTER_MODE_RETAIN_LABEL}: ce_relevance {r.ce_relevance:.3f})")
+            # UPG-POINTER-MODE-UNIFORM-STRIP / UPG-BANNER-CALIBRATION: this
+            # result kept a bounded excerpt (never the full body) for one of
+            # two independent reasons — say which, so the caller can weigh
+            # trust correctly. floor_retained: its own ce_relevance clears
+            # the (now decoupled) retention floor. rank1_retained-only: it is
+            # simply the set's top-ranked guess, exempted by rank alone, and
+            # may have no ce_relevance at all (reranking may not have run).
+            if floor_retained[i - 1]:
+                lines.append(f"    ({POINTER_MODE_RETAIN_LABEL}: ce_relevance {r.ce_relevance:.3f})")
+            elif r.ce_relevance is not None:
+                lines.append(f"    ({POINTER_MODE_RETAIN_RANK1_LABEL}; ce_relevance {r.ce_relevance:.3f})")
+            else:
+                lines.append(f"    ({POINTER_MODE_RETAIN_RANK1_LABEL})")
             lines.append("")
             # UPG-POINTER-RETAIN-STORAGE-CAP-HONESTY: same storage-cap check
             # the full-body path below applies — a retained excerpt can ALSO
