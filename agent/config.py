@@ -108,6 +108,10 @@ EVICTION_HINT_MAX_IDS : int
 EVICTION_MAX_TRACKED_SESSIONS : int
     Maximum concurrent per-session EvictionAdvisor instances tracked by a
     daemon before the oldest is dropped (LRU) (UPG-EVICT-SESSION-SCOPE).
+    Also reused, same cap and same LRU shape, by WorkingContextStore's
+    per-session anchor-observation ledger (UPG-ANCHOR-UNOBSERVED-BINDING)
+    — one more per-session in-memory dict with the identical unbounded-
+    session-growth risk, not a reason for a second tunable.
 
 EVICTION_REMEMBER_ESCALATION_CHUNKS : int
     Chunks retrieved since the caller's last vectr_remember before

@@ -609,6 +609,22 @@ _EXPIRED_TEMPLATE = (
 # config.yaml.
 _INJECTED_FRAME_TEMPLATE = "Recorded {date} (anchor: {target}, status: {status}): "
 
+# UPG-ANCHOR-UNOBSERVED-BINDING: the unobserved-binding caveat, appended to
+# `_injected_frame()`'s `status` field only when the note's first anchor was
+# declared with observed=False (never on None/unknown — see
+# `_anchor_observed_at_write()`). Same category as _INJECTED_FRAME_TEMPLATE/
+# _ANTI_MEMORY_TEMPLATE/_EXPIRED_TEMPLATE just above: a fixed protocol string
+# shaping how a fact is PRESENTED, not query-classification, so it lives here
+# as a plain constant rather than in config.yaml. Deliberately worded
+# DIFFERENTLY from drift's "changed since — verify": drift means the FILE
+# changed after the anchor hash was recorded and the remedy is re-deriving
+# the note from the current source; this means the WRITING agent never
+# actually opened the file it anchored to and the remedy is a first read —
+# conflating the two into one "stale" phrase would erase that distinction
+# (the acceptance bar this task was written against explicitly rules out
+# merging them).
+_UNOBSERVED_STATUS_SUFFIX = "not verified as read this session — recommend a first read, not re-derivation"
+
 
 def _injected_frame(note: WorkingNote, stale_warnings: dict[int, list[str]]) -> str:
     """The structural-trust framing prefix for one ACTIVE (non-revoked)
@@ -642,13 +658,29 @@ def _injected_frame(note: WorkingNote, stale_warnings: dict[int, list[str]]) -> 
     unqualified "changed since — verify" a code-anchored note gets) keeps
     the caller from over-trusting a stale environment fact while also not
     under-selling it as a flat contradiction. Non-operational drift and the
-    no-drift branches are completely untouched by this refinement."""
+    no-drift branches are completely untouched by this refinement.
+
+    UPG-ANCHOR-UNOBSERVED-BINDING adds one further, independently-gated,
+    PURELY ADDITIVE suffix: when the note's first anchor was written with
+    observed=False (`note.anchors[0][2]` — the third element `remember()`
+    now stores; see `_anchor_observed_at_write()`), `_UNOBSERVED_STATUS_
+    SUFFIX` is appended to whatever `status` the drift logic above already
+    produced. This is deliberately independent of, and can compose with,
+    the drift branches above (a note can be both drifted AND unobserved —
+    two orthogonal true facts, both worth saying) rather than being folded
+    into the SAME `anchor_drifted` boolean, per this task's own acceptance
+    bar: drift and non-observation are different failure modes with
+    different remedies and must never collapse into one merged "stale"
+    flag. The observed value is read via `len(anchor) >= 3` — an anchor
+    pair written before this wave (or one written by a session with no
+    observation ledger, see the None branch below) has no third element or
+    stores `None`, and BOTH render with no suffix at all: only a literal
+    `False` (never `None`, never a missing element) ever adds the caveat,
+    so this is byte-identical to pre-this-task output for every anchor this
+    task doesn't have positive evidence about."""
     date = _date_str(note.created_at)
-    target = (
-        note.anchors[0][0]
-        if note.anchors and note.anchors[0] and note.anchors[0][0]
-        else "none"
-    )
+    first_anchor = note.anchors[0] if note.anchors and note.anchors[0] else None
+    target = first_anchor[0] if first_anchor and first_anchor[0] else "none"
     stale_files = stale_warnings.get(note.note_id, [])
     anchor_drifted = any(f.endswith("[anchor_changed]") for f in stale_files)
     if anchor_drifted and note.kind == "operational":
@@ -659,6 +691,9 @@ def _injected_frame(note: WorkingNote, stale_warnings: dict[int, list[str]]) -> 
         status = f"last confirmed {date}"
     else:
         status = "matches current state"
+    observed = first_anchor[2] if first_anchor and len(first_anchor) >= 3 else None
+    if observed is False:
+        status = f"{status}; {_UNOBSERVED_STATUS_SUFFIX}"
     return _INJECTED_FRAME_TEMPLATE.format(date=date, target=target, status=status)
 
 
@@ -905,6 +940,32 @@ class WorkingContextStore:
         # docstring, the same "attach after construction" shape as the
         # embedder below.
         self._symbol_resolver = None
+        # UPG-ANCHOR-UNOBSERVED-BINDING: per-session, in-memory ledger of file
+        # paths this session's PreToolUse hook calls have already reported
+        # (`fire()` records into it; `remember()` reads it to mark each
+        # declared anchor observed/unobserved/unknown). Keyed by
+        # (workspace, session_id) -> set of path-candidate strings (both the
+        # as-given and workspace-relative forms `_path_trigger_candidates()`
+        # already computes, so it matches an anchor declared in either form).
+        # Deliberately NEVER persisted to the sqlite DB or any other durable
+        # store: a daemon restart, a stdio transport with no session_id, or a
+        # team-mode bind that never routes hook events through this process
+        # all mean "no record", and the whole point of the tri-state design
+        # (see `_anchor_observed_at_write()`) is that "no record" must read
+        # as unknown, never as a false "never observed" accusation — an
+        # ephemeral, LRU-bounded dict is what makes that distinction free:
+        # a key that was never populated this process's lifetime is simply
+        # absent, the same shape as one deliberately never touched.
+        # LRU-bounded by EVICTION_MAX_TRACKED_SESSIONS, same cap and same
+        # "delete-then-reinsert to touch" eviction shape VectrService already
+        # applies to its own per-session ledgers (_trigger_ledgers/
+        # _turn_ledgers/_session_advisors in app/service.py) — kept here
+        # instead of there because populating it requires the workspace-root
+        # path normalization `_path_trigger_candidates()` performs, and that
+        # normalization is deliberately confined to the fire()/remember()
+        # boundary in this module (trigger_engine.py's filesystem-purity
+        # invariant), not duplicated into the service layer.
+        self._observed_paths: dict[tuple[str, str], set[str]] = {}
         # Guards attach_embedder() (UPG-STDIO-MEMORY-READY): the store can be
         # constructed with embed_fn=None (memory tools live before the
         # embedding model has loaded) and upgraded to a real embedder later,
@@ -1358,6 +1419,21 @@ class WorkingContextStore:
         yet) stores a null hash and is simply never flagged stale until it
         exists.
 
+        UPG-ANCHOR-UNOBSERVED-BINDING: each stored anchor pair also carries a
+        third element, the tri-state OBSERVATION verdict — whether THIS
+        session ever reported reading/touching this exact path before this
+        write (via a real PreToolUse hook call reaching `fire()`; see
+        `_anchor_observed_at_write()`). This is evidence the anchor's file
+        was actually opened by the writing agent, distinct from the content
+        hash above (which only proves what the FILE currently contains, not
+        that anyone read it). True/False only when this session's own
+        observation ledger exists and does/doesn't contain the path; None
+        when no ledger exists for this session at all (no session_id, hooks
+        not wired, stdio transport, team-mode bind, daemon restarted
+        mid-session) — an absent ledger is never treated as proof of
+        non-observation, so it is stored (and later rendered) as unknown,
+        never as a false unobserved accusation.
+
         `supersedes`: the note_id this note explicitly tombstones. The
         target note (looked up in this workspace) has `valid_until`/
         `superseded_at` set (excluding it from recall() by default and from
@@ -1443,7 +1519,18 @@ class WorkingContextStore:
         triggers_json = json.dumps(triggers_list)
 
         root = Path(workspace)
-        anchor_pairs = [[p, _hash_path_content(root, p)] for p in (anchors or [])]
+        # UPG-ANCHOR-UNOBSERVED-BINDING: third element is the tri-state
+        # observation verdict for this SESSION's writing of THIS note — True
+        # ("this session's own PreToolUse traffic reported this exact
+        # path"), False ("this session has an observation ledger and this
+        # path is not in it"), or None ("no ledger for this session exists
+        # at all — hooks not wired, stdio transport, team-mode bind, or a
+        # daemon restart mid-session — an absent ledger is never treated as
+        # proof of non-observation"). See `_anchor_observed_at_write()`.
+        anchor_pairs = [
+            [p, _hash_path_content(root, p), self._anchor_observed_at_write(workspace, session_id, p)]
+            for p in (anchors or [])
+        ]
         anchors_json = json.dumps(anchor_pairs)
 
         # UPG-TRIGGER-SCOPE-KIND-DEFAULTS: an omitted scope (None) resolves to
@@ -3755,6 +3842,76 @@ class WorkingContextStore:
                     continue
                 _append_event(conn, workspace, nid, "stale_flagged", actor="system", payload=sig, ts=now)
 
+    def _record_observation(
+        self, workspace: str, session_id: str | None, path_candidates: "tuple[str, ...] | None"
+    ) -> None:
+        """UPG-ANCHOR-UNOBSERVED-BINDING: record that this session's own
+        PreToolUse hook call reported `path_candidates` (the SAME
+        as-given-plus-workspace-relative tuple `fire()` just computed via
+        `_path_trigger_candidates()` for its own P-primitive matching, never
+        recomputed or re-derived here) — the caller (the editor's PreToolUse
+        hook, forwarding whatever `tool_input.file_path` it already resolved
+        for a Read/Edit/Write/MultiEdit/NotebookEdit call) is the entire
+        source of this fact; nothing here parses prompt or note content.
+
+        A no-op when `session_id` or `path_candidates` is None/empty — a
+        stdio transport or a caller that never supplies a session_id simply
+        never gets a ledger entry, which is exactly the "no record exists"
+        state `_anchor_observed_at_write()` reads back as unknown, not as a
+        false negative.
+
+        Same LRU-bounded, delete-then-reinsert-to-touch eviction shape as
+        `VectrService._ledger_for`/`_turn_ledger_for` (app/service.py) — see
+        `self._observed_paths`'s own comment in `__init__` for why the bound
+        lives on this dict rather than being unbounded."""
+        if session_id is None or not path_candidates:
+            return
+        from agent.config import EVICTION_MAX_TRACKED_SESSIONS
+
+        key = (workspace, session_id)
+        observed = self._observed_paths.get(key)
+        if observed is None:
+            if len(self._observed_paths) >= EVICTION_MAX_TRACKED_SESSIONS:
+                oldest_key = next(iter(self._observed_paths))
+                del self._observed_paths[oldest_key]
+            observed = set()
+        else:
+            del self._observed_paths[key]
+        observed.update(path_candidates)
+        self._observed_paths[key] = observed
+
+    def _anchor_observed_at_write(
+        self, workspace: str, session_id: str | None, anchor_path: str
+    ) -> bool | None:
+        """UPG-ANCHOR-UNOBSERVED-BINDING: three-valued observation verdict
+        for one declared anchor path, read by `remember()` at write time —
+        True (this session's own PreToolUse traffic reported this exact
+        path, in either candidate form), False (this session HAS a ledger
+        entry — at least one path was observed — but this particular path is
+        not in it), or None/unknown (no ledger entry exists for this
+        session at all: no session_id, hooks never wired, stdio transport,
+        team-mode bind, or a daemon restart lost the in-memory ledger since
+        this session started).
+
+        The None branch is the load-bearing one (THE CRITICAL CONSTRAINT):
+        an absent ledger is NOT evidence of non-observation, so this
+        deliberately returns None rather than False whenever the ledger key
+        itself is missing — only a PRESENT ledger with a PRESENT-but-
+        non-matching entry ever earns a real `False`. Never widen the first
+        branch below into `if session_id is None or key not in ...: return
+        False` — that would collapse the required three states into two and
+        manufacture a false "never observed" accusation on every session
+        that simply has no ledger, which is worse than saying nothing."""
+        if session_id is None:
+            return None
+        observed = self._observed_paths.get((workspace, session_id))
+        if observed is None:
+            return None
+        candidates = _path_trigger_candidates(workspace, anchor_path)
+        if not candidates:
+            return False
+        return any(c in observed for c in candidates)
+
     def fire(
         self,
         workspace: str,
@@ -3858,6 +4015,14 @@ class WorkingContextStore:
 
         branch = _current_git_branch(Path(workspace))
         path_candidates = _path_trigger_candidates(workspace, file_path)
+        # UPG-ANCHOR-UNOBSERVED-BINDING: this IS the read signal — every
+        # PreToolUse call with a file_path (Read/Edit/Write/MultiEdit/
+        # NotebookEdit; app/service.py's `_recall_impl` file_path branch
+        # always reaches here via fire_and_format()) reports the caller's
+        # own already-resolved path, unconditionally, regardless of whether
+        # any note ends up matching it below — a later remember() in this
+        # same session can then mark an anchor to this path observed=true.
+        self._record_observation(workspace, session_id, path_candidates)
 
         with self._conn() as conn:
             rows = conn.execute(

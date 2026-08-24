@@ -2093,7 +2093,10 @@ class TestRememberTriggerEngineParams:
         store, ws = _store(tmp_path), str(tmp_path)
         note_id = store.remember(ws, "a gotcha about a future file", anchors=["not/created/yet.py"])
         note = store.get_note(ws, note_id)
-        assert note.anchors == [["not/created/yet.py", None]]
+        # Third element is the UPG-ANCHOR-UNOBSERVED-BINDING observation
+        # verdict: no session_id was passed, so it is unknown (None), never
+        # inferred as False.
+        assert note.anchors == [["not/created/yet.py", None, None]]
 
     def test_supersedes_tombstones_the_target_note(self, tmp_path) -> None:
         store, ws = _store(tmp_path), str(tmp_path)
@@ -2174,6 +2177,114 @@ class TestRememberTriggerEngineParams:
         old = next(n for n in all_notes if n.content == "original")
         assert old.superseded_by == "bob"
         assert old.superseded_by_note_id is None  # untouched by the explicit-supersedes path
+
+
+class TestAnchorObservedBinding:
+    """UPG-ANCHOR-UNOBSERVED-BINDING: remember() stamps a third, tri-state
+    element onto each declared anchor row (`_anchor_observed_at_write()`) —
+    True/False only when the writing session's own PreToolUse traffic
+    (recorded via fire()'s file_path parameter, see `_record_observation()`)
+    gives a real answer, else None/unknown. An absent ledger must never be
+    read as "never observed" — an unknown observation state and a genuine
+    negative are different facts and must never collapse into one."""
+
+    def test_anchor_to_a_path_observed_earlier_in_session_is_marked_observed(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "src" / "auth.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("original content")
+        # Simulate the PreToolUse hook reporting a Read/Edit of this file
+        # earlier in the session (no note needs to actually fire on it).
+        store.fire(ws, event="pre-edit", file_path="src/auth.py", session_id="s1")
+        note_id = store.remember(
+            ws, "a gotcha about auth.py", anchors=["src/auth.py"], session_id="s1",
+        )
+        note = store.get_note(ws, note_id)
+        assert note.anchors[0][2] is True
+
+    def test_anchor_to_a_path_never_observed_in_a_session_with_a_ledger_is_marked_false(
+        self, tmp_path
+    ) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        # The session DOES have a ledger (it observed some other file) —
+        # this is the genuine "present ledger, absent path" False case,
+        # distinct from "no ledger exists at all".
+        store.fire(ws, event="pre-edit", file_path="src/other.py", session_id="s1")
+        note_id = store.remember(
+            ws, "a gotcha about auth.py", anchors=["src/auth.py"], session_id="s1",
+        )
+        note = store.get_note(ws, note_id)
+        assert note.anchors[0][2] is False
+
+    def test_no_observation_ledger_at_all_stores_unknown_not_false(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        # No fire() call was ever made for this session_id -- no ledger key
+        # exists. Must read back as None (unknown), never inferred False.
+        note_id = store.remember(
+            ws, "a gotcha about auth.py", anchors=["src/auth.py"], session_id="never-fired",
+        )
+        note = store.get_note(ws, note_id)
+        assert note.anchors[0][2] is None
+
+    def test_omitted_session_id_at_write_also_stores_unknown(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.fire(ws, event="pre-edit", file_path="src/auth.py", session_id="s1")
+        note_id = store.remember(ws, "a gotcha about auth.py", anchors=["src/auth.py"])
+        note = store.get_note(ws, note_id)
+        assert note.anchors[0][2] is None
+
+    def test_ledger_is_populated_only_via_fires_file_path_parameter(self, tmp_path) -> None:
+        """Criterion (e): remember() itself never populates the ledger, and
+        a fire()/recall() call carrying no file_path never does either —
+        the ledger's only writer is fire()'s own file_path argument, which
+        the caller (the editor's PreToolUse hook) already resolved."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.remember(ws, "an unrelated note", session_id="s1")
+        store.fire(ws, event="session-start", session_id="s1")  # no file_path
+        note_id = store.remember(
+            ws, "a gotcha about auth.py", anchors=["src/auth.py"], session_id="s1",
+        )
+        note = store.get_note(ws, note_id)
+        assert note.anchors[0][2] is None  # still unknown -- nothing ever reported this path
+
+    def test_absolute_hook_path_observation_matches_a_relatively_authored_anchor(self, tmp_path) -> None:
+        """Mirrors the P-primitive's existing abs/rel normalization
+        (`_path_trigger_candidates`): a real editor hook reports an
+        ABSOLUTE file_path while the anchor is naturally authored
+        workspace-relative."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        (tmp_path / "src").mkdir()
+        abs_path = str(tmp_path / "src" / "auth.py")
+        store.fire(ws, event="pre-edit", file_path=abs_path, session_id="s1")
+        note_id = store.remember(
+            ws, "a gotcha about auth.py", anchors=["src/auth.py"], session_id="s1",
+        )
+        note = store.get_note(ws, note_id)
+        assert note.anchors[0][2] is True
+
+    def test_observation_is_scoped_per_session_not_shared_across_sessions(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.fire(ws, event="pre-edit", file_path="src/auth.py", session_id="s1")
+        note_id = store.remember(
+            ws, "a gotcha about auth.py", anchors=["src/auth.py"], session_id="s2",
+        )
+        note = store.get_note(ws, note_id)
+        assert note.anchors[0][2] is None  # s2 never had a ledger of its own
+
+    def test_fire_and_format_renders_the_unobserved_caveat_end_to_end(self, tmp_path) -> None:
+        """End-to-end: the tri-state verdict actually reaches the injected
+        framing a caller sees, not just the stored row."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        store.fire(ws, event="pre-edit", file_path="src/other.py", session_id="s1")
+        store.remember(
+            ws, "check auth expiry before merging", kind="gotcha",
+            anchors=["src/auth.py"], session_id="s1",
+            triggers=[{"event": "pre-edit", "path": "src/auth.py"}],
+        )
+        text, note_ids = store.fire_and_format(ws, event="pre-edit", file_path="src/auth.py")
+        assert len(note_ids) == 1
+        from agent.working_context_store._store import _UNOBSERVED_STATUS_SUFFIX
+        assert _UNOBSERVED_STATUS_SUFFIX in text
 
 
 class TestKindDefaultScopes:
@@ -3494,6 +3605,70 @@ class TestInjectedFrame:
         assert "Recorded " in text
         assert "anchor: none" in text
         assert "status: last confirmed" in text
+
+    def test_unobserved_anchor_appends_a_distinct_suffix_not_the_drift_wording(self, tmp_path) -> None:
+        """UPG-ANCHOR-UNOBSERVED-BINDING criterion (b): a False third
+        element (this session HAD a ledger, and this path was not in it)
+        appends a caveat that reads distinctly from drift's 'changed since
+        — verify' — drift wants re-derivation, unobserved wants a first
+        read. The two must never collapse into one 'stale' flag."""
+        from agent.working_context_store._store import _injected_frame, _UNOBSERVED_STATUS_SUFFIX
+        note = self._note(anchors=[["src/auth.py", "abc123", False]])
+        frame = _injected_frame(note, stale_warnings={})
+        assert "status: matches current state" in frame
+        assert _UNOBSERVED_STATUS_SUFFIX in frame
+        assert "changed since — verify" not in frame
+
+    def test_unknown_observation_third_element_none_renders_no_new_caveat(self, tmp_path) -> None:
+        """Criterion (c): an explicit None third element (a session with no
+        observation ledger) must render byte-identical to a note with no
+        anchor-observation knowledge at all — no caveat text appears."""
+        from agent.working_context_store._store import (
+            _injected_frame, _UNOBSERVED_STATUS_SUFFIX, _date_str,
+        )
+        note = self._note(anchors=[["src/auth.py", "abc123", None]])
+        frame = _injected_frame(note, stale_warnings={})
+        assert frame == (
+            f"Recorded {_date_str(note.created_at)} (anchor: src/auth.py, "
+            f"status: matches current state): "
+        )
+        assert _UNOBSERVED_STATUS_SUFFIX not in frame
+
+    def test_legacy_two_element_anchor_row_renders_as_unknown_never_as_unobserved(self, tmp_path) -> None:
+        """Criterion (d): a pre-existing anchor row written before this
+        field existed (only [path, hash], no third element) must load and
+        render exactly as before — never inferred as observed=False just
+        because the element is missing."""
+        from agent.working_context_store._store import (
+            _injected_frame, _UNOBSERVED_STATUS_SUFFIX, _date_str,
+        )
+        note = self._note(anchors=[["src/auth.py", "abc123"]])
+        frame = _injected_frame(note, stale_warnings={})
+        assert frame == (
+            f"Recorded {_date_str(note.created_at)} (anchor: src/auth.py, "
+            f"status: matches current state): "
+        )
+        assert _UNOBSERVED_STATUS_SUFFIX not in frame
+
+    def test_observed_true_third_element_renders_no_unobserved_caveat(self, tmp_path) -> None:
+        """A True third element (this session's own hook traffic reported
+        this exact path) is the properly-bound case — no caveat, same as
+        the unknown/legacy cases, distinguishing it is purely internal."""
+        from agent.working_context_store._store import _injected_frame, _UNOBSERVED_STATUS_SUFFIX
+        note = self._note(anchors=[["src/auth.py", "abc123", True]])
+        frame = _injected_frame(note, stale_warnings={})
+        assert _UNOBSERVED_STATUS_SUFFIX not in frame
+
+    def test_unobserved_and_drifted_compose_additively_not_merged(self, tmp_path) -> None:
+        """Drift and unobserved are orthogonal facts — a note can be both
+        drifted AND unobserved, and both pieces of text must appear (not
+        collapsed into a single boolean 'stale' flag)."""
+        from agent.working_context_store._store import _injected_frame, _UNOBSERVED_STATUS_SUFFIX
+        note = self._note(note_id=11, anchors=[["src/auth.py", "abc123", False]])
+        stale_warnings = {11: ["src/auth.py [anchor_changed]"]}
+        frame = _injected_frame(note, stale_warnings)
+        assert "status: changed since — verify" in frame
+        assert _UNOBSERVED_STATUS_SUFFIX in frame
 
 
 # ---------------------------------------------------------------------------

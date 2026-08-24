@@ -158,7 +158,7 @@ class WorkingNote:
     provenance: str = DEFAULT_PROVENANCE  # human | user-stated | agent | auto (bm2-design-skeleton.md §5)
     user_quote: str = ""               # verbatim user-turn excerpt bound to `content` at write time (UPG-MEM-PROVENANCE-USER-STATED); "" unless provenance == USER_STATED_PROVENANCE
     scope: str = DEFAULT_SCOPE            # workspace | repo | path-subtree | branch | session
-    anchors: list[list[str]] = None    # type: ignore[assignment]  # [[path, content_hash_at_write_or_None], ...]
+    anchors: list[list[str]] = None    # type: ignore[assignment]  # [[path, content_hash_at_write_or_None, observed_bool_or_None], ...] — 3rd element (UPG-ANCHOR-UNOBSERVED-BINDING) is True/False only when this session had an observation ledger, else None (unknown); a 2-element row written before this field existed loads with no 3rd element and reads back as None via `len(anchor) >= 3` checks, never inferred as False
     supersedes: int | None = None      # note_id THIS note explicitly tombstones at write time
     superseded_by_note_id: int | None = None  # reciprocal: set on the OLD note by the explicit-supersedes path (distinct from `superseded_by`'s code_hash-conflict/author_id semantics)
     last_fired: float | None = None    # last time the trigger engine actually fired this note (T:cooldown + total-order tie-break)
