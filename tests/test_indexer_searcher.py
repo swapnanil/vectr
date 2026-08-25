@@ -333,6 +333,57 @@ class TestCodeIndexer:
         indexer.index_file(path)
         assert path in indexer.indexed_file_paths
 
+    def test_indexed_file_count_reflects_persisted_collection_on_warm_start(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """UPG-STATUS-WARMSTART-FILES: on a warm start (a daemon restart over
+        an already-indexed workspace), `indexed_file_count` must report the
+        persisted corpus immediately — not 0 while `total_chunks` already
+        reports thousands, which made `/v1/status` internally inconsistent for
+        the whole warm-start window. It now derives from the SAME seeded
+        per-language metadata cache `indexed_language_stats()` reads (actual
+        chunk metadata), i.e. exactly what `total_chunks` counts."""
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(
+            idx_module, "get_embed_provider", lambda _model: _DummyEmbedProvider()
+        )
+        make_py(tmp_path, "a.py", "def a(): pass")
+        make_py(tmp_path, "b.py", "def b(): pass")
+        db = str(tmp_path / "chroma")
+
+        first = CodeIndexer(str(tmp_path), db_path=db)
+        first.index_workspace()
+        assert first.total_chunks > 0
+
+        # The "warm start": a brand-new indexer over the same persisted db,
+        # before anything has been walked in this one.
+        warm = CodeIndexer(str(tmp_path), db_path=db)
+        assert warm.total_chunks > 0
+        assert warm._indexed_files == set()  # nothing walked in this process yet
+        assert warm.indexed_file_count == 2  # was 0 before the fix
+        # Same source of truth as total_chunks: the collection's chunk metadata.
+        stats = warm.indexed_language_stats()
+        assert warm.indexed_file_count == sum(s["files"] for s in stats.values())
+
+    def test_indexed_file_count_falls_with_total_chunks_through_rebuild(
+        self, indexer, tmp_path,
+    ) -> None:
+        """UPG-STATUS-WARMSTART-FILES: indexed_file_count and total_chunks
+        share one source of truth (the body collection), so a forced
+        `_recreate_collections()` rebuild resets them TOGETHER — the count may
+        never get stuck at its pre-rebuild value while chunks climb back from
+        zero."""
+        make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_workspace()
+        assert indexer.indexed_file_count == 1
+        assert indexer.total_chunks > 0
+        indexer._recreate_collections()
+        assert indexer.total_chunks == 0
+        assert indexer.indexed_file_count == 0
+
     def test_indexed_languages_lists_distinct_sorted(self, indexer, tmp_path) -> None:
         # UPG-3.1: ground-truth language set comes from chunk metadata, not a fixed list.
         make_py(tmp_path, "a.py", "def x(): pass")

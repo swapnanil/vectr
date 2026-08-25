@@ -609,10 +609,21 @@ ranking:
     # silently misleading. Additive, deterministic, chunk-property-based — never
     # reorders anything (no query-side logic).
     enabled: true
-    # Only annotate a large divergence: a below-rank-1 result whose displayed
-    # relevance is at least this multiple of rank 1's. Mild inversions (a
-    # near-tie) are left unlabeled to avoid noise.
-    margin_ratio: 1.5
+    # Only annotate a large divergence. UPG-GATE-V4-MINORS: the divergence
+    # measure is now a SHARE OF REMAINING HEADROOM, not a fixed multiple of
+    # rank-1's score. Displayed scores are bounded in [0, 1], so the old
+    # ratio rule ("lower result scored >= margin_ratio * rank-1") was
+    # structurally unsatisfiable on confident queries: once rank-1 reached
+    # 2/3, NO inversion however large could ever be annotated (measured gate
+    # witness: rank-1 0.864 vs a rank-5 0.969 went unannotated). The required
+    # absolute gap instead shrinks as rank-1 approaches the ceiling —
+    # annotate iff (score - top_score) >= min_headroom_ratio * (1 -
+    # top_score), i.e. the inversion consumes at least this share of the
+    # score range still available above rank-1. Calibrated between two
+    # pinned cases: 0.80 -> 0.90 consumes 50% of the remaining range
+    # (near-tie, left unlabeled); 0.864 -> 0.969 consumes ~77% (annotated).
+    # Mild inversions are still left unlabeled to avoid noise.
+    min_headroom_ratio: 0.65
 
   result_floor:
     # UPG-RESULT-FLOOR: an absent-topic query still draws n_results nearest

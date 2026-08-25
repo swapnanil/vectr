@@ -1080,9 +1080,13 @@ NOTFOUND_FLOOR_BANNER_CLI: str = str(_nff_cfg["banner_cli"])
 
 # UPG-SCORE-ORDER-EXPLAIN: annotate a large displayed-relevance-vs-order
 # divergence with the demoting prior's reason (render-only, additive).
+# UPG-GATE-V4-MINORS: the margin is a share of the score headroom above
+# rank-1 — gap >= MIN_HEADROOM_RATIO * (1 - top_score) — replacing the fixed
+# ratio r >= MARGIN_RATIO * top_score, which scores bounded in [0, 1] made
+# unsatisfiable on any confident query (top_score >= 2/3).
 _soe_cfg: dict[str, Any] = _cfg["ranking"]["score_order_explain"]
 SCORE_ORDER_EXPLAIN_ENABLED: bool = bool(_soe_cfg["enabled"])
-SCORE_ORDER_EXPLAIN_MARGIN_RATIO: float = float(_soe_cfg["margin_ratio"])
+SCORE_ORDER_EXPLAIN_MIN_HEADROOM_RATIO: float = float(_soe_cfg["min_headroom_ratio"])
 
 # UPG-RESULT-FLOOR: drop sub-floor cross-encoder-relevance results instead of
 # returning a full n_results block of ~0.000 ANN neighbours (keeps >=1).

@@ -1491,7 +1491,27 @@ class CodeIndexer:
 
     @property
     def indexed_file_count(self) -> int:
-        return len(self._indexed_files)
+        """Distinct files present in the body collection (UPG-STATUS-WARMSTART-FILES).
+
+        Derived from the same seeded / incrementally-maintained per-language
+        metadata cache `indexed_language_stats()` reads — actual chunk
+        metadata, i.e. exactly what `total_chunks` counts — so a daemon
+        restart over an already-indexed workspace reports the persisted file
+        count immediately instead of `indexed_files: 0` sitting next to an
+        already-populated `total_chunks` on `/v1/status`. That mismatch was
+        the old behaviour: this used to read `_indexed_files`, the set of
+        files THIS PROCESS has walked, which stays empty until some in-process
+        index run touches it (the wart once forced the benchmark runners to
+        refuse scoring on `indexed_files==0`). `_recreate_collections()`
+        resets the cache together with `_total_chunks_cache`, so both counters
+        also fall to 0 and climb together through a forced rebuild.
+        `_indexed_files` itself keeps its separate, narrower meaning — files
+        walked this process — feeding `index_workspace()`'s return value;
+        `indexed_file_paths` below remains walk-scoped for the same reason.
+        """
+        self._ensure_stats_seeded()
+        with self._stats_lock:
+            return sum(len(files) for files in self._lang_files.values())
 
     @property
     def indexed_file_paths(self) -> list[str]:

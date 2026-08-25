@@ -3006,13 +3006,16 @@ def _mode_and_index_lines(
 ) -> list[str]:
     """Format the Mode + indexed-files/chunks/last-indexed lines.
 
-    In memory-only/search-only mode, indexing never runs in this process —
-    `indexed_files` reflects only files this process has walked (0, since
-    the startup walk is skipped), while `total_chunks` reads the persisted
-    index and can be nonzero from an earlier full-mode run. Framing both as
-    if they were live counts is misleading (UPG-CLI-STATUS-MODE): the mode
-    line makes the gap self-explanatory, and the row wording says the
-    figures are what's persisted, not what this run has done.
+    Both figures read the persisted index (`indexed_files` has counted
+    distinct files in the collection — not files this process has walked —
+    since UPG-STATUS-WARMSTART-FILES), so in memory-only/search-only mode
+    they describe the last full-mode run, not anything this process did.
+    Framing them as live counts would be misleading (UPG-CLI-STATUS-MODE):
+    the mode line makes that self-explanatory, and the non-full-mode row
+    wording says the figure is what's persisted. In full mode the two rows
+    print unchanged — they are now internally consistent during a warm
+    start instead of showing `indexed_files: 0` beside a populated chunk
+    count.
     """
     mode = data.get("mode", "full")
     lines = [f"{mode_label} : {mode}"]

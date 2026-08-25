@@ -9,7 +9,7 @@ from agent.config import (
     MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
     MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS,
     SCORE_ORDER_EXPLAIN_ENABLED,
-    SCORE_ORDER_EXPLAIN_MARGIN_RATIO,
+    SCORE_ORDER_EXPLAIN_MIN_HEADROOM_RATIO,
     POINTER_MODE_RETAIN_ENABLED,
     POINTER_MODE_RETAIN_MIN_RELEVANCE,
     POINTER_MODE_RETAIN_EXCERPT_LINES,
@@ -1365,16 +1365,33 @@ def _format_search_results(
         # score_source uniform within a response.
         src = getattr(r, "score_source", "") or ""
         src_label = f" ({src})" if src else ""
-        # UPG-SCORE-ORDER-EXPLAIN: a below-rank-1 result whose relevance clears
-        # the divergence margin gets a one-phrase reason for its lower rank.
+        # UPG-SCORE-ORDER-EXPLAIN, reformulated by UPG-GATE-V4-MINORS: a
+        # below-rank-1 result whose displayed relevance exceeds rank 1's by a
+        # large share of the score range still available ABOVE rank 1 gets a
+        # one-phrase reason for its lower rank. Headroom share, not a fixed
+        # multiple: displayed scores are bounded in [0, 1], so the old ratio
+        # rule (r.score >= 1.5 * top_score) was structurally unsatisfiable on
+        # confident queries — once top_score reached 2/3, no inversion however
+        # large could ever be annotated (measured gate witness: rank-1 0.864
+        # vs a rank-5 0.969). The headroom form shrinks the required gap as
+        # rank-1 approaches the ceiling: gap >= MIN_HEADROOM_RATIO * (1 -
+        # top_score), i.e. the inversion must consume that share of what's
+        # left of the range (calibration in config.yaml; no division, so
+        # top_score == 1.0 needs no guard — r.score > top_score cannot hold).
+        # UPG-GATE-V4-MINORS (a): an EMPTY quality_reason means this chunk
+        # carries no quality demotion at all, so its lower rank came from
+        # rank-1-side priors or pool order — nothing observable from this
+        # chunk alone. The old "composite ranking prior" fallback named a
+        # mechanism without explaining anything; silence is the honest state.
         rank_note = ""
+        reason = getattr(r, "quality_reason", "")
         if (
             SCORE_ORDER_EXPLAIN_ENABLED
             and i > 1
-            and top_score > 0
-            and r.score >= SCORE_ORDER_EXPLAIN_MARGIN_RATIO * top_score
+            and reason
+            and r.score > top_score
+            and (r.score - top_score) >= SCORE_ORDER_EXPLAIN_MIN_HEADROOM_RATIO * (1.0 - top_score)
         ):
-            reason = getattr(r, "quality_reason", "") or "composite ranking prior"
             rank_note = f"  (ranked lower: {reason})"
         lines.append(f"[{i}] {chunk_id}  score {r.score:.3f}{src_label}{dup}{rank_note}")
         if r.symbol_name:

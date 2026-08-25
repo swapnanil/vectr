@@ -2562,8 +2562,10 @@ class TestFormatSearchResults:
 
     def test_score_order_explain_annotates_large_divergence(self) -> None:
         # UPG-SCORE-ORDER-EXPLAIN (B6): a below-rank-1 result whose displayed
-        # relevance clears the divergence margin (>=1.5x rank 1) is annotated
-        # with the demoting prior's reason.
+        # relevance clears the divergence margin is annotated with the demoting
+        # prior's reason. UPG-GATE-V4-MINORS: the margin is headroom share, not
+        # a fixed multiple — this case consumes (0.90-0.30)/(1-0.30) = ~86% of
+        # the range above rank 1, far past min_headroom_ratio (0.65).
         from agent.searcher import SearchResult, SearchResultList
         rank1 = SearchResult(file_path="core.py", lines="1-40", symbol_name="select",
                              language="python", score=0.30, content="def select(): ...",
@@ -2583,7 +2585,94 @@ class TestFormatSearchResults:
                              language="python", score=0.90, content="y",
                              score_source="reranker", quality_reason="test-file demotion")
         text = _format_search_results(SearchResultList([rank1, rank2]), "q", 5, 100)
-        assert "ranked lower" not in text  # 0.90 < 1.5*0.80
+        # Expectation UNCHANGED by UPG-GATE-V4-MINORS: (0.90-0.80)/(1-0.80)
+        # = 50% of the remaining range — a near-tie, below min_headroom_ratio
+        # (0.65), left unlabeled.
+        assert "ranked lower" not in text
+
+    def test_score_order_explain_annotates_confident_query_inversion(self) -> None:
+        # UPG-GATE-V4-MINORS (b) regression, measured gate witness (query
+        # "i18n translation activation"): rank-5 displayed 0.969 against
+        # rank-1's 0.864 and could NOT be annotated — scores are bounded in
+        # [0, 1], so the old rule (r.score >= 1.5 * top_score) required
+        # top_score < 2/3 to ever fire. The headroom-share rule annotates it:
+        # (0.969 - 0.864) / (1 - 0.864) = ~77% >= min_headroom_ratio (0.65).
+        from agent.searcher import SearchResult, SearchResultList
+        results = [
+            SearchResult(file_path="core.py", lines="1-40", symbol_name="activate",
+                         language="python", score=0.864, content="a",
+                         score_source="reranker"),
+            SearchResult(file_path="mid1.py", lines="1-10", symbol_name="m1",
+                         language="python", score=0.900, content="b",
+                         score_source="reranker"),
+            SearchResult(file_path="mid2.py", lines="1-10", symbol_name="m2",
+                         language="python", score=0.920, content="c",
+                         score_source="reranker"),
+            SearchResult(file_path="mid3.py", lines="1-10", symbol_name="m3",
+                         language="python", score=0.930, content="d",
+                         score_source="reranker"),
+            SearchResult(file_path="tests/test_i18n.py", lines="1-20", symbol_name="test_translation",
+                         language="python", score=0.969, content="e",
+                         score_source="reranker", quality_reason="test-file demotion"),
+        ]
+        text = _format_search_results(SearchResultList(results), "i18n translation activation", 12, 500)
+        assert "(ranked lower: test-file demotion)" in text
+        # Only the gross inversion carries a note. The mid-pack results are
+        # doubly ineligible: they carry no quality_reason (suppressed under
+        # part (a)), and their gaps from rank 1 are near-ties anyway
+        # ((0.930 - 0.864)/0.136 ≈ 49%, below the 65% bar).
+        assert text.count("(ranked lower:") == 1
+
+    def test_score_order_explain_headroom_threshold_boundary(self) -> None:
+        # UPG-GATE-V4-MINORS (b): pin the constant itself at rank-1 0.80,
+        # where the remaining range is 0.20 and the threshold gap is
+        # 0.65 * 0.20 = 0.13. A gap of 0.125 stays unlabeled; 0.140 is
+        # annotated.
+        from agent.searcher import SearchResult, SearchResultList
+
+        def _render(rank2_score: float) -> str:
+            rank1 = SearchResult(file_path="core.py", lines="1-40", symbol_name="a",
+                                 language="python", score=0.80, content="x",
+                                 score_source="reranker")
+            rank2 = SearchResult(file_path="b.py", lines="1-10", symbol_name="b",
+                                 language="python", score=rank2_score, content="y",
+                                 score_source="reranker", quality_reason="private helper")
+            return _format_search_results(SearchResultList([rank1, rank2]), "q", 5, 100)
+
+        assert "ranked lower" not in _render(0.925)   # gap 0.125 < 0.13
+        assert "(ranked lower: private helper)" in _render(0.940)  # gap 0.140 >= 0.13
+
+    def test_score_order_explain_never_fires_without_an_inversion(self) -> None:
+        # UPG-GATE-V4-MINORS (b) edge guard: the headroom form multiplies out
+        # to zero when top_score == 1.0, so equal top scores would satisfy
+        # gap >= 0 if the strict r.score > top_score requirement were ever
+        # dropped. A saturated set must stay unlabeled.
+        from agent.searcher import SearchResult, SearchResultList
+        rank1 = SearchResult(file_path="core.py", lines="1-40", symbol_name="a",
+                             language="python", score=1.0, content="x",
+                             score_source="reranker")
+        rank2 = SearchResult(file_path="b.py", lines="1-10", symbol_name="b",
+                             language="python", score=1.0, content="y",
+                             score_source="reranker", quality_reason="trivial stub")
+        text = _format_search_results(SearchResultList([rank1, rank2]), "q", 5, 100)
+        assert "ranked lower" not in text
+
+    def test_score_order_explain_requires_a_real_demotion_reason(self) -> None:
+        # UPG-GATE-V4-MINORS (a): with no quality demotion recorded for the
+        # chunk, there is nothing honest to attribute its lower rank to (the
+        # cause lives on rank-1's side or in pool order). The annotation must
+        # be SUPPRESSED, not filled with the old "composite ranking prior"
+        # mechanism name — a reason-shaped string that explains nothing.
+        from agent.searcher import SearchResult, SearchResultList
+        rank1 = SearchResult(file_path="core.py", lines="1-40", symbol_name="select",
+                             language="python", score=0.30, content="def select(): ...",
+                             score_source="reranker")
+        rank2 = SearchResult(file_path="lib.rs", lines="1-10", symbol_name="Layout",
+                             language="rust", score=0.90, content="pub use foo::Bar;",
+                             score_source="reranker")  # quality_reason defaults to ""
+        text = _format_search_results(SearchResultList([rank1, rank2]), "q", 5, 100)
+        assert "ranked lower" not in text
+        assert "composite ranking prior" not in text
 
     def test_low_confidence_renders_pointer_mode(self) -> None:
         # UPG-LOWCONF-OUTPUT-SLIM / UPG-FLOOR-SLIM-PAYLOAD (B4): the low-confidence
