@@ -1241,6 +1241,10 @@ PROACTIVE_ENVELOPE_OPEN_HUMAN: str = str(_pro_envelope_cfg["open_human"])
 PROACTIVE_ENVELOPE_CLOSE: str = str(_pro_envelope_cfg["close"])
 
 PROACTIVE_COOLDOWN_ITEMS: int = int(_pro_cfg["cooldown_items"])
+# UPG-PROXY-COOLDOWN-NO-TIME-DECAY: wall-clock suppression window (seconds) on
+# top of the count ring. 0 disables the decay (pure count ring, the historical
+# behaviour); agent/proactive/settings.py normalises non-positive to None.
+PROACTIVE_COOLDOWN_TTL_SECONDS: float = float(_pro_cfg["cooldown_ttl_seconds"])
 
 # UPG-PROXY-INJECT-PRECISION: structural (path-anchored) channel relevance
 # gate. Every value below is a STATIC config threshold or a note.kind
@@ -1270,7 +1274,9 @@ PROACTIVE_MATCHER_SEMANTIC_NOTE: bool = bool(_pro_matchers_cfg["semantic_note"])
 PROACTIVE_MATCHER_CODE_SEARCH: bool = bool(_pro_matchers_cfg["code_search"])
 
 _proxy_cfg: dict[str, Any] = _pro_cfg["proxy"]
-PROACTIVE_PROXY_ENABLED: bool = bool(_proxy_cfg["enabled"])
+# (UPG-PROACTIVE-DEAD-GATES: the old `proxy.enabled` constant is gone — the
+# proxy listener's injection behaviour is governed by `proxy.inject`, and the
+# localhost boundary by settings.py's unconditional `proactive_bind_is_loopback`.)
 PROACTIVE_PROXY_HOST: str = str(_proxy_cfg["host"])
 PROACTIVE_PROXY_PORT: int = int(_proxy_cfg["port"])
 PROACTIVE_PROXY_UPSTREAM_BASE_URL: str = str(_proxy_cfg["upstream_base_url"])

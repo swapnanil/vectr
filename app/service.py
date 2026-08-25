@@ -2687,7 +2687,13 @@ class VectrService:
     def _proactive_gate(self, settings):
         from agent.proactive.gate import LedgerStore, ProactiveGate
         if self._proactive_ledger is None:
-            self._proactive_ledger = LedgerStore(settings.cooldown_items)
+            # UPG-PROXY-COOLDOWN-NO-TIME-DECAY: the ledger is created once per
+            # service lifetime, so its TTL is fixed at construction from the
+            # same settings snapshot that sized the ring.
+            self._proactive_ledger = LedgerStore(
+                settings.cooldown_items,
+                ttl_seconds=settings.cooldown_ttl_seconds,
+            )
         return ProactiveGate(
             min_similarity=settings.min_similarity,
             max_items_per_event=settings.max_items_per_event,

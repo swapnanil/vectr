@@ -786,6 +786,64 @@ class TestRecallForPathUPG96:
         notes = store.recall_for_path("/repo", "/repo/gate.py", limit=3)
         assert any("pool ceiling" in n.content for n in notes)
 
+    # -- UPG-PROXY-ANCHOR-ABS-REL-NORM ---------------------------------------
+    #
+    # Declared anchors are authored either way (remember() allows absolute OR
+    # workspace-relative), and so are incoming file_paths (a real hook sends
+    # an absolute one; direct callers legitimately pass relative ones).
+    # Matching on "as-given + workspace-relative" covered
+    # abs-input-vs-rel-anchor but silently missed the mirror case,
+    # REL-input-vs-ABS-anchor: the note below could only be found through its
+    # prose, never its declaration.
+
+    def test_relative_query_matches_absolute_declared_anchor(self, tmp_path) -> None:
+        """A note anchored to an ABSOLUTE path must be recalled when the
+        caller passes a WORKSPACE-RELATIVE file_path — the candidate set
+        needs the workspace-rooted absolute form."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        (tmp_path / "src").mkdir()
+        # Stored fully-resolved on purpose: _anchors_exact_match() compares
+        # candidate forms to declared anchors by exact string equality, so on
+        # symlinked temp dirs (/var -> /private/var) only the resolved
+        # spelling can byte-equal the workspace-rooted absolute candidate the
+        # fix derives.
+        abs_anchor = str((tmp_path / "src" / "gate.py").resolve())
+        store.remember(
+            ws, "the retry loop here needs a backoff cap", kind="gotcha",
+            anchors=[abs_anchor],
+        )
+        notes = store.recall_for_path(ws, "src/gate.py", kind="gotcha")
+        assert len(notes) == 1
+        # Non-vacuity: content never names the file, so ONLY the anchors arm
+        # can have produced this hit.
+        assert "gate.py" not in notes[0].content
+
+    def test_relative_query_still_matches_relative_declared_anchor(self, tmp_path) -> None:
+        """Control for the mirror case above: the long-standing direction (a
+        relative query finding its own relative anchor) is unchanged."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        (tmp_path / "src").mkdir()
+        store.remember(
+            ws, "the retry loop here needs a backoff cap", kind="gotcha",
+            anchors=["src/gate.py"],
+        )
+        notes = store.recall_for_path(ws, "src/gate.py", kind="gotcha")
+        assert len(notes) == 1
+
+    def test_relative_query_does_not_match_other_files_absolute_anchor(
+        self, tmp_path
+    ) -> None:
+        """Negative control: normalisation widens the candidate set, it does
+        not loosen exact equality — a note anchored elsewhere stays silent."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        (tmp_path / "src").mkdir()
+        abs_anchor = str((tmp_path / "src" / "gate.py").resolve())
+        store.remember(
+            ws, "the retry loop here needs a backoff cap", kind="gotcha",
+            anchors=[abs_anchor],
+        )
+        assert store.recall_for_path(ws, "app/routes.py", kind="gotcha") == []
+
 
 # ---------------------------------------------------------------------------
 # format_notes_for_llm
@@ -3103,6 +3161,118 @@ class TestFirePathPrimitiveAbsoluteRelative:
         )
         results = store.fire(ws, event="pre-edit", file_path=outside)
         assert len(results) == 1  # still only the absolute-pattern note
+
+    def test_absolute_pattern_fires_on_relative_hook_path(self, tmp_path) -> None:
+        """UPG-PROXY-ANCHOR-ABS-REL-NORM's mirror case through fire(): a
+        trigger whose `path` is ABSOLUTE must still fire when the caller
+        passes a WORKSPACE-RELATIVE file_path — `_path_trigger_candidates()`
+        now derives the workspace-rooted absolute form for relative inputs,
+        and this P-primitive shares that candidate set with
+        `recall_for_path()`."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "agent" / "trigger_engine.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("content")
+        absolute_pattern = str(f.resolve())
+        store.remember(
+            ws, "an absolutely-anchored gotcha", kind="gotcha",
+            triggers=[{"path": absolute_pattern, "event": "pre-edit"}],
+        )
+        results = store.fire(ws, event="pre-edit", file_path="agent/trigger_engine.py")
+        assert len(results) == 1
+        assert results[0].fired is True
+
+
+class TestPathTriggerCandidateForms:
+    """Direct units on the shared helpers (UPG-PROXY-ANCHOR-ABS-REL-NORM /
+    UPG-PROXY-WEAK-TIER-TIEBREAK): `recall_for_path()`'s narrowing inputs and
+    `fire()`'s live P primitive both consume `_path_trigger_candidates()`'s
+    output, and three consumers share one boundary predicate — pin its exact
+    shape here so the consumers can never silently disagree."""
+
+    def test_relative_input_yields_workspace_rooted_absolute_form(self, tmp_path) -> None:
+        from agent.working_context_store._store import _path_trigger_candidates
+
+        ws = str(tmp_path)
+        cands = _path_trigger_candidates(ws, "src/auth.py")
+        assert cands[0] == "src/auth.py"
+        # Exactly one derived form: the process cwd is nowhere near `ws`, so
+        # no CWD-relative form exists, and the absolute form is rooted at the
+        # WORKSPACE (never this process's cwd).
+        assert cands == (
+            "src/auth.py",
+            str((tmp_path / "src" / "auth.py").resolve()),
+        )
+
+    def test_absolute_input_under_root_stays_two_forms(self, tmp_path) -> None:
+        """A real hook event (absolute file_path) keeps the historical
+        two-form candidate sequence byte-for-byte: as-given + workspace-
+        relative. The new absolute form is only derived for RELATIVE inputs,
+        so this contract is what makes the change a pure widening."""
+        from agent.working_context_store._store import _path_trigger_candidates
+
+        ws = str(tmp_path)
+        p = str(tmp_path / "src" / "auth.py")
+        assert _path_trigger_candidates(ws, p) == (p, "src/auth.py")
+
+    def test_absolute_input_outside_root_has_no_derived_forms(self, tmp_path) -> None:
+        from agent.working_context_store._store import _path_trigger_candidates
+
+        ws = str(tmp_path)
+        outside = str(tmp_path.parent / "outside_the_workspace.py")
+        assert _path_trigger_candidates(ws, outside) == (outside,)
+
+    def test_none_input_returns_none(self) -> None:
+        from agent.working_context_store._store import _path_trigger_candidates
+
+        assert _path_trigger_candidates("/some/ws", None) is None
+
+    def test_boundary_count_and_first_agree_with_match(self) -> None:
+        """The boolean, the count, and the first-offset views of the ONE
+        boundary predicate can never drift: count>0 <=> match <=> first>=0,
+        and first is occurrences[0]."""
+        from agent.working_context_store._store import (
+            _path_boundary_count,
+            _path_boundary_first,
+            _path_boundary_match,
+            _path_boundary_occurrences,
+        )
+
+        cases = [
+            ("edit gate.py now", "gate.py"),
+            ('the file "gate.py" was touched', "gate.py"),
+            ("gate.py: verify_token must check expiry", "gate.py"),
+            ("mentions uv_regate.py instead", "gate.py"),   # substring, no boundary
+            ("open gate.pyc for bytecode", "gate.py"),      # longer extension
+            ("see src/auth/gate.py handled", "src/auth/gate.py"),  # multi-segment needle
+        ]
+        for text, needle in cases:
+            occ = _path_boundary_occurrences(text, needle)
+            assert _path_boundary_match(text, needle) == bool(occ), (text, needle)
+            assert _path_boundary_count(text, needle) == len(occ), (text, needle)
+            assert (_path_boundary_first(text, needle) >= 0) == bool(occ), (text, needle)
+            assert _path_boundary_first(text, needle) == (occ[0] if occ else -1), (text, needle)
+
+    def test_boundary_count_counts_and_first_locates(self) -> None:
+        from agent.working_context_store._store import (
+            _path_boundary_count,
+            _path_boundary_first,
+        )
+
+        text = "gate.py supersedes the old gate.py notes"
+        assert _path_boundary_count(text, "gate.py") == 2
+        assert _path_boundary_first(text, "gate.py") == 0
+
+    def test_empty_needle_is_never_a_match_anywhere(self) -> None:
+        from agent.working_context_store._store import (
+            _path_boundary_count,
+            _path_boundary_first,
+            _path_boundary_match,
+        )
+
+        assert _path_boundary_match("anything", "") is False
+        assert _path_boundary_count("anything", "") == 0
+        assert _path_boundary_first("anything", "") == -1
 
 
 class TestFireScopeEnforcement:

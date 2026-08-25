@@ -120,31 +120,46 @@ def _actor_for_promotion(to: str) -> str:
 
 def _path_trigger_candidates(workspace_root: str, file_path: str | None) -> tuple[str, ...] | None:
     """The P (path) trigger primitive's candidate forms for one lifecycle
-    file_path: the path exactly as given, plus its workspace-relative form
-    when computable — the SAME resolve()/relative_to() normalization
-    `recall_for_path()` already uses just above. A real hook (every AI code
-    editor) sends an ABSOLUTE file_path, while triggers/anchors are naturally
-    authored workspace-relative (a gotcha's kind-default bundle generates
-    them straight from anchors — `default_bundle_for_kind()`); matching only
-    the as-given form would silently never fire a relatively-anchored
-    trigger against a real hook event. `trigger_engine.py` itself stays free
-    of filesystem/workspace knowledge (its purity invariant) — this
-    normalization lives here, at the `fire()` boundary, which is the one
-    place that already knows the workspace root.
+    file_path: the path exactly as given, plus — each when computable — its
+    workspace-relative form AND its workspace-rooted ABSOLUTE form (the SAME
+    resolve()/relative_to() normalization `recall_for_path()` already uses
+    just above; the absolute form of a relative input is derived from
+    workspace_root, not this process's cwd, so it means the same file
+    regardless of where the daemon happens to have been launched).
+
+    UPG-PROXY-ANCHOR-ABS-REL-NORM: declared anchors/triggers are authored
+    either way (remember()'s own docstring allows both), and so are incoming
+    file_paths — a real hook sends an absolute one, while direct callers of
+    recall_for_path()/fire() legitimately pass workspace-relative ones.
+    Matching only "as-given + relative" covered abs-input-vs-rel-anchor but
+    silently missed the mirror case, rel-input-vs-ABS-anchor: a note whose
+    anchors column holds "/ws/src/auth.py" was invisible to a caller asking
+    for "src/auth.py", falling back to (at best) content-boundary matching.
+    Deriving the third form closes that direction at this single boundary,
+    which both `recall_for_path()` and `fire()`'s live P-primitive share.
 
     A file outside `workspace_root` simply has no relative form — the
-    as-given form is still returned, just without a second candidate, never
+    as-given form is still returned, just without extra candidates, never
     an error. Returns None only when `file_path` itself is None (no path
     this call)."""
     if file_path is None:
         return None
     candidates = [file_path]
+    resolved_root = Path(workspace_root).resolve()
     try:
-        relpath = str(Path(file_path).resolve().relative_to(Path(workspace_root).resolve()))
+        relpath = str(Path(file_path).resolve().relative_to(resolved_root))
     except (ValueError, OSError):
         relpath = None
     if relpath and relpath not in candidates:
         candidates.append(relpath)
+    # The workspace-rooted absolute form only carries information the
+    # as-given form does not when the input was relative. For an absolute
+    # input this join reproduces the input itself (already present), so the
+    # candidate sequence for a real hook event stays exactly two forms.
+    if not Path(file_path).is_absolute():
+        abspath = str((resolved_root / file_path).resolve())
+        if abspath not in candidates:
+            candidates.append(abspath)
     return tuple(candidates)
 
 
@@ -155,6 +170,34 @@ def _is_path_identifier_char(ch: str) -> bool:
     from a longer identifier that merely contains the needle as a
     substring (e.g. "uv_regate.py" contains "gate.py")."""
     return ch.isalnum() or ch in ("_", "-")
+
+
+def _path_boundary_occurrences(text: str, needle: str) -> list[int]:
+    """Every offset in `text` where `needle` (a file basename or relative
+    path) occurs at a genuine path boundary, ascending — the single
+    implementation behind `_path_boundary_match`, `_path_boundary_count`,
+    and `_path_boundary_first` (UPG-PROXY-WEAK-TIER-TIEBREAK), so the
+    boolean, the count, and the position of a mention can never disagree
+    about what counts as one.
+
+    A match only counts when the character immediately before the
+    occurrence is not identifier-class (or the occurrence starts the
+    string) AND the character immediately after is not identifier-class
+    (or the occurrence ends the string) — see `_path_boundary_match`."""
+    if not needle:
+        return []
+    found: list[int] = []
+    start = 0
+    while True:
+        idx = text.find(needle, start)
+        if idx == -1:
+            return found
+        before_ok = idx == 0 or not _is_path_identifier_char(text[idx - 1])
+        after_idx = idx + len(needle)
+        after_ok = after_idx >= len(text) or not _is_path_identifier_char(text[after_idx])
+        if before_ok and after_ok:
+            found.append(idx)
+        start = idx + 1
 
 
 def _path_boundary_match(text: str, needle: str) -> bool:
@@ -170,20 +213,32 @@ def _path_boundary_match(text: str, needle: str) -> bool:
     occurrence ends the string). Callers that need a cheap prefilter
     (e.g. a SQL LIKE clause) should treat this function's result as the
     precise filter applied afterward, not a replacement for the prefilter
-    — see `recall_for_path()`."""
-    if not needle:
-        return False
-    start = 0
-    while True:
-        idx = text.find(needle, start)
-        if idx == -1:
-            return False
-        before_ok = idx == 0 or not _is_path_identifier_char(text[idx - 1])
-        after_idx = idx + len(needle)
-        after_ok = after_idx >= len(text) or not _is_path_identifier_char(text[after_idx])
-        if before_ok and after_ok:
-            return True
-        start = idx + 1
+    — see `recall_for_path()`.
+
+    Delegates to `_path_boundary_occurrences()` (same scan, early exit on
+    the first hit) rather than keeping its own copy of the boundary rule —
+    three consumers now share that predicate, and they must never drift."""
+    return bool(_path_boundary_occurrences(text, needle))
+
+
+def _path_boundary_count(text: str, needle: str) -> int:
+    """How many separate path-boundary occurrences `needle` has in `text`
+    (UPG-PROXY-WEAK-TIER-TIEBREAK): a note whose subject is a file tends to
+    name it repeatedly; a note that merely name-drops it in passing names
+    it once. Same boundary predicate as `_path_boundary_match`, which is
+    exactly `count > 0`."""
+    return len(_path_boundary_occurrences(text, needle))
+
+
+def _path_boundary_first(text: str, needle: str) -> int:
+    """The character offset of the FIRST path-boundary occurrence of
+    `needle` in `text`, or -1 when there is none (UPG-PROXY-WEAK-TIER-
+    TIEBREAK): among notes that mention a file equally often, one whose
+    subject is the file tends to name it early (title / opening sentence),
+    where a passing mention lands mid-list. Same boundary predicate as
+    `_path_boundary_match`."""
+    hits = _path_boundary_occurrences(text, needle)
+    return hits[0] if hits else -1
 
 
 def _anchors_exact_match(
@@ -194,8 +249,9 @@ def _anchors_exact_match(
     of a file's candidate path forms EXACTLY — the strongest possible
     signal a note is about that file, independent of whatever its prose
     content happens to mention. `path_candidates` is
-    `_path_trigger_candidates()`'s output (as-given + workspace-relative
-    forms) for the file being recalled."""
+    `_path_trigger_candidates()`'s output — as-given + workspace-relative
+    + (for a relative input) workspace-rooted absolute forms
+    (UPG-PROXY-ANCHOR-ABS-REL-NORM) — for the file being recalled."""
     if not anchors or not path_candidates:
         return False
     declared = {a[0] for a in anchors if a}
@@ -281,7 +337,8 @@ def _scope_filter(
     recall() has no file context, so a path-subtree-scoped note is left
     unfiltered there. `file_path` accepts either a single string or a tuple
     of candidate forms for the same file (as-given plus workspace-relative,
-    same shape `fire()`'s `_path_trigger_candidates()` produces) — a real
+    plus the workspace-rooted absolute form for a relative input — the same
+    shape `fire()`'s `_path_trigger_candidates()` produces) — a real
     hook/tool call sends an ABSOLUTE path while anchors are naturally
     authored workspace-relative, so `recall_for_path()` passes both forms
     to give `scope_permits()`'s path-subtree check a relative form to
@@ -3096,7 +3153,8 @@ class WorkingContextStore:
         path_candidates = _path_trigger_candidates(workspace, file_path)
         relpath = next((c for c in (path_candidates or ()) if c != file_path), "")
         relpath_or_basename = relpath if relpath else basename
-        # `path_candidates` is only "as-given plus workspace-relative"
+        # `path_candidates` is "as-given plus workspace-relative, plus the
+        # workspace-rooted absolute form for a relative input"
         # (`_path_trigger_candidates()`'s own contract, shared with `fire()`'s
         # live P-primitive evaluation) — it has no bare-basename form of its
         # own unless the file happens to sit directly at the workspace root

@@ -43,6 +43,8 @@ from agent.working_context_store._store import (
     _ANTI_MEMORY_TEMPLATE,
     _date_str,
     _note_title,
+    _path_boundary_count,
+    _path_boundary_first,
     _path_boundary_match,
 )
 from agent.working_context_store._types import PROVENANCE_VALUES, WorkingNote
@@ -241,12 +243,25 @@ def _structural_note_candidate(
     score_mention: float,
     state: dict | None = None,
     anchor_path: str | None = None,
+    path_mention_count: int = 0,
+    path_mention_first_offset: int = -1,
 ) -> Candidate:
     """`relation` is one of the STRUCTURAL_TIER_* constants `_first_anchor()`
     resolved: DECLARED_ANCHOR, DECLARED_TRIGGER, or MENTION (raw — kind
     branching below turns a mention into GOTCHA_MENTION or plain MENTION,
     exactly as before this note's kind was already the only thing that
-    branch depended on)."""
+    branch depended on).
+
+    `path_mention_count` / `path_mention_first_offset`
+    (UPG-PROXY-WEAK-TIER-TIEBREAK): how many times the matched file's
+    basename occurs in this note's content at a genuine path boundary, and
+    where the first one lands — carried on the Candidate so the gate can
+    break ties among EQUAL-score candidates (every Tier-C item scores the
+    same `structural_scores.mention`) by relevance instead of insertion
+    order. Both are structural note-vs-path properties computed by the
+    same predicate `_path_boundary_match()` applies; they never touch
+    `score`, which would change tier competition against the semantic
+    band."""
     summary = _note_summary(note, state)
     kind_label = _kind_label(note, state)
     provenance_label = _provenance_label(note)
@@ -297,6 +312,10 @@ def _structural_note_candidate(
         # gate can pick the whole block's envelope wording without parsing
         # rendered text.
         note_provenance=provenance_label,
+        # UPG-PROXY-WEAK-TIER-TIEBREAK: the equal-score relevance tie-break
+        # signals (see this function's docstring).
+        path_mention_count=path_mention_count,
+        path_mention_first_offset=path_mention_first_offset,
     )
 
 
@@ -463,6 +482,13 @@ class ProactiveMatcher:
                 found = _first_anchor(note, anchors)
                 if found is not None:
                     anchor_path, anchor, relation = found
+                    # UPG-PROXY-WEAK-TIER-TIEBREAK: count how hard THIS note
+                    # talks about the matched file (basename occurrences at
+                    # genuine path boundaries, and where the first lands) —
+                    # the gate's equal-score tie-break signals.
+                    content = note.content or ""
+                    mention_count = _path_boundary_count(content, anchor)
+                    mention_first_offset = _path_boundary_first(content, anchor)
                 else:
                     # Defensive fallback: the source returned a note this
                     # window's anchors/triggers/content narrowing can't
@@ -472,6 +498,12 @@ class ProactiveMatcher:
                     # existing behaviour before the anchor/trigger/mention
                     # 3-way split.
                     anchor_path, anchor, relation = None, "file", STRUCTURAL_TIER_DECLARED_ANCHOR
+                    # Leave the tie-break signals at their inert defaults:
+                    # `anchor` above is a display placeholder ("file"), not a
+                    # filename, and boundary-counting a common English word
+                    # would be prose statistics, not structure.
+                    mention_count = 0
+                    mention_first_offset = -1
                 candidates.append(
                     _structural_note_candidate(
                         note, anchor, relation, self._max_chars,
@@ -481,6 +513,8 @@ class ProactiveMatcher:
                         self._structural_score_mention,
                         state,
                         anchor_path,
+                        mention_count,
+                        mention_first_offset,
                     )
                 )
 

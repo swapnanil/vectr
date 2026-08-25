@@ -2369,6 +2369,16 @@ proactive:
   # Dedup / cooldown ledger size: the last N injected anchor ids per session are
   # suppressed, so the same note is not re-injected turn after turn.
   cooldown_items: 30
+  # UPG-PROXY-COOLDOWN-NO-TIME-DECAY: wall-clock suppression window (seconds)
+  # on top of that count ring. The proxy channel's session key is process-
+  # scoped, so "last 30" can span the proxy's whole lifetime — without a time
+  # bound a note that becomes genuinely relevant again hours later stays
+  # suppressed until 30 OTHER distinct anchors have cycled through. An entry
+  # stops suppressing once its most recent delivery is older than this TTL;
+  # the count ring still applies on top of it. 0 disables the decay entirely
+  # (pure count ring, the historical behaviour). Suppression refreshes on each
+  # re-delivery: the window runs from the MOST RECENT time you saw the note.
+  cooldown_ttl_seconds: 3600
 
   # Structural (path-anchored) channel relevance gate (UPG-PROXY-INJECT-
   # PRECISION). `recall_for_path()` answers "which notes mention or are
@@ -2471,9 +2481,12 @@ proactive:
   # Phase 3 — localhost Anthropic-shaped API proxy. The literal "vectr in the
   # middle" of the wire: point the agent harness at it with
   # ANTHROPIC_BASE_URL, and it forwards to the real API while appending
-  # deterministic context AFTER the last prompt-cache breakpoint.
+  # deterministic context AFTER the last prompt-cache breakpoint. (The old
+  # `enabled` toggle was removed as dead config — UPG-PROACTIVE-DEAD-GATES:
+  # nothing read it; whether injection happens is governed by `inject`, and
+  # the localhost boundary is enforced unconditionally at runtime, never by a
+  # config key.)
   proxy:
-    enabled: false                 # opt-in listener; off by default
     host: 127.0.0.1                # localhost only; a non-loopback host is refused
     port: 8785                     # proxy listener port (distinct from any daemon port)
     upstream_base_url: https://api.anthropic.com   # the real API the proxy forwards to
