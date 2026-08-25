@@ -1621,6 +1621,41 @@ class TestT17DataRetention:
         assert any("query=x" in ln and "client=alice" in ln for ln in lines)
         assert any("query=y" in ln and "client=" not in ln for ln in lines)
 
+    def test_audit_log_stamps_true_utc_not_local_time(self, tmp_path, monkeypatch) -> None:
+        """UPG-AUDIT-LOCAL-TIME-Z: the stamp's trailing 'Z' claims UTC, but
+        logging.Formatter defaults to LOCAL time — the file used to carry
+        local wall-clock under a Z suffix (observed 03:12:39Z for a true
+        21:42:44Z), silently skewing audit-to-transcript correlation by the
+        host's UTC offset. The formatter must be pinned to gmtime (the
+        deterministic half of this pin), and a freshly written stamp must be
+        within a minute of true UTC regardless of host timezone (the
+        end-to-end half; a one-minute tolerance cannot false-pass any real
+        timezone offset, which is at least ~30 minutes)."""
+        import logging
+        import time as _time
+        from datetime import datetime, timezone
+
+        log_file = tmp_path / "audit.log"
+        monkeypatch.setenv("VECTR_AUDIT_LOG", str(log_file))
+        log = logging.getLogger("vectr.audit")
+        log.handlers.clear()
+        try:
+            from agent.working_context_store import _get_audit_logger, audit as _audit
+            formatter = _get_audit_logger().handlers[0].formatter
+            assert formatter.converter is _time.gmtime, (
+                "audit stamps must use gmtime — the datefmt's literal Z means UTC"
+            )
+            _audit("UTC_CHECK", k="v")
+        finally:
+            log.handlers.clear()
+
+        stamp_text = log_file.read_text().split(" ", 1)[0]
+        stamped = datetime.strptime(stamp_text, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        skew_s = abs((datetime.now(timezone.utc) - stamped).total_seconds())
+        assert skew_s < 60, f"audit stamp {stamp_text!r} is not true UTC (skew {skew_s:.0f}s)"
+
     def test_remember_increments_count(self, tmp_path) -> None:
         store, ws = self._store(tmp_path)
         assert store.count_notes(ws) == 0

@@ -13,6 +13,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+# UPG-L3-CONFIG-READ-TIME: `BOUNDARY_PRECOMPACT_ENABLED` /
+# `BOUNDARY_PRECOMPACT_TOKEN_CAP` are read at REQUEST time via the module
+# attribute (`config.BOUNDARY_PRECOMPACT_*` in `_boundary_precompact_text`
+# below), not bound by value here — the same rule `app/routes.py` documents
+# for its config reads, so a test override (or a future reload path) is
+# honored instead of baked in at import. Everything else keeps this file's
+# dominant by-value convention.
+import agent.config as config
 from agent.config import (
     DEFAULT_PORT,
     INDEXING_VECTOR_STORE_DISPATCH_MAX_WORKERS,
@@ -25,8 +33,6 @@ from agent.config import (
     SEARCH_IDENTIFIER_HINT_NEARMISS_ENABLED,
     SEARCH_IDENTIFIER_HINT_NEARMISS_MAX,
     ARC_DETECTION_ENABLED,
-    BOUNDARY_PRECOMPACT_ENABLED,
-    BOUNDARY_PRECOMPACT_TOKEN_CAP,
     EMBEDDING_DEFAULT_MODEL,
     EPISODES_DIGEST_HEAD_LINES,
     EPISODES_DIGEST_MAX_CHARS,
@@ -3307,7 +3313,10 @@ class VectrService:
         matcher (UPG-9.4) — restating them here would double the same
         information rather than adding to it.
         """
-        if not BOUNDARY_PRECOMPACT_ENABLED:
+        # Both tunables are read at request time through the config module
+        # (UPG-L3-CONFIG-READ-TIME) — see the import-site note at the top of
+        # this file.
+        if not config.BOUNDARY_PRECOMPACT_ENABLED:
             return ""
         text = _BOUNDARY_PRECOMPACT_BASE_TEXT
         count = (
@@ -3319,7 +3328,7 @@ class VectrService:
                 "pending distillation; keep the reasoning about what they mean."
             )
             candidate = f"{text}\n\n{arc_sentence}"
-            if token_estimate(candidate) <= BOUNDARY_PRECOMPACT_TOKEN_CAP:
+            if token_estimate(candidate) <= config.BOUNDARY_PRECOMPACT_TOKEN_CAP:
                 text = candidate
         return text
 

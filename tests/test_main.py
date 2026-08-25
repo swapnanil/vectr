@@ -313,9 +313,15 @@ class TestDoStartBindHostEnv:
             proc.pid = 99999
             return proc
 
+        # UPG-CLI-START-TEXT-EXIT-CODE: this asserts on the env handed to
+        # Popen, captured before the readiness verdict is reached. Readiness
+        # is pinned so the subject is the spawn env alone, not whether PID
+        # 99999 happens to be alive on the running machine. The exit contract
+        # itself is pinned by TestDoStartReadinessBranches.
         with patch("subprocess.Popen", side_effect=_mock_popen), \
              patch("main.InstanceRegistry") as MockReg, \
              patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=True), \
              patch("builtins.open", MagicMock()):
             MockReg.return_value.register = MagicMock()
             m._do_start(ws, 8765, wh, **kwargs)
@@ -3646,6 +3652,100 @@ class TestInstructionVetV3ToolLoadingSplice:
 
 
 # ---------------------------------------------------------------------------
+# Aliased guidance files: CLAUDE.md <-> AGENTS.md symlink / hardlink
+# (UPG-INIT-SYMLINK-WRITE-ORDER)
+# ---------------------------------------------------------------------------
+
+class TestAliasedGuidanceFilesWrittenOnce:
+    """Workspaces commonly alias CLAUDE.md and AGENTS.md to one another so a
+    single body serves several AI code editors. Every guidance write follows
+    such an alias, so writing each PATH in turn used to rewrite the same
+    underlying file repeatedly — each write strips the previous vectr block
+    before appending its own — and the LAST intended variant silently won.
+    `_write_workspace_config` now groups paths that resolve to the same
+    underlying file (symlink, hardlink, or dangling symlink) and writes each
+    distinct file exactly once with merged options."""
+
+    @staticmethod
+    def _block_count(text: str) -> int:
+        return text.count("<!-- vectr-start -->")
+
+    def test_claude_md_symlink_to_agents_md_keeps_tool_loading_guidance(self, tmp_path):
+        """The reported defect: CLAUDE.md -> AGENTS.md symlink. The CLAUDE.md
+        variant (with the deferred-tool loading blockquote) was written
+        first, then AGENTS.md's pass rewrote the same bytes without it. The
+        single merged write must keep both."""
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("# My agents\n")
+        (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+        m._write_workspace_config(str(tmp_path), 8765)
+
+        content = agents.read_text()
+        assert self._block_count(content) == 1
+        assert "# My agents" in content   # pre-existing user content preserved
+        assert "ToolSearch" in content    # CLAUDE.md-only tool_loading=True merged in
+
+    def test_agents_md_symlink_to_claude_md_all_hooks_installed_is_hook_aware(self, tmp_path):
+        """Reverse direction (AGENTS.md -> not-yet-existing CLAUDE.md) with
+        BOTH hook surfaces installed: the shared file gets the hook-aware
+        session-start variant plus the tool-loading block, written once."""
+        m._write_claude_hooks(str(tmp_path))
+        m._write_codex_hooks(str(tmp_path))
+        (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+        m._write_workspace_config(str(tmp_path), 8765)
+
+        content = (tmp_path / "CLAUDE.md").read_text()  # real file behind the alias
+        assert self._block_count(content) == 1
+        assert "your working-memory notes are auto-injected automatically" in content
+        assert 'call `vectr_recall(query="<your task>")`' not in content
+        assert "ToolSearch" in content
+        # The alias resolves to exactly those bytes.
+        assert (tmp_path / "AGENTS.md").resolve().read_text() == content
+
+    def test_partial_hooks_keep_default_variant_on_aliased_file(self, tmp_path):
+        """Only one hook surface installed: the aliased file also serves a
+        reader WITHOUT automatic injection, so the conservative intersection
+        keeps the default self-recall variant — dropping it would starve
+        that reader of recall entirely (hook-aware copy tells the model not
+        to self-recall because injection is automatic)."""
+        m._write_claude_hooks(str(tmp_path))
+        (tmp_path / "AGENTS.md").write_text("x\n")
+        (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+        m._write_workspace_config(str(tmp_path), 8765)
+
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert 'call `vectr_recall(query="<your task>")`' in content
+        assert "your working-memory notes are auto-injected automatically" not in content
+        # tool_loading merges by union even when hooks merge by intersection.
+        assert "ToolSearch" in content
+
+    def test_hardlinked_files_written_once(self, tmp_path):
+        """A hardlink pair shares an inode without being a symlink — identity
+        grouping must catch it via st_dev/st_ino too."""
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("seed\n")
+        agents = tmp_path / "AGENTS.md"
+        os.link(claude, agents)
+        m._write_workspace_config(str(tmp_path), 8765)
+
+        assert self._block_count(agents.read_text()) == 1
+        assert agents.read_text() == claude.read_text()
+        assert "ToolSearch" in agents.read_text()
+
+    def test_dangling_symlink_pair_still_written_once(self, tmp_path):
+        """Fresh workspace where CLAUDE.md is a symlink to a not-yet-existing
+        AGENTS.md: neither name stats, but realpath still collapses the pair,
+        so creation happens through ONE merged write instead of the old
+        create-then-strip-then-rewrite through the alias."""
+        (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+        m._write_workspace_config(str(tmp_path), 8765)
+
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert self._block_count(content) == 1
+        assert "ToolSearch" in content
+
+
+# ---------------------------------------------------------------------------
 # TestMergeSafeInit
 # ---------------------------------------------------------------------------
 
@@ -4074,7 +4174,15 @@ class TestWaitForDaemonReady:
 class TestDoStartReadinessBranches:
     """UPG-CLI-START-READY-RACE: `_do_start`'s printed message must reflect
     whether the daemon actually became reachable, not just that Popen()
-    returned."""
+    returned.
+
+    UPG-CLI-START-TEXT-EXIT-CODE: the text surface's exit contract is the
+    same rule the opt-in --json surface already had — exit 1 exactly when
+    status == "failed" (process exited before readiness; nothing is
+    listening), and 0 for both "ready" and "not_ready". The tests here pin
+    each branch's code alongside its message; the ready branch returning
+    normally is pinned implicitly by every pre-existing success-path test,
+    which would error on an unexpected SystemExit."""
 
     def _patched_popen(self):
         def _mock_popen(cmd, env, **kwargs):
@@ -4115,7 +4223,29 @@ class TestDoStartReadinessBranches:
         assert "has not" in err and "responding yet" in err
         assert "Poll readiness with: vectr status" in err
 
+    def test_not_ready_returns_normally_exit_zero(self, tmp_path):
+        """UPG-CLI-START-TEXT-EXIT-CODE: `not_ready` is an uncertain outcome,
+        not a failure — the process is alive and may still be loading — so
+        the text surface exits 0 for it, mirroring the --json surface (which
+        exits 1 only for status == "failed"). A `set -e` script must not
+        abort on a slow-but-succeeding start."""
+        ws = str(tmp_path)
+        wh = workspace_hash(ws)
+        with patch("subprocess.Popen", side_effect=self._patched_popen()), \
+             patch("main.InstanceRegistry") as MockReg, \
+             patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=False), \
+             patch("main._is_pid_alive", return_value=True), \
+             patch("builtins.open", MagicMock()):
+            MockReg.return_value.register = MagicMock()
+            m._do_start(ws, 8765, wh)  # no SystemExit raised
+
     def test_prints_failed_message_when_process_exited(self, tmp_path, capsys):
+        """UPG-CLI-START-TEXT-EXIT-CODE: `failed` now exits 1 on the text
+        surface exactly as the --json surface always did — nothing is
+        listening after this outcome, so any later use of this workspace's
+        port is guaranteed to fail and $? must be able to say so. Message
+        content unchanged."""
         ws = str(tmp_path)
         wh = workspace_hash(ws)
         with patch("subprocess.Popen", side_effect=self._patched_popen()), \
@@ -4125,8 +4255,10 @@ class TestDoStartReadinessBranches:
              patch("main._is_pid_alive", return_value=False), \
              patch("builtins.open", MagicMock()):
             MockReg.return_value.register = MagicMock()
-            m._do_start(ws, 8765, wh)
+            with pytest.raises(SystemExit) as exc_info:
+                m._do_start(ws, 8765, wh)
 
+        assert exc_info.value.code == 1
         err = capsys.readouterr().err
         assert "failed to start" in err
 
@@ -4148,9 +4280,15 @@ class TestDoStartExplicitEnvConstruction:
         wh = workspace_hash(ws)
         captured_env: dict = {}
 
+        # UPG-CLI-START-TEXT-EXIT-CODE: this asserts on the env handed to
+        # Popen, captured before the readiness verdict is reached. Readiness
+        # is pinned so the subject is the spawn env alone, not whether PID
+        # 99999 happens to be alive on the running machine. The exit contract
+        # itself is pinned by TestDoStartReadinessBranches.
         with patch("subprocess.Popen", side_effect=self._mock_popen_factory(captured_env)), \
              patch("main.InstanceRegistry") as MockReg, \
              patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=True), \
              patch("builtins.open", MagicMock()):
             MockReg.return_value.register = MagicMock()
             m._do_start(ws, 8765, wh, workspace_explicit=True)
@@ -4162,9 +4300,15 @@ class TestDoStartExplicitEnvConstruction:
         wh = workspace_hash(ws)
         captured_env: dict = {}
 
+        # UPG-CLI-START-TEXT-EXIT-CODE: this asserts on the env handed to
+        # Popen, captured before the readiness verdict is reached. Readiness
+        # is pinned so the subject is the spawn env alone, not whether PID
+        # 99999 happens to be alive on the running machine. The exit contract
+        # itself is pinned by TestDoStartReadinessBranches.
         with patch("subprocess.Popen", side_effect=self._mock_popen_factory(captured_env)), \
              patch("main.InstanceRegistry") as MockReg, \
              patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=True), \
              patch("builtins.open", MagicMock()):
             MockReg.return_value.register = MagicMock()
             m._do_start(ws, 8765, wh)
@@ -4220,9 +4364,15 @@ class TestDoStartForegroundFastEnvConstruction:
         wh = workspace_hash(ws)
         captured_env: dict = {}
 
+        # UPG-CLI-START-TEXT-EXIT-CODE: this asserts on the env handed to
+        # Popen, captured before the readiness verdict is reached. Readiness
+        # is pinned so the subject is the spawn env alone, not whether PID
+        # 99999 happens to be alive on the running machine. The exit contract
+        # itself is pinned by TestDoStartReadinessBranches.
         with patch("subprocess.Popen", side_effect=self._mock_popen_factory(captured_env)), \
              patch("main.InstanceRegistry") as MockReg, \
              patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=True), \
              patch("builtins.open", MagicMock()):
             MockReg.return_value.register = MagicMock()
             m._do_start(ws, 8765, wh, foreground_fast=True)
@@ -4234,9 +4384,15 @@ class TestDoStartForegroundFastEnvConstruction:
         wh = workspace_hash(ws)
         captured_env: dict = {}
 
+        # UPG-CLI-START-TEXT-EXIT-CODE: this asserts on the env handed to
+        # Popen, captured before the readiness verdict is reached. Readiness
+        # is pinned so the subject is the spawn env alone, not whether PID
+        # 99999 happens to be alive on the running machine. The exit contract
+        # itself is pinned by TestDoStartReadinessBranches.
         with patch("subprocess.Popen", side_effect=self._mock_popen_factory(captured_env)), \
              patch("main.InstanceRegistry") as MockReg, \
              patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=True), \
              patch("builtins.open", MagicMock()):
             MockReg.return_value.register = MagicMock()
             m._do_start(ws, 8765, wh)
