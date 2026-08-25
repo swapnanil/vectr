@@ -321,6 +321,66 @@ def _write_ide_config_merge_safe(
         print(f"  Appended vectr block to {path}", file=sys.stderr)
 
 
+def _write_guidance_files_merged(
+    specs: list[tuple[Path, dict]], *, search_only: bool,
+) -> None:
+    """Write the vectr guidance block into each IDE config file named by
+    `specs` — `(path, _write_ide_config_merge_safe options)` — writing each
+    DISTINCT underlying file exactly once (UPG-INIT-SYMLINK-WRITE-ORDER).
+
+    Workspaces commonly alias these files to one another (CLAUDE.md ->
+    AGENTS.md, AGENTS.md -> CLAUDE.md, GEMINI.md -> AGENTS.md, occasionally a
+    hardlink). Writing each PATH in turn follows the alias, so every write
+    after the first silently rewrote the same underlying bytes, and because
+    each write strips any existing vectr block before appending its own, the
+    LAST intended variant won and every earlier variant was discarded —
+    e.g. a CLAUDE.md->AGENTS.md symlink lost CLAUDE.md's deferred-tool
+    loading blockquote to AGENTS.md's rewrite seconds later.
+
+    Aliased paths are grouped by resolved identity — `(st_dev, st_ino)` for
+    files that stat, `realpath` for names that don't (which still collapses
+    a dangling symlink with its target's name) — and each group gets ONE
+    merge-safe write through its first member's path, with options merged
+    so the single shared body serves every member:
+
+    - create_if_missing: True when ANY member would create its file;
+    - tool_loading: True when ANY member gets the deferred-tool loading
+      blockquote — its conditional wording ("if ... not directly callable
+      yet") is inert for a harness without that mechanism;
+    - hooks_installed: True only when EVERY member's own hook surface is
+      installed — the conservative intersection. Hook-aware copy tells the
+      reader NOT to self-recall at session start because injection is
+      automatic; on an aliased file that claim is only true when every
+      harness reading it actually injects. With only some surfaces hooked,
+      the default variant keeps manual recall working everywhere at the
+      cost of one redundant recall where hooks ARE installed.
+
+    Non-aliased paths keep their own per-file write, message, and options —
+    behavior is unchanged for workspaces without aliases.
+    """
+    # Plain dict: insertion order is preserved (py3.7+), so non-aliased
+    # files keep their spec order below.
+    groups: dict[tuple, list[tuple[Path, dict]]] = {}
+    for path, opts in specs:
+        try:
+            st = path.stat()  # follows symlinks; hardlinks share an inode
+            key = ("inode", st.st_dev, st.st_ino)
+        except OSError:
+            # Missing name — realpath still resolves any symlink components
+            # it CAN, so a dangling symlink groups with its target's name.
+            key = ("missing", os.path.realpath(path))
+        groups.setdefault(key, []).append((path, opts))
+
+    for members in groups.values():
+        _write_ide_config_merge_safe(
+            members[0][0],
+            create_if_missing=any(o["create_if_missing"] for _, o in members),
+            hooks_installed=all(o["hooks_installed"] for _, o in members),
+            search_only=search_only,
+            tool_loading=any(o["tool_loading"] for _, o in members),
+        )
+
+
 def _remove_vectr_block(path: Path) -> None:
     """Remove the vectr block from a file. Delete the file if it becomes empty."""
     if not path.exists():
@@ -790,19 +850,32 @@ def _write_workspace_config(workspace: str, port: int, *, search_only: bool = Fa
     # hooks are installed for this workspace (UPG-CODEX-PARITY), mirroring how
     # CLAUDE.md keys on Claude Code hooks above; the other append-only files
     # have no automatic-injection path, so they always get the default variant.
+    # UPG-INIT-SYMLINK-WRITE-ORDER: the per-file specs are handed to
+    # `_write_guidance_files_merged`, which collapses aliased paths (symlink
+    # or hardlink — e.g. CLAUDE.md -> AGENTS.md) into ONE write with merged
+    # options instead of letting the second write silently overwrite the
+    # first through the alias. `.cursor/rules/vectr.mdc` stays outside this
+    # list: it is a vectr-owned whole-file write (`_write_cursor_rules`),
+    # not a merge-safe block append.
     codex_hooks_installed = _codex_hooks_installed(workspace)
-    _write_ide_config_merge_safe(
-        root / "CLAUDE.md", create_if_missing=True, hooks_installed=hooks_installed, search_only=search_only,
-        tool_loading=True,
-    )
-    for _rel in _IDE_CONFIG_APPEND_ONLY:
-        file_hooks = codex_hooks_installed if _rel == "AGENTS.md" else False
-        _write_ide_config_merge_safe(
-            root / _rel, create_if_missing=False, hooks_installed=file_hooks, search_only=search_only,
-        )
-    _write_ide_config_merge_safe(
-        root / ".github" / "copilot-instructions.md", create_if_missing=False, search_only=search_only,
-    )
+    # Every spec carries ALL option keys — _write_guidance_files_merged
+    # merges each key across an alias group by direct lookup.
+    def _spec(rel_path: Path, *, create: bool, hooks: bool = False, tool_loading: bool = False):
+        return (rel_path, dict(create_if_missing=create, hooks_installed=hooks, tool_loading=tool_loading))
+
+    guidance_specs: list[tuple[Path, dict]] = [
+        _spec(root / "CLAUDE.md", create=True, hooks=hooks_installed, tool_loading=True),
+        *(
+            _spec(
+                root / rel,
+                create=False,
+                hooks=codex_hooks_installed if rel == "AGENTS.md" else False,
+            )
+            for rel in _IDE_CONFIG_APPEND_ONLY
+        ),
+        _spec(root / ".github" / "copilot-instructions.md", create=False),
+    ]
+    _write_guidance_files_merged(guidance_specs, search_only=search_only)
     _write_cursor_rules(workspace, search_only=search_only)
 
     # When this workspace's daemon runs with authentication enabled
@@ -1845,9 +1918,12 @@ def _do_start(
         # UPG-CLI-STOP-NO-PORT-FLAG companion: a single deterministic line on
         # stdout so scripts/harnesses can discover the actually-bound port
         # (find_free_port may have walked past a busy --port) without
-        # scraping the human stderr text. Unlike the text branch below,
-        # "failed" exits non-zero here — this surface is opt-in specifically
-        # for callers that check results programmatically.
+        # scraping the human stderr text. Opt-in specifically for callers
+        # that check results programmatically; its exit contract is the one
+        # shared rule both output surfaces now follow (UPG-CLI-START-TEXT-
+        # EXIT-CODE): exit 1 exactly when `status == "failed"` — the daemon
+        # process exited before becoming ready and nothing is listening —
+        # and 0 otherwise, including "not_ready".
         print(json.dumps({
             "status": status,
             "port": port,
@@ -1904,11 +1980,29 @@ def _do_start(
         print(f"Logs      : {log_path}", file=sys.stderr)
         print(f"Poll readiness with: vectr status --path {workspace}", file=sys.stderr)
     else:
+        # UPG-CLI-START-TEXT-EXIT-CODE: the default text surface now follows
+        # the same exit contract the opt-in --json surface already had —
+        # exit 1 exactly when the daemon process exited before becoming
+        # ready (nothing is listening; any later use of this workspace's
+        # port is guaranteed to fail), and 0 otherwise. "not_ready" stays
+        # exit 0 deliberately: the process is still alive and may simply be
+        # loading (large workspace / first-run embedding-model download), so
+        # it is an uncertain outcome, not a failure — a nonzero exit there
+        # would make `set -e` scripts abort on slow-but-successful starts.
+        # Scripts that must distinguish all three outcomes have --json,
+        # whose status field names them explicitly. Pre-existing nonzero
+        # exits on this command (bind-auth refusal, --strict-port collision)
+        # already meant exit 0 was never a guarantee the daemon runs; this
+        # only closes the post-spawn gap. Callers that poll readiness after
+        # an apparent success (the benchmark harnesses, the editor
+        # extension) keep working unchanged — they never branched on the
+        # text path's code in the first place.
         print(
             f"Vectr failed to start: the process exited before becoming ready.",
             file=sys.stderr,
         )
         print(f"Logs      : {log_path}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _get_port_for_workspace(workspace: str, fallback: int) -> int:
