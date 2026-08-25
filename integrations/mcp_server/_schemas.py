@@ -878,6 +878,42 @@ _MEMORY_TOOLS = [
             "required": ["note_id"],
         },
     },
+    {
+        "name": "vectr_anchor",
+        "annotations": {
+            "title": "Attach anchor paths to a stored note",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        "description": (
+            "Attach file paths to an EXISTING note so future changes to those "
+            "files can flag the note as possibly-stale (UPG-ANCHOR-ATTACH). "
+            "The single-call replacement for re-storing with anchors=[...] and "
+            "supersedes=<note_id> when you notice afterwards that a note is "
+            "about a specific process/config file. Anchors are staleness "
+            "probes, never a claim that the note is wrong: on the next "
+            "staleness check, a changed anchor means the process MAY have "
+            "changed. Idempotent — paths already attached are reported back, "
+            "not duplicated."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "integer",
+                    "description": "ID of the note to attach anchors to (the [#N] id from vectr_recall)",
+                },
+                "anchors": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Workspace-relative file paths to anchor this note to (at least one)",
+                },
+            },
+            "required": ["note_id", "anchors"],
+        },
+    },
 ]  # end _MEMORY_TOOLS
 
 # ingest_traces — not gated by session memory (always available)
@@ -944,6 +980,7 @@ MEMORY_READY_TOOLS = frozenset(
         "vectr_revoke",
         "vectr_reinstate",
         "vectr_pin",
+        "vectr_anchor",
         "vectr_status",
         "vectr_snapshot",
         "vectr_snapshot_list",

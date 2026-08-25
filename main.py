@@ -2325,6 +2325,30 @@ def cmd_remember(args: argparse.Namespace) -> None:
         _handle_daemon_call_error(exc, port)
 
 
+def cmd_anchor(args: argparse.Namespace) -> None:
+    """Attach file anchors to an existing working-memory note
+    (UPG-ANCHOR-ATTACH): the shell path to POST /v1/anchor, mirroring the
+    MCP `vectr_anchor` tool — post-write anchoring without re-storing.
+    Anchors are staleness probes, never a claim about note correctness;
+    idempotent (already-present paths are reported, not duplicated)."""
+    import httpx
+
+    workspace = str(Path(args.path).resolve())
+    port = _get_port_for_workspace(workspace, args.port)
+    _check_version_skew(port, registry_entry=_resolve_hook_instance(workspace))
+    payload: dict = {"note_id": args.note_id, "anchors": list(args.paths)}
+    try:
+        resp = httpx.post(f"{_api_base(port)}/v1/anchor", json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        print(data.get("message", "Anchored."))
+        already = data.get("already_present") or []
+        if already:
+            print(f"Already anchored (no-op): {', '.join(already)}", file=sys.stderr)
+    except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
+        _handle_daemon_call_error(exc, port)
+
+
 def cmd_recall(args: argparse.Namespace) -> None:
     """Print recalled working-memory notes to stdout (UPG-9.1).
 
@@ -4272,6 +4296,16 @@ def main() -> None:
     p_recall.add_argument("--path", default=_default_path)
     p_recall.add_argument("--port", type=int, default=_default_port)
 
+    p_anchor = sub.add_parser("anchor", help="Attach file anchors to an existing working-memory note")
+    # NOTE: anchor paths are POSITIONAL (--path stays the universal
+    # workspace-root flag on every subcommand); repeat for several paths.
+    p_anchor.add_argument("paths", nargs="+", metavar="PATH",
+                          help="Workspace-relative file path(s) to anchor the note to")
+    p_anchor.add_argument("--id", type=int, required=True, dest="note_id",
+                          help="Note ID to attach anchors to (the [#N] id from 'vectr recall')")
+    p_anchor.add_argument("--path", default=_default_path)
+    p_anchor.add_argument("--port", type=int, default=_default_port)
+
     p_resume = sub.add_parser(
         "resume",
         help="Print 'pick up where you left off' to stdout",
@@ -4435,6 +4469,7 @@ def main() -> None:
         "forget":  cmd_forget,
         "remember": cmd_remember,
         "recall":  cmd_recall,
+        "anchor":  cmd_anchor,
         "resume":  cmd_resume,
         "hook":    cmd_hook,
         "key":     cmd_key,

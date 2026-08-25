@@ -12,6 +12,8 @@ from agent.chroma_dispatch import dispatch_chroma_async
 from agent.working_context_store import USER_STATED_PROVENANCE, bind_user_quote, resolve_remember_content
 
 from app.models import (
+    AnchorRequest,
+    AnchorResponse,
     ArcRecord,
     ArcResolveResult,
     ArcsDismissRequest,
@@ -558,6 +560,32 @@ async def pin(body: PinRequest, request: Request) -> PinResponse:
         note_id=body.note_id,
         pinned=body.pinned,
         message=f"Note #{body.note_id} {verb}.",
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/anchor", response_model=AnchorResponse)
+async def anchor(body: AnchorRequest, request: Request) -> AnchorResponse:
+    """Attach anchor paths to an existing note post-write
+    (UPG-ANCHOR-ATTACH, `vectr_anchor`): the single-call replacement for the
+    re-store-with-supersedes workaround. Anchors are delivery-shaping
+    metadata — check_staleness() compares their write-time hashes against
+    the live files on every check, so drift surfaces as a stale flag, never
+    as a judgment that the note is wrong. Idempotent: paths the note is
+    already anchored to are reported in `already_present`, not duplicated."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    result = svc.attach_anchors(body.note_id, body.anchors, session_id=body.session_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail={"error": "note_not_found", "detail": f"Note #{body.note_id} not found."})
+    return AnchorResponse(
+        note_id=body.note_id,
+        attached=result["attached"],
+        already_present=result["already_present"],
+        message=f"Attached {len(result['attached'])} anchor(s) to note #{body.note_id}.",
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

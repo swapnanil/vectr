@@ -915,11 +915,13 @@ def handle_tools_call(
         # kind/anchors-gated in remember_with_extras).
         proxy_suffix = ""
         if outcome.proxy_anchor_suggestions:
+            # UPG-ANCHOR-ATTACH: advertise the single-call vectr_anchor
+            # primitive instead of the old re-store-with-supersedes workaround.
             proxy_suffix = (
                 f"\nProcess files present here: {', '.join(outcome.proxy_anchor_suggestions)}. "
-                "To anchor this note to one, re-store it with anchors=[...] and "
-                "supersedes=<note_id>. A changed anchor means the process MAY have "
-                "changed, never that the note is wrong."
+                "To anchor this note to one, call vectr_anchor(note_id=<this note>, "
+                "anchors=[<path>]) — no re-store needed. A changed anchor means the "
+                "process MAY have changed, never that the note is wrong."
             )
         return {
             "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}{quote_suffix}{distill_suffix}{related_suffix}{revoked_suffix}{proxy_suffix}"}],
@@ -947,12 +949,29 @@ def handle_tools_call(
                 max_age_days = float(max_age_days)
             except (TypeError, ValueError):
                 max_age_days = None
-        note_id_arg = arguments.get("note_id") or None
+        # UPG-RECALL-NOTE-ID-NO-EXPAND: note_id= is a LOOKUP of one stored
+        # note, not a retrieval — a malformed id must say so explicitly
+        # instead of silently degrading to the generic ranked/index path.
+        # The reported live symptom: a caller passing "#581" (copied from
+        # the [#N] prefix in index output) failed int(), became None here,
+        # and got the whole index listing back instead of note #581's body.
+        # Bool is rejected first because JSON true/false are int subclasses
+        # (int(True) == 1 would silently expand an unrelated note), matching
+        # the distilled_from handler's bool exclusion above.
+        note_id_arg = arguments.get("note_id")
+        if isinstance(note_id_arg, bool):
+            return _mcp_error(
+                "note_id must be an integer note id (the [#N] shown by "
+                f"vectr_recall); got {note_id_arg!r}. Nothing was recalled."
+            )
         if note_id_arg is not None:
             try:
                 note_id_arg = int(note_id_arg)
             except (TypeError, ValueError):
-                note_id_arg = None
+                return _mcp_error(
+                    "note_id must be an integer note id (the [#N] shown by "
+                    f"vectr_recall); got {note_id_arg!r}. Nothing was recalled."
+                )
         text = dispatch_chroma_sync(
             service,
             service.recall,
@@ -1217,6 +1236,53 @@ def handle_tools_call(
                 if pinned else
                 "It will no longer be injected unconditionally — it now recalls the same as any other note."
             )}],
+            "isError": False,
+        }
+
+    # ---- vectr_anchor ----
+    if tool_name == "vectr_anchor":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
+        # UPG-ANCHOR-ATTACH: post-write anchoring without a re-store.
+        note_id = arguments.get("note_id")
+        # Bool rejected up front: JSON true/false are int subclasses and
+        # int(True) == 1 would silently mutate an unrelated note.
+        if note_id is None or isinstance(note_id, bool):
+            return _mcp_error("note_id is required as an integer (the [#N] id shown by vectr_recall)")
+        try:
+            nid = int(note_id)
+        except (TypeError, ValueError):
+            return _mcp_error("note_id must be an integer (the [#N] id shown by vectr_recall)")
+        anchors_arg = arguments.get("anchors")
+        # `not anchors_arg` is load-bearing: all() over an empty list is
+        # True, so an explicit anchors=[] would otherwise pass a check
+        # whose own message promises a non-empty list. REST enforces the
+        # same floor with min_length=1 and the CLI with nargs="+".
+        if not isinstance(anchors_arg, list) or not anchors_arg or not all(
+            isinstance(a, str) and a.strip() for a in anchors_arg
+        ):
+            return _mcp_error("anchors must be a non-empty list of file paths")
+        try:
+            # Transport-level session identity only (same convention as
+            # vectr_remember): the UPG-ANCHOR-UNOBSERVED-BINDING tri-state
+            # verdict describes THIS harness session's own observation
+            # ledger, so the calling LLM never gets to declare one.
+            result = service.attach_anchors(
+                note_id=nid, anchors=anchors_arg, session_id=session_id,
+            )
+        except ValueError as exc:
+            return _mcp_error(str(exc))
+        if result is None:
+            return _mcp_error(f"Note #{nid} not found.")
+        parts = [f"Attached {len(result['attached'])} anchor(s) to note #{nid}."]
+        if result["already_present"]:
+            parts.append(f"Already anchored (no-op): {', '.join(result['already_present'])}.")
+        parts.append("A changed anchor means the process MAY have changed, never that the note is wrong.")
+        return {
+            "content": [{"type": "text", "text": " ".join(parts)}],
             "isError": False,
         }
 
