@@ -368,6 +368,57 @@ class TestCodeIndexer:
         stats = warm.indexed_language_stats()
         assert warm.indexed_file_count == sum(s["files"] for s in stats.values())
 
+    def test_indexed_file_paths_reflect_persisted_collection_on_warm_start(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """UPG-WARMSTART-FINGERPRINT-STARVATION: on a daemon restart over an
+        already-indexed workspace, `indexed_file_paths` must report the
+        persisted corpus immediately. It previously returned `_indexed_files`
+        (the walk-scoped set of files THIS process has walked), which stays
+        empty until an in-process index run touches it — so across the whole
+        warm-start window the strategy fingerprint behind /v1/status and
+        vectr_map's passport render were silently computed from ZERO files,
+        indistinguishable from a genuinely fileless workspace."""
+        import agent.indexer as idx_module
+        from agent.indexer import CodeIndexer
+        from tests.conftest import _DummyEmbedProvider
+
+        monkeypatch.setattr(
+            idx_module, "get_embed_provider", lambda _model: _DummyEmbedProvider()
+        )
+        make_py(tmp_path, "a.py", "def a(): pass")
+        make_py(tmp_path, "b.py", "def b(): pass")
+        db = str(tmp_path / "chroma")
+
+        first = CodeIndexer(str(tmp_path), db_path=db)
+        first.index_workspace()
+        assert first.total_chunks > 0
+
+        # The "warm start": a brand-new indexer over the same persisted db,
+        # before anything has been walked in this one.
+        warm = CodeIndexer(str(tmp_path), db_path=db)
+        assert warm._indexed_files == set()  # nothing walked in this process yet
+        paths = warm.indexed_file_paths
+        assert len(paths) == 2, paths
+        assert any(p.endswith("a.py") for p in paths)
+        assert any(p.endswith("b.py") for p in paths)
+        # One source of truth with indexed_file_count (UPG-STATUS-WARMSTART-FILES):
+        # exactly one path per counted file — the two properties can never
+        # disagree again.
+        assert len(paths) == warm.indexed_file_count
+
+    def test_indexed_file_paths_tracks_delta_maintenance(
+        self, indexer, tmp_path,
+    ) -> None:
+        """The metadata-derived indexed_file_paths must keep tracking the
+        incremental `_apply_chunk_delta` maintenance on index/delete, not just
+        the construction-time seed."""
+        path_a = make_py(tmp_path, "a.py", "def a(): pass")
+        indexer.index_file(path_a)
+        assert [p for p in indexer.indexed_file_paths if p.endswith("a.py")]
+        indexer.delete_file(path_a)
+        assert not any(p.endswith("a.py") for p in indexer.indexed_file_paths)
+
     def test_indexed_file_count_falls_with_total_chunks_through_rebuild(
         self, indexer, tmp_path,
     ) -> None:
@@ -458,6 +509,60 @@ class TestCodeIndexer:
             "indexed_language_stats() triggered a paginated collection scan "
             "instead of reading the incrementally-maintained cache"
         )
+
+    def test_chunk_delta_partial_delete_keeps_file_until_last_chunk(
+        self, indexer, tmp_path,
+    ) -> None:
+        """UPG-CHUNK-DELTA-PARTIAL-FILE-DISCARD: `_apply_chunk_delta(sign=-1)`
+        must drop a file from its per-language bucket only when its LAST body
+        chunk goes — never on any deletion batch that merely touches the file.
+        Today every delete site is whole-file (`_delete_chunks_for_file`), so
+        no production path can build the partial batch this test simulates;
+        exercising the bookkeeping directly pins the invariant any future
+        partial-chunk deletion path (incremental re-chunk, per-symbol
+        invalidation, quality-based eviction) must preserve."""
+        path = make_py(tmp_path, "multi.py", "def a(): pass\ndef b(): pass\ndef c(): pass\n")
+        indexer.index_file(path)
+        stats_before = indexer.indexed_language_stats()
+        n_chunks = stats_before["python"]["chunks"]
+        assert n_chunks >= 2, "fixture must produce multiple chunks to split a deletion"
+
+        # Remove all but one of the file's chunks in a single batch.
+        indexer._apply_chunk_delta(
+            [{"language": "python", "file_path": path} for _ in range(n_chunks - 1)],
+            sign=-1,
+        )
+        stats = indexer.indexed_language_stats()
+        assert stats["python"]["files"] == 1, (
+            "a partial-chunk deletion batch must not discard the surviving file"
+        )
+        assert stats["python"]["chunks"] == 1
+        assert path in indexer.indexed_file_paths
+
+        # Removing the last chunk drops the file from its bucket (the
+        # whole-file behaviour every current delete site relies on).
+        indexer._apply_chunk_delta([{"language": "python", "file_path": path}], sign=-1)
+        stats = indexer.indexed_language_stats()
+        assert stats["python"]["files"] == 0
+        assert path not in indexer.indexed_file_paths
+
+    def test_delete_file_whole_file_still_discards_bucket(
+        self, indexer, tmp_path,
+    ) -> None:
+        """Regression guard alongside the partial-delete fix: the public
+        whole-file path (`delete_file` → `_delete_chunks_for_file`) must keep
+        discarding the file from its bucket exactly as before."""
+        path_a = make_py(tmp_path, "a.py", "def a(): pass")
+        path_b = make_py(tmp_path, "b.py", "def b(): pass")
+        indexer.index_file(path_a)
+        indexer.index_file(path_b)
+        assert len(indexer.indexed_file_paths) == 2
+
+        indexer.delete_file(path_a)
+        paths = indexer.indexed_file_paths
+        assert not any(p.endswith("a.py") for p in paths)
+        assert any(p.endswith("b.py") for p in paths)
+        assert indexer.indexed_language_stats()["python"]["files"] == 1
 
     def test_get_all_documents_returns_indexed_content(self, indexer, tmp_path) -> None:
         make_py(tmp_path, "fn.py", """
@@ -2148,6 +2253,219 @@ class TestTxtRstSectionHeadingChunking:
         section_chunks = [c for c in chunks if c.node_type == "section"]
         assert len(section_chunks) == 3, [c.symbol_name for c in chunks]
         assert all(c.language == "rst" for c in chunks)
+
+
+# ---------------------------------------------------------------------------
+# UPG-WINDOW-CHUNK-BYTE-CAP — a character cap alongside every line-based cap.
+# A single long source line (minified JS bundle, generated SQL dump, one
+# giant data-fixture line) defeats the window walker's 200-LINE window and
+# produced an unbounded chunk: reproduced on main with django's
+# raster.numpy.txt, which chunks into 2 windows whose largest is 709,049
+# characters across only 174 lines. Oversized chunks are now sub-split into
+# bounded pieces — tail retrievable, never truncated away.
+# ---------------------------------------------------------------------------
+
+class TestChunkCharCap:
+    CAP = 400
+
+    @pytest.fixture()
+    def _small_cap(self, monkeypatch):
+        """Shrink the cap for fast, deterministic splitting assertions.
+        Opt-in per test: the byte-identical and wholesale-drop tests below
+        deliberately do NOT request this fixture — they run under the real
+        shipped config."""
+        import agent.indexer._chunking as chunking_mod
+        monkeypatch.setattr(chunking_mod, "_MAX_CHUNK_CHARS", self.CAP)
+
+    def _giant_line(self, n_chars: int) -> str:
+        # Deterministic pseudo-data dump shaped like raster.numpy.txt's array
+        # literal — digits/punctuation, no newlines, no spaces near the end so
+        # the tail is recognisable.
+        body = "".join(f"{i % 97:02d}," for i in range(n_chars // 3 + 1))
+        return "DATA = np.array([" + body[:n_chars - len("DATA = np.array([") - 2] + "])"
+
+    def test_window_fallback_giant_line_produces_bounded_chunks(
+        self, _small_cap, tmp_path,
+    ) -> None:
+        """The reproduced shape end-to-end through chunk_file(): a mostly-small
+        .txt file whose one giant line previously emitted an unbounded window
+        chunk now yields multiple ≤cap pieces, with the giant line's bytes
+        fully preserved across its hard-split slices."""
+        from agent.indexer import chunk_file
+        giant = self._giant_line(50_000)
+        lines = [f"header line {i} of a small text fixture" for i in range(30)]
+        lines.insert(15, giant)
+        p = tmp_path / "raster-shaped.txt"
+        p.write_text("\n".join(lines), encoding="utf-8")
+
+        chunks = chunk_file(str(p))
+        assert len(chunks) > 1, "one giant line must produce multiple bounded chunks"
+        oversized = [c for c in chunks if len(c.content) > self.CAP]
+        assert oversized == [], (
+            f"chunks exceed the character cap: {[len(c.content) for c in oversized]}"
+        )
+        # Tail retrievable: the giant line's slices, re-joined IN ORDINAL
+        # ORDER (ids sort lexicographically — #10 before #2 — so order by the
+        # numeric suffix), ARE the line — nothing truncated away.
+        slices = [c for c in chunks if c.start_line == 16 and c.end_line == 16]
+        assert len(slices) >= 2, "the giant line itself must be hard-split into several slices"
+        slices.sort(key=lambda c: int(c.chunk_id.rsplit("#", 1)[1]))
+        assert "".join(s.content for s in slices) == giant
+        assert slices[-1].content.endswith("])"), "the line's tail bytes must survive in the last slice"
+
+    def test_hard_split_piece_ids_unique_and_marked(
+        self, _small_cap, tmp_path,
+    ) -> None:
+        """Hard-split slices of one line share its single-line span, so their
+        ids carry a '#<k>' ordinal suffix — unique among themselves and
+        uncollidable with any natural 'path:start-end' id (which never
+        contains '#')."""
+        from agent.indexer import chunk_file
+        lines = [self._giant_line(50_000)] + [f"filler {i}" for i in range(5)]
+        p = tmp_path / "one-liner.txt"
+        p.write_text("\n".join(lines), encoding="utf-8")
+        chunks = chunk_file(str(p))
+        ids = [c.chunk_id for c in chunks]
+        assert len(ids) == len(set(ids)), f"duplicate chunk ids: {ids}"
+        suffixed = [i for i in ids if "#" in i]
+        assert len(suffixed) >= 2, f"expected several #-suffixed hard-split ids, got {ids}"
+        for cid in suffixed:
+            base = cid.split("#")[0]
+            assert base.endswith("-1"), f"suffixed id {cid} must carry the single-line span"
+
+    def test_hard_split_pieces_survive_trivial_drop_for_txt(
+        self, _small_cap, tmp_path,
+    ) -> None:
+        """Each hard-split slice of a giant line is a 1-non-blank-line txt
+        chunk — exactly what is_trivial_chunk's short-doc rule (≤2 non-blank
+        lines) drops. The parent's keep/drop decision happens BEFORE the split
+        and pieces are never re-judged, so a KEPT oversized chunk cannot lose
+        its tail to hygiene: two filler lines keep the window above the
+        short-doc threshold, yet every slice alone would fail it — if
+        postprocessing re-judged pieces, ALL of them would vanish."""
+        from agent.indexer import chunk_file
+        lines = [self._giant_line(50_000), "filler line one", "filler line two"]
+        p = tmp_path / "kept-giant.txt"
+        p.write_text("\n".join(lines), encoding="utf-8")
+        chunks = chunk_file(str(p))
+        assert len(chunks) >= 2, (
+            "hard-split slices must survive postprocessing — dropping any of "
+            "them loses exactly the tail bytes the cap exists to make retrievable"
+        )
+
+    def test_short_doc_rule_still_drops_one_line_txt_wholesale(
+        self, tmp_path,
+    ) -> None:
+        """The keep/drop decision itself is unchanged by the char cap: a .txt
+        file whose ONLY content is one non-blank line is dropped wholesale by
+        UPG-15.5's short-doc rule exactly as before this fix. The rule has no
+        size escape hatch — relaxing it for huge stub-shaped docs would be a
+        separate product decision, not part of the byte cap."""
+        from agent.indexer import chunk_file
+        p = tmp_path / "only-giant.txt"
+        p.write_text(self._giant_line(50_000), encoding="utf-8")
+        assert chunk_file(str(p)) == [], (
+            "UPG-15.5 short-doc drop must be unaffected by the char-cap change"
+        )
+
+    def test_normal_txt_window_chunks_byte_identical(self, tmp_path):
+        """THE non-regression constraint: a normal source file's chunk set is
+        byte-for-byte unchanged. Runs under the REAL shipped config (no cap
+        override): a 450-line headingless .txt takes the same window-fallback
+        path as before this fix, and every emitted field must equal the
+        hand-computed pre-fix expectation exactly — ids, spans, contents,
+        node types, symbol names."""
+        import agent.indexer._chunking as chunking_mod
+
+        assert chunking_mod._MAX_CHUNK_CHARS >= 32_000, (
+            "this test pins behaviour under the real shipped cap; it must not "
+            "run under a shrunken override"
+        )
+        from agent.indexer import chunk_file
+        lines = [f"Plain unstructured prose line {i} with no section markers." for i in range(450)]
+        p = tmp_path / "flat.txt"
+        p.write_text("\n".join(lines), encoding="utf-8")
+
+        chunks = chunk_file(str(p))
+        # window=200, overlap=50 → starts at 0, 150, 300 (1-indexed 1, 151, 301).
+        expected_spans = [(1, 200), (151, 350), (301, 450)]
+        assert len(chunks) == len(expected_spans), (
+            f"expected {len(expected_spans)} windows, got {len(chunks)}"
+        )
+        for c, (start, end) in zip(chunks, expected_spans):
+            assert c.chunk_id == f"{p}:{start}-{end}", c.chunk_id
+            assert c.file_path == str(p)
+            assert c.start_line == start and c.end_line == end
+            assert c.node_type == "window"
+            assert c.symbol_name == ""
+            assert c.language == "txt"
+            assert c.content == "\n".join(lines[start - 1:end]), (
+                f"window content changed for span {start}-{end}"
+            )
+
+    def test_python_giant_line_function_bounded_on_ast_path(
+        self, _small_cap, tmp_path,
+    ) -> None:
+        """Acceptance extends past the window fallback: an AST-parsed python
+        file whose function holds one giant line emits only bounded chunks —
+        the leaf definition's content is verbatim file lines, so the giant
+        line is hard-split into #-suffixed single-line-span pieces."""
+        from agent.indexer import chunk_file
+        giant = self._giant_line(50_000)
+        src = "\n".join([
+            "def load_table():",
+            "    row = '" + "x" * 300 + "'",
+            "    return [",
+            giant + ",",
+            "    ]",
+            "",
+        ])
+        p = tmp_path / "table.py"
+        p.write_text(src, encoding="utf-8")
+        chunks = chunk_file(str(p))
+        assert chunks, "python file must still produce chunks"
+        assert all(len(c.content) <= self.CAP for c in chunks), (
+            [len(c.content) for c in chunks]
+        )
+
+    def test_char_carve_for_span_mismatched_content(self, _small_cap) -> None:
+        """When content lines don't map 1:1 onto the recorded span (stripped
+        prose sections; AST container headers keeping header lines but the
+        full container span), the splitter carves at CHARACTER granularity and
+        every piece inherits the parent's own span — honest 'within this
+        range' metadata instead of invented boundaries."""
+        from agent.indexer._chunking import _split_oversized_chunk
+        from agent.indexer._types import CodeChunk
+        parent = CodeChunk(
+            chunk_id="/ws/doc.txt:40-41",
+            content="\n".join(f"prose paragraph {i} " + "w" * 90 for i in range(6)),
+            file_path="/ws/doc.txt",
+            language="txt",
+            node_type="section",
+            start_line=40,
+            end_line=41,  # span says 2 lines; content has 6 (e.g. stripped section)
+            symbol_name="Section",
+        )
+        pieces = _split_oversized_chunk(parent)
+        assert len(pieces) >= 2
+        assert all(p.end_line == 41 and p.start_line == 40 for p in pieces)
+        ids = [p.chunk_id for p in pieces]
+        assert len(ids) == len(set(ids))
+        assert all("#" in cid for cid in ids)
+        assert all(len(p.content) <= self.CAP for p in pieces)
+        assert "".join(p.content for p in pieces) == parent.content
+        assert all(p.symbol_name == "Section" and p.node_type == "section" for p in pieces)
+
+    def test_no_char_cap_change_for_small_files(self, _small_cap, tmp_path) -> None:
+        """A file whose every chunk is within the cap takes the identical
+        pass-through path — no re-splitting, no id churn — even under a tiny
+        cap boundary probe just above the largest emitted chunk."""
+        from agent.indexer._chunking import _postprocess_chunks, _fallback_window_chunks
+        lines = [f"line {i}" for i in range(20)]
+        path = "/ws/small.txt"
+        raw = _fallback_window_chunks(lines, path, "txt")
+        out = _postprocess_chunks(list(raw))
+        assert out == raw, "chunks within the cap must pass through untouched"
 
 
 # ---------------------------------------------------------------------------

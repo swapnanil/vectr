@@ -184,6 +184,13 @@ class CodeIndexer:
         self._stats_seeded = False
         self._lang_chunk_counts: dict[str, int] = {}
         self._lang_files: dict[str, set[str]] = {}
+        # Live body-collection chunk count per file path (UPG-CHUNK-DELTA-
+        # PARTIAL-FILE-DISCARD). A file's chunks all carry one language (it is
+        # derived from the extension), so this is keyed by path alone. It is
+        # what lets `_apply_chunk_delta(sign=-1)` tell "some chunks of this
+        # file were deleted" apart from "the file's LAST chunk was deleted" —
+        # only the latter may drop the file from its `_lang_files` bucket.
+        self._file_chunk_counts: dict[str, int] = {}
         # Total chunk counts (body + purpose collections), read by
         # `total_chunks`/`total_purpose_chunks`. Seeded here from a real
         # (but construction-time, always off-the-event-loop) count;
@@ -312,6 +319,7 @@ class CodeIndexer:
         with self._stats_lock:
             self._lang_chunk_counts = {}
             self._lang_files = {}
+            self._file_chunk_counts = {}
             self._stats_seeded = True
             self._total_chunks_cache = 0
             self._purpose_chunks_cache = 0
@@ -1350,6 +1358,7 @@ class CodeIndexer:
             _PAGE = 1000
             chunks: dict[str, int] = {}
             files: dict[str, set[str]] = {}
+            file_counts: dict[str, int] = {}
             offset = 0
             while True:
                 with _timed_chroma_call("get"):
@@ -1365,11 +1374,13 @@ class CodeIndexer:
                     fp = meta.get("file_path")
                     if fp:
                         files.setdefault(lang, set()).add(fp)
+                        file_counts[fp] = file_counts.get(fp, 0) + 1
                 offset += len(ids)
                 if len(ids) < _PAGE:
                     break
             self._lang_chunk_counts = chunks
             self._lang_files = files
+            self._file_chunk_counts = file_counts
             self._stats_seeded = True
 
     def _apply_chunk_delta(self, metadatas: list[dict], sign: int) -> None:
@@ -1379,25 +1390,60 @@ class CodeIndexer:
         arithmetic — never around a ChromaDB or embedding call — so this
         lock is never the thing a request handler waits on
         (UPG-REST-STARVATION).
+
+        On removal, a file path is dropped from its `_lang_files` bucket only
+        when its LAST body chunk goes (tracked via `_file_chunk_counts`),
+        not on any deletion batch that merely touches the file
+        (UPG-CHUNK-DELTA-PARTIAL-FILE-DISCARD). Today every delete site is
+        whole-file (`_delete_chunks_for_file`, the only caller with
+        `sign=-1`, deletes exactly the `where={"file_path": ...}` result set),
+        so the two behaviours coincide — but the moment any partial-chunk
+        deletion path exists (incremental re-chunk, per-symbol invalidation,
+        quality-based eviction), discarding on first touch would silently
+        undercount `indexed_file_paths`/`indexed_language_stats()["files"]`
+        while `total_chunks` stayed right.
         """
         if not metadatas:
             return
         with self._stats_lock:
-            for meta in metadatas:
-                lang = meta.get("language")
-                if not lang:
-                    continue
-                self._lang_chunk_counts[lang] = max(
-                    0, self._lang_chunk_counts.get(lang, 0) + sign
-                )
-                fp = meta.get("file_path")
-                if sign > 0:
+            if sign > 0:
+                for meta in metadatas:
+                    lang = meta.get("language")
+                    if not lang:
+                        continue
+                    self._lang_chunk_counts[lang] = (
+                        self._lang_chunk_counts.get(lang, 0) + 1
+                    )
+                    fp = meta.get("file_path")
                     if fp:
                         self._lang_files.setdefault(lang, set()).add(fp)
-                elif fp:
-                    files = self._lang_files.get(lang)
-                    if files is not None:
-                        files.discard(fp)
+                        self._file_chunk_counts[fp] = (
+                            self._file_chunk_counts.get(fp, 0) + 1
+                        )
+            else:
+                removed_per_file: dict[str, int] = {}
+                for meta in metadatas:
+                    lang = meta.get("language")
+                    if not lang:
+                        continue
+                    self._lang_chunk_counts[lang] = max(
+                        0, self._lang_chunk_counts.get(lang, 0) - 1
+                    )
+                    fp = meta.get("file_path")
+                    if fp:
+                        removed_per_file[fp] = removed_per_file.get(fp, 0) + 1
+                # A file's chunks all share one language, so scanning every
+                # bucket's set here costs O(languages) — trivial next to the
+                # per-chunk loop above, and immune to any historical metadata
+                # having filed the path under an unexpected bucket.
+                for fp, n_removed in removed_per_file.items():
+                    remaining = self._file_chunk_counts.get(fp, 0) - n_removed
+                    if remaining > 0:
+                        self._file_chunk_counts[fp] = remaining
+                    else:
+                        self._file_chunk_counts.pop(fp, None)
+                        for files in self._lang_files.values():
+                            files.discard(fp)
 
     def _refresh_chunk_count_caches(self) -> None:
         """Refresh `total_chunks`/`total_purpose_chunks` from a real, one-off
@@ -1506,8 +1552,10 @@ class CodeIndexer:
         resets the cache together with `_total_chunks_cache`, so both counters
         also fall to 0 and climb together through a forced rebuild.
         `_indexed_files` itself keeps its separate, narrower meaning — files
-        walked this process — feeding `index_workspace()`'s return value;
-        `indexed_file_paths` below remains walk-scoped for the same reason.
+        walked this process — feeding only `index_workspace()`'s return value;
+        `indexed_file_paths` below reads this same metadata cache, so the two
+        properties can no longer disagree across a warm-start window
+        (UPG-WARMSTART-FINGERPRINT-STARVATION).
         """
         self._ensure_stats_seeded()
         with self._stats_lock:
@@ -1515,8 +1563,27 @@ class CodeIndexer:
 
     @property
     def indexed_file_paths(self) -> list[str]:
-        """Return a copy of all file paths currently in the index."""
-        return list(self._indexed_files)
+        """All file paths currently present in the body collection.
+
+        Derived from the SAME seeded / incrementally-maintained per-language
+        metadata cache `indexed_file_count` reads — actual chunk metadata, i.e.
+        exactly the corpus that property and `total_chunks` describe. It
+        previously returned `_indexed_files`, the set of files THIS PROCESS has
+        walked, which stays empty across a daemon restart's warm-start window
+        until some in-process index run touches it (UPG-WARMSTART-FINGERPRINT-
+        STARVATION). Every consumer silently degraded over that window: the
+        workspace fingerprint behind `/v1/status`'s strategy rationale was
+        computed from zero files, and vectr_map rendered its passport import
+        graph over an empty file list — silently, because a fingerprint over an
+        empty path set still returns a well-formed answer indistinguishable
+        from a genuinely fileless workspace. Metadata-derived, consumers see
+        the persisted corpus immediately at construction (`_ensure_stats_seeded`
+        runs eagerly in `__init__`), and the property now honours its own
+        documented "currently in the index" contract.
+        """
+        self._ensure_stats_seeded()
+        with self._stats_lock:
+            return [fp for files in self._lang_files.values() for fp in files]
 
     def indexed_language_stats(self) -> dict[str, dict[str, int]]:
         """Per-language coverage in the collection: `{lang: {"files", "chunks"}}`.

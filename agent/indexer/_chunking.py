@@ -12,6 +12,7 @@ from agent.chunk_quality import (
 )
 from agent.config import (
     INDEXING_MAX_CHUNK_LINES as _MAX_CHUNK_LINES,
+    INDEXING_MAX_CHUNK_CHARS as _MAX_CHUNK_CHARS,
     INDEXING_CLASS_HEADER_LINES as _CLASS_HEADER_LINES,
     INDEXING_FLOW_SCAN_HEAD_BYTES as _FLOW_SCAN_HEAD_BYTES,
     INDEXING_FLOW_PRAGMA as _FLOW_PRAGMA,
@@ -607,6 +608,105 @@ def _chunk_prose_headings(lines: list[str], file_path: str, language: str) -> li
     return chunks
 
 
+def _split_oversized_chunk(c: CodeChunk) -> list[CodeChunk]:
+    """Sub-split one chunk whose content exceeds `_MAX_CHUNK_CHARS` into pieces
+    each within the cap (UPG-WINDOW-CHUNK-BYTE-CAP). The caller has already
+    decided this chunk is worth keeping — pieces are never re-judged
+    individually, so none of them can be silently dropped and lose the tail.
+
+    Two carving strategies, chosen per chunk:
+
+    Line-granular — when the content is verbatim file lines 1:1 with the
+    chunk's recorded `[start_line, end_line]` span (window fallback chunks,
+    plain AST definitions), the same way `_chunk_prose_headings` sub-splits
+    an oversized section: accumulate whole lines up to the cap, emit, repeat.
+    Every full-line piece keeps honest line spans and a natural
+    `path:start-end` id. A single line longer than the cap itself (the
+    reproduced shape: a giant numpy array dump inside an otherwise small
+    .txt file, or any minified/generated one-liner — the window path is
+    shared by EVERY language's fallback) is hard-split into cap-char runs;
+    each run's span is that single line, so its id carries a `#<k>` ordinal
+    suffix to stay unique (`path:L-L#0`, `path:L-L#1`, …). Natural ids never
+    contain '#', so these can't collide with any other chunk; every
+    downstream consumer tolerates them (`vectr_fetch` resolves ids by exact
+    match; only the misalignment "nearest ids" ranking skips ids whose range
+    doesn't parse as two ints, which is acceptable degradation for
+    pathological input).
+
+    Character-granular — when the mapping between content lines and the
+    recorded span is broken (prose/markdown section chunks are stripped;
+    AST container-header chunks keep only their header lines but record the
+    FULL container span; AST definition chunks prepend leading comments),
+    slicing at line boundaries would assign spans that lie. The content is
+    instead carved into cap-char runs that all inherit the parent's own
+    `[start_line, end_line]`, each with a `#<k>`-suffixed id for uniqueness.
+
+    Unlike the window walker's 50-line overlap, sub-split pieces are DISJOINT:
+    overlap would multiply the very byte cost this cap exists to bound, and
+    the prose sub-split precedent doesn't overlap either.
+    """
+    content_lines = c.content.split("\n")
+    span_lines = c.end_line - c.start_line + 1
+    one_to_one = (
+        c.start_line > 0
+        and c.end_line >= c.start_line
+        and len(content_lines) == span_lines
+    )
+
+    def _piece(content: str, start_line: int, end_line: int, k: int | None) -> CodeChunk:
+        suffix = "" if k is None else f"#{k}"
+        return CodeChunk(
+            chunk_id=f"{c.file_path}:{start_line}-{end_line}{suffix}",
+            content=content,
+            file_path=c.file_path,
+            language=c.language,
+            node_type=c.node_type,
+            start_line=start_line,
+            end_line=end_line,
+            symbol_name=c.symbol_name,
+        )
+
+    pieces: list[CodeChunk] = []
+    if one_to_one:
+        acc: list[str] = []
+        acc_chars = 0
+        acc_start = c.start_line
+
+        def flush(last_line: int) -> None:
+            nonlocal acc, acc_chars
+            if acc:
+                pieces.append(_piece("\n".join(acc), acc_start, last_line, None))
+                acc = []
+                acc_chars = 0
+
+        for offset, line in enumerate(content_lines):
+            file_line = c.start_line + offset
+            if len(line) > _MAX_CHUNK_CHARS:
+                flush(file_line - 1)
+                for k in range(0, -(-len(line) // _MAX_CHUNK_CHARS)):
+                    pieces.append(_piece(
+                        line[k * _MAX_CHUNK_CHARS:(k + 1) * _MAX_CHUNK_CHARS],
+                        file_line, file_line, k,
+                    ))
+                acc_start = file_line + 1
+                continue
+            added = len(line) + (1 if acc else 0)  # +1 for the join newline
+            if acc and acc_chars + added > _MAX_CHUNK_CHARS:
+                flush(file_line - 1)
+                acc_start = file_line
+                added = len(line)
+            acc.append(line)
+            acc_chars += added
+        flush(c.end_line)
+    else:
+        for k in range(0, -(-len(c.content) // _MAX_CHUNK_CHARS)):
+            pieces.append(_piece(
+                c.content[k * _MAX_CHUNK_CHARS:(k + 1) * _MAX_CHUNK_CHARS],
+                c.start_line, c.end_line, k,
+            ))
+    return pieces
+
+
 def _postprocess_chunks(chunks: list[CodeChunk]) -> list[CodeChunk]:
     """Wave 1 chunk hygiene applied to every chunker path.
 
@@ -624,6 +724,15 @@ def _postprocess_chunks(chunks: list[CodeChunk]) -> list[CodeChunk]:
       only the DROP decision is gated on the chunk's own recorded properties.
     - UPG-1.2: tag re-export / import-only blocks as navigational so the ranker
       can heavily down-weight them (they're a table of contents, not an answer).
+    - UPG-WINDOW-CHUNK-BYTE-CAP: a kept chunk whose content exceeds
+      `_MAX_CHUNK_CHARS` (a single long line defeats every LINE-based cap on
+      the window fallback, which is shared by every language) is sub-split
+      into bounded pieces by `_split_oversized_chunk`. The split runs AFTER
+      the keep/drop/tag decisions above and its pieces are never re-judged:
+      a hard-split run of one huge data-dump line must not be misread by
+      `is_trivial_chunk`'s short-doc rule (a ≤2-non-blank-line .txt stub) and
+      dropped — that would silently discard exactly the tail bytes this split
+      exists to make retrievable.
     """
     out: list[CodeChunk] = []
     for c in chunks:
@@ -631,7 +740,10 @@ def _postprocess_chunks(chunks: list[CodeChunk]) -> list[CodeChunk]:
             continue
         if c.node_type != NAVIGATIONAL_NODE_TYPE and is_navigational_chunk(c.content, c.language):
             c.node_type = NAVIGATIONAL_NODE_TYPE
-        out.append(c)
+        if len(c.content) > _MAX_CHUNK_CHARS:
+            out.extend(_split_oversized_chunk(c))
+        else:
+            out.append(c)
     return out
 
 
