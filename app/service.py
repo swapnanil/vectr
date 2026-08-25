@@ -1664,9 +1664,21 @@ class VectrService:
     def locate(self, name: str, limit: int = 10) -> list:
         return self._symbol_graph.locate(self._workspace_root, name, limit)
 
-    def locate_with_snippets(self, name: str, limit: int = 10, caller_file: str | None = None):
-        """Locate symbols via L2 multi-strategy resolution. Returns LocateResult. No LLM call."""
-        return self._symbol_graph.locate_l2(self._workspace_root, name, limit=limit, caller_file=caller_file)
+    def locate_with_snippets(self, name: str, limit: int = 10, caller_file: str | None = None,
+                             with_near_miss: bool = True):
+        """Locate symbols via L2 multi-strategy resolution. Returns LocateResult. No LLM call.
+
+        UPG-LOCATE-NEARMISS-WIRE-PRIMARY-TOOL: this is the primary locate
+        surface (MCP `vectr_locate` + REST `/v1/locate`), so a total miss
+        carries deterministic near-miss candidates on the result's
+        `near_miss` field by default — explicitly labeled inexact wherever
+        rendered, never merged into `symbols`. Internal callers that only
+        need exact resolution (the search-hint paths call the symbol graph
+        directly) keep the cheaper no-suggestion behaviour."""
+        return self._symbol_graph.locate_l2(
+            self._workspace_root, name, limit=limit, caller_file=caller_file,
+            with_near_miss=with_near_miss,
+        )
 
     def trace(self, name: str, direction: str = "both", limit: int = 20,
               include_builtins: bool = False) -> dict:
