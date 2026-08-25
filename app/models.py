@@ -305,6 +305,13 @@ _EVENT_VALUES = ("session-start", "prompt-submit", "pre-edit", "pre-run", "pre-c
 # a separate, explicit call (PromoteRequest below) once a person has endorsed
 # the note.
 _REST_PROVENANCE_VALUES = ("agent", "auto")
+# UPG-REST-SORTBY-UNVALIDATED — mirrors recall()'s sort_by contract
+# (agent/working_context_store/_store.py::recall). Same local-tuple
+# convention as _VALID_KINDS above; MCP (tool schema enum) and CLI
+# (argparse choices) already enforce this vocabulary — without this tuple
+# the REST surface accepted any string and the store silently treated an
+# unknown value as relevance.
+_SORT_BY_VALUES = ("relevance", "recency", "priority", "chronological")
 
 
 class RememberRequest(BaseModel):
@@ -552,7 +559,7 @@ class RememberResponse(BaseModel):
             "(agent/proxy_anchors.py) — empty unless memory_write."
             "proxy_anchor_suggestions.enabled, kind='operational', and this call "
             "passed no anchors. Presence is glob-detected only, never content-read; "
-            "re-store with anchors=[...] to attach one."
+            "attach one with vectr_anchor(note_id=<this note>, anchors=[<path>])."
         ),
     )
 
@@ -627,6 +634,16 @@ class RecallRequest(BaseModel):
     def validate_kind(cls, v: str | None) -> str | None:
         if v is not None and v not in _VALID_KINDS:
             raise ValueError(f"kind must be one of: {', '.join(_VALID_KINDS)}")
+        return v
+
+    @field_validator("sort_by")
+    @classmethod
+    def validate_sort_by(cls, v: str) -> str:
+        # UPG-REST-SORTBY-UNVALIDATED: reject unknown values with a 422 at
+        # the REST boundary instead of letting the store silently treat
+        # them as relevance (same precedent as validate_kind above).
+        if v not in _SORT_BY_VALUES:
+            raise ValueError(f"sort_by must be one of: {', '.join(_SORT_BY_VALUES)}")
         return v
 
     @field_validator("surface")
@@ -736,6 +753,40 @@ class PinRequest(BaseModel):
 class PinResponse(BaseModel):
     note_id: int
     pinned: bool
+    message: str
+    processing_ms: int
+
+
+class AnchorRequest(BaseModel):
+    """Attach anchor paths to an EXISTING note post-write
+    (UPG-ANCHOR-ATTACH) — the first-class replacement for the
+    re-store-with-supersedes workaround. Anchors are delivery-shaping
+    staleness probes, never a claim about note correctness: check_staleness()
+    compares their write-time hashes against the live files on every check.
+    See WorkingContextStore.attach_anchors() for the pair format and
+    idempotency contract."""
+
+    note_id: int = Field(..., description="Note to attach anchors to")
+    anchors: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Workspace-relative file paths to anchor this note to (at least one)",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Calling session's identity — threads into the "
+            "UPG-ANCHOR-UNOBSERVED-BINDING tri-state observation verdict "
+            "recorded per attached path (True/False when this session has "
+            "an observation ledger, None when none exists)"
+        ),
+    )
+
+
+class AnchorResponse(BaseModel):
+    note_id: int
+    attached: list[str] = Field(default_factory=list, description="Paths actually added, in request order")
+    already_present: list[str] = Field(default_factory=list, description="Requested paths the note was already anchored to (idempotent no-ops)")
     message: str
     processing_ms: int
 

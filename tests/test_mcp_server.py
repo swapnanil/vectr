@@ -1739,7 +1739,10 @@ class TestVectrRememberWriteTimeOffersSuffixRendering:
         )
         text = result["content"][0]["text"]
         assert "Process files present here: Dockerfile, .github/workflows/ci.yml." in text
-        assert "re-store it with anchors=[...] and supersedes=<note_id>." in text
+        # UPG-ANCHOR-ATTACH: the suggestion now advertises the single-call
+        # vectr_anchor primitive instead of the re-store workaround.
+        assert "vectr_anchor(note_id=<this note>, anchors=[<path>])" in text
+        assert "no re-store needed" in text
         assert (
             "A changed anchor means the process MAY have changed, "
             "never that the note is wrong."
@@ -2050,6 +2053,35 @@ class TestVectrRecall:
         handle_tools_call("vectr_recall", {"note_id": 7}, svc)
         assert_seam_call(svc.recall, VectrService.recall, note_id=7)
 
+    def test_recall_note_id_hash_prefix_is_an_error_not_a_fallback(self) -> None:
+        """UPG-RECALL-NOTE-ID-NO-EXPAND: note_id= is a LOOKUP of one stored
+        note, not a retrieval — a malformed id ('#581' copied from the [#N]
+        prefix in index output, the reported live symptom) must be rejected
+        explicitly instead of silently degrading to the generic ranked/index
+        path."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_recall", {"note_id": "#581"}, svc)
+        assert result["isError"] is True
+        text = result["content"][0]["text"]
+        assert "integer" in text
+        assert "'#581'" in text  # the offending value is echoed for recovery
+        svc.recall.assert_not_called()
+
+    def test_recall_note_id_bool_is_an_error_not_silent_note_1(self) -> None:
+        """JSON true/false are int subclasses; int(True)==1 would silently
+        expand an unrelated note. Must error like any other malformed id."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_recall", {"note_id": True}, svc)
+        assert result["isError"] is True
+        svc.recall.assert_not_called()
+
+    def test_recall_note_id_numeric_string_still_coerces(self) -> None:
+        """A numeric string ("581" without the '#') is still accepted — the
+        fix targets malformed ids, not lenient int parsing."""
+        svc = _mock_service()
+        handle_tools_call("vectr_recall", {"note_id": "581"}, svc)
+        assert_seam_call(svc.recall, VectrService.recall, note_id=581)
+
     def test_recall_passes_sort_by_and_max_age(self) -> None:
         """UPG-RECALL-HIERARCHY: sort_by and max_age_days reach the service."""
         svc = _mock_service()
@@ -2061,6 +2093,98 @@ class TestVectrRecall:
         result = handle_tools_call("vectr_recall", {}, svc)
         assert result["isError"] is False
         assert "Notes" in result["content"][0]["text"]
+
+
+class TestVectrAnchor:
+    """UPG-ANCHOR-ATTACH: vectr_anchor dispatch — first-class post-write
+    anchoring, replacing the re-store-with-supersedes workaround."""
+
+    def test_anchor_calls_service_and_renders_result(self) -> None:
+        svc = _mock_service()
+        svc.attach_anchors.return_value = {"attached": ["Dockerfile"], "already_present": []}
+        result = handle_tools_call("vectr_anchor", {"note_id": 42, "anchors": ["Dockerfile"]}, svc)
+        assert result["isError"] is False
+        assert_seam_call(
+            svc.attach_anchors, VectrService.attach_anchors,
+            note_id=42, anchors=["Dockerfile"],
+        )
+        text = result["content"][0]["text"]
+        assert "Attached 1 anchor(s)" in text
+        # The deterrent framing travels with every anchor write.
+        assert "never that the note is wrong" in text
+
+    def test_anchor_reports_already_present_paths_as_noop(self) -> None:
+        svc = _mock_service()
+        svc.attach_anchors.return_value = {"attached": [], "already_present": ["Dockerfile"]}
+        result = handle_tools_call("vectr_anchor", {"note_id": 42, "anchors": ["Dockerfile"]}, svc)
+        assert result["isError"] is False
+        assert "no-op" in result["content"][0]["text"]
+
+    def test_anchor_unknown_note_is_an_explicit_error(self) -> None:
+        """Lookup semantics, consistent with vectr_pin/promote/revoke and
+        with UPG-RECALL-NOTE-ID-NO-EXPAND's never-fallback rule."""
+        svc = _mock_service()
+        svc.attach_anchors.return_value = None
+        result = handle_tools_call("vectr_anchor", {"note_id": 99999, "anchors": ["a.py"]}, svc)
+        assert result["isError"] is True
+        assert "not found" in result["content"][0]["text"]
+
+    def test_anchor_missing_note_id_is_an_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_anchor", {"anchors": ["a.py"]}, svc)
+        assert result["isError"] is True
+        svc.attach_anchors.assert_not_called()
+
+    def test_anchor_bool_note_id_is_an_error_not_silent_note_1(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_anchor", {"note_id": True, "anchors": ["a.py"]}, svc)
+        assert result["isError"] is True
+        svc.attach_anchors.assert_not_called()
+
+    def test_anchor_malformed_note_id_is_an_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_anchor", {"note_id": "#42", "anchors": ["a.py"]}, svc)
+        assert result["isError"] is True
+        svc.attach_anchors.assert_not_called()
+
+    def test_anchor_missing_empty_or_non_string_anchors_are_errors(self) -> None:
+        svc = _mock_service()
+        for bad_args in (
+            {"note_id": 42},                          # anchors absent
+            {"note_id": 42, "anchors": []},           # empty list
+            {"note_id": 42, "anchors": [""]},         # empty string element
+            {"note_id": 42, "anchors": [42]},         # non-string element
+            {"note_id": 42, "anchors": "a.py"},       # bare string, not a list
+        ):
+            result = handle_tools_call("vectr_anchor", bad_args, svc)
+            assert result["isError"] is True, f"{bad_args!r} must be rejected"
+        svc.attach_anchors.assert_not_called()
+
+    def test_anchor_threads_transport_session_id(self) -> None:
+        """Session identity is transport-level (the harness's own session,
+        same convention as vectr_remember) — it feeds the
+        UPG-ANCHOR-UNOBSERVED-BINDING observation verdict per attached path."""
+        svc = _mock_service()
+        svc.attach_anchors.return_value = {"attached": ["a.py"], "already_present": []}
+        handle_tools_call(
+            "vectr_anchor", {"note_id": 9, "anchors": ["a.py"]}, svc,
+            session_id="sess-1",
+        )
+        assert_seam_call(svc.attach_anchors, VectrService.attach_anchors, session_id="sess-1")
+
+    def test_anchor_schema_declares_both_required_args(self) -> None:
+        from integrations.mcp_server._schemas import MCP_TOOLS
+        matches = [t for t in MCP_TOOLS if t["name"] == "vectr_anchor"]
+        assert len(matches) == 1
+        schema = matches[0]["inputSchema"]
+        assert schema["required"] == ["note_id", "anchors"]
+        assert matches[0]["annotations"]["idempotentHint"] is True
+
+    def test_anchor_is_memory_ready_gated(self) -> None:
+        """Servable as soon as phase 1 construction completes, like its
+        sibling working-note mutators."""
+        from integrations.mcp_server._schemas import MEMORY_READY_TOOLS
+        assert "vectr_anchor" in MEMORY_READY_TOOLS
 
     def test_recall_appends_eviction_hint_when_should_evict(self) -> None:
         svc = _mock_service()
@@ -2240,8 +2364,9 @@ class TestVectrForget:
         names = {t["name"] for t in tools}
         # UPG-MEMORY-STATE-MACHINE §4.2 added vectr_revoke/vectr_reinstate (18 = 16 + 2);
         # memoization-l3-distiller-design added vectr_distill (19 = 18 + 1);
-        # UPG-RECALL-MISS-FLOOR part (b) added vectr_pin (20 = 19 + 1).
-        assert len(tools) == 20
+        # UPG-RECALL-MISS-FLOOR part (b) added vectr_pin (20 = 19 + 1);
+        # UPG-ANCHOR-ATTACH added vectr_anchor (21 = 20 + 1).
+        assert len(tools) == 21
         assert {
             "vectr_recall", "vectr_forget", "vectr_promote", "vectr_revoke", "vectr_reinstate",
             "vectr_snapshot", "vectr_snapshot_list", "vectr_resume", "vectr_distill", "vectr_pin",

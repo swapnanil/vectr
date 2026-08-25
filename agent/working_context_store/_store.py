@@ -1878,6 +1878,70 @@ class WorkingContextStore:
         audit("PIN", workspace=workspace, note_id=note_id, pinned=pinned)
         return True
 
+    def attach_anchors(
+        self,
+        workspace: str,
+        note_id: int,
+        anchors: list[str],
+        session_id: str | None = None,
+    ) -> dict[str, list[str]] | None:
+        """Attach anchor paths to an EXISTING note (UPG-ANCHOR-ATTACH,
+        `vectr_anchor`): first-class post-write anchoring, replacing the
+        re-store-with-supersedes workaround. Like set_pinned()/
+        update_note_fields(), anchors are mutable delivery-shaping metadata,
+        so this is a plain UPDATE plus one audit() call — deliberately NOT a
+        note_events lifecycle event: NOTE_EVENT_KINDS covers the note's
+        content lifecycle, and staleness is re-derived from live anchor
+        hashes on every check_staleness() anyway, so a newly attached anchor
+        participates in the next check with no event required.
+
+        Pair construction mirrors remember(): [path, content_hash_or_None,
+        observed_tri_state] — hash computed NOW via _hash_path_content()
+        (it becomes the baseline the next check_staleness() compares
+        against), observation verdict via _anchor_observed_at_write().
+
+        Idempotent: a requested path already present on the note (exact
+        string match on element 0, same value remember() stored verbatim)
+        is skipped and reported in `already_present`, not duplicated.
+        A fully-idempotent request (nothing new) writes nothing and audits
+        nothing.
+
+        Returns {"attached": [...], "already_present": [...]} — attached
+        lists paths actually added, in request order — or None if the note
+        does not exist in this workspace. Raises ValueError when `anchors`
+        is empty, mirroring update_note_fields()'s
+        require-at-least-one-field contract."""
+        if not anchors:
+            raise ValueError("attach_anchors requires at least one anchor path")
+        note = self.get_note(workspace, note_id)
+        if note is None:
+            return None
+        root = Path(workspace)
+        existing_paths = {a[0] for a in (note.anchors or [])}
+        attached: list[str] = []
+        already_present: list[str] = []
+        new_pairs: list[list] = []
+        for p in anchors:
+            if p in existing_paths:
+                already_present.append(p)
+                continue
+            # Third element is the UPG-ANCHOR-UNOBSERVED-BINDING tri-state —
+            # same semantics as in remember().
+            new_pairs.append(
+                [p, _hash_path_content(root, p), self._anchor_observed_at_write(workspace, session_id, p)]
+            )
+            existing_paths.add(p)
+            attached.append(p)
+        if new_pairs:
+            merged = [list(a) for a in (note.anchors or [])] + new_pairs
+            with self._conn() as conn:
+                conn.execute(
+                    "UPDATE notes SET anchors = ? WHERE workspace = ? AND note_id = ?",
+                    (json.dumps(merged), workspace, note_id),
+                )
+            audit("ANCHOR_ATTACH", workspace=workspace, note_id=note_id, attached=attached)
+        return {"attached": attached, "already_present": already_present}
+
     def revoke_note(
         self,
         workspace: str,
@@ -2463,8 +2527,11 @@ class WorkingContextStore:
 
         max_age_days: applied as a SQL filter after candidate fetch (UPG-RECALL-HIERARCHY).
         sort_by: 'relevance' preserves semantic order; 'recency'/'priority'/
-        'chronological' each re-sort the candidate set after fetch
-        (UPG-RECALL-HIERARCHY, UPG-DECISION-TIMELINE).
+        'chronological' each re-sort the candidate set after fetch, with a
+        sort-aware SQL prefetch guaranteeing the true top-`limit` rows by
+        that key are present even when they missed the semantic pool
+        (UPG-RECALL-HIERARCHY, UPG-DECISION-TIMELINE,
+        UPG-RECALL-SEMANTIC-POOL-SORT-TRUNCATION).
         session_id: scope="session" enforcement (TRIGGER-ENGINE wave 2a) —
         see recall()'s docstring; the same post-LIMIT trade-off applies.
         """
@@ -2503,31 +2570,46 @@ class WorkingContextStore:
             if not candidate_ids:
                 return []
 
-        # Fetch from SQLite by semantic candidate IDs, applying metadata filters
-        placeholders = ",".join("?" * len(candidate_ids))
-        sql = f"SELECT * FROM notes WHERE workspace = ? AND note_id IN ({placeholders})"
-        params: list = [workspace, *candidate_ids]
+        # Metadata filters, built ONCE and shared by two queries: the
+        # semantic-candidate fetch immediately below, and the sort-aware
+        # prefetch in the non-relevance branch further down
+        # (UPG-RECALL-SEMANTIC-POOL-SORT-TRUNCATION). They deliberately
+        # EXCLUDE the `note_id IN (...)` semantic restriction, which is
+        # appended only to the candidate fetch: the prefetch's entire job is
+        # to reach rows that MISSED the semantic pool, so reusing a WHERE
+        # clause that pins membership to that same pool would make it a
+        # no-op.
+        filter_sql = ""
+        filter_params: list = []
 
         if not include_superseded:
-            sql += " AND valid_until IS NULL"
+            filter_sql += " AND valid_until IS NULL"
 
         if priority:
-            sql += " AND priority = ?"
-            params.append(priority)
+            filter_sql += " AND priority = ?"
+            filter_params.append(priority)
 
         if kind:
-            sql += " AND kind = ?"
-            params.append(kind)
+            filter_sql += " AND kind = ?"
+            filter_params.append(kind)
 
         if tags:
             tag_clauses = " OR ".join(["tags LIKE ?" for _ in tags])
-            sql += f" AND ({tag_clauses})"
-            params.extend([f'%"{t}"%' for t in tags])
+            filter_sql += f" AND ({tag_clauses})"
+            filter_params.extend([f'%"{t}"%' for t in tags])
 
         if max_age_days is not None:
             cutoff = time.time() - max_age_days * 86400
-            sql += " AND created_at >= ?"
-            params.append(cutoff)
+            filter_sql += " AND created_at >= ?"
+            filter_params.append(cutoff)
+
+        # Fetch from SQLite by semantic candidate IDs, applying metadata filters
+        placeholders = ",".join("?" * len(candidate_ids))
+        sql = (
+            f"SELECT * FROM notes WHERE workspace = ? AND note_id IN ({placeholders})"
+            + filter_sql
+        )
+        params: list = [workspace, *candidate_ids, *filter_params]
 
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -2538,8 +2620,44 @@ class WorkingContextStore:
             ordered = [id_to_row[nid] for nid in candidate_ids if nid in id_to_row][:limit]
             notes = [self._row_to_note(r) for r in ordered]
         else:
+            # UPG-RECALL-SEMANTIC-POOL-SORT-TRUNCATION: the pool holds only
+            # the top `limit * 3` SEMANTIC matches, so when more notes than
+            # that pass the metadata filters above, re-sorting just the pool
+            # can silently drop the true oldest/highest-priority/newest note
+            # (it never made the semantic pool). For an explicit non-relevance
+            # sort, re-run the same METADATA filters (without the semantic
+            # `note_id IN (...)` restriction) with that sort's ORDER BY so the
+            # true top-`limit` rows by the requested key are guaranteed
+            # present, and union them into the pool (setdefault keeps every
+            # semantic-pool row already fetched). Membership deliberately may
+            # ignore query similarity here: a caller naming a sort invokes an
+            # ordering contract over the filtered corpus, not "the nearest few,
+            # reordered". min_similarity does NOT gate these prefetched rows —
+            # cosine similarity is only defined within the measured pool.
+            # Unknown sort_by values get no prefetch, matching recall()'s SQL
+            # path's fall-through-to-default leniency.
+            _SORT_ORDER_SQL = {
+                # ORDER BY fragments mirror recall()'s canonical copies above.
+                "recency": " ORDER BY created_at DESC LIMIT ?",
+                "priority": (
+                    " ORDER BY CASE priority WHEN 'high' THEN 0"
+                    " WHEN 'medium' THEN 1 ELSE 2 END, created_at DESC LIMIT ?"
+                ),
+                "chronological": " ORDER BY created_at ASC, note_id ASC LIMIT ?",
+            }
+            order_sql = _SORT_ORDER_SQL.get(sort_by)
+            if order_sql is not None:
+                prefetch_sql = (
+                    "SELECT * FROM notes WHERE workspace = ?" + filter_sql + order_sql
+                )
+                with self._conn() as conn:
+                    rows_pre = conn.execute(
+                        prefetch_sql, [workspace, *filter_params, limit]
+                    ).fetchall()
+                for r in rows_pre:
+                    id_to_row.setdefault(r["note_id"], r)
             # Convert all candidates to notes, then re-sort.
-            all_notes = [self._row_to_note(r) for r in rows]
+            all_notes = [self._row_to_note(r) for r in id_to_row.values()]
             if sort_by == "recency":
                 all_notes.sort(key=lambda n: n.created_at, reverse=True)
             elif sort_by == "priority":

@@ -414,6 +414,11 @@ def client_real_memory(tmp_path):
         ws, note_id, actor=actor, reason=reason
     )
     svc.pin_note.side_effect = lambda note_id, pinned=True: real_store.set_pinned(ws, note_id, pinned)
+    svc.attach_anchors.side_effect = (
+        lambda note_id, anchors, session_id=None: real_store.attach_anchors(
+            ws, note_id, anchors, session_id=session_id
+        )
+    )
 
     # TRIGGER-ENGINE wave 2a: a minimal per-session ledger registry mirroring
     # `VectrService._ledger_for`/`reset_trigger_ledger` so REST-level tests

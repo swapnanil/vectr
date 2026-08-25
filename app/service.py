@@ -2276,6 +2276,26 @@ class VectrService:
             self._bump_notes_epoch()
         return changed
 
+    def attach_anchors(
+        self, note_id: int, anchors: list[str], session_id: str | None = None,
+    ) -> dict | None:
+        """Attach anchor paths to an existing note post-write
+        (UPG-ANCHOR-ATTACH): the single-call replacement for the
+        re-store-with-supersedes workaround. See
+        `WorkingContextStore.attach_anchors()` for the exact contract
+        (raises ValueError on empty anchors; returns None if the note does
+        not exist). Idempotent: already-present paths land in
+        `already_present`; the notes epoch is bumped only when at least one
+        path was actually added, so a fully-idempotent repeat is not a
+        mutation."""
+        self._require_memory_layer()
+        result = self._context_store.attach_anchors(
+            self._workspace_root, note_id, anchors, session_id=session_id,
+        )
+        if result and result["attached"]:
+            self._bump_notes_epoch()
+        return result
+
     def get_note(self, note_id: int):
         """Fetch a single note by ID (UPG-RECALL-HIERARCHY expand path)."""
         self._require_memory_layer()

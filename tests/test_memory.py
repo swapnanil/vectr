@@ -2380,6 +2380,85 @@ class TestAnchorObservedBinding:
         assert _UNOBSERVED_STATUS_SUFFIX in text
 
 
+class TestAttachAnchors:
+    """UPG-ANCHOR-ATTACH: post-write anchoring without a re-store — same
+    pair format, hashing, and tri-state observation contracts as
+    remember(anchors=...)."""
+
+    def test_attach_computes_hash_and_stores_tri_state(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "src" / "auth.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("original content")
+        nid = store.remember(ws, "a gotcha about auth.py")
+        result = store.attach_anchors(ws, nid, ["src/auth.py"])
+        assert result == {"attached": ["src/auth.py"], "already_present": []}
+        note = store.get_note(ws, nid)
+        assert len(note.anchors) == 1
+        assert note.anchors[0][0] == "src/auth.py"
+        # Same write-time hashing contract as remember(anchors=...).
+        assert note.anchors[0][1] is not None
+        assert len(note.anchors[0][1]) == 16
+        # No session ledger exists -> unknown, never False (tri-state).
+        assert note.anchors[0][2] is None
+
+    def test_attach_is_idempotent_on_exact_paths(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note", anchors=["src/auth.py"])
+        result = store.attach_anchors(ws, nid, ["src/auth.py"])
+        assert result == {"attached": [], "already_present": ["src/auth.py"]}
+        note = store.get_note(ws, nid)
+        assert len(note.anchors) == 1  # not duplicated
+
+    def test_attach_mixed_new_and_existing_preserves_order(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note", anchors=["a.py"])
+        result = store.attach_anchors(ws, nid, ["a.py", "b.py"])
+        assert result == {"attached": ["b.py"], "already_present": ["a.py"]}
+        note = store.get_note(ws, nid)
+        assert [a[0] for a in note.anchors] == ["a.py", "b.py"]
+
+    def test_attach_to_unknown_note_returns_none(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        assert store.attach_anchors(ws, 999999, ["a.py"]) is None
+
+    def test_attach_requires_at_least_one_anchor(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note")
+        with pytest.raises(ValueError):
+            store.attach_anchors(ws, nid, [])
+        note = store.get_note(ws, nid)
+        assert not note.anchors  # unchanged by the rejected call
+
+    def test_attached_anchor_participates_in_staleness_check(self, tmp_path) -> None:
+        """The point of the whole primitive end-to-end: the attach-time
+        hash becomes the drift baseline — a later file change flags the
+        note stale on the next check, exactly as if anchored at write."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "src" / "server.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("original")
+        nid = store.remember(ws, "gotcha about server.py")
+        store.attach_anchors(ws, nid, ["src/server.py"])
+        note = store.get_note(ws, nid)
+        assert not store.check_staleness([note], ws)  # baseline matches
+        f.write_text("changed content")
+        note = store.get_note(ws, nid)
+        stale = store.check_staleness([note], ws)
+        assert stale.get(nid)
+
+    def test_attach_with_session_ledger_records_observation_verdict(self, tmp_path) -> None:
+        """session_id threads into the UPG-ANCHOR-UNOBSERVED-BINDING
+        tri-state exactly as remember(session_id=..., anchors=...) does."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        # Ledger exists but never observed src/auth.py -> genuine False.
+        store.fire(ws, event="pre-edit", file_path="src/other.py", session_id="s1")
+        nid = store.remember(ws, "note about auth")
+        store.attach_anchors(ws, nid, ["src/auth.py"], session_id="s1")
+        note = store.get_note(ws, nid)
+        assert note.anchors[0][2] is False
+
+
 class TestKindDefaultScopes:
     """UPG-TRIGGER-SCOPE-KIND-DEFAULTS (bm2-design-skeleton.md §1's Default
     bundles table): an OMITTED scope (the caller never passes scope=) is
