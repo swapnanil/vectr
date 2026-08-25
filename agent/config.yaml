@@ -836,6 +836,18 @@ indexing:
   # hard cap — prevents single huge chunks diluting embeddings
   max_chunk_lines: 150
 
+  # Character cap per chunk (UPG-WINDOW-CHUNK-BYTE-CAP). Every LINE-based cap
+  # (this section's max_chunk_lines, the window walker's 200-line windows) is
+  # defeated by a single long line: a minified JS bundle, a generated SQL dump,
+  # or one giant data-fixture line produces an unbounded chunk that costs
+  # memory in its embed batch and is truncated away at the embedder's token
+  # cap anyway. Any chunk exceeding this many characters is sub-split into
+  # bounded pieces (tail stays retrievable — nothing is truncated away).
+  # Default headroom: a full 200-line window of dense source averages well
+  # under half of this, so ordinary files never hit the cap; it only bites
+  # genuinely oversized content.
+  max_chunk_chars: 32000
+
   # lines kept for class-level chunk (sig + docstring + attrs)
   class_header_lines: 40
 

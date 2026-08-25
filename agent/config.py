@@ -84,6 +84,12 @@ RERANK_BATCH_SIZE_BY_DEVICE : dict[str, int]
 INDEXING_MAX_CHUNK_LINES : int
     Hard cap on lines per chunk — prevents single huge chunks diluting embeddings (UPG-12.1).
 
+INDEXING_MAX_CHUNK_CHARS : int
+    Hard cap on characters per chunk (UPG-WINDOW-CHUNK-BYTE-CAP). A single long
+    source line defeats every line-based cap; oversized chunks are sub-split
+    into bounded pieces so the tail stays retrievable instead of being embedded
+    (paid for in memory/latency) and then truncated at the embedder's token cap.
+
 INDEXING_CLASS_HEADER_LINES : int
     Lines kept for class-level chunk (sig + docstring + attrs) (UPG-12.1).
 
@@ -831,6 +837,7 @@ if "default" not in RERANK_BATCH_SIZE_BY_DEVICE:
 _idx_cfg: dict[str, Any] = _cfg["indexing"]
 
 INDEXING_MAX_CHUNK_LINES: int = int(_idx_cfg["max_chunk_lines"])
+INDEXING_MAX_CHUNK_CHARS: int = int(_idx_cfg["max_chunk_chars"])
 INDEXING_CLASS_HEADER_LINES: int = int(_idx_cfg["class_header_lines"])
 INDEXING_BUILD_ARTIFACT_DIR_SUFFIXES: tuple[str, ...] = tuple(
     str(s).lower() for s in _idx_cfg["build_artifact_dir_suffixes"]

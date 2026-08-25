@@ -217,6 +217,21 @@ class TestConfigLoaderIndexing:
             f"INDEXING_MAX_CHUNK_LINES should be 150, got {cfg.INDEXING_MAX_CHUNK_LINES}"
         )
 
+    def test_max_chunk_chars_default(self) -> None:
+        """UPG-WINDOW-CHUNK-BYTE-CAP: the character cap must ship with enough
+        headroom that an ordinary full window never hits it — only genuinely
+        oversized content (one giant line / minified one-liner) may be
+        sub-split."""
+        assert cfg.INDEXING_MAX_CHUNK_CHARS == 32000, (
+            f"INDEXING_MAX_CHUNK_CHARS should be 32000, got {cfg.INDEXING_MAX_CHUNK_CHARS}"
+        )
+        # Even an absurdly generous reading of a full window — one line for
+        # every point of max_chunk_lines, each line itself max_chunk_lines
+        # characters long — must stay under the char cap.
+        assert cfg.INDEXING_MAX_CHUNK_CHARS > (
+            cfg.INDEXING_MAX_CHUNK_LINES * cfg.INDEXING_MAX_CHUNK_LINES
+        )
+
     def test_class_header_lines_default(self) -> None:
         assert cfg.INDEXING_CLASS_HEADER_LINES == 40, (
             f"INDEXING_CLASS_HEADER_LINES should be 40, got {cfg.INDEXING_CLASS_HEADER_LINES}"
@@ -224,6 +239,10 @@ class TestConfigLoaderIndexing:
 
     def test_max_chunk_lines_is_int(self) -> None:
         assert isinstance(cfg.INDEXING_MAX_CHUNK_LINES, int)
+
+    def test_max_chunk_chars_is_positive_int(self) -> None:
+        assert isinstance(cfg.INDEXING_MAX_CHUNK_CHARS, int)
+        assert cfg.INDEXING_MAX_CHUNK_CHARS > 0
 
     def test_class_header_lines_is_int(self) -> None:
         assert isinstance(cfg.INDEXING_CLASS_HEADER_LINES, int)
@@ -239,6 +258,7 @@ class TestConfigLoaderIndexing:
         """indexer.py must import chunk line limits from config, not define its own."""
         import agent.indexer as indexer_mod
         assert indexer_mod._MAX_CHUNK_LINES is cfg.INDEXING_MAX_CHUNK_LINES
+        assert indexer_mod._MAX_CHUNK_CHARS is cfg.INDEXING_MAX_CHUNK_CHARS
         assert indexer_mod._CLASS_HEADER_LINES is cfg.INDEXING_CLASS_HEADER_LINES
 
 
