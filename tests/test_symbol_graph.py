@@ -931,6 +931,112 @@ class TestNearestSymbolNamesExactGuardUPG:
         assert near == []
 
 
+# ---------------------------------------------------------------------------
+# UPG-LOCATE-NEARMISS-WIRE-PRIMARY-TOOL: locate_l2's "none" branch now carries
+# the same deterministic near-miss candidates nearest_symbol_names has always
+# computed — ON THE RESULT (opt-in via `with_near_miss`) so the primary
+# vectr_locate surface can render them labeled inexact instead of answering a
+# zero-suggestion miss. `symbols` stays empty: a suggestion, never a rewrite.
+# ---------------------------------------------------------------------------
+
+class TestLocateNearMissOnResultUPG:
+    def test_qualified_double_typo_carries_suggestion_on_result(self, tmp_path) -> None:
+        """The original witness shape: vectr_locate("OrderRepositary.save_recrd")
+        called directly (not via trace/search) still resolves "none" — never a
+        silent rewrite — but no longer returns a zero-suggestion miss."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(
+            tmp_path, "orders.py",
+            "class OrderRepository:\n    def save_record(self):\n        pass\n",
+        )
+        g.index_file("ws", str(tmp_path / "orders.py"))
+
+        result = g.locate_l2("ws", "OrderRepositary.save_recrd", with_near_miss=True)
+        assert result.resolution_strategy == "none"
+        assert result.symbols == []          # a miss stays a miss
+        assert [s.name for s in result.near_miss] == ["OrderRepository.save_record"]
+        assert result.near_miss[0].snippet   # rendered by the formatter below
+
+    def test_prefix_containment_shape_carried_on_result(self, tmp_path) -> None:
+        """The other fallback stage (token = real name + misremembered extra
+        word) reaches the primary tool path too, not just nearest_symbol_names
+        callers."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "control.py", "class CacheControl:\n    pass\n")
+        g.index_file("ws", str(tmp_path / "control.py"))
+
+        result = g.locate_l2("ws", "CacheControlHeader", with_near_miss=True)
+        assert result.resolution_strategy == "none"
+        assert [s.name for s in result.near_miss] == ["CacheControl"]
+
+    def test_near_miss_off_by_default_for_internal_callers(self, tmp_path) -> None:
+        """Internal locate_l2 callers (the search-hint paths run it per token
+        per search) keep the cheap behaviour: no suggestion queries on a miss
+        unless they opt in."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "control.py", "class CacheControl:\n    pass\n")
+        g.index_file("ws", str(tmp_path / "control.py"))
+
+        result = g.locate_l2("ws", "CacheControlHeader")
+        assert result.resolution_strategy == "none"
+        assert result.near_miss == []
+
+    def test_exact_resolution_never_populates_near_miss(self, tmp_path) -> None:
+        g = SymbolGraph(str(tmp_path))
+        make_py(tmp_path, "control.py", "class CacheControl:\n    pass\n")
+        g.index_file("ws", str(tmp_path / "control.py"))
+
+        result = g.locate_l2("ws", "CacheControl", with_near_miss=True)
+        assert result.resolution_strategy == "exact"
+        assert result.near_miss == []
+
+    def test_formatter_leads_with_labeled_inexact_suggestions(self, tmp_path) -> None:
+        """Same labeling convention as trace()'s qualifier-near-miss banner and
+        the search-hint near-miss section — never the plain dead-end text and
+        never presented as a match."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(
+            tmp_path, "orders.py",
+            "class OrderRepository:\n    def save_record(self):\n        pass\n",
+        )
+        g.index_file("ws", str(tmp_path / "orders.py"))
+
+        result = g.locate_l2("ws", "OrderRepositary.save_recrd", with_near_miss=True)
+        text = g.format_locate_l2_for_llm(result)
+        assert "No exact match for 'OrderRepositary.save_recrd'" in text
+        assert "(inexact — verify before use)" in text
+        assert "[function] OrderRepository.save_record" in text
+        assert "No symbol matching" not in text
+
+    def test_formatter_plain_miss_unchanged_without_candidates(self, tmp_path) -> None:
+        """A miss with no near-miss candidates keeps the existing redirect
+        message byte-for-byte."""
+        g = SymbolGraph(str(tmp_path))
+        text = g.format_locate_l2_for_llm(
+            LocateResult(symbols=[], resolution_strategy="none",
+                         query="XyzzyQwerty"),
+        )
+        assert "No symbol matching 'XyzzyQwerty' found in the indexed codebase." in text
+
+
+class TestNearestSymbolNamesExactTokenUPG:
+    def test_exactly_resolved_token_gets_no_suggestions(self, tmp_path) -> None:
+        """nearest_symbol_names' contract is 'a token that already failed EXACT
+        resolution': an exactly-resolving token now returns [] rather than
+        falling through to prefix-containment candidates dressed up as a
+        near-miss for an already-correct lookup."""
+        g = SymbolGraph(str(tmp_path))
+        make_py(
+            tmp_path, "mod.py",
+            "class CacheControl:\n    pass\n"
+            "class CacheControlExtra:\n    pass\n",
+        )
+        g.index_file("ws", str(tmp_path / "mod.py"))
+
+        assert g.locate_l2("ws", "CacheControl").resolution_strategy == "exact"
+        assert g.nearest_symbol_names("ws", "CacheControl", limit=10) == []
+
+
 class TestLevenshtein:
     def test_identical_strings(self) -> None:
         assert _levenshtein("abc", "abc") == 0
@@ -2260,6 +2366,153 @@ class TestCallerAggregationDoesNotCollapseAcrossFilesUPG:
         text = g.format_trace_for_llm(result, "target")
         assert f"{ws}/one/handler.py" in text
         assert f"{ws}/two/handler.py" in text
+
+
+# ---------------------------------------------------------------------------
+# UPG-TRACE-CALLER-LIMIT-TRANSPARENCY: every trace list truncated at `limit`
+# says how many entries were cut — a caller/callee list must never read as
+# complete when it is only a prefix of the real one. Since
+# UPG-TRACE-CALLER-AGGREGATION stopped collapsing same-leaf callers across
+# files, distinct (name, file) pairs each consume their own slot against the
+# limit, so truncation got dramatically easier to hit silently.
+# ---------------------------------------------------------------------------
+
+class TestTraceLimitTransparencyUPG:
+    def test_flat_callers_truncated_count_and_footer(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        # 25 DISTINCT callers (distinct names AND files — each its own entry
+        # since UPG-TRACE-CALLER-AGGREGATION) against limit=20.
+        _seed_edges(g, ws, [
+            (f"{ws}/pkg/caller_{i}.py", f"caller_{i}", 10 + i, "target")
+            for i in range(25)
+        ])
+        result = g.trace(ws, "target", direction="callers", limit=20)
+        assert len(result["callers"]) == 20
+        assert result["callers_truncated"] == 5
+        text = g.format_trace_for_llm(result, "target")
+        assert "(+5 more callers not shown — pass a higher limit to show)" in text
+
+    def test_flat_callees_truncated_count_and_footer(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [
+            (f"{ws}/caller.py", "target", i, f"callee_{i}")
+            for i in range(25)
+        ])
+        result = g.trace(ws, "target", direction="callees", limit=20)
+        assert len(result["callees"]) == 20
+        assert result["callees_truncated"] == 5
+        text = g.format_trace_for_llm(result, "target")
+        assert "(+5 more callees not shown — pass a higher limit to show)" in text
+
+    def test_per_definition_callee_truncation_reported_per_entry(
+        self, tmp_path,
+    ) -> None:
+        """The by-definition branch renders one callee list PER definition —
+        each list is truncated independently against the same limit, so each
+        entry carries its own count and its own footer."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [
+            ("target", "function", f"{ws}/mod_a.py"),
+            ("target", "function", f"{ws}/mod_b.py"),
+        ])
+        specs = []
+        for mod in ("mod_a", "mod_b"):
+            specs += [
+                (f"{ws}/{mod}.py", "target", i, f"{mod}_callee_{i}")
+                for i in range(22)
+            ]
+        _seed_edges(g, ws, specs)
+
+        result = g.trace(ws, "target", direction="both", limit=20)
+        by_def = result["by_definition"]
+        assert len(by_def) == 2
+        assert all(entry["truncated_callees"] == 2 for entry in by_def)
+        text = g.format_trace_for_llm(result, "target")
+        # Both per-definition lists were cut, and BOTH cuts are disclosed.
+        assert text.count("(+2 more callees not shown — pass a higher limit to show)") == 2
+
+    def test_definitions_beyond_limit_disclosed(self, tmp_path) -> None:
+        """Whole definitions (with their calls) silently missing when the
+        definitions fetch hits the cap is the worst shape of this defect — the
+        reader can't even tell which sections never rendered."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_symbols(g, ws, [
+            ("multi_def_fn", "function", f"{ws}/mod_{i}.py") for i in range(21)
+        ])
+        result = g.trace(ws, "multi_def_fn", direction="both", limit=20)
+        assert len(result["by_definition"]) == 20
+        assert result["definitions_truncated"] == 1
+        text = g.format_trace_for_llm(result, "multi_def_fn")
+        assert (
+            "(+1 more definition of 'multi_def_fn' beyond "
+            "the limit not shown — pass a higher limit to show)"
+        ) in text
+
+    def test_definitions_disclosure_suppressed_for_resolved_qualified_query(
+        self, tmp_path,
+    ) -> None:
+        # A resolved Class.method query fetches ALL classes' definitions of the
+        # leaf, then keeps only the named class's — beyond-cap definitions are
+        # other-class sites excluded BY DESIGN there, so disclosing them would
+        # misrepresent designed filtering as silent loss. Both definitions here
+        # belong to the NAMED class (in different files), so whichever one the
+        # LIMIT-capped fetch returns, the qualifier still resolves and the
+        # second definition is genuinely lost to the cap — yet correctly not
+        # disclosed as such for this query shape.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        make_py(
+            tmp_path, "orders_a.py",
+            "class OrderRepository:\n    def save_record(self):\n        pass\n",
+        )
+        make_py(
+            tmp_path, "orders_b.py",
+            "class OrderRepository:\n    def save_record(self):\n        pass\n",
+        )
+        g.index_file(ws, str(tmp_path / "orders_a.py"))
+        g.index_file(ws, str(tmp_path / "orders_b.py"))
+
+        result = g.trace(ws, "OrderRepository.save_record", direction="both", limit=1)
+        assert result.get("qualified_class") == "OrderRepository"
+        assert len(result["by_definition"]) == 1
+        assert result["definitions_truncated"] == 1
+        text = g.format_trace_for_llm(result, "OrderRepository.save_record")
+        assert "beyond the limit not shown" not in text
+
+    def test_no_truncation_means_no_footer(self, tmp_path) -> None:
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [(f"{ws}/a.py", "caller", 1, "target")])
+        result = g.trace(ws, "target", direction="both", limit=20)
+        assert result["callers_truncated"] == 0
+        assert result["callees_truncated"] == 0
+        assert result["definitions_truncated"] == 0
+        text = g.format_trace_for_llm(result, "target")
+        assert "not shown" not in text
+
+    def test_aggregate_edges_reports_truncated_directly(self, tmp_path) -> None:
+        """Unit guard on the authoritative layer: `_aggregate_edges` owns THE
+        cut against the user-facing `limit`, so the count must come from there
+        — a count taken after any second truncation would itself be wrong."""
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        edges = [
+            CallEdge(
+                from_file=f"{ws}/f{i}.py", from_symbol=f"caller_{i}",
+                from_line=i + 1, to_symbol="target", edge_type="calls",
+            )
+            for i in range(7)
+        ]
+        shown, hidden, truncated = g._aggregate_edges(
+            ws, edges, "from_symbol", 5, rank_repo_defined=False,
+        )
+        assert len(shown) == 5
+        assert hidden == 0
+        assert truncated == 2
 
 
 # ---------------------------------------------------------------------------
