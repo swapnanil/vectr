@@ -21,9 +21,28 @@ The permanent, growing set of reproducible cases that guard vectr's two quality 
   },
   "origin": "eval-v2 N=1 audit F1; live-reproduced on 8792",
   "upg": "UPG-11.1",
-  "status": "failing"               // failing | green
+  "status": "failing",              // failing | green
+  "embed_model_stamp": "...",       // embed model the expect was last verified under
+  "corpus_revision_stamp": "..."    // witness revision the expect was last verified against:
+                                    //   git SHA of the external corpus checkout (full or >=7-char hex),
+                                    //   "in-repo" — inputs are fixture files versioned by this repo,
+                                    //   "unknown" — verifying revision could not be established.
+                                    // Never guess a SHA: a wrong stamp manufactures false attribution.
 }
 ```
+
+### Corpus-revision stamping (UPG-CORPUS-REVISION-STAMP)
+
+A rank label is only interpretable against the corpus bytes it was produced
+on. `corpus_revision_stamp` records that revision so a passing→failing flip
+is attributable: the harness resolves the served workspace's actual revision
+from `/v1/status` `workspace_root` (`git rev-parse HEAD`) plus its dirty state
+(`git status --porcelain`) and prints `[REVISION MISMATCH]` / dirty notices
+when they disagree with the stamp. Print-only, never a FAIL — same severity
+contract as `embed_model_stamp`: it flags a label needing re-verification,
+not a product defect. A non-git workspace or unavailable git degrades to a
+reported unknown, never to a silent pass. When you (re)verify a case's
+expectations, set its stamp to the served revision of THAT run.
 
 ## Daemon setup (product cases)
 - Dedicated acceptance port **8799**, global binary `/opt/homebrew/bin/vectr`.

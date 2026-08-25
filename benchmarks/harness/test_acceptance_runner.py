@@ -19,13 +19,19 @@ Same trap: "all" in "recall", "get" in "getter", "run" in "running".
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 
 import run_acceptance
 from run_acceptance import (
     _symbol_leaf,
+    classify_revision_stamp,
+    comparable_revision,
+    describe_served_revision,
     main,
+    resolve_served_revision,
     run_case,
     top_k_absent,
     top_k_contains,
@@ -505,3 +511,300 @@ class TestMainErrorHandlingAndBuckets:
         assert "Results: 2 pass / 0 fail / 1 error / 1 manual / 0 skip  (4 total)" in out
         # an error must fail the gate (non-zero exit), not be swallowed
         assert exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# corpus_revision_stamp — served-revision resolution, stamp classification and
+# main() wiring (UPG-CORPUS-REVISION-STAMP).
+#
+# The stamp records which witness revision a case's 'expect' was verified
+# against so a passing->failing flip is attributable to corpus drift vs
+# product regression. Contract pinned here:
+#   - only a git SHA (>=7 hex chars) is comparable; "in-repo"/"unknown" are
+#     provenance sentinels, never diffed against a workspace;
+#   - a dirty working tree is reported DISTINCTLY from clean match/mismatch,
+#     because HEAD over a dirty tree does not describe the indexed bytes;
+#   - non-git roots, missing dirs and unavailable git degrade to explicit
+#     unknown states — never a crash, never a fabricated revision;
+#   - every notice is print-only: mismatches must NOT change the exit code.
+# ---------------------------------------------------------------------------
+
+# A plausible full SHA that is guaranteed different from any scratch repo's
+# HEAD (all-zero-prefix SHAs cannot be committed).
+_OTHER_SHA = "0e5a1b2c3d4e5f60718293a4b5c6d7e8f9012345"
+
+
+def _git_in(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run git inside a scratch repo with a hermetic identity/config."""
+    return subprocess.run(
+        ["git", "-C", str(repo),
+         "-c", "user.name=vectr-harness-test",
+         "-c", "user.email=harness-test@example.com",
+         "-c", "commit.gpgsign=false",
+         *args],
+        capture_output=True, text=True, check=False,
+    )
+
+
+def _init_repo(tmp_path: Path) -> tuple[Path, str]:
+    """Create a real minimal git repo with one commit; return (path, full sha)."""
+    repo = tmp_path / "witness"
+    repo.mkdir()
+    init = _git_in(repo, "init", "-q")
+    assert init.returncode == 0, init.stderr
+    (repo / "tracked.txt").write_text("line one\n")
+    add = _git_in(repo, "add", ".")
+    assert add.returncode == 0, add.stderr
+    commit = _git_in(repo, "commit", "-q", "-m", "init")
+    assert commit.returncode == 0, commit.stderr
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True)
+    return repo, head.stdout.strip()
+
+
+class TestComparableRevision:
+    def test_full_sha_is_comparable(self) -> None:
+        sha = "0f1e2d3c4b5a69788796a5b4c3d2e1f001234567"
+        assert comparable_revision(sha.upper()) == sha
+
+    def test_abbreviated_sha_is_comparable(self) -> None:
+        # The abbreviated GATE-v4 django witness SHA from the lane brief.
+        assert comparable_revision("957d0cee71") == "957d0cee71"
+
+    def test_in_repo_sentinel_is_not_comparable(self) -> None:
+        assert comparable_revision("in-repo") is None
+
+    def test_unknown_sentinel_is_not_comparable(self) -> None:
+        assert comparable_revision("unknown") is None
+
+    def test_missing_none_and_blank_are_not_comparable(self) -> None:
+        assert comparable_revision(None) is None
+        assert comparable_revision("") is None
+        assert comparable_revision("   ") is None
+
+    def test_six_char_hex_is_not_comparable(self) -> None:
+        # Below 7 chars an abbreviation is too ambiguous to diff against.
+        assert comparable_revision("957d0c") is None
+
+    def test_non_hex_value_is_not_comparable(self) -> None:
+        # Historical records cite vectr-trunk revisions like '56be786' in
+        # prose; anything that is not pure hex must never be diffed.
+        assert comparable_revision("trunk-56be786") is None
+
+
+class TestResolveServedRevision:
+    def test_clean_repo_reports_head_sha(self, tmp_path) -> None:
+        repo, sha = _init_repo(tmp_path)
+        result = resolve_served_revision(str(repo))
+        assert result == {"state": "clean", "revision": sha, "detail": None}
+
+    def test_modified_tracked_file_is_dirty(self, tmp_path) -> None:
+        repo, sha = _init_repo(tmp_path)
+        (repo / "tracked.txt").write_text("line one\nline two\n")
+        result = resolve_served_revision(str(repo))
+        assert result["state"] == "dirty"
+        assert result["revision"] == sha
+
+    def test_untracked_file_alone_is_dirty(self, tmp_path) -> None:
+        # Pins the brief's requirement that UNTRACKED changes also count: a
+        # new untracked file can enter the index without any tracked diff.
+        repo, sha = _init_repo(tmp_path)
+        (repo / "untracked.txt").write_text("stray\n")
+        result = resolve_served_revision(str(repo))
+        assert result["state"] == "dirty"
+        assert result["revision"] == sha
+
+    def test_plain_directory_is_not_a_git_repo(self, tmp_path) -> None:
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        result = resolve_served_revision(str(plain))
+        assert result["state"] == "not-a-git-repo"
+        assert result["revision"] is None
+
+    def test_missing_directory_is_unknown_not_crash(self, tmp_path) -> None:
+        result = resolve_served_revision(str(tmp_path / "does-not-exist"))
+        assert result["state"] == "unknown"
+        assert result["revision"] is None
+        assert "does-not-exist" in result["detail"]
+
+    def test_none_root_is_unknown(self) -> None:
+        result = resolve_served_revision(None)
+        assert result["state"] == "unknown"
+        assert result["revision"] is None
+
+    def test_blank_root_is_unknown(self) -> None:
+        assert resolve_served_revision("")["state"] == "unknown"
+        assert resolve_served_revision("   ")["state"] == "unknown"
+
+    def test_non_string_root_is_unknown(self) -> None:
+        # A daemon sending a malformed workspace_root must degrade, not crash.
+        assert resolve_served_revision(12345)["state"] == "unknown"
+
+    def test_no_git_binary_degrades_to_reported_unknown(self, tmp_path, monkeypatch) -> None:
+        repo, _sha = _init_repo(tmp_path)
+        monkeypatch.setenv("PATH", "")
+        result = resolve_served_revision(str(repo))
+        assert result["state"] == "no-git-binary"
+        assert result["revision"] is None
+
+    def test_status_timeout_reports_cleanliness_unknown(self, tmp_path, monkeypatch) -> None:
+        repo, sha = _init_repo(tmp_path)
+        real_git = run_acceptance._git
+
+        def hung_status(args, cwd, timeout=15):
+            if args and args[0] == "status":
+                raise subprocess.TimeoutExpired(cmd="git status", timeout=timeout)
+            return real_git(args, cwd, timeout=timeout)
+
+        monkeypatch.setattr(run_acceptance, "_git", hung_status)
+        result = resolve_served_revision(str(repo))
+        assert result["state"] == "cleanliness-unknown"
+        assert result["revision"] == sha
+
+    def test_status_failure_reports_cleanliness_unknown(self, tmp_path, monkeypatch) -> None:
+        repo, sha = _init_repo(tmp_path)
+        real_git = run_acceptance._git
+
+        def failing_status(args, cwd, timeout=15):
+            if args and args[0] == "status":
+                return subprocess.CompletedProcess(
+                    args=["git"], returncode=128, stdout="",
+                    stderr="fatal: unable to read tree")
+            return real_git(args, cwd, timeout=timeout)
+
+        monkeypatch.setattr(run_acceptance, "_git", failing_status)
+        result = resolve_served_revision(str(repo))
+        assert result["state"] == "cleanliness-unknown"
+        assert result["revision"] == sha
+
+
+class TestDescribeServedRevision:
+    def test_clean_names_the_sha(self) -> None:
+        line = describe_served_revision(
+            {"state": "clean", "revision": _OTHER_SHA, "detail": None})
+        assert _OTHER_SHA in line
+        assert "clean" in line
+        assert "DIRTY" not in line
+
+    def test_dirty_is_loud_and_explains_why(self) -> None:
+        line = describe_served_revision(
+            {"state": "dirty", "revision": _OTHER_SHA, "detail": None})
+        assert _OTHER_SHA in line
+        assert "DIRTY" in line
+        assert "does not describe the indexed bytes" in line
+
+    def test_non_git_states_report_unknown(self) -> None:
+        for state in ("not-a-git-repo", "no-git-binary"):
+            line = describe_served_revision({"state": state, "revision": None,
+                                             "detail": None})
+            assert line.startswith("unknown"), state
+
+    def test_generic_unknown_carries_detail(self) -> None:
+        line = describe_served_revision(
+            {"state": "unknown", "revision": None, "detail": "boom"})
+        assert "boom" in line
+
+
+class TestClassifyRevisionStamp:
+    _served_clean = {"state": "clean", "revision": _OTHER_SHA, "detail": None}
+    _served_dirty = {"state": "dirty", "revision": _OTHER_SHA, "detail": None}
+
+    def test_clean_exact_match_is_match(self) -> None:
+        verdict = classify_revision_stamp(_OTHER_SHA, self._served_clean)
+        assert verdict == "match"
+
+    def test_clean_abbreviated_stamp_matches_full_served(self) -> None:
+        verdict = classify_revision_stamp(_OTHER_SHA[:10], self._served_clean)
+        assert verdict == "match"
+
+    def test_uppercase_stamp_normalizes(self) -> None:
+        verdict = classify_revision_stamp(_OTHER_SHA.upper(), self._served_clean)
+        assert verdict == "match"
+
+    def test_clean_different_revision_is_mismatch(self) -> None:
+        other = "1234567890abcdef1234567890abcdef12345678"
+        assert classify_revision_stamp(other, self._served_clean) == "mismatch"
+
+    def test_dirty_same_revision_is_dirty_match_not_match(self) -> None:
+        # Matching SHA + dirty tree must NOT count as a verified match: the
+        # indexed bytes may differ from the labelled ones.
+        assert classify_revision_stamp(_OTHER_SHA, self._served_dirty) == "dirty-match"
+
+    def test_dirty_different_revision_is_mismatch_dirty(self) -> None:
+        other = "1234567890abcdef1234567890abcdef12345678"
+        assert classify_revision_stamp(other, self._served_dirty) == "mismatch-dirty"
+
+    def test_cleanliness_unknown_same_revision_is_dirty_match(self) -> None:
+        served = {"state": "cleanliness-unknown", "revision": _OTHER_SHA,
+                  "detail": "git status failed"}
+        assert classify_revision_stamp(_OTHER_SHA, served) == "dirty-match"
+
+    def test_comparable_stamp_with_unresolved_served_is_unchecked(self) -> None:
+        for served in ({"state": "not-a-git-repo", "revision": None, "detail": None},
+                       {"state": "no-git-binary", "revision": None, "detail": None},
+                       {"state": "unknown", "revision": None, "detail": None}):
+            assert classify_revision_stamp(_OTHER_SHA, served) == "served-unresolved"
+
+    def test_sentinels_and_absence_are_unstamped(self) -> None:
+        for stamp in ("in-repo", "unknown", None, "", "trunk-56be786"):
+            assert classify_revision_stamp(stamp, self._served_clean) == "unstamped"
+
+
+class TestMainRevisionStampWiring:
+    """End-to-end through main(): HTTP mocked, workspace is a REAL scratch git
+    repo at a known SHA. Pins the severity contract: a revision mismatch is
+    printed but never changes the exit code."""
+
+    def _write_cases(self, path: Path) -> None:
+        cases = [
+            # All three share one trivially-passing expect; the variation under
+            # test is the corpus_revision_stamp value, not the assertions.
+            {"id": "F-rev-mismatch", "query": "q1", "corpus": "django",
+             "expect": {"top_k_contains": {"k": 3, "symbol": "Field.deconstruct"}},
+             "corpus_revision_stamp": "1234567890abcdef1234567890abcdef12345678"},
+            {"id": "F-rev-inrepo", "query": "q2", "corpus": "zig-fixture",
+             "expect": {"top_k_contains": {"k": 3, "symbol": "Field.deconstruct"}},
+             "corpus_revision_stamp": "in-repo"},
+            {"id": "F-rev-unknown", "query": "q3", "corpus": "django",
+             "expect": {"top_k_contains": {"k": 3, "symbol": "Field.deconstruct"}},
+             "corpus_revision_stamp": "unknown"},
+        ]
+        with open(path, "w") as fh:
+            for c in cases:
+                fh.write(json.dumps(c) + "\n")
+
+    def test_mismatch_printed_exit_code_untouched(self, tmp_path, monkeypatch, capsys) -> None:
+        repo, sha = _init_repo(tmp_path)
+        cases_path = tmp_path / "rev_cases.jsonl"
+        self._write_cases(cases_path)
+
+        def fake_get(base: str, path: str) -> dict:
+            assert path == "/v1/status"
+            return {"indexed_files": 1, "total_chunks": 1, "languages": [],
+                    "workspace_root": str(repo)}
+
+        def fake_post(base: str, path: str, body: dict) -> dict:
+            assert path == "/v1/search"
+            return {"results": [{"file": "/p/f.py", "symbol": "Field.deconstruct",
+                                 "score": 0.9}]}
+
+        monkeypatch.setattr(run_acceptance, "_CASES_PATH", cases_path)
+        monkeypatch.setattr(run_acceptance, "_get", fake_get)
+        monkeypatch.setattr(run_acceptance, "_post", fake_post)
+
+        exit_code = main(["--port", "9999"])
+        out = capsys.readouterr().out
+
+        # Header always reports the served workspace state...
+        assert f"Served workspace: {repo}" in out
+        assert f"Served revision: {sha} (working tree clean)" in out
+        # ...the stamped-but-different case gets a per-case notice...
+        assert "[REVISION MISMATCH] F-rev-mismatch" in out
+        assert "needs re-verification" in out
+        # ...and the summary accounts for every non-comparable stamp.
+        assert (
+            "2 case(s) carry no comparable corpus_revision_stamp" in out
+        )
+        # Severity contract: informational only — passing run still exits 0.
+        assert exit_code == 0
+        assert "Results: 3 pass / 0 fail / 0 error / 0 manual / 0 skip  (3 total)" in out

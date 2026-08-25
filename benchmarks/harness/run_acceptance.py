@@ -56,12 +56,33 @@ future embedding-model default swap surfaces every case whose "passing"
 label was never re-checked under the new model, instead of trusting it
 indefinitely (see UPG-ACCEPT-REGRESSION-RECOVERY / the wave2 embedder swap).
 
+A case may likewise carry a 'corpus_revision_stamp' recording the witness
+revision its 'expect' assertions were verified against (UPG-CORPUS-
+REVISION-STAMP): the git SHA of the external corpus checkout (full or >=7-char
+abbreviation), the sentinel "in-repo" when the case's inputs are fixture files
+versioned by this repository itself rather than by a separate checkout, or
+"unknown" when the verifying revision could not be established. Before
+replay, the harness resolves from /v1/status 'workspace_root' which revision
+the daemon is actually serving (git rev-parse HEAD) and whether that working
+tree is dirty (git status --porcelain); dirtiness is reported distinctly
+because a SHA over a dirty tree does not describe the bytes being indexed.
+A revision mismatch — or a dirty tree — PRINTS a notice, never a FAIL,
+never affecting the exit code: same severity contract as embed_model_stamp,
+it flags a label needing re-verification against the new corpus state, not
+a product defect. A workspace that is not a git checkout (or an unavailable
+git binary) degrades to a reported "unknown" served revision in the run
+header, and stamped cases that could not be checked are counted in the run
+summary — never silently passed as verified.
+
 Exit code: 0 if every evaluated case passes and no case errored, 1 otherwise.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+import subprocess
 import sys
 import urllib.request
 from pathlib import Path
@@ -86,6 +107,162 @@ def _post(base: str, path: str, body: dict) -> dict:
     )
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.load(r)
+
+
+# ---------------------------------------------------------------------------
+# Corpus-revision stamps (UPG-CORPUS-REVISION-STAMP)
+# ---------------------------------------------------------------------------
+
+# Sentinel values of product_cases.jsonl 'corpus_revision_stamp' that carry
+# provenance rather than a diffable revision:
+_REVISION_STAMP_IN_REPO = "in-repo"   # inputs are fixture files versioned by THIS repo
+_REVISION_STAMP_UNKNOWN = "unknown"   # verifying witness revision could not be established
+
+# A stamp is comparable against a served revision only when it looks like a
+# git SHA. 7 chars is the shortest abbreviation git itself renders unambiguously.
+_HEX_REVISION_RE = re.compile(r"[0-9a-f]{7,40}")
+
+
+def comparable_revision(stamp: object) -> str | None:
+    """Normalize a 'corpus_revision_stamp' into a comparable revision, or None.
+
+    Only a git SHA (7-40 hex chars, case-insensitive) is comparable; the
+    "in-repo"/"unknown" sentinels — and any other value — describe the
+    stamp's provenance, not a revision to diff the served workspace against.
+    """
+    if not isinstance(stamp, str):
+        return None
+    s = stamp.strip().lower()
+    return s if _HEX_REVISION_RE.fullmatch(s) else None
+
+
+def _git(args: list[str], cwd: str, timeout: int = 15) -> subprocess.CompletedProcess:
+    """Run one read-only git query inside cwd. Never raises for a missing
+    binary or a hung git — callers catch those and degrade to 'unknown'."""
+    return subprocess.run(
+        ["git", "-C", cwd, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def resolve_served_revision(workspace_root: object) -> dict:
+    """Determine the git state of the workspace the daemon is serving.
+
+    Returns {"state": <str>, "revision": <str|None>, "detail": <str|None>}
+    where state is one of:
+      "clean"               — a git repo at `revision`, working tree clean;
+                              the SHA then describes the indexed bytes
+      "dirty"               — a repo at `revision` with uncommitted OR
+                              untracked changes present; the HEAD SHA does
+                              NOT describe the bytes being indexed
+      "cleanliness-unknown" — a repo at `revision` whose dirtiness could not
+                              be determined (`git status` failed)
+      "not-a-git-repo"      — the root exists but is not a git checkout
+      "no-git-binary"       — git could not be executed at all
+      "unknown"             — anything else (no workspace_root, missing dir,
+                              git error)
+
+    Never raises and never guesses: every unresolvable condition degrades to
+    an explicit reported state, never to a fabricated revision.
+    """
+    if not isinstance(workspace_root, str) or not workspace_root.strip():
+        return {
+            "state": "unknown",
+            "revision": None,
+            "detail": "/v1/status reported no usable workspace_root",
+        }
+    root = os.path.expanduser(workspace_root.strip())
+    if not os.path.isdir(root):
+        return {
+            "state": "unknown",
+            "revision": None,
+            "detail": f"workspace_root not found on this machine: {root!r}",
+        }
+    try:
+        probe = _git(["rev-parse", "--verify", "HEAD"], root)
+    except FileNotFoundError:
+        return {"state": "no-git-binary", "revision": None,
+                "detail": "git executable not found"}
+    except subprocess.TimeoutExpired:
+        return {"state": "unknown", "revision": None,
+                "detail": "git rev-parse timed out"}
+    except OSError as exc:
+        return {"state": "unknown", "revision": None, "detail": f"git failed: {exc}"}
+    err = (probe.stderr or "").strip()
+    if probe.returncode != 0:
+        if "not a git repository" in err.lower():
+            return {"state": "not-a-git-repo", "revision": None, "detail": None}
+        return {"state": "unknown", "revision": None,
+                "detail": err[:200] or "git rev-parse failed"}
+    revision = probe.stdout.strip()
+    try:
+        status = _git(["status", "--porcelain"], root)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"state": "cleanliness-unknown", "revision": revision,
+                "detail": f"git status failed: {exc}"}
+    if status.returncode != 0:
+        return {"state": "cleanliness-unknown", "revision": revision,
+                "detail": ((status.stderr or "").strip() or "git status failed")[:200]}
+    dirty = bool(status.stdout.strip())
+    return {"state": "dirty" if dirty else "clean",
+            "revision": revision, "detail": None}
+
+
+def describe_served_revision(served: dict) -> str:
+    """One human-readable line about the served workspace's git state."""
+    state = served.get("state")
+    revision = served.get("revision")
+    detail = served.get("detail")
+    if state == "clean":
+        return f"{revision} (working tree clean)"
+    if state == "dirty":
+        return (
+            f"{revision} (DIRTY working tree — uncommitted/untracked changes; "
+            "this SHA does not describe the indexed bytes)"
+        )
+    if state == "cleanliness-unknown":
+        return f"{revision} (working-tree cleanliness undetermined: {detail})"
+    if state == "not-a-git-repo":
+        return "unknown (workspace is not a git repository)"
+    if state == "no-git-binary":
+        return "unknown (git is not available to this harness)"
+    return f"unknown ({detail or 'unresolvable'})"
+
+
+def classify_revision_stamp(case_stamp: object, served: dict) -> str:
+    """Classify one case's corpus_revision_stamp against the served workspace.
+
+    Returns one of:
+      "match"             — served tree is clean at the stamped revision
+      "dirty-match"       — stamped revision is checked out, but the tree is
+                            dirty (or its cleanliness unknown), so matching
+                            SHAs still do not prove the indexed bytes are the
+                            labelled ones
+      "mismatch"          — clean tree at a DIFFERENT revision than stamped:
+                            genuine corpus drift vs the label
+      "mismatch-dirty"    — different revision AND unverifiable bytes
+      "served-unresolved" — the case carries a comparable stamp but the run
+                            could not resolve a served revision
+      "unstamped"         — no comparable revision ("in-repo"/"unknown"/absent)
+    """
+    rev = comparable_revision(case_stamp)
+    if rev is None:
+        return "unstamped"
+    served_rev = served.get("revision")
+    if not isinstance(served_rev, str) or not served_rev:
+        return "served-unresolved"
+    served_rev = served_rev.lower()
+    # Either side may be an abbreviated SHA; accept a shared prefix in both
+    # directions (stamps written by this harness are full SHAs, but >=7-char
+    # abbreviations recorded by hand must still match their full form).
+    same_revision = served_rev.startswith(rev) or rev.startswith(served_rev)
+    clean = served.get("state") == "clean"
+    if same_revision:
+        return "match" if clean else "dirty-match"
+    return "mismatch" if clean else "mismatch-dirty"
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +617,12 @@ def main(argv: list[str] | None = None) -> int:
 
     current_embed_model = st.get("embed_model")
 
+    # Served-corpus revision resolution (UPG-CORPUS-REVISION-STAMP): resolved
+    # ONCE per run — every case in a run shares the daemon's single workspace.
+    served_revision = resolve_served_revision(st.get("workspace_root"))
+    print(f"Served workspace: {st.get('workspace_root') or '(none reported)'}")
+    print(f"Served revision: {describe_served_revision(served_revision)}")
+
     total = len(cases)
     n_pass = 0
     n_fail = 0
@@ -447,6 +630,10 @@ def main(argv: list[str] | None = None) -> int:
     n_manual = 0
     skipped = 0
     n_stamp_mismatch = 0
+    n_rev_mismatch = 0
+    n_rev_dirty_match = 0
+    n_rev_unchecked = 0
+    n_rev_unstamped = 0
 
     for case in cases:
         cid = case["id"]
@@ -465,6 +652,37 @@ def main(argv: list[str] | None = None) -> int:
                 f"\n[STAMP MISMATCH] {cid}: verified under {stamp!r}, "
                 f"daemon is running {current_embed_model!r} — needs re-verification"
             )
+
+        # Stamp-vs-served-revision check (UPG-CORPUS-REVISION-STAMP): also
+        # print-only, same reasoning. Mismatches are printed per case; a dirty
+        # tree that still matches the stamp is reported once in the summary,
+        # since it affects every stamped case identically.
+        rev_stamp = case.get("corpus_revision_stamp")
+        rev_verdict = classify_revision_stamp(rev_stamp, served_revision)
+        if rev_verdict == "mismatch":
+            n_rev_mismatch += 1
+            print(
+                f"\n[REVISION MISMATCH] {cid}: {case.get('corpus')!r} expect was "
+                f"verified against corpus revision {rev_stamp!r}, but the served "
+                f"workspace is at {served_revision.get('revision')!r} — needs "
+                "re-verification"
+            )
+        elif rev_verdict == "mismatch-dirty":
+            n_rev_mismatch += 1
+            print(
+                f"\n[REVISION MISMATCH] {cid}: {case.get('corpus')!r} expect was "
+                f"verified against corpus revision {rev_stamp!r}, but the served "
+                f"workspace is at {served_revision.get('revision')!r} (and its "
+                "working tree is dirty, so even that SHA may not describe the "
+                "indexed bytes) — needs re-verification"
+            )
+        elif rev_verdict == "dirty-match":
+            n_rev_dirty_match += 1
+        elif rev_verdict == "served-unresolved":
+            n_rev_unchecked += 1
+        elif rev_verdict == "unstamped":
+            n_rev_unstamped += 1
+        # "match": served tree is cleanly at the stamped revision — silent.
 
         if not expect:
             skipped += 1
@@ -509,6 +727,31 @@ def main(argv: list[str] | None = None) -> int:
             f"{n_stamp_mismatch} case(s) stamped under a different embed model than "
             f"the current daemon ({current_embed_model!r}) — see [STAMP MISMATCH] "
             "lines above. Informational only; does not affect pass/fail or exit code."
+        )
+    if n_rev_mismatch:
+        print(
+            f"{n_rev_mismatch} case(s) stamped against a different corpus revision "
+            "than the served workspace is serving — see [REVISION MISMATCH] lines "
+            "above. Informational only; does not affect pass/fail or exit code."
+        )
+    if n_rev_dirty_match:
+        print(
+            f"{n_rev_dirty_match} case(s) match their stamped corpus revision, but "
+            "the served workspace's working tree is dirty (or its cleanliness could "
+            "not be determined), so the HEAD SHA does not prove the indexed bytes "
+            "are the ones the labels were verified against. Informational only."
+        )
+    if n_rev_unchecked:
+        print(
+            f"{n_rev_unchecked} stamped case(s) could not be revision-checked this "
+            f"run (served revision unresolved: {served_revision.get('state')!r}). "
+            "Informational only."
+        )
+    if n_rev_unstamped:
+        print(
+            f"{n_rev_unstamped} case(s) carry no comparable corpus_revision_stamp "
+            "(in-repo / unknown / none) — a flip on them cannot be mechanically "
+            "attributed to corpus drift."
         )
     print("=" * 80)
     return 0 if n_fail == 0 and n_error == 0 else 1
