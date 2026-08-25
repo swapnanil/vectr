@@ -391,7 +391,7 @@ class ProactiveGate:
         #    TIEBREAK — relevance among EQUAL-score candidates, desc/asc
         #    respectively, then provenance rank asc, anchor_id asc.
         #
-        #    Every Tier-C ("weak mention") candidate scores exactly
+        #    Every Tier-D ("weak mention") candidate scores exactly
         #    `structural_scores.mention`, so before this tie-break the single
         #    weak item the per-event cap admits was chosen by provenance rank
         #    + anchor_id — insertion-order luck carrying no relevance signal
@@ -411,7 +411,7 @@ class ProactiveGate:
         #    pinned by test_structural_outranks_semantic_on_tie — is
         #    unchanged. Tuning `structural_scores.mention` itself is NOT
         #    what happens here: that would change which TIER wins against
-        #    the semantic band, not which Tier-C item wins against another.
+        #    the semantic band, not which Tier-D item wins against another.
         eligible.sort(
             key=lambda c: (
                 -c.score,
@@ -427,7 +427,7 @@ class ProactiveGate:
         #    item that would overflow the running character total.
         #
         #    UPG-PROXY-INJECT-PRECISION lever 3: at most
-        #    `max_weak_structural_items` Tier-C ("weak mention") structural
+        #    `max_weak_structural_items` Tier-D ("weak mention") structural
         #    candidates are selected per delivery moment — a check against
         #    `Candidate.structural_tier`, a STRUCTURAL PROPERTY of the match
         #    computed by the matcher, never a read of window/query content. A

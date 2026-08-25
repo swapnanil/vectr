@@ -256,7 +256,7 @@ def _structural_note_candidate(
     (UPG-PROXY-WEAK-TIER-TIEBREAK): how many times the matched file's
     basename occurs in this note's content at a genuine path boundary, and
     where the first one lands — carried on the Candidate so the gate can
-    break ties among EQUAL-score candidates (every Tier-C item scores the
+    break ties among EQUAL-score candidates (every Tier-D item scores the
     same `structural_scores.mention`) by relevance instead of insertion
     order. Both are structural note-vs-path properties computed by the
     same predicate `_path_boundary_match()` applies; they never touch
