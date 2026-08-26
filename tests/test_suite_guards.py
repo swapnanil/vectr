@@ -135,14 +135,29 @@ _RealHFClassStandin.__name__ = "SentenceTransformer"
 _RealHFClassStandin.__module__ = "sentence_transformers"
 
 
-def _product_builder(local_files_only):
+def _make_product_builder():
+    """The capture must be a real CLOSURE CELL, not a module global.
+
+    `LocalEmbedProvider.__init__` from-imports SentenceTransformer as a
+    function local and its builder lambda closes over that local
+    (agent/indexer/_types.py), which is why the guard inspects
+    `build_fn.__closure__`. A stand-in that merely READS a module-level name
+    has `__closure__ is None` and would exempt itself from the very rule it
+    claims to exercise — the test would pass for the wrong reason if the
+    guard were later weakened to inspect globals instead.
+    """
     st = _RealHFClassStandin  # captured, exactly like the product lambda's ST
-    return f"would construct {st!r} with local_files_only={local_files_only}"
+
+    def _builder(local_files_only):
+        return f"would construct {st!r} with local_files_only={local_files_only}"
+
+    # Make this builder LOOK product-defined (the guard keys off the builder's
+    # __module__) without importing anything heavy.
+    _builder.__module__ = "agent.indexer._types"
+    return _builder
 
 
-# Make this builder LOOK product-defined (the guard keys off the builder's
-# __module__) without importing anything heavy.
-_product_builder.__module__ = "agent.indexer._types"
+_product_builder = _make_product_builder()
 
 
 class TestRealModelDownloadGuard:
@@ -179,7 +194,10 @@ class TestRealModelDownloadGuard:
         out = mc.load_with_offline_preference(
             _product_builder, "org/cached-model", str(tmp_path),
         )
-        assert out == "built(local_files_only=True)"
+        # `_product_builder` reports the class it WOULD have constructed; the
+        # only thing under test here is that the loader's offline branch ran
+        # it (local_files_only=True) instead of the guard refusing it.
+        assert out.endswith("local_files_only=True"), out
 
     def test_builder_without_product_module_is_treated_as_exempt(self, tmp_path):
         """Defensive default: an exotic callable whose __module__ isn't under
