@@ -34,6 +34,17 @@ os.environ["VECTR_RERANKER_MODEL"] = ""
 # on first PersistentClient construction; with the socket guard active that
 # egress would be refused (correctly), and we don't want even the noise.
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+# tiktoken downloads its BPE files (cl100k_base.tiktoken) from
+# openaipublic.blob.core.windows.net on the first get_encoding() call and
+# caches them keyed by TIKTOKEN_CACHE_DIR. A developer machine usually has a
+# warm cache, so that fetch is invisible locally while CI, with a cold one,
+# takes the network — which is exactly how two tests in test_t2_driver.py
+# passed here and failed in CI run 32962144004 once the socket guard landed.
+# Pointing the cache at a per-run temp dir makes the first call attempt the
+# download in BOTH environments, so the guard refuses it identically and this
+# class cannot hide behind a warm cache again. Nothing in the unit suite wants
+# a real tokenizer; the two call sites stub the counter.
+os.environ["TIKTOKEN_CACHE_DIR"] = tempfile.mkdtemp(prefix="vectr-tiktoken-cold-")
 
 import numpy as np
 import pytest
