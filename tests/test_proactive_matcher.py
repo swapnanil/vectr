@@ -224,6 +224,62 @@ def test_declared_trigger_glob_wildcard_matches_via_matcher():
     assert cands[0].structural_tier == STRUCTURAL_TIER_DECLARED_TRIGGER
 
 
+def test_declared_trigger_wildcard_renders_the_matching_glob():
+    """UPG-MATCHER-RELATIVE-ANCHOR-LABEL: the provenance label names the
+    form that ACTUALLY matched. A '*.py' glob must render as
+    "triggers on *.py", not as the concrete basename it happened to hit —
+    before this fix the line claimed "triggers on resolver.py", overstating
+    a package-wide declaration as a single-file one."""
+    n = _note(41, "package-wide caveat", triggers=[{"path": "*.py"}])
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 1
+    assert "triggers on *.py" in cands[0].line
+
+
+def test_full_path_declared_anchor_renders_the_declared_string():
+    """UPG-MATCHER-RELATIVE-ANCHOR-LABEL: an anchor authored as the exact
+    window path renders as itself ("anchored to /abs/resolver.py"), not as
+    the basename the match never used."""
+    n = _note(42, "the backoff cap here needs tuning")
+    n.anchors = [["/abs/resolver.py", None]]
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 1
+    assert "anchored to /abs/resolver.py" in cands[0].line
+    assert cands[0].anchor_path == "/abs/resolver.py"
+
+
+def test_basename_and_full_path_both_declared_still_render_basename():
+    """UPG-MATCHER-RELATIVE-ANCHOR-LABEL preserves the pre-change label when
+    BOTH forms are declared: only the case where the basename was never
+    declared switched to reporting the matched string."""
+    n = _note(43, "the backoff cap here needs tuning")
+    n.anchors = [["resolver.py", None], ["/abs/resolver.py", None]]
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    cands = _matcher(src, semantic_note=False, code_search=False).match(w)
+    assert len(cands) == 1
+    assert "anchored to resolver.py" in cands[0].line
+
+
+def test_tiebreak_signals_stay_keyed_to_the_basename():
+    """UPG-MATCHER-RELATIVE-ANCHOR-LABEL must be label-only: a note whose
+    prose names resolver.py twice keeps counting 2 mentions even though its
+    label now renders a wildcard glob, so gate.py's equal-score ordering
+    inputs are byte-for-byte what they were before the label change."""
+    n = _note(44, "resolver.py lock drops on scope exit; see resolver.py docs",
+              triggers=[{"path": "*.py"}])
+    src = _Source(structural=[n])
+    w = ProactiveWindow(text="", file_paths=["/abs/resolver.py"], symbols=[])
+    c = _matcher(src, semantic_note=False, code_search=False).match(w)[0]
+    assert "triggers on *.py" in c.line
+    assert c.path_mention_count == 2
+    assert c.path_mention_first_offset == 0
+
+
 def test_declared_anchor_still_wins_over_a_declared_trigger_on_the_same_note():
     """When a note declares BOTH an exact anchor and a (broader) trigger
     glob for the same file, the stronger anchor relation wins -- matching

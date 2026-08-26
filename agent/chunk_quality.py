@@ -1,4 +1,4 @@
-"""Language-agnostic chunk-quality heuristics (Opus audit Wave 1).
+"""Language-agnostic chunk-quality heuristics.
 
 The four audited corpora (Python-multi, C, Zig, Rust) all showed the same
 failure: low-information chunks outranking real code — bare ``}`` / ``return 0;``

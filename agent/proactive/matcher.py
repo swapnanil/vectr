@@ -486,9 +486,15 @@ class ProactiveMatcher:
                     # talks about the matched file (basename occurrences at
                     # genuine path boundaries, and where the first lands) —
                     # the gate's equal-score tie-break signals.
+                    # UPG-MATCHER-RELATIVE-ANCHOR-LABEL: `anchor` may now be
+                    # the declared form that actually matched (a full path or
+                    # a glob), so the signals stay keyed to the BASENAME they
+                    # have always counted — the label change alters nothing
+                    # about equal-score ordering.
+                    base = anchors[anchor_path]
                     content = note.content or ""
-                    mention_count = _path_boundary_count(content, anchor)
-                    mention_first_offset = _path_boundary_first(content, anchor)
+                    mention_count = _path_boundary_count(content, base)
+                    mention_first_offset = _path_boundary_first(content, base)
                 else:
                     # Defensive fallback: the source returned a note this
                     # window's anchors/triggers/content narrowing can't
@@ -569,6 +575,12 @@ def _first_anchor(
     that case as "mentions X", the weakest provenance claim. Returns None
     when the note is about none of the window's files.
 
+    The display label is the form that ACTUALLY matched
+    (UPG-MATCHER-RELATIVE-ANCHOR-LABEL): the declared anchor string (basename
+    or exact path — whichever the note's `anchors` column contains; basename
+    wins when both are declared), or the declared glob pattern for a trigger
+    match. Never a derived form the author didn't write.
+
     The window file path (`anchors` dict's key, not its basename value) is
     returned alongside the display label so `match()` can carry it onto the
     STRUCTURAL_TIER_DECLARED_ANCHOR `Candidate.anchor_path` (UPG-PROXY-
@@ -578,10 +590,18 @@ def _first_anchor(
     declared = {a[0] for a in (note.anchors or []) if a}
     for path, base in anchors.items():
         if base and (base in declared or path in declared):
-            return path, base, STRUCTURAL_TIER_DECLARED_ANCHOR
+            # Report the declared string that actually matched, not
+            # unconditionally the basename (UPG-MATCHER-RELATIVE-ANCHOR-LABEL);
+            # when BOTH forms are declared, keep the historical basename.
+            return path, base if base in declared else path, STRUCTURAL_TIER_DECLARED_ANCHOR
     for path, base in anchors.items():
-        if path_trigger_match(note.triggers, (path, base)) is not None:
-            return path, base, STRUCTURAL_TIER_DECLARED_TRIGGER
+        matched_glob = path_trigger_match(note.triggers, (path, base))
+        if matched_glob is not None:
+            # Render the glob that actually matched — path_trigger_match()
+            # returns it explicitly for this explanatory purpose, and a
+            # wildcard glob reported as one concrete basename overstates a
+            # package-wide declaration as a single-file one.
+            return path, matched_glob, STRUCTURAL_TIER_DECLARED_TRIGGER
     content = note.content or ""
     for path, base in anchors.items():
         if base and _path_boundary_match(content, base):

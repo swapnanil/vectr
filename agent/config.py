@@ -366,7 +366,7 @@ HOOKS_LOG_CHARS_PER_TOKEN : int
 
 HOOKS_MIN_SIMILARITY : float
     Per-turn UserPromptSubmit recall relevance floor (UPG-9.5). Raised from
-    0.35 to 0.72 (adversarial-review measurement, 2026-07-15): at 0.35 the
+    0.35 to 0.72 (measured 2026-07-15): at 0.35 the
     hook injected 3 irrelevant notes on 8/8 deliberately off-topic prompts;
     the M trigger primitive's own per-kind thetas (0.72-0.80) had 0/8 false
     fires on the identical prompts.
@@ -1311,8 +1311,8 @@ PROACTIVE_RESPONSE_CACHE_TTL_SECONDS: float = float(_resp_cache_cfg["ttl_seconds
 PROACTIVE_RESPONSE_CACHE_MAX_ENTRIES: int = int(_resp_cache_cfg["max_entries"])
 
 # ---------------------------------------------------------------------------
-# Trigger engine wave 1 (TRIGGER-ENGINE, bm2-design-skeleton.md §2/§3) —
-# total order + injection budgets. See agent/trigger_engine.py.
+# Trigger engine (TRIGGER-ENGINE) — total order + injection budgets.
+# See agent/trigger_engine.py.
 # ---------------------------------------------------------------------------
 
 _trig_cfg: dict[str, Any] = _cfg["memory_triggers"]
@@ -1352,8 +1352,7 @@ MEMORY_TRIGGER_BODY_TRUNCATION_MIN_BOUNDARY_FRACTION: float = float(
     _trig_inject_cfg["body_truncation_min_boundary_fraction"]
 )
 
-# Trigger engine wave 2b (TRIGGER-ENGINE, bm2-design-skeleton.md §8) — the M
-# (semantic) primitive's fixed per-kind cosine thresholds. Built by direct
+# The M (semantic) primitive's fixed per-kind cosine thresholds. Built by direct
 # subscript against every kind already enumerated in kind_priority above, so
 # a config.yaml missing an entry for any kind raises KeyError here at import
 # rather than silently defaulting a kind to "never matches" or "always
@@ -1363,7 +1362,7 @@ _trig_theta_cfg: dict[str, Any] = _trig_semantic_cfg["theta_by_kind"]
 MEMORY_TRIGGER_SEMANTIC_THETA_BY_KIND: dict[str, float] = {
     kind: float(_trig_theta_cfg[kind]) for kind in MEMORY_TRIGGER_KIND_PRIORITY
 }
-# Serving-policy hardening (§5.5) — see the cooldown_turns key's own
+# Serving-policy hardening (UPG-MEMORY-STATE-MACHINE §5.5) — see the cooldown_turns key's own
 # config.yaml comment for the turns-vs-wall-clock-seconds distinction.
 MEMORY_TRIGGER_SEMANTIC_COOLDOWN_TURNS: int = int(_trig_semantic_cfg["cooldown_turns"])
 

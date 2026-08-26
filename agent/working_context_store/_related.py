@@ -121,10 +121,12 @@ def related_active_notes(
         # only for dropping the note itself, so a few nearest neighbours
         # that happen to belong to another workspace — or to be already
         # revoked/superseded/expired — would starve the result to [] even
-        # though close active notes exist here. `limit * 3` is the same
-        # over-fetch `_semantic_recall` uses against this collection for
-        # the same reason; the final `related[:limit]` still bounds output.
-        n_query = min(max(limit * 3, limit + 1), col_count)
+        # though close active notes exist here. Sized through the canonical
+        # width helper (same over-fetch `_semantic_recall` uses against this
+        # collection for the same reason); the final `related[:limit]` still
+        # bounds output.
+        from agent.working_context_store._store import working_memory_fetch_width
+        n_query = working_memory_fetch_width(limit, col_count, floor=limit + 1)
         with timed_chroma_call("query"):
             results = col.query(query_embeddings=[vec], n_results=n_query)
 
@@ -282,7 +284,10 @@ def revoked_related_notes(
         # docstring and the `revoked_query_floor` config comment for why a
         # rare target class needs a much deeper pool than a small render
         # limit would otherwise imply.
-        n_query = min(max(limit * 3, MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR), col_count)
+        from agent.working_context_store._store import working_memory_fetch_width
+        n_query = working_memory_fetch_width(
+            limit, col_count, floor=MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR,
+        )
         with timed_chroma_call("query"):
             results = col.query(query_embeddings=[vec], n_results=n_query)
 

@@ -3389,6 +3389,57 @@ class TestPathTriggerCandidateForms:
         assert _path_boundary_first("anything", "") == -1
 
 
+class TestWorkingMemoryFetchWidth:
+    """Direct units on the over-fetch contract helper (UPG-OVERFETCH-
+    CONTRACT-UNDOCUMENTED): every vector query against the GLOBAL
+    'working_memory' collection must size n_results through
+    working_memory_fetch_width(), because workspace/lifecycle filtering runs
+    in SQL only AFTER the vector search. Pins the exact formula — multiplier,
+    floor override, col_count cap — plus byte-for-byte equivalence with the
+    three pre-helper expressions it replaced, so no call site can drift back
+    to a raw render limit without an obvious failure."""
+
+    def test_multiplier_is_three_times_the_render_limit(self) -> None:
+        from agent.working_context_store._store import working_memory_fetch_width
+
+        assert working_memory_fetch_width(5, 1000) == 15
+        assert working_memory_fetch_width(1, 1000) == 3
+
+    def test_floor_raises_width_above_the_multiplier(self) -> None:
+        from agent.working_context_store._store import working_memory_fetch_width
+
+        # related_active_notes passes floor=limit + 1; the revoked path
+        # passes MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR. The floor wins
+        # whenever it exceeds render_limit * 3; the multiplier otherwise.
+        assert working_memory_fetch_width(1, 1000, floor=7) == 7
+        assert working_memory_fetch_width(10, 1000, floor=2) == 30
+
+    def test_col_count_caps_the_ask(self) -> None:
+        from agent.working_context_store._store import working_memory_fetch_width
+
+        # ChromaDB errors when asked for more results than exist, so the
+        # live collection count caps even a large floor.
+        assert working_memory_fetch_width(10, 4) == 4
+        assert working_memory_fetch_width(1, 1000, floor=50) == 50
+        assert working_memory_fetch_width(5, 2, floor=20) == 2
+
+    def test_matches_the_literal_formulas_it_replaced(self) -> None:
+        """The helper conversion had to change NO fetched width anywhere:
+        each expression below is the pre-helper formula verbatim."""
+        from agent.config import MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR
+        from agent.working_context_store._store import working_memory_fetch_width
+
+        for limit in (1, 3, 10):
+            for col_count in (limit * 3, limit * 3 + 7, 10_000):
+                assert working_memory_fetch_width(limit, col_count) == min(limit * 3, col_count)
+                assert working_memory_fetch_width(
+                    limit, col_count, floor=limit + 1,
+                ) == min(max(limit * 3, limit + 1), col_count)
+                assert working_memory_fetch_width(
+                    limit, col_count, floor=MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR,
+                ) == min(max(limit * 3, MEMORY_WRITE_RELATED_REVOKED_QUERY_FLOOR), col_count)
+
+
 class TestFireScopeEnforcement:
     """TRIGGER-ENGINE wave 2a, bm2-design-skeleton.md §1 — all five
     SCOPE_VALUES enforced through the real store (SQLite round-trip), not

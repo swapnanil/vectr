@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 # UPG-L3-CONFIG-READ-TIME: `BOUNDARY_PRECOMPACT_ENABLED` /
 # `BOUNDARY_PRECOMPACT_TOKEN_CAP` are read at REQUEST time via the module
@@ -237,6 +238,7 @@ class VectrService:
         workspace_explicit: bool = False,
         configure_ide: bool = True,
         defer_search_init: bool = False,
+        proactive_now_fn: Callable[[], float] | None = None,
     ) -> None:
         """`defer_search_init` (UPG-STDIO-MEMORY-READY): when True, this
         constructor runs ONLY the fast, synchronous phase below — no
@@ -435,6 +437,11 @@ class VectrService:
         self._proactive_injection_counts: dict[str, int] = {}
         self._proactive_injection_lock = threading.Lock()
         self._proactive_ledger = None  # agent.proactive.gate.LedgerStore
+        # Injectable clock threaded into that ledger's TTL cooldown
+        # (UPG-GATE-NOWFN-PLUMBING): tests pass a fake clock so TTL expiry
+        # is provable end-to-end at service level; production leaves it
+        # None and the LedgerStore keeps its time.monotonic default.
+        self._proactive_now_fn = proactive_now_fn
 
         # Deferred-charge retrievals awaiting delivery confirmation
         # (UPG-PROXY-APPEND-BURNS-COOLDOWN): delivery_token -> the retrieval
@@ -2731,6 +2738,7 @@ class VectrService:
             self._proactive_ledger = LedgerStore(
                 settings.cooldown_items,
                 ttl_seconds=settings.cooldown_ttl_seconds,
+                now_fn=self._proactive_now_fn or time.monotonic,
             )
         return ProactiveGate(
             min_similarity=settings.min_similarity,
