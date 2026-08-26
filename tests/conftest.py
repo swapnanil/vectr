@@ -296,6 +296,7 @@ def _base_mock_service():
     svc.promote_note.return_value = True
     svc.revoke_note.return_value = True
     svc.reinstate_note.return_value = True
+    svc.supersede_note.return_value = True
     svc.pin_note.return_value = True
     svc.recall.return_value = "# Working Notes (1 entries)\n\n[1] [HIGH] test content\n"
     svc.snapshot_session.return_value = "snap_abc123"
@@ -412,6 +413,11 @@ def client_real_memory(tmp_path):
     )
     svc.reinstate_note.side_effect = lambda note_id, actor="agent", reason=None: real_store.reinstate_note(
         ws, note_id, actor=actor, reason=reason
+    )
+    svc.supersede_note.side_effect = (
+        lambda note_id, superseded_by=None, reason=None, actor="agent": real_store.supersede_note(
+            ws, note_id, superseded_by=superseded_by, reason=reason, actor=actor
+        )
     )
     svc.pin_note.side_effect = lambda note_id, pinned=True: real_store.set_pinned(ws, note_id, pinned)
     svc.attach_anchors.side_effect = (
