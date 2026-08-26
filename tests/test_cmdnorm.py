@@ -9,7 +9,18 @@ from __future__ import annotations
 
 import pytest
 
-from app.cmdnorm import classify_arg, leading_cd_target, normalize_command, tokenize
+from app.cmdnorm import (
+    CD_ABSOLUTE,
+    CD_NONE,
+    CD_RELATIVE,
+    CD_SYMBOLIC_HOME,
+    CD_UNRESOLVABLE,
+    classify_arg,
+    leading_cd_resolution,
+    leading_cd_target,
+    normalize_command,
+    tokenize,
+)
 
 
 class TestTokenize:
@@ -28,6 +39,62 @@ class TestTokenize:
         # Must never raise on a malformed command — a real episode we still
         # need to process, not crash on.
         assert tokenize('echo "unterminated') == ["echo", '"unterminated']
+
+
+class TestGluedCompoundSeparators:
+    """UPG-CMDNORM-GLUED-SEPARATOR: a bare `;`/`&&`/`||` glued to an
+    adjacent token (`cd /path;cmd`) must split exactly like its
+    whitespace-separated form — in the shell that RAN the command, an
+    unquoted separator is a control operator regardless of spacing — while
+    quoted text is never touched. Every assertion here fails with the
+    pre-fix tokenizer, where shlex yielded `cd /repo-a;make` as ONE token
+    and no compound split (hence no cd-strip, hence no effective-cwd
+    extraction) ever happened."""
+
+    def test_glued_semicolon_splits(self) -> None:
+        assert tokenize("cd /repo-a;make build") == ["cd", "/repo-a", ";", "make", "build"]
+
+    def test_glued_double_ampersand_splits(self) -> None:
+        assert tokenize("make clean&&make build") == ["make", "clean", "&&", "make", "build"]
+
+    def test_glued_double_pipe_splits(self) -> None:
+        assert tokenize("make build||echo failed") == ["make", "build", "||", "echo", "failed"]
+
+    def test_spaced_separators_are_unchanged(self) -> None:
+        # Regression guard: the padding pass must be a no-op on the common
+        # already-spaced shapes.
+        assert tokenize("cd /repo-a && make build") == ["cd", "/repo-a", "&&", "make", "build"]
+        assert tokenize("cd /repo-a ; make build") == ["cd", "/repo-a", ";", "make", "build"]
+
+    def test_leading_cd_target_extracted_from_glued_semicolon(self) -> None:
+        # The headline consumer: UPG-ARC-CWD-VS-EFFECTIVE-DIR's
+        # leading_cd_target must now see through the glued form. With the
+        # bug present this returns None (the whole `cd /repo-a;make`
+        # prefix stays glued into one un-splittable segment).
+        assert leading_cd_target("cd /repo-a;make build") == "/repo-a"
+
+    def test_normalize_strips_cd_before_glued_separator(self) -> None:
+        # `_strip_leading_cd` shares the same tokenizer, so the long-standing
+        # verb normalization gains the glued forms too.
+        a = normalize_command("cd /repo-a&&mvn test -Dtest=Foo")
+        b = normalize_command("mvn test -Dtest=Foo")
+        assert a.verb == b.verb
+        assert a.flags == b.flags
+
+    def test_quoted_semicolon_never_split(self) -> None:
+        assert tokenize('echo "a;b"') == ["echo", "a;b"]
+
+    def test_quoted_double_ampersand_never_split(self) -> None:
+        assert tokenize('grep "p&&q" f') == ["grep", "p&&q", "f"]
+
+    def test_single_quoted_semicolon_never_split(self) -> None:
+        assert tokenize("echo 'a;b'") == ["echo", "a;b"]
+
+    def test_escaped_semicolon_outside_quotes_not_padded(self) -> None:
+        # `\;` is a literal semicolon to the shell (find -exec tails); the
+        # padding pass copies the escape pair verbatim so shlex still sees
+        # one argument.
+        assert tokenize("echo a\\;b") == ["echo", "a;b"]
 
 
 class TestClassifyArg:
@@ -143,14 +210,11 @@ class TestLeadingCdTarget:
         assert leading_cd_target("cd /repo-a && make build") == "/repo-a"
 
     def test_semicolon_separator(self) -> None:
-        # NOTE: the semicolon must be whitespace-separated (`; `, not `;`
-        # glued onto the preceding token) — this module's shlex-based
-        # tokenizer only splits on `;` as a standalone token, a
-        # PRE-EXISTING limitation shared by `normalize_command`'s own
-        # `_strip_leading_cd`/compound-splitting (not introduced here;
-        # `normalize_command("cd /repo-a; make build")` — no space before
-        # `;` — already fails to strip the leading cd today).
+        # Both the spaced and the GLUED form (`;` without whitespace) must
+        # work — the glued form is UPG-CMDNORM-GLUED-SEPARATOR's fix, now
+        # covered in depth by TestGluedCompoundSeparators above.
         assert leading_cd_target("cd /repo-a ; make build") == "/repo-a"
+        assert leading_cd_target("cd /repo-a;make build") == "/repo-a"
 
     def test_quoted_path(self) -> None:
         assert leading_cd_target('cd "/path with spaces" && make build') == "/path with spaces"
@@ -164,10 +228,15 @@ class TestLeadingCdTarget:
     def test_no_leading_cd_returns_none(self) -> None:
         assert leading_cd_target("make build") is None
 
-    def test_bare_cd_no_argument_returns_none(self) -> None:
-        # $HOME has no concrete path in argv — deliberately unhandled,
-        # caller falls back to the episode's own cwd field.
-        assert leading_cd_target("cd && make build") is None
+    def test_bare_cd_yields_symbolic_home(self) -> None:
+        # CHANGED by the UPG-ARC-CWD-VS-EFFECTIVE-DIR refinement (was
+        # `is None` + "caller falls back to the episode's own cwd field"):
+        # a bare `cd` goes HOME, so falling back to the cwd field keyed a
+        # command that ran in $HOME as if it ran in the harness cwd —
+        # exactly the field-vs-effective divergence this item exists to
+        # kill. The tilde-form returned here is a symbolic, per-machine-
+        # constant key (see leading_cd_resolution's CD_SYMBOLIC_HOME).
+        assert leading_cd_target("cd && make build") == "~"
 
     def test_flagged_cd_not_recognized(self) -> None:
         # `cd -- <path>` is a 3-token leading segment; `_strip_leading_cd`
@@ -183,6 +252,64 @@ class TestLeadingCdTarget:
 
     def test_pushd_not_recognized(self) -> None:
         assert leading_cd_target("pushd /repo-a && make build") is None
+
+
+class TestLeadingCdResolution:
+    """UPG-ARC-CWD-VS-EFFECTIVE-DIR refinement: `leading_cd_resolution`
+    classifies a leading cd chain so `app.arcs` can COMPOSE relative
+    targets with the episode cwd field, key tilde/$HOME forms symbolically,
+    and REFUSE TO PAIR on shapes whose effective directory is not
+    statically derivable — instead of the shipped behavior of returning a
+    raw textual token (or None) and letting every caller fall back."""
+
+    def test_no_cd_is_none(self) -> None:
+        assert leading_cd_resolution("mvn test") == (CD_NONE, None)
+
+    def test_absolute_target(self) -> None:
+        assert leading_cd_resolution("cd /repo-a && make build") == (CD_ABSOLUTE, "/repo-a")
+
+    def test_relative_target(self) -> None:
+        assert leading_cd_resolution("cd sub/dir && make build") == (CD_RELATIVE, "sub/dir")
+
+    def test_bare_cd_is_symbolic_home(self) -> None:
+        assert leading_cd_resolution("cd && make build") == (CD_SYMBOLIC_HOME, "~")
+        assert leading_cd_resolution("cd ~ && make build") == (CD_SYMBOLIC_HOME, "~")
+
+    def test_tilde_targets_are_symbolic_home(self) -> None:
+        assert leading_cd_resolution("cd ~/repo && make") == (CD_SYMBOLIC_HOME, "~/repo")
+        assert leading_cd_resolution("cd ~other/repo && make") == (CD_SYMBOLIC_HOME, "~other/repo")
+
+    def test_oldpwd_dash_is_unresolvable(self) -> None:
+        # $OLDPWD differs per call site — no truthful bucket key exists.
+        assert leading_cd_resolution("cd - && make build") == (CD_UNRESOLVABLE, None)
+
+    def test_env_var_target_is_unresolvable(self) -> None:
+        # The VALUE varies per call site even when the NAME recurs; a
+        # textual key would falsely group two different repos.
+        assert leading_cd_resolution('cd "$REPO" && make build') == (CD_UNRESOLVABLE, None)
+        assert leading_cd_resolution("cd $REPO && make build") == (CD_UNRESOLVABLE, None)
+
+    def test_flagged_cd_declined_shape_is_unresolvable(self) -> None:
+        # A leading cd EXISTS here, so the episode cwd field is KNOWN-wrong
+        # as the effective dir: UNRESOLVABLE (refuse pairing), never NONE
+        # (trust the field). This is the verdict `_strip_leading_cd`'s shape
+        # parity alone could not express.
+        assert leading_cd_resolution("cd -- /repo-a && make build") == (CD_UNRESOLVABLE, None)
+        assert leading_cd_resolution("cd -L /repo-a && make build") == (CD_UNRESOLVABLE, None)
+
+    def test_pushd_and_non_leading_cd_are_none(self) -> None:
+        # Not recognized as a leading cd AT ALL — the cwd field stays the
+        # caller's best information, same as before UPG-ARC-CWD-VS-
+        # EFFECTIVE-DIR.
+        assert leading_cd_resolution("pushd /repo-a && make build") == (CD_NONE, None)
+        assert leading_cd_resolution("mkdir -p /repo-a && cd /repo-a && make build") == (CD_NONE, None)
+
+    def test_last_cd_in_chain_wins(self) -> None:
+        assert leading_cd_resolution("cd a && cd b && npm run build") == (CD_RELATIVE, "b")
+        assert leading_cd_resolution("cd a && cd /abs && x") == (CD_ABSOLUTE, "/abs")
+        # A bare cd LAST in the chain means the command runs in $HOME,
+        # overriding any earlier concrete target.
+        assert leading_cd_resolution("cd a && cd && x") == (CD_SYMBOLIC_HOME, "~")
 
 
 class TestNormalizeCommandPipelineCollapse:
