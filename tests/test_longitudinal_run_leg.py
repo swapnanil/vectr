@@ -560,6 +560,19 @@ def test_run_agent_passes_settings_for_hook_arms_only(tmp_path, monkeypatch):
         captured["cmd"] = cmd
         return _FakeProc()
 
+    # Both hook arms exercised below bracket the spawned agent with two
+    # `/v1/status` GETs against the leg's daemon port. Only argv is under
+    # test here, but without this stub those are LIVE connections to
+    # 127.0.0.1:8899 — whether anything answers is a property of the
+    # developer's machine, not of the test. Same stub the delta tests below
+    # use; caught by the conftest socket guard.
+    monkeypatch.setattr(
+        run_leg,
+        "_http_json",
+        lambda method, url, payload=None, timeout=30: {
+            "hook_injection_counts": {"SessionStart": 0, "UserPromptSubmit": 0}
+        },
+    )
     monkeypatch.setattr(run_leg.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(run_leg.shutil, "which", lambda name: "/usr/bin/claude" if name == "claude" else None)
 

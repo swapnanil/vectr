@@ -486,6 +486,20 @@ def _spawn_mcp_stdio(tmp_path: Path, extra_env: dict | None = None) -> subproces
     env.pop("VECTR_MCP_ALL_TOOLS", None)
     if extra_env:
         env.update(extra_env)
+    # UPG-TEST-REAL-EMBEDDER-DOWNLOAD-GUARD: this child's background
+    # VectrService construction may build a real LocalEmbedProvider (the
+    # in-process guard can't see a subprocess). Unless the run explicitly
+    # opted into real models, pin HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE so any
+    # accidental hub access fails fast and LOCALLY inside the child instead
+    # of reaching huggingface.co (CI hit real HTTP 429s). Safe by
+    # construction: every assertion in this file holds whether the background
+    # service finished loading or errored into "Vectr failed to start" —
+    # initialize/tools-list responses are independent of service health, and
+    # the reranker is already disabled via the inherited empty
+    # VECTR_RERANKER_MODEL.
+    if env.get("VECTR_TEST_ALLOW_REAL_NETWORK") != "1":
+        env.setdefault("HF_HUB_OFFLINE", "1")
+        env.setdefault("TRANSFORMERS_OFFLINE", "1")
     return subprocess.Popen(
         [py, str(_MAIN_PY), "mcp-stdio", str(tmp_path)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -7,10 +7,14 @@ deterministic dummy embedder. No model download required; tests run in <1 s.
 """
 from __future__ import annotations
 
+import concurrent.futures
+import errno
 import os
 import sys
 import textwrap
 import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
 from unittest.mock import MagicMock, patch
@@ -26,6 +30,10 @@ if "langchain_community.chat_models.vertexai" not in sys.modules:
 # Disable cross-encoder reranker before any searcher import so tests never
 # trigger a model download.
 os.environ["VECTR_RERANKER_MODEL"] = ""
+# ChromaDB's built-in posthog telemetry phones home from a background thread
+# on first PersistentClient construction; with the socket guard active that
+# egress would be refused (correctly), and we don't want even the noise.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
 import numpy as np
 import pytest
@@ -132,6 +140,356 @@ def _no_ide_config_writes_into_real_tree() -> Generator[None, None, None]:
                 + "\n\nConstruct the service with configure_ide=False, or point it "
                 "at a tmp_path workspace. The writes above were suppressed."
             )
+
+
+# ---------------------------------------------------------------------------
+# UPG-TEST-LIVE-DAEMON-PORT-CONTAMINATION: suite-wide live-socket guard.
+#
+# Six tests were fixed at d49e339 for reaching toward what could be a real
+# daemon's port; this guard closes the CLASS: no unit test may open a live
+# TCP connection to a listening socket it doesn't own. Port 8765 serves the
+# user's LIVE vectr session — a stale registry entry or a hardcoded default
+# must never turn into a real probe against it.
+#
+# Mechanism: patch `socket.socket.connect`/`connect_ex` once per session.
+# Every HTTP client in the tree funnels through these two methods (httpx →
+# httpcore → socket.create_connection; urllib/requests likewise; and
+# agent/hook_cli.py's stdlib client dials sockets directly), so one seam
+# covers all of them without knowing which client a test happens to use.
+#
+# Verdicts per connection attempt:
+#   * loopback port registered via allow_loopback_port()  → allowed through.
+#   * other loopback ports                                → refused AND
+#     recorded; a function-scoped autouse fixture fails the OWNING test
+#     after it finishes (a connect attempt usually surfaces as an
+#     "unreachable daemon" branch the test deliberately tolerates — failing
+#     mid-test would misattribute it; failing after keeps the owner named).
+#   * non-loopback addresses                              → refused outright,
+#     unrecorded (telemetry-style egress from third-party libs is noise we
+#     swallow rather than fail unrelated tests over).
+#
+# The refusal exception derives from ConnectionError (an OSError) so product
+# code's broad "daemon unreachable" handlers convert it deterministically
+# into exactly the verdict CI gets — tests keep their semantics, they just
+# can't accidentally talk to a real listener anymore.
+#
+# Binding/listening is untouched: find_free_port probes, stub servers, and
+# TIME_WAIT-reproduction tests all keep working. FastAPI's TestClient is
+# in-process ASGI and opens no socket at all.
+#
+# Opt-out for `-m integration` runs (real model downloads need real
+# network): VECTR_TEST_ALLOW_REAL_NETWORK=1.
+# ---------------------------------------------------------------------------
+
+_SOCKET_GUARD_ENV = "VECTR_TEST_ALLOW_REAL_NETWORK"
+
+_allowed_ports_lock = threading.Lock()
+_allowed_loopback_ports: set[int] = set()
+
+_violations_lock = threading.Lock()
+_loopback_violations: list[tuple[str, int]] = []
+
+
+class _BlockedConnectionAttempt(ConnectionError):
+    """A unit-test connection attempt the socket guard refused."""
+
+
+@contextmanager
+def allow_loopback_port(port: int) -> Generator[None, None, None]:
+    """Allow live connections to this loopback `port` for the duration of the
+    block. For tests that own a local stub server on an ephemeral port (e.g.
+    tests/test_hook_cli_parity.py's stub daemon) — register it here so the
+    suite-wide socket guard lets its own clients through."""
+    with _allowed_ports_lock:
+        _allowed_loopback_ports.add(int(port))
+    try:
+        yield
+    finally:
+        with _allowed_ports_lock:
+            _allowed_loopback_ports.discard(int(port))
+
+
+def _inspect_connect_address(address: object) -> tuple[str, str, int] | None:
+    """Classify a connect() address as ("allowed" | "loopback" | "remote", host,
+    port), or None when it isn't an IP-style connect target at all (AF_UNIX
+    paths, malformed tuples) — those are passed through untouched."""
+    if not isinstance(address, tuple) or len(address) < 2:
+        return None
+    host, port = address[0], address[1]
+    if isinstance(port, bool) or not isinstance(port, int):
+        return None
+    if isinstance(host, bytes):
+        host = host.decode("utf-8", errors="replace")
+    if not isinstance(host, str):
+        return None
+    normalized = host.lower()
+    is_loopback = (
+        normalized == "localhost"
+        or normalized.startswith("127.")
+        or normalized in ("::1", "0:0:0:0:0:0:0:1")
+    )
+    if not is_loopback:
+        return ("remote", host, port)
+    with _allowed_ports_lock:
+        if port in _allowed_loopback_ports:
+            return ("allowed", host, port)
+    return ("loopback", host, port)
+
+
+def _summarize_violations(violations: list[tuple[str, int]]) -> str | None:
+    """Human-facing failure message for recorded loopback violations, or None
+    when the list is empty. Split out as a pure function so it can be tested
+    without going through the autouse fixture's teardown."""
+    if not violations:
+        return None
+    unique = sorted(set(violations))
+    targets = ", ".join(f"{host}:{port}" for host, port in unique)
+    return (
+        f"this test attempted a live connection to {targets}. Unit tests must "
+        "never talk to a real listening socket — the default port (8765) serves "
+        "the user's live vectr daemon. Stub the probe instead: patch "
+        "main._is_server_alive / main._wait_for_daemon_ready / httpx.get (see "
+        "tests/test_main.py::_stub_version_skew_probe for the pattern), or, if "
+        "the test owns a local stub server, wrap its ephemeral port with "
+        f"tests.conftest.allow_loopback_port(...). ({_SOCKET_GUARD_ENV}=1 "
+        "disables this guard for integration runs.)"
+    )
+
+
+def _current_loopback_violations() -> list[tuple[str, int]]:
+    """Snapshot of violations recorded so far in the current test (for the
+    guard's own tests in tests/test_suite_guards.py)."""
+    with _violations_lock:
+        return list(_loopback_violations)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_live_daemon_probes() -> Generator[None, None, None]:
+    """Install the session-wide socket guard (see the block comment above)."""
+    if os.environ.get(_SOCKET_GUARD_ENV) == "1":
+        yield
+        return
+
+    import socket as _socket_module
+
+    mp = pytest.MonkeyPatch()
+    real_connect = _socket_module.socket.connect
+    real_connect_ex = _socket_module.socket.connect_ex
+
+    def _guarded_connect(self, address):
+        info = _inspect_connect_address(address)
+        if info is None or info[0] == "allowed":
+            return real_connect(self, address)
+        kind, host, port = info
+        if kind == "loopback":
+            with _violations_lock:
+                _loopback_violations.append((host, port))
+        raise _BlockedConnectionAttempt(
+            f"unit test attempted a live connection to {host}:{port} — blocked "
+            f"by the suite-wide socket guard ({_SOCKET_GUARD_ENV}=1 opts out)."
+        )
+
+    def _guarded_connect_ex(self, address):
+        info = _inspect_connect_address(address)
+        if info is None or info[0] == "allowed":
+            return real_connect_ex(self, address)
+        kind, host, port = info
+        if kind == "loopback":
+            with _violations_lock:
+                _loopback_violations.append((host, port))
+        # connect_ex contract: report failure as an errno, don't raise.
+        return errno.ECONNREFUSED
+
+    mp.setattr(_socket_module.socket, "connect", _guarded_connect)
+    mp.setattr(_socket_module.socket, "connect_ex", _guarded_connect_ex)
+    try:
+        yield
+    finally:
+        mp.undo()
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_unallowlisted_loopback_connect() -> Generator[None, None, None]:
+    """Fail whichever test caused recorded loopback connect attempts — after
+    the test body ran, so the violation names the right test even when the
+    product code swallowed the refused connection as an ordinary
+    'daemon unreachable' branch."""
+    with _violations_lock:
+        _loopback_violations.clear()
+    yield
+    with _violations_lock:
+        violations = list(_loopback_violations)
+        _loopback_violations.clear()
+    message = _summarize_violations(violations)
+    if message:
+        pytest.fail(message, pytrace=False)
+
+
+# ---------------------------------------------------------------------------
+# UPG-TEST-REAL-EMBEDDER-DOWNLOAD-GUARD: the unit suite must never fetch a
+# Hugging Face model. CI has hit real HTTP 429s because something reached for
+# the hub; both product load sites (LocalEmbedProvider, _Reranker) route
+# through agent.model_cache.load_with_offline_preference, whose cache-miss
+# fallback constructs the model with local_files_only=False — i.e. downloads.
+#
+# Guard rule: refuse ONLY calls whose builder function is defined in product
+# code (its __module__ lives under "agent."), captured the REAL
+# SentenceTransformer/CrossEncoder class in its closure, and whose model
+# is_model_cached reports as not locally cached — precisely the trajectory
+# that hits the network. Everything else delegates to the real loader
+# untouched:
+#   * tests exercising the loader itself pass TEST-defined fake builders
+#     (__module__ starts elsewhere) — unaffected;
+#   * tests that stub SentenceTransformer/CrossEncoder or patch the loader
+#     outright bypass this wrapper entirely (their own patch replaces ours,
+#     and mock.patch restores ours afterwards);
+#   * the session-scoped VECTR_CACHE_DIR isolation guarantees every real
+#     model looks uncached in unit runs, so ANY product-path construction is
+#     caught before torch even starts loading weights.
+#
+# A second layer backstops paths that skip our loader (e.g. direct
+# SentenceTransformer construction): huggingface_hub.snapshot_download /
+# hf_hub_download are wrapped to raise the same error. Known gap, accepted:
+# _Reranker._load wraps its load in `except Exception` and degrades to
+# "reranker disabled", so a backstop hit THERE degrades quietly instead of
+# failing loudly — but the reranker is already hard-disabled in unit runs
+# (VECTR_RERANKER_MODEL="" above), and LocalEmbedProvider.__init__ (the site
+# behind the CI incident) has no such handler, so the realistic surface
+# fails loudly.
+#
+# Opt-out for `-m integration` runs (which genuinely download/load models):
+# VECTR_TEST_ALLOW_REAL_NETWORK=1 — the same flag the socket guard honors.
+# ---------------------------------------------------------------------------
+
+
+class RealModelDownloadBlocked(RuntimeError):
+    """A unit test tried to make vectr fetch/load a real Hugging Face model."""
+
+
+def _builder_closes_over_real_hf_class(build_fn) -> bool:
+    """True when the builder captured the REAL sentence_transformers class in
+    its closure. Product builders (`lambda local_only: SentenceTransformer(...)`
+    inside LocalEmbedProvider/_Reranker) do; tests that stub
+    SentenceTransformer/CrossEncoder produce builders whose closure holds the
+    FAKE — a different object, whose __module__ is the test module (or
+    unittest.mock), not "sentence_transformers". Keying off __name__ AND
+    __module__ together means a fake can't dodge this by being named like the
+    real class, and no torch-importing reference to the real class is needed
+    for the comparison."""
+    for cell in getattr(build_fn, "__closure__", None) or []:
+        try:
+            value = cell.cell_contents
+        except ValueError:
+            continue  # emptied cell
+        if (
+            getattr(value, "__name__", "") in ("SentenceTransformer", "CrossEncoder")
+            and getattr(value, "__module__", "") == "sentence_transformers"
+        ):
+            return True
+    return False
+
+
+def _download_trajectory_detected(build_fn, model_name: str, cache_dir: str) -> bool:
+    """True when letting the real loader run would attempt a network fetch:
+    a product-defined builder that captured the real HF model class, for a
+    model is_model_cached reports as NOT locally cached."""
+    from agent import model_cache as _model_cache
+
+    builder_module = getattr(build_fn, "__module__", "") or ""
+    if not builder_module.startswith("agent."):
+        return False  # test-defined builder — cannot be a product download path
+    if not _builder_closes_over_real_hf_class(build_fn):
+        return False  # stubbed construction — cannot reach the hub either way
+    return not _model_cache.is_model_cached(model_name, cache_dir)
+
+
+def _refuse_real_model(model_name: str) -> RealModelDownloadBlocked:
+    return RealModelDownloadBlocked(
+        f"unit test attempted to load the real Hugging Face model '{model_name}' "
+        "(agent.model_cache.load_with_offline_preference cache-miss path). The "
+        "unit suite must never download models — CI hits HTTP 429. Inject a "
+        "deterministic provider instead: see tests/conftest._DummyEmbedProvider "
+        "and the `indexer` fixture, or monkeypatch "
+        "`agent.indexer.get_embed_provider`. If this test genuinely needs the "
+        "real model, mark it @pytest.mark.integration and run the suite with "
+        f"VECTR_TEST_ALLOW_REAL_NETWORK=1."
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_real_model_downloads() -> Generator[None, None, None]:
+    if os.environ.get(_SOCKET_GUARD_ENV) == "1":
+        yield
+        return
+
+    import huggingface_hub
+    from agent import model_cache as _model_cache
+
+    mp = pytest.MonkeyPatch()
+    real_load = _model_cache.load_with_offline_preference
+    real_snapshot_download = huggingface_hub.snapshot_download
+    real_hf_hub_download = huggingface_hub.hf_hub_download
+
+    def _guarded_load(build_fn, model_name, cache_dir):
+        if _download_trajectory_detected(build_fn, model_name, cache_dir):
+            raise _refuse_real_model(model_name)
+        return real_load(build_fn, model_name, cache_dir)
+
+    def _guarded_snapshot_download(*args, **kwargs):
+        name = kwargs.get("repo_id") or (args[0] if args else "<unknown>")
+        raise _refuse_real_model(str(name))
+
+    def _guarded_hf_hub_download(*args, **kwargs):
+        name = kwargs.get("repo_id") or (args[0] if args else "<unknown>")
+        raise _refuse_real_model(str(name))
+
+    mp.setattr(_model_cache, "load_with_offline_preference", _guarded_load)
+    mp.setattr(huggingface_hub, "snapshot_download", _guarded_snapshot_download)
+    mp.setattr(huggingface_hub, "hf_hub_download", _guarded_hf_hub_download)
+    try:
+        yield
+    finally:
+        mp.undo()
+
+
+# ---------------------------------------------------------------------------
+# UPG-PURPOSE-PASS-TEST-RACE: deterministic drain barrier for the deferred
+# purpose-vector pass.
+#
+# index_workspace() hands purpose-vector upserts to a single-worker
+# ThreadPoolExecutor and returns before they land (UPG-PURPOSE-PASS-
+# DEFERRAL). Polling `purpose_vectors_pending` works but degrades silently:
+# under machine load (e.g. a second full suite running concurrently —
+# UPG-TEST-CONCURRENT-SUITE-FLAKE) a fixed-deadline poller expires while the
+# pass is still mid-flight and the test proceeds to read a half-updated
+# collection. This helper instead submits a sentinel to the SAME executor:
+# because the pool has exactly one worker and FIFO ordering, the sentinel
+# running means every previously submitted pass has FINISHED. A hang now
+# raises a loud TimeoutError naming the mechanism instead of quietly
+# proceeding past stale reads.
+# ---------------------------------------------------------------------------
+
+
+def wait_for_deferred_purpose_pass(idx, timeout: float = 30.0) -> None:
+    """Block until all purpose-vector passes queued on `idx`'s deferred
+    executor have completed; raise TimeoutError if they don't finish within
+    `timeout` seconds. Safe to call when nothing was deferred (idle executor →
+    returns immediately) or when the sync path ran instead (`_purpose_executor`
+    absent)."""
+    executor = getattr(idx, "_purpose_executor", None)
+    if executor is None:
+        return
+    try:
+        executor.submit(lambda: None).result(timeout=timeout)
+    except concurrent.futures.TimeoutError as exc:
+        raise TimeoutError(
+            f"deferred purpose-vector pass did not finish within {timeout}s "
+            f"(purpose_vectors_pending={idx.purpose_vectors_pending}). The "
+            "single-worker FIFO barrier timed out — check for a stuck embed "
+            "provider or a governor flag that moved work off "
+            "_purpose_executor (agent/indexer/_core.py:"
+            "_schedule_deferred_purpose_pass)."
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +633,11 @@ def integration_indexer(tmp_path_factory):
     CodeIndexer with the production Snowflake/snowflake-arctic-embed-m-v1.5 model.
 
     Downloads once (~440 MB), then cached at ~/.cache/vectr/models.
-    Used only by @pytest.mark.integration tests.  Run with: pytest -m integration
+    Used only by @pytest.mark.integration tests.  Run with:
+        VECTR_TEST_ALLOW_REAL_NETWORK=1 pytest -m integration
+    (that flag opts this session out of conftest's socket guard and
+    real-model-download guard; without it, constructing this fixture raises
+    RealModelDownloadBlocked).
     """
     import os as _os
     tmp = tmp_path_factory.mktemp("integration")
