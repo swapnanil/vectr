@@ -85,7 +85,14 @@ def vectr_service(tmp_path_factory):
     with patch("agent.indexer.get_embed_provider", return_value=_DummyEmbedProvider()), \
          patch("agent.indexer.CodeIndexer._load_mtime_cache", return_value={}), \
          patch.dict("os.environ", {"VECTR_DB_DIR": db_dir, "VECTR_EMBED_MODEL": "dummy"}):
-        svc = _RealVectrService(workspace_root=workspace)
+        # configure_ide=False: this fixture points a real VectrService at the
+        # real source tree on purpose (retrieval quality needs real code to
+        # search), but indexing the tree must not also REWRITE it. Left at its
+        # default True, phase-2 startup writes .cursor/mcp.json,
+        # .vscode/mcp.json and .claude/settings.json into the developer's
+        # working checkout, pointing their editor at whatever port this
+        # in-process service reports. There is no HTTP bind here to advertise.
+        svc = _RealVectrService(workspace_root=workspace, configure_ide=False)
         svc.index(workspace)
         yield svc
 

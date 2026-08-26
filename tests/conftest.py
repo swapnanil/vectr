@@ -77,6 +77,64 @@ def _isolated_cache_root(tmp_path_factory) -> Generator[Path, None, None]:
 
 
 # ---------------------------------------------------------------------------
+# UPG-TEST-IDE-CONFIG-REAL-TREE-WRITE: the suite must never rewrite the
+# developer's own editor config.
+#
+# VectrService takes `configure_ide: bool = True`, and at phase-2 startup that
+# makes the service write .cursor/mcp.json, .vscode/mcp.json and
+# .claude/settings.json into whatever workspace root it was given, pointing
+# them at its own port. That is correct for a real daemon and wrong for a
+# test: a test that legitimately indexes the real source tree (retrieval
+# quality needs real code to search) would silently repoint the developer's
+# editor at a port no one is listening on, and the damage outlives the run.
+#
+# One fixture did exactly that. The rule is cheap to enforce, so enforce it
+# rather than relying on every future fixture author to remember
+# `configure_ide=False`.
+#
+# The write is SUPPRESSED as well as recorded, because configure_all() catches
+# Exception around each writer and only logs a warning — a raise here would be
+# swallowed and the file written anyway. Recording and failing at teardown is
+# what actually makes it visible.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_ide_config_writes_into_real_tree() -> Generator[None, None, None]:
+    from integrations import vscode_bridge
+
+    violations: list[str] = []
+    real_merge = vscode_bridge._merge_json_file
+
+    def guarded(path, payload, owned_keys=None, **kwargs):
+        try:
+            resolved = Path(path).resolve()
+            inside = resolved == _REPO_ROOT or _REPO_ROOT in resolved.parents
+        except OSError:  # pragma: no cover - unresolvable path is not ours
+            inside = False
+        if inside:
+            violations.append(str(resolved))
+            return
+        return real_merge(path, payload, owned_keys=owned_keys, **kwargs)
+
+    vscode_bridge._merge_json_file = guarded
+    try:
+        yield
+    finally:
+        vscode_bridge._merge_json_file = real_merge
+        if violations:
+            listed = "\n  ".join(sorted(set(violations)))
+            raise RuntimeError(
+                "A test wrote editor MCP config into the real source tree:\n  "
+                + listed
+                + "\n\nConstruct the service with configure_ide=False, or point it "
+                "at a tmp_path workspace. The writes above were suppressed."
+            )
+
+
+# ---------------------------------------------------------------------------
 # Dummy embed provider — deterministic, zero-download
 # ---------------------------------------------------------------------------
 

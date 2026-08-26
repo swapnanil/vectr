@@ -585,5 +585,5 @@ class TestServerDefaultPort:
         import inspect
         from integrations import vscode_bridge
         for fn in (vscode_bridge.configure_cursor, vscode_bridge.configure_claude_code,
-                   vscode_bridge.configure_all):
+                   vscode_bridge.configure_vscode, vscode_bridge.configure_all):
             assert inspect.signature(fn).parameters["port"].default == cfg.DEFAULT_PORT
