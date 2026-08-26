@@ -84,7 +84,7 @@ def handle_tools_list(session_id: str | None = None, service: Any = None) -> dic
 
     Always shown: exploration tools + vectr_remember + vectr_evict_hint.
     Gated on notes existing: vectr_recall, vectr_forget, vectr_promote, vectr_revoke,
-    vectr_reinstate, vectr_snapshot, vectr_snapshot_list.
+    vectr_reinstate, vectr_supersede, vectr_snapshot, vectr_snapshot_list.
     """
     # Hosted/registry deployments (e.g. a catalog's containerised inspector)
     # start with an empty note store but must still advertise the complete
@@ -442,20 +442,24 @@ def handle_tools_call(
                 "migration completes on the next restart"
             )
 
-        # UPG-TASK-SUPERSEDES-HYGIENE: a nudge, not a lifecycle change — task
-        # notes never decay or auto-expire, so a stale checkpoint left
-        # un-superseded keeps firing at every future session-start forever.
-        # Purely additive/state-based: fires once the live (non-superseded)
-        # count of aged kind="task" notes clears the config threshold.
+        # UPG-TASK-SUPERSEDES-HYGIENE / UPG-STATUS-AGE-ONLY-FORGET-NUDGE: a
+        # neutral inventory line, not a WARNING. Age alone is not a
+        # deterministic staleness signal — a 10-day-old checkpoint may be
+        # exactly current work — so this never alarms and never nominates
+        # vectr_forget (the one destructive verb, whose product thesis
+        # forbids removal on an age threshold). The only remediation it
+        # names is supersession: recording what happened to the work via a
+        # successor checkpoint is a caller judgment about STATE, which is
+        # precisely the remediation kind="task" notes admit.
         stale_task_count = status.get("stale_task_count", 0)
         if stale_task_count >= MEMORY_HYGIENE_STALE_TASK_WARN_COUNT:
             oldest_id = status.get("stale_task_oldest_id")
             lines.append(
-                f"  WARNING        : {stale_task_count} task note(s) are older than "
-                f"{MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS} days and still active "
-                f"(oldest: #{oldest_id}) — consider vectr_remember(kind=\"task\", "
-                "supersedes=<old id>) if the work moved on, or vectr_forget(note_id=...) "
-                "if it's done"
+                f"  Task notes     : {stale_task_count} checkpoint(s) older than "
+                f"{MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS} days are still active "
+                f"(oldest: #{oldest_id}) — age alone never retires a note. When one "
+                "describes finished or moved-on work, record that with "
+                "vectr_remember(kind=\"task\", priority=\"high\", supersedes=<old id>)"
             )
 
         # Per-language coverage + symbol availability (UPG-3.3). Tells the agent
@@ -923,8 +927,24 @@ def handle_tools_call(
                 "anchors=[<path>]) — no re-store needed. A changed anchor means the "
                 "process MAY have changed, never that the note is wrong."
             )
+        # UPG-RESUME-TASK-PRIORITY-VISIBILITY: session-start boot injection and
+        # the resume surface show only priority='high' task notes (the shared
+        # _boot_task_notes() query), while 'medium' is the default — so a
+        # checkpoint saved without an explicit priority would never appear at
+        # resume, silently. Surface that fact in the SAME confirmation as the
+        # write, and only when the caller let the default stand (an explicitly
+        # chosen lower priority is an intentional ranking decision, not an
+        # oversight to nag about).
+        priority_hint = ""
+        if kind == "task" and arguments.get("priority") is None:
+            priority_hint = (
+                "\n  Note: session-start/resume surfaces show only priority='high' task "
+                "checkpoints — this one stored as 'medium'. If it should be picked up at "
+                "resume, re-store it with priority=\"high\" (and supersedes=<this id> when "
+                "it replaces an older checkpoint)."
+            )
         return {
-            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}{quote_suffix}{distill_suffix}{related_suffix}{revoked_suffix}{proxy_suffix}"}],
+            "content": [{"type": "text", "text": f"Stored note #{note_id}{scope_suffix}. Recall with vectr_recall — <50ms, verbatim, any time.{echo}{quote_suffix}{distill_suffix}{related_suffix}{revoked_suffix}{proxy_suffix}{priority_hint}"}],
             "isError": False,
         }
 
@@ -1208,6 +1228,54 @@ def handle_tools_call(
             return _mcp_error(f"Note #{nid} not found.")
         return {
             "content": [{"type": "text", "text": f"Reinstated note #{nid}. Its original content will surface again."}],
+            "isError": False,
+        }
+
+    # ---- vectr_supersede ----
+    if tool_name == "vectr_supersede":
+        # Search-only mode: the working-memory layer is disabled for this workspace
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
+        note_id = arguments.get("note_id")
+        # Bool rejected up front: JSON true/false are int subclasses and
+        # int(True) == 1 would retire an unrelated note.
+        if note_id is None or isinstance(note_id, bool):
+            return _mcp_error("note_id is required as an integer (the [#N] id shown by vectr_recall)")
+        try:
+            nid = int(note_id)
+        except (TypeError, ValueError):
+            return _mcp_error("note_id must be an integer (the [#N] id shown by vectr_recall)")
+        superseded_by = arguments.get("superseded_by")
+        if superseded_by is not None:
+            if isinstance(superseded_by, bool):
+                return _mcp_error("superseded_by must be an integer note id")
+            try:
+                superseded_by = int(superseded_by)
+            except (TypeError, ValueError):
+                return _mcp_error("superseded_by must be an integer note id")
+        reason = arguments.get("reason") or None
+        # UPG-MEMORY-STATE-MACHINE §4.2 convention (same as vectr_revoke):
+        # MCP is the AI's own surface, so actor is hardcoded here (never a
+        # caller argument) — only the REST /v1/supersede route a person's
+        # own CLI/UI calls can attribute the retirement to actor="human".
+        try:
+            retired = service.supersede_note(nid, superseded_by=superseded_by, reason=reason, actor="agent")
+        except ValueError as exc:
+            return _mcp_error(str(exc))
+        if not retired:
+            return _mcp_error(f"Note #{nid} not found.")
+        successor_str = (
+            f" Its replacement is #{superseded_by}." if superseded_by is not None else ""
+        )
+        return {
+            "content": [{"type": "text", "text": (
+                f"Retired note #{nid} as superseded. It will no longer surface in "
+                f"default recall/session-start and renders with the factual "
+                f"'[superseded ...]' badge — not the revoked deterrent.{successor_str} "
+                "Reverse with vectr_reinstate if this was wrong."
+            )}],
             "isError": False,
         }
 

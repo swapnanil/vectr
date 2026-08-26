@@ -56,6 +56,8 @@ from app.models import (
     RevokeResponse,
     SearchRequest,
     SearchResponse,
+    SupersedeRequest,
+    SupersedeResponse,
     SnapshotRequest,
     SnapshotResponse,
     StatusResponse,
@@ -623,9 +625,12 @@ async def revoke(body: RevokeRequest, request: Request) -> RevokeResponse:
 @router.post("/v1/reinstate", response_model=ReinstateResponse)
 async def reinstate(body: ReinstateRequest, request: Request) -> ReinstateResponse:
     """Revert-of-revert (UPG-MEMORY-STATE-MACHINE §4.2): always legal.
-    Reverses a prior `/v1/revoke` (or a `contradicts=` write): the note
-    returns to active state and its raw content, not the anti-memory
-    deterrent block, is rendered again on every surface."""
+    Reverses a prior `/v1/revoke` (or a `contradicts=` write), a TTL
+    expiry, or a supersession (`supersedes=` at write time or
+    `/v1/supersede` post-hoc — the tombstone columns are cleared so the
+    note returns to default recall/fire): the note returns to active state
+    and its raw content, not the anti-memory deterrent block, is rendered
+    again on every surface."""
     t0 = time.monotonic()
     svc = _service(request)
     if getattr(svc, "search_only", False):
@@ -640,6 +645,41 @@ async def reinstate(body: ReinstateRequest, request: Request) -> ReinstateRespon
     return ReinstateResponse(
         note_id=body.note_id,
         message=f"Note #{body.note_id} reinstated.",
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/supersede", response_model=SupersedeResponse)
+async def supersede(body: SupersedeRequest, request: Request) -> SupersedeResponse:
+    """Post-hoc supersession (UPG-NOTE-RETIRE-POST-HOC): retire an
+    already-stored note as superseded — the transition write-time
+    `supersedes=` cannot reach, for a replacement that was written without
+    it. Zero-inference — vectr never decides a retirement itself; this
+    route only appends the event and returns. The note is not deleted and
+    not revoked: it stops being a default recall/fire candidate and renders
+    with the factual "[superseded ...]" badge (never the anti-memory
+    deterrent — that framing is reserved for /v1/revoke's "this note was
+    WRONG"). Reversible via `/v1/reinstate`.
+
+    Person-operated surface: `actor` defaults to "agent" but accepts
+    "human" explicitly (never "system"). An agent-actor call may not retire
+    a human-provenance note; only actor="human" may."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    try:
+        retired = svc.supersede_note(
+            body.note_id, superseded_by=body.superseded_by, reason=body.reason, actor=body.actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": "invalid_supersedence", "detail": str(exc)})
+    if not retired:
+        raise HTTPException(status_code=404, detail={"error": "note_not_found", "detail": f"Note #{body.note_id} not found."})
+    return SupersedeResponse(
+        note_id=body.note_id,
+        message=f"Note #{body.note_id} retired as superseded.",
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 

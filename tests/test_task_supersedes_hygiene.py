@@ -2,13 +2,19 @@
 UPG-TASK-SUPERSEDES-HYGIENE — a memory-hygiene NUDGE, never a lifecycle
 change: kind="task" notes never decay, auto-supersede, or auto-expire.
 
+UPG-STATUS-AGE-ONLY-FORGET-NUDGE — that nudge is NEUTRAL inventory framing,
+never a WARNING, and never nominates vectr_forget: age alone is not a
+deterministic staleness signal, so the only remediation it names is
+supersession (a caller judgment about work state).
+
 Coverage:
   - WorkingContextStore.stale_task_summary(): state-based count + oldest id
     (kind + age + tombstone status only, never content).
   - VectrService.stale_task_summary() / status(): wraps the store, exposed
     unconditionally, (0, None) in search-only mode.
-  - vectr_status MCP output: warning line appended above the configured
-    threshold, absent below it and when notes are superseded.
+  - vectr_status MCP output: neutral line appended above the configured
+    threshold, absent below it and when notes are superseded; names only
+    supersedes as remediation.
   - /v1/status REST: same fields surfaced through StatusResponse.
   - Config-driven: mutating the threshold changes behaviour without any
     code change.
@@ -172,6 +178,21 @@ class TestServiceStaleTaskSummary:
         assert "Memory hygiene" in boot_text
         assert f"#{oldest_id}" in boot_text
 
+    def test_boot_recall_nudge_never_nominates_forget(self, tmp_path, monkeypatch) -> None:
+        # UPG-STATUS-AGE-ONLY-FORGET-NUDGE: the boot-injection nudge must offer
+        # supersession as the remediation and never nominate vectr_forget on an
+        # age threshold.
+        from agent.config import MEMORY_HYGIENE_STALE_TASK_WARN_COUNT
+        svc = self._make_service(tmp_path, monkeypatch)
+        for i in range(MEMORY_HYGIENE_STALE_TASK_WARN_COUNT):
+            nid = svc._context_store.remember(
+                svc._workspace_root, f"stale checkpoint {i}", kind="task"
+            )
+            _backdate(svc._context_store, nid, age_days=10)
+        boot_text = svc.recall("", boot=True, session_id="sess-forget-check")
+        assert "vectr_forget" not in boot_text
+        assert "supersedes" in boot_text
+
     def test_boot_recall_no_nudge_below_threshold(self, tmp_path, monkeypatch) -> None:
         svc = self._make_service(tmp_path, monkeypatch)
         nid = svc._context_store.remember(svc._workspace_root, "one stale task", kind="task")
@@ -182,7 +203,7 @@ class TestServiceStaleTaskSummary:
 
 
 # ---------------------------------------------------------------------------
-# MCP-level: vectr_status warning line (mocked svc.status(), UPG-9x pattern)
+# MCP-level: vectr_status stale-task line (mocked svc.status(), UPG-9x pattern)
 # ---------------------------------------------------------------------------
 
 class TestMCPStatusStaleTaskWarning:
@@ -210,42 +231,67 @@ class TestMCPStatusStaleTaskWarning:
         result = handle_tools_call("vectr_status", {}, svc, session_id="test")
         return result["content"][0]["text"]
 
-    def test_warning_present_above_threshold(self) -> None:
+    # UPG-STATUS-AGE-ONLY-FORGET-NUDGE: the line is neutral inventory
+    # framing, not a WARNING — age alone is never a staleness verdict, and
+    # the one destructive verb is never nominated on it.
+
+    def test_line_present_above_threshold(self) -> None:
         from agent.config import MEMORY_HYGIENE_STALE_TASK_WARN_COUNT
         text = self._call(self._base_status(
             stale_task_count=MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
             stale_task_oldest_id=42,
         ))
-        assert "WARNING" in text
         assert "#42" in text
-        assert "task note" in text.lower()
+        assert "checkpoint(s)" in text
+        assert "still active" in text
 
-    def test_warning_absent_below_threshold(self) -> None:
+    def test_line_is_not_a_warning(self) -> None:
+        """The task-note line must not carry WARNING severity. With this mock
+        status dict no other WARNING line can fire (grammars_unavailable is
+        empty and no failure keys are set), so any WARNING in the output
+        would have to be this line's."""
         from agent.config import MEMORY_HYGIENE_STALE_TASK_WARN_COUNT
         text = self._call(self._base_status(
-            stale_task_count=MEMORY_HYGIENE_STALE_TASK_WARN_COUNT - 1,
+            stale_task_count=MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
             stale_task_oldest_id=42,
         ))
-        assert "task note(s) are older than" not in text
+        assert "WARNING" not in text
 
-    def test_warning_absent_when_count_zero(self) -> None:
-        text = self._call(self._base_status(stale_task_count=0, stale_task_oldest_id=None))
-        assert "task note(s) are older than" not in text
+    def test_line_never_nominates_forget(self) -> None:
+        from agent.config import MEMORY_HYGIENE_STALE_TASK_WARN_COUNT
+        text = self._call(self._base_status(
+            stale_task_count=MEMORY_HYGIENE_STALE_TASK_WARN_COUNT + 100,
+            stale_task_oldest_id=42,
+        ))
+        assert "vectr_forget" not in text
 
-    def test_warning_absent_when_key_missing_entirely(self) -> None:
-        """Backward-compat: an older mock/status dict without the new keys
-        must not error and must not warn (defaults to 0)."""
-        text = self._call(self._base_status())
-        assert "task note(s) are older than" not in text
-
-    def test_warning_mentions_supersedes_and_forget(self) -> None:
+    def test_line_names_supersede_as_the_remediation(self) -> None:
         from agent.config import MEMORY_HYGIENE_STALE_TASK_WARN_COUNT
         text = self._call(self._base_status(
             stale_task_count=MEMORY_HYGIENE_STALE_TASK_WARN_COUNT,
             stale_task_oldest_id=7,
         ))
-        assert "supersedes" in text
-        assert "vectr_forget" in text
+        assert 'supersedes=<old id>' in text
+        # The successor checkpoint guidance steers toward resume visibility too.
+        assert 'priority="high"' in text
+
+    def test_line_absent_below_threshold(self) -> None:
+        from agent.config import MEMORY_HYGIENE_STALE_TASK_WARN_COUNT
+        text = self._call(self._base_status(
+            stale_task_count=MEMORY_HYGIENE_STALE_TASK_WARN_COUNT - 1,
+            stale_task_oldest_id=42,
+        ))
+        assert "checkpoint(s)" not in text
+
+    def test_line_absent_when_count_zero(self) -> None:
+        text = self._call(self._base_status(stale_task_count=0, stale_task_oldest_id=None))
+        assert "checkpoint(s)" not in text
+
+    def test_line_absent_when_key_missing_entirely(self) -> None:
+        """Backward-compat: an older mock/status dict without the new keys
+        must not error and must not warn (defaults to 0)."""
+        text = self._call(self._base_status())
+        assert "checkpoint(s)" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -276,14 +322,14 @@ class TestConfigDrivenThreshold:
             "symbol_count": 0, "notes_count": 0, "languages": [],
             "grammars_unavailable": [], "stale_task_count": 1, "stale_task_oldest_id": 3,
         }
-        # Default config (3) — 1 stale task must not warn.
-        assert "task note(s) are older than" not in self._call(status)
+        # Default config (3) — 1 stale task must not render the line.
+        assert "checkpoint(s)" not in self._call(status)
 
-        # Lower the threshold to 1 — the same count of 1 must now warn.
+        # Lower the threshold to 1 — the same count of 1 must now render it.
         monkeypatch.setattr(dispatch_mod, "MEMORY_HYGIENE_STALE_TASK_WARN_COUNT", 1)
-        assert "task note(s) are older than" in self._call(status)
+        assert "checkpoint(s)" in self._call(status)
 
-    def test_warning_age_text_reflects_config(self, monkeypatch) -> None:
+    def test_line_age_text_reflects_config(self, monkeypatch) -> None:
         import integrations.mcp_server._dispatch as dispatch_mod
 
         monkeypatch.setattr(dispatch_mod, "MEMORY_HYGIENE_STALE_TASK_WARN_COUNT", 1)

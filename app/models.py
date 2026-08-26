@@ -334,7 +334,14 @@ class RememberRequest(BaseModel):
         ),
     )
     tags: list[str] | None = Field(default=None, description="Topic tags")
-    priority: str = Field(default="medium", description="high | medium | low")
+    priority: str = Field(
+        default="medium",
+        description=(
+            "high | medium | low. Session-start/resume surfaces show only "
+            "priority='high' kind='task' notes — a checkpoint meant for "
+            "resume needs priority='high' (UPG-RESUME-TASK-PRIORITY-VISIBILITY)."
+        ),
+    )
     kind: str = Field(default="finding", description="directive | task | gotcha | finding | reference | decision | operational")
     session_id: str | None = Field(default=None)
     title: str = Field(default="", description="Short label for index-tier display (optional; derived from first content line if empty)")
@@ -843,6 +850,39 @@ class ReinstateRequest(BaseModel):
 
 
 class ReinstateResponse(BaseModel):
+    note_id: int
+    message: str
+    processing_ms: int
+
+
+class SupersedeRequest(BaseModel):
+    """Post-hoc supersession (UPG-NOTE-RETIRE-POST-HOC) — retire an
+    already-stored note as superseded, for a replacement that was written
+    without `supersedes=`. Appends a `superseded_post_hoc` event and sets
+    the same tombstone columns as the write-time path, so the note stops
+    being a default recall/fire candidate and renders with the factual
+    "[superseded ...]" badge — never the revoked deterrent. Reversible via
+    /v1/reinstate."""
+
+    note_id: int = Field(..., description="Note to retire as superseded")
+    superseded_by: int | None = Field(
+        default=None,
+        description="Optional ID of the replacement note; must already exist in this workspace",
+    )
+    reason: str | None = Field(
+        default=None, description="Optional: why this note is being retired as superseded"
+    )
+    actor: str = Field(default="agent", description="agent | human")
+
+    @field_validator("actor")
+    @classmethod
+    def validate_actor(cls, v: str) -> str:
+        if v not in _NOTE_EVENT_ACTOR_VALUES:
+            raise ValueError(f"actor must be one of: {', '.join(_NOTE_EVENT_ACTOR_VALUES)}")
+        return v
+
+
+class SupersedeResponse(BaseModel):
     note_id: int
     message: str
     processing_ms: int
