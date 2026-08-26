@@ -2259,6 +2259,32 @@ class VectrService:
             self._bump_notes_epoch()
         return reinstated
 
+    def supersede_note(
+        self,
+        note_id: int,
+        superseded_by: int | None = None,
+        reason: str | None = None,
+        actor: str = "agent",
+    ) -> bool:
+        """Post-hoc supersession (UPG-NOTE-RETIRE-POST-HOC): retire an
+        already-stored note as superseded — for a replacement that was
+        written without `supersedes=` and an old note only later discovered
+        to be already-superseded-in-substance. See
+        `WorkingContextStore.supersede_note()` for the exact contract
+        (raises ValueError on an invalid actor, a missing successor, or a
+        human-provenance target retired by an agent-actor call; returns
+        False if the note does not exist). The note is not deleted and not
+        revoked — it stops being a default recall/fire candidate and renders
+        with the factual "[superseded ...]" badge."""
+        self._require_memory_layer()
+        retired = self._context_store.supersede_note(
+            self._workspace_root, note_id,
+            superseded_by=superseded_by, reason=reason, actor=actor,
+        )
+        if retired:
+            self._bump_notes_epoch()
+        return retired
+
     def pin_note(self, note_id: int, pinned: bool = True) -> bool:
         """Explicit Tier 0 membership toggle (UPG-RECALL-MISS-FLOOR part
         (b)): set/clear a note's `pinned` flag. Pinned notes are injected
@@ -3280,18 +3306,23 @@ class VectrService:
         )
 
     def _stale_task_nudge_line(self) -> str:
-        """One-line stale-task hygiene nudge, or "" when below the warn count
+        """One-line stale-task hygiene note, or "" when below the warn count
         (UPG-NUDGE-HOOK-PATH-UNREACHABLE). The same signal vectr_status renders,
         surfaced on the SessionStart injection path so it reaches agents that
-        never call status."""
+        never call status. Neutral framing, never a WARNING, and never names
+        vectr_forget: age alone is not a deterministic staleness signal
+        (UPG-STATUS-AGE-ONLY-FORGET-NUDGE), so the only remediation offered is
+        supersession — a caller judgment about work state, which is the one
+        remediation kind="task" notes admit."""
         count, oldest_id = self.stale_task_summary()
         if count < MEMORY_HYGIENE_STALE_TASK_WARN_COUNT:
             return ""
         return (
-            f"Memory hygiene: {count} task note(s) older than "
+            f"Memory hygiene: {count} task checkpoint(s) older than "
             f"{MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS} days are still active "
-            f"(oldest: #{oldest_id}) — vectr_remember(kind=\"task\", supersedes=<old id>) "
-            "if the work moved on, or vectr_forget(note_id=...) if it's done."
+            f"(oldest: #{oldest_id}) — age alone never retires a note; when one "
+            "describes finished or moved-on work, record that with "
+            "vectr_remember(kind=\"task\", priority=\"high\", supersedes=<old id>)."
         )
 
     def _arc_distill_nudge_line(self) -> str:

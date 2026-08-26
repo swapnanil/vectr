@@ -2365,11 +2365,13 @@ class TestVectrForget:
         # UPG-MEMORY-STATE-MACHINE §4.2 added vectr_revoke/vectr_reinstate (18 = 16 + 2);
         # memoization-l3-distiller-design added vectr_distill (19 = 18 + 1);
         # UPG-RECALL-MISS-FLOOR part (b) added vectr_pin (20 = 19 + 1);
-        # UPG-ANCHOR-ATTACH added vectr_anchor (21 = 20 + 1).
-        assert len(tools) == 21
+        # UPG-ANCHOR-ATTACH added vectr_anchor (21 = 20 + 1);
+        # UPG-NOTE-RETIRE-POST-HOC added vectr_supersede (22 = 21 + 1).
+        assert len(tools) == 22
         assert {
             "vectr_recall", "vectr_forget", "vectr_promote", "vectr_revoke", "vectr_reinstate",
             "vectr_snapshot", "vectr_snapshot_list", "vectr_resume", "vectr_distill", "vectr_pin",
+            "vectr_supersede",
         } <= names
 
     def test_all_tools_env_flag_off_keeps_gating(self, monkeypatch) -> None:
@@ -2570,6 +2572,155 @@ class TestVectrReinstate:
         assert "vectr_reinstate" in {t["name"] for t in _MEMORY_TOOLS}
         write_names = {t["name"] for t in _MEMORY_WRITE_TOOLS}
         assert "vectr_reinstate" not in write_names
+
+
+class TestVectrSupersede:
+    """vectr_supersede (UPG-NOTE-RETIRE-POST-HOC): retire an ALREADY-STORED
+    note as superseded. Same MCP-surface conventions as vectr_revoke/
+    vectr_reinstate above — actor hardcoded to "agent" (never a caller
+    argument on the AI's own surface)."""
+
+    def test_supersede_calls_service_with_successor_and_agent_actor(self) -> None:
+        svc = _mock_service()
+        svc.supersede_note.return_value = True
+        result = handle_tools_call(
+            "vectr_supersede", {"note_id": 12, "superseded_by": 15, "reason": "replaced in substance"}, svc
+        )
+        svc.supersede_note.assert_called_once_with(12, superseded_by=15, reason="replaced in substance", actor="agent")
+        assert result["isError"] is False
+        assert "#12" in result["content"][0]["text"]
+        assert "#15" in result["content"][0]["text"]
+
+    def test_supersede_without_successor_omits_replacement_line(self) -> None:
+        svc = _mock_service()
+        svc.supersede_note.return_value = True
+        result = handle_tools_call("vectr_supersede", {"note_id": 12}, svc)
+        svc.supersede_note.assert_called_once_with(12, superseded_by=None, reason=None, actor="agent")
+        assert result["isError"] is False
+        assert "replacement is" not in result["content"][0]["text"]
+
+    def test_supersede_names_the_factual_badge_not_the_revoked_deterrent(self) -> None:
+        # The confirmation text must teach the distinction: a retired note was
+        # true when written (factual badge); a revoked note was WRONG.
+        svc = _mock_service()
+        svc.supersede_note.return_value = True
+        result = handle_tools_call("vectr_supersede", {"note_id": 12}, svc)
+        text = result["content"][0]["text"]
+        assert "[superseded ...]" in text
+        assert "not the revoked deterrent" in text
+
+    def test_supersede_string_superseded_by_is_coerced(self) -> None:
+        svc = _mock_service()
+        svc.supersede_note.return_value = True
+        handle_tools_call("vectr_supersede", {"note_id": "12", "superseded_by": "15"}, svc)
+        svc.supersede_note.assert_called_once_with(12, superseded_by=15, reason=None, actor="agent")
+
+    def test_supersede_missing_note_id_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_supersede", {}, svc)
+        assert result["isError"] is True
+        svc.supersede_note.assert_not_called()
+
+    def test_supersede_non_integer_note_id_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_supersede", {"note_id": "abc"}, svc)
+        assert result["isError"] is True
+        svc.supersede_note.assert_not_called()
+
+    def test_supersede_bool_note_id_returns_error(self) -> None:
+        # JSON true/false are int subclasses; int(True) == 1 would retire an
+        # unrelated note. Same guard as vectr_recall's note_id path.
+        svc = _mock_service()
+        result = handle_tools_call("vectr_supersede", {"note_id": True}, svc)
+        assert result["isError"] is True
+        svc.supersede_note.assert_not_called()
+
+    def test_supersede_bool_superseded_by_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_supersede", {"note_id": 12, "superseded_by": False}, svc)
+        assert result["isError"] is True
+        svc.supersede_note.assert_not_called()
+
+    def test_supersede_non_integer_superseded_by_returns_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_supersede", {"note_id": 12, "superseded_by": "soon"}, svc)
+        assert result["isError"] is True
+        svc.supersede_note.assert_not_called()
+
+    def test_supersede_not_found_returns_error(self) -> None:
+        svc = _mock_service()
+        svc.supersede_note.return_value = False
+        result = handle_tools_call("vectr_supersede", {"note_id": 999}, svc)
+        assert result["isError"] is True
+        assert "not found" in result["content"][0]["text"].lower()
+
+    def test_supersede_value_error_from_service_returns_mcp_error(self) -> None:
+        # Covers every store-side validation raise reaching this surface:
+        # missing successor, self-successor, human-provenance boundary.
+        svc = _mock_service()
+        svc.supersede_note.side_effect = ValueError(
+            "superseded_by references note #15, which does not exist in this workspace"
+        )
+        result = handle_tools_call("vectr_supersede", {"note_id": 12, "superseded_by": 15}, svc)
+        assert result["isError"] is True
+        assert "does not exist" in result["content"][0]["text"]
+
+    def test_supersede_in_tools_list(self) -> None:
+        names = {t["name"] for t in handle_tools_list()["tools"]}
+        assert "vectr_supersede" in names
+
+    def test_supersede_gated_with_other_memory_read_tools(self) -> None:
+        assert "vectr_supersede" in {t["name"] for t in _MEMORY_TOOLS}
+        write_names = {t["name"] for t in _MEMORY_WRITE_TOOLS}
+        assert "vectr_supersede" not in write_names
+
+
+class TestVectrRememberResumePriorityHint:
+    """UPG-RESUME-TASK-PRIORITY-VISIBILITY: a kind='task' note stored with
+    the priority default ('medium') never appears on session-start/resume —
+    those surfaces show only priority='high'. The write confirmation says so,
+    but ONLY when the caller let the default stand: an explicitly chosen
+    lower priority is an intentional ranking decision, not an oversight."""
+
+    # Bug-present shape: with the hint block deleted, the first test's
+    # assertion fails ("priority='high'" absent from the task-note text);
+    # the explicit-priority tests would still pass (they assert absence),
+    # which is why the omitted-default case is the headline.
+
+    def test_task_note_with_default_priority_carries_resume_hint(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_remember", {"content": "checkpoint: auth flow done", "kind": "task"}, svc)
+        assert result["isError"] is False
+        text = result["content"][0]["text"]
+        assert "session-start/resume surfaces show only priority='high'" in text
+        assert 'priority="high"' in text
+        assert "supersedes=<this id>" in text
+
+    def test_explicit_medium_priority_stays_silent(self) -> None:
+        # An explicitly chosen medium is deliberate — no nagging.
+        svc = _mock_service()
+        result = handle_tools_call(
+            "vectr_remember", {"content": "checkpoint", "kind": "task", "priority": "medium"}, svc
+        )
+        assert result["isError"] is False
+        assert "session-start/resume surfaces show only" not in result["content"][0]["text"]
+
+    def test_explicit_high_priority_stays_silent(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call(
+            "vectr_remember", {"content": "checkpoint", "kind": "task", "priority": "high"}, svc
+        )
+        assert result["isError"] is False
+        assert "session-start/resume surfaces show only" not in result["content"][0]["text"]
+
+    def test_non_task_kind_never_hints(self) -> None:
+        # Resume visibility is a TASK-note concern only; findings/gotchas/
+        # directives have their own delivery channels.
+        for kind in ("finding", "gotcha", "directive"):
+            svc = _mock_service()
+            result = handle_tools_call("vectr_remember", {"content": "a note", "kind": kind}, svc)
+            assert result["isError"] is False
+            assert "session-start/resume surfaces show only" not in result["content"][0]["text"]
 
 
 class TestVectrPin:

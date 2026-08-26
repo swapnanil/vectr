@@ -4360,7 +4360,9 @@ def main() -> None:
     p_remember = sub.add_parser("remember", help="Store a working-memory note (shell path to the note store)")
     p_remember.add_argument("content", help="The note content to store")
     p_remember.add_argument("--tags", action="append", metavar="TAG", help="Topic tag (repeatable)")
-    p_remember.add_argument("--priority", choices=["high", "medium", "low"], default="medium")
+    p_remember.add_argument("--priority", choices=["high", "medium", "low"], default="medium",
+                            help="For kind='task' checkpoints: only priority='high' appears on "
+                                 "session-start/resume surfaces")
     p_remember.add_argument("--kind", choices=["directive", "task", "gotcha", "finding", "reference", "decision", "operational"],
                             default="finding", help="Memory kind (controls injection policy)")
     p_remember.add_argument("--title", default="", help="Short label for index-tier display (optional; derived from first content line if empty)")

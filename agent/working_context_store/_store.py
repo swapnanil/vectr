@@ -861,10 +861,18 @@ def _format_full_block(
         sup_by = n.superseded_by or (
             f"note#{n.superseded_by_note_id}" if n.superseded_by_note_id else None
         )
+        import datetime as _dt
+        sup_date = _dt.datetime.fromtimestamp(n.superseded_at or n.valid_until).strftime("%Y-%m-%d")
         if sup_by:
-            import datetime as _dt
-            sup_date = _dt.datetime.fromtimestamp(n.superseded_at or n.valid_until).strftime("%Y-%m-%d")
             superseded_marker = f" [superseded by @{sup_by}, {sup_date}]"
+        else:
+            # UPG-NOTE-RETIRE-POST-HOC: a note retired with no successor
+            # link (`supersede_note(superseded_by=None)` — the only path
+            # that can leave valid_until set with neither identifier).
+            # Factual framing, never blank: an excluded-from-recall note
+            # that renders as if active on the include-superseded surfaces
+            # would mislead exactly the reader who dug it up.
+            superseded_marker = f" [superseded, {sup_date}]"
 
     # Surface the kind when it carries injection semantics (UPG-9.3) —
     # 'finding' is the default and adds no signal, so it's left implicit.
@@ -1989,19 +1997,103 @@ class WorkingContextStore:
         actor: str = "agent",
         reason: str | None = None,
     ) -> bool:
-        """Revert a revocation OR an expiry (UPG-MEMORY-STATE-MACHINE §4.2,
-        UPG-MEMORY-DECAY-KIND-SCOPED; `vectr_reinstate`) — appends a
+        """Revert a revocation OR an expiry OR a supersession
+        (UPG-MEMORY-STATE-MACHINE §4.2, UPG-MEMORY-DECAY-KIND-SCOPED,
+        UPG-NOTE-RETIRE-POST-HOC; `vectr_reinstate`) — appends a
         `reinstated` event, always legal regardless of the note's current
         folded state (a no-op-in-spirit reinstate on an already-active note
         is harmless, same "just append, let the fold decide" philosophy as
-        a repeat revoke). The SAME event kind reverses both terminal states
+        a repeat revoke). The SAME event kind reverses every terminal state
         — `reinstated` means "return to active" regardless of whether the
-        note got there via `revoke_note()` or `purge_expired_notes()`'s
-        automatic TTL expiry, so no separate "un-expire" call is needed.
-        Returns True if the note exists, False if it does not exist in this
-        workspace. Raises ValueError if `actor` is invalid (same restriction
-        as `revoke_note` — reinstatement is always a judgment call, never
-        `actor='system'`).
+        note got there via `revoke_note()`, `purge_expired_notes()`'s
+        automatic TTL expiry, or a supersession (`supersedes=` at write
+        time, `supersede_note()` post-hoc), so no separate un-expire /
+        un-supersede call is needed. Returns True if the note exists, False
+        if it does not exist in this workspace. Raises ValueError if
+        `actor` is invalid (same restriction as `revoke_note` —
+        reinstatement is always a judgment call, never `actor='system'`).
+
+        Supersession additionally tombstones COLUMNS on the note row
+        (`valid_until`/`superseded_at`/`superseded_by_note_id` — recall()'s
+        default exclusion and evaluate_note's never-fire check both read
+        those columns, not the fold), so reversing it also clears them here
+        when the CURRENT folded state is 'superseded'. Revocation and
+        expiry are event-only transitions and need no column reversal; an
+        active-state note gets no column write at all, so reinstating an
+        already-active note stays a pure no-op exactly as before."""
+        if actor not in NOTE_EVENT_ACTORS or actor == "system":
+            raise ValueError(
+                f"actor must be one of: {', '.join(a for a in NOTE_EVENT_ACTORS if a != 'system')}"
+            )
+        note = self.get_note(workspace, note_id)
+        if note is None:
+            return False
+        was_superseded = (
+            self.note_event_states(workspace, [note]).get(note_id, {}).get("state")
+            == "superseded"
+        )
+        with self._conn() as conn:
+            if was_superseded:
+                # UPG-NOTE-RETIRE-POST-HOC: clear the tombstone columns in
+                # the SAME transaction as the event, so a caller can never
+                # observe "folded back to active" while the row is still
+                # excluded from default recall()/fire().
+                conn.execute(
+                    """UPDATE notes SET valid_until = NULL, superseded_at = NULL,
+                       superseded_by_note_id = NULL
+                       WHERE workspace = ? AND note_id = ?""",
+                    (workspace, note_id),
+                )
+            _append_event(conn, workspace, note_id, "reinstated", actor=actor, reason=reason)
+        audit("REINSTATE", workspace=workspace, note_id=note_id, actor=actor)
+        return True
+
+    def supersede_note(
+        self,
+        workspace: str,
+        note_id: int,
+        superseded_by: int | None = None,
+        reason: str | None = None,
+        actor: str = "agent",
+    ) -> bool:
+        """Post-hoc supersession (UPG-NOTE-RETIRE-POST-HOC, `vectr_supersede`)
+        — retire an ALREADY-STORED note as superseded, for the case the
+        write-time `supersedes=` parameter cannot reach: the replacement was
+        written without it, and the old note only later turned out to be
+        already-superseded-in-substance. Appends a `superseded_post_hoc`
+        event — the SAME lifecycle state as write-time `superseded`, but a
+        distinct KIND, so the trail honestly records this link was asserted
+        after the fact by a caller judgment rather than born of a write.
+
+        Sets the exact columns the write-time path sets (`valid_until`,
+        `superseded_at`, `superseded_by_note_id`) so exclusion behaves
+        identically: dropped from default recall()/fire(), retained with its
+        history, rendered with the factual "[superseded ...]" badge — never
+        the revoked deterrent ("this note was WRONG" is `vectr_revoke`'s
+        semantics; a retired note was true when written and the world moved
+        on). Reversible via `reinstate_note()`.
+
+        `superseded_by`: optional note_id of the replacement, which must
+        already exist in this workspace (validated BEFORE any mutation —
+        same half-applied-write guard as remember()'s supersedes path).
+        Omitted, the note retires with no successor link and renders
+        "[superseded, <date>]".
+
+        `reason`: free text recorded on the event (the caller's evidence
+        that the old note's substance lives on elsewhere).
+
+        `actor` must be one of NOTE_EVENT_ACTORS other than 'system'
+        (reserved for the deterministic anchor-drift transition) — deciding
+        a stored note is already-superseded is a judgment call. Same
+        provenance write-boundary guard as remember()'s supersedes path,
+        keyed on the CALLER instead of a new write's provenance (there is
+        no new write here): an agent-actor call may not retire a
+        human-provenance note; only actor='human' may.
+
+        Returns True if the note exists and was retired, False if it does
+        not exist in this workspace. Raises ValueError on an invalid actor,
+        a `superseded_by` equal to `note_id` itself, or a `superseded_by`
+        that does not exist in this workspace.
         """
         if actor not in NOTE_EVENT_ACTORS or actor == "system":
             raise ValueError(
@@ -2010,9 +2102,44 @@ class WorkingContextStore:
         note = self.get_note(workspace, note_id)
         if note is None:
             return False
+        if superseded_by == note_id:
+            raise ValueError("superseded_by must reference a different note than the one being retired")
+        now = time.time()
         with self._conn() as conn:
-            _append_event(conn, workspace, note_id, "reinstated", actor=actor, reason=reason)
-        audit("REINSTATE", workspace=workspace, note_id=note_id, actor=actor)
+            # Validate the successor BEFORE mutating anything, mirroring
+            # remember()'s supersedes pre-insert validation.
+            if superseded_by is not None:
+                target = conn.execute(
+                    "SELECT note_id FROM notes WHERE workspace = ? AND note_id = ?",
+                    (workspace, superseded_by),
+                ).fetchone()
+                if target is None:
+                    raise ValueError(
+                        f"superseded_by references note #{superseded_by}, "
+                        "which does not exist in this workspace"
+                    )
+            # Provenance write-boundary guard (companion to remember()'s
+            # supersedes guard): an agent-actor call may not retire a
+            # human-provenance note — only a human-actor call may.
+            if note.provenance == "human" and actor != "human":
+                raise ValueError(
+                    f"note #{note_id} is provenance='human' -- an agent-actor "
+                    "call may not supersede a human-provenance note (only a "
+                    "human-actor call may)"
+                )
+            conn.execute(
+                """UPDATE notes SET valid_until = ?, superseded_at = ?, superseded_by_note_id = ?
+                   WHERE workspace = ? AND note_id = ?""",
+                (now, now, superseded_by, workspace, note_id),
+            )
+            _append_event(
+                conn, workspace, note_id, "superseded_post_hoc",
+                actor=actor, reason=reason,
+                payload=str(superseded_by) if superseded_by is not None else None,
+                ts=now,
+            )
+        audit("SUPERSEDE", workspace=workspace, note_id=note_id,
+              superseded_by=superseded_by, actor=actor)
         return True
 
     def note_event_states(

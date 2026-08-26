@@ -921,6 +921,72 @@ class TestReinstateRoute:
 
 
 # ---------------------------------------------------------------------------
+# POST /v1/supersede (UPG-NOTE-RETIRE-POST-HOC)
+# ---------------------------------------------------------------------------
+
+class TestSupersedeRoute:
+    def test_supersede_returns_200_with_mocked_service(self, client) -> None:
+        resp = client.post(
+            "/v1/supersede", json={"note_id": 1, "superseded_by": 2, "reason": "replaced in substance"}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["note_id"] == 1
+        assert "processing_ms" in data
+
+    def test_supersede_invalid_actor_returns_422(self, client) -> None:
+        # 'system' is reserved for the deterministic transitions — deciding a
+        # stored note is already-superseded is always a judgment call.
+        resp = client.post("/v1/supersede", json={"note_id": 1, "actor": "system"})
+        assert resp.status_code == 422
+
+    def test_supersede_missing_successor_returns_422(self, client_real_memory) -> None:
+        # Validated BEFORE any mutation: the target must be untouched.
+        client = client_real_memory
+        note_id = client.post("/v1/remember", json={"content": "a finding"}).json()["note_id"]
+        resp = client.post("/v1/supersede", json={"note_id": note_id, "superseded_by": 999999})
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["error"] == "invalid_supersedence"
+        recalled = client.post("/v1/recall", json={"detail": "full"}).json()["notes"]
+        assert "a finding" in recalled  # still active — nothing half-applied
+
+    def test_supersede_via_rest_excludes_from_default_recall(self, client_real_memory) -> None:
+        client = client_real_memory
+        old_id = client.post("/v1/remember", json={"content": "the API returns a list"}).json()["note_id"]
+        new_id = client.post("/v1/remember", json={"content": "the API returns a dict"}).json()["note_id"]
+        resp = client.post(
+            "/v1/supersede",
+            json={"note_id": old_id, "superseded_by": new_id, "actor": "human", "reason": "consolidated"},
+        )
+        assert resp.status_code == 200
+        default_recall = client.post("/v1/recall", json={}).json()["notes"]
+        assert "the API returns a list" not in default_recall
+
+    def test_supersede_human_actor_accepted_on_agent_provenance_note(self, client_real_memory) -> None:
+        # REST is the person-operated surface: actor="human" on an
+        # agent-provenance note is legal (only the reverse — agent actor on
+        # a human-provenance note — crosses the write boundary).
+        client = client_real_memory
+        note_id = client.post("/v1/remember", json={"content": "a finding"}).json()["note_id"]
+        resp = client.post("/v1/supersede", json={"note_id": note_id, "actor": "human"})
+        assert resp.status_code == 200
+
+    def test_reinstate_reverses_supersede_via_rest(self, client_real_memory) -> None:
+        client = client_real_memory
+        note_id = client.post("/v1/remember", json={"content": "wrongly retired"}).json()["note_id"]
+        other_id = client.post("/v1/remember", json={"content": "unrelated"}).json()["note_id"]
+        client.post("/v1/supersede", json={"note_id": note_id, "superseded_by": other_id})
+        resp = client.post("/v1/reinstate", json={"note_id": note_id, "reason": "retirement was wrong"})
+        assert resp.status_code == 200
+        recalled = client.post("/v1/recall", json={"detail": "full"}).json()["notes"]
+        assert "wrongly retired" in recalled
+
+    def test_supersede_nonexistent_note_returns_404(self, client_real_memory) -> None:
+        resp = client_real_memory.post("/v1/supersede", json={"note_id": 999999})
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # POST /v1/pin (UPG-RECALL-MISS-FLOOR part (b)) — explicit Tier 0 membership
 # ---------------------------------------------------------------------------
 

@@ -333,7 +333,12 @@ _MEMORY_WRITE_TOOLS = [
                 },
                 "priority": {
                     "type": "string",
-                    "description": "Note priority: 'high' | 'medium' (default) | 'low'",
+                    "description": (
+                        "Note priority: 'high' | 'medium' (default) | 'low'. "
+                        "Session-start boot injection and the resume surface show only "
+                        "priority='high' kind='task' notes, so a checkpoint you want "
+                        "picked up at resume needs priority='high'."
+                    ),
                     "default": "medium",
                     "enum": ["high", "medium", "low"],
                 },
@@ -342,7 +347,9 @@ _MEMORY_WRITE_TOOLS = [
                     "description": (
                         "Memory kind, controlling how the note is injected (default 'finding'): "
                         "'directive' = a must-never-miss rule, injected unconditionally every session; "
-                        "'task' = current-work context; 'gotcha' = a file/path-anchored caveat; "
+                        "'task' = current-work context (save checkpoints with priority=\"high\" — "
+                        "session-start/resume surfaces show only high-priority task notes); "
+                        "'gotcha' = a file/path-anchored caveat; "
                         "'finding' = a relevance-ranked learning; 'reference' = a pointer (URL/ticket); "
                         "'decision' = an architectural/design decision plus its why — not auto-injected, "
                         "recall the group chronologically with vectr_recall(kind=\"decision\", "
@@ -845,6 +852,48 @@ _MEMORY_TOOLS = [
         },
     },
     {
+        "name": "vectr_supersede",
+        "annotations": {
+            "title": "Retire a note as superseded (post-hoc)",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        "description": (
+            "Retire an ALREADY-STORED note as superseded, when you discover only AFTER "
+            "writing its replacement that supersedes=<old id> was not passed on that "
+            "write. The retired note stops appearing in default recall/session-start "
+            "and renders with a factual '[superseded ...]' badge — it is NOT marked "
+            "wrong and never shows the revoked deterrent (it was accurate when "
+            "written; the world moved on). Use vectr_revoke instead when the note is "
+            "actually FALSE. Pass superseded_by=<note_id> to link the replacement if "
+            "one exists; omit it to retire with no successor. Reversible with "
+            "vectr_reinstate."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "integer",
+                    "description": "ID of the note to retire (the [#N] id from vectr_recall)",
+                },
+                "superseded_by": {
+                    "type": "integer",
+                    "description": (
+                        "Optional: ID of the replacement note that already exists "
+                        "(the write that should have carried supersedes=<this note>)."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional: why this note is being retired as superseded.",
+                },
+            },
+            "required": ["note_id"],
+        },
+    },
+    {
         "name": "vectr_pin",
         "annotations": {
             "title": "Pin/unpin a note into Tier 0",
@@ -979,6 +1028,7 @@ MEMORY_READY_TOOLS = frozenset(
         "vectr_promote",
         "vectr_revoke",
         "vectr_reinstate",
+        "vectr_supersede",
         "vectr_pin",
         "vectr_anchor",
         "vectr_status",
