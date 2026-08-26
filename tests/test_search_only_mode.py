@@ -652,9 +652,15 @@ class TestDoStartEnvConstructionSearchOnly:
             proc.pid = 99999
             return proc
 
+        # UPG-CLI-START-TEXT-EXIT-CODE: this asserts on the env handed to
+        # Popen, captured before the readiness verdict is reached. Readiness
+        # is pinned so the subject is the spawn env alone, not whether PID
+        # 99999 happens to be alive on the running machine. The exit contract
+        # itself is pinned by TestDoStartReadinessBranches.
         with patch("subprocess.Popen", side_effect=_mock_popen), \
              patch("main.InstanceRegistry") as MockReg, \
              patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=True), \
              patch("builtins.open", MagicMock()):
             MockReg.return_value.register = MagicMock()
             m._do_start(ws, 8765, wh, search_only=True)
@@ -676,9 +682,15 @@ class TestDoStartEnvConstructionSearchOnly:
             proc.pid = 99999
             return proc
 
+        # UPG-CLI-START-TEXT-EXIT-CODE: this asserts on the env handed to
+        # Popen, captured before the readiness verdict is reached. Readiness
+        # is pinned so the subject is the spawn env alone, not whether PID
+        # 99999 happens to be alive on the running machine. The exit contract
+        # itself is pinned by TestDoStartReadinessBranches.
         with patch("subprocess.Popen", side_effect=_mock_popen), \
              patch("main.InstanceRegistry") as MockReg, \
              patch("main._migrate_legacy_files"), \
+             patch("main._wait_for_daemon_ready", return_value=True), \
              patch("builtins.open", MagicMock()):
             MockReg.return_value.register = MagicMock()
             m._do_start(ws, 8765, wh, search_only=False)
