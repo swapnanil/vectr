@@ -293,6 +293,108 @@ class TestJavaMethodNameExtractionUPG:
         assert "add" in names
 
 
+class TestRustImplSymbolNameUPG:
+    """UPG-RUST-IMPL-SYMBOL-NAME-TRAIT-VS-TYPE: an `impl_item` exposes no
+    `name` field, so `_get_symbol_name` fell through to the positional
+    child-scan, whose first identifier-ish child is the TRAIT for
+    `impl Trait for Type { }` — the impl container was indexed under the
+    trait's name. Resolution now goes through the grammar's `type` field,
+    which names the implemented type on both inherent and trait impls."""
+
+    def test_trait_impl_indexed_under_type_not_trait(self, tmp_path) -> None:
+        # No struct declaration in the file: the ONLY emitted symbol is the
+        # impl block itself, so the assertion can't be satisfied by anything
+        # else. With the bug present this emits ("Measurable", "impl") and
+        # nothing else; fixed, it emits ("Widget", "impl").
+        p = tmp_path / "widget_impl.rs"
+        p.write_text(
+            "impl Measurable for Widget {\n"
+            "    fn measure(&self) -> u32 { 1 }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        by_name = {s["name"]: s for s in symbols}
+        assert by_name.get("Widget", {}).get("kind") == "impl", (
+            f"expected the impl block indexed under the TYPE 'Widget', got {symbols}"
+        )
+        assert "Measurable" not in by_name, (
+            f"the trait name must never become the impl symbol's name: {sorted(by_name)}"
+        )
+
+    def test_inherent_impl_still_resolved(self, tmp_path) -> None:
+        # Regression guard: `impl Type { }` has no trait child; the old scan
+        # happened to pick the type. The field-based path must agree.
+        p = tmp_path / "widget.rs"
+        p.write_text(
+            "impl Widget {\n"
+            "    fn refresh(&mut self) { }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        impls = [s for s in symbols if s["kind"] == "impl"]
+        assert [s["name"] for s in impls] == ["Widget"]
+
+    def test_generic_trait_impl_resolved_via_type_field(self, tmp_path) -> None:
+        # Both the trait (`Measurable<T>`) and the type (`Bag<T>`) are
+        # generic_type nodes here, so the positional scan found NO matching
+        # direct child and dropped the impl entirely (name "" → not emitted).
+        # The field path unwraps generic_type → its own `type` field down to
+        # the bare type_identifier, same as _graph._impl_owner_type_name.
+        p = tmp_path / "bag.rs"
+        p.write_text(
+            "impl<T> Measurable<T> for Bag<T> {\n"
+            "    fn measure(&self) -> u32 { 1 }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        impls = [s for s in symbols if s["kind"] == "impl"]
+        assert [s["name"] for s in impls] == ["Bag"], (
+            f"generic trait impl must resolve to the type 'Bag', got {symbols}"
+        )
+
+
+class TestJavaConstructorSymbolsUPG:
+    """UPG-ENUM-CONTAINER-NONMETHOD-COVERAGE (constructor half):
+    constructor_declaration was absent from the Java symbol map, so every
+    constructor was invisible to the symbol graph — unlocatable, and calls
+    inside its body attributed to the enclosing class's context rather than
+    to the constructor's own position."""
+
+    def test_constructor_extracted_as_method_kind_symbol(self, tmp_path) -> None:
+        p = tmp_path / "Widget.java"
+        p.write_text(
+            "public class Widget {\n"
+            "    private int v;\n"
+            "    public Widget() { this.v = 0; }\n"
+            "    public Widget(int v) { this.v = v; }\n"
+            "    public int get() { return v; }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        widget_kinds = {s["kind"] for s in symbols if s["name"] == "Widget"}
+        # Both the class definition AND its constructors share the name;
+        # before the fix only the class's "class" kind existed.
+        assert {"class", "method"} <= widget_kinds, (
+            f"expected class + constructor(method) symbols named 'Widget', got {widget_kinds}"
+        )
+
+    def test_constructor_line_points_at_declaration(self, tmp_path) -> None:
+        p = tmp_path / "Gauge.java"
+        p.write_text(
+            "public class Gauge {\n"
+            "    public Gauge(int start) { }\n"
+            "    public int read() { return 0; }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        ctors = [s for s in symbols if s["name"] == "Gauge" and s["kind"] == "method"]
+        assert len(ctors) == 1
+        lines = p.read_text().splitlines()
+        assert "Gauge(int start)" in lines[ctors[0]["start_line"] - 1], (
+            f"constructor start_line {ctors[0]['start_line']} does not point at its declaration"
+        )
+
+
 class TestTSTypedefSymbolGraphUPG:
     """UPG-TS-SYMBOLGRAPH-TYPEDEF: type_alias_declaration and enum_declaration
     must resolve as symbols so vectr_locate finds a TS type alias / enum, not
@@ -4321,14 +4423,15 @@ class TestFileImportanceARCH1a:
         """SYMBOL_SCHEMA_VERSION is an exact pin, not a floor: every
         extraction-behavior change must bump it (or existing installs never
         rebuild their graph) AND consciously update this pin in the same
-        commit. Currently 12 (Zig struct/enum-scoped const/var extracted as
-        locatable namespace members, function-locals still excluded —
-        UPG-ZIG-STRUCT-CONST-LOCATE — bumped from 11 Java/C/Zig/TS name-extraction fixes —
-        UPG-JAVA-METHOD-NAME-EXTRACTION / UPG-C-STRUCT-TYPEDEF-LOCATE /
-        UPG-C-MACRO-ADJACENT-DROP / UPG-ZIG-SYMBOL-EXTRACTION /
-        UPG-TS-SYMBOLGRAPH-TYPEDEF — bumped from 10/UPG-SIBLING-TYPEDEF-CROWDING)."""
-        assert SYMBOL_SCHEMA_VERSION == 12, (
-            f"Expected SYMBOL_SCHEMA_VERSION=12; got {SYMBOL_SCHEMA_VERSION}. "
+        commit. Currently 13 (Rust impl_item name via grammar `type` field —
+        `impl Trait for Type { }` indexed under the type, never the trait —
+        UPG-RUST-IMPL-SYMBOL-NAME-TRAIT-VS-TYPE; Java constructor_declaration
+        extracted as a method-kind symbol —
+        UPG-ENUM-CONTAINER-NONMETHOD-COVERAGE — bumped from 12 Zig
+        struct/enum-scoped const/var namespace members —
+        UPG-ZIG-STRUCT-CONST-LOCATE)."""
+        assert SYMBOL_SCHEMA_VERSION == 13, (
+            f"Expected SYMBOL_SCHEMA_VERSION=13; got {SYMBOL_SCHEMA_VERSION}. "
             "If you changed extraction behavior, bump the version and update this pin."
         )
 

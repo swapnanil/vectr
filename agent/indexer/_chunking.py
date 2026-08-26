@@ -155,7 +155,11 @@ _CHUNK_NODE_TYPES: dict[str, set[str]] = {
                    "method_definition", "interface_declaration", "type_alias_declaration", "enum_declaration"},
     "go": {"function_declaration", "method_declaration", "type_declaration"},
     "rust": {"function_item", "impl_item", "struct_item", "trait_item", "enum_item"},
-    "java": {"method_declaration", "class_declaration", "interface_declaration", "enum_declaration"},
+    # UPG-ENUM-CONTAINER-NONMETHOD-COVERAGE: constructor_declaration joins the
+    # other Java member declarations — a constructor is a definition a caller
+    # can search for, exactly like the methods already listed here.
+    "java": {"method_declaration", "constructor_declaration", "class_declaration",
+             "interface_declaration", "enum_declaration"},
     "zig": {"function_declaration", "variable_declaration", "test_declaration"},
     "c": {"function_definition", "struct_specifier", "enum_specifier", "type_definition"},
     "cpp": {"function_definition", "class_specifier", "struct_specifier",
@@ -232,6 +236,24 @@ def _extract_symbol_name(node, language: str, code_bytes: bytes) -> str:
                 nm = child.child_by_field_name("name")
                 if nm is not None:
                     return code_bytes[nm.start_byte:nm.end_byte].decode("utf-8", errors="replace")
+        return ""
+    # UPG-RUST-IMPL-SYMBOL-NAME-TRAIT-VS-TYPE: an `impl_item` exposes no `name`
+    # field, so resolution fell through to the positional child-scan below,
+    # which takes the FIRST identifier-ish child in document order — the TRAIT
+    # for `impl Trait for Type { }`. On the chunk side that mislabeled
+    # symbol_name AND, worse, fed `class_context`: every member chunk of a
+    # trait impl carried `# class: <trait>` in its embedding text. Resolve via
+    # the grammar's `type` field (present on both inherent and trait impls),
+    # matching symbol_graph._get_symbol_name and _graph._impl_owner_type_name;
+    # unwrap generic wrappers bounded, "" rather than falling back to the scan.
+    if language == "rust" and node.type == "impl_item":
+        cur = node.child_by_field_name("type")
+        for _ in range(6):  # bounded — generic/reference nesting is shallow
+            if cur is None:
+                return ""
+            if cur.type == "type_identifier":
+                return code_bytes[cur.start_byte:cur.end_byte].decode("utf-8", errors="replace")
+            cur = cur.child_by_field_name("type")
         return ""
     # Prefer tree-sitter's explicit `name` field when the grammar exposes one:
     # the positional child-scan below returns the FIRST identifier-ish child,
@@ -338,6 +360,120 @@ def _is_member_container(node, target_types: set[str]) -> bool:
     return False
 
 
+def _emit_overflow_chunks(
+    results: list[CodeChunk],
+    node,
+    lines: list[str],
+    file_path: str,
+    language: str,
+    cap: int,
+    prefix_line_count: int,
+    covered_spans: list[tuple[int, int]],
+    class_context: str,
+) -> None:
+    """Re-emit a truncated node's post-cap remainder as bounded continuation
+    chunks (UPG-ENUM-CONTAINER-NONMETHOD-COVERAGE).
+
+    The header cap exists so one giant container can't flood the index with a
+    single enormous chunk — that trade is kept untouched. But capping a chunk
+    while nothing re-emits what it dropped made content past the cap
+    structurally unreachable: not in any chunk (search can't find it), not a
+    symbol (the symbol graph has no field/constructor/enum-constant entries).
+    A Java enum whose constants ARE its meaning lost everything past the cap.
+
+    This restores coverage without reopening the flood the cap prevents:
+
+    - The kept chunk is emitted FIRST, byte-for-byte unchanged (same id,
+      same capped content, same full-span metadata) — this function only ever
+      ADDS chunks.
+    - Only the UNCOVERED remainder is re-emitted: line ranges past what the
+      kept chunk shows (`cap` lines minus the comment/context prefix it
+      consumed) that no member chunk emitted by the recursion already
+      carries. Member chunks' spans are extended upward across the leading
+      comment/blank lines `_get_leading_comments` prepended into their own
+      content, so a doc comment is never emitted twice — once inside its
+      member's chunk and once as orphan glue.
+    - Runs containing no non-blank line are skipped (pure whitespace between
+      members); each surviving run is sliced into disjoint ≤_MAX_CHUNK_LINES
+      pieces with HONEST sub-spans — unlike the header chunk's
+      full-span-id-with-capped-content quirk, every source line a piece's span
+      names appears in it verbatim and complete (one synthetic `# class:`
+      context line may precede them, mirroring the chunks being continued), so
+      the `path:start-end` ids never point at text the reader can't see.
+
+    Cost: only nodes whose content exceeded their cap gain chunks, at
+    ceil(uncovered_lines / _MAX_CHUNK_LINES) per uncovered run — a 500-member
+    enum (~550 lines, leaf-capped at 150) yields 3 continuation chunks where
+    previously ~400 lines simply vanished; a typical class whose every member
+    got its own chunk yields nothing retrievable (blank-line gaps are filtered
+    here; any lone closing-brace residue is content-trivial with no symbol
+    name, so the existing UPG-1.1 trivial-drop pass removes it).
+
+    node_type "overflow" deliberately matches none of chunk_quality's
+    definition/type-def/function sets, so continuation chunks get neutral
+    ranking priors — they must never be mistaken for the canonical definition
+    site of the container whose tail they carry.
+    """
+    start_line = node.start_point[0] + 1  # 1-indexed
+    end_line = node.end_point[0] + 1
+    # Last file line the kept (capped) chunk actually shows: its first
+    # `cap` content lines include `prefix_line_count` leading-comment/context
+    # lines consumed before the node's own text begins.
+    visible_last = start_line + cap - 1 - prefix_line_count
+    region_lo = max(visible_last + 1, start_line)
+    if region_lo > end_line:
+        return
+
+    # Extend each member span upward over the leading comment/blank lines its
+    # own chunk already carries (same prefixes _get_leading_comments collects),
+    # then merge into a union of already-covered ranges.
+    covered: list[list[int]] = []
+    for ms, me in sorted(covered_spans):
+        ext = ms
+        i = ms - 2  # 0-indexed line just above the member's first
+        while i >= 0:
+            stripped = lines[i].strip()
+            if stripped and not stripped.startswith(("#", "//", "/*", "*", "@")):
+                break
+            ext = i + 1
+            i -= 1
+        if covered and ext <= covered[-1][1] + 1:
+            covered[-1][1] = max(covered[-1][1], me)
+        else:
+            covered.append([ext, me])
+
+    # Complement of the covered union within [region_lo, end_line].
+    runs: list[tuple[int, int]] = []
+    cur = region_lo
+    for s, e in covered:
+        if e < cur:
+            continue
+        if s > cur:
+            runs.append((cur, min(s - 1, end_line)))
+        cur = e + 1
+        if cur > end_line:
+            break
+    if cur <= end_line:
+        runs.append((cur, end_line))
+
+    context_prefix = f"# class: {class_context}\n" if class_context else ""
+    for r0, r1 in runs:
+        if r1 < r0 or not any(l.strip() for l in lines[r0 - 1:r1]):
+            continue  # pure whitespace between members — nobody's content
+        for ps in range(r0, r1 + 1, _MAX_CHUNK_LINES):
+            pe = min(ps + _MAX_CHUNK_LINES - 1, r1)
+            results.append(CodeChunk(
+                chunk_id=f"{file_path}:{ps}-{pe}",
+                content=context_prefix + "\n".join(lines[ps - 1:pe]),
+                file_path=file_path,
+                language=language,
+                node_type="overflow",
+                start_line=ps,
+                end_line=pe,
+                symbol_name="",
+            ))
+
+
 def _collect_chunks_ast(
     node,
     code_bytes: bytes,
@@ -365,14 +501,19 @@ def _collect_chunks_ast(
 
         # Cap very long chunks — container bodies (classes, impl/extension blocks,
         # namespaces, …) can be thousands of lines. A CONTAINER only keeps its
-        # header here; its members are emitted as their own chunks below, so
-        # nothing past the cap is lost. A leaf definition (a plain function, a
-        # struct with no nested members) keeps the full budget instead, since
-        # nothing else will carry the rest of its content.
+        # header here; its members are emitted as their own chunks below, and
+        # whatever the header dropped that NO member carries (fields, initializers,
+        # enum constants, …) is re-emitted by _emit_overflow_chunks below, so
+        # nothing past the cap is lost (UPG-ENUM-CONTAINER-NONMETHOD-COVERAGE).
+        # A leaf definition (a plain function, a struct with no nested members)
+        # keeps the full budget instead, since nothing else will carry the rest
+        # of its content; if even that budget truncates it, its tail is re-emitted
+        # by the same overflow path.
         is_container = node.type in _CLASS_NODE_TYPES or _is_member_container(node, target_types)
         cap = _CLASS_HEADER_LINES if is_container else _MAX_CHUNK_LINES
         content_lines = content.splitlines()
-        if len(content_lines) > cap:
+        truncated = len(content_lines) > cap
+        if truncated:
             content = "\n".join(content_lines[:cap])
 
         chunk_id = f"{file_path}:{start + 1}-{end + 1}"
@@ -387,6 +528,7 @@ def _collect_chunks_ast(
             symbol_name=symbol,
         ))
 
+        member_spans: list[tuple[int, int]] = []
         if is_container:
             # Also recurse into the body so members get their own chunks with context.
             # This walks every child unconditionally (via the plain fallback loop
@@ -395,9 +537,34 @@ def _collect_chunks_ast(
             # (UPG-JAVA-ENUM-METHOD-CHUNK-DEPTH — e.g. Java's enum_body_declarations)
             # is traversed through automatically once `is_container` is True for
             # the enclosing node; no separate wrapper-aware traversal is needed here.
+            emitted_before = len(results)
             for child in node.children:
                 _collect_chunks_ast(child, code_bytes, lines, language, file_path,
                                     target_types, results, class_context=symbol)
+            member_spans = [(c.start_line, c.end_line) for c in results[emitted_before:]]
+        if truncated:
+            # The cap silently dropped this node's tail. Re-emit only what no
+            # chunk emitted above already carries — never the kept chunk's own
+            # bytes a second time, and never a member's doc comment twice.
+            # The tail CONTINUES existing chunks, so it inherits their context
+            # line: a container's leftover fields/constants continue the
+            # member set ("# class: <Container>", like every member chunk);
+            # a leaf's own tail continues the leaf's chunk (same class_context
+            # the kept chunk used — usually none for a top-level definition).
+            # Never the node's OWN name: "# class: big_fn" on big_fn's tail
+            # would claim the function is an enclosing class.
+            prefix_count = (len(leading.splitlines()) if leading else 0) + (1 if context_prefix else 0)
+            _emit_overflow_chunks(
+                results=results,
+                node=node,
+                lines=lines,
+                file_path=file_path,
+                language=language,
+                cap=cap,
+                prefix_line_count=prefix_count,
+                covered_spans=member_spans,
+                class_context=symbol if is_container else class_context,
+            )
         return  # don't recurse further for non-container nodes (avoids duplicate nested defs)
 
     for child in node.children:
