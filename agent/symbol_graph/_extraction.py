@@ -93,6 +93,28 @@ def _get_symbol_name(node, code_bytes: bytes, language: str = "") -> str:
                 if nm is not None:
                     return code_bytes[nm.start_byte:nm.end_byte].decode("utf-8", errors="replace")
         return ""
+    # UPG-RUST-IMPL-SYMBOL-NAME-TRAIT-VS-TYPE: an `impl_item` exposes no `name`
+    # field, so resolution fell through to the positional child-scan below,
+    # which takes the FIRST identifier-ish child in document order — the TRAIT
+    # for `impl Trait for Type { }` (`trait` precedes `type`), indexing the
+    # impl block under the trait's name instead of the type's. tree-sitter-rust
+    # exposes the implemented type as the `type` field for BOTH `impl Type { }`
+    # and `impl Trait for Type { }`, so resolve through it, the same field-
+    # based approach the qualified Type.method owner lookup already uses
+    # (_graph._impl_owner_type_name) and the same shape as the v11 Java fix.
+    # A generic impl nests the leaf one level down (`impl<T> Foo<T>` →
+    # generic_type whose own `type` field is the bare type_identifier) —
+    # unwrap bounded; return "" rather than falling back to the scan, which is
+    # exactly the misresolution this branch exists to prevent.
+    if language == "rust" and node.type == "impl_item":
+        cur = node.child_by_field_name("type")
+        for _ in range(6):  # bounded — generic/reference nesting is shallow
+            if cur is None:
+                return ""
+            if cur.type == "type_identifier":
+                return code_bytes[cur.start_byte:cur.end_byte].decode("utf-8", errors="replace")
+            cur = cur.child_by_field_name("type")
+        return ""
     # Prefer tree-sitter's explicit `name` field when the grammar exposes one.
     # The positional child-scan below returns the FIRST identifier-ish child,
     # which is the RETURN TYPE — not the method name — for a Java

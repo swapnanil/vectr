@@ -887,6 +887,11 @@ _FUNCTION_NODE_TYPES: frozenset[str] = frozenset({
 _METHOD_NODE_TYPES: frozenset[str] = frozenset({
     "method_definition",
     "method_declaration",
+    # UPG-ENUM-CONTAINER-NONMETHOD-COVERAGE: Java constructors are chunked
+    # (node_type "constructor_declaration", added to `_CHUNK_NODE_TYPES["java"]`)
+    # and are as much a symbol definition as any method — a one-line constructor
+    # deserves the same trivial-drop exemption.
+    "constructor_declaration",
 })
 
 # The full symbol-DEFINITION node_type family (UPG-TRIVIAL-DROP-ALIAS-DEFS):
