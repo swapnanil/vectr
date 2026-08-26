@@ -2626,18 +2626,20 @@ class TestDualVectorPurposeCollection:
         indexer.delete_file(path)
         assert indexer._purpose_collection.count() == 0
 
-    def _wait_until_purpose_pass_done(self, idx, timeout: float = 5.0) -> None:
+    def _wait_until_purpose_pass_done(self, idx, timeout: float = 30.0) -> None:
         """index_workspace() defers the purpose-vector pass to a background
         executor by default (UPG-PURPOSE-PASS-DEFERRAL) and returns before it
-        lands; `purpose_vectors_pending` is the documented signal for a
-        caller that needs the collection to be caught up before asserting on
-        it — mirrors `TestPurposePassDeferral._wait_until_not_pending`
-        above. Without this wait, assertions immediately after
-        index_workspace() race the deferred pass and are flaky by
-        construction, not by clock resolution."""
-        deadline = time.time() + timeout
-        while idx.purpose_vectors_pending and time.time() < deadline:
-            time.sleep(0.01)
+        lands; callers that need the collection caught up before asserting on
+        it must wait. This delegates to conftest.wait_for_deferred_purpose_pass,
+        a FIFO drain barrier on the executor itself: the old fixed-deadline
+        `purpose_vectors_pending` poll expired SILENTLY under machine load
+        (e.g. a second full suite running concurrently —
+        UPG-TEST-CONCURRENT-SUITE-FLAKE), letting tests proceed against a
+        half-updated collection; the barrier either waits for real completion
+        or fails loudly with a TimeoutError naming the mechanism."""
+        from tests.conftest import wait_for_deferred_purpose_pass
+
+        wait_for_deferred_purpose_pass(idx, timeout=timeout)
 
     def test_reindex_prunes_stale_purpose_chunks(self, indexer, tmp_path) -> None:
         path = Path(make_py(tmp_path, "evolving.py", "def v1(): pass"))
@@ -3138,10 +3140,46 @@ class TestPurposePassDeferral:
     CodeIndexer + real ChromaDB collection on tiny synthetic corpora only —
     never a large real repo."""
 
-    def _wait_until_not_pending(self, idx, timeout: float = 5.0) -> None:
-        deadline = time.time() + timeout
-        while idx.purpose_vectors_pending and time.time() < deadline:
-            time.sleep(0.01)
+    def _wait_until_not_pending(self, idx, timeout: float = 30.0) -> None:
+        """FIFO drain barrier (tests.conftest.wait_for_deferred_purpose_pass)
+        instead of a silent fixed-deadline poll — see
+        TestDualVectorPurposeCollection._wait_until_purpose_pass_done."""
+        from tests.conftest import wait_for_deferred_purpose_pass
+
+        wait_for_deferred_purpose_pass(idx, timeout=timeout)
+
+    def test_drain_barrier_returns_only_after_queued_pass_completes(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        """UPG-PURPOSE-PASS-TEST-RACE: pins what the drain barrier GUARANTEES
+        and what the old pollers only hoped for — the barrier must not return
+        while a purpose pass submitted before it is still mid-flight. If the
+        barrier were still the silent poller: under load its deadline expired
+        while the pass ran, this assertion read `done == []` mid-flight and
+        failed nondeterministically (or worse, downstream collection reads
+        saw stale data with no failure at all here)."""
+        from tests.conftest import wait_for_deferred_purpose_pass
+
+        done: list[bool] = []
+        real_upsert = indexer._upsert_purpose_vectors
+
+        def _slow_recording(*args, **kwargs):
+            time.sleep(0.2)
+            real_upsert(*args, **kwargs)
+            done.append(True)
+
+        monkeypatch.setattr(indexer, "_upsert_purpose_vectors", _slow_recording)
+
+        make_py(tmp_path, "barrier_a.py", "def barrier_fn():\n    return 1\n")
+        indexer.index_workspace()
+
+        # The deferred pass may or may not have started yet — that's exactly
+        # the race the barrier exists to close.
+        wait_for_deferred_purpose_pass(indexer)
+        assert done, (
+            "wait_for_deferred_purpose_pass returned while the purpose pass "
+            "submitted before it was still running — FIFO drain broken"
+        )
 
     def test_purpose_pass_scheduled_on_background_executor_by_default(
         self, indexer, tmp_path, monkeypatch,
@@ -3480,10 +3518,13 @@ class TestPurposeResumeHole:
     purpose vectors are not. Exercised against a real CodeIndexer + real
     ChromaDB collection on tiny synthetic corpora only."""
 
-    def _wait_until_not_pending(self, idx, timeout: float = 5.0) -> None:
-        deadline = time.time() + timeout
-        while idx.purpose_vectors_pending and time.time() < deadline:
-            time.sleep(0.01)
+    def _wait_until_not_pending(self, idx, timeout: float = 30.0) -> None:
+        """FIFO drain barrier (tests.conftest.wait_for_deferred_purpose_pass)
+        instead of a silent fixed-deadline poll — see
+        TestDualVectorPurposeCollection._wait_until_purpose_pass_done."""
+        from tests.conftest import wait_for_deferred_purpose_pass
+
+        wait_for_deferred_purpose_pass(idx, timeout=timeout)
 
     def test_ordinary_run_backfills_gap_left_by_never_dispatched_deferred_pass(
         self, tmp_path, monkeypatch,

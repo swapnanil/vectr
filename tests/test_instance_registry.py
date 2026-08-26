@@ -385,6 +385,8 @@ def _put_port_in_time_wait(port_hint: int = 0) -> int:
     then close from the server side first. Returns the port. Uses `port_hint`
     (default 0 = kernel-assigned ephemeral) so callers never hardcode a port
     that could collide with a live daemon."""
+    from tests.conftest import allow_loopback_port
+
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", port_hint))
@@ -398,12 +400,16 @@ def _put_port_in_time_wait(port_hint: int = 0) -> int:
         time.sleep(0.2)
         c.close()
 
-    t = threading.Thread(target=_client)
-    t.start()
-    conn, _addr = srv.accept()
-    conn.recv(2)
-    conn.close()  # server side closes first -> this port lands in TIME_WAIT
-    t.join()
+    # The client dials this test's OWN just-bound listener — register it with
+    # the suite-wide socket guard (tests/conftest.py) for exactly the dance's
+    # duration, like every other test-owned loopback server.
+    with allow_loopback_port(port):
+        t = threading.Thread(target=_client)
+        t.start()
+        conn, _addr = srv.accept()
+        conn.recv(2)
+        conn.close()  # server side closes first -> this port lands in TIME_WAIT
+        t.join()
     srv.close()
     time.sleep(0.05)
     return port
