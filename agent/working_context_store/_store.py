@@ -947,6 +947,34 @@ _NOTES_REEMBED_BATCH_SIZE = 256
 # — a robustness/timeout knob, same category as the throughput constants above.
 _SQLITE_BUSY_TIMEOUT_S = 5.0
 
+# Over-fetch multiplier behind working_memory_fetch_width(): how many
+# candidates a 'working_memory' vector query fetches per note it intends to
+# render, so that hits consumed by other workspaces' notes don't starve the
+# result. Kept as a named constant so the helper below is the single place
+# the number lives.
+_WORKING_MEMORY_OVERFETCH_MULTIPLIER = 3
+
+
+def working_memory_fetch_width(render_limit: int, col_count: int, *, floor: int = 0) -> int:
+    """How many candidates a 'working_memory' vector query must fetch to be able
+    to render up to `render_limit` notes.
+
+    INVARIANT for every vector-query path against this collection: size
+    n_results through this helper, never with a raw render limit. The
+    'working_memory' collection is GLOBAL — one ChromaDB collection shared by
+    every workspace a daemon serves, queried with no per-workspace `where=`
+    clause — so every filter (other workspaces, valid_until expiry,
+    superseded/folded lifecycle state, similarity cutoffs) runs in SQLite or
+    Python only AFTER the vector search has already chosen its hits. A query
+    sized exactly to its render budget can have every slot taken by other
+    workspaces' notes and legitimately render nothing. Fetching a multiple of
+    the render limit keeps same-workspace survivors likely; `floor` lets a
+    caller demand a deeper pool than the multiplier implies when its contract
+    needs one; capping at `col_count` avoids ChromaDB errors on collections
+    smaller than the ask.
+    """
+    return min(max(render_limit * _WORKING_MEMORY_OVERFETCH_MULTIPLIER, floor), col_count)
+
 
 class WorkingContextStore:
     """
@@ -1042,6 +1070,15 @@ class WorkingContextStore:
         self._attach_lock = threading.Lock()
         if embed_fn is not None and notes_chroma_client is not None and not self._vectors_disabled():
             try:
+                # GLOBAL collection: shared by every workspace this daemon
+                # serves, with no per-workspace `where=` scoping — any query
+                # path added against it must over-fetch before filtering (see
+                # working_memory_fetch_width()). Two more contract facts:
+                # `hnsw:space=cosine` is what makes this repo's
+                # `similarity = 1 - distance` arithmetic valid (Chroma's l2
+                # default would make it meaningless), and chroma ids come
+                # from SQLite's GLOBAL INTEGER PRIMARY KEY AUTOINCREMENT, so
+                # ids never collide across workspaces.
                 self._notes_col = notes_chroma_client.get_or_create_collection(
                     name="working_memory",
                     metadata={"hnsw:space": "cosine"},
@@ -1122,6 +1159,9 @@ class WorkingContextStore:
             if embed_fn is None or notes_chroma_client is None or self._vectors_disabled():
                 return
             try:
+                # GLOBAL collection — same invariant as the __init__ creation
+                # site above: query paths must over-fetch before filtering
+                # (working_memory_fetch_width()).
                 notes_col = notes_chroma_client.get_or_create_collection(
                     name="working_memory",
                     metadata={"hnsw:space": "cosine"},
@@ -2662,12 +2702,15 @@ class WorkingContextStore:
         session_id: scope="session" enforcement (TRIGGER-ENGINE wave 2a) —
         see recall()'s docstring; the same post-LIMIT trade-off applies.
         """
-        # Cap n_results at collection size to avoid ChromaDB errors on small collections
         with timed_chroma_call("count"):
             col_count = self._notes_col.count()
         if col_count == 0:
             return []
-        n_query = min(limit * 3, col_count)
+        # GLOBAL collection, SQL-filtered only after the vector search:
+        # over-fetch through the canonical width helper (docstring carries
+        # the full invariant; the col_count cap avoids ChromaDB errors on
+        # collections smaller than the ask).
+        n_query = working_memory_fetch_width(limit, col_count)
 
         q_vec = self._embed_query_fn([query])[0]
         with timed_chroma_call("query"):
@@ -4248,8 +4291,8 @@ class WorkingContextStore:
         `record_fires` (wave 3, §5.3 — closes the "session ledger burns a
         trigger on a non-delivery" finding), when True (the default),
         records a fresh match into `ledger` before returning — the original,
-        still-correct contract for a caller like `VectrService.fire_triggers()`
-        whose every returned `FireResult` IS the delivery (no further
+        still-correct contract for any caller whose every returned
+        `FireResult` IS the delivery (no further
         packing/dedup happens downstream). `fire_and_format()` below passes
         `record_fires=False` instead: it calls `fire()` once per event in an
         OR list and then still has to survive turn-ledger cross-surface

@@ -114,9 +114,11 @@ class Candidate:
                           # retirement (agent/proactive/gate.py's `select()`)
                           # to test membership against a request's
                           # `edited_file_paths` — never for display; the
-                          # rendered `line`'s anchor label is always the
-                          # basename computed in matcher.py, independent of
-                          # this field.
+                          # rendered `line`'s anchor label comes from
+                          # matcher.py independently of this field (since
+                          # UPG-MATCHER-RELATIVE-ANCHOR-LABEL it names the
+                          # form that actually matched — declared anchor
+                          # string or glob — not necessarily a basename).
     note_provenance: str | None = None  # `WorkingNote.provenance` (UPG-PROXY-
                           # INJECT-ROLE-PROVENANCE), one of PROVENANCE_VALUES
                           # ("human" | "agent" | "auto") for a note-backed

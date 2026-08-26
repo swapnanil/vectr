@@ -2576,11 +2576,10 @@ def _post_trigger_reset(port: int, session_id: str) -> bool:
     """POST /v1/trigger/reset; True on success, False on any failure (never
     raises).
 
-    Used by the PreCompact hook (TRIGGER-ENGINE wave 2a,
-    bm2-design-skeleton.md §3: "cleared on compaction") to clear this
-    session's per-session fire ledger and cumulative injection budget —
-    a reset failure must never block compaction, mirroring `_post_snapshot`
-    immediately above.
+    Used by the PreCompact hook to clear this session's per-session fire
+    ledger and cumulative injection budget on compaction — a reset failure
+    must never block compaction, mirroring `_post_snapshot` immediately
+    above.
     """
     import httpx
     try:
@@ -2874,9 +2873,8 @@ def _resolve_hook_instance(cwd: str) -> dict | None:
 
 
 def cmd_hook(args: argparse.Namespace) -> None:
-    """Emit hook output for harness-injected vectr memory (UPG-9.4+;
-    TRIGGER-ENGINE wave 2a wires the per-memory trigger engine into every
-    branch below).
+    """Emit hook output for harness-injected vectr memory (UPG-9.4+);
+    the per-memory trigger engine is wired into every branch below.
 
     Invoked by the hook entries that `vectr init --hooks` writes — not meant to
     be called by hand. Resolves the workspace from the event's cwd (the harness
@@ -2905,9 +2903,9 @@ def cmd_hook(args: argparse.Namespace) -> None:
     note whose ONLY explicit trigger is `post-compaction` (not covered by the
     directive kind-default bundle, which already includes `session-start`) is
     folded into that one call rather than inventing a new delivery point.
-    `pre-run` is now live (wave 3, §5.2 — see the pre-tool-use row above);
-    `pre-commit` remains declared-but-inert this wave (no lifecycle moment
-    maps to it — never an error, bm2-design-skeleton.md §2).
+    `pre-run` is now live (see the pre-tool-use row above);
+    `pre-commit` remains declared-but-inert (no lifecycle moment
+    maps to it — never an error).
 
     `post-commit` (UPG-COMMIT-MEMORY-HOOK) is fundamentally different from
     the five events above: it is invoked directly by `git` (installed by
@@ -2931,7 +2929,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
         if entry is None:
             return  # no daemon serves this workspace → inject nothing
         port = entry["port"]
-        # TRIGGER-ENGINE wave 2a: the harness's own hook-JSON `session_id` —
+        # The harness's own hook-JSON `session_id` —
         # present on every real hook invocation, stable across a /compact —
         # is the per-session identity the engine's fire ledger, cumulative
         # injection budget, and scope="session"/"branch" enforcement key on.
@@ -2963,7 +2961,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # and inject them before the model sees it. The relevance cutoff
             # (UPG-5.1) keeps an off-topic prompt from injecting anything.
             # detail="index" keeps the injected context token-bounded (UPG-RECALL-HIERARCHY).
-            # events=["prompt-submit"] (TRIGGER-ENGINE wave 2a) additionally
+            # events=["prompt-submit"] additionally
             # fires any note with an EXPLICIT prompt-submit trigger override
             # (no kind's default bundle uses this event) — merged with, and
             # deduped against, the semantic query results server-side.
@@ -2996,7 +2994,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
             # Write, ... all put the target path under tool_input.file_path) — which
             # tool names actually reach this hook is a matcher decision made by
             # `_write_claude_hooks`, not a content-based guess made here. The
-            # engine's pre-edit event (TRIGGER-ENGINE wave 2a) is merged in
+            # engine's pre-edit event is merged in
             # server-side alongside this same file_path recall.
             #
             # Command-family injection: a Bash call carries no
@@ -3050,7 +3048,7 @@ def cmd_hook(args: argparse.Namespace) -> None:
             trigger = (event.get("trigger") or "manual").strip() or "manual"
             label = f"pre-compact-{trigger}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
             _post_snapshot(port, label)
-            # TRIGGER-ENGINE wave 2a (§3 "cleared on compaction"): reset this
+            # Cleared on compaction: reset this
             # session's fire ledger + cumulative injection budget so the
             # SessionStart `compact` call above gets a fresh budget and
             # re-eligibility for every trigger axis. A session with no
