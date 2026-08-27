@@ -1398,6 +1398,15 @@ MEMORY_WRITE_PROXY_SUGGEST_LIMIT: int = int(_proxy_suggest_cfg["limit"])
 
 _content_file_cfg: dict[str, Any] = _mem_write_cfg["content_file"]
 MEMORY_WRITE_CONTENT_FILE_MAX_BYTES: int = int(_content_file_cfg["max_bytes"])
+# UPG-REMEMBER-CONTENT-FILE-PATH-REFUSAL: operator-configured additional
+# absolute roots content_file reads are allowed to resolve under, beyond the
+# primary workspace root and the multi-root `extra_roots` already accepted by
+# the resolver. Operator-only — the trust decision is made at daemon startup
+# (config), not per call, so a calling agent cannot widen containment.
+# Empty tuple by default: the boundary is unchanged until an operator opts in.
+MEMORY_WRITE_CONTENT_FILE_ADDITIONAL_READABLE_ROOTS: tuple[str, ...] = tuple(
+    str(r) for r in _content_file_cfg["additional_readable_roots"]
+)
 
 # ---------------------------------------------------------------------------
 # UPG-TASK-SUPERSEDES-HYGIENE: vectr_status stale-task nudge thresholds.

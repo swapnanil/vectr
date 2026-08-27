@@ -2289,6 +2289,23 @@ memory_write:
     # only so content_file cannot be used to load an unrelated large file
     # (a log dump, a full source tree) into a single working-memory note.
     max_bytes: 1048576
+    # UPG-REMEMBER-CONTENT-FILE-PATH-REFUSAL: additional absolute roots the
+    # operator allows content_file reads from, BEYOND the primary workspace
+    # root and the multi-root `extra_roots` already accepted by the
+    # resolver. Empty by default — the boundary is unchanged until an
+    # operator (whoever runs the daemon) explicitly opts in by listing one
+    # or more roots here. Use this to allow content_file reads from a
+    # directory the workspace does not own but agents are instructed to
+    # write to (a harness's scratchpad dir, a per-session temp dir, etc.)
+    # without weakening the per-call refusal to read /etc/passwd or another
+    # project's tree. Operator-only: a calling agent cannot widen
+    # containment per call — the trust decision is made once at startup,
+    # not per request, so the boundary is not a flag the caller can
+    # simply always pass. Symlink resolution still runs BEFORE the
+    # containment check (matching the primary/extra_roots rule), so a
+    # symlink inside an additional root that resolves outside every
+    # accepted root is still rejected.
+    additional_readable_roots: []
 
 proactive:
   # UPG-PRO — "Proactive context" (experimental). Deterministically surface the
