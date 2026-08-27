@@ -82,9 +82,18 @@ def _symbol_name_arg(arguments: dict) -> str:
 def handle_tools_list(session_id: str | None = None, service: Any = None) -> dict:
     """Return tools appropriate for this session.
 
-    Always shown: exploration tools + vectr_remember + vectr_evict_hint.
-    Gated on notes existing: vectr_recall, vectr_forget, vectr_promote, vectr_revoke,
-    vectr_reinstate, vectr_supersede, vectr_snapshot, vectr_snapshot_list.
+    Always shown: the exploration tools (vectr_search, vectr_fetch,
+    vectr_status, vectr_map, vectr_map_save, vectr_locate, vectr_trace),
+    the memory-write tools (vectr_remember, vectr_evict_hint,
+    vectr_distill), and the utility tool (vectr_ingest_traces). Gated on
+    notes existing: every _MEMORY_TOOLS member (vectr_recall,
+    vectr_snapshot, vectr_snapshot_list, vectr_resume, vectr_forget,
+    vectr_promote, vectr_revoke, vectr_reinstate, vectr_supersede,
+    vectr_pin, vectr_anchor). The grouped lists above are kept in sync
+    with _EXPLORATION_TOOLS / _MEMORY_WRITE_TOOLS / _UTILITY_TOOLS /
+    _MEMORY_TOOLS in integrations/mcp_server/_schemas.py — re-derive
+    them from those constants when changing tool membership, rather than
+    hand-editing.
     """
     # Hosted/registry deployments (e.g. a catalog's containerised inspector)
     # start with an empty note store but must still advertise the complete
@@ -963,6 +972,17 @@ def handle_tools_call(
         limit = int(arguments.get("limit", 10))
         detail = arguments.get("detail", "index") or "index"
         sort_by = arguments.get("sort_by", "relevance") or "relevance"
+        # UPG-MCP-SORTBY-PASSTHROUGH: the store used to silently treat any
+        # unknown sort_by as 'relevance', which masks a caller typo as
+        # "results just look different". Validate at the dispatch boundary
+        # with the same vocabulary and the same "must be one of" error
+        # shape as REST (app/models.py::RecallRequest.validate_sort_by,
+        # UPG-REST-SORTBY-UNVALIDATED) — the schema enum constrains
+        # well-behaved clients, this guards everything else.
+        if sort_by not in ("relevance", "recency", "priority", "chronological"):
+            return _mcp_error(
+                "sort_by must be one of: relevance, recency, priority, chronological"
+            )
         max_age_days = arguments.get("max_age_days") or None
         if max_age_days is not None:
             try:
@@ -1105,6 +1125,15 @@ def handle_tools_call(
 
         note_id = arguments.get("note_id")
         if note_id is not None:
+            # UPG-MCP-NOTEID-BOOL-GUARDS: JSON true/false are int subclasses
+            # and int(True) == 1 would silently delete note #1 — same guard
+            # vectr_recall/vectr_anchor already carry. The destructive failure
+            # mode is the reason this item leads the lane.
+            if isinstance(note_id, bool):
+                return _mcp_error(
+                    "note_id must be an integer (the [#N] id shown by "
+                    f"vectr_recall); got {note_id!r}. Nothing was deleted."
+                )
             try:
                 nid = int(note_id)
             except (TypeError, ValueError):
@@ -1140,6 +1169,14 @@ def handle_tools_call(
         to = arguments.get("to", "")
         if note_id is None:
             return _mcp_error("note_id is required (the [#N] id shown by vectr_recall)")
+        # UPG-MCP-NOTEID-BOOL-GUARDS: JSON true/false are int subclasses and
+        # int(True) == 1 would promote an unrelated note — same guard
+        # vectr_recall/vectr_anchor already carry.
+        if isinstance(note_id, bool):
+            return _mcp_error(
+                "note_id must be an integer (the [#N] id shown by "
+                f"vectr_recall); got {note_id!r}. Nothing was promoted."
+            )
         try:
             nid = int(note_id)
         except (TypeError, ValueError):
@@ -1184,6 +1221,14 @@ def handle_tools_call(
         reason = (arguments.get("reason") or "").strip()
         if note_id is None:
             return _mcp_error("note_id is required (the [#N] id shown by vectr_recall)")
+        # UPG-MCP-NOTEID-BOOL-GUARDS: JSON true/false are int subclasses and
+        # int(True) == 1 would revoke an unrelated note — same guard
+        # vectr_recall/vectr_anchor already carry.
+        if isinstance(note_id, bool):
+            return _mcp_error(
+                "note_id must be an integer (the [#N] id shown by "
+                f"vectr_recall); got {note_id!r}. Nothing was revoked."
+            )
         try:
             nid = int(note_id)
         except (TypeError, ValueError):
@@ -1216,6 +1261,14 @@ def handle_tools_call(
         reason = arguments.get("reason") or None
         if note_id is None:
             return _mcp_error("note_id is required (the [#N] id shown by vectr_recall)")
+        # UPG-MCP-NOTEID-BOOL-GUARDS: JSON true/false are int subclasses and
+        # int(True) == 1 would reinstate an unrelated note — same guard
+        # vectr_recall/vectr_anchor already carry.
+        if isinstance(note_id, bool):
+            return _mcp_error(
+                "note_id must be an integer (the [#N] id shown by "
+                f"vectr_recall); got {note_id!r}. Nothing was reinstated."
+            )
         try:
             nid = int(note_id)
         except (TypeError, ValueError):
@@ -1290,6 +1343,14 @@ def handle_tools_call(
         pinned = arguments.get("pinned", True)
         if note_id is None:
             return _mcp_error("note_id is required (the [#N] id shown by vectr_recall)")
+        # UPG-MCP-NOTEID-BOOL-GUARDS: JSON true/false are int subclasses and
+        # int(True) == 1 would pin an unrelated note — same guard
+        # vectr_recall/vectr_anchor already carry.
+        if isinstance(note_id, bool):
+            return _mcp_error(
+                "note_id must be an integer (the [#N] id shown by "
+                f"vectr_recall); got {note_id!r}. Nothing was pinned."
+            )
         try:
             nid = int(note_id)
         except (TypeError, ValueError):
