@@ -1737,17 +1737,23 @@ class SymbolGraph:
         rank_repo_defined: bool,
         include_builtins: bool = True,
         exclude_uses: bool = False,
-    ) -> tuple[list[CallEdge], int, int]:
+    ) -> tuple[list[CallEdge], int, int, bool]:
         """Fetch edges by exact `column` match; fall back to partial (LIKE) only
         when no exact-named edge exists. Exact-first kills the substring
         conflation that merged unrelated symbols — `trace compare` no longer
         pulls in `compare_stacks` / `_Py_atomic_compare_exchange_*` (UPG-4.1).
         Results are deduped and ranked by relevance, then truncated (UPG-4.2).
-        Returns `(edges, hidden_builtins, truncated)` — the count of
-        builtin/stdlib callees suppressed before truncation when
-        `include_builtins` is False (UPG-4.3), and the count of aggregated
+        Returns `(edges, hidden_builtins, truncated, raw_capped)` — the count
+        of builtin/stdlib callees suppressed before truncation when
+        `include_builtins` is False (UPG-4.3), the count of aggregated
         entries dropped by the `limit` cut itself
-        (UPG-TRACE-CALLER-LIMIT-TRANSPARENCY).
+        (UPG-TRACE-CALLER-LIMIT-TRANSPARENCY), and whether the SQL fetch
+        itself hit `_EDGE_FETCH_CAP` so the per-direction `truncated` count
+        is a LOWER BOUND and the formatter must label it as such
+        (UPG-TRACE-EDGE-FETCH-CAP-UNCOUNTED). Without this flag, a heavily
+        called name (more than 1000 raw edge rows) would render a "(+N
+        more ...)" line that looks exact while undercounting the real
+        remainder by an unbounded amount.
         `exclude_uses` drops type-usage edges (UPG-4.4) — set on the callees
         direction so "Calls:" stays function calls, not the types a function
         mentions; left off for callers so `trace <Type>` finds its usage sites.
@@ -1764,7 +1770,16 @@ class SymbolGraph:
                     (workspace, f"%{name}%", self._EDGE_FETCH_CAP),
                 ).fetchall()
         edges = [self._row_to_edge(r) for r in rows]
-        return self._aggregate_edges(workspace, edges, group, limit, rank_repo_defined, include_builtins)
+        shown, hidden, truncated = self._aggregate_edges(
+            workspace, edges, group, limit, rank_repo_defined, include_builtins,
+        )
+        # UPG-TRACE-EDGE-FETCH-CAP-UNCOUNTED: a SQL fetch that returned
+        # exactly `_EDGE_FETCH_CAP` rows MAY have left more on the table.
+        # We don't pay a second query to know for sure — the formatter's
+        # reworded note ("at least N more ...") is true under either case
+        # and strictly more honest than the prior exact-looking version.
+        raw_capped = len(rows) >= self._EDGE_FETCH_CAP
+        return shown, hidden, truncated, raw_capped
 
     @staticmethod
     def _is_builtin_call(name: str, from_file: str, repo: set[str]) -> bool:
@@ -1963,7 +1978,7 @@ class SymbolGraph:
     def callers(self, workspace: str, symbol_name: str, limit: int = 20) -> list[CallEdge]:
         """Who calls this symbol? Exact name match preferred (partial fallback).
         Deduped per (caller name, file), ranked by call frequency (UPG-4.2)."""
-        edges, _, _ = self._edges(workspace, "to_symbol", symbol_name, "from_symbol", limit, rank_repo_defined=False)
+        edges, _, _, _ = self._edges(workspace, "to_symbol", symbol_name, "from_symbol", limit, rank_repo_defined=False)
         return edges
 
     def callees(
@@ -1972,7 +1987,7 @@ class SymbolGraph:
         """What does this symbol call? Exact name match preferred (partial fallback).
         Deduped by callee, repo-internal calls ranked ahead of builtins (UPG-4.2);
         builtin/stdlib callees suppressed unless `include_builtins` (UPG-4.3)."""
-        edges, _, _ = self._edges(
+        edges, _, _, _ = self._edges(
             workspace, "from_symbol", symbol_name, "to_symbol", limit,
             rank_repo_defined=True, include_builtins=include_builtins,
             exclude_uses=True,
@@ -2096,6 +2111,12 @@ class SymbolGraph:
         lookup_name = leaf if class_qualifier else symbol_name
 
         result: dict = {}
+        # UPG-TRACE-DIRECTION-UNQUERIED-RENDER: a direction the caller did NOT
+        # ask for is recorded as `None`, not `[]`, so the formatter can
+        # distinguish "we looked and found nothing" from "we never looked".
+        # `direction="both"` legitimately renders both blocks when both are
+        # genuinely empty — the `None`/`[]` split is what keeps that honest
+        # without conflating it with a single-direction trace.
         if direction in ("callers", "both"):
             # Callers can't be attributed to one class-qualified definition —
             # a call site never records the receiver's type — so a resolved
@@ -2108,14 +2129,20 @@ class SymbolGraph:
             # UPG-TRACE-CALLER-LIMIT-TRANSPARENCY: called via `_edges` rather
             # than `self.callers()` only to capture how many aggregated caller
             # entries the `limit` cut dropped — the formatter reports it.
-            callers, _, callers_truncated = self._edges(
+            # UPG-TRACE-EDGE-FETCH-CAP-UNCOUNTED: also captures whether the
+            # SQL fetch itself hit the upstream cap so the formatter can
+            # label the rendered "more not shown" count as a lower bound.
+            callers, _, callers_truncated, callers_raw_capped = self._edges(
                 workspace, "to_symbol", lookup_name, "from_symbol", limit,
                 rank_repo_defined=False,
             )
             result["callers"] = callers
             result["callers_truncated"] = callers_truncated
+            result["callers_raw_capped"] = callers_raw_capped
+        else:
+            result["callers"] = None  # UPG-TRACE-DIRECTION-UNQUERIED-RENDER
         if direction in ("callees", "both"):
-            callees, hidden, callees_truncated = self._edges(
+            callees, hidden, callees_truncated, callees_raw_capped = self._edges(
                 workspace, "from_symbol", lookup_name, "to_symbol", limit,
                 rank_repo_defined=True, include_builtins=include_builtins,
                 exclude_uses=True,
@@ -2123,6 +2150,9 @@ class SymbolGraph:
             result["callees"] = callees
             result["hidden_builtins"] = hidden
             result["callees_truncated"] = callees_truncated
+            result["callees_raw_capped"] = callees_raw_capped
+        else:
+            result["callees"] = None  # UPG-TRACE-DIRECTION-UNQUERIED-RENDER
 
         defs = self._exact_definitions(workspace, lookup_name, limit=limit)
         # UPG-TRACE-CALLER-LIMIT-TRANSPARENCY: the definitions fetch is capped
@@ -2188,6 +2218,12 @@ class SymbolGraph:
                         "callees": cs,
                         "hidden_builtins": hidden,
                         "truncated_callees": def_truncated,  # UPG-TRACE-CALLER-LIMIT-TRANSPARENCY
+                        # UPG-TRACE-EDGE-FETCH-CAP-UNCOUNTED: same per-entry
+                        # raw-cap signal as the flat direction — when this
+                        # definition alone has more raw edges than the SQL
+                        # cap, the per-entry "(+N more ...)" line is a
+                        # lower bound, not a count.
+                        "truncated_callees_raw_capped": len(rows) >= self._EDGE_FETCH_CAP,
                     })
             result["by_definition"] = by_def
         return result
@@ -2389,14 +2425,28 @@ class SymbolGraph:
                 f"pass include_builtins=true to show)")
 
     @staticmethod
-    def _truncation_note(n: int, what: str) -> str:
+    def _truncation_note(n: int, what: str, raw_capped: bool = False) -> str:
         """Footer telling the LLM how many entries a `limit` cut removed from
         the list just rendered — without it, a caller/callee list reads as
         complete when it is only a prefix of the real one, and the caller has
         no signal to act on (UPG-TRACE-CALLER-LIMIT-TRANSPARENCY). Same shape
-        as the hidden-builtins footer above."""
+        as the hidden-builtins footer above.
+
+        UPG-TRACE-EDGE-FETCH-CAP-UNCOUNTED: when `raw_capped` is True the
+        SQL fetch upstream of aggregation also hit `_EDGE_FETCH_CAP`, so
+        this `n` is a LOWER BOUND on the real remainder (more raw rows
+        may have been dropped before aggregation even ran). The note
+        rewords to "at least N more" and stops suggesting that raising
+        the user-facing `limit` is a sufficient fix — the cap that has
+        to be lifted for an exact count is the SQL `_EDGE_FETCH_CAP`
+        (static; not user-tunable today)."""
         if n <= 0:
             return ""
+        if raw_capped:
+            return (
+                f"    (+at least {n} more {what} not shown — raw edge row cap "
+                f"may hide more; count is a lower bound, not exact)"
+            )
         return f"    (+{n} more {what} not shown — pass a higher limit to show)"
 
     @staticmethod
@@ -2657,7 +2707,10 @@ class SymbolGraph:
                 note = self._hidden_builtins_note(entry.get("hidden_builtins", 0))
                 if note:
                     lines.append(note)
-                tnote = self._truncation_note(entry.get("truncated_callees", 0), "callees")
+                tnote = self._truncation_note(
+                    entry.get("truncated_callees", 0), "callees",
+                    raw_capped=entry.get("truncated_callees_raw_capped", False),
+                )
                 if tnote:
                     lines.append(tnote)
                 lines.append("")
@@ -2668,7 +2721,10 @@ class SymbolGraph:
                     lines.append(f"{self._caller_verb(callers)} — any '{leaf_name}' ({len(callers)}):")
                     for e in callers:
                         lines.append(self._render_caller_line(e, spans, workspace))
-                    tnote = self._truncation_note(trace_result.get("callers_truncated", 0), "callers")
+                    tnote = self._truncation_note(
+                        trace_result.get("callers_truncated", 0), "callers",
+                        raw_capped=bool(trace_result.get("callers_raw_capped")),
+                    )
                     if tnote:
                         lines.append(tnote)
                 else:
@@ -2677,9 +2733,27 @@ class SymbolGraph:
                 lines.append(self._empty_trace_hint(symbol_name))
             return "\n".join(lines)
 
-        callers = trace_result.get("callers", [])
-        callees = trace_result.get("callees", [])
-        spans, callee_loc = self._trace_call_site_ids(workspace, callers, [callees], chunk_span_lookup)
+        # UPG-TRACE-DIRECTION-UNQUERIED-RENDER: `callers`/`callees` are
+        # `None` (not `[]`) when the caller did not query that direction —
+        # `.get(key)` with no default is what lets the `is None` gate below
+        # mean "skip this block entirely" rather than "render a (none found
+        # in index) line about a lookup that never happened". `[]` is
+        # reserved for "queried and genuinely empty", which still renders
+        # its honest miss line.
+        callers = trace_result.get("callers")
+        callees = trace_result.get("callees")
+        if callers is None and callees is None:
+            # Neither direction queried — formatter is being called on a
+            # result that ran no SQL. Skip the body entirely; the only
+            # output is the header above.
+            return "\n".join(lines)
+        # `_trace_call_site_ids` treats `None` callers as `[]` and an empty
+        # `callee_lists` as nothing-to-resolve — passing it the un-queried
+        # direction as a literal empty input is safe and keeps the batch
+        # span resolver's contract intact.
+        spans, callee_loc = self._trace_call_site_ids(
+            workspace, callers or [], [callees or []], chunk_span_lookup,
+        )
         callers_empty = callers is not None and not callers
         if callers is not None:
             if callers:
@@ -2696,7 +2770,10 @@ class SymbolGraph:
                     lines.append(f"{self._caller_verb(callers)} ({len(callers)}):")
                 for e in callers:
                     lines.append(self._render_caller_line(e, spans, workspace))
-                tnote = self._truncation_note(trace_result.get("callers_truncated", 0), "callers")
+                tnote = self._truncation_note(
+                    trace_result.get("callers_truncated", 0), "callers",
+                    raw_capped=bool(trace_result.get("callers_raw_capped")),
+                )
                 if tnote:
                     lines.append(tnote)
             elif qualifier_unresolved:
@@ -2716,7 +2793,10 @@ class SymbolGraph:
                     lines.append(f"\nCalls ({len(callees)}):")
                 for e in callees:
                     lines.append(self._render_callee_line(e, "  ", callee_loc, spans, workspace))
-                tnote = self._truncation_note(trace_result.get("callees_truncated", 0), "callees")
+                tnote = self._truncation_note(
+                    trace_result.get("callees_truncated", 0), "callees",
+                    raw_capped=bool(trace_result.get("callees_raw_capped")),
+                )
                 if tnote:
                     lines.append(tnote)
             else:
