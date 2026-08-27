@@ -395,6 +395,276 @@ class TestJavaConstructorSymbolsUPG:
         )
 
 
+class TestJavaEnumAndFieldSymbolsUPG:
+    """UPG-JAVA-ENUM-CONSTANTS-NO-L2-SYMBOLS: enum_constant and field_declaration
+    were absent from the Java symbol map, so `vectr_locate STATUS_CODE_159` /
+    `vectr_locate MAX_RETRIES` missed while the L3 chunker now finds them — the
+    TIER0 asymmetry class in its inverted form, after the constructor half was
+    closed at v13. Enum constants and class fields are members of a type's
+    namespace and locatable; method-locals are not — but tree-sitter-java
+    separates `field_declaration` (class/enum body) from
+    `local_variable_declaration` (method body) at the grammar level, so the
+    enclosing-kind gate the Zig case required is unnecessary here."""
+
+    def test_enum_constants_are_extracted_with_their_kind(self, tmp_path) -> None:
+        p = tmp_path / "Status.java"
+        p.write_text(
+            "public enum Status {\n"
+            "    ACTIVE,\n"
+            "    INACTIVE,\n"
+            "    PENDING_CODE_159\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        by_name = {s["name"]: s for s in symbols}
+        # The enum itself is still kind=enum (rank 0); each constant is kind=
+        # enum_constant (rank 1) so the enum outranks its values on a same-
+        # name collision, mirroring the class/method precedent.
+        assert by_name["Status"]["kind"] == "enum"
+        assert by_name["ACTIVE"]["kind"] == "enum_constant"
+        assert by_name["INACTIVE"]["kind"] == "enum_constant"
+        assert by_name["PENDING_CODE_159"]["kind"] == "enum_constant"
+        # No "Status" kind=enum_constant leak — the enum body's name is its
+        # own declaration, not a member of itself.
+        assert "Status" not in {n for n, s in by_name.items() if s["kind"] == "enum_constant"}
+
+    def test_enum_constant_is_locatable_via_locate_l2(self, tmp_path) -> None:
+        p = tmp_path / "Status.java"
+        p.write_text(
+            "public enum Status {\n"
+            "    ACTIVE,\n"
+            "    INACTIVE\n"
+            "}\n"
+        )
+        g = SymbolGraph(str(tmp_path))
+        g.index_file("ws", str(p))
+        result = g.locate_l2("ws", "ACTIVE")
+        assert result.resolution_strategy == "exact"
+        assert result.symbols[0].name == "ACTIVE"
+        assert result.symbols[0].kind == "enum_constant"
+
+    def test_class_field_is_extracted_with_field_kind(self, tmp_path) -> None:
+        p = tmp_path / "Config.java"
+        p.write_text(
+            "public class Config {\n"
+            "    public int MAX_RETRIES = 3;\n"
+            "    private final String NAME = \"default\";\n"
+            "    public static int PORT = 8080;\n"
+            "    public void setPort(int p) { this.PORT = p; }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        by_name = {s["name"]: s for s in symbols}
+        # The static/final distinction does not change the kind — both instance
+        # and `static`/`final` fields are part of the class's namespace and
+        # share a single `field` kind. Splitting them would multiply locate
+        # noise without a documented use case.
+        assert by_name["MAX_RETRIES"]["kind"] == "field"
+        assert by_name["NAME"]["kind"] == "field"
+        assert by_name["PORT"]["kind"] == "field"
+        # The setPort method must still be present and not demoted by the new
+        # field entries; the class ranks above its fields, methods rank with
+        # fields (all 1), and the locatable "PORT" is the field, not anything
+        # else.
+        assert by_name["setPort"]["kind"] == "method"
+        assert by_name["Config"]["kind"] == "class"
+
+    def test_method_local_variable_is_not_extracted_as_a_field(self, tmp_path) -> None:
+        """tree-sitter-java separates `field_declaration` (class/enum body
+        members) from `local_variable_declaration` (method body locals) at the
+        grammar level. Without that separation, the Zig-style enclosing-kind
+        gate would have been required to keep `int x = 0;` inside a method
+        body from leaking into the graph as a `field`. The grammar already
+        prevents that, and this test pins the property: a local declaration
+        matching the field_declaration signature (`int x = 0;`) inside a
+        method body is not in the symbol set."""
+        p = tmp_path / "Local.java"
+        p.write_text(
+            "public class Local {\n"
+            "    public void run() {\n"
+            "        int x = 0;\n"
+            "        String s = \"hi\";\n"
+            "        x = x + 1;\n"
+            "    }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        names = {s["name"] for s in symbols}
+        assert "x" not in names
+        assert "s" not in names
+        # The class and method are still extracted.
+        assert "Local" in names
+        assert "run" in names
+
+    def test_enum_constant_ranks_below_its_enum_with_the_same_name(self, tmp_path) -> None:
+        """A symbol kind that ranks BELOW the enum/class that contains it
+        must hold for both of the new kinds, so an enum and an enum constant
+        of the same name (or a class and a field of the same name) resolves
+        to the type definition, not the member. Confirms the rank=1 entry
+        for both new kinds, matching the class/method precedent (rank 0/1).
+
+        Asserted through `locate_l2`, which is the surface that consults
+        `_KIND_RANK`; plain `locate` orders by exact-match/name-length/path
+        and has never ranked by kind, so it would return seed order here and
+        prove nothing either way (cf. the struct-over-impl precedent in
+        TestLocateL2Ranking.test_canonical_def_ranks_before_impl_on_exact_match).
+        Each pair is seeded member-first so a pass cannot come from insertion
+        order."""
+        # Seed the graph directly so we can test the rank ordering without
+        # any tree-sitter grammar concerns — _seed_symbols is the existing
+        # helper for that.
+        g = SymbolGraph(str(tmp_path))
+        p = tmp_path / "Same.java"
+        p.write_text("class Same { }\n")
+        _seed_symbols(g, "ws", [
+            ("Same", "enum_constant", str(p)),
+            ("Same", "enum",         str(p)),
+        ])
+        ranked = g.locate_l2("ws", "Same").symbols
+        # The first result is the type definition; the constant sorts after.
+        assert ranked[0].kind == "enum"
+        assert ranked[1].kind == "enum_constant"
+        # Same property for the class/field pair.
+        _seed_symbols(g, "ws2", [
+            ("Pair", "field", str(p)),
+            ("Pair", "class", str(p)),
+        ])
+        ranked2 = g.locate_l2("ws2", "Pair").symbols
+        assert ranked2[0].kind == "class"
+        assert ranked2[1].kind == "field"
+
+    def test_static_final_field_has_no_distinct_kind(self, tmp_path) -> None:
+        """Static/final/instance fields are all extracted under the single
+        `field` kind, by design: splitting them would multiply locate noise
+        without a documented use case. Constants (Java `final` primitives
+        the JLS would call a compile-time constant) are NOT a separate kind
+        in the symbol graph — they are still a `field`, mirroring the L3
+        chunker which also has no Java-constant-specific kind."""
+        p = tmp_path / "Const.java"
+        p.write_text(
+            "public class Const {\n"
+            "    public static final int LIMIT = 100;\n"
+            "    public final int VERSION = 1;\n"
+            "    public int counter = 0;\n"
+            "}\n"
+        )
+        by_name = {s["name"]: s for s in extract_symbols_from_file(str(p))[0]}
+        for n in ("LIMIT", "VERSION", "counter"):
+            assert by_name[n]["kind"] == "field", (
+                f"{n} should be a field, not {by_name[n]['kind']!r}"
+            )
+
+
+class TestRustImplSymbolNameNodeUPG:
+    """UPG-IMPL-SYMBOL-NAME-NODE-GAP: `_get_symbol_name_node` returned None
+    for a Rust `impl_item` and the parse-error check fell back to the whole
+    impl block, so an impl containing one locally-erroring construct lost
+    its symbol identity where an equivalent function kept it. The fix
+    factors the type-field walk out of `_get_symbol_name` into
+    `_rust_impl_type_node` and uses it from both resolvers, so the name-node
+    the parse-error check scopes to is the same node the string resolver
+    extracts the name from — one walk, two callers, no drift."""
+
+    def test_impl_with_locally_erroring_construct_keeps_its_symbol(self, tmp_path) -> None:
+        """The witness shape for the gap: a syntactically clean impl header
+        followed by a body containing a construct the grammar cannot parse.
+        Here the broken function body has an unmatched `let` (missing `;`),
+        which tree-sitter-rust flags as a local ERROR inside the function
+        without wrapping the whole impl block — exactly the shape this fix
+        is meant to recover from. Before the fix the impl symbol was
+        dropped because `node.has_error` over the whole block returned
+        True; after the fix it is kept because the parse-error check scopes
+        to the `type_identifier` node, which is clean."""
+        p = tmp_path / "widget.rs"
+        p.write_text(
+            "struct Widget;\n"
+            "impl Widget {\n"
+            "    fn broken() {\n"
+            "        let x = 1\n"
+            "        let y = 2;\n"
+            "    }\n"
+            "    fn ok() -> u32 { 1 }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        impls = [s for s in symbols if s["kind"] == "impl"]
+        # The impl block must still be indexed under its type name, even
+        # though its body contains a locally-unparseable statement sequence.
+        assert [s["name"] for s in impls] == ["Widget"], (
+            f"impl symbol must survive a locally-erroring body construct, got {symbols}"
+        )
+
+    def test_trait_for_type_still_indexed_under_type(self, tmp_path) -> None:
+        """Regression guard for the shared walk: `impl Trait for Type { }`
+        must still resolve to the TYPE, never the trait. The v13 fix put the
+        type-field walk into `_get_symbol_name`; the v14 refactor moves it
+        into `_rust_impl_type_node` and shares it with the name-node
+        resolver. Both consumers of the walk must agree on which type the
+        impl symbol names. Pin with a fixture that has NO other `Widget`
+        symbols so the assertion cannot pass by accident."""
+        p = tmp_path / "widget_impl.rs"
+        p.write_text(
+            "impl Measurable for Widget {\n"
+            "    fn measure(&self) -> u32 { 1 }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        by_name = {s["name"]: s for s in symbols}
+        assert by_name.get("Widget", {}).get("kind") == "impl", (
+            f"impl Trait for Type must resolve to the type 'Widget', got {symbols}"
+        )
+        assert "Measurable" not in by_name, (
+            f"the trait name must never become the impl symbol's name: {sorted(by_name)}"
+        )
+
+    def test_generic_trait_impl_resolved_via_type_field(self, tmp_path) -> None:
+        """Both the trait (`Measurable<T>`) and the type (`Bag<T>`) are
+        `generic_type` nodes here, so the old positional scan found no
+        matching direct child and dropped the impl entirely (name "" → not
+        emitted). The shared walk unwraps `generic_type` → its own `type`
+        field down to the bare `type_identifier`; the refactor must keep
+        that."""
+        p = tmp_path / "bag.rs"
+        p.write_text(
+            "impl<T> Measurable<T> for Bag<T> {\n"
+            "    fn measure(&self) -> u32 { 1 }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        impls = [s for s in symbols if s["kind"] == "impl"]
+        assert [s["name"] for s in impls] == ["Bag"], (
+            f"generic trait impl must resolve to the type 'Bag', got {symbols}"
+        )
+
+    def test_broken_impl_name_still_rejected(self, tmp_path) -> None:
+        """The whole point of the name-node-scoped error check is to
+        preserve symbols whose name is clean; a name that is itself part
+        of a parse error must STILL be rejected (a malformed identifier
+        cannot mint a symbol). Without the reserved-keyword and
+        whole-subtree check, a previous coverage push indexed grammar
+        keywords as symbols. Pin the rejection on the worst-case impl
+        header the grammar can produce — one whose `type` field is
+        itself an ERROR node (no `type_identifier` reachable). The
+        shared walk returns None, the name resolver returns "", and
+        no symbol is emitted."""
+        p = tmp_path / "broken.rs"
+        # `impl {` — no type at all, the parser produces an impl_item whose
+        # `type` field is missing/empty. Both the string and the name-node
+        # resolver must fall through cleanly to "not a symbol".
+        p.write_text(
+            "impl {\n"
+            "    fn nothing() { }\n"
+            "}\n"
+        )
+        symbols, _ = extract_symbols_from_file(str(p))
+        # The impl has no resolvable name → no impl-kind symbol, and the
+        # function inside it (kind=function) is independent and not pinned
+        # by this test.
+        assert not any(s["kind"] == "impl" for s in symbols), (
+            f"an impl with no resolvable type must not be indexed, got {symbols}"
+        )
+
+
 class TestTSTypedefSymbolGraphUPG:
     """UPG-TS-SYMBOLGRAPH-TYPEDEF: type_alias_declaration and enum_declaration
     must resolve as symbols so vectr_locate finds a TS type alias / enum, not
@@ -4643,15 +4913,15 @@ class TestFileImportanceARCH1a:
         """SYMBOL_SCHEMA_VERSION is an exact pin, not a floor: every
         extraction-behavior change must bump it (or existing installs never
         rebuild their graph) AND consciously update this pin in the same
-        commit. Currently 13 (Rust impl_item name via grammar `type` field —
-        `impl Trait for Type { }` indexed under the type, never the trait —
-        UPG-RUST-IMPL-SYMBOL-NAME-TRAIT-VS-TYPE; Java constructor_declaration
-        extracted as a method-kind symbol —
-        UPG-ENUM-CONTAINER-NONMETHOD-COVERAGE — bumped from 12 Zig
-        struct/enum-scoped const/var namespace members —
-        UPG-ZIG-STRUCT-CONST-LOCATE)."""
-        assert SYMBOL_SCHEMA_VERSION == 13, (
-            f"Expected SYMBOL_SCHEMA_VERSION=13; got {SYMBOL_SCHEMA_VERSION}. "
+        commit. Currently 14 (Java enum_constant and field_declaration
+        extracted as symbols, so `locate` finds enum values and class fields
+        the L3 search already covered — UPG-JAVA-ENUM-CONSTANTS-NO-L2-SYMBOLS;
+        Rust impl_item parse-error check scoped to the implemented type's
+        `type_identifier` node rather than the whole impl block —
+        UPG-IMPL-SYMBOL-NAME-NODE-GAP — bumped from 13 Rust impl_item name via
+        grammar `type` field — UPG-RUST-IMPL-SYMBOL-NAME-TRAIT-VS-TYPE)."""
+        assert SYMBOL_SCHEMA_VERSION == 14, (
+            f"Expected SYMBOL_SCHEMA_VERSION=14; got {SYMBOL_SCHEMA_VERSION}. "
             "If you changed extraction behavior, bump the version and update this pin."
         )
 
