@@ -114,6 +114,191 @@ class TestStaleTaskSummaryStore:
         count, oldest_id = store.stale_task_summary(str(tmp_path), min_age_days=7)
         assert (count, oldest_id) == (0, None)
 
+    # UPG-STALE-TASK-SUMMARY-COUNTS-DEAD-STATES: the original predicate
+    # was `valid_until IS NULL`, which catches the SUPERSEDE tombstone
+    # (an explicit column write) but not the EVENT-fold terminal states
+    # REVOKED and EXPIRED (both of which leave `valid_until` NULL by
+    # their own contracts — see `revoke_note()` and `purge_expired_notes
+    # ()` in agent/working_context_store/_store.py). The new predicate
+    # also requires the event-fold state to be "active". These tests
+    # pin the new behaviour at the store level: a stale-task hygiene
+    # nudge that recommends "consider supersedes=<old id>" for a note
+    # the system has already retired (EXPIRED) or the user already
+    # judged wrong (REVOKED) is wrong-footed noise that mis-tunes
+    # UPG-HYGIENE-THRESHOLD-RETUNE.
+
+    def test_revoked_old_task_note_not_counted(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note_id = store.remember(ws, "wrong checkpoint", kind="task")
+        _backdate(store, note_id, age_days=10)
+        # REVOKED: appends the `revoked` event; `revoke_note()`'s contract
+        # deliberately leaves `valid_until` NULL (anti-memory deterrent
+        # rendering must stay visible, so tombstoning would be wrong).
+        # The pre-fix predicate missed this — the note was un-superseded
+        # in the column sense, so the old count included it.
+        store.revoke_note(ws, note_id, reason="judged wrong")
+        count, oldest_id = store.stale_task_summary(ws, min_age_days=7)
+        assert (count, oldest_id) == (0, None)
+
+    def test_expired_old_task_note_not_counted(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note_id = store.remember(ws, "aged-out checkpoint", kind="task")
+        _backdate(store, note_id, age_days=30)
+        # EXPIRED: `purge_expired_notes()` appends the `expired` event
+        # and deliberately leaves the columns NULL
+        # (UPG-MEMORY-DECAY-KIND-SCOPED's append-only invariant). The
+        # ttl_days=1 override collapses every kind's effective TTL to
+        # 1 day so the 30-day-old backdated note crosses it; the kind
+        # baseline (21d for task) would also fire on a 30-day-old note
+        # on its own, but the override makes the test independent of
+        # the shipped config.
+        expired = store.purge_expired_notes(ws, ttl_days=1)
+        assert expired == 1
+        count, oldest_id = store.stale_task_summary(ws, min_age_days=7)
+        assert (count, oldest_id) == (0, None)
+
+    def test_reinstated_revoked_old_task_note_counts_again(self, tmp_path) -> None:
+        """A revoked note that the user reverses should resume counting
+        toward the hygiene nudge — the same way a brand-new active note
+        would. This pins the "fold is the authority" contract: reinstated
+        brings the folded state back to `active`, and the new predicate
+        honours that transition."""
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note_id = store.remember(ws, "checkpoint I will flip on", kind="task")
+        _backdate(store, note_id, age_days=10)
+        store.revoke_note(ws, note_id, reason="first judgment")
+        # Sanity: revoked is dead to the inventory.
+        assert store.stale_task_summary(ws, min_age_days=7) == (0, None)
+        # Reinstate brings it back to active.
+        store.reinstate_note(ws, note_id, reason="second look, kept it")
+        count, oldest_id = store.stale_task_summary(ws, min_age_days=7)
+        assert (count, oldest_id) == (1, note_id)
+
+    def test_reinstated_expired_old_task_note_counts_again(self, tmp_path) -> None:
+        """The same reinstate-after-expiry symmetry: an expired note the
+        user later revives via `reinstate_note()` (the SAME `reinstated`
+        event reverses every terminal state per
+        UPG-MEMORY-STATE-MACHINE §4.2) must count toward the nudge
+        again."""
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        note_id = store.remember(ws, "checkpoint that aged out", kind="task")
+        _backdate(store, note_id, age_days=30)
+        store.purge_expired_notes(ws, ttl_days=1)
+        assert store.stale_task_summary(ws, min_age_days=7) == (0, None)
+        store.reinstate_note(ws, note_id, reason="un-expired, still relevant")
+        count, oldest_id = store.stale_task_summary(ws, min_age_days=7)
+        assert (count, oldest_id) == (1, note_id)
+
+    def test_oldest_id_skips_dead_state_note_older_than_live_one(
+        self, tmp_path
+    ) -> None:
+        """The count and the oldest-id subquery are TWO separate
+        predicates in the same statement (per the brief), so a fix that
+        tightens one and not the other is a regression waiting to
+        happen. This test pins BOTH: a dead-state (revoked) note that
+        is OLDER than a live active note must not pull the oldest-id
+        away from the live one, AND the count must reflect only the
+        live set. The two together are the whole acceptance gate — if
+        a future change restores the single-column predicate or splits
+        the count and oldest-id into two different predicates, this
+        test fails immediately."""
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        # Live note: created 10 days ago, still active.
+        live_id = store.remember(ws, "current checkpoint", kind="task")
+        _backdate(store, live_id, age_days=10)
+        # Dead note: created 20 days ago, REVOKED. Older than the live
+        # one but in a terminal state — must NOT count, and must NOT
+        # be picked as the oldest-id.
+        dead_id = store.remember(ws, "old wrong checkpoint", kind="task")
+        _backdate(store, dead_id, age_days=20)
+        store.revoke_note(ws, dead_id, reason="wrong")
+
+        count, oldest_id = store.stale_task_summary(ws, min_age_days=7)
+        # The count is 1, the live note's id. The dead note is
+        # filtered out on both axes — count AND oldest-id.
+        assert count == 1, (
+            f"expected 1 live stale task note, got {count}; "
+            f"the revoked note was {dead_id} (backdated 20d), "
+            f"the live one is {live_id} (backdated 10d)"
+        )
+        assert oldest_id == live_id, (
+            f"oldest_id must skip the dead-state note; "
+            f"got {oldest_id}, expected {live_id}"
+        )
+
+    def test_oldest_id_skips_expired_note_older_than_live_one(
+        self, tmp_path
+    ) -> None:
+        """Same shape as the revoked test above, but for the EXPIRED
+        terminal state — pinning the same two-axis invariant for a
+        different dead state, since the brief's "the count and the
+        oldest-id subquery are two separate predicates" warning
+        applies equally to both."""
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        live_id = store.remember(ws, "current checkpoint", kind="task")
+        _backdate(store, live_id, age_days=10)
+        expired_id = store.remember(ws, "old aged-out checkpoint", kind="task")
+        _backdate(store, expired_id, age_days=20)
+        # TTL must fall BETWEEN the two ages. `purge_expired_notes` expires
+        # every note past the cutoff, so a ttl below 10 days would expire the
+        # "live" note too, leaving nothing to compare against — the assertion
+        # would then be measuring an empty set rather than the skip behaviour.
+        newly_expired = store.purge_expired_notes(ws, ttl_days=15)
+        assert newly_expired == 1, (
+            f"setup expired {newly_expired} notes; exactly the 20d note must "
+            f"expire and the 10d one must stay active for this test to mean "
+            f"anything"
+        )
+        assert store._note_event_states_by_ids(ws, [live_id])[live_id][
+            "state"
+        ] == "active"
+
+        count, oldest_id = store.stale_task_summary(ws, min_age_days=7)
+        assert count == 1, (
+            f"expected 1 live stale task note, got {count}; "
+            f"the expired note was {expired_id} (backdated 20d), "
+            f"the live one is {live_id} (backdated 10d)"
+        )
+        assert oldest_id == live_id, (
+            f"oldest_id must skip the expired note; "
+            f"got {oldest_id}, expected {live_id}"
+        )
+
+    def test_active_count_unchanged_for_pre_migration_notes(self, tmp_path) -> None:
+        """Notes with NO `note_events` rows at all (pre-migration data)
+        fold to `active` by `fold()`'s own default — the same state a
+        brand-new `created` event would produce. The new predicate
+        must NOT regress this: a backdated task note with no event
+        log must still count toward the hygiene nudge exactly the way
+        it did before the change. Backstop for the "we accidentally
+        excluded old notes" failure mode."""
+        store = _store(tmp_path)
+        ws = str(tmp_path)
+        # Insert directly: skip `remember()`'s `created` event so this
+        # note has an EMPTY `note_events` log, simulating a row from
+        # before the event-log feature shipped. Every NOT-NULL column
+        # with no default gets an explicit value; the rest (tags,
+        # decay_score, author_id, author_trust_score, valid_from,
+        # code_hash, pinned) take the schema's own defaults.
+        with store._conn() as conn:
+            conn.execute(
+                "INSERT INTO notes (workspace, content, priority, kind,"
+                " created_at, last_accessed) VALUES (?, '', 'medium',"
+                " 'task', ?, ?)",
+                (ws, time.time() - 30 * 86400, time.time()),
+            )
+            pre_migration_id = conn.execute(
+                "SELECT last_insert_rowid()"
+            ).fetchone()[0]
+        count, oldest_id = store.stale_task_summary(ws, min_age_days=7)
+        assert (count, oldest_id) == (1, pre_migration_id)
+
 
 # ---------------------------------------------------------------------------
 # Service-level: VectrService.stale_task_summary() / status()

@@ -21,7 +21,7 @@ from agent.config import (
 )
 from agent.chroma_dispatch import dispatch_chroma_sync
 from agent.render_paths import workspace_relpath
-from agent.working_context_store import USER_STATED_PROVENANCE, bind_user_quote, resolve_remember_content
+from agent.working_context_store import SORT_BY_VALUES, USER_STATED_PROVENANCE, bind_user_quote, resolve_remember_content
 
 
 def _service_ws_root(service) -> str:
@@ -979,9 +979,15 @@ def handle_tools_call(
         # shape as REST (app/models.py::RecallRequest.validate_sort_by,
         # UPG-REST-SORTBY-UNVALIDATED) — the schema enum constrains
         # well-behaved clients, this guards everything else.
-        if sort_by not in ("relevance", "recency", "priority", "chronological"):
+        # UPG-SORTBY-SHARED-VOCAB: the vocabulary itself is the shared
+        # SORT_BY_VALUES constant from agent.working_context_store so a
+        # fifth sort mode added at the source automatically tightens this
+        # guard, the REST validator, the MCP schema enum, and the CLI
+        # argparse choices — adding it at one place and forgetting another
+        # is the drift this change exists to eliminate.
+        if sort_by not in SORT_BY_VALUES:
             return _mcp_error(
-                "sort_by must be one of: relevance, recency, priority, chronological"
+                f"sort_by must be one of: {', '.join(SORT_BY_VALUES)}"
             )
         max_age_days = arguments.get("max_age_days") or None
         if max_age_days is not None:

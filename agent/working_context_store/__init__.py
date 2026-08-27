@@ -57,6 +57,7 @@ from agent.working_context_store._types import (
     PROMOTION_RANK,
     PROVENANCE_VALUES,
     SCOPE_VALUES,
+    SORT_BY_VALUES,
     USER_STATED_PROVENANCE,
     VALID_KINDS,
     SnapshotEntry,
@@ -125,6 +126,10 @@ __all__ = [
     "DEFAULT_SCOPE",
     "PROVENANCE_VALUES",
     "DEFAULT_PROVENANCE",
+    # Shared recall sort-mode vocabulary (UPG-SORTBY-SHARED-VOCAB) —
+    # imported by REST, MCP dispatch + tool schema, and the CLI so a fifth
+    # sort mode can be added at one place, not five.
+    "SORT_BY_VALUES",
     "SnapshotEntry",
     "WorkingNote",
     # Verbatim user-excerpt binding (UPG-MEM-PROVENANCE-USER-STATED)
