@@ -4072,6 +4072,92 @@ class TestFetchChunks:
         with pytest.raises(ValueError):
             indexer.fetch_chunks(too_many)
 
+    def test_misaligned_id_in_hard_split_only_file_returns_no_nearest_ids(
+        self, indexer, tmp_path, monkeypatch,
+    ) -> None:
+        """UPG-CHUNK-ID-RANGE-PARSE: end-to-end check that the
+        `_parse_chunk_id` skip behaviour holds through `fetch_chunks`'s
+        full misalignment path. A file whose chunks are all hard-split
+        pieces of one giant line (the only thing in the file that triggered
+        UPG-WINDOW-CHUNK-BYTE-CAP) — every stored id in that file carries
+        a `#<k>` suffix and therefore does not parse as `path:start-end`.
+        A caller asking for a misaligned id in the same file must see
+        `nearest_ids=[]` (an honest "no real chunk in this file covers
+        that span") rather than a `nearest_ids` list flooded with sibling
+        ids that all point to slices of the same single source line.
+
+        If `_parse_chunk_id` ever learned to strip the ordinal, every piece
+        would parse to the same `(file, start, end)` and the ranking would
+        tie them all at distance 0; with the test file's three pieces that
+        tie, `nearest_ids` would become `["<file>:1-1#0", "<file>:1-1#1",
+        "<file>:1-1#2"]` — three ids for the same line, strictly worse
+        than `[]`."""
+        # Shrink the chunk-character cap so a single 1,200-char line gets
+        # hard-split into multiple pieces — the same trick
+        # `TestChunkCharCap._small_cap` uses to make the split deterministic.
+        import agent.indexer._chunking as chunking_mod
+        monkeypatch.setattr(chunking_mod, "_MAX_CHUNK_CHARS", 400)
+
+        from agent.indexer import chunk_file
+        # A file whose only content is one giant line. The window chunker
+        # emits one parent chunk spanning the whole file, then
+        # `_postprocess_chunks` hands the parent to `_split_oversized_chunk`,
+        # which carves the giant line at character granularity and emits
+        # `path:1-1#0`, `path:1-1#1`, `path:1-1#2` — every stored id in the
+        # file is `#<k>`-suffixed.
+        # The extension is load-bearing. This fixture is deliberately a
+        # SINGLE-LINE file, and a single-line `.txt` is dropped to zero
+        # chunks by is_trivial_chunk's short-doc rule
+        # (UPG-TXT-SINGLE-LINE-DATA-BLOB-DROP, still open), which would
+        # leave this test silently pinning nothing. Multi-line `.txt`
+        # chunks normally; only this single-line shape is affected.
+        giant = "".join(f"{i % 97:02d}," for i in range(400))
+        p = tmp_path / "hard_split_only.py"
+        p.write_text(giant, encoding="utf-8")
+
+        chunks = chunk_file(str(p))
+        # Sanity: every chunk in the file is a hard-split piece — these are
+        # the '#<k>'-suffixed ids UPG-WINDOW-CHUNK-BYTE-CAP introduced and
+        # the reason this test exists.
+        assert len(chunks) >= 2, [c.chunk_id for c in chunks]
+        assert all("#" in c.chunk_id for c in chunks), [c.chunk_id for c in chunks]
+        # All pieces share the single-line span 1-1.
+        assert all(c.start_line == 1 and c.end_line == 1 for c in chunks), (
+            [(c.start_line, c.end_line, c.chunk_id) for c in chunks]
+        )
+
+        # Index directly so the body collection holds the hard-split pieces.
+        indexer._collection.upsert(
+            ids=[c.chunk_id for c in chunks],
+            documents=[c.content for c in chunks],
+            metadatas=[{
+                "file_path": c.file_path,
+                "language": c.language,
+                "node_type": c.node_type,
+                "start_line": c.start_line,
+                "end_line": c.end_line,
+                "symbol_name": c.symbol_name or "",
+            } for c in chunks],
+            embeddings=[[float(len(c.content)) % 1.0] * 4 for c in chunks],
+        )
+        file_path = str(p.resolve())
+        bad_id = f"{file_path}:9000-9005"
+
+        result = indexer.fetch_chunks([bad_id])
+        assert len(result) == 1
+        entry = result[0]
+        assert entry["found"] is False
+        assert entry["reason"] == "misaligned", (
+            f"file IS indexed (it has hard-split pieces), so the misalign "
+            f"branch must engage; got reason={entry.get('reason')!r}"
+        )
+        assert entry["nearest_ids"] == [], (
+            f"hard-split piece ids must be skipped from the misalignment "
+            f"ranking (they all share one parent's span, so including them "
+            f"would tie every sibling at distance 0 and flood the suggestion "
+            f"list with N ids for the same line). Got: {entry['nearest_ids']!r}"
+        )
+
 
 class TestParseChunkIdAndNearestChunkIds:
     """Smallest-level coverage for the two pure helpers behind
@@ -4093,6 +4179,73 @@ class TestParseChunkIdAndNearestChunkIds:
     def test_parse_chunk_id_returns_none_for_non_numeric_range(self) -> None:
         from agent.indexer._core import _parse_chunk_id
         assert _parse_chunk_id("a.py:start-end") is None
+
+    def test_parse_chunk_id_returns_none_for_hard_split_piece_id(self) -> None:
+        """UPG-CHUNK-ID-RANGE-PARSE: `_parse_chunk_id` intentionally returns
+        None for `#<k>`-suffixed hard-split piece ids. Those pieces are
+        produced by `_split_oversized_chunk` (UPG-WINDOW-CHUNK-BYTE-CAP) when
+        a single source line is so long it has to be carved at character
+        granularity, or when the parent chunk's content does not map 1:1 onto
+        its recorded span (prose/header-stripped sections). All pieces of one
+        parent share the EXACT same `(start_line, end_line)` range, so a
+        parser that accepted them would lump every sibling into one tie in
+        the misalignment ranking — `nearest_ids` would then flood with N
+        ids that all point to slices of the same single line of bytes,
+        which is strictly worse than the current "no parseable neighbour
+        here" behaviour (the file probe in `_not_found_fetch_entry` then
+        still returns `nearest_ids=[]` for that file, an honest "no real
+        chunk covers this span" signal). The exact id `vectr_fetch` is
+        asked for resolves by ChromaDB's `get(ids=...)` exact match, so
+        the `#<k>` ids never NEED the parse path to work."""
+        from agent.indexer._core import _parse_chunk_id
+        # One-to-one carve: pieces of one long line share the single-line span.
+        assert _parse_chunk_id("minified.js:1-1#0") is None
+        assert _parse_chunk_id("minified.js:1-1#42") is None
+        # Character-granular carve: pieces inherit the parent's own span.
+        assert _parse_chunk_id("doc.txt:40-41#0") is None
+        assert _parse_chunk_id("doc.txt:40-41#3") is None
+
+    def test_nearest_chunk_ids_skips_hard_split_piece_candidates(self) -> None:
+        """UPG-CHUNK-ID-RANGE-PARSE: pieces of one hard-split parent all share
+        the same parsed range. Including them in the ranking would tie them
+        all at the same score, so `nearest_ids` would be filled with sibling
+        ids that are slices of the same source line — a strictly worse
+        suggestion than the real, different-spanned chunks in the file. The
+        `limit=2` result below must therefore contain only the natural
+        `a.py:1-5` and `a.py:100-120` ids, NOT the `#<k>` siblings that
+        share one-line span `10-10`."""
+        from agent.indexer._core import _nearest_chunk_ids_by_span
+        candidates = [
+            "a.py:1-5",                  # natural — distance 125
+            "a.py:100-120",              # natural — distance 10 (closest natural)
+            "minified.js:10-10#0",       # hard-split piece — would tie with #1
+            "minified.js:10-10#1",       # hard-split piece — would tie with #0
+        ]
+        # Requested span 130-140: closest natural is a.py:100-120 (10 away).
+        # The hard-split pieces would have distance min(|10-140|, |10-130|)=120
+        # — further than the natural 100-120, AND if the requested range
+        # were `10-10` they would all tie on distance 0 with each other.
+        nearest = _nearest_chunk_ids_by_span(candidates, 130, 140, limit=2)
+        assert nearest == ["a.py:100-120", "a.py:1-5"], (
+            f"hard-split piece ids must be skipped from misalignment ranking; "
+            f"got {nearest}"
+        )
+
+    def test_nearest_chunk_ids_for_requested_single_line_span_excludes_pieces(self) -> None:
+        """The worst-case failure mode if `_parse_chunk_id` were taught to
+        strip the `#<k>` ordinal: a caller asks for the parent's natural span
+        (e.g. `a.py:10-10`), the file contains a giant line of 50_000 chars
+        that was hard-split into 100 `#<k>` siblings. Every piece parses to
+        `(a.py, 10, 10)`, so all 100 tie at distance 0, and the suggestion
+        list is filled with sibling ids of the same line. That is what the
+        current skip behaviour guards against."""
+        from agent.indexer._core import _nearest_chunk_ids_by_span
+        candidates = [f"a.py:10-10#{k}" for k in range(100)]
+        nearest = _nearest_chunk_ids_by_span(candidates, 10, 10, limit=5)
+        assert nearest == [], (
+            f"hard-split piece ids alone in a file must not be suggested as "
+            f"misalignment candidates; got {nearest}"
+        )
 
     def test_nearest_chunk_ids_prefers_overlap_over_distance(self) -> None:
         from agent.indexer._core import _nearest_chunk_ids_by_span
