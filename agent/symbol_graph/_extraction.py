@@ -107,13 +107,21 @@ def _get_symbol_name(node, code_bytes: bytes, language: str = "") -> str:
     # unwrap bounded; return "" rather than falling back to the scan, which is
     # exactly the misresolution this branch exists to prevent.
     if language == "rust" and node.type == "impl_item":
-        cur = node.child_by_field_name("type")
-        for _ in range(6):  # bounded — generic/reference nesting is shallow
-            if cur is None:
-                return ""
-            if cur.type == "type_identifier":
-                return code_bytes[cur.start_byte:cur.end_byte].decode("utf-8", errors="replace")
-            cur = cur.child_by_field_name("type")
+        type_node = _rust_impl_type_node(node)
+        if type_node is not None:
+            return code_bytes[type_node.start_byte:type_node.end_byte].decode("utf-8", errors="replace")
+        return ""
+    # UPG-JAVA-ENUM-CONSTANTS-NO-L2-SYMBOLS: a Java `field_declaration`
+    # has no `name` field — the identifier is nested in the first
+    # `variable_declarator`'s `name` field, same shape as the v11 method
+    # bug. Without this, the positional child-scan below returns the
+    # field's TYPE (the first identifier-ish child in document order)
+    # instead of the field's name, and `public int MAX_RETRIES = 3;` is
+    # indexed under "int".
+    if language == "java" and node.type == "field_declaration":
+        name_node = _java_field_name_node(node)
+        if name_node is not None:
+            return code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
         return ""
     # Prefer tree-sitter's explicit `name` field when the grammar exposes one.
     # The positional child-scan below returns the FIRST identifier-ish child,
@@ -157,6 +165,37 @@ def _c_name_node(node):
     return node.child_by_field_name("declarator")
 
 
+def _rust_impl_type_node(node):
+    """The `type_identifier` node naming the implemented type for a Rust
+    `impl_item`, or None when the grammar can't resolve one
+    (UPG-IMPL-SYMBOL-NAME-NODE-GAP).
+
+    Shared by `_get_symbol_name` (string resolver) and `_get_symbol_name_node`
+    (name-node resolver) so the two cannot drift again: before this factor,
+    the string resolver walked the `type` field while the name-node resolver
+    returned None for `impl_item` and fell back to a whole-subtree error check
+    that erased the impl's identity whenever any construct inside the block
+    failed to parse. A generic impl nests the leaf one level down
+    (`impl<T> Foo<T>` → `generic_type` whose own `type` field is the bare
+    `type_identifier`); unwrapped here bounded, so deep or pathological
+    nesting returns None rather than guessing.
+
+    `impl Trait for Type { }` always resolves to the type after `for` — the
+    `trait` is a separate, optional field present only on that form, so
+    resolving through `type` never misreads a trait name.
+    """
+    if node.type != "impl_item":
+        return None
+    cur = node.child_by_field_name("type")
+    for _ in range(6):  # bounded — generic/reference nesting is shallow
+        if cur is None:
+            return None
+        if cur.type == "type_identifier":
+            return cur
+        cur = cur.child_by_field_name("type")
+    return None
+
+
 def _get_symbol_name_node(node, language: str):
     """The AST node bearing the symbol's own identifier, when the grammar
     exposes it (UPG-REACT-TSX-FUNCTION-DECL-DROP / UPG-C-STRUCT-TYPEDEF-LOCATE).
@@ -166,13 +205,43 @@ def _get_symbol_name_node(node, language: str):
     signature or body (a Flow-only type the routed grammar can't parse; a
     C macro expanding to non-expression tokens inside a body/struct field list)
     must not erase symbol identity when the name token is clean. For C/C++ the
-    name lives in a declarator chain, resolved by `_c_name_node`. Returns None
-    when the node exposes no name-bearing subtree — callers then fall back to
-    the broader whole-subtree error check.
+    name lives in a declarator chain, resolved by `_c_name_node`; for a Rust
+    `impl_item` the identifier-bearing subtree is the implemented type's
+    `type_identifier` node, resolved by `_rust_impl_type_node` — so the parse-
+    error check scopes to the same node the string resolver extracts the name
+    from (UPG-IMPL-SYMBOL-NAME-NODE-GAP). Returns None when the node exposes
+    no name-bearing subtree — callers then fall back to the broader whole-
+    subtree error check.
     """
     if language in ("c", "cpp"):
         return _c_name_node(node)
+    if language == "rust" and node.type == "impl_item":
+        return _rust_impl_type_node(node)
+    if language == "java" and node.type == "field_declaration":
+        return _java_field_name_node(node)
     return node.child_by_field_name("name")
+
+
+def _java_field_name_node(node):
+    """The name-bearing subtree of a Java `field_declaration` node, for
+    scoped error checks (UPG-JAVA-ENUM-CONSTANTS-NO-L2-SYMBOLS).
+
+    The grammar's `name` field on a `field_declaration` does not exist — the
+    field's identifier is nested one level down, in the first
+    `variable_declarator`'s own `name` field — so a generic
+    `node.child_by_field_name("name")` returns None and the positional
+    child-scan fallback would return the FIRST identifier-ish child in
+    document order, which is the field's TYPE (`int x = 0;` → `int`, not
+    `x`). The same shape as the v11 method-name bug, with the same fix
+    shape: walk into the `declarator` field and read its `name`. For
+    multi-declarator fields (`int x, y, z;`) the first declarator's name is
+    returned — the others aren't separately locatable from a single
+    declaration, and the C case has the same property.
+    """
+    declarator = node.child_by_field_name("declarator")
+    if declarator is None:
+        return None
+    return declarator.child_by_field_name("name")
 
 
 # Zig `const X = <container>` RHS node types that make X a genuine type
