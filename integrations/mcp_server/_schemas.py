@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from importlib import metadata as _importlib_metadata
 
+from agent.working_context_store import SORT_BY_VALUES
+
 
 def _package_version() -> str:
     try:
@@ -637,7 +639,12 @@ _MEMORY_TOOLS = [
                         "timeline, or with any other kind/tag filter for the same time-ordered view)."
                     ),
                     "default": "relevance",
-                    "enum": ["relevance", "recency", "priority", "chronological"],
+                    # UPG-SORTBY-SHARED-VOCAB: same SORT_BY_VALUES constant the
+                    # REST validator, MCP dispatch guard, and CLI argparse
+                    # choices consume. JSON Schema needs a JSON-native list,
+                    # not a tuple, so we list()-cast at the boundary; the
+                    # vocabulary itself is still the shared constant.
+                    "enum": list(SORT_BY_VALUES),
                 },
                 "max_age_days": {
                     "type": "number",

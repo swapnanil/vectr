@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator
 
+from agent.working_context_store import SORT_BY_VALUES
+
 
 # ---------------------------------------------------------------------------
 # Shared
@@ -311,7 +313,16 @@ _REST_PROVENANCE_VALUES = ("agent", "auto")
 # (argparse choices) already enforce this vocabulary — without this tuple
 # the REST surface accepted any string and the store silently treated an
 # unknown value as relevance.
-_SORT_BY_VALUES = ("relevance", "recency", "priority", "chronological")
+#
+# UPG-SORTBY-SHARED-VOCAB: this is no longer a local definition — it is the
+# same SORT_BY_VALUES constant the MCP dispatch, MCP tool schema, and CLI
+# also import. Re-aliased under the historical private name (a handful of
+# existing in-module call sites read `_SORT_BY_VALUES`) so that adding a
+# fifth sort mode at the source automatically tightens the REST validator
+# here, alongside the other three surfaces. Kept the private alias purely
+# to minimise the diff at the two in-module consumers below; the
+# authoritative declaration lives in agent.working_context_store._types.
+_SORT_BY_VALUES = SORT_BY_VALUES
 
 
 class RememberRequest(BaseModel):

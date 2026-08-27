@@ -3646,33 +3646,85 @@ class WorkingContextStore:
         never mutates or expires anything itself.
 
         A note counts as "live" here the same way recall() treats it by
-        default: valid_until IS NULL (an explicit tombstone via supersedes
-        excludes a note from ever firing again, so it must not double-count
-        toward staleness pressure). Oldest is by created_at ASC, note_id ASC
-        tie-break, matching the ordering convention used elsewhere in this
-        store.
+        default: a `valid_until IS NULL` row AND a folded event state of
+        `active`. `valid_until IS NULL` alone is the original (pre-UPG-
+        STALE-TASK-SUMMARY-COUNTS-DEAD-STATES) predicate — it caught the
+        supersede tombstone (an explicit `valid_until` write) but missed
+        two EVENT-fold terminal states the same store can leave a row in
+        with `valid_until` still NULL:
+          - REVOKED (`revoke_note()` never sets `valid_until` by the
+            anti-memory contract — a revoked note stays a default recall()/
+            fire() candidate so its deterrent rendering can substitute for
+            the raw content; tombstoning it would silently hide exactly
+            the wrongness the caller flagged).
+          - EXPIRED (`purge_expired_notes()` appends the `expired` event
+            and deliberately leaves the columns NULL, per
+            UPG-MEMORY-DECAY-KIND-SCOPED's append-only invariant; the row
+            stays visible via get_note() so a caller can still inspect
+            what expired, only the default listing surfaces exclude it).
+        Consequence before this fix: a stale-task nudge would recommend
+        "consider supersedes=<old id>" for notes the system itself had
+        already retired (expired) or the user had already judged wrong
+        (revoked) — wrong-footed rather than harmful, but exactly the
+        noise UPG-HYGIENE-THRESHOLD-RETUNE is trying to measure. The fix
+        consults the event fold (UPG-MEMORY-STATE-MACHINE §4.1) for the
+        candidate task-note set and drops every note whose folded state
+        is not `active`. Notes with no events at all (pre-migration
+        rows) fold to `active` by `fold()`'s own default — the same
+        state a brand-new `created` event would produce, so old notes
+        keep counting exactly as before.
+
+        Cost profile change: the old shape was one SQL round trip
+        returning `(count, oldest_id)`; the new shape is one SQL round
+        trip for the candidate set, one batched `note_events` fetch +
+        Python fold for those candidate IDs, and a final min() over the
+        filtered list. The `note_events` fetch is bounded by the size of
+        the candidate task-note set (not the whole workspace), so the
+        added work is O(N) over the at-risk note population, not O(N)
+        over the workspace. The derived-column alternative (cache the
+        folded state on the row) would buy the same correctness at a
+        schema-migration cost; rejected for the same reason
+        `_exclude_expired()` chose the fold — a column duplicating
+        something the append-only log already authoritatively says would
+        be a permanent two-writer-update consistency hazard (every
+        `revoke_note` / `reinstate_note` / `purge_expired_notes` call
+        would have to remember to update the cache alongside the event
+        write, or the cache would silently disagree with the fold).
+
+        Oldest is by created_at ASC, note_id ASC tie-break, matching
+        the ordering convention used elsewhere in this store.
         """
         cutoff = time.time() - min_age_days * 86400
         with self._conn() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """
-                SELECT COUNT(*), (
-                    SELECT note_id FROM notes
-                    WHERE workspace = ? AND kind = 'task' AND valid_until IS NULL
-                          AND created_at < ?
-                    ORDER BY created_at ASC, note_id ASC LIMIT 1
-                )
-                FROM notes
+                SELECT note_id, created_at FROM notes
                 WHERE workspace = ? AND kind = 'task' AND valid_until IS NULL
                       AND created_at < ?
                 """,
-                (workspace, cutoff, workspace, cutoff),
-            ).fetchone()
-        if not row:
+                (workspace, cutoff),
+            ).fetchall()
+        if not rows:
             return 0, None
-        count = row[0] or 0
-        oldest_id = row[1] if row[1] is not None else None
-        return count, oldest_id
+        # Fold the candidate set: `valid_until IS NULL` already excludes
+        # the supersede tombstone (which DOES set `valid_until`), so the
+        # remaining candidates can only be in EVENT-fold terminal states
+        # `revoked` or `expired` (both leave `valid_until` NULL by their
+        # contracts above). A note with no events folds to `active` —
+        # the pre-migration default, preserved here.
+        candidate_ids = [r["note_id"] for r in rows]
+        states = self._note_event_states_by_ids(workspace, candidate_ids)
+        live = [
+            r for r in rows
+            if states.get(r["note_id"], {}).get("state", "active") == "active"
+        ]
+        if not live:
+            return 0, None
+        # Oldest is the same ORDER BY rule the old SQL used: created_at
+        # ASC, note_id ASC tie-break. min() with that key tuple gives the
+        # same row the previous LIMIT 1 subquery did.
+        oldest = min(live, key=lambda r: (r["created_at"], r["note_id"]))
+        return len(live), oldest["note_id"]
 
     def forget_all(self, workspace: str) -> int:
         """Clear all notes AND snapshots for a workspace.

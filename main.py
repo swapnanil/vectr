@@ -4380,7 +4380,15 @@ def main() -> None:
                           help="Relevance cutoff [0..1]: drop semantic matches below this cosine similarity")
     p_recall.add_argument("--max-age-days", type=float, default=None, dest="max_age_days",
                           help="Time filter: only return notes created within this many days")
-    p_recall.add_argument("--sort-by", choices=["relevance", "recency", "priority", "chronological"], default="relevance",
+    # UPG-SORTBY-SHARED-VOCAB: the same SORT_BY_VALUES constant the REST
+    # validator, MCP dispatch guard, and MCP tool schema consume is what the
+    # CLI's argparse choices list declares. Imported function-locally to match
+    # this file's convention — every other agent.working_context_store import
+    # in main.py is function-local too (see the WorkingContextStore imports in
+    # the memory subcommands), keeping the store package off the import path
+    # of CLI invocations that never touch working memory.
+    from agent.working_context_store import SORT_BY_VALUES as _SORT_BY_VALUES
+    p_recall.add_argument("--sort-by", choices=list(_SORT_BY_VALUES), default="relevance",
                           dest="sort_by", help="Sort order: relevance | recency | priority | chronological (oldest-first; index lines show the creation date)")
     p_recall.add_argument("--detail", choices=["index", "full"], default="index",
                           help="Detail level: 'index' = one-line summaries (default); 'full' = bodies")
