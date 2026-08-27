@@ -1202,18 +1202,26 @@ class TestSymbolGraphTrace:
         result = g.trace("ws", "process", direction="both")
         assert "callers" in result
         assert "callees" in result
+        assert result["callers"] is not None
+        assert result["callees"] is not None
 
     def test_trace_callers_only(self, tmp_path) -> None:
+        # UPG-TRACE-DIRECTION-UNQUERIED-RENDER: a direction the caller did
+        # not ask for is recorded as `None`, not absent, so the formatter
+        # can distinguish "we never looked" from "we looked and found
+        # nothing". The dict now carries both keys consistently — the
+        # value shape is the public signal, not key presence.
         g, _ = self._indexed_graph(tmp_path)
         result = g.trace("ws", "process", direction="callers")
-        assert "callers" in result
-        assert "callees" not in result
+        assert isinstance(result["callers"], list)
+        assert result["callees"] is None
 
     def test_trace_callees_only(self, tmp_path) -> None:
+        # UPG-TRACE-DIRECTION-UNQUERIED-RENDER: see `test_trace_callers_only`.
         g, _ = self._indexed_graph(tmp_path)
         result = g.trace("ws", "process", direction="callees")
-        assert "callees" in result
-        assert "callers" not in result
+        assert isinstance(result["callees"], list)
+        assert result["callers"] is None
 
     def test_edges_have_file_path(self, tmp_path) -> None:
         g, path = self._indexed_graph(tmp_path)
@@ -2615,6 +2623,218 @@ class TestTraceLimitTransparencyUPG:
         assert len(shown) == 5
         assert hidden == 0
         assert truncated == 2
+
+
+# ---------------------------------------------------------------------------
+# UPG-TRACE-DIRECTION-UNQUERIED-RENDER: a single-direction trace must not
+# render anything about the direction the caller never asked for. The
+# previous "absent key ⇒ `[]` via `.get(key, [])` ⇒ always non-None ⇒
+# always rendered" chain turned every `direction="callees"` result into a
+# fake "Called by: (none found in index)" line about a lookup that never
+# ran — a confident-looking false negative an LLM caller would act on.
+# Fix: `trace()` now sets the un-queried direction to `None` (not absent,
+# not `[]`), and the formatter gates on `is None`.
+# ---------------------------------------------------------------------------
+
+class TestTraceDirectionUnqueriedRenderUPG:
+    def _indexed_graph(self, tmp_path):
+        g = SymbolGraph(str(tmp_path))
+        path = make_py(tmp_path, "svc.py", textwrap.dedent("""\
+            def helper():
+                pass
+
+            def process():
+                helper()
+
+            def orchestrate():
+                process()
+                helper()
+        """))
+        g.index_file("ws", path)
+        return g, path
+
+    def test_callees_direction_does_not_render_callers_block(self, tmp_path) -> None:
+        g, _ = self._indexed_graph(tmp_path)
+        result = g.trace("ws", "process", direction="callees")
+        # The un-queried callers direction must not appear anywhere in the
+        # rendered text — no "Called by" heading, no "(none found in index)"
+        # line about callers, no callers block at all. A reader of this
+        # answer must not be able to conclude "process has no callers" from
+        # a `direction="callees"` trace.
+        text = g.format_trace_for_llm(result, "process")
+        assert "Called by" not in text
+        assert "none found in index" not in text
+
+    def test_callers_direction_does_not_render_callees_block(self, tmp_path) -> None:
+        g, _ = self._indexed_graph(tmp_path)
+        result = g.trace("ws", "helper", direction="callers")
+        # Symmetric: a callers-only trace must not render the Calls block.
+        # The per-definition "calls (N)" header (only when by_def is
+        # rendered) and the flat "Calls (N):" heading both come from the
+        # callees path; either here would be a real false negative.
+        text = g.format_trace_for_llm(result, "helper")
+        assert "Calls" not in text  # no "Calls (N):" or "calls (0):" header
+        assert "(none found in index)" not in text
+
+    def test_both_direction_with_genuine_empty_still_renders_both_blocks(
+        self, tmp_path,
+    ) -> None:
+        # A `direction="both"` trace on a symbol that genuinely has no
+        # callers and no callees must STILL render the two "none found in
+        # index" lines — those are real, queried lookups that returned
+        # empty, not the un-queried-direction false negative fixed above.
+        # Fixing the un-queried case must not break this honest-miss case.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        path = make_py(tmp_path, "lonely.py", "def lonely_function():\n    pass\n")
+        g.index_file(ws, path)
+        result = g.trace(ws, "lonely_function", direction="both")
+        assert isinstance(result["callers"], list) and result["callers"] == []
+        assert isinstance(result["callees"], list) and result["callees"] == []
+        text = g.format_trace_for_llm(result, "lonely_function")
+        assert "Called by: (none found in index)" in text
+        assert "Calls: (none found in index)" in text
+
+    def test_unqueried_direction_silences_recovery_hint(self, tmp_path) -> None:
+        # The `_empty_trace_hint` recovery banner is a "static call-graph
+        # found no calls for X" suggestion. It must not fire for a
+        # single-direction trace whose OTHER direction was simply not
+        # queried — the recovery hint assumes both sides were looked up.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        path = make_py(tmp_path, "c.py", "def lonely():\n    pass\n")
+        g.index_file(ws, path)
+        result = g.trace(ws, "lonely", direction="callees")
+        text = g.format_trace_for_llm(result, "lonely")
+        # Recovery hint is gated by `callers_empty and callees_empty`; an
+        # un-queried callers direction is `None`, so `callers_empty`
+        # evaluates False and the hint must NOT appear.
+        assert "vectr_search" not in text
+        assert "dynamic" not in text.lower()
+
+    def test_result_dict_carries_unqueried_direction_as_none(self, tmp_path) -> None:
+        # The signal must be `None` (not absent, not `[]`) — see the
+        # docstring of the class for why the dict now has both keys
+        # consistently. This pins the public contract for any future
+        # caller that wants to introspect the result directly.
+        g, _ = self._indexed_graph(tmp_path)
+        callers_only = g.trace("ws", "process", direction="callers")
+        assert "callers" in callers_only
+        assert "callees" in callers_only
+        assert isinstance(callers_only["callers"], list)
+        assert callers_only["callees"] is None
+        callees_only = g.trace("ws", "process", direction="callees")
+        assert "callers" in callees_only
+        assert "callees" in callees_only
+        assert isinstance(callees_only["callees"], list)
+        assert callees_only["callers"] is None
+
+
+# ---------------------------------------------------------------------------
+# UPG-TRACE-EDGE-FETCH-CAP-UNCOUNTED: `_EDGE_FETCH_CAP = 1000` is an
+# upstream SQL LIMIT on raw edge rows. When it bites, the aggregated
+# `truncated` count the user sees in "(+N more ...)" is itself a LOWER
+# BOUND — aggregation never saw the beyond-cap raw rows. The disclosure
+# must say so. No extra query per trace: we detect cap-hit by
+# `len(rows) == _EDGE_FETCH_CAP` and reword the note.
+# ---------------------------------------------------------------------------
+
+class TestTraceEdgeFetchCapUncountedUPG:
+    def test_raw_capped_flag_propagated_to_truncation_note(self, tmp_path) -> None:
+        # When the SQL fetch hits _EDGE_FETCH_CAP, the per-direction
+        # `*_raw_capped` flag is True and the rendered "(+N more X not
+        # shown — pass a higher limit to show)" is reworded to the
+        # lower-bound phrasing. This pins the formatter path end-to-end.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        # Seed exactly the cap count of raw rows so `len(rows) ==
+        # _EDGE_FETCH_CAP` is true. Each row is a distinct (name, file)
+        # pair after UPG-TRACE-CALLER-AGGREGATION, so the `limit=20`
+        # truncation also fires — both caps bit, raw_capped wins on the
+        # note wording.
+        cap = SymbolGraph._EDGE_FETCH_CAP
+        _seed_edges(g, ws, [
+            (f"{ws}/p_{i}.py", f"caller_{i}", 1, "target")
+            for i in range(cap)
+        ])
+        result = g.trace(ws, "target", direction="callers", limit=20)
+        assert result["callers_raw_capped"] is True
+        # The 1000 raw rows deduped to (up to) 1000 entries before the
+        # limit cut — 20 are shown, the rest are "more not shown" and the
+        # note MUST announce that count is a lower bound.
+        text = g.format_trace_for_llm(result, "target")
+        assert "lower bound" in text
+        assert "at least" in text
+        assert "raw edge row cap" in text
+        # And must NOT use the old exact-looking wording — that is the
+        # whole defect this UPG item names.
+        assert "pass a higher limit to show" not in text
+
+    def test_raw_capped_flag_false_when_under_cap(self, tmp_path) -> None:
+        # Below the cap, the existing exact-count wording is correct and
+        # must be preserved (no regression for the common case).
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        _seed_edges(g, ws, [
+            (f"{ws}/caller_{i}.py", f"caller_{i}", 1, "target")
+            for i in range(25)
+        ])
+        result = g.trace(ws, "target", direction="callers", limit=20)
+        assert result["callers_raw_capped"] is False
+        text = g.format_trace_for_llm(result, "target")
+        assert "(+5 more callers not shown — pass a higher limit to show)" in text
+        assert "lower bound" not in text
+
+    def test_callees_raw_capped_flag_propagated(self, tmp_path) -> None:
+        # Same path on the callees direction — symmetry check.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        cap = SymbolGraph._EDGE_FETCH_CAP
+        _seed_edges(g, ws, [
+            (f"{ws}/caller.py", "target", i, f"callee_{i}")
+            for i in range(cap)
+        ])
+        result = g.trace(ws, "target", direction="callees", limit=20)
+        assert result["callees_raw_capped"] is True
+        text = g.format_trace_for_llm(result, "target")
+        assert "lower bound" in text
+        assert "raw edge row cap" in text
+
+    def test_per_definition_raw_capped_propagated(self, tmp_path) -> None:
+        # The by-definition branch runs its OWN SQL fetch (per
+        # definition's file) and so has its own raw-cap signal per entry.
+        # When a single definition has more raw rows than the cap, the
+        # per-entry "(+N more ...)" footer must reword to the lower-bound
+        # phrasing.
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        cap = SymbolGraph._EDGE_FETCH_CAP
+        _seed_symbols(g, ws, [
+            ("target", "function", f"{ws}/mod_a.py"),
+            ("target", "function", f"{ws}/mod_b.py"),
+        ])
+        # Only mod_a hits the cap; mod_b stays small. The cap'd
+        # definition's note must reword; mod_b's note (if it fires at
+        # all) must use the exact wording.
+        _seed_edges(g, ws, [
+            (f"{ws}/mod_a.py", "target", i, f"callee_{i}")
+            for i in range(cap)
+        ] + [
+            (f"{ws}/mod_b.py", "target", i, f"modb_callee_{i}")
+            for i in range(25)
+        ])
+        result = g.trace(ws, "target", direction="both", limit=20)
+        by_def = result["by_definition"]
+        assert len(by_def) == 2
+        capped_entry = next(e for e in by_def if e["truncated_callees_raw_capped"])
+        not_capped = next(e for e in by_def if not e["truncated_callees_raw_capped"])
+        assert capped_entry["truncated_callees"] > 0
+        assert not_capped["truncated_callees"] > 0
+        text = g.format_trace_for_llm(result, "target")
+        # The capped entry's lower-bound note appears at least once.
+        assert "lower bound" in text
+        # The non-capped entry's exact note also appears.
+        assert "pass a higher limit to show" in text
 
 
 # ---------------------------------------------------------------------------
