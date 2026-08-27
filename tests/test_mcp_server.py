@@ -19,6 +19,7 @@ from integrations.mcp_server import (
     _EXPLORATION_TOOLS,
     _MEMORY_WRITE_TOOLS,
     _MEMORY_TOOLS,
+    _UTILITY_TOOLS,
     handle_tools_call,
     handle_tools_list,
     enable_memory_for_session,
@@ -280,6 +281,60 @@ class TestHandleToolsList:
                          "vectr_map", "vectr_locate", "vectr_trace", "vectr_snapshot",
                          "vectr_fetch"):
             assert expected in names
+
+    def test_handle_tools_list_docstring_lists_every_real_tool(self) -> None:
+        """UPG-MCP-TOOLS-LIST-DOCSTRING: the docstring on handle_tools_list
+        was hand-curated and drifted (omitted vectr_pin, vectr_distill,
+        vectr_anchor, vectr_resume, vectr_ingest_traces, vectr_snapshot_list).
+        Derive the correct inventory from the actual gating code's tool
+        groups and assert the docstring mentions every member — a future
+        tool addition that forgets to update the docstring will fail here
+        with a precise list of missing names, not a 'docstring looks
+        wrong' message.
+        """
+        from integrations.mcp_server._dispatch import handle_tools_list as _h
+
+        # Always-shown = exploration + memory-write + utility, derived from
+        # the same constants the live code uses (no hand-copy).
+        always_shown = {t["name"] for t in _EXPLORATION_TOOLS}
+        always_shown |= {t["name"] for t in _MEMORY_WRITE_TOOLS}
+        always_shown |= {t["name"] for t in _UTILITY_TOOLS}
+        # Gated on notes existing = the _MEMORY_TOOLS list verbatim.
+        gated = {t["name"] for t in _MEMORY_TOOLS}
+
+        doc = _h.__doc__ or ""
+        missing_always = sorted(always_shown - _names_in_doc(doc))
+        missing_gated = sorted(gated - _names_in_doc(doc))
+        assert not missing_always, (
+            f"handle_tools_list docstring is missing always-shown tool(s): "
+            f"{missing_always} — derive the list from _EXPLORATION_TOOLS + "
+            f"_MEMORY_WRITE_TOOLS + _UTILITY_TOOLS, not by hand"
+        )
+        assert not missing_gated, (
+            f"handle_tools_list docstring is missing gated tool(s): "
+            f"{missing_gated} — derive the list from _MEMORY_TOOLS, not by hand"
+        )
+
+        # And: no name mentioned in the docstring that is NOT a real tool
+        # (catches typos and retired tools lingering in the prose).
+        real_all = always_shown | gated
+        # Strip the leading 'vectr_' prefix token off each doc mention so
+        # the comparison uses full tool names.
+        all_mentioned = _names_in_doc(doc)
+        spurious = sorted(all_mentioned - real_all)
+        assert not spurious, (
+            f"handle_tools_list docstring mentions tool(s) that are not in any "
+            f"grouping: {spurious}"
+        )
+
+
+def _names_in_doc(doc: str) -> set[str]:
+    """Pick `vectr_<word>` tokens out of a docstring — only the ones bounded
+    by non-word characters (so 'vectr_pin' inside 'vectr_pinned' is not
+    matched). Cheap tokeniser; fine for a 6-line docstring.
+    """
+    import re
+    return {m.group(0) for m in re.finditer(r"\bvectr_[a-z][a-z0-9_]*", doc)}
 
 
 # ---------------------------------------------------------------------------
@@ -2088,6 +2143,30 @@ class TestVectrRecall:
         handle_tools_call("vectr_recall", {"sort_by": "recency", "max_age_days": 7.0}, svc)
         assert_seam_call(svc.recall, VectrService.recall, sort_by="recency", max_age_days=7.0)
 
+    def test_recall_unknown_sort_by_is_rejected_with_vocab(self) -> None:
+        """UPG-MCP-SORTBY-PASSTHROUGH: an out-of-vocabulary sort_by must be
+        rejected at the MCP dispatch boundary, not silently treated as
+        'relevance' by the store. Error shape mirrors REST's 422 body
+        (app/models.py::RecallRequest.validate_sort_by) so both surfaces
+        agree on the vocabulary and the wording."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_recall", {"sort_by": "newest"}, svc)
+        assert result["isError"] is True
+        text = result["content"][0]["text"]
+        assert "sort_by must be one of" in text
+        for vocab in ("relevance", "recency", "priority", "chronological"):
+            assert vocab in text, f"vocab term {vocab!r} missing from error"
+        svc.recall.assert_not_called()
+
+    def test_recall_every_documented_sort_value_accepted(self) -> None:
+        """Same vocabulary as REST (test_recall_rest_every_documented_sort_value_accepted).
+        The MCP schema enum already constrains well-behaved clients; this
+        pins the dispatch-side check to the same four values."""
+        for value in ("relevance", "recency", "priority", "chronological"):
+            svc = _mock_service()
+            result = handle_tools_call("vectr_recall", {"sort_by": value}, svc)
+            assert result["isError"] is False, f"sort_by={value!r} must be accepted"
+
     def test_recall_returns_notes_text(self) -> None:
         svc = _mock_service()
         result = handle_tools_call("vectr_recall", {}, svc)
@@ -2328,6 +2407,30 @@ class TestVectrForget:
         svc.forget_note.assert_not_called()
         svc.forget_all.assert_not_called()
 
+    def test_forget_note_id_bool_is_an_error_not_silent_note_1(self) -> None:
+        """UPG-MCP-NOTEID-BOOL-GUARDS: JSON true/false are int subclasses;
+        int(True) == 1 would silently delete note #1 — must error like any
+        other malformed id. The destructive failure mode is the reason this
+        item leads the lane."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_forget", {"note_id": True}, svc)
+        assert result["isError"] is True
+        svc.forget_note.assert_not_called()
+        svc.forget_all.assert_not_called()
+        # The offender is echoed so a model can recover without re-deriving
+        # what it sent (same shape as vectr_recall/vectr_anchor's guard).
+        assert "True" in result["content"][0]["text"]
+
+    def test_forget_note_id_one_int_still_deletes_note_1(self) -> None:
+        """UPG-MCP-NOTEID-BOOL-GUARDS: the bool guard must not block a real
+        int 1 — only the bool True/False are rejected."""
+        svc = _mock_service()
+        svc.forget_note.return_value = True
+        result = handle_tools_call("vectr_forget", {"note_id": 1}, svc)
+        assert result["isError"] is False
+        svc.forget_note.assert_called_once_with(1)
+        assert "#1" in result["content"][0]["text"]
+
     def test_forget_all_true_clears_workspace(self) -> None:
         svc = _mock_service()
         svc.forget_all.return_value = 5
@@ -2429,6 +2532,25 @@ class TestVectrPromote:
         assert result["isError"] is True
         svc.promote_note.assert_not_called()
 
+    def test_promote_note_id_bool_is_an_error_not_silent_note_1(self) -> None:
+        """UPG-MCP-NOTEID-BOOL-GUARDS: same guard as vectr_recall/vectr_anchor
+        — JSON true/false are int subclasses; int(True) == 1 would promote
+        an unrelated note."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_promote", {"note_id": True, "to": "agent"}, svc)
+        assert result["isError"] is True
+        svc.promote_note.assert_not_called()
+        assert "True" in result["content"][0]["text"]
+
+    def test_promote_note_id_one_int_still_promotes_note_1(self) -> None:
+        """UPG-MCP-NOTEID-BOOL-GUARDS: only bool True/False is rejected; an
+        actual int 1 still reaches the service."""
+        svc = _mock_service()
+        svc.promote_note.return_value = True
+        result = handle_tools_call("vectr_promote", {"note_id": 1, "to": "agent"}, svc)
+        assert result["isError"] is False
+        svc.promote_note.assert_called_once_with(1, "agent")
+
     def test_promote_not_found_returns_error(self) -> None:
         svc = _mock_service()
         svc.promote_note.return_value = False
@@ -2496,6 +2618,22 @@ class TestVectrRevoke:
         assert result["isError"] is True
         svc.revoke_note.assert_not_called()
 
+    def test_revoke_note_id_bool_is_an_error_not_silent_note_1(self) -> None:
+        """UPG-MCP-NOTEID-BOOL-GUARDS: int(True) == 1 would revoke note #1."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_revoke", {"note_id": True, "reason": "wrong"}, svc)
+        assert result["isError"] is True
+        svc.revoke_note.assert_not_called()
+        assert "True" in result["content"][0]["text"]
+
+    def test_revoke_note_id_one_int_still_revokes_note_1(self) -> None:
+        """UPG-MCP-NOTEID-BOOL-GUARDS: only bool is rejected; int 1 still works."""
+        svc = _mock_service()
+        svc.revoke_note.return_value = True
+        result = handle_tools_call("vectr_revoke", {"note_id": 1, "reason": "wrong"}, svc)
+        assert result["isError"] is False
+        svc.revoke_note.assert_called_once_with(1, "wrong", actor="agent")
+
     def test_revoke_not_found_returns_error(self) -> None:
         svc = _mock_service()
         svc.revoke_note.return_value = False
@@ -2549,6 +2687,22 @@ class TestVectrReinstate:
         result = handle_tools_call("vectr_reinstate", {"note_id": "abc"}, svc)
         assert result["isError"] is True
         svc.reinstate_note.assert_not_called()
+
+    def test_reinstate_note_id_bool_is_an_error_not_silent_note_1(self) -> None:
+        """UPG-MCP-NOTEID-BOOL-GUARDS: int(True) == 1 would reinstate note #1."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_reinstate", {"note_id": True}, svc)
+        assert result["isError"] is True
+        svc.reinstate_note.assert_not_called()
+        assert "True" in result["content"][0]["text"]
+
+    def test_reinstate_note_id_one_int_still_reinstates_note_1(self) -> None:
+        """UPG-MCP-NOTEID-BOOL-GUARDS: only bool is rejected; int 1 still works."""
+        svc = _mock_service()
+        svc.reinstate_note.return_value = True
+        result = handle_tools_call("vectr_reinstate", {"note_id": 1}, svc)
+        assert result["isError"] is False
+        svc.reinstate_note.assert_called_once_with(1, actor="agent", reason=None)
 
     def test_reinstate_not_found_returns_error(self) -> None:
         svc = _mock_service()
@@ -2760,6 +2914,22 @@ class TestVectrPin:
         result = handle_tools_call("vectr_pin", {"note_id": "abc"}, svc)
         assert result["isError"] is True
         svc.pin_note.assert_not_called()
+
+    def test_pin_note_id_bool_is_an_error_not_silent_note_1(self) -> None:
+        """UPG-MCP-NOTEID-BOOL-GUARDS: int(True) == 1 would pin note #1."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_pin", {"note_id": True}, svc)
+        assert result["isError"] is True
+        svc.pin_note.assert_not_called()
+        assert "True" in result["content"][0]["text"]
+
+    def test_pin_note_id_one_int_still_pins_note_1(self) -> None:
+        """UPG-MCP-NOTEID-BOOL-GUARDS: only bool is rejected; int 1 still works."""
+        svc = _mock_service()
+        svc.pin_note.return_value = True
+        result = handle_tools_call("vectr_pin", {"note_id": 1}, svc)
+        assert result["isError"] is False
+        svc.pin_note.assert_called_once_with(1, True)
 
     def test_pin_not_found_returns_error(self) -> None:
         svc = _mock_service()
