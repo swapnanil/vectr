@@ -100,7 +100,7 @@ class TestGluedCompoundSeparators:
 
 
 class TestEscapedSeparatorSplit:
-    """UPG-CMDNORM-ESCAPED-SEPARATOR-SPLIT: the padding pass correctly
+    r"""UPG-CMDNORM-ESCAPED-SEPARATOR-SPLIT: the padding pass correctly
     refuses to pad a `<bs><sep>` (so a glued `echo a\;b` stays one token),
     but the loss happens DOWNSTREAM — `shlex.split(..., posix=True)`
     strips the backslash, leaving a bare `;` token that `_split_on_any`
