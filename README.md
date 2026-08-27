@@ -11,10 +11,10 @@
 [![CI](https://github.com/swapnanil/vectr/actions/workflows/ci.yml/badge.svg)](https://github.com/swapnanil/vectr/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version 1.10.0](https://img.shields.io/badge/version-1.10.0-blue.svg)](CHANGELOG.md)
-[![MCP: 19 tools](https://img.shields.io/badge/MCP-19%20tools-blue.svg)](#19-mcp-tools)
+[![Version 1.11.0](https://img.shields.io/badge/version-1.11.0-blue.svg)](CHANGELOG.md)
+[![MCP: 22 tools](https://img.shields.io/badge/MCP-22%20tools-blue.svg)](#22-mcp-tools)
 
-Version 1.10.0 · Last updated 2026-08-18 · [CHANGELOG](CHANGELOG.md)
+Version 1.11.0 · Last updated 2026-08-27 · [CHANGELOG](CHANGELOG.md)
 
 ## In 30 seconds
 
@@ -223,11 +223,11 @@ No port, no daemon: a single foreground process framed as newline-delimited JSON
 4. **Symbol graph.** Call edges, import chains, and HTTP routes (Flask, FastAPI, Express, Spring) are extracted and stored. `vectr_locate` resolves a name through a 6-strategy cascade: exact match, suffix, same-module, import-chain, substring, then fuzzy. A fuzzy answer is always rendered as explicitly inexact rather than presented as a confident match, because a confident wrong symbol is worse than a not-found.
 5. **Working memory.** `vectr_remember` stores structured notes to SQLite and ChromaDB. `vectr_recall` runs semantic search over notes rather than a SQL LIKE, so multi-word queries still find the relevant context.
 6. **Trigger evaluation.** Each note's conditions are checked deterministically by the daemon at lifecycle moments, with a per-session fire ledger and injection budgets, so a note resurfaces exactly when it applies and never twice in the same window.
-7. **MCP protocol.** 19 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
+7. **MCP protocol.** 22 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
 
 ---
 
-## 19 MCP tools
+## 22 MCP tools
 
 `vectr start` writes a guidance file into your workspace with this table, so your AI code editor knows which tool to reach for without being prompted.
 
@@ -248,7 +248,9 @@ No port, no daemon: a single foreground process framed as newline-delimited JSON
 | Situation | Tool |
 |---|---|
 | Notes exist from a prior session | `vectr_recall(query)`, semantic vector search rather than substring match, two-tier (crisp index by default, expand one note with `note_id=N` or all bodies with `detail='full'`) |
+| One note must survive every recall regardless of the query | `vectr_pin(note_id=N)`, which places it in Tier 0 so it is injected on every `vectr_recall(query=...)` call. Bounded, so pin sparingly. `vectr_remember(..., pin=true)` does the same at write time |
 | You found something worth preserving | `vectr_remember(content, tags, priority, kind, title, agent)`. `kind` controls delivery: `directive` fires unconditionally every session, `task` carries current-work state, `gotcha` resurfaces when its file is touched, `operational` covers build and environment facts, `finding` (the default) is relevance-ranked, `reference` is a pointer, and `decision` is an architectural decision recallable as a chronological ADR-style timeline via `vectr_recall(kind="decision", sort_by="chronological")`. `title` labels the note in index output, and `agent` attributes it to a subagent or orchestrator |
+| A stored note turns out to be about a file you did not declare | `vectr_anchor(note_id=N, anchors=[...])`, attaching file anchors to an existing note without re-storing it. Idempotent, hashed at write time, and it emits no lifecycle event, so the note's history stays clean (also `vectr anchor --id N PATH...` on the CLI) |
 | Starting a session, want to pick up where you left off | `vectr_resume()`, returning the most recent task note, the latest snapshot, and open gotchas with their file anchors in one call (also `vectr resume` on the CLI) |
 | Context is filling up | `vectr_evict_hint()`, which identifies chunks vectr can re-retrieve, with the exact re-fetch ids |
 | A chunk shown earlier has left your context | `vectr_fetch(ids=[...])`, a deterministic byte-verbatim re-fetch by id, with no re-search and no file re-read. Flags a truncation warning if the index itself stored a capped chunk |
@@ -258,6 +260,7 @@ No port, no daemon: a single foreground process framed as newline-delimited JSON
 | An auto-captured note has been reviewed and still holds | `vectr_promote(note_id=N)`, raising its trust class one step from `auto` to `agent`. Promotion to `human` is reserved for user-side surfaces, never the agent's call |
 | Automatically captured failure-to-success moments are waiting | `vectr_distill()`, which renders pending arcs (a command failed, then passed after an edit) for review. Persist a lesson with `vectr_remember(..., distilled_from=[arc_id])` or dismiss with `vectr_distill(dismiss=[...], reason)` |
 | A stored note turned out to be wrong | `vectr_revoke(note_id=N, reason)`, which keeps the note visible as a deterrent ("previously believed ..., revoked ...") instead of deleting it, so the mistake is not silently re-derived. `vectr_remember(contradicts=N)` corrects and revokes in one step |
+| A note is simply out of date, not wrong | `vectr_supersede(note_id=N, successor_note_id=M)`, which retires it in favour of a newer note without revoke's "proven wrong" framing. The audit trail records post-hoc retirement distinctly from write-time supersession, and `vectr_reinstate` reverses it |
 | A revoked note was right after all | `vectr_reinstate(note_id=N)`, restoring the original content |
 
 ### Triggers: the delivery layer

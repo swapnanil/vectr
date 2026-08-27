@@ -1,5 +1,364 @@
 # Changelog
 
+## 1.11.0 - 2026-08-27
+
+A stored note can be retired after the fact without the false "proven wrong"
+framing, and reinstating one actually reverses it instead of leaving a zombie;
+anchors can be attached to a note that already exists, and vectr now says
+whether the writing agent ever actually read the file it anchored; working
+memory becomes editable in your own `$EDITOR` through the append-only
+lifecycle rather than around it; the default reranker changes model; a
+low-confidence result set stops withholding the body of its own best guess;
+Rust trait impls stop being indexed under the wrong name; and a long single
+line stops defeating every chunk size cap.
+
+### Working memory
+
+- Post-hoc retirement, distinct from revocation. `vectr_supersede` and
+  `POST /v1/supersede` retire a stored note without deleting it and without
+  revoke's "proven wrong" framing. A new `superseded_post_hoc` event kind
+  folds to the existing `superseded` state, so the audit trail can tell
+  post-hoc retirement from write-time supersession while recall exclusion,
+  trigger firing, the export mirror and badge rendering all behave
+  identically. The successor is validated before any mutation;
+  self-supersession and `actor="system"` are rejected, and an agent-actor
+  call may not retire a human-provenance note.
+- Reinstatement now genuinely reverses. `reinstate_note()` appended its event
+  and folded state back to `active` while leaving `valid_until`,
+  `superseded_at` and `superseded_by_note_id` set, so a reinstated note
+  stayed excluded from default recall and could never fire again: a zombie,
+  against a docstring promising reversal. Those columns are now cleared when
+  the pre-fold state is `superseded`. This changes write-time `supersedes=`
+  behavior too, not only post-hoc retirements.
+- Anchors attach to an existing note. `vectr_anchor`, `POST /v1/anchor` and
+  `vectr anchor --id N PATH...` add file anchors to a stored note without
+  re-storing it, using `remember()`'s own pair format and write-time hashing.
+  Idempotent, emits no lifecycle event, and rejects an empty anchor list on
+  every surface. The proxy-anchor suggestion copy now advertises it instead
+  of the re-store-with-`supersedes` workaround.
+- An anchor records whether the file was actually observed. `remember()`
+  hashed every declared anchor unconditionally, storing vectr's own read of
+  the file rather than evidence the writing agent ever opened it, so a note
+  anchored to a file nobody read rendered identically to a properly bound
+  one. A per-session in-memory observation ledger, populated exclusively from
+  the `PreToolUse` file path already reaching `fire()` and never from prompt
+  or note content, gives each anchor a tri-state verdict: observed, not
+  observed, or unknown. Unknown covers no session id, unwired hooks, stdio
+  transport, team-mode bind and a daemon restarted mid-session; an absent
+  ledger is never read as evidence of non-observation. Only a literal "not
+  observed" renders a caveat, additive to and independent of the existing
+  drift caveat, so a note can be both drifted and unobserved without the two
+  being merged into one "stale" flag. Legacy two-element anchor rows render
+  byte-identically to before.
+- An explicit non-relevance recall sort returns the true top-`limit`.
+  `recency`, `priority` and `chronological` now re-query the store under the
+  requested ordering, so the genuine top rows by that key are present even
+  when they never entered the semantic candidate pool: a prefetch pinned to
+  that pool cannot reach what missed it. Metadata filters are built once and
+  shared; only the candidate fetch appends the semantic `note_id IN` clause.
+  Membership for an explicit sort follows the requested key rather than query
+  similarity, and `min_similarity` still applies within the measured pool
+  only. The `relevance` default is untouched.
+- `sort_by` is validated on every surface. REST returns 422 for a value
+  outside `relevance` | `recency` | `priority` | `chronological`, and the MCP
+  `vectr_recall` handler checks the same closed set at dispatch. Previously
+  MCP, the surface that actually serves AI callers, forwarded arbitrary
+  strings one layer down, where an unknown value degraded silently to
+  `relevance`.
+- A malformed `note_id` is an error, not a silent fall-through. `vectr_recall`
+  with an unparseable `note_id` returns a tool error naming the offending
+  value instead of quietly serving the ranked index path. Across all eight
+  MCP tools that take a `note_id`, `bool` is rejected before the `int()`
+  conversion: JSON `true`/`false` deserialize to Python `bool`, which is an
+  `int` subclass, so `int(True) == 1` meant a caller passing `note_id=true`
+  silently operated on note #1. On `vectr_forget` that was destructive.
+- `content_file` containment is widenable by the operator, never by the
+  caller. Reads resolved only against the primary workspace root and
+  `extra_roots`, so an agent instructed to stage a large note body in a
+  directory the workspace does not own (a harness scratchpad, a per-session
+  temp dir) could not read it back, defeating the reason `content_file`
+  exists. A new `memory_write.content_file.additional_readable_roots`
+  allowlist is read from config at startup rather than accepted as a per-call
+  argument, so a calling agent cannot widen its own boundary. Empty by
+  default: nothing changes until an operator opts in. Symlink resolution
+  still runs before the containment check, and relative paths still resolve
+  against the primary root only.
+- The stale-task line stops nominating deletion. Both emitters (MCP
+  `vectr_status` and the SessionStart boot injection) dropped the WARNING
+  prefix and no longer suggest `vectr_forget` for notes flagged on age. The
+  line reports a neutral inventory fact, names supersession as the
+  remediation, and states the rule in itself: age alone never retires a note.
+  The flagged volume is unchanged.
+- `vectr_remember` warns when a task note omits priority. Boot and resume
+  share one `priority='high'` task query; admitting medium would flood a
+  capped token budget with defaulted checkpoints and evict the ones that
+  explicitly asked to be picked up. So the hint fires only when priority was
+  omitted for a task note. An explicitly chosen medium stays silent.
+
+### Memory legibility
+
+- `vectr memory edit` opens working memory in `$EDITOR` and writes back
+  through the lifecycle, never around it. A body change becomes
+  `remember(supersedes=...)`, never an in-place content mutation; a
+  kind/priority/tags change with the body unchanged is a column update; a new
+  block with no `[#N]` is a fresh note; a deleted block is a revoke,
+  reversible with `vectr_reinstate`. A hard delete is reachable only through
+  an explicit `- forget: PERMANENTLY-DELETE-CONFIRMED` bullet on a
+  still-present block, documented in the buffer's own header. Conflict
+  detection re-reads and re-fingerprints every note the plan touches
+  immediately before the first write and applies nothing if any drifted; a
+  note the buffer never touched is never re-read, so its concurrent drift is
+  not a conflict. The buffer parser, the diff/plan translation and the single
+  writing function are separate from the `$EDITOR`-launching wrapper.
+
+### Retrieval and ranking
+
+- Default reranker is now `Alibaba-NLP/gte-reranker-modernbert-base`, with
+  `ranking.rerank.top_k_unfiltered` lowered from 60 to 40. On the django
+  acceptance corpus under shipped defaults: 43/57 passing and 5/6 must-pass,
+  against 35/57 and 3/6 for the previous `BAAI/bge-reranker-base`. Rerank
+  latency roughly 1634ms against 1957ms, model cache 574MB against 1.1GB, no
+  `trust_remote_code`. `top_k_unfiltered` was swept over {10,20,30,40,60};
+  must-pass is non-monotonic across that sweep, so 40 was chosen as the low
+  end of a contiguous plateau rather than the isolated peak at 20. `top_k`
+  is unchanged: it governs only the language-filtered branch, which no
+  django case exercises. Known cost at pool 40: F30 regresses.
+- Reranker `batch_size` and `max_length` are config-driven. `predict()` was
+  called with no `batch_size`, silently inheriting sentence-transformers'
+  default of 32, which a 40-query sweep with realistic 59-to-92-pair
+  candidate pools found to be the worst value measured on mps for both
+  shipped models, with zero rank movement at any batch size. `batch_size` is
+  now a device-keyed map resolved from the loaded CrossEncoder's own device
+  rather than a second detection path. A 10-query CPU sweep under the
+  production 5-thread cap confirms 4 as the CPU optimum and 32 as the worst
+  for both models: bge-reranker-base 1.70x (4450ms to 2610ms),
+  gte-reranker-modernbert-base 1.49x (6297ms to 4219ms). Measured on Apple
+  Silicon; cuda and the fallback keep the library default, undocumented as
+  untested on real CUDA hardware.
+- A low-confidence result set no longer withholds the body of its own best
+  guess. `pointer_mode_retain.min_relevance` was pinned to the same scalar as
+  `notfound_floor.min_top_relevance` (0.30), which is a structural deadlock
+  rather than a coincidence: when `low_confidence` fires via the ce-floor
+  sub-signal, it fires *because* rank-1's own `ce_relevance` sits below that
+  bar, so a retain floor at the same value can never pass for the very result
+  that triggered the flag, on any reranker or corpus. Measured live at
+  rank-1-correct, `ce_relevance` 0.024, banner fired, zero code delivered,
+  forcing a second `vectr_fetch` round trip. New `retain_rank1_always`
+  (default true) keeps the composite-top result's excerpt regardless of
+  score, mirroring the existing `result_floor` precedent and extending it
+  from "stays in the list" to "keeps its body". Being rank-based, it needs no
+  calibrated constant and survives a reranker swap. `min_relevance` stays at
+  0.30 for ranks 2+ until separation evidence exists.
+- The score-order explanation gate is expressed as headroom share. It used a
+  fixed ratio (`score >= 1.5 * top_score`), unsatisfiable whenever rank-1
+  scored 2/3 or above since displayed scores are bounded in [0, 1], leaving
+  confident-query inversions structurally unannotatable (witness: rank-1
+  0.864 against rank-5 0.969). The condition is now
+  `score - top_score >= min_headroom_ratio * (1 - top_score)` at 0.65, so the
+  required absolute gap shrinks as rank-1 approaches the ceiling. That
+  separates 0.80 to 0.90 (50% of the remaining range, unlabeled) from 0.864
+  to 0.969 (77%, labeled) despite near-identical absolute gaps.
+- The "composite ranking prior" fallback annotation is gone. An empty
+  `quality_reason` means the chunk carries no demotion at all, so the cause
+  of its lower rank lies on the rank-1 side or in pool order, neither
+  observable from the render. The annotation is suppressed rather than filled
+  with a mechanism name implying an explanation exists.
+
+### Symbol graph, trace and locate
+
+- Rust `impl Trait for Type` is indexed under the type, not the trait. The
+  positional child scan took the first type-ish node, which in a trait impl
+  is the trait; resolution now reads the grammar's `type` field. Generic
+  trait impls (`impl<T> Tr<T> for Bag<T>`) previously resolved to the empty
+  string and were dropped from the graph entirely. The chunker carried its
+  own copy of the same resolver and the same bug, so trait-impl members
+  embedded a wrong `# class:` line.
+- Java constructors are symbols. `constructor_declaration` was absent from
+  all three node-type maps, so a class's constructors existed only as lines
+  inside the class chunk: no symbol, no definition chunk.
+- Container and leaf truncation no longer drops the tail. A constants-only
+  Java enum of 160 entries kept 150 lines and the rest were unreachable from
+  any chunk. Overflow chunks now re-emit the complement of what was kept, so
+  tail constants and fields are searchable without duplicating content
+  already covered by a member chunk.
+- `vectr_trace` distinguishes "never looked" from "looked and found nothing".
+  An un-queried direction was recorded by omitting its key and read back with
+  `.get(key, [])`, so the gate meant to separate the two was always true and
+  a `direction="callees"` trace rendered "Called by: (none found in index)"
+  about a lookup that never ran. The un-queried direction is now recorded as
+  `None`. `direction="both"` still renders both miss lines when both lookups
+  genuinely returned empty.
+- Trace truncation counts are honest about their own cap. An internal edge
+  fetch cap bounds the raw fetch upstream of aggregation, so once it is hit
+  the truncated count is a lower bound. The disclosure now reads "at least N
+  more" instead of claiming an exact count and advising a higher `limit` that
+  cannot move the underlying cap. No extra query on the trace path.
+- Trace discloses what the user-facing limit dropped. The aggregation layer
+  reports how many aggregated entries the cut removed alongside the
+  hidden-builtins count, and every render path shows it: flat caller and
+  callee lists and each per-definition callee list gain a footer, and a
+  capped definitions fetch adds a definitions-beyond-limit line. That line is
+  suppressed for a resolved qualified query, where beyond-cap definitions are
+  other-class sites excluded by design. Default limits unchanged.
+- A `vectr_locate` miss no longer dead-ends. `locate` now populates near-miss
+  candidates for an unresolved name on MCP and REST, using the same fallback
+  stages the search-hint path already had. The graph-level flag defaults off
+  so per-token search-hint paths keep the cheap no-suggestion path, and the
+  plain miss text is unchanged when no candidate exists.
+
+### Indexing
+
+- Every chunker path is bounded in bytes, not only in lines.
+  `indexing.max_chunk_chars` (default 32000) applies alongside
+  `max_chunk_lines`, since a single long line (a minified bundle, a generated
+  data blob) defeats every line-based cap. Oversized chunks are sub-split
+  into disjoint bounded pieces rather than truncated; a line longer than the
+  cap is hard-split into cap-sized runs with `#<k>`-suffixed ids.
+  Sub-splitting runs after chunk-hygiene keep/drop decisions, and pieces are
+  never re-judged.
+- Warm start no longer starves the strategy fingerprint. Indexed file paths
+  derive from the persisted collection's chunk metadata, the same source as
+  the indexed file count, so the fingerprint, the symbol-graph seed and
+  `vectr_map`'s import graph see the restored corpus immediately after a
+  daemon restart instead of an empty list until the first in-process index
+  run.
+- `/v1/status` stops reporting zero indexed files beside a populated chunk
+  count. The file count derives from the same seeded per-language metadata
+  cache the language stats read, rather than the process-local walk set, so
+  both counters move together across the warm-start window.
+- Purpose vectors are resumable and their gap is visible. A per-file purpose
+  completion cache, tracked separately from the mtime cache, lets an ordinary
+  non-force index run detect and backfill files whose body chunks are current
+  but whose purpose vectors were never written: an interrupted deferred pass,
+  a crash mid-pass, or a dispatch that never went out. A one-time migration
+  seed means upgrading does not force a corpus-wide purpose reindex.
+  `total_purpose_chunks` and `purpose_backfill_pending_files` are exposed on
+  both `/v1/status` and `vectr_status`, with an explicit warning line when a
+  run leaves an open gap, so this class of silent hole cannot hide behind a
+  green status.
+- A partial-file chunk delete no longer drops language-bucket membership. The
+  decrement path removes a file from its bucket only when its last chunk
+  goes, tracked per file. Latent today, since every current delete site is
+  whole-file.
+- Excludes are matched workspace-relative. `should_index_file` passed the
+  absolute path to the config-file, generated-file and build-artifact
+  matchers, and those scan every component of the path they are given, so an
+  ancestor of the workspace decided exclusion: a checkout living under a
+  directory named `generated`, `node_modules`, `.vscode` or `*.egg-info` lost
+  its entire tree.
+- Schema versions bumped so existing indexes rebuild through the normal
+  staleness paths rather than serving pre-fix data: symbol schema 12 to 13
+  (Rust trait-impl names, new constructor rows), indexing schema 5 to 7
+  (byte-capped chunks, then chunk symbol names, `# class:` text, constructor
+  and overflow chunks).
+
+### Proactive delivery
+
+- A relative hook path reaches a note with an absolute declared anchor. Path
+  trigger candidates now derive a workspace-rooted absolute form for relative
+  inputs, rooted at the workspace root and never at the process cwd.
+  Absolute inputs keep their historical two-form candidate set, so this is a
+  pure widening.
+- Weak-tier candidates have a deterministic tie-break. Tier-C candidates all
+  score a flat 0.6, so the per-event weak cap admitted whichever equal-score
+  item note creation order happened to surface. Two tie-break-only fields
+  (path mention count, first mention offset) now sort between score and the
+  legacy chain. They are never read against the floor and never folded into
+  the score, and hand-built candidates keep their prior ordering.
+- Cooldown suppressions age out on a quiet process. The session ledger stored
+  bare anchor ids, so under a process-scoped session key a suppression could
+  never expire. Wall-clock TTL decay (`proactive.cooldown_ttl_seconds`,
+  default 3600) now sits on top of the existing count ring, with an
+  injectable clock so no test sleeps. A non-positive value normalizes to
+  `None`, restoring the previous behavior exactly.
+- Config-gated proactive machinery that was never live is removed:
+  `proactive_enabled()`, `enforce_proactive_bind()`, `ProactiveRefused`, the
+  `proxy_enabled` field, `PROACTIVE_PROXY_ENABLED` and the
+  `VECTR_PROACTIVE_PROXY` env name. All had zero production callers, and the
+  bind security property is enforced unconditionally at runtime, so the
+  config-gated pair read as live machinery that was not.
+
+### Episodes and arcs
+
+- The Go test-failure marker stops matching pytest output. `^FAIL` fired
+  `go_test.fail` on every failing pytest run, since the short summary prints
+  `FAILED tests/x.py::test_y`. The verdict was unaffected, both markers being
+  failures, but `markers_matched` is the record of which tool reported what,
+  and a Go marker on a Python run makes that record wrong. `^FAIL(\s|$)`
+  keeps every real Go form and drops `FAILED`; the marker table version bumps
+  1 to 2 so values persisted under the old table stay distinguishable.
+- Arc bucketing refuses to key on a known-wrong directory. Four residual
+  holes still permitted the cross-directory false pairing effective-dir
+  bucketing exists to kill: a relative `cd` target was returned textually and
+  never composed against the episode cwd, so `cd sub && mvn test` under
+  `/work/A` and `/work/B` keyed identically; `cd -` returned `-` as a bucket
+  key though `$OLDPWD` differs per call site; a bare `cd` fell back to the
+  episode cwd, provably wrong since a bare `cd` runs in `$HOME`; and env-var
+  and flagged `cd` shapes fell back the same way. Refusing to bucket is now
+  preferred over bucketing on a value known to be wrong.
+- Command normalization splits glued shell separators. Tokenization gains a
+  quote-aware pre-pass padding unquoted `;`, `&&` and `||` so they become
+  their own tokens: an unquoted separator is a control operator in the shell
+  that ran the command regardless of surrounding whitespace. Quote state is
+  tracked per character and backslash escapes are honored, so quoted text is
+  never touched, and the unbalanced-quote fallback splits the original string
+  rather than the padded one.
+
+### CLI and editor integration
+
+- The daemon writes `.vscode/mcp.json` itself. Startup configuration wrote
+  `.cursor/mcp.json` and `.claude/settings.json` but not the VS Code file,
+  even though the CLI writes that path at start and the config checker lists
+  it. The only writer keeping it current was the editor extension's own sync,
+  which runs solely after the extension itself spawned the daemon, so any
+  other route to a port change left VS Code pointing at a dead port
+  indefinitely while the other two configs self-healed. Reproduced live with
+  two configs on 8765 and `.vscode/mcp.json` on 8768 with nothing listening.
+  VS Code keys its entry under `servers` rather than `mcpServers`, so it
+  carries its own owned-key path. The extension's sync is now redundant
+  rather than load-bearing.
+- `vectr start` text output adopts the `--json` exit contract: exit 1 exactly
+  when status is `failed`, with both `ready` and `not_ready` exiting 0.
+  `vectr restart` inherits it.
+- `vectr init` handles aliased guidance files. `CLAUDE.md`/`AGENTS.md` pairs
+  that are symlinks or hardlinks to one another get one merged write per
+  distinct underlying file, grouped by device and inode with a realpath
+  fallback for dangling pairs.
+- Audit log timestamps are true UTC. The log formatter's converter is pinned
+  to `gmtime`, so the literal `Z` suffix in the date format no longer stamps
+  local time.
+- `scripts/release.sh` enforces all five version bumps. Preflight checked
+  only `pyproject.toml` and `CHANGELOG.md`, so a missed bump in `README.md`,
+  `server.json` or `vscode-extension/package.json` passed silently: that is
+  how the extension manifest drifted from 1.6.0 to 1.10.0. All five are
+  checked now, `server.json` requiring all three of its version fields. The
+  completion message also claimed the tag triggers the MCP registry workflow.
+  It does not; that workflow is `workflow_dispatch` only.
+
+### Internals
+
+- The over-fetch invariant for the global working-memory collection is
+  codified in one function, with all three vector-query paths sizing
+  `n_results` through it.
+- `app/service.py` reads the pre-compact boundary config as module attributes
+  at request time rather than binding them by value at import.
+- The proactive gate takes an injectable clock, making cooldown TTL expiry
+  provable at service level.
+- Test isolation is enforced session-wide rather than per test. Loopback
+  socket connects are refused unless the test registered its own ephemeral
+  port, since port 8765 serves a live session and a unit test reaching a real
+  listener is a defect rather than a strategy. Product-code model loading
+  that would hit the network raises rather than downloading, gated on the
+  exact conjunction of a product-defined builder, a real model class and an
+  uncached model, with the hub download functions wrapped as a backstop and
+  the stdio child pinned offline. The deferred purpose pass is awaited by
+  submitting a sentinel to the same single-worker queue, so returning proves
+  every queued pass finished instead of polling a counter that expires
+  silently. Source-tree wheel builds are serialized across concurrent suites.
+  Both guards opt out with `VECTR_TEST_ALLOW_REAL_NETWORK=1`.
+- The acceptance runner stamps a per-case corpus revision and prints a
+  comparison against the served workspace revision.
+
 ## 1.10.0 - 2026-08-18
 
 Expiry stops deleting notes and becomes a kind-scoped state transition that
