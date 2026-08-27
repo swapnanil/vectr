@@ -7,6 +7,8 @@ extraction (incl. the absorption cap), and positional-argument abstraction
 """
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from app.cmdnorm import (
@@ -95,6 +97,215 @@ class TestGluedCompoundSeparators:
         # padding pass copies the escape pair verbatim so shlex still sees
         # one argument.
         assert tokenize("echo a\\;b") == ["echo", "a;b"]
+
+
+class TestEscapedSeparatorSplit:
+    """UPG-CMDNORM-ESCAPED-SEPARATOR-SPLIT: the padding pass correctly
+    refuses to pad a `<bs><sep>` (so a glued `echo a\;b` stays one token),
+    but the loss happens DOWNSTREAM — `shlex.split(..., posix=True)`
+    strips the backslash, leaving a bare `;` token that `_split_on_any`
+    misreads as a real separator. The marker-tagging path in the padding
+    pass (see `app/cmdnorm.py:_ESCAPED_SEP_MARKER`) plus the marker-
+    consuming branch in `_split_on_any` carry the "this sep was escaped"
+    signal through shlex so the bare token is never matched. The
+    `\<sep>` only triggers the marker when the escape sits at a TOKEN
+    BOUNDARY (preceded by whitespace) — glued escapes like `echo a\;b`
+    keep riding through shlex as a single token, no marker needed, and
+    the test above pins that."""
+
+    def test_tokenize_marks_escaped_semicolon_at_boundary(self) -> None:
+        # `find . -exec cmd {} \; -print` — the `\;` is at a token boundary
+        # (preceded by whitespace), so the padding pass tags it with the
+        # marker before shlex. The marker survives shlex (it's a regular
+        # char) and shows up attached to the bare `;` in the shlex output.
+        # What we pin here is the structure: the marker is present, the
+        # bare `;` is not a separate token. The marker is internal and
+        # gets stripped in `_split_on_any`.
+        toks = tokenize("find . -exec cmd {} \\; -print")
+        # No bare `;` token — the marker kept it from being one.
+        assert ";" not in toks
+        # Exactly one token whose last char is `;`: the marker+`;` pair.
+        # (We avoid hard-coding the marker character in the assertion so
+        # this test does not depend on a specific U+ codepoint.)
+        assert sum(1 for t in toks if t.endswith(";")) == 1
+        # The token count is one MORE than the spaced form `find . -exec
+        # cmd {} ; -print` (which would split to 7 tokens, 5 of which
+        # are real tokens; we get 7 here too, but the `;` is in the same
+        # token as the marker, not its own token).
+        assert len(toks) == 7
+
+    def test_normalize_escaped_semicolon_with_following_tokens(self) -> None:
+        # The headline fix: when more tokens follow the escaped `;`, the
+        # phantom split used to mis-attribute the command. `find ... \;`
+        # used to leave `-print` as the entire primary segment (verb=`''`);
+        # with the marker, the primary segment keeps every token and the
+        # verb is `find` again.
+        n = normalize_command("find . -exec cmd {} \\; -print")
+        assert n.verb == "find"
+        # The escaped `;` is not promoted to argv (mirrors the pre-fix
+        # behavior of the empty trailing segment being discarded by
+        # `_split_on_any`'s `[s for s in segments if s]` filter).
+        assert ";" not in n.args
+
+    def test_normalize_escaped_semicolon_terminal_case_preserved(self) -> None:
+        # Terminal `find -exec ... \;` was the benign pre-fix case (the
+        # phantom split produced an empty trailing segment that the
+        # final filter discarded). The marker path keeps that behavior
+        # exact: argv is unchanged, the `;` does not become a stored arg.
+        n = normalize_command("find . -exec rm {} \\;")
+        assert n.verb == "find"
+        # Pre-fix args were ('.', '{}'); the marker path leaves them the
+        # same. (The `;` is consumed by the marked-sep branch, not added
+        # to argv — see `_split_on_any`'s docstring.)
+        assert ";" not in n.args
+
+    def test_quoted_separator_still_untouched(self) -> None:
+        # The marker path is for unquoted backslash-escapes only. A
+        # quoted `;` is a literal char inside one shlex token and never
+        # gets the marker.
+        assert tokenize('echo "a;b"') == ["echo", "a;b"]
+        assert tokenize("echo 'a;b'") == ["echo", "a;b"]
+        assert tokenize('echo "a|b"') == ["echo", "a|b"]
+        assert tokenize("echo 'a|b'") == ["echo", "a|b"]
+
+    def test_glued_escape_does_not_get_marker(self) -> None:
+        # `echo a\;b` — the `\;` is glued to `a` and `b`, no whitespace
+        # around it, so it is NOT at a token boundary and the marker
+        # path does not fire. shlex already keeps the literal `;` inside
+        # one token. (Pins the existing test's behavior; doubles as a
+        # regression guard against the marker accidentally tagging
+        # glued escapes.)
+        assert tokenize("echo a\\;b") == ["echo", "a;b"]
+
+    def test_escaped_doubled_ampersand_at_boundary_kept_literal(self) -> None:
+        # `make \&\& build` puts the escape at a boundary, so the marker
+        # path fires and the doubled `&&` is not split. Verb stays `make`
+        # (a single bareword; `build` is absorbed into the verb by the
+        # ARC_NORM_MAX_VERB_TOKENS=3 absorption).
+        n = normalize_command("make \\&\\& build")
+        assert n.verb == "make build"
+        # The escaped `&&` is consumed by the marker path (mirrors the
+        # pre-fix empty-trailing-segment-discard behavior), so it is
+        # not promoted to argv as a literal token.
+        assert "&&" not in n.args
+
+    def test_escaped_doubled_pipe_at_boundary_kept_literal(self) -> None:
+        # Mirror of the doubled-ampersand case for `\|\|`. The escaped
+        # `||` is at a token boundary, marked, and not split. The whole
+        # command is one segment; the verb absorption runs over all
+        # three remaining tokens (`echo`, `a`, `b`) and produces a
+        # 3-token verb. Pre-fix this routed to the `b` segment instead
+        # of `echo`, attributing the captured `echo` to the wrong
+        # command.
+        n = normalize_command("echo a \\|\\| b")
+        assert n.verb == "echo a b"
+
+    def test_double_escape_unchanged(self) -> None:
+        # `\\;` is a LITERAL backslash followed by a real separator —
+        # the user's `\\` is "this backslash is literal", then `;` is a
+        # genuine compound separator. Our pad pass must not mark it
+        # (the first backslash's `nxt` is `\`, which is not a sep). The
+        # `;` then fires its own padding branch normally. Same as pre-fix.
+        n = normalize_command("echo a\\\\;ls")
+        # The `\\` becomes a literal backslash in argv, then `;` is a
+        # real separator, then `ls` is the next segment. The primary
+        # segment is the LAST one (`ls`).
+        assert n.verb == "ls"
+
+    def test_unbalanced_quotes_fallback_preserves_backslash(self) -> None:
+        # The unbalanced-quote fallback path bypasses the padding pass
+        # entirely (tokenize's `cmd_raw.split()` operates on the
+        # ORIGINAL string, not the padded one). The `\;` therefore
+        # arrives at `_split_on_any` as the literal `\\;` token (with
+        # the backslash preserved) — not a bare `;` — so it is not in
+        # `_COMPOUND_SEPARATORS` and no split happens. Same as pre-fix;
+        # pinned here so the fallback is documented as escape-safe.
+        n = normalize_command('find . -exec rm {} \\; "unterminated')
+        # With unbalanced quotes, the rest of the string is in the
+        # fallback's whitespace split, but `find` and the literal `\;`
+        # are still recognizable as the first segment's verb/args.
+        assert n.verb == "find"
+
+
+class TestSinglePipeAmp:
+    """UPG-CMDNORM-SINGLE-PIPE-AMP part (a): a glued single `|`
+    (`cat a|grep b`) is not a member of `_COMPOUND_SEPARATORS` and was
+    not padded by the pre-fix pass, so the existing `|` split on the
+    primary segment never saw it. The new single-`|` branch in the
+    padding pass makes glued and spaced pipes tokenize identically,
+    with no vocabulary change. Part (b) — background `&` as a segment
+    boundary — is intentionally NOT implemented here (see report)."""
+
+    def test_glued_single_pipe_splits(self) -> None:
+        # The headline fix: `cat a|grep b` now tokenizes like
+        # `cat a | grep b`. The resulting verb and downstream-stage
+        # tokens match the spaced form.
+        toks = tokenize("cat a|grep b")
+        assert toks == ["cat", "a", "|", "grep", "b"]
+
+    def test_glued_single_pipe_normalizes_like_spaced(self) -> None:
+        # End-to-end check: `cat a|grep b` and `cat a | grep b` produce
+        # the same NormalizedCommand. Pre-fix the glued form was one
+        # segment (no `|` token to split on) so the display-stage
+        # stripping never fired and the primary was wrong.
+        glued = normalize_command("cat a|grep b")
+        spaced = normalize_command("cat a | grep b")
+        assert glued.verb == spaced.verb
+        assert glued.flags == spaced.flags
+        assert glued.args == spaced.args
+        assert glued.arg_classes == spaced.arg_classes
+        # `a` is a bareword and is absorbed into the verb (the same
+        # verb-absorption cap, ARC_NORM_MAX_VERB_TOKENS=3, that pulls
+        # `foo bar` into the verb in `make foo bar baz qux`); `b` is
+        # also a bareword but arrives via the downstream `grep b`
+        # stage, where it is folded into the comparison set as a
+        # positional arg, not a verb token.
+        assert "b" in glued.args
+        # Spaced-vs-glued parity: the headline invariant. Compared with
+        # `cmd_raw` excluded, because that field stores the ORIGINAL
+        # string verbatim and so differs by construction between the two
+        # spellings — a whole-dataclass `==` could never pass here. Every
+        # NORMALIZED field must match, which is what parity means.
+        as_dict = dataclasses.asdict
+        glued_norm, spaced_norm = as_dict(glued), as_dict(spaced)
+        assert glued_norm.pop("cmd_raw") != spaced_norm.pop("cmd_raw")
+        assert glued_norm == spaced_norm
+
+    def test_doubled_pipe_unchanged_after_single_pipe_branch(self) -> None:
+        # The single-`|` branch is placed AFTER the doubled `&&`/`||`
+        # branch in the pad pass, so `||` is still recognized as the
+        # doubled compound separator. This test is the reviewer-first
+        # guard: a single-`|` implementation placed before the doubled
+        # check would split `a||b` as `a | | b` and route the primary
+        # to `b` instead of `a`.
+        toks = tokenize("a||b")
+        assert toks == ["a", "||", "b"]
+        # Spaced variant too.
+        assert tokenize("a || b") == ["a", "||", "b"]
+
+    def test_doubled_ampersand_unchanged_after_single_pipe_branch(self) -> None:
+        # Mirror of the above for `&&`. The single-`|` branch only
+        # fires on `c == "|"` and never on `&`, so the doubled-`&`
+        # branch's behavior is untouched.
+        toks = tokenize("a&&b")
+        assert toks == ["a", "&&", "b"]
+        assert tokenize("a && b") == ["a", "&&", "b"]
+
+    def test_glued_mixed_doubled_and_single_pipe(self) -> None:
+        # `a||b|c` exercises the branch ordering: position 1 is `|`,
+        # the doubled check sees `cmd_raw[2] == "|"` and fires the
+        # `||` padding; then position 4 is the trailing `|`, the
+        # doubled check sees `cmd_raw[5] == "c"`, fails, and the
+        # single-`|` branch fires. Three segments as expected.
+        toks = tokenize("a||b|c")
+        assert toks == ["a", "||", "b", "|", "c"]
+
+    def test_quoted_pipe_unchanged_after_single_pipe_branch(self) -> None:
+        # The single-`|` branch is OUTSIDE the in_double / in_single
+        # quote-state branches, so a `|` inside quotes is never
+        # padded. Pre-fix and post-fix produce the same token list.
+        assert tokenize('grep "foo|bar" file.txt') == ["grep", "foo|bar", "file.txt"]
+        assert tokenize("grep 'foo|bar' file.txt") == ["grep", "foo|bar", "file.txt"]
 
 
 class TestClassifyArg:

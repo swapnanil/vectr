@@ -36,14 +36,34 @@ _NUM_RE = re.compile(ARC_NORM_NUM_REGEX)
 _PATH_EXT_RE = re.compile(ARC_NORM_PATH_EXTENSION_REGEX)
 _ENV_ASSIGNMENT_RE = re.compile(ARC_NORM_ENV_ASSIGNMENT_REGEX)
 
-# Compound-command boundaries (top-level, unquoted only). Two guards keep
-# quoted text out of this set's way: `tokenize`'s pre-tokenize padding pass
-# (UPG-CMDNORM-GLUED-SEPARATOR) tracks quote state and never pads a `;`/
-# `&&`/`||` inside quotes, and shlex has already stripped the remaining
-# quoting by the time these are compared, so a literal token equal to one of
-# these is never something the user quoted, e.g. grep "a|b" stays one shlex
-# token and never matches here.
+# Compound-command boundaries (top-level, unquoted, unescaped). Three guards
+# keep quoted text and literal backslash-escapes out of this set's way:
+#   1. `tokenize`'s pre-tokenize padding pass (UPG-CMDNORM-GLUED-SEPARATOR)
+#      tracks quote state and never pads a `;`/`&&`/`||` inside quotes.
+#   2. The same pass also pads a glued single `|` (UPG-CMDNORM-SINGLE-
+#      PIPE-AMP) so `cat a|grep b` and `cat a | grep b` tokenize the same
+#      way, letting the existing `|` split on the primary segment see it.
+#   3. It also marks a backslash-escaped compound separator at a token
+#      boundary (`<bs>;`, `<bs>&<bs>&`, `<bs>|<bs>|`) with an internal
+#      marker (UPG-CMDNORM-ESCAPED-SEPARATOR-SPLIT); `_split_on_any` strips
+#      the marker and skips the bare separator so the user's `\<sep>` keeps
+#      the `;`/`&&`/`||` literal instead of letting shlex's stripped-
+#      backslash output match a real compound separator.
+# After all three, a literal token equal to one of these is never something
+# the user quoted (`grep "a|b"` stays one shlex token) or escaped (`find
+# . -exec rm {} \;` keeps the literal `;` from being misread).
 _COMPOUND_SEPARATORS = frozenset({"&&", "||", ";"})
+
+# Internal marker used to carry a backslash-escape's "this separator is
+# literal" signal through shlex (which strips the backslash) into
+# `_split_on_any`. U+2063 INVISIBLE SEPARATOR is never typed by a user
+# and never appears in a real shell command, so it is safe to use as a
+# private sentinel — and so it can be safely stripped before the
+# segment's tokens reach the stored `NormalizedCommand`. The marker is
+# only ever inserted by the padding pass for a `<bs><sep>` at a token
+# boundary; in every other position the escape rides through shlex as a
+# literal char inside its adjacent token.
+_ESCAPED_SEP_MARKER = "⁣"
 
 
 @dataclass(frozen=True)
@@ -116,9 +136,31 @@ def _pad_glued_compound_separators(cmd_raw: str) -> str:
                 i += 1
         elif c == "\\" and i + 1 < n:
             # Outside quotes: an escaped pair is literal (`\\;`, `\\&\\&`)
-            # — never a separator, never a quote-state change.
-            out.append(cmd_raw[i:i + 2])
-            i += 2
+            # — never a separator, never a quote-state change. The one
+            # exception is a `<bs><sep>` AT A TOKEN BOUNDARY: shlex will
+            # strip the backslash and emit a bare `<sep>` token that
+            # `_split_on_any` would then misread as a real compound
+            # separator (UPG-CMDNORM-ESCAPED-SEPARATOR-SPLIT). For that
+            # shape we mark the escape with `_ESCAPED_SEP_MARKER` so
+            # `_split_on_any` can keep the bare sep out of the separator
+            # set; glued escapes like `echo a\;b` are not at a boundary
+            # and shlex already keeps the `;` inside one token, so they
+            # need no marker.
+            nxt = cmd_raw[i + 1]
+            if (
+                _out_ends_at_token_boundary(out)
+                and _is_escaped_compound_sep(cmd_raw, i)
+            ):
+                if nxt == ";":
+                    out.append(_ESCAPED_SEP_MARKER + ";")
+                    i += 2
+                else:
+                    # Doubled form `<bs><X><bs><X>` for `&&`/`||`.
+                    out.append(_ESCAPED_SEP_MARKER + nxt + nxt)
+                    i += 4
+            else:
+                out.append(cmd_raw[i:i + 2])
+                i += 2
         elif c == "'":
             in_single = True
             out.append(c)
@@ -131,12 +173,74 @@ def _pad_glued_compound_separators(cmd_raw: str) -> str:
             out.append(" ; ")
             i += 1
         elif c in "&|" and i + 1 < n and cmd_raw[i + 1] == c:
+            # Doubled `&&` / `||` — must fire BEFORE the single-`|` branch
+            # below so `||` is treated as the doubled compound separator,
+            # not a single `|` followed by an unmatched `|`.
             out.append(" " + c + c + " ")
             i += 2
+        elif c == "|":
+            # Single `|` (UPG-CMDNORM-SINGLE-PIPE-AMP): a glued single pipe
+            # like `cat a|grep b` would shlex into one token per glued
+            # group, so the existing `|` split on the primary segment
+            # would never see it. Padding the glued form makes spaced and
+            # glued pipes tokenize identically, with no vocabulary change
+            # for downstream code.
+            out.append(" | ")
+            i += 1
         else:
             out.append(c)
             i += 1
     return "".join(out)
+
+
+def _is_escaped_compound_sep(cmd_raw: str, i: int) -> bool:
+    """At position `i` (which is a backslash), does the escape form a
+    top-level compound separator? Detected shapes:
+
+      - `<bs>;`             (single-char `;`)
+      - `<bs><X><bs><X>`    (doubled `&&` / `||` for X in `&|`)
+
+    Note `<bs><X>` for a single `&` or `|` is NOT a compound separator
+    (`_COMPOUND_SEPARATORS` holds only `&&`/`||`/`;`) and is left alone,
+    so an escaped single `&` survives into argv the way it always has.
+
+    An escaped single `<bs>|` is a KNOWN residual, deliberately not
+    marked here: `normalize_command` runs a SECOND `_split_on_any` over
+    the primary segment with `seps={"|"}` for pipeline staging, and that
+    call does misread a shlex-stripped `\\|` as a stage boundary
+    (`echo a \\| b` yields verb `echo a` with `b` as a downstream-stage
+    arg). That behavior is unchanged from before this fix — the escape
+    was already lost at the same place — so marking it is a separate
+    scope decision with its own compatibility question, filed as
+    UPG-CMDNORM-ESCAPED-SINGLE-PIPE-STAGE rather than slipped in
+    here."""
+    if i + 1 >= len(cmd_raw):
+        return False
+    nxt = cmd_raw[i + 1]
+    if nxt == ";":
+        return True
+    if (
+        nxt in "&|"
+        and i + 3 < len(cmd_raw)
+        and cmd_raw[i + 2] == "\\"
+        and cmd_raw[i + 3] == nxt
+    ):
+        return True
+    return False
+
+
+def _out_ends_at_token_boundary(out: list[str]) -> bool:
+    """Is the most-recently-emitted character a token boundary for shlex
+    purposes (whitespace, or the very start of input)? Used to decide
+    whether an escape would, after shlex drops the backslash, arrive at
+    `_split_on_any` as its own bare token.
+
+    `out` is the padding pass's running emit list — entries are single
+    chars except for escape pairs (`<bs>X`), so the last character of
+    the last entry is the right thing to look at."""
+    if not out:
+        return True
+    return out[-1][-1].isspace()
 
 
 def tokenize(cmd_raw: str) -> list[str]:
@@ -179,9 +283,32 @@ def classify_arg(token: str) -> str:
 
 
 def _split_on_any(tokens: list[str], seps: frozenset[str]) -> list[list[str]]:
+    """Split a token list on any token present in `seps`, dropping the
+    separator tokens. Also recognizes `_ESCAPED_SEP_MARKER`-tagged tokens
+    (UPG-CMDNORM-ESCAPED-SEPARATOR-SPLIT) — a marked `<MARKER><sep>` is
+    the padding pass's signal that the user wrote `<bs><sep>` and meant
+    the separator literally, so we keep the bare sep out of argv AND
+    out of the separator set (mirroring the pre-fix behavior for the
+    terminal `find -exec ... \;` shape, where the phantom split produced
+    a trailing empty segment that the final filter discarded). The
+    marker itself never reaches a stored `NormalizedCommand` — it is
+    either consumed by the marked-sep branch or stripped from any
+    non-separator token that happened to start with it."""
     segments: list[list[str]] = []
     current: list[str] = []
     for tok in tokens:
+        if tok.startswith(_ESCAPED_SEP_MARKER):
+            rest = tok[len(_ESCAPED_SEP_MARKER):]
+            if rest in seps:
+                # Marked escaped separator: do not add to argv, do not split.
+                continue
+            # Marker as a prefix in a non-separator token: strip it so it
+            # does not leak into stored argv. (The pad pass only inserts
+            # the marker at a token boundary, so this branch is rare —
+            # reached when the marker rides through a longer token
+            # because the user typed it literally, an event the marker
+            # being INVISIBLE SEPARATOR makes effectively impossible.)
+            tok = rest
         if tok in seps:
             segments.append(current)
             current = []
