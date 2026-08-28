@@ -308,6 +308,260 @@ class TestSinglePipeAmp:
         assert tokenize("grep 'foo|bar' file.txt") == ["grep", "foo|bar", "file.txt"]
 
 
+class TestBackgroundAmp:
+    """UPG-CMDNORM-BACKGROUND-AMP: a glued single `&` (`make&make`) is
+    not padded by the pre-fix pass, and a single `&` is not a member
+    of `_COMPOUND_SEPARATORS`, so outcome attribution for a
+    backgrounded compound follows the last segment — even though the
+    real shell runs the first command in the background and the
+    second in the foreground (so the recorded exit code is the
+    foreground command's). The fix pads the glued `&` and adds `&`
+    to `_COMPOUND_SEPARATORS`, so the last-segment selection matches
+    what the shell actually reports. Part (b) — the escaped `<bs>&`
+    boundary case — is intentionally covered too because making `&`
+    a compound separator would otherwise misread a user-escaped `&`
+    as a real boundary.
+
+    Design decision: `&` is added to `_COMPOUND_SEPARATORS` and the
+    last segment wins (same as `;`/`&&`/`||`). Rejected alternatives:
+      - Keep `&` out of `_COMPOUND_SEPARATORS` and strip it as a
+        no-op. Rejected: the verb absorption would then absorb the
+        bare `&` token into the verb (it's a bareword), producing
+        nonsense verbs like `make build &`.
+      - Keep `&` out of `_COMPOUND_SEPARATORS` and let the trailing
+        `&` ride through. Rejected: same verb-absorption problem,
+        and the infix `&` would never split at all, so `make build &
+        make test` would mis-attribute to `make build` instead of
+        `make test`.
+    The last-segment choice mirrors the existing `;`/`&&`/`||`
+    behavior and is consistent with what the shell records for
+    `a & b` (the foreground `b`'s exit code)."""
+
+    def test_glued_single_ampersand_splits(self) -> None:
+        # The headline fix: `make&make` now tokenizes like
+        # `make & make`. The resulting primary segment and verb match
+        # the spaced form.
+        toks = tokenize("make&make")
+        assert toks == ["make", "&", "make"]
+
+    def test_glued_single_ampersand_normalizes_like_spaced(self) -> None:
+        # End-to-end check: `make&make` and `make & make` produce the
+        # same NormalizedCommand. Pre-fix the glued form was one
+        # token so the compound-separator split never saw `&` and the
+        # primary was wrong.
+        glued = normalize_command("make&make")
+        spaced = normalize_command("make & make")
+        assert glued.verb == spaced.verb
+        assert glued.flags == spaced.flags
+        assert glued.args == spaced.args
+        assert glued.arg_classes == spaced.arg_classes
+        # `cmd_raw` differs by construction (it stores the ORIGINAL
+        # string verbatim), so the headline invariant is normalized-
+        # field parity, not whole-dataclass equality.
+        as_dict = dataclasses.asdict
+        glued_norm, spaced_norm = as_dict(glued), as_dict(spaced)
+        assert glued_norm.pop("cmd_raw") != spaced_norm.pop("cmd_raw")
+        assert glued_norm == spaced_norm
+
+    def test_trailing_ampersand_drops_ampersand_from_primary(self) -> None:
+        # `make build &` — the trailing `&` is a separator boundary
+        # with no following segment. `_split_on_any`'s empty-segment
+        # filter drops the trailing `[]`, so the primary is the
+        # non-empty `["make", "build"]` segment. The `&` is not
+        # absorbed into the verb (it would otherwise produce
+        # `make build &`).
+        n = normalize_command("make build &")
+        assert n.verb == "make build"
+        assert n.args == ()
+        assert n.flags == ()
+        assert "&" not in n.args
+        assert "&" not in n.flags
+
+    def test_infix_ampersand_picks_last_segment(self) -> None:
+        # `make build & make test` — `&` is a compound separator, so
+        # the primary segment is the LAST one (`make test`). This
+        # matches the shell's recorded exit code for `a & b` (the
+        # foreground `b`'s).
+        n = normalize_command("make build & make test")
+        assert n.verb == "make test"
+        assert n.args == ()
+        assert n.flags == ()
+
+    def test_doubled_ampersand_unchanged_after_single_amp_branch(self) -> None:
+        # The single-`&` branch is placed AFTER the doubled `&&`
+        # check in the pad pass, so `&&` is still recognized as the
+        # doubled compound separator. This test is the reviewer-first
+        # guard: a single-`&` implementation placed before the
+        # doubled check would split `a&&b` as `a & & b` and route
+        # the primary to `b` instead of `a` (or to nothing, given
+        # the empty-segment filter).
+        toks = tokenize("a&&b")
+        assert toks == ["a", "&&", "b"]
+        # Spaced variant too.
+        assert tokenize("a && b") == ["a", "&&", "b"]
+        # And the normalized form still picks the last segment.
+        assert normalize_command("a&&b").verb == "b"
+        assert normalize_command("a && b").verb == "b"
+
+    def test_quoted_ampersand_never_split(self) -> None:
+        # The single-`&` branch is OUTSIDE the in_double / in_single
+        # quote-state branches, so a `&` inside quotes is never
+        # padded. Pre-fix and post-fix produce the same token list.
+        assert tokenize('echo "a&b"') == ["echo", "a&b"]
+        assert tokenize("echo 'a&b'") == ["echo", "a&b"]
+
+    def test_glued_mixed_doubled_and_single_ampersand(self) -> None:
+        # `a&&b&c` exercises the branch ordering: position 1 is `&`,
+        # the doubled check sees `cmd_raw[2] == "&"` and fires the
+        # `&&` padding; then position 4 is the trailing `&`, the
+        # doubled check sees `cmd_raw[5] == "c"`, fails, and the
+        # single-`&` branch fires. Three segments as expected.
+        toks = tokenize("a&&b&c")
+        assert toks == ["a", "&&", "b", "&", "c"]
+
+    def test_escaped_single_ampersand_at_boundary_kept_literal(self) -> None:
+        # `make build <bs>& make test`: the `<bs>&` is at a token
+        # boundary, so the pad pass tags it with the marker and
+        # `_split_on_any` skips it, adding nothing to argv AND not
+        # splitting. The two halves therefore run together into one
+        # segment, which is the SAME shape `<bs>&<bs>&` already
+        # produces (asserted below so the two cannot drift apart).
+        # This is imprecise against a real shell, where `<bs>&` is a
+        # literal `&` argument to `make`; the imprecision is filed as
+        # UPG-CMDNORM-ESCAPED-SEP-DROPPED-FROM-ARGV and is deliberately
+        # not fixed here, because changing it changes `<bs>;`,
+        # `<bs>&<bs>&` and `<bs>|<bs>|` at the same time.
+        n = normalize_command("make build \\& make test")
+        assert n.verb == "make build make"
+        assert n.args == ("test",)
+        # The escaped `&` is consumed by the marked-sep branch, not
+        # promoted to argv.
+        assert "&" not in n.args
+        assert "&" not in n.flags
+        # Identical to the escaped-doubled precedent it mirrors.
+        doubled = normalize_command("make build \\&\\& make test")
+        assert (doubled.verb, doubled.args) == (n.verb, n.args)
+
+    def test_escaped_single_ampersand_at_end_drops_ampersand(self) -> None:
+        # `make build \&` — the trailing `\&` is marked and skipped.
+        # The empty trailing segment is filtered. Primary is the
+        # non-empty `["make", "build"]` segment.
+        n = normalize_command("make build \\&")
+        assert n.verb == "make build"
+        assert "&" not in n.args
+
+    def test_glued_escape_single_ampersand_does_not_get_marker(self) -> None:
+        # `make\&make` — the `\&` is glued to `make` on both sides,
+        # NOT at a token boundary, so the marker path does not fire.
+        # shlex keeps the literal `&` inside one token. Pre-fix and
+        # post-fix produce the same token list.
+        assert tokenize("make\\&make") == ["make&make"]
+
+    def test_stderr_merge_redirect_not_split_as_background(self) -> None:
+        # `2>&1` is a stderr-merge redirect, NOT a background operator.
+        # The `&` is preceded by `>`, so the single-`&` branch's
+        # `prev_is_gt` guard fires and the `&` is NOT padded. shlex
+        # keeps `2>&1` as one token, and the trailing stderr-merge
+        # stripping in `normalize_command` produces an empty verb.
+        # This is the regression guard for adding `&` to
+        # `_COMPOUND_SEPARATORS`: without the guard, the `&` would
+        # be padded and the token would split, breaking the stderr-
+        # merge stripping.
+        assert tokenize("2>&1") == ["2>&1"]
+        n = normalize_command("2>&1")
+        assert n.verb == ""
+        # And the full `cmd 2>&1 | tail -30` shape still works.
+        a = normalize_command("mvn test -q 2>&1 | tail -30")
+        b = normalize_command("mvn test -q")
+        assert a.verb == b.verb
+        assert a.flags == b.flags
+        assert a.args == b.args
+
+    def test_amp_gt_redirect_not_padded(self) -> None:
+        # `&>file` (bash-specific redirect of both streams to `file`)
+        # is a redirect, not a background operator. The `&` is
+        # followed by `>`, so the single-`&` branch's `next_is_gt`
+        # guard fires and the `&` is NOT padded. shlex keeps
+        # `&>file` as one token. Not tested in the suite's existing
+        # shapes but handled for the same reason as `>&`: padding
+        # would split the redirect and mis-attribute the command.
+        assert tokenize("&>file") == ["&>file"]
+        assert tokenize("cmd &>file") == ["cmd", "&>file"]
+
+
+class TestEscapedSinglePipeStage:
+    """UPG-CMDNORM-ESCAPED-SINGLE-PIPE-STAGE: the second `_split_on_any`
+    call (for pipeline staging with `seps={"|"}`) misread a shlex-
+    stripped `<bs>|` as a stage boundary: `echo a <bs>| b` yielded verb
+    `echo a` with `b` as a downstream-stage arg. The marker path now
+    covers `<bs>|` at a token boundary, the compound-separator call
+    preserves the marker on the `|`, and the staging call strips the
+    marker and adds the bare `|` to the current segment. So the `|`
+    is treated as a literal `|` arg, not a pipeline boundary.
+
+    The fix is small and does not disturb the staging split's existing
+    behavior for real pipes: a bare `|` (no escape) is still a stage
+    boundary, exactly as before. The two `_split_on_any` calls now
+    carry the "this was escaped" signal through the compound-separator
+    call to the staging call via the marker on the `|` token."""
+
+    def test_escaped_single_pipe_at_boundary_treated_as_literal(self) -> None:
+        # `echo a \| b` — the `\|` is at a token boundary, so the
+        # pad pass marks it. The staging call strips the marker and
+        # adds the bare `|` to the current segment, so the `|` is
+        # NOT a stage boundary. The `|` is absorbed into the verb
+        # (it's a bareword; the cap pulls in `echo`, `a`, `|`), and
+        # `b` becomes a positional arg.
+        n = normalize_command("echo a \\| b")
+        # The `|` is in the primary stage, not in a downstream stage.
+        # Verb absorption takes `echo` and `a` (2 tokens), then `|`
+        # (a bareword) — at the cap of 3, so `|` is absorbed too.
+        assert "|" in n.verb
+        # `b` is the remaining positional arg (not a downstream
+        # stage arg).
+        assert "b" in n.args
+        # The `|` does not appear as a stage-boundary marker in the
+        # comparison set; downstream stages are empty.
+        assert n.args == ("b",)
+
+    def test_escaped_single_pipe_differs_from_real_pipe(self) -> None:
+        # `echo a | b` is a pipeline (verb `echo a`, downstream `b`),
+        # while `echo a \| b` is `echo` with `|` as a literal arg
+        # (verb absorbs `|`, `b` is a positional arg). They must
+        # normalize differently — they ARE different commands in the
+        # shell.
+        real = normalize_command("echo a | b")
+        escaped = normalize_command("echo a \\| b")
+        # Real pipe: `b` is a downstream-stage arg.
+        assert "b" in real.args
+        assert "|" not in real.verb
+        # Escaped pipe: `|` is in the verb (absorbed as a bareword),
+        # `b` is a positional arg.
+        assert "|" in escaped.verb
+        assert escaped.args == ("b",)
+
+    def test_real_pipe_unchanged_after_escape_fix(self) -> None:
+        # Regression guard: the staging split's existing behavior for
+        # real pipes is preserved. `cat a | grep b` still treats `|`
+        # as a stage boundary.
+        n = normalize_command("cat a | grep b")
+        assert n.verb == "cat a"
+        assert "b" in n.args
+        # And the spaced-vs-glued parity still holds.
+        glued = normalize_command("cat a|grep b")
+        assert n.verb == glued.verb
+        assert n.args == glued.args
+        assert n.flags == glued.flags
+
+    def test_glued_escape_single_pipe_does_not_get_marker(self) -> None:
+        # `echo a\|b` — the `\|` is glued to `a` and `b`, NOT at a
+        # token boundary, so the marker path does not fire. shlex
+        # keeps the literal `|` inside one token. Pre-fix and
+        # post-fix produce the same token list (and the same
+        # normalized form: verb absorbs the whole `a|b` token).
+        assert tokenize("echo a\\|b") == ["echo", "a|b"]
+
+
 class TestClassifyArg:
     @pytest.mark.parametrize(
         "token,expected",

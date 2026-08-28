@@ -36,23 +36,29 @@ _NUM_RE = re.compile(ARC_NORM_NUM_REGEX)
 _PATH_EXT_RE = re.compile(ARC_NORM_PATH_EXTENSION_REGEX)
 _ENV_ASSIGNMENT_RE = re.compile(ARC_NORM_ENV_ASSIGNMENT_REGEX)
 
-# Compound-command boundaries (top-level, unquoted, unescaped). Three guards
+# Compound-command boundaries (top-level, unquoted, unescaped). Four guards
 # keep quoted text and literal backslash-escapes out of this set's way:
 #   1. `tokenize`'s pre-tokenize padding pass (UPG-CMDNORM-GLUED-SEPARATOR)
-#      tracks quote state and never pads a `;`/`&&`/`||` inside quotes.
+#      tracks quote state and never pads a `;`/`&&`/`||`/`&` inside quotes.
 #   2. The same pass also pads a glued single `|` (UPG-CMDNORM-SINGLE-
 #      PIPE-AMP) so `cat a|grep b` and `cat a | grep b` tokenize the same
-#      way, letting the existing `|` split on the primary segment see it.
+#      way, letting the existing `|` split on the primary segment see it,
+#      and a glued single `&` (UPG-CMDNORM-BACKGROUND-AMP) so `make&make`
+#      and `make & make` tokenize the same way, letting the compound-
+#      separator split on `&` see the boundary.
 #   3. It also marks a backslash-escaped compound separator at a token
-#      boundary (`<bs>;`, `<bs>&<bs>&`, `<bs>|<bs>|`) with an internal
-#      marker (UPG-CMDNORM-ESCAPED-SEPARATOR-SPLIT); `_split_on_any` strips
-#      the marker and skips the bare separator so the user's `\<sep>` keeps
-#      the `;`/`&&`/`||` literal instead of letting shlex's stripped-
-#      backslash output match a real compound separator.
-# After all three, a literal token equal to one of these is never something
+#      boundary (`<bs>;`, `<bs>&`, `<bs>&<bs>&`, `<bs>|`, `<bs>|<bs>|`)
+#      with an internal marker (UPG-CMDNORM-ESCAPED-SEPARATOR-SPLIT and
+#      UPG-CMDNORM-ESCAPED-SINGLE-PIPE-STAGE); `_split_on_any` strips
+#      the marker and either skips the bare separator (for `;`/`&&`/`||`/
+#      `&`, which are control operators and never valid argv) or adds it
+#      to the current segment as a literal `|` arg (for `|`, which the
+#      user may have escaped precisely to pass as a literal char rather
+#      than a pipeline boundary).
+# After all four, a literal token equal to one of these is never something
 # the user quoted (`grep "a|b"` stays one shlex token) or escaped (`find
 # . -exec rm {} \;` keeps the literal `;` from being misread).
-_COMPOUND_SEPARATORS = frozenset({"&&", "||", ";"})
+_COMPOUND_SEPARATORS = frozenset({"&&", "||", ";", "&"})
 
 # Internal marker used to carry a backslash-escape's "this separator is
 # literal" signal through shlex (which strips the backslash) into
@@ -151,13 +157,34 @@ def _pad_glued_compound_separators(cmd_raw: str) -> str:
                 _out_ends_at_token_boundary(out)
                 and _is_escaped_compound_sep(cmd_raw, i)
             ):
-                if nxt == ";":
-                    out.append(_ESCAPED_SEP_MARKER + ";")
-                    i += 2
-                else:
+                # Order matters: the doubled `<bs><X><bs><X>` check must
+                # fire BEFORE the single-char `&`/`|` branch, so a
+                # `\|\|` at a boundary is marked as one escaped `||`
+                # (advance 4), not as two single escaped `|` tokens
+                # (advance 2 twice). Mirrors the ordering hazard in
+                # `_pad_glued_compound_separators`'s `&&`/`||` vs single
+                # `|` branch.
+                if (
+                    nxt in "&|"
+                    and i + 3 < len(cmd_raw)
+                    and cmd_raw[i + 2] == "\\"
+                    and cmd_raw[i + 3] == nxt
+                ):
                     # Doubled form `<bs><X><bs><X>` for `&&`/`||`.
                     out.append(_ESCAPED_SEP_MARKER + nxt + nxt)
                     i += 4
+                elif nxt == ";":
+                    out.append(_ESCAPED_SEP_MARKER + ";")
+                    i += 2
+                else:
+                    # Single-char `&` (UPG-CMDNORM-BACKGROUND-AMP) or `|`
+                    # (UPG-CMDNORM-ESCAPED-SINGLE-PIPE-STAGE) at a token
+                    # boundary: mark with the marker so the downstream
+                    # `_split_on_any` calls can keep the bare sep out of
+                    # the compound-separator split and (for `|`) out of
+                    # the pipeline-staging split.
+                    out.append(_ESCAPED_SEP_MARKER + nxt)
+                    i += 2
             else:
                 out.append(cmd_raw[i:i + 2])
                 i += 2
@@ -173,11 +200,38 @@ def _pad_glued_compound_separators(cmd_raw: str) -> str:
             out.append(" ; ")
             i += 1
         elif c in "&|" and i + 1 < n and cmd_raw[i + 1] == c:
-            # Doubled `&&` / `||` — must fire BEFORE the single-`|` branch
-            # below so `||` is treated as the doubled compound separator,
-            # not a single `|` followed by an unmatched `|`.
+            # Doubled `&&` / `||` — must fire BEFORE the single-`|` / `&`
+            # branches below so `||` is treated as the doubled compound
+            # separator, not a single `|` followed by an unmatched `|`,
+            # and `&&` is read as one doubled separator, not two single
+            # `&` background markers.
             out.append(" " + c + c + " ")
             i += 2
+        elif c == "&":
+            # Single `&` (UPG-CMDNORM-BACKGROUND-AMP): a glued single `&`
+            # like `make&make` would shlex into one token, so the
+            # compound-separator split on `&` would never see it. Padding
+            # the glued form makes spaced and glued `&` tokenize
+            # identically, with no vocabulary change for downstream code.
+            #
+            # Two `&`-as-redirect shapes must NOT be padded, since they
+            # are not background operators but part of a shell redirect:
+            #   - `>&` (the `&` follows `>`, e.g. `2>&1`, `1>&2`):
+            #     padding would split the stderr-merge token and break
+            #     `normalize_command`'s trailing-stderr-merge stripping.
+            #   - `&>` (the `&` is followed by `>`, e.g. `cmd &>file`,
+            #     bash-specific redirect of both streams to `file`):
+            #     padding would route the primary to `>` and mis-attribute
+            #     the redirect. Not tested in the suite but handled for
+            #     the same reason.
+            prev_is_gt = bool(out) and out[-1][-1] == ">"
+            next_is_gt = i + 1 < n and cmd_raw[i + 1] == ">"
+            if prev_is_gt or next_is_gt:
+                out.append(c)
+                i += 1
+            else:
+                out.append(" & ")
+                i += 1
         elif c == "|":
             # Single `|` (UPG-CMDNORM-SINGLE-PIPE-AMP): a glued single pipe
             # like `cat a|grep b` would shlex into one token per glued
@@ -198,26 +252,26 @@ def _is_escaped_compound_sep(cmd_raw: str, i: int) -> bool:
     top-level compound separator? Detected shapes:
 
       - `<bs>;`             (single-char `;`)
+      - `<bs>&`             (single-char `&`, UPG-CMDNORM-BACKGROUND-AMP)
+      - `<bs>|`             (single-char `|`, UPG-CMDNORM-ESCAPED-SINGLE-
+                             PIPE-STAGE; see `_split_on_any` for the
+                             special handling that keeps the bare `|`
+                             as a literal arg instead of a stage boundary)
       - `<bs><X><bs><X>`    (doubled `&&` / `||` for X in `&|`)
 
-    Note `<bs><X>` for a single `&` or `|` is NOT a compound separator
-    (`_COMPOUND_SEPARATORS` holds only `&&`/`||`/`;`) and is left alone,
-    so an escaped single `&` survives into argv the way it always has.
-
-    An escaped single `<bs>|` is a KNOWN residual, deliberately not
-    marked here: `normalize_command` runs a SECOND `_split_on_any` over
-    the primary segment with `seps={"|"}` for pipeline staging, and that
-    call does misread a shlex-stripped `\\|` as a stage boundary
-    (`echo a \\| b` yields verb `echo a` with `b` as a downstream-stage
-    arg). That behavior is unchanged from before this fix — the escape
-    was already lost at the same place — so marking it is a separate
-    scope decision with its own compatibility question, filed as
-    UPG-CMDNORM-ESCAPED-SINGLE-PIPE-STAGE rather than slipped in
-    here."""
+    The single-`<bs>|` case is the one that differs from the generic
+    marked-separator behavior: `normalize_command` runs a second
+    `_split_on_any` over the primary segment with `seps={"|"}` for
+    pipeline staging, and a bare `|` would be misread as a stage
+    boundary there. The marker carries the "this was escaped" signal
+    through both calls; the first call preserves it (does not strip
+    the marker from `|`) and the second call strips it and adds the
+    bare `|` to the current segment."""
     if i + 1 >= len(cmd_raw):
         return False
     nxt = cmd_raw[i + 1]
-    if nxt == ";":
+    if nxt in ";&|":
+        # Single-char `;`, `&`, or `|` at a token boundary.
         return True
     if (
         nxt in "&|"
@@ -225,6 +279,7 @@ def _is_escaped_compound_sep(cmd_raw: str, i: int) -> bool:
         and cmd_raw[i + 2] == "\\"
         and cmd_raw[i + 3] == nxt
     ):
+        # Doubled `&&` / `||`.
         return True
     return False
 
@@ -287,10 +342,18 @@ def _split_on_any(tokens: list[str], seps: frozenset[str]) -> list[list[str]]:
     separator tokens. Also recognizes `_ESCAPED_SEP_MARKER`-tagged tokens
     (UPG-CMDNORM-ESCAPED-SEPARATOR-SPLIT) — a marked `<MARKER><sep>` is
     the padding pass's signal that the user wrote `<bs><sep>` and meant
-    the separator literally, so we keep the bare sep out of argv AND
-    out of the separator set (mirroring the pre-fix behavior for the
-    terminal `find -exec ... \;` shape, where the phantom split produced
-    a trailing empty segment that the final filter discarded). The
+    the separator literally. For `;`/`&&`/`||`/`&` (control operators,
+    never valid argv), we keep the bare sep out of argv AND out of the
+    separator set (mirroring the pre-fix behavior for the terminal
+    `find -exec ... <bs>;` shape, where the phantom split produced a
+    trailing empty segment that the final filter discarded). For `|`
+    (UPG-CMDNORM-ESCAPED-SINGLE-PIPE-STAGE), the user may have escaped
+    it precisely to pass it as a literal char rather than a pipeline
+    boundary, so the second-call behavior strips the marker and adds
+    the bare `|` to the current segment instead of skipping it. The
+    first call (compound separators) preserves the marker on a `|` so
+    the second call can see it — otherwise the bare `|` would survive
+    into the primary segment and the staging split would misfire. The
     marker itself never reaches a stored `NormalizedCommand` — it is
     either consumed by the marked-sep branch or stripped from any
     non-separator token that happened to start with it."""
@@ -300,14 +363,24 @@ def _split_on_any(tokens: list[str], seps: frozenset[str]) -> list[list[str]]:
         if tok.startswith(_ESCAPED_SEP_MARKER):
             rest = tok[len(_ESCAPED_SEP_MARKER):]
             if rest in seps:
-                # Marked escaped separator: do not add to argv, do not split.
+                if rest == "|":
+                    # Marked escaped pipe (UPG-CMDNORM-ESCAPED-SINGLE-
+                    # PIPE-STAGE): the user wrote `<bs>|` at a token
+                    # boundary, meaning a literal `|` arg, NOT a
+                    # pipeline boundary. Strip the marker and add the
+                    # bare `|` to the current segment.
+                    current.append("|")
+                # else: marked escaped compound separator: do not add
+                # to argv, do not split.
                 continue
-            # Marker as a prefix in a non-separator token: strip it so it
-            # does not leak into stored argv. (The pad pass only inserts
-            # the marker at a token boundary, so this branch is rare —
-            # reached when the marker rides through a longer token
-            # because the user typed it literally, an event the marker
-            # being INVISIBLE SEPARATOR makes effectively impossible.)
+            # Marker as a prefix in a non-separator token: strip it so
+            # it does not leak into stored argv. Exception: a marked
+            # `|` must keep its marker here so the pipeline-staging
+            # call (which uses a different `seps` set) can recognize
+            # it and add the bare `|` to the current segment.
+            if rest == "|":
+                current.append(tok)
+                continue
             tok = rest
         if tok in seps:
             segments.append(current)
