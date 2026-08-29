@@ -11,6 +11,7 @@ Critical coverage:
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import pytest
@@ -4140,6 +4141,30 @@ def _semantic_store(tmp_path):
     return WorkingContextStore(str(tmp_path), embed_fn=_dummy_embed, notes_chroma_client=client)
 
 
+def _spy_store_sql(store, monkeypatch) -> list[str]:
+    """Capture every SQL statement `store` runs, and return the growing list.
+
+    sqlite3.Cursor is an immutable C type, so its `execute` cannot be patched.
+    The supported hook is Connection.set_trace_callback(), installed here by
+    wrapping the store's own _conn() on the instance.
+
+    The callback yields EXPANDED SQL — parameters are already substituted, so
+    a captured statement reads `kind = \'finding\'` and `LIMIT 2`, never
+    `kind = ?` / `LIMIT ?`. Match on the expanded form; a predicate written
+    against placeholders matches nothing and passes vacuously.
+    """
+    seen_sqls: list[str] = []
+    real_conn = store._conn
+
+    def traced_conn():
+        conn = real_conn()
+        conn.set_trace_callback(seen_sqls.append)
+        return conn
+
+    monkeypatch.setattr(store, "_conn", traced_conn)
+    return seen_sqls
+
+
 class TestSemanticRecall:
     """B9 — recall(query=...) uses cosine similarity instead of SQL LIKE."""
 
@@ -4239,7 +4264,9 @@ class TestSemanticRecall:
 
         store = _semantic_store(tmp_path)
         ws = "/repo"
-        for i in range(5):
+        # More than 3x the render limit below, so the width is not clamped by
+        # col_count and the multiplier is what is actually being asserted.
+        for i in range(12):
             store.remember(ws, f"note content {i}")
 
         # No kind: floor is 0 (the default), width is `limit * 3`.
@@ -4266,25 +4293,16 @@ class TestSemanticRecall:
         the semantic pool would not naturally select kind matches first).
         Verified by intercepting the SQL the prefetch runs and asserting
         it carries the `kind = ?` predicate."""
-        import sqlite3
         store = _semantic_store(tmp_path)
         ws = "/repo"
         for i in range(4):
             store.remember(ws, f"finding note {i}", kind="finding")
         store.remember(ws, "unrelated task", kind="task")
 
-        seen_sqls: list[str] = []
-
         # Spy on the store's own _conn() to capture every SQL the
         # _semantic_recall call makes. We filter for the prefetch
         # signature (ORDER BY created_at DESC, no `note_id IN` clause).
-        real_execute = sqlite3.Cursor.execute
-
-        def spy_execute(self, sql, *args, **kwargs):
-            seen_sqls.append(sql)
-            return real_execute(self, sql, *args, **kwargs)
-
-        monkeypatch.setattr(sqlite3.Cursor, "execute", spy_execute)
+        seen_sqls = _spy_store_sql(store, monkeypatch)
         store.recall(ws, query="anything", limit=2, kind="finding")
 
         # The prefetch in the relevance branch runs the metadata filters
@@ -4292,7 +4310,7 @@ class TestSemanticRecall:
         # a no-op) and ends with `ORDER BY created_at DESC LIMIT ?`.
         prefetch_sqls = [
             s for s in seen_sqls
-            if "kind = ?" in s
+            if "kind = " in s
             and "note_id IN" not in s
             and "ORDER BY created_at DESC" in s
         ]
@@ -4320,24 +4338,16 @@ class TestSemanticRecall:
     def test_no_kind_filter_does_not_run_kind_prefetch(self, tmp_path, monkeypatch) -> None:
         """The fix is `kind`-gated: a recall() without `kind=...` must
         NOT run the new SQL prefetch (no selectivity problem to fix)."""
-        import sqlite3
         store = _semantic_store(tmp_path)
         ws = "/repo"
         for i in range(3):
             store.remember(ws, f"note {i}")
 
-        seen_sqls: list[str] = []
-        real_execute = sqlite3.Cursor.execute
-
-        def spy_execute(self, sql, *args, **kwargs):
-            seen_sqls.append(sql)
-            return real_execute(self, sql, *args, **kwargs)
-
-        monkeypatch.setattr(sqlite3.Cursor, "execute", spy_execute)
+        seen_sqls = _spy_store_sql(store, monkeypatch)
         store.recall(ws, query="anything", limit=2)
 
         # The kind prefetch signature is a SELECT * FROM notes that ends
-        # in `ORDER BY created_at DESC LIMIT ?` (no `note_id DESC`
+        # in `ORDER BY created_at DESC LIMIT <n>` (no `note_id DESC`
         # tie-break — _recall_floor_notes uses `created_at DESC, note_id
         # DESC`, the sort-aware prefetch uses one of three `ORDER BY`
         # variants, and recall's SQL path appends `LIMIT ?` to the
@@ -4348,9 +4358,9 @@ class TestSemanticRecall:
         prefetch_sqls = [
             s for s in seen_sqls
             if "SELECT * FROM notes" in s
-            and "workspace = ?" in s
+            and "workspace = " in s
             and "note_id IN" not in s
-            and s.rstrip().endswith("ORDER BY created_at DESC LIMIT ?")
+            and re.search(r"ORDER BY created_at DESC LIMIT \d+$", s.rstrip())
         ]
         assert not prefetch_sqls, (
             "kind-gated SQL prefetch must not run when no `kind` filter "

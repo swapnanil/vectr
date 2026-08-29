@@ -929,6 +929,9 @@ def client_real_memory(tmp_path):
             ws, note_id, anchors, session_id=session_id
         )
     )
+    svc.detach_anchors.side_effect = (
+        lambda note_id, anchors: real_store.detach_anchors(ws, note_id, anchors)
+    )
 
     # TRIGGER-ENGINE wave 2a: a minimal per-session ledger registry mirroring
     # `VectrService._ledger_for`/`reset_trigger_ledger` so REST-level tests
