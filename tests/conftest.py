@@ -14,6 +14,7 @@ import sys
 import textwrap
 import tempfile
 import threading
+import zlib
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
@@ -91,6 +92,63 @@ def _isolated_cache_root(tmp_path_factory) -> Generator[Path, None, None]:
     mp.setenv(CACHE_DIR_ENV, str(cache_dir))
     try:
         yield cache_dir
+    finally:
+        mp.undo()
+
+
+# ---------------------------------------------------------------------------
+# UPG-TEST-REGISTRY-NOT-ISOLATED: redirect the session off the developer's
+# real instance registry (~/.vectr/instances.json).
+#
+# `REGISTRY_PATH = Path.home() / ".vectr" / "instances.json"`
+# (agent/instance_registry.py:16) sits OUTSIDE VECTR_CACHE_DIR, so the
+# `_isolated_cache_root` fixture above does not cover it. Every product call
+# site that builds `InstanceRegistry()` without an explicit `registry_path=`
+# — main.py's cmd_start / cmd_status / cmd_stop / cmd_restart and
+# agent.cache_maintenance.live_instance_slugs — would otherwise read and
+# write the developer's real file. Two distinct harms: (1) a unit test can
+# observe the live daemon's entry on port 8765 and have its verdict decided
+# by the workstation (same class as UPG-TEST-LIVE-DAEMON-PORT-CONTAMINATION),
+# and (2) a unit run can corrupt the user's real registry.
+#
+# Mechanical constraint (do not skip): `__init__` captures the module-level
+# `REGISTRY_PATH` as its default-argument value at class definition. Patching
+# the module attribute (`agent.instance_registry.REGISTRY_PATH = ...`) does
+# NOTHING for `InstanceRegistry()` with no args — the default is already
+# bound in the function's `__defaults__` tuple. The correct seam is to wrap
+# `__init__` itself and inject the test path when the caller didn't. This is
+# deliberately test-only: routing REGISTRY_PATH through vectr_cache_root()
+# would be a product change (relocates a user-visible file) and needs its
+# own gate and migration story.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_instance_registry(tmp_path_factory) -> Generator[Path, None, None]:
+    from agent import instance_registry
+
+    isolated_dir = tmp_path_factory.mktemp("vectr_instance_registry")
+    isolated_path = isolated_dir / "instances.json"
+    real_init = instance_registry.InstanceRegistry.__init__
+
+    def _isolated_init(self, registry_path: Path = None) -> None:
+        # `Path = None` (not the real default) so the sentinel is detectable:
+        # an explicit `registry_path=` from a test or product call still wins
+        # (no `is None` substitution), and a caller that genuinely wants the
+        # developer's real path can still get it by passing
+        # `registry_path=instance_registry.REGISTRY_PATH` — nothing here
+        # forbids that, only patches the silent no-arg case.
+        if registry_path is None:
+            registry_path = isolated_path
+        real_init(self, registry_path)
+
+    # `_isolated_init.__defaults__` stays (None,) on purpose: that sentinel
+    # is what tells the wrapper the caller didn't pass an explicit path.
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(instance_registry.InstanceRegistry, "__init__", _isolated_init)
+    try:
+        yield isolated_path
     finally:
         mp.undo()
 
@@ -508,13 +566,28 @@ def wait_for_deferred_purpose_pass(idx, timeout: float = 30.0) -> None:
 # ---------------------------------------------------------------------------
 
 class _DummyEmbedProvider:
-    """Deterministic 768-dim embedder for unit tests. Matches nomic-embed-code dim."""
+    """Deterministic, process-independent 768-dim embedder for unit tests.
+    Matches nomic-embed-code dim.
+
+    Vectors are seeded from a stable digest (zlib.crc32) of the text — NOT
+    from Python's built-in ``hash()`` for str, which is salted by
+    ``PYTHONHASHSEED`` and so produced different vectors in every pytest
+    process. That made any assertion whose verdict depended on dense ranking
+    ORDER (rather than mere presence) nondeterministic across runs, with the
+    resulting flakes looking like product regressions because neither the
+    test code nor the product code had changed (UPG-DUMMY-EMBEDDER-HASH-
+    DETERMINISM). zlib.crc32 is stdlib, has no external dependency, and is
+    stable across processes for the same input bytes."""
     DIM = 768
 
     def encode(self, texts: list[str]) -> np.ndarray:
         out = []
         for text in texts:
-            seed = abs(hash(text[:80])) % (2**31)
+            # crc32 returns a 32-bit unsigned int — used directly as a
+            # RandomState seed so the same text always lands on the same
+            # vector (deterministic across processes, deterministic across
+            # runs, deterministic across pytest invocations).
+            seed = zlib.crc32(text[:80].encode("utf-8"))
             rng = np.random.RandomState(seed)
             v = rng.randn(self.DIM).astype(np.float32)
             norm = np.linalg.norm(v)
