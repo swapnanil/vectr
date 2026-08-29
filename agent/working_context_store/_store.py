@@ -1990,6 +1990,90 @@ class WorkingContextStore:
             audit("ANCHOR_ATTACH", workspace=workspace, note_id=note_id, attached=attached)
         return {"attached": attached, "already_present": already_present}
 
+    def detach_anchors(
+        self,
+        workspace: str,
+        note_id: int,
+        anchors: list[str],
+    ) -> dict[str, list[str]] | None:
+        """Remove anchor paths from an EXISTING note (UPG-ANCHOR-DETACH,
+        `vectr_unanchor`): the inverse of `attach_anchors()`. Like attach,
+        anchors are delivery-shaping metadata, so this is a plain UPDATE
+        plus one `audit()` call — deliberately NOT a note_events lifecycle
+        event: NOTE_EVENT_KINDS covers the note's content lifecycle, and
+        staleness is re-derived from live anchor hashes on every
+        check_staleness() anyway, so a removed anchor drops out of the
+        next check with no event required.
+
+        Path comparison mirrors `attach_anchors()` exactly: exact string
+        equality on element 0 of the pair (the same value `remember()`
+        stored verbatim). A note anchored via one spelling of a path is
+        detachable by that same spelling only — no normalisation, by
+        design, so a deliberate spelling difference stays a deliberate
+        spelling difference.
+
+        Idempotent: a requested path not present on the note is reported
+        in `not_present` (the attach-mirror's name `already_present`
+        would be a lie — the path is not "already" removed, it was never
+        there). A fully-idempotent request (nothing to remove) writes
+        nothing and audits nothing.
+
+        Returns {"removed": [...], "not_present": [...]} — removed lists
+        paths actually dropped, in request order — or None if the note
+        does not exist in this workspace. Raises ValueError when
+        `anchors` is empty, mirroring `attach_anchors()`'s
+        require-at-least-one-field contract.
+
+        When the last anchor is removed, the column is written as `[]` —
+        the same default the schema migration writes for notes that have
+        never had an anchor (TEXT NOT NULL DEFAULT '[]'), so a detached-
+        to-zero note is byte-identical to a never-anchored note on
+        reload. No NULL is ever written.
+        """
+        if not anchors:
+            raise ValueError("detach_anchors requires at least one anchor path")
+        note = self.get_note(workspace, note_id)
+        if note is None:
+            return None
+        existing_pairs = [list(a) for a in (note.anchors or [])]
+        existing_paths = {a[0]: a for a in existing_pairs}
+        removed: list[str] = []
+        not_present: list[str] = []
+        keep_pairs: list[list] = []
+        # Walk the REQUEST list (not the existing pairs) so a duplicate
+        # entry in the request (`['x.py', 'x.py']`) reports as
+        # one-removed + one-dup, mirroring attach_anchors()'s
+        # one-attached + one-already_present. Per-anchor dedup is
+        # responsibility of the caller; the contract is that we report
+        # what each entry of the request resolved to.
+        requested_seen: set[str] = set()
+        for p in anchors:
+            if p in requested_seen:
+                # Duplicate of an earlier request entry — exact
+                # symmetric of attach_anchors()'s `if p in existing_paths`
+                # branch: the path was already removed by the first
+                # occurrence, so report it as a no-op against the now-
+                # empty post-removal state.
+                not_present.append(p)
+                continue
+            requested_seen.add(p)
+            if p in existing_paths:
+                # Drop the existing pair, record the removal.
+                keep_pairs = [a for a in existing_pairs if a[0] != p]
+                existing_pairs = keep_pairs
+                existing_paths.pop(p, None)
+                removed.append(p)
+            else:
+                not_present.append(p)
+        if removed:
+            with self._conn() as conn:
+                conn.execute(
+                    "UPDATE notes SET anchors = ? WHERE workspace = ? AND note_id = ?",
+                    (json.dumps(keep_pairs), workspace, note_id),
+                )
+            audit("ANCHOR_DETACH", workspace=workspace, note_id=note_id, removed=removed)
+        return {"removed": removed, "not_present": not_present}
+
     def revoke_note(
         self,
         workspace: str,
@@ -2710,7 +2794,26 @@ class WorkingContextStore:
         # over-fetch through the canonical width helper (docstring carries
         # the full invariant; the col_count cap avoids ChromaDB errors on
         # collections smaller than the ask).
-        n_query = working_memory_fetch_width(limit, col_count)
+        #
+        # UPG-SEMANTIC-UNDERFILL: a `kind` filter is a SQL-side predicate
+        # whose selectivity against the same-workspace corpus is unknowable
+        # at fetch time. The base width is `limit * 3`; if 90% of the pool
+        # is the wrong kind, the render still leaves the caller short of
+        # `limit` with no signal that the shortfall is a pool artifact
+        # rather than the store's true answer. `kind` is the one filter
+        # whose selectivity has a rough prior (kind takes one of 7 values,
+        # so even a perfectly-distributed corpus has ~14% of rows passing),
+        # so deepen the pool with `floor=limit*10` only when `kind` is set.
+        # This is a guess, not a measurement: the cost is a single ChromaDB
+        # query at a wider `n_results` (cosine over pre-computed vectors,
+        # the actual embeddings are not recomputed), which the
+        # `working_memory_fetch_width` helper's col_count cap still bounds
+        # for small corpora. min_similarity is intentionally NOT widened
+        # here: it's a cutoff on the score itself, so a query whose whole
+        # pool sits below the floor SHOULD return nothing — that's correct
+        # behavior, not underfill.
+        kind_floor = limit * 10 if kind else 0
+        n_query = working_memory_fetch_width(limit, col_count, floor=kind_floor)
 
         q_vec = self._embed_query_fn([query])[0]
         with timed_chroma_call("query"):
@@ -2787,6 +2890,41 @@ class WorkingContextStore:
         # Preserve semantic rank order by default (ChromaDB returns by ascending distance)
         id_to_row = {r["note_id"]: r for r in rows}
         if sort_by == "relevance":
+            # UPG-SEMANTIC-UNDERFILL: a `kind` filter can leave the
+            # relevance branch under-filled even after the fetch width
+            # deepening above. The pool-deepening is a guess; this prefetch
+            # is the deterministic backstop — it re-runs the same
+            # `kind`/`valid_until`/etc. metadata filters (NO semantic
+            # `note_id IN (...)` clause, otherwise the prefetch would be a
+            # no-op) and unions the survivors into the rank-ordered pool.
+            # Survivors arrive appended to the end of candidate_ids so the
+            # `[:limit]` below keeps the existing rank order for notes that
+            # were in the original pool and only fills the tail with these
+            # additional same-workspace, kind-matching rows. min_similarity
+            # is NOT applied here: it's a vector-score cutoff, not a
+            # selectivity filter, so prefetched rows have no measured score
+            # to compare against. (This mirrors the existing
+            # sort-aware-prefetch in the non-relevance branch below, which
+            # also exempts prefetched rows from min_similarity — see the
+            # UPG-RECALL-SEMANTIC-POOL-SORT-TRUNCATION comment.)
+            if kind:
+                prefetch_sql_kind = (
+                    "SELECT * FROM notes WHERE workspace = ?"
+                    + filter_sql
+                    + " ORDER BY created_at DESC LIMIT ?"
+                )
+                with self._conn() as conn:
+                    rows_kind = conn.execute(
+                        prefetch_sql_kind, [workspace, *filter_params, limit],
+                    ).fetchall()
+                existing_ids = set(id_to_row.keys())
+                for r in rows_kind:
+                    if r["note_id"] not in existing_ids:
+                        id_to_row[r["note_id"]] = r
+                        # Append to candidate_ids so the [:limit] below
+                        # keeps the semantic rank order for pool survivors
+                        # and only fills the tail with the prefetched rows.
+                        candidate_ids.append(r["note_id"])
             ordered = [id_to_row[nid] for nid in candidate_ids if nid in id_to_row][:limit]
             notes = [self._row_to_note(r) for r in ordered]
         else:

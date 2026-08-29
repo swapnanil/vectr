@@ -5254,3 +5254,174 @@ class TestCodexInitIntegration:
     def test_disclosure_lists_codex_config(self):
         assert ".codex/config.toml" in m._IDE_CONFIG_WRITES_DISCLOSURE
         assert "8 files" in m._IDE_CONFIG_WRITES_DISCLOSURE
+
+
+# ---------------------------------------------------------------------------
+# cmd_anchor / cmd_unanchor (UPG-ANCHOR-ATTACH / UPG-ANCHOR-DETACH)
+# ---------------------------------------------------------------------------
+
+class TestCmdAnchor:
+    """UPG-ANCHOR-ATTACH: cmd_anchor is the shell path to POST /v1/anchor.
+    The dispatch table registers the cmd; the parser requires --id and
+    one-or-more PATHs; the call posts the payload as JSON to the daemon."""
+
+    def test_anchor_posts_to_v1_anchor_with_note_id_and_paths(self, tmp_path):
+        from unittest.mock import patch, MagicMock
+        import argparse
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "note_id": 42,
+            "attached": ["src/auth.py"],
+            "already_present": [],
+            "message": "Attached 1 anchor(s) to note #42.",
+            "processing_ms": 3,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(
+                note_id=42, paths=["src/auth.py", "src/server.py"],
+                path=str(tmp_path), port=8765,
+            )
+            m.cmd_anchor(args)
+
+        mock_post.assert_called_once()
+        call_url = mock_post.call_args[0][0]
+        assert "/v1/anchor" in call_url
+        payload = mock_post.call_args[1]["json"]
+        assert payload == {"note_id": 42, "anchors": ["src/auth.py", "src/server.py"]}
+
+    def test_anchor_parser_requires_note_id_and_one_or_more_paths(self):
+        """Argparse parity with REST (min_length=1) and MCP (non-empty
+        anchors list): nargs='+' on the positional PATH and required=True
+        on --id are the load-bearing pieces."""
+        from unittest.mock import patch
+        with patch("main.cmd_anchor") as mock_cmd:
+            with patch("sys.argv", ["vectr", "anchor", "src/auth.py", "--id", "42"]):
+                m.main()
+        # Both present: cmd_anchor was dispatched with both args.
+        assert mock_cmd.call_count == 1
+        ns = mock_cmd.call_args[0][0]
+        assert ns.paths == ["src/auth.py"]
+        assert ns.note_id == 42
+        # Missing --id: argparse exits with SystemExit (status 2). The
+        # command is never dispatched.
+        with patch("main.cmd_anchor") as mock_cmd, \
+             patch("sys.argv", ["vectr", "anchor", "src/auth.py"]):
+            with pytest.raises(SystemExit):
+                m.main()
+        assert mock_cmd.call_count == 0
+        # Zero paths: also a SystemExit (nargs='+') — same contract.
+        with patch("main.cmd_anchor") as mock_cmd, \
+             patch("sys.argv", ["vectr", "anchor", "--id", "42"]):
+            with pytest.raises(SystemExit):
+                m.main()
+        assert mock_cmd.call_count == 0
+
+
+class TestCmdUnanchor:
+    """UPG-ANCHOR-DETACH: cmd_unanchor is the shell path to POST /v1/unanchor.
+    The inverse of cmd_anchor — same shape, different verb."""
+
+    def test_unanchor_posts_to_v1_unanchor_with_note_id_and_paths(self, tmp_path):
+        from unittest.mock import patch, MagicMock
+        import argparse
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "note_id": 42,
+            "removed": ["src/auth.py"],
+            "not_present": [],
+            "message": "Removed 1 anchor(s) from note #42.",
+            "processing_ms": 3,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(
+                note_id=42, paths=["src/auth.py", "src/server.py"],
+                path=str(tmp_path), port=8765,
+            )
+            m.cmd_unanchor(args)
+
+        mock_post.assert_called_once()
+        call_url = mock_post.call_args[0][0]
+        assert "/v1/unanchor" in call_url
+        payload = mock_post.call_args[1]["json"]
+        assert payload == {"note_id": 42, "anchors": ["src/auth.py", "src/server.py"]}
+
+    def test_unanchor_prints_not_present_paths_to_stderr(self, tmp_path, capsys):
+        from unittest.mock import patch, MagicMock
+        import argparse
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "note_id": 42,
+            "removed": [],
+            "not_present": ["src/missing.py"],
+            "message": "Removed 0 anchor(s) from note #42.",
+            "processing_ms": 2,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp):
+            MockReg.return_value.get.return_value = None
+            args = argparse.Namespace(
+                note_id=42, paths=["src/missing.py"],
+                path=str(tmp_path), port=8765,
+            )
+            m.cmd_unanchor(args)
+
+        out, err = capsys.readouterr()
+        assert "Removed 0" in out
+        assert "not_present" in err or "no-op" in err
+        assert "src/missing.py" in err
+
+    def test_unanchor_is_dispatched_in_main(self, tmp_path):
+        """The main() dispatch table routes 'unanchor' to cmd_unanchor."""
+        from unittest.mock import patch, MagicMock
+        import argparse
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "note_id": 1, "removed": ["x.py"], "not_present": [],
+            "message": "Removed 1 anchor(s) from note #1.", "processing_ms": 1,
+        }
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("main.InstanceRegistry") as MockReg, \
+             patch("httpx.post", return_value=mock_resp), \
+             patch("main.cmd_unanchor") as mock_cmd:
+            MockReg.return_value.get.return_value = None
+            with patch("sys.argv", ["vectr", "unanchor", "x.py", "--id", "1"]):
+                m.main()
+        mock_cmd.assert_called_once()
+
+    def test_unanchor_parser_requires_note_id_and_one_or_more_paths(self):
+        """Same nargs='+' / required=True contract as 'anchor' — REST and
+        MCP enforce the same non-empty-anchors floor and the CLI must
+        match, or the surface splits on this single user input."""
+        from unittest.mock import patch
+        with patch("main.cmd_unanchor") as mock_cmd:
+            with patch("sys.argv", ["vectr", "unanchor", "src/auth.py", "--id", "42"]):
+                m.main()
+        assert mock_cmd.call_count == 1
+        ns = mock_cmd.call_args[0][0]
+        assert ns.paths == ["src/auth.py"]
+        assert ns.note_id == 42
+        with patch("main.cmd_unanchor") as mock_cmd, \
+             patch("sys.argv", ["vectr", "unanchor", "src/auth.py"]):
+            with pytest.raises(SystemExit):
+                m.main()
+        assert mock_cmd.call_count == 0
+        with patch("main.cmd_unanchor") as mock_cmd, \
+             patch("sys.argv", ["vectr", "unanchor", "--id", "42"]):
+            with pytest.raises(SystemExit):
+                m.main()
+        assert mock_cmd.call_count == 0

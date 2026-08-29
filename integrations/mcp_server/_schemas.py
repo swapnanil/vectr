@@ -970,6 +970,42 @@ _MEMORY_TOOLS = [
             "required": ["note_id", "anchors"],
         },
     },
+    {
+        "name": "vectr_unanchor",
+        "annotations": {
+            "title": "Remove anchor paths from a stored note",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+        "description": (
+            "Remove file paths from an EXISTING note's anchor set "
+            "(UPG-ANCHOR-DETACH). The inverse of `vectr_anchor`: use it when "
+            "you discover a note was anchored to the wrong file, or when the "
+            "anchored file's relevance has gone away. A removed anchor simply "
+            "stops being a candidate in the next staleness check — never a "
+            "claim that the note is wrong. Idempotent — paths the note was "
+            "never anchored to are reported back, not treated as failures. "
+            "Path comparison is exact-string on the spelling the note was "
+            "anchored with, matching `vectr_anchor`'s contract."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "integer",
+                    "description": "ID of the note to remove anchors from (the [#N] id from vectr_recall)",
+                },
+                "anchors": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Workspace-relative file paths to detach this note from (at least one)",
+                },
+            },
+            "required": ["note_id", "anchors"],
+        },
+    },
 ]  # end _MEMORY_TOOLS
 
 # ingest_traces — not gated by session memory (always available)
@@ -1038,6 +1074,7 @@ MEMORY_READY_TOOLS = frozenset(
         "vectr_supersede",
         "vectr_pin",
         "vectr_anchor",
+        "vectr_unanchor",
         "vectr_status",
         "vectr_snapshot",
         "vectr_snapshot_list",

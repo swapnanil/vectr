@@ -2329,6 +2329,29 @@ class VectrService:
             self._bump_notes_epoch()
         return result
 
+    def detach_anchors(
+        self, note_id: int, anchors: list[str],
+    ) -> dict | None:
+        """Remove anchor paths from an existing note (UPG-ANCHOR-DETACH,
+        `vectr_unanchor`): the inverse of `attach_anchors()`. The
+        single-call replacement for the re-store-with-supersedes
+        workaround's mirror case. See
+        `WorkingContextStore.detach_anchors()` for the exact contract
+        (raises ValueError on empty anchors; returns None if the note does
+        not exist). Idempotent: paths not on the note land in
+        `not_present`; the notes epoch is bumped only when at least one
+        path was actually removed, so a fully-idempotent repeat is not a
+        mutation. Path comparison is exact-string on element 0 of the
+        pair, matching `attach_anchors()` so a note is detachable by the
+        same spelling that anchored it."""
+        self._require_memory_layer()
+        result = self._context_store.detach_anchors(
+            self._workspace_root, note_id, anchors,
+        )
+        if result and result["removed"]:
+            self._bump_notes_epoch()
+        return result
+
     def get_note(self, note_id: int):
         """Fetch a single note by ID (UPG-RECALL-HIERARCHY expand path)."""
         self._require_memory_layer()
