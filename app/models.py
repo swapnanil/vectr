@@ -809,6 +809,34 @@ class AnchorResponse(BaseModel):
     processing_ms: int
 
 
+class UnanchorRequest(BaseModel):
+    """Remove anchor paths from an EXISTING note post-write
+    (UPG-ANCHOR-DETACH) — the inverse of `AnchorRequest` and the
+    single-call replacement for the re-store-with-supersedes workaround's
+    mirror case. Anchors are delivery-shaping staleness probes, never a
+    claim about note correctness: a removed anchor simply stops being a
+    candidate in the next check_staleness() check. See
+    `WorkingContextStore.detach_anchors()` for the idempotency contract
+    and the path-equality rule (exact-string on element 0, matching
+    `attach_anchors()` so a note is detachable by the same spelling that
+    anchored it)."""
+
+    note_id: int = Field(..., description="Note to remove anchors from")
+    anchors: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Workspace-relative file paths to detach this note from (at least one)",
+    )
+
+
+class UnanchorResponse(BaseModel):
+    note_id: int
+    removed: list[str] = Field(default_factory=list, description="Paths actually removed, in request order")
+    not_present: list[str] = Field(default_factory=list, description="Requested paths the note was not anchored to (idempotent no-ops)")
+    message: str
+    processing_ms: int
+
+
 # 'system' is not settable via these REST requests — reserved for the one
 # deterministic, non-judgment transition (stale_flagged, anchor drift);
 # every REVOKE/REINSTATE call here is, definitionally, a judgment call, so

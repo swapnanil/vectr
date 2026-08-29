@@ -613,6 +613,51 @@ class TestRestAnchorAttach:
         assert resp.status_code == 422
 
 
+class TestRestUnanchorDetach:
+    """UPG-ANCHOR-DETACH: POST /v1/unanchor — first-class post-write
+    de-anchoring over the REAL store-backed service. Mirrors
+    POST /v1/anchor's contract: idempotent, 404 on unknown note, 422 on
+    empty anchors."""
+
+    def test_unanchor_round_trip(self, client_real_memory) -> None:
+        r = client_real_memory.post("/v1/remember", json={"content": "how the deploy pipeline works"})
+        nid = r.json()["note_id"]
+        # First attach so the path is actually on the note.
+        client_real_memory.post("/v1/anchor", json={"note_id": nid, "anchors": ["Dockerfile"]})
+        resp = client_real_memory.post("/v1/unanchor", json={
+            "note_id": nid, "anchors": ["Dockerfile"],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["removed"] == ["Dockerfile"]
+        assert data["not_present"] == []
+        assert f"#{nid}" in data["message"]
+
+    def test_unanchor_path_not_on_note_is_a_noop_not_an_error(self, client_real_memory) -> None:
+        """Idempotency: a path the note was never anchored to lands in
+        `not_present`, not a 404 or 422. Mirrors attach's
+        already-present-noop behaviour."""
+        r = client_real_memory.post("/v1/remember", json={"content": "unanchored note"})
+        nid = r.json()["note_id"]
+        resp = client_real_memory.post("/v1/unanchor", json={
+            "note_id": nid, "anchors": ["Dockerfile"],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["removed"] == []
+        assert resp.json()["not_present"] == ["Dockerfile"]
+
+    def test_unanchor_unknown_note_is_404_not_a_silent_ok(self, client_real_memory) -> None:
+        """Lookup semantics on a write surface too: an unknown id says so
+        explicitly (mirrors /v1/anchor's 404 shape)."""
+        resp = client_real_memory.post("/v1/unanchor", json={"note_id": 999999, "anchors": ["x.py"]})
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["error"] == "note_not_found"
+
+    def test_unanchor_empty_anchors_is_422(self, client_real_memory) -> None:
+        resp = client_real_memory.post("/v1/unanchor", json={"note_id": 1, "anchors": []})
+        assert resp.status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # Age string granularity (UPG-RECALL-AGE-GRANULARITY)
 # ---------------------------------------------------------------------------

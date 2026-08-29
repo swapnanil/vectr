@@ -2459,6 +2459,113 @@ class TestAttachAnchors:
         assert note.anchors[0][2] is False
 
 
+class TestDetachAnchors:
+    """UPG-ANCHOR-DETACH: post-write de-anchoring without a re-store —
+    inverse of attach_anchors(). Path comparison mirrors attach exactly
+    (element 0 of the pair, no normalisation); idempotent for paths the
+    note was never anchored to; removes the last anchor as `[]`, not NULL."""
+
+    def test_detach_removes_named_anchor(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note", anchors=["src/auth.py", "src/server.py"])
+        result = store.detach_anchors(ws, nid, ["src/auth.py"])
+        assert result == {"removed": ["src/auth.py"], "not_present": []}
+        note = store.get_note(ws, nid)
+        assert [a[0] for a in note.anchors] == ["src/server.py"]
+
+    def test_detach_unknown_path_is_idempotent_not_an_error(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note", anchors=["src/auth.py"])
+        result = store.detach_anchors(ws, nid, ["src/other.py"])
+        assert result == {"removed": [], "not_present": ["src/other.py"]}
+        note = store.get_note(ws, nid)
+        # Untouched — the rejected-by-absence request never wrote.
+        assert [a[0] for a in note.anchors] == ["src/auth.py"]
+
+    def test_detach_mixed_present_and_absent_preserves_request_order(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note", anchors=["a.py", "b.py"])
+        result = store.detach_anchors(ws, nid, ["b.py", "missing.py", "a.py"])
+        # `removed` and `not_present` both follow request order, like
+        # attach's `attached` and `already_present`.
+        assert result == {"removed": ["b.py", "a.py"], "not_present": ["missing.py"]}
+        note = store.get_note(ws, nid)
+        assert note.anchors == []
+
+    def test_detach_last_anchor_writes_empty_list_never_null(self, tmp_path) -> None:
+        """Schema's TEXT NOT NULL DEFAULT '[]' contract: a detached-to-zero
+        note must reload byte-identical to a never-anchored note."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note", anchors=["src/auth.py"])
+        store.detach_anchors(ws, nid, ["src/auth.py"])
+        note = store.get_note(ws, nid)
+        assert note.anchors == []
+        # The on-disk column must be the JSON `[]` literal, not SQL NULL —
+        # get_note() always materialises the column so a NULL here would
+        # surface as anchors=None from the Note dataclass.
+        from agent.working_context_store import WorkingContextStore as _WCS
+        with _WCS(str(tmp_path))._conn() as conn:
+            raw = conn.execute(
+                "SELECT anchors FROM notes WHERE workspace = ? AND note_id = ?",
+                (ws, nid),
+            ).fetchone()[0]
+        assert raw == "[]"
+
+    def test_detach_is_idempotent_on_repeat(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note", anchors=["src/auth.py"])
+        first = store.detach_anchors(ws, nid, ["src/auth.py"])
+        second = store.detach_anchors(ws, nid, ["src/auth.py"])
+        assert first == {"removed": ["src/auth.py"], "not_present": []}
+        assert second == {"removed": [], "not_present": ["src/auth.py"]}
+
+    def test_detach_duplicate_request_entries_follow_attach_mirror(self, tmp_path) -> None:
+        """A duplicate entry in the request (['x.py', 'x.py']) must report
+        as one-removed + one-not_present, the exact symmetric of
+        attach_anchors()'s one-attached + one-already_present."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note", anchors=["x.py"])
+        result = store.detach_anchors(ws, nid, ["x.py", "x.py"])
+        assert result == {"removed": ["x.py"], "not_present": ["x.py"]}
+
+    def test_detach_unknown_note_returns_none(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        assert store.detach_anchors(ws, 999999, ["a.py"]) is None
+
+    def test_detach_requires_at_least_one_anchor(self, tmp_path) -> None:
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note", anchors=["src/auth.py"])
+        with pytest.raises(ValueError):
+            store.detach_anchors(ws, nid, [])
+        # Unchanged by the rejected call.
+        note = store.get_note(ws, nid)
+        assert [a[0] for a in note.anchors] == ["src/auth.py"]
+
+    def test_detach_stops_anchor_participating_in_staleness_check(self, tmp_path) -> None:
+        """The point of the whole primitive end-to-end: a detached anchor
+        drops out of the next check_staleness() pass. Note stays."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        f = tmp_path / "src" / "server.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("original")
+        nid = store.remember(ws, "gotcha about server.py", anchors=["src/server.py"])
+        store.detach_anchors(ws, nid, ["src/server.py"])
+        f.write_text("changed content")
+        note = store.get_note(ws, nid)
+        # Detached -> no longer a candidate, so no stale flag.
+        assert not store.check_staleness([note], ws).get(nid)
+
+    def test_detach_uses_exact_string_on_path_no_normalisation(self, tmp_path) -> None:
+        """A note anchored as 'src/Auth.py' is not detachable via
+        'src/auth.py' — matching attach_anchors()'s exact-string rule."""
+        store, ws = _store(tmp_path), str(tmp_path)
+        nid = store.remember(ws, "note", anchors=["src/Auth.py"])
+        result = store.detach_anchors(ws, nid, ["src/auth.py"])
+        assert result == {"removed": [], "not_present": ["src/auth.py"]}
+        note = store.get_note(ws, nid)
+        assert [a[0] for a in note.anchors] == ["src/Auth.py"]
+
+
 class TestKindDefaultScopes:
     """UPG-TRIGGER-SCOPE-KIND-DEFAULTS (bm2-design-skeleton.md §1's Default
     bundles table): an OMITTED scope (the caller never passes scope=) is
@@ -4109,6 +4216,165 @@ class TestSemanticRecall:
         ws = "/repo"
         store.remember(ws, "the only note here")
         assert len(store.recall(ws, query="something off topic entirely")) == 1
+
+    def test_kind_filter_deepens_pool_via_floor(self, tmp_path, monkeypatch) -> None:
+        """UPG-SEMANTIC-UNDERFILL: when `kind` is set, _semantic_recall
+        passes a wider `floor` to working_memory_fetch_width() so the
+        vector query is sized to absorb unknown `kind` selectivity rather
+        than the 3x default. Unset `kind` must keep the 3x default — no
+        regression on the no-filter case."""
+        import agent.working_context_store._store as _store_mod
+
+        captured: list[tuple[int, int, int]] = []
+
+        def spy(render_limit, col_count, *, floor=0):
+            captured.append((render_limit, col_count, floor))
+            return _store_mod.working_memory_fetch_width(
+                render_limit, col_count, floor=floor,
+            )
+
+        # The function uses the module-level name; rebinding on the
+        # module is the canonical monkeypatch target.
+        monkeypatch.setattr(_store_mod, "working_memory_fetch_width", spy)
+
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        for i in range(5):
+            store.remember(ws, f"note content {i}")
+
+        # No kind: floor is 0 (the default), width is `limit * 3`.
+        captured.clear()
+        store.recall(ws, query="note content 0", limit=2)
+        assert captured, "working_memory_fetch_width must be called"
+        render_limit, col_count, floor = captured[-1]
+        assert floor == 0
+        # Sanity: the no-kind width is at least limit*3 (and exactly so
+        # when the corpus is bigger than 3x the limit).
+        assert col_count >= render_limit * 3
+
+        # With kind: floor is widened to `limit * 10`, raising the pool
+        # ceiling above the 3x default.
+        captured.clear()
+        store.recall(ws, query="note content 0", limit=2, kind="finding")
+        assert captured, "working_memory_fetch_width must be called"
+        render_limit, col_count, floor = captured[-1]
+        assert floor == render_limit * 10
+
+    def test_kind_prefetch_runs_in_relevance_branch(self, tmp_path, monkeypatch) -> None:
+        """The relevance branch runs the kind-aware SQL prefetch backstop
+        even when the query embedding is unrelated to the corpus (i.e.
+        the semantic pool would not naturally select kind matches first).
+        Verified by intercepting the SQL the prefetch runs and asserting
+        it carries the `kind = ?` predicate."""
+        import sqlite3
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        for i in range(4):
+            store.remember(ws, f"finding note {i}", kind="finding")
+        store.remember(ws, "unrelated task", kind="task")
+
+        seen_sqls: list[str] = []
+
+        # Spy on the store's own _conn() to capture every SQL the
+        # _semantic_recall call makes. We filter for the prefetch
+        # signature (ORDER BY created_at DESC, no `note_id IN` clause).
+        real_execute = sqlite3.Cursor.execute
+
+        def spy_execute(self, sql, *args, **kwargs):
+            seen_sqls.append(sql)
+            return real_execute(self, sql, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite3.Cursor, "execute", spy_execute)
+        store.recall(ws, query="anything", limit=2, kind="finding")
+
+        # The prefetch in the relevance branch runs the metadata filters
+        # WITHOUT a `note_id IN (...)` clause (otherwise the prefetch is
+        # a no-op) and ends with `ORDER BY created_at DESC LIMIT ?`.
+        prefetch_sqls = [
+            s for s in seen_sqls
+            if "kind = ?" in s
+            and "note_id IN" not in s
+            and "ORDER BY created_at DESC" in s
+        ]
+        assert prefetch_sqls, (
+            "kind-aware SQL prefetch should run in the relevance branch "
+            "when kind= is set, so underfill is the backstop of the "
+            "pool widening rather than the only fix"
+        )
+
+    def test_kind_prefetch_does_not_leak_other_kinds(self, tmp_path) -> None:
+        """The SQL prefetch reuses the kind predicate (filter_sql), so a
+        `kind='finding'` recall must NEVER surface rows of any other kind,
+        even if those rows are abundant in the corpus."""
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        for _ in range(4):
+            store.remember(ws, "task one", kind="task")
+        for _ in range(4):
+            store.remember(ws, "gotcha one", kind="gotcha")
+        # Only the kind that matches the filter is expected back.
+        notes = store.recall(ws, query="anything", limit=10, kind="task")
+        assert notes
+        assert all(n.kind == "task" for n in notes)
+
+    def test_no_kind_filter_does_not_run_kind_prefetch(self, tmp_path, monkeypatch) -> None:
+        """The fix is `kind`-gated: a recall() without `kind=...` must
+        NOT run the new SQL prefetch (no selectivity problem to fix)."""
+        import sqlite3
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        for i in range(3):
+            store.remember(ws, f"note {i}")
+
+        seen_sqls: list[str] = []
+        real_execute = sqlite3.Cursor.execute
+
+        def spy_execute(self, sql, *args, **kwargs):
+            seen_sqls.append(sql)
+            return real_execute(self, sql, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite3.Cursor, "execute", spy_execute)
+        store.recall(ws, query="anything", limit=2)
+
+        # The kind prefetch signature is a SELECT * FROM notes that ends
+        # in `ORDER BY created_at DESC LIMIT ?` (no `note_id DESC`
+        # tie-break — _recall_floor_notes uses `created_at DESC, note_id
+        # DESC`, the sort-aware prefetch uses one of three `ORDER BY`
+        # variants, and recall's SQL path appends `LIMIT ?` to the
+        # `ORDER BY` rather than ending with `LIMIT ?` alone). The
+        # kind gate is exactly that the prefetch includes `kind = ?` in
+        # its WHERE — without a kind filter, the underfill fix is not
+        # applicable, so the query must not run.
+        prefetch_sqls = [
+            s for s in seen_sqls
+            if "SELECT * FROM notes" in s
+            and "workspace = ?" in s
+            and "note_id IN" not in s
+            and s.rstrip().endswith("ORDER BY created_at DESC LIMIT ?")
+        ]
+        assert not prefetch_sqls, (
+            "kind-gated SQL prefetch must not run when no `kind` filter "
+            "is set — the underfill fix is intentionally narrow"
+        )
+
+    def test_kind_underfill_with_min_similarity_still_respects_floor(self, tmp_path) -> None:
+        """min_similarity and the kind backstop coexist: even when the
+        pool is widened for kind, an off-topic query whose whole pool is
+        below min_similarity still returns nothing. The underfill fix
+        only addresses the kind selectivity artifact, not the similarity
+        cutoff (which is correct behavior, not underfill — see
+        UPG-5.1)."""
+        store = _semantic_store(tmp_path)
+        ws = "/repo"
+        store.remember(ws, "finding about tp_del legacy garbage")
+        # Unrelated query with a 0.5 floor — every vector in the pool is
+        # near-orthogonal under _dummy_embed, so the floor withholds all.
+        notes = store.recall(
+            ws, query="kubernetes ingress controller",
+            kind="finding", min_similarity=0.5,
+        )
+        assert notes == []
+
 
     def test_forget_removes_from_chroma(self, tmp_path) -> None:
         import chromadb

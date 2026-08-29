@@ -2443,6 +2443,30 @@ def cmd_anchor(args: argparse.Namespace) -> None:
         _handle_daemon_call_error(exc, port)
 
 
+def cmd_unanchor(args: argparse.Namespace) -> None:
+    """Remove file anchors from an existing working-memory note
+    (UPG-ANCHOR-DETACH): the shell path to POST /v1/unanchor, mirroring
+    the MCP `vectr_unanchor` tool — post-write de-anchoring without
+    re-storing. The inverse of `vectr anchor`. Idempotent: paths the note
+    is not anchored to are reported, not treated as failures."""
+    import httpx
+
+    workspace = str(Path(args.path).resolve())
+    port = _get_port_for_workspace(workspace, args.port)
+    _check_version_skew(port, registry_entry=_resolve_hook_instance(workspace))
+    payload: dict = {"note_id": args.note_id, "anchors": list(args.paths)}
+    try:
+        resp = httpx.post(f"{_api_base(port)}/v1/unanchor", json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        print(data.get("message", "Unanchored."))
+        not_present = data.get("not_present") or []
+        if not_present:
+            print(f"Not anchored (no-op): {', '.join(not_present)}", file=sys.stderr)
+    except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
+        _handle_daemon_call_error(exc, port)
+
+
 def cmd_recall(args: argparse.Namespace) -> None:
     """Print recalled working-memory notes to stdout (UPG-9.1).
 
@@ -4408,6 +4432,17 @@ def main() -> None:
     p_anchor.add_argument("--path", default=_default_path)
     p_anchor.add_argument("--port", type=int, default=_default_port)
 
+    p_unanchor = sub.add_parser("unanchor", help="Remove file anchors from an existing working-memory note")
+    # Same positional-paths convention as 'anchor' (--path is the universal
+    # workspace-root flag on every subcommand); nargs="+" enforces the
+    # non-empty contract that REST and MCP both pin.
+    p_unanchor.add_argument("paths", nargs="+", metavar="PATH",
+                            help="Workspace-relative file path(s) to detach this note from")
+    p_unanchor.add_argument("--id", type=int, required=True, dest="note_id",
+                            help="Note ID to remove anchors from (the [#N] id from 'vectr recall')")
+    p_unanchor.add_argument("--path", default=_default_path)
+    p_unanchor.add_argument("--port", type=int, default=_default_port)
+
     p_resume = sub.add_parser(
         "resume",
         help="Print 'pick up where you left off' to stdout",
@@ -4572,6 +4607,7 @@ def main() -> None:
         "remember": cmd_remember,
         "recall":  cmd_recall,
         "anchor":  cmd_anchor,
+        "unanchor": cmd_unanchor,
         "resume":  cmd_resume,
         "hook":    cmd_hook,
         "key":     cmd_key,

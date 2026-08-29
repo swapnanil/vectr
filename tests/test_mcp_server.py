@@ -2265,6 +2265,105 @@ class TestVectrAnchor:
         from integrations.mcp_server._schemas import MEMORY_READY_TOOLS
         assert "vectr_anchor" in MEMORY_READY_TOOLS
 
+
+# ---------------------------------------------------------------------------
+# vectr_unanchor (UPG-ANCHOR-DETACH)
+# ---------------------------------------------------------------------------
+
+class TestVectrUnanchor:
+    """UPG-ANCHOR-DETACH: vectr_unanchor dispatch — first-class post-write
+    de-anchoring, the inverse of vectr_anchor."""
+
+    def test_unanchor_calls_service_and_renders_result(self) -> None:
+        svc = _mock_service()
+        svc.detach_anchors.return_value = {"removed": ["Dockerfile"], "not_present": []}
+        result = handle_tools_call("vectr_unanchor", {"note_id": 42, "anchors": ["Dockerfile"]}, svc)
+        assert result["isError"] is False
+        assert_seam_call(
+            svc.detach_anchors, VectrService.detach_anchors,
+            note_id=42, anchors=["Dockerfile"],
+        )
+        text = result["content"][0]["text"]
+        assert "Removed 1 anchor(s)" in text
+
+    def test_unanchor_reports_not_present_paths_as_noop(self) -> None:
+        svc = _mock_service()
+        svc.detach_anchors.return_value = {"removed": [], "not_present": ["Dockerfile"]}
+        result = handle_tools_call("vectr_unanchor", {"note_id": 42, "anchors": ["Dockerfile"]}, svc)
+        assert result["isError"] is False
+        assert "no-op" in result["content"][0]["text"]
+        assert "Dockerfile" in result["content"][0]["text"]
+
+    def test_unanchor_unknown_note_is_an_explicit_error(self) -> None:
+        """Lookup semantics, consistent with vectr_anchor's not-found shape
+        and UPG-RECALL-NOTE-ID-NO-EXPAND's never-fallback rule."""
+        svc = _mock_service()
+        svc.detach_anchors.return_value = None
+        result = handle_tools_call("vectr_unanchor", {"note_id": 99999, "anchors": ["a.py"]}, svc)
+        assert result["isError"] is True
+        assert "not found" in result["content"][0]["text"]
+
+    def test_unanchor_value_error_on_empty_anchors_is_an_error(self) -> None:
+        """Store raises ValueError on empty anchors; dispatch surfaces it
+        as a tool error, same shape as vectr_anchor's empty-anchors error."""
+        svc = _mock_service()
+        svc.detach_anchors.side_effect = ValueError("detach_anchors requires at least one anchor path")
+        result = handle_tools_call("vectr_unanchor", {"note_id": 42, "anchors": ["a.py"]}, svc)
+        assert result["isError"] is True
+        assert "requires at least one anchor" in result["content"][0]["text"]
+
+    def test_unanchor_missing_note_id_is_an_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_unanchor", {"anchors": ["a.py"]}, svc)
+        assert result["isError"] is True
+        svc.detach_anchors.assert_not_called()
+
+    def test_unanchor_bool_note_id_is_an_error_not_silent_note_1(self) -> None:
+        """Same guard as vectr_anchor: JSON true is an int subclass
+        (int(True) == 1) and would silently mutate an unrelated note."""
+        svc = _mock_service()
+        result = handle_tools_call("vectr_unanchor", {"note_id": True, "anchors": ["a.py"]}, svc)
+        assert result["isError"] is True
+        svc.detach_anchors.assert_not_called()
+
+    def test_unanchor_malformed_note_id_is_an_error(self) -> None:
+        svc = _mock_service()
+        result = handle_tools_call("vectr_unanchor", {"note_id": "#42", "anchors": ["a.py"]}, svc)
+        assert result["isError"] is True
+        svc.detach_anchors.assert_not_called()
+
+    def test_unanchor_missing_empty_or_non_string_anchors_are_errors(self) -> None:
+        """Same load-bearing non-empty-list guard as vectr_anchor: REST
+        enforces min_length=1 and the CLI enforces nargs='+', so the
+        dispatch-side check must agree or the surface splits."""
+        svc = _mock_service()
+        for bad_args in (
+            {"note_id": 42},                          # anchors absent
+            {"note_id": 42, "anchors": []},           # empty list
+            {"note_id": 42, "anchors": [""]},         # empty string element
+            {"note_id": 42, "anchors": [42]},         # non-string element
+            {"note_id": 42, "anchors": "a.py"},       # bare string, not a list
+        ):
+            result = handle_tools_call("vectr_unanchor", bad_args, svc)
+            assert result["isError"] is True, f"{bad_args!r} must be rejected"
+        svc.detach_anchors.assert_not_called()
+
+    def test_unanchor_schema_declares_both_required_args(self) -> None:
+        from integrations.mcp_server._schemas import MCP_TOOLS
+        matches = [t for t in MCP_TOOLS if t["name"] == "vectr_unanchor"]
+        assert len(matches) == 1
+        schema = matches[0]["inputSchema"]
+        assert schema["required"] == ["note_id", "anchors"]
+        assert matches[0]["annotations"]["idempotentHint"] is True
+        assert matches[0]["annotations"]["destructiveHint"] is False
+
+    def test_unanchor_is_memory_ready_gated(self) -> None:
+        """Servable as soon as phase 1 construction completes, like its
+        sibling working-note mutators — no model load, no indexer, no
+        searcher, no watcher required to detach an anchor."""
+        from integrations.mcp_server._schemas import MEMORY_READY_TOOLS
+        assert "vectr_unanchor" in MEMORY_READY_TOOLS
+
     def test_recall_appends_eviction_hint_when_should_evict(self) -> None:
         svc = _mock_service()
         svc.auto_eviction_hint.return_value = "Drop these: segment.py"  # UPG-7.1 gated path
@@ -2469,8 +2568,9 @@ class TestVectrForget:
         # memoization-l3-distiller-design added vectr_distill (19 = 18 + 1);
         # UPG-RECALL-MISS-FLOOR part (b) added vectr_pin (20 = 19 + 1);
         # UPG-ANCHOR-ATTACH added vectr_anchor (21 = 20 + 1);
-        # UPG-NOTE-RETIRE-POST-HOC added vectr_supersede (22 = 21 + 1).
-        assert len(tools) == 22
+        # UPG-NOTE-RETIRE-POST-HOC added vectr_supersede (22 = 21 + 1);
+        # UPG-ANCHOR-DETACH added vectr_unanchor (23 = 22 + 1).
+        assert len(tools) == 23
         assert {
             "vectr_recall", "vectr_forget", "vectr_promote", "vectr_revoke", "vectr_reinstate",
             "vectr_snapshot", "vectr_snapshot_list", "vectr_resume", "vectr_distill", "vectr_pin",

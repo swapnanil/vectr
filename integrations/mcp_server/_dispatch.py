@@ -89,11 +89,11 @@ def handle_tools_list(session_id: str | None = None, service: Any = None) -> dic
     notes existing: every _MEMORY_TOOLS member (vectr_recall,
     vectr_snapshot, vectr_snapshot_list, vectr_resume, vectr_forget,
     vectr_promote, vectr_revoke, vectr_reinstate, vectr_supersede,
-    vectr_pin, vectr_anchor). The grouped lists above are kept in sync
-    with _EXPLORATION_TOOLS / _MEMORY_WRITE_TOOLS / _UTILITY_TOOLS /
-    _MEMORY_TOOLS in integrations/mcp_server/_schemas.py — re-derive
-    them from those constants when changing tool membership, rather than
-    hand-editing.
+    vectr_pin, vectr_anchor, vectr_unanchor). The grouped lists above
+    are kept in sync with _EXPLORATION_TOOLS / _MEMORY_WRITE_TOOLS /
+    _UTILITY_TOOLS / _MEMORY_TOOLS in integrations/mcp_server/_schemas.py
+    — re-derive them from those constants when changing tool membership,
+    rather than hand-editing.
     """
     # Hosted/registry deployments (e.g. a catalog's containerised inspector)
     # start with an empty note store but must still advertise the complete
@@ -1416,6 +1416,43 @@ def handle_tools_call(
         if result["already_present"]:
             parts.append(f"Already anchored (no-op): {', '.join(result['already_present'])}.")
         parts.append("A changed anchor means the process MAY have changed, never that the note is wrong.")
+        return {
+            "content": [{"type": "text", "text": " ".join(parts)}],
+            "isError": False,
+        }
+
+    # ---- vectr_unanchor ----
+    if tool_name == "vectr_unanchor":
+        # UPG-ANCHOR-DETACH: post-write de-anchoring without a re-store.
+        if getattr(service, "search_only", False):
+            from app.service import _SEARCH_ONLY_MSG
+            return {"content": [{"type": "text", "text": _SEARCH_ONLY_MSG}], "isError": False}
+
+        note_id = arguments.get("note_id")
+        # Bool rejected up front: same guard as vectr_anchor (JSON true/false
+        # are int subclasses, so int(True) == 1 would silently mutate note #1).
+        if note_id is None or isinstance(note_id, bool):
+            return _mcp_error("note_id is required as an integer (the [#N] id shown by vectr_recall)")
+        try:
+            nid = int(note_id)
+        except (TypeError, ValueError):
+            return _mcp_error("note_id must be an integer (the [#N] id shown by vectr_recall)")
+        anchors_arg = arguments.get("anchors")
+        # Same non-empty-list guard as vectr_anchor (see comment there on
+        # why `not anchors_arg` is load-bearing, not `not all(...)`).
+        if not isinstance(anchors_arg, list) or not anchors_arg or not all(
+            isinstance(a, str) and a.strip() for a in anchors_arg
+        ):
+            return _mcp_error("anchors must be a non-empty list of file paths")
+        try:
+            result = service.detach_anchors(note_id=nid, anchors=anchors_arg)
+        except ValueError as exc:
+            return _mcp_error(str(exc))
+        if result is None:
+            return _mcp_error(f"Note #{nid} not found.")
+        parts = [f"Removed {len(result['removed'])} anchor(s) from note #{nid}."]
+        if result["not_present"]:
+            parts.append(f"Not anchored (no-op): {', '.join(result['not_present'])}.")
         return {
             "content": [{"type": "text", "text": " ".join(parts)}],
             "isError": False,

@@ -14,6 +14,8 @@ from agent.working_context_store import USER_STATED_PROVENANCE, bind_user_quote,
 from app.models import (
     AnchorRequest,
     AnchorResponse,
+    UnanchorRequest,
+    UnanchorResponse,
     ArcRecord,
     ArcResolveResult,
     ArcsDismissRequest,
@@ -588,6 +590,31 @@ async def anchor(body: AnchorRequest, request: Request) -> AnchorResponse:
         attached=result["attached"],
         already_present=result["already_present"],
         message=f"Attached {len(result['attached'])} anchor(s) to note #{body.note_id}.",
+        processing_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+@router.post("/v1/unanchor", response_model=UnanchorResponse)
+async def unanchor(body: UnanchorRequest, request: Request) -> UnanchorResponse:
+    """Remove anchor paths from an existing note post-write
+    (UPG-ANCHOR-DETACH, `vectr_unanchor`): the inverse of POST /v1/anchor.
+    Anchors are delivery-shaping metadata — a removed anchor simply stops
+    being a candidate in the next check_staleness() check, never a claim
+    that the note is wrong. Idempotent: paths the note was never anchored
+    to are reported in `not_present`, not treated as failures."""
+    t0 = time.monotonic()
+    svc = _service(request)
+    if getattr(svc, "search_only", False):
+        from app.service import _SEARCH_ONLY_MSG
+        raise HTTPException(status_code=503, detail={"error": "search_only_mode", "detail": _SEARCH_ONLY_MSG})
+    result = svc.detach_anchors(body.note_id, body.anchors)
+    if result is None:
+        raise HTTPException(status_code=404, detail={"error": "note_not_found", "detail": f"Note #{body.note_id} not found."})
+    return UnanchorResponse(
+        note_id=body.note_id,
+        removed=result["removed"],
+        not_present=result["not_present"],
+        message=f"Removed {len(result['removed'])} anchor(s) from note #{body.note_id}.",
         processing_ms=int((time.monotonic() - t0) * 1000),
     )
 
