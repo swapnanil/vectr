@@ -40,6 +40,9 @@ from agent.config import (
     NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS as _NOTFOUND_FLOOR_MIN_ZERO_DF_TOKENS,
     NOTFOUND_FLOOR_MIN_TOP_RELEVANCE as _NOTFOUND_FLOOR_MIN_TOP_RELEVANCE,
     NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE as _NOTFOUND_FLOOR_CE_OVERRIDE_MIN_RELEVANCE,
+    RELATIVE_CLIFF_ENABLED as _RELATIVE_CLIFF_ENABLED,
+    RELATIVE_CLIFF_MIN_TOP as _RELATIVE_CLIFF_MIN_TOP,
+    RELATIVE_CLIFF_MIN_DROP as _RELATIVE_CLIFF_MIN_DROP,
     RESULT_FLOOR_ENABLED as _RESULT_FLOOR_ENABLED,
     RESULT_FLOOR_MIN_RELEVANCE as _RESULT_FLOOR_MIN_RELEVANCE,
     DOCSTRING_DEDUP_BODY_SIMILARITY_MIN as _DOCSTRING_DEDUP_BODY_SIMILARITY_MIN,
@@ -47,6 +50,7 @@ from agent.config import (
     vectr_cache_root as _vectr_cache_root,
 )
 from agent.indexer import CodeIndexer
+from agent.ranking_cliff import relative_cliff_fires as _relative_cliff_fires
 
 
 # ---------------------------------------------------------------------------
@@ -785,12 +789,39 @@ class CodeSearcher:
             and not ce_override
         )
 
+        # UPG-BANNER-CALIBRATION Phase 3: a third, independent low-confidence
+        # sub-signal — the rank-1-to-rank-2 cross-encoder relevance cliff. A
+        # set whose top result decisively leads the next is a set built on a
+        # real best guess; a set where the two are essentially tied on a
+        # shared weak base is not, even when the absolute low_top_relevance
+        # sub-signal above does not trip. Gated on ranking.relative_cliff
+        # .enabled; with the shipped default (false) the entire sub-signal
+        # is bypassed before relative_cliff_fires is called, so behaviour is
+        # byte-identical to the pre-this-feature path. The cliff function
+        # itself is a pure-Python comparison of two already-computed
+        # ce_relevance values in agent.ranking_cliff; no query-text
+        # classification enters here.
+        #
+        # ce_relevance at rank 0 / rank 1 is None when reranking didn't run
+        # (rerank=False, the reranker model failed to load, or — post-backfill
+        # in the rare straggler case — a candidate that fell outside the
+        # rerank pool). relative_cliff_fires is itself a no-op on None at
+        # either position (see agent/ranking_cliff.py), so the cliff sub-
+        # signal correctly stays silent in that case, matching the
+        # low_top_relevance sub-signal's own "reranking didn't run => silent"
+        # contract.
+        cliff_trigger = bool(final) and _RELATIVE_CLIFF_ENABLED and _relative_cliff_fires(
+            [r.ce_relevance for r in final[:2]],
+            min_top=_RELATIVE_CLIFF_MIN_TOP,
+            min_drop=_RELATIVE_CLIFF_MIN_DROP,
+        )
+
         # low_confidence: only meaningful when there is something to lead with —
         # an empty result set has its own "no results" message downstream.
         final.low_confidence = (
             _NOTFOUND_FLOOR_ENABLED
             and bool(final)
-            and (zero_df_trigger or low_top_relevance)
+            and (zero_df_trigger or low_top_relevance or cliff_trigger)
         )
         return final, elapsed_ms
 

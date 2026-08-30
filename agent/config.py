@@ -519,6 +519,38 @@ NOTFOUND_FLOOR_BANNER_CLI : str
     above because that text names `vectr_locate`, meaningless at a shell
     prompt — no `vectr locate` subcommand exists.
 
+RELATIVE_CLIFF_ENABLED : bool
+    UPG-BANNER-CALIBRATION Phase 3: master switch for the rank-1-to-rank-2
+    ce_relevance cliff sub-signal (ranking.relative_cliff.enabled in
+    config.yaml). False is an exact no-op: the cliff sub-signal never
+    enters the low_confidence OR, restoring pre-this-feature behaviour.
+    The Phase 1 measurement could not validate either a recalibrated
+    absolute floor or a rank-1-vs-rank-2 cliff on the two corpora it
+    reached (django + tigerbeetle); the default stays OFF until Phase 3
+    measurement on the missing three corpora (react, cpython, uv)
+    shows a separation. A change to the default is a product decision
+    (Rail 7) and not made in this lane.
+
+RELATIVE_CLIFF_MIN_TOP : float
+    UPG-BANNER-CALIBRATION Phase 3: absolute ce_relevance floor below
+    which a rank-1 cannot credibly lead a set, in the same scale and
+    gate (ce_relevance-only, never the dense-cosine fallback) as
+    NOTFOUND_FLOOR_MIN_TOP_RELEVANCE above. The cliff sub-signal only
+    fires when rank-1 is at least this high; a weak top result with a
+    wide-looking drop to rank-2 is not a confident result regardless
+    of the drop. No-op whenever RELATIVE_CLIFF_ENABLED is False.
+
+RELATIVE_CLIFF_MIN_DROP : float
+    UPG-BANNER-CALIBRATION Phase 3: the required rank-1-to-rank-2 gap
+    expressed as a share of remaining headroom above rank-1, i.e.
+        (score[0] - score[1]) >= min_drop * (1 - score[0])
+    not a fixed score difference — see the score_order_explain entry
+    for why a fixed margin on bounded scores is unsatisfiable on a
+    confident query. The exact value is the Phase 3 question the
+    distribution study answers; the shipped default 0.50 is a
+    placeholder the enabled=false default never exercises. No-op
+    whenever RELATIVE_CLIFF_ENABLED is False.
+
 EMBEDDING_DEFAULT_MODEL : str
     Default local (sentence-transformers) embedding model for the L3 content
     index (UPG-EMBEDDER-SWAP-GRANITE). A workspace's ChromaDB collection is
@@ -1116,6 +1148,19 @@ POINTER_MODE_RETAIN_EXCERPT_LINES: int = int(_pmr_cfg["excerpt_lines"])
 POINTER_MODE_RETAIN_LABEL: str = str(_pmr_cfg["label"])
 POINTER_MODE_RETAIN_RANK1_ALWAYS: bool = bool(_pmr_cfg["retain_rank1_always"])
 POINTER_MODE_RETAIN_RANK1_LABEL: str = str(_pmr_cfg["rank1_label"])
+
+# UPG-BANNER-CALIBRATION Phase 3: an alternative low-confidence sub-signal
+# (ranking.relative_cliff in config.yaml) — a rank-1-to-rank-2 ce_relevance
+# drop test, an alternative to the absolute min_top_relevance floor. SHIPPED
+# DEFAULT OFF; the Phase 3 distribution study on the three unmeasured corpora
+# is what would justify turning it on, and the value of min_drop. See the
+# config.yaml comment for the headroom-relative gap formula; the cliff
+# function itself is a pure-Python comparison of two already-computed scores
+# in agent.ranking_cliff.relative_cliff_fires, with no query-side logic.
+_rc_cfg: dict[str, Any] = _cfg["ranking"]["relative_cliff"]
+RELATIVE_CLIFF_ENABLED: bool = bool(_rc_cfg["enabled"])
+RELATIVE_CLIFF_MIN_TOP: float = float(_rc_cfg["min_top"])
+RELATIVE_CLIFF_MIN_DROP: float = float(_rc_cfg["min_drop"])
 
 # ---------------------------------------------------------------------------
 # Search — additive identifier-shape symbol-graph hint (UPG-QUERYTYPE-REROUTE)

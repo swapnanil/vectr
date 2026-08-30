@@ -600,6 +600,53 @@ ranking:
     # terminal reader instead of the editor's LLM.
     banner_cli: "No strong match for this query — the results below scored low on absolute relevance and may be unrelated. Try an exact symbol name, rephrase the query, or fall back to grep/reading the file directly."
 
+  relative_cliff:
+    # UPG-BANNER-CALIBRATION Phase 3: an ALTERNATIVE low-confidence sub-
+    # signal — the rank-1-to-rank-2 cross-encoder relevance cliff. Tests
+    # whether the top result decisively leads the next, or whether the
+    # two are essentially tied on a shared weak base. The Phase 1
+    # distribution study (django + tigerbeetle, 65 queries, current
+    # default reranker) showed that the absolute `min_top_relevance`
+    # floor above never fires under gte-reranker-modernbert-base (its
+    # compressed range lifts every class into 0.5-0.97), and a
+    # preliminary rank-1-vs-rank-2 cliff check on django showed no clean
+    # separation either. A relative-cliff test is the third alternative
+    # the measurement on the missing three corpora (react, cpython, uv)
+    # is meant to evaluate. This entry ships the MECHANISM behind a
+    # config switch so the reviewer can measure it; it does NOT change
+    # the default. enabled: false keeps low_confidence byte-identical
+    # to the pre-this-feature behaviour — an exact no-op. A future
+    # default change requires Phase 3 measurement evidence on all five
+    # warm corpora and a separate product decision (Rail 7).
+    enabled: false
+    # Absolute floor (UPG-SCORE-DISPLAY-FLAT scale) below which a
+    # rank-1 cannot credibly lead a set. A rank-1 well under this bar
+    # is not a confident result regardless of how wide the drop to
+    # rank-2 looks; the cliff only matters on a top result that has
+    # any business being a top result. Same scale as
+    # min_top_relevance above — a calibrated cross-encoder relevance
+    # in [0, 1], never the raw dense-cosine fallback (UPG-NOTFOUND-
+    # FLOOR-2: a bi-encoder cosine cannot separate absent-topic from
+    # on-topic, so reusing it here would re-introduce that defect).
+    min_top: 0.30
+    # Required gap between rank-1 and rank-2 expressed as a SHARE OF
+    # REMAINING HEADROOM above rank-1:
+    #     (score[0] - score[1]) >= min_drop * (1 - score[0])
+    # rather than a fixed score difference. Displayed scores are
+    # bounded in [0, 1] so a constant margin is structurally
+    # unsatisfiable on any confident query (the score_order_explain
+    # rationale above, restated for this signal): once score[0]
+    # reaches 2/3, no gap however large can clear a fixed 0.10
+    # margin. The headroom formulation degrades gracefully with
+    # rank-1 confidence. 0.50 means "rank-2 must score at least half
+    # the range still available below rank-1 lower than rank-1",
+    # which is the same shape the score_order_explain entry already
+    # uses (UPG-GATE-V4-MINORS). The exact value is the Phase 3
+    # question the distribution study answers; 0.50 is a placeholder
+    # that the enabled=false default never exercises. Set enabled:
+    # true and tune this against the distribution output.
+    min_drop: 0.50
+
   score_order_explain:
     # UPG-SCORE-ORDER-EXPLAIN: displayed absolute relevance may disagree with
     # display order (the composite quality/importance priors decide order, not
