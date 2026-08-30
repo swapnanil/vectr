@@ -1994,6 +1994,70 @@ class SymbolGraph:
         )
         return edges
 
+    # ------------------------------------------------------------------
+    # UPG-BASE-METHOD-OVERRIDE-FLOOD: read API for same-file override edges
+    # written by `_extract_overrides` at index time. The data these return
+    # is the input a later ranking change would consume to lift a base
+    # method above its overrides in a same-leaf top-k tie (the F1/F23/
+    # F56 family). This lane ships the read API; the ranking change is
+    # out of scope and must be evidence-gated on real measurement.
+    # ------------------------------------------------------------------
+
+    def overrides_of(
+        self,
+        workspace: str,
+        from_file: str,
+        from_symbol: str,
+        from_line: int,
+    ) -> list[CallEdge]:
+        """Same-file base methods that *from_symbol* at *from_file:from_line*
+        overrides (UPG-BASE-METHOD-OVERRIDE-FLOOD).
+
+        The source is identified by (file, symbol name, line) — the same
+        triple the existing `edges` table uses for source identity. Returns
+        one CallEdge per base the method overrides; a method that overrides
+        multiple bases (e.g. a TS `class X extends A, B, C` where A, B, and
+        C are in the same file) returns one edge per base. A method that
+        extends a base defined in a different file is not present in the
+        result — see LANE-REPORT for the same-file scope rationale.
+
+        The returned `to_symbol` is the qualified `BaseClass.method` form
+        so the caller can `locate()` it without ambiguity. The base
+        file is implicit (same as `from_file` by construction).
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT from_file, from_symbol, from_line, to_symbol, edge_type "
+                "FROM edges WHERE workspace = ? AND edge_type = 'overrides' "
+                "AND from_file = ? AND from_symbol = ? AND from_line = ?",
+                (workspace, from_file, from_symbol, from_line),
+            ).fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
+    def overridden_by(
+        self,
+        workspace: str,
+        to_file: str,
+        to_symbol: str,
+    ) -> list[CallEdge]:
+        """Same-file subclass methods that override *to_symbol* in *to_file*
+        (UPG-BASE-METHOD-OVERRIDE-FLOOD). The inverse of `overrides_of`.
+
+        `to_symbol` is the qualified `BaseClass.method` form (as written
+        by `_extract_overrides`). Returns one CallEdge per subclass method
+        that overrides this base; the source `(from_file, from_symbol,
+        from_line)` triple on the returned edge identifies each override.
+        `from_file` equals `to_file` by the same-file scope of this lane.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT from_file, from_symbol, from_line, to_symbol, edge_type "
+                "FROM edges WHERE workspace = ? AND edge_type = 'overrides' "
+                "AND from_file = ? AND to_symbol = ?",
+                (workspace, to_file, to_symbol),
+            ).fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
     def _exact_definitions(self, workspace: str, name: str, limit: int = 20) -> list[Symbol]:
         """Definition sites whose name matches `name` exactly. Each (file_path,
         name) is a distinct node — this is the fully-qualified identity that

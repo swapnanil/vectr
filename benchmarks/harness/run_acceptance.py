@@ -780,11 +780,14 @@ def run_case(case: dict, base: str,
         all_pass = all_pass and ok
 
     # --- top_k_contains_any_of ---
-    # UPG-HARNESS-TOPK-ANY-OF-EVALUATOR: an F56-shaped case passes when the top-k
+    # UPG-HARNESS-TOPK-ANY-OF-EVALUATOR: a case passes when the top-k
     # contains AT LEAST ONE of several acceptable answers (a query with more than
     # one defensible canonical result). Each candidate is a {file?, symbol?} spec
     # evaluated with the same top_k_contains semantics; the assertion passes if
-    # any candidate is present.
+    # any candidate is present. Originally introduced for the now-split F56a/
+    # F56b case (the any-of clause there could let either candidate hide the
+    # real defect behind the other); F22 and F45 still use this evaluator, so
+    # the machinery stays.
     if "top_k_contains_any_of" in expect:
         spec = expect["top_k_contains_any_of"]
         candidates = spec.get("candidates", [])

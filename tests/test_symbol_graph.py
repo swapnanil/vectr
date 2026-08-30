@@ -38,6 +38,11 @@ from agent.symbol_graph import (
     _locate_scope_depth_batch,
     _locate_class_enclosed_batch,
     _enclosing_class_from_lines,
+    # UPG-BASE-METHOD-OVERRIDE-FLOOD: same-file override extraction.
+    _extract_overrides,
+    _collect_methods_by_class,
+    _python_class_bases,
+    _js_class_bases,
 )
 import agent.symbol_graph as _sgmod
 from tests.conftest import make_py
@@ -4913,15 +4918,16 @@ class TestFileImportanceARCH1a:
         """SYMBOL_SCHEMA_VERSION is an exact pin, not a floor: every
         extraction-behavior change must bump it (or existing installs never
         rebuild their graph) AND consciously update this pin in the same
-        commit. Currently 14 (Java enum_constant and field_declaration
-        extracted as symbols, so `locate` finds enum values and class fields
-        the L3 search already covered — UPG-JAVA-ENUM-CONSTANTS-NO-L2-SYMBOLS;
-        Rust impl_item parse-error check scoped to the implemented type's
-        `type_identifier` node rather than the whole impl block —
-        UPG-IMPL-SYMBOL-NAME-NODE-GAP — bumped from 13 Rust impl_item name via
-        grammar `type` field — UPG-RUST-IMPL-SYMBOL-NAME-TRAIT-VS-TYPE)."""
-        assert SYMBOL_SCHEMA_VERSION == 14, (
-            f"Expected SYMBOL_SCHEMA_VERSION=14; got {SYMBOL_SCHEMA_VERSION}. "
+        commit. Currently 15 (same-file class-base override edges of
+        edge_type="overrides" recorded at index time;
+        SymbolGraph.overrides_of / SymbolGraph.overridden_by expose the
+        read API — UPG-BASE-METHOD-OVERRIDE-FLOOD — bumped from 14 Java
+        enum_constant and field_declaration extracted as symbols,
+        UPG-JAVA-ENUM-CONSTANTS-NO-L2-SYMBOLS, and Rust impl_item
+        parse-error check scoped to the implemented type's
+        `type_identifier` node, UPG-IMPL-SYMBOL-NAME-NODE-GAP)."""
+        assert SYMBOL_SCHEMA_VERSION == 15, (
+            f"Expected SYMBOL_SCHEMA_VERSION=15; got {SYMBOL_SCHEMA_VERSION}. "
             "If you changed extraction behavior, bump the version and update this pin."
         )
 
@@ -5297,3 +5303,564 @@ class TestClassImportanceARCH2:
             "log-scale gap should be at least an order of magnitude larger "
             "than the linear-scale gap in this high-max_count scenario"
         )
+
+
+# ---------------------------------------------------------------------------
+# UPG-BASE-METHOD-OVERRIDE-FLOOD: same-file class-base override extraction
+# and read API.
+#
+# Pinned here as structural fact (extraction is a fact about the code, not a
+# query-side decision), in line with the lane scope. Synthetic fixtures
+# only — Django / real-corpus names stay in the benchmark corpus, not in
+# committed tests, matching the vectr product/benchmark separation.
+# ---------------------------------------------------------------------------
+
+class TestExtractOverridesPython:
+    """Python `class Sub(Base)` form: emit one overrides edge per (subclass
+    method, base method) pair, all with edge_type='overrides'."""
+
+    def test_simple_single_base_override_emits_one_edge(self, tmp_path) -> None:
+        """A class with one same-named method override on one base emits
+        exactly one overrides edge with the expected fields."""
+        path = make_py(tmp_path, "hashers.py", textwrap.dedent("""\
+            class BasePasswordHasher:
+                def verify(self, password, encoded):
+                    return True
+
+            class BCryptSHA256PasswordHasher(BasePasswordHasher):
+                def verify(self, password, encoded):
+                    return True
+        """))
+        symbols, edges = extract_symbols_from_file(path)
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        assert len(override_edges) == 1, (
+            f"expected 1 override edge for the BCryptSHA256PasswordHasher.verify "
+            f"override of BasePasswordHasher.verify; got {override_edges}"
+        )
+        e = override_edges[0]
+        assert e["from_file"] == path
+        assert e["from_symbol"] == "verify", (
+            f"from_symbol must be the bare method name (matching the symbols "
+            f"table convention); got {e['from_symbol']!r}"
+        )
+        assert e["from_line"] == 6, (
+            f"from_line must point at the SUBCLASS method (the override site); "
+            f"got {e['from_line']}"
+        )
+        assert e["to_symbol"] == "BasePasswordHasher.verify", (
+            f"to_symbol must be qualified 'BaseClass.method' so the consumer "
+            f"can locate the base unambiguously when many classes in the same "
+            f"file share a method name; got {e['to_symbol']!r}"
+        )
+
+    def test_override_edge_targets_actual_base_method_line(self, tmp_path) -> None:
+        """The base method's line is recoverable via the symbols table after
+        a locate() on the qualified 'BaseClass.method' name — pins that the
+        qualified target is locatable, not just a string."""
+        path = make_py(tmp_path, "hashers.py", textwrap.dedent("""\
+            class BasePasswordHasher:
+                def verify(self, password, encoded):
+                    return True
+
+            class BCryptSHA256PasswordHasher(BasePasswordHasher):
+                def verify(self, password, encoded):
+                    return True
+        """))
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g.index_file(ws, path)
+        # The symbols table must have an entry for `verify` (the base), and
+        # the locate surface must resolve the qualified target to the base
+        # class (line 2) rather than the subclass (line 6).
+        result = g.locate_l2(ws, "BasePasswordHasher.verify")
+        syms = result.symbols
+        assert syms, (
+            f"locate('BasePasswordHasher.verify') must resolve to the base "
+            f"class method; got empty result {result}"
+        )
+        base_hit = next(
+            (s for s in syms if s.start_line == 2 and s.file_path == path),
+            None,
+        )
+        assert base_hit is not None, (
+            f"qualified locate must find the BASE method at line 2; got "
+            f"candidates: {[(s.start_line, s.name) for s in syms]}"
+        )
+
+    def test_multiple_subclasses_each_get_their_own_override_edge(self, tmp_path) -> None:
+        """Six PasswordHasher subclasses overriding `verify` produce six
+        distinct override edges, one per subclass (F56 family of cases)."""
+        classes = [
+            "BCryptSHA256PasswordHasher", "MD5PasswordHasher",
+            "PBKDF2PasswordHasher", "ScryptPasswordHasher",
+            "Argon2PasswordHasher",
+        ]
+        body = "class BasePasswordHasher:\n    def verify(self, password, encoded):\n        return True\n\n"
+        for cls in classes:
+            body += f"class {cls}(BasePasswordHasher):\n    def verify(self, password, encoded):\n        return True\n\n"
+        path = make_py(tmp_path, "hashers.py", textwrap.dedent(body))
+        _, edges = extract_symbols_from_file(path)
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        assert len(override_edges) == len(classes), (
+            f"expected {len(classes)} override edges (one per subclass); "
+            f"got {len(override_edges)}"
+        )
+        # All five edges must point to the same base, but have distinct from_lines.
+        from_lines = sorted(e["from_line"] for e in override_edges)
+        assert len(set(from_lines)) == len(classes), (
+            f"every override must have a distinct from_line (the subclass "
+            f"method's line); got {from_lines}"
+        )
+        for e in override_edges:
+            assert e["to_symbol"] == "BasePasswordHasher.verify", (
+                f"every override must target the same base; got {e['to_symbol']!r}"
+            )
+
+    def test_unrelated_subclass_method_is_not_an_override_edge(self, tmp_path) -> None:
+        """A method on the subclass whose name does NOT exist on the base
+        must NOT produce an override edge (the override relationship is
+        name-matched on the base)."""
+        path = make_py(tmp_path, "hashers.py", textwrap.dedent("""\
+            class BasePasswordHasher:
+                def verify(self, password, encoded):
+                    return True
+
+            class CustomHasher(BasePasswordHasher):
+                def custom_method(self):
+                    return False
+        """))
+        _, edges = extract_symbols_from_file(path)
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        assert override_edges == [], (
+            f"custom_method on CustomHasher does not exist on the base, so "
+            f"no override edge should be emitted; got {override_edges}"
+        )
+
+    def test_no_base_in_same_file_emits_no_override_edge(self, tmp_path) -> None:
+        """A subclass whose base is in a different file emits no override
+        edge (same-file scope is the explicit precision/recall tradeoff —
+        see LANE-REPORT)."""
+        path = make_py(tmp_path, "custom_hashers.py", textwrap.dedent("""\
+            from other_module import BasePasswordHasher
+
+            class CustomHasher(BasePasswordHasher):
+                def verify(self, password, encoded):
+                    return True
+        """))
+        _, edges = extract_symbols_from_file(path)
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        assert override_edges == [], (
+            f"base is imported from another module, NOT in this file — no "
+            f"override edge should be emitted (same-file scope); got {override_edges}"
+        )
+
+    def test_no_class_definition_emits_no_override_edges(self, tmp_path) -> None:
+        """A file with no classes emits no override edges — sanity check
+        that the override walk is class-scoped, not file-wide."""
+        path = make_py(tmp_path, "helpers.py", textwrap.dedent("""\
+            def alpha():
+                return 1
+
+            def beta():
+                return 2
+        """))
+        _, edges = extract_symbols_from_file(path)
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        assert override_edges == [], (
+            f"no classes in file — no override edges expected; got {override_edges}"
+        )
+
+    def test_unresolvable_compound_base_is_skipped(self, tmp_path) -> None:
+        """A class base that's an attribute lookup (e.g. `models.Model`) is
+        skipped — without a real type resolver, the identifier on the left
+        of `.` doesn't name a single class. The override edge is recorded
+        only for the SIMPLE-identifier base."""
+        path = make_py(tmp_path, "fields.py", textwrap.dedent("""\
+            class SimpleBase:
+                def my_method(self):
+                    return 1
+
+            class SimpleChild(SimpleBase):
+                def my_method(self):
+                    return 2
+
+            from somewhere import other
+
+            class CompoundBase(other.Thing):
+                def my_method(self):
+                    return 3
+        """))
+        _, edges = extract_symbols_from_file(path)
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        # Only the SIMPLE base (SimpleBase) should resolve; the compound
+        # base (`other.Thing`) is skipped.
+        assert len(override_edges) == 1, (
+            f"only the simple-identifier base should produce an override "
+            f"edge; got {override_edges}"
+        )
+        assert override_edges[0]["to_symbol"] == "SimpleBase.my_method", (
+            f"the resolved base must be the simple-identifier one; got "
+            f"{override_edges[0]['to_symbol']!r}"
+        )
+
+    def test_inner_class_with_no_base_emits_no_override(self, tmp_path) -> None:
+        """An inner class with no declared base: no override edge from it.
+        The walk reaches the inner class (verified separately in
+        _collect_methods_by_class's own recursion contract) but, lacking a
+        base, nothing to match against. Sanity check that the walk's flat
+        iteration does not silently drop inner classes from consideration."""
+        path = make_py(tmp_path, "models.py", textwrap.dedent("""\
+            class Outer:
+                def render(self):
+                    return 'outer'
+
+                class Inner:
+                    def render(self):
+                        return 'inner'
+        """))
+        # Inner.render has no class base at all (it's just `class Inner: ...`),
+        # so no override edge should be emitted from the inner class.
+        # Outer.render is a module-level method on a class with no parent
+        # either, so no override edge there either.
+        _, edges = extract_symbols_from_file(path)
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        assert override_edges == [], (
+            f"neither Outer nor Inner declares a base; no override edges "
+            f"expected; got {override_edges}"
+        )
+
+
+class TestExtractOverridesJavaScript:
+    """JavaScript / TypeScript `class X extends Y[, Z, ...]` form: same
+    shape as Python but different grammar node types (`class_heritage`
+    instead of `superclasses`)."""
+
+    def test_ts_extends_single_base_emits_one_edge(self, tmp_path) -> None:
+        path = make_py(tmp_path, "btn.ts", textwrap.dedent("""\
+            class BaseButton {
+                render(): void { }
+            }
+
+            class PrimaryButton extends BaseButton {
+                render(): void { }
+            }
+        """))
+        _, edges = extract_symbols_from_file(path)
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        assert len(override_edges) == 1, (
+            f"TS `extends BaseButton` should emit one override edge; got {override_edges}"
+        )
+        e = override_edges[0]
+        assert e["from_symbol"] == "render"
+        assert e["from_line"] == 6, f"from_line should be the subclass method line; got {e['from_line']}"
+        assert e["to_symbol"] == "BaseButton.render", (
+            f"to_symbol should be qualified 'BaseClass.method'; got {e['to_symbol']!r}"
+        )
+
+    def test_ts_extends_multiple_bases_emits_edges_per_base(self, tmp_path) -> None:
+        """TS allows `class X extends A, B, C` — each base gets an edge
+        when the corresponding method exists on it."""
+        path = make_py(tmp_path, "multi.ts", textwrap.dedent("""\
+            class MixinA {
+                go(): void { }
+            }
+            class MixinB {
+                go(): void { }
+            }
+
+            class Composite extends MixinA, MixinB {
+                go(): void { }
+            }
+        """))
+        _, edges = extract_symbols_from_file(path)
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        # Composite.go overrides BOTH MixinA.go and MixinB.go.
+        targets = sorted(e["to_symbol"] for e in override_edges)
+        assert targets == ["MixinA.go", "MixinB.go"], (
+            f"expected edges to both bases; got {targets}"
+        )
+
+    def test_js_class_without_extends_emits_no_edge(self, tmp_path) -> None:
+        path = make_py(tmp_path, "simple.js", textwrap.dedent("""\
+            class Widget {
+                render() { return 'w'; }
+            }
+        """))
+        _, edges = extract_symbols_from_file(path)
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        assert override_edges == [], (
+            f"no extends → no base → no override edge; got {override_edges}"
+        )
+
+
+class TestExtractOverridesNonOOOLanguages:
+    """Languages without a `class ... (Base)` form return [] — no override
+    edge can be emitted without resolving the base, and these languages
+    use different syntax (impl blocks, struct embedding, etc.) that is
+    deliberately out of scope for this lane."""
+
+    @pytest.mark.parametrize("language,path_name,body", [
+        ("rust", "lib.rs", "trait Foo { fn bar(&self) {} }\n"),
+        ("go", "main.go", "package main\n\nfunc plainFunc() {}\n"),
+        ("c", "main.c", "int main(void) { return 0; }\n"),
+    ])
+    def test_rust_go_c_emit_no_override_edges(
+        self, tmp_path, language, path_name, body
+    ) -> None:
+        path = tmp_path / path_name
+        path.write_text(body)
+        _, edges = extract_symbols_from_file(str(path))
+        override_edges = [e for e in edges if e["edge_type"] == "overrides"]
+        assert override_edges == [], (
+            f"{language} does not use a class-inheritance form that this "
+            f"lane resolves; expected no override edges; got {override_edges}"
+        )
+
+
+class TestExtractOverridesDedup:
+    """Override edges are deduped by (file, from_symbol, from_line, to_symbol,
+    edge_type) so two walkers producing the same edge don't double-insert."""
+
+    def test_dedup_collapses_duplicate_edges(self, tmp_path) -> None:
+        """If the same (subclass, base) pair were walked twice (e.g. the
+        _collect_methods_by_class walk and the override walk both finding
+        the same method), the dedup should collapse to one edge."""
+        path = make_py(tmp_path, "dup.py", textwrap.dedent("""\
+            class Base:
+                def go(self):
+                    pass
+
+            class Sub(Base):
+                def go(self):
+                    pass
+        """))
+        _, edges = extract_symbols_from_file(path)
+        # Build a key for every override edge.
+        keys = [
+            (e["from_file"], e["from_symbol"], e["from_line"],
+             e["to_symbol"], e["edge_type"])
+            for e in edges if e["edge_type"] == "overrides"
+        ]
+        assert len(keys) == len(set(keys)), (
+            f"override edges must be deduped by (file, from_symbol, from_line, "
+            f"to_symbol, edge_type); got duplicates: {keys}"
+        )
+
+
+class TestSymbolGraphOverridesOf:
+    """The `overrides_of` read API on SymbolGraph — given a (file, method,
+    line) triple, return every base method it overrides. Uses the existing
+    `edges` table (no schema migration) and the same SQLite query shape
+    as the other edge query methods."""
+
+    def _index_fixtures(self, tmp_path) -> tuple[SymbolGraph, str, str, int, int]:
+        """Helper: index a simple Base/Sub fixture and return
+        (graph, workspace, file_path, base_line, sub_line)."""
+        # Callers pass a SUBDIRECTORY (tmp_path / "a") to get two isolated
+        # workspaces, and pytest's tmp_path only guarantees the root exists.
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        path = make_py(tmp_path, "hashers.py", textwrap.dedent("""\
+            class BasePasswordHasher:
+                def verify(self, password, encoded):
+                    return True
+
+            class BCryptPasswordHasher(BasePasswordHasher):
+                def verify(self, password, encoded):
+                    return True
+        """))
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g.index_file(ws, path)
+        return g, ws, path, 2, 6  # base at line 2, subclass at line 6
+
+    def test_overrides_of_returns_base_edge(self, tmp_path) -> None:
+        g, ws, path, base_line, sub_line = self._index_fixtures(tmp_path)
+        edges = g.overrides_of(ws, path, "verify", sub_line)
+        assert len(edges) == 1, (
+            f"subclass verify at line {sub_line} overrides exactly one base; "
+            f"got {len(edges)} edges: {edges}"
+        )
+        e = edges[0]
+        assert e.to_symbol == "BasePasswordHasher.verify", (
+            f"edge target must be the qualified base name; got {e.to_symbol!r}"
+        )
+        assert e.edge_type == "overrides"
+        assert e.from_symbol == "verify"
+        assert e.from_line == sub_line
+
+    def test_overrides_of_returns_empty_for_non_override(self, tmp_path) -> None:
+        """A method that does NOT override anything has no edge — query
+        returns an empty list (not None, not an error)."""
+        g, ws, path, base_line, sub_line = self._index_fixtures(tmp_path)
+        # Base.verify itself doesn't override anything.
+        edges = g.overrides_of(ws, path, "verify", base_line)
+        assert edges == [], (
+            f"base method has no parent; overrides_of must return []; got {edges}"
+        )
+
+    def test_overrides_of_returns_empty_for_unknown_line(self, tmp_path) -> None:
+        """A (file, symbol, line) triple that doesn't correspond to a
+        recorded override returns [] — same shape as an empty result for
+        any other reason, so callers don't have to special-case it."""
+        g, ws, path, base_line, sub_line = self._index_fixtures(tmp_path)
+        edges = g.overrides_of(ws, path, "verify", 9999)
+        assert edges == [], (
+            f"unknown line must return [] (same as a method that has no "
+            f"parent); got {edges}"
+        )
+
+    def test_overrides_of_is_workspace_isolated(self, tmp_path) -> None:
+        """An override edge recorded under workspace A must not be visible
+        from workspace B's query — same isolation contract as every other
+        graph accessor."""
+        g_a, ws_a, path_a, _, sub_line = self._index_fixtures(tmp_path / "a")
+        g_b, ws_b, path_b, _, _ = self._index_fixtures(tmp_path / "b")
+        # edges are scoped per-workspace by SQLite; query B with A's data.
+        edges = g_b.overrides_of(ws_b, path_b, "verify", sub_line)
+        # B has its OWN override edge (different workspace but same file
+        # path and line — both are the right number in their own DB). The
+        # isolation test: A's row must not be readable through B.
+        for e in edges:
+            assert e.from_file == path_b, (
+                f"edges returned by workspace B must come from B's DB; got {e.from_file}"
+            )
+
+
+class TestSymbolGraphOverriddenBy:
+    """The `overridden_by` read API on SymbolGraph — the inverse of
+    `overrides_of`. Given a (file, BaseClass.method) target, return every
+    subclass method that overrides it."""
+
+    def test_overridden_by_returns_subclass_edges(self, tmp_path) -> None:
+        """The F56 case shape: 5 subclasses each override the same
+        `BasePasswordHasher.verify`; overridden_by must list all 5."""
+        classes = [
+            "BCryptSHA256PasswordHasher", "MD5PasswordHasher",
+            "PBKDF2PasswordHasher", "ScryptPasswordHasher",
+            "Argon2PasswordHasher",
+        ]
+        body = "class BasePasswordHasher:\n    def verify(self, password, encoded):\n        return True\n\n"
+        for cls in classes:
+            body += f"class {cls}(BasePasswordHasher):\n    def verify(self, password, encoded):\n        return True\n\n"
+        path = make_py(tmp_path, "hashers.py", textwrap.dedent(body))
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g.index_file(ws, path)
+        edges = g.overridden_by(ws, path, "BasePasswordHasher.verify")
+        # Every subclass's verify is an override; 5 distinct (file, line) triples.
+        assert len(edges) == len(classes), (
+            f"expected {len(classes)} subclass override edges for "
+            f"BasePasswordHasher.verify; got {len(edges)}: {edges}"
+        )
+        from_lines = sorted(set(e.from_line for e in edges))
+        assert len(from_lines) == len(classes), (
+            f"every override must have a distinct from_line; got {from_lines}"
+        )
+        for e in edges:
+            assert e.to_symbol == "BasePasswordHasher.verify"
+            assert e.from_symbol == "verify"
+            assert e.from_file == path
+
+    def test_overridden_by_returns_empty_for_no_subclasses(self, tmp_path) -> None:
+        """A base with no subclass overrides in this file returns []. A
+        cross-file subclass would be missed by the same-file scope (and
+        is the explicit out-of-scope tradeoff — see LANE-REPORT)."""
+        path = make_py(tmp_path, "lonely.py", textwrap.dedent("""\
+            class LonelyBase:
+                def go(self):
+                    pass
+        """))
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g.index_file(ws, path)
+        edges = g.overridden_by(ws, path, "LonelyBase.go")
+        assert edges == [], (
+            f"no subclass override in this file → []; got {edges}"
+        )
+
+
+class TestOverrideEdgesDontInterfereWithExistingEdges:
+    """The `overrides` edge_type is additive — it must not collide with
+    the existing `calls` / `uses` / `dynamic` edges in callers(), callees(),
+    or any other graph accessor that filters on edge_type."""
+
+    def test_callers_does_not_pick_up_overrides(self, tmp_path) -> None:
+        """A caller of `verify` must still see only CALLER methods, not
+        `overrides` edges (which are structural class relationships, not
+        control-flow)."""
+        path = make_py(tmp_path, "hashers.py", textwrap.dedent("""\
+            class BasePasswordHasher:
+                def verify(self, password, encoded):
+                    return True
+
+            class CustomHasher(BasePasswordHasher):
+                def verify(self, password, encoded):
+                    return True
+
+            def login():
+                CustomHasher().verify("p", "h")
+        """))
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g.index_file(ws, path)
+        # `verify` is called from `login`; the override edges between
+        # subclasses and the base must not appear in the caller list.
+        callers = g.callers(ws, "verify")
+        caller_names = {c.from_symbol for c in callers}
+        assert "login" in caller_names, (
+            f"callers of `verify` must include the actual caller `login`; "
+            f"got {caller_names}"
+        )
+        # Override edges (which would carry the from_symbol 'verify' for
+        # the SUBCLASS methods, not for a caller) must not appear in this
+        # callers() result — callers() filters to control-flow edges by
+        # construction, and a `verify -> verify` overrides edge would
+        # otherwise be a self-collision.
+        # Easier check: callers' from_lines should be the line of `login`,
+        # not the line of any method definition.
+        caller_lines = {c.from_line for c in callers}
+        # login is the last def in the fixture; line varies by dedent —
+        # assert it is NOT 2 (the base method's line) and NOT 6 (the
+        # subclass method's line).
+        for ln in caller_lines:
+            assert ln != 2 and ln != 6, (
+                f"caller of `verify` must NOT be a method definition (those "
+                f"are override edges, not call edges); got from_line={ln}"
+            )
+
+
+class TestOverridesF56Shape:
+    """The F56 case shape: a base hasher with multiple subclass overrides
+    of `verify`. The new override edges are exactly the data the lane
+    ships — they let a later ranking change discover that all the top-5
+    candidates in the F56 query are overrides of a single base class."""
+
+    def test_f56_shape_records_override_graph(self, tmp_path) -> None:
+        """Replicate the F56 family of fixtures: BasePasswordHasher with
+        five subclass overrides, all named `verify`. Confirm the override
+        graph captures every subclass as an override of the base."""
+        classes = [
+            "BCryptSHA256PasswordHasher", "MD5PasswordHasher",
+            "PBKDF2PasswordHasher", "ScryptPasswordHasher",
+            "Argon2PasswordHasher",
+        ]
+        body = "class BasePasswordHasher:\n    def verify(self, password, encoded):\n        return True\n\n"
+        for cls in classes:
+            body += f"class {cls}(BasePasswordHasher):\n    def verify(self, password, encoded):\n        return True\n\n"
+        path = make_py(tmp_path, "hashers.py", textwrap.dedent(body))
+        ws = str(tmp_path)
+        g = SymbolGraph(ws)
+        g.index_file(ws, path)
+        # The base's overridden_by list must contain exactly the 5
+        # subclass override edges. A later ranking change consuming this
+        # data could observe "all 5 top-5 candidates are overrides of the
+        # same base" — the structural signal this lane ships.
+        edges = g.overridden_by(ws, path, "BasePasswordHasher.verify")
+        assert len(edges) == 5, (
+            f"F56-shape: 5 subclass overrides of BasePasswordHasher.verify; "
+            f"got {len(edges)}"
+        )
+        # Every edge is from the same file (same-file scope; this is the
+        # precision/recall tradeoff documented in LANE-REPORT).
+        assert {e.from_file for e in edges} == {path}
+

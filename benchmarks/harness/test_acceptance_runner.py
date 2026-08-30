@@ -365,15 +365,24 @@ class TestRunCaseManualBucket:
         assert any("MANUAL" in m for m in messages)
 
     def test_top_k_contains_any_of_passes_when_one_candidate_matches(self, monkeypatch) -> None:
-        """UPG-HARNESS-TOPK-ANY-OF-EVALUATOR: F56's 'top_k_contains_any_of' is now
-        machine-evaluated — passes when the top-k holds AT LEAST ONE candidate."""
+        """UPG-HARNESS-TOPK-ANY-OF-EVALUATOR: a 'top_k_contains_any_of' is
+        machine-evaluated — passes when the top-k holds AT LEAST ONE candidate.
+        Originally written against F56 (the 'verify username and password
+        credentials' case whose check_password / ModelBackend.authenticate
+        alternative could hide a real failure behind either side matching);
+        that case was split into F56a and F56b by UPG-BASE-METHOD-OVERRIDE-
+        FLOOD so the actual defect (check_password absent) is no longer
+        hidden behind the authenticate alternative, but the harness
+        evaluator is unchanged and is still used by other corpus cases
+        (F22, F45) — the test pins its current behaviour with synthetic
+        candidates."""
         monkeypatch.setattr(
             run_acceptance, "_post",
             lambda base, path, body: {"results": [
                 {"symbol": "check_password", "file": "/p/django/contrib/auth/hashers.py"},
             ]},
         )
-        case = {"id": "F56", "query": "q", "expect": {"top_k_contains_any_of": {
+        case = {"id": "F56a-or-wherever-any-of-still-applies", "query": "q", "expect": {"top_k_contains_any_of": {
             "k": 5, "candidates": [
                 {"file": "django/contrib/auth/hashers.py", "symbol": "check_password"},
                 {"file": "django/contrib/auth/backends.py", "symbol": "ModelBackend.authenticate"},
@@ -389,7 +398,7 @@ class TestRunCaseManualBucket:
                 {"symbol": "unrelated", "file": "/p/other.py"},
             ]},
         )
-        case = {"id": "F56", "query": "q", "expect": {"top_k_contains_any_of": {
+        case = {"id": "F56a-or-wherever-any-of-still-applies", "query": "q", "expect": {"top_k_contains_any_of": {
             "k": 5, "candidates": [
                 {"file": "django/contrib/auth/hashers.py", "symbol": "check_password"},
                 {"file": "django/contrib/auth/backends.py", "symbol": "ModelBackend.authenticate"},
