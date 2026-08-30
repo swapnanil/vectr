@@ -26,11 +26,14 @@ import pytest
 
 import run_acceptance
 from run_acceptance import (
+    _MCP_BANNER,
+    _mcp_text,
     _symbol_leaf,
     classify_revision_stamp,
     comparable_revision,
     describe_served_revision,
     main,
+    parse_mcp_search_text,
     resolve_served_revision,
     run_case,
     top_k_absent,
@@ -808,3 +811,437 @@ class TestMainRevisionStampWiring:
         # Severity contract: informational only — passing run still exits 0.
         assert exit_code == 0
         assert "Results: 3 pass / 0 fail / 0 error / 0 manual / 0 skip  (3 total)" in out
+
+
+# ---------------------------------------------------------------------------
+# UPG-ACCEPTANCE-MCP-MODE — MCP text parser, new assertions, --strict-status.
+#
+# The parser is anchored on the renderer's own punctuation
+# (integrations/mcp_server/_dispatch.py:1595-1691). The tests use short
+# hand-rolled strings that match that shape exactly; if the renderer ever
+# changes the anchor substrings, the tests fail loudly and the parser +
+# tests get updated in lockstep.
+# ---------------------------------------------------------------------------
+
+_SEP = "─" * 60  # the per-result 60-dash separator the renderer emits
+
+
+def _header(query: str = "rate limit", n: int = 5, ms: int = 12,
+            chunks: int = 1000, low_conf: bool = False) -> str:
+    """Synthesize the response header the MCP renderer prints above results."""
+    h = f"Found {n} results for '{query}' ({ms}ms, {chunks} chunks searched)"
+    if low_conf:
+        h += " — low confidence: pointers only (vectr_fetch(ids=[...]) to expand)"
+    return h
+
+
+def _result_block(rank: int, file_path: str, lines: str, symbol: str,
+                  score: float, source: str = "reranker",
+                  body: str | None = None) -> str:
+    """One result block, in the exact shape the MCP renderer emits."""
+    chunk_id = f"{file_path}:{lines}"
+    sym_range = f"  [lines {lines.split('-')[0]}–{lines.split('-')[-1]}]"
+    block = [
+        _SEP,
+        f"[{rank}] {chunk_id}  score {score:.3f} ({source})",
+        f"    symbol: {symbol}{sym_range}  language: python",
+    ]
+    if body is not None:
+        # The renderer puts a blank line, then the body, then a blank line
+        block.append("")
+        block.append(body)
+        block.append("")
+    else:
+        # Pointer mode: the per-result block ends right after the symbol
+        # line with a single blank line (see _dispatch.py:1645-1649).
+        block.append("")
+    return "\n".join(block)
+
+
+def _mcp_text_full(banner: bool, blocks: list[str], query: str = "rate limit",
+                   n: int = 5, low_conf_header: bool = False) -> str:
+    """Full response text: optional banner + header + per-result blocks."""
+    parts: list[str] = []
+    if banner:
+        parts.append(_MCP_BANNER + "\nNo strong match in the indexed corpus for this "
+                     "query — the results below may be unrelated. Fall back to "
+                     "grep or reading the file directly.\n")
+    parts.append(_header(query=query, n=n, low_conf=low_conf_header))
+    parts.extend(blocks)
+    return "\n".join(parts)
+
+
+class TestParseMcpSearchText:
+    def test_no_results_short_circuits(self) -> None:
+        text = "No results found for: asdfqwer"
+        parsed = parse_mcp_search_text(text)
+        assert parsed == {"low_confidence": False, "results": []}
+
+    def test_single_result_with_body(self) -> None:
+        text = _mcp_text_full(
+            banner=False,
+            blocks=[_result_block(1, "django/middleware.py", "100-130",
+                                  "RateLimit.check", 0.92, body="def check(self): pass")],
+        )
+        parsed = parse_mcp_search_text(text)
+        assert parsed["low_confidence"] is False
+        assert len(parsed["results"]) == 1
+        r = parsed["results"][0]
+        assert r["rank"] == 1
+        assert r["file"] == "django/middleware.py"
+        assert r["lines"] == "100-130"
+        assert r["symbol"] == "RateLimit.check"
+        assert r["score"] == 0.92
+        assert r["score_source"] == "reranker"
+        assert r["body_present"] is True
+
+    def test_single_result_pointer_mode_no_body(self) -> None:
+        text = _mcp_text_full(
+            banner=True,
+            blocks=[_result_block(1, "django/x.py", "1-5", "Foo", 0.3,
+                                  body=None)],
+            low_conf_header=True,
+        )
+        parsed = parse_mcp_search_text(text)
+        assert parsed["low_confidence"] is True
+        assert parsed["results"][0]["body_present"] is False
+
+    def test_multi_result_body_only_when_present(self) -> None:
+        text = _mcp_text_full(
+            banner=True,
+            blocks=[
+                _result_block(1, "a.py", "1-2", "A", 0.3, body=None),
+                _result_block(2, "b.py", "3-4", "B", 0.25,
+                              body="def b(): return 1"),
+            ],
+            low_conf_header=True,
+        )
+        parsed = parse_mcp_search_text(text)
+        assert [r["body_present"] for r in parsed["results"]] == [False, True]
+        assert [r["rank"] for r in parsed["results"]] == [1, 2]
+        assert [r["symbol"] for r in parsed["results"]] == ["A", "B"]
+
+    def test_banner_string_constant_unchanged(self) -> None:
+        """Anchors the parser to the renderer's literal banner. If a future
+        refactor renames the banner string in _dispatch.py, this fails and
+        the parser + tests get updated in lockstep (no silent drift)."""
+        assert "─── Low confidence ───" in _MCP_BANNER
+        assert _MCP_BANNER == "─── Low confidence ───"
+
+
+class TestMcpTextHelper:
+    def test_extracts_text_from_content(self) -> None:
+        out = _mcp_text({"content": [{"type": "text", "text": "hello"}],
+                         "isError": False})
+        assert out == "hello"
+
+    def test_concatenates_multi_item_content(self) -> None:
+        out = _mcp_text({"content": [
+            {"type": "text", "text": "line1"},
+            {"type": "text", "text": "line2"},
+        ]})
+        assert out == "line1\nline2"
+
+    def test_empty_content_is_empty_string(self) -> None:
+        assert _mcp_text({}) == ""
+        assert _mcp_text({"content": []}) == ""
+
+    def test_non_text_items_are_skipped(self) -> None:
+        out = _mcp_text({"content": [
+            {"type": "image", "data": "abc"},
+            {"type": "text", "text": "after"},
+        ]})
+        assert out == "after"
+
+
+# ---------------------------------------------------------------------------
+# run_case — new surface-mode assertions, in MCP mode (mocked mcp_call).
+# ---------------------------------------------------------------------------
+
+def _fake_mcp_call_with_text(base: str, session_id: str, tool_name: str,
+                              arguments: dict) -> dict:
+    """Stub mcp_call: returns a fixed response that the parser can ingest."""
+    text = _mcp_text_full(
+        banner=False,
+        blocks=[_result_block(1, "django/x.py", "1-5", "Foo", 0.9,
+                              body="def foo(): pass")],
+    )
+    return {"content": [{"type": "text", "text": text}], "isError": False}
+
+
+def _fake_mcp_call_pointer_mode(base: str, session_id: str, tool_name: str,
+                                 arguments: dict) -> dict:
+    """Stub mcp_call: returns pointer-mode (low_confidence + no body)."""
+    text = _mcp_text_full(
+        banner=True,
+        blocks=[_result_block(1, "django/x.py", "1-5", "Foo", 0.3, body=None)],
+        low_conf_header=True,
+    )
+    return {"content": [{"type": "text", "text": text}], "isError": False}
+
+
+class TestRunCaseMcpSurface:
+    def test_mcp_search_passes_with_body_and_no_banner(self, monkeypatch) -> None:
+        monkeypatch.setattr(run_acceptance, "mcp_call", _fake_mcp_call_with_text)
+        case = {"id": "F44", "query": "x",
+                "expect": {
+                    "top_k_contains": {"k": 5, "file": "django/x.py",
+                                        "symbol": "Foo"},
+                    "low_confidence_absent": True,
+                    "body_present": True,
+                }}
+        ok, messages = run_case(case, "http://localhost:0",
+                                 surface="mcp", mcp_session_id="s")
+        assert ok is True
+        assert any("low_confidence_absent" in m for m in messages)
+        assert any("body_present" in m for m in messages)
+        # The success-marker is PASS, not SKIP — the assertion is meaningful
+        # on the MCP surface and was actually evaluated.
+        assert any(run_acceptance._PASS in m and "low_confidence_absent" in m for m in messages)
+        assert any(run_acceptance._PASS in m and "body_present" in m for m in messages)
+
+    def test_mcp_search_fails_low_confidence_absent_when_banner_fires(
+            self, monkeypatch) -> None:
+        monkeypatch.setattr(run_acceptance, "mcp_call",
+                             _fake_mcp_call_pointer_mode)
+        case = {"id": "F44", "query": "x",
+                "expect": {
+                    "low_confidence_absent": True,
+                    "body_present": True,
+                }}
+        ok, messages = run_case(case, "http://localhost:0",
+                                 surface="mcp", mcp_session_id="s")
+        assert ok is False
+        assert any(run_acceptance._FAIL in m and "low_confidence_absent" in m for m in messages)
+        assert any(run_acceptance._FAIL in m and "body_present" in m for m in messages)
+
+    def test_mcp_inverted_low_confidence_true_passes_when_banner_fires(
+            self, monkeypatch) -> None:
+        """low_confidence_absent=False asserts the banner DID fire (the
+        inverse). F46 / F52 / F55 are the cases that benefit."""
+        monkeypatch.setattr(run_acceptance, "mcp_call",
+                             _fake_mcp_call_pointer_mode)
+        case = {"id": "F46", "query": "x",
+                "expect": {"low_confidence_absent": False}}
+        ok, messages = run_case(case, "http://localhost:0",
+                                 surface="mcp", mcp_session_id="s")
+        assert ok is True
+        assert any(run_acceptance._PASS in m and "low_confidence_absent" in m for m in messages)
+
+    def test_rest_run_silently_skips_mcp_only_assertions(self, monkeypatch) -> None:
+        """The legacy /v1 surface has no banner / pointer-mode signal; the
+        assertion is structurally uncheckable there. Silently skipping with
+        a [SKIP] notice — never silently passing — is the only honest shape.
+        """
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [
+                {"symbol": "Foo", "file": "django/x.py", "score": 0.9,
+                 "content": "def foo(): pass"},
+            ]},
+        )
+        case = {"id": "F44-rest", "query": "x",
+                "expect": {
+                    "top_k_contains": {"k": 5, "file": "django/x.py",
+                                        "symbol": "Foo"},
+                    "low_confidence_absent": True,
+                    "body_present": True,
+                }}
+        ok, messages = run_case(case, "http://localhost:0",
+                                 surface="rest", mcp_session_id=None)
+        assert ok is True  # the top_k_contains passed; MCP-only ones skipped
+        skip_lines = [m for m in messages if "[SKIP]" in m
+                       and "only meaningful" in m]
+        assert len(skip_lines) == 2
+        assert any("low_confidence_absent" in s for s in skip_lines)
+        assert any("body_present" in s for s in skip_lines)
+
+    def test_mcp_session_id_required(self, monkeypatch) -> None:
+        """A surface='mcp' call without a session id must error loudly, not
+        silently fall back to REST (the brief explicitly warns against the
+        latter)."""
+        case = {"id": "F44", "query": "x",
+                "expect": {"top_k_contains": {"k": 5, "symbol": "Foo"}}}
+        ok, messages = run_case(case, "http://localhost:0",
+                                 surface="mcp", mcp_session_id="")
+        assert ok is False
+        assert any("session_id" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# main() — --strict-status wires a status-mismatch check that fails the gate.
+# ---------------------------------------------------------------------------
+
+def _fake_get_status(base: str, path: str) -> dict:
+    if path == "/v1/status":
+        return {"indexed_files": 1, "total_chunks": 1, "languages": [],
+                "workspace_root": "/nonexistent"}
+    return {}
+
+
+def _fake_post_pass(base: str, path: str, body: dict) -> dict:
+    return {"results": [{"file": "/p/x.py", "symbol": "Foo", "score": 0.9,
+                          "content": ""}]}
+
+
+class TestStrictStatus:
+    def _write(self, path: Path, cases: list[dict]) -> None:
+        with open(path, "w") as fh:
+            for c in cases:
+                fh.write(json.dumps(c) + "\n")
+
+    def test_strict_status_passes_when_label_matches_observed(
+            self, tmp_path, monkeypatch, capsys) -> None:
+        cases_path = tmp_path / "st.jsonl"
+        self._write(cases_path, [
+            {"id": "ok", "query": "q", "corpus": "django",
+             "expect": {"top_k_contains": {"k": 3, "symbol": "Foo"}},
+             "status": "passing"},
+        ])
+        monkeypatch.setattr(run_acceptance, "_CASES_PATH", cases_path)
+        monkeypatch.setattr(run_acceptance, "_get", _fake_get_status)
+        monkeypatch.setattr(run_acceptance, "_post", _fake_post_pass)
+        exit_code = main(["--port", "9999", "--strict-status"])
+        out = capsys.readouterr().out
+        assert "[STATUS DRIFT]" not in out
+        assert exit_code == 0
+
+    def test_strict_status_fails_when_label_is_wrong(
+            self, tmp_path, monkeypatch, capsys) -> None:
+        """The corpus's drifted labels — recorded as 'passing' but the
+        case actually fails — are exactly what --strict-status is built to
+        catch. Pins the strict-mode contract: drift is a fail, not a notice."""
+        cases_path = tmp_path / "st.jsonl"
+        self._write(cases_path, [
+            # top_k_contains fails (response has no Foo), but status says
+            # passing. Strict mode must catch the drift.
+            {"id": "drift", "query": "q", "corpus": "django",
+             "expect": {"top_k_contains": {"k": 3, "symbol": "Foo"}},
+             "status": "passing"},
+        ])
+        monkeypatch.setattr(run_acceptance, "_CASES_PATH", cases_path)
+        monkeypatch.setattr(run_acceptance, "_get", _fake_get_status)
+        # POST returns a result that does NOT satisfy top_k_contains
+        monkeypatch.setattr(
+            run_acceptance, "_post",
+            lambda base, path, body: {"results": [
+                {"file": "/p/other.py", "symbol": "Other", "score": 0.9},
+            ]},
+        )
+        exit_code = main(["--port", "9999", "--strict-status"])
+        out = capsys.readouterr().out
+        # The case id sits on the case header line; the drift line itself
+        # carries recorded/observed. Assert both rather than expecting the
+        # harness to concatenate them.
+        assert "[STATUS DRIFT]" in out
+        assert "] drift  " in out
+        assert "recorded='passing'" in out
+        assert "observed='failing'" in out
+        # drift is a fail; exit code reflects that
+        assert exit_code == 1
+        assert "Results: 0 pass / 1 fail" in out
+        # Summary reports the drift count.
+        assert "1 case(s) had a recorded 'status' label" in out
+
+    def test_strict_status_treats_green_and_passing_as_synonyms(
+            self, tmp_path, monkeypatch, capsys) -> None:
+        """The corpus has historically used both 'passing' and 'green' for
+        the same observation; strict mode treats them as equivalent so a
+        synonym swap doesn't trigger a spurious drift notice."""
+        cases_path = tmp_path / "st.jsonl"
+        self._write(cases_path, [
+            {"id": "syn", "query": "q", "corpus": "django",
+             "expect": {"top_k_contains": {"k": 3, "symbol": "Foo"}},
+             "status": "green"},
+        ])
+        monkeypatch.setattr(run_acceptance, "_CASES_PATH", cases_path)
+        monkeypatch.setattr(run_acceptance, "_get", _fake_get_status)
+        monkeypatch.setattr(run_acceptance, "_post", _fake_post_pass)
+        exit_code = main(["--port", "9999", "--strict-status"])
+        out = capsys.readouterr().out
+        assert "[STATUS DRIFT]" not in out
+        assert exit_code == 0
+
+    def test_strict_status_does_not_compare_manual_cases(
+            self, tmp_path, monkeypatch, capsys) -> None:
+        """A case that landed in the MANUAL bucket (no recognised assertions
+        ran) cannot be drift-checked — there's no observation to compare
+        against. The check must skip it, not synthesise a phantom outcome."""
+        cases_path = tmp_path / "st.jsonl"
+        self._write(cases_path, [
+            {"id": "manual", "query": "q", "corpus": "django",
+             "expect": {"notes": "free text only"},
+             "status": "passing"},
+        ])
+        monkeypatch.setattr(run_acceptance, "_CASES_PATH", cases_path)
+        monkeypatch.setattr(run_acceptance, "_get", _fake_get_status)
+        monkeypatch.setattr(run_acceptance, "_post", _fake_post_pass)
+        exit_code = main(["--port", "9999", "--strict-status"])
+        out = capsys.readouterr().out
+        assert "[STATUS DRIFT]" not in out
+        # the manual case is counted in n_manual, not n_fail
+        assert "1 manual" in out
+
+
+# ---------------------------------------------------------------------------
+# main() — the surface flag and MCP session-establishment wiring.
+# ---------------------------------------------------------------------------
+
+def _fake_mcp_initialize(base: str) -> str:
+    return "deadbeef" * 4  # 32-char hex session id
+
+
+class TestMcpSurfaceWiring:
+    def test_mcp_mode_initializes_session_once(self, tmp_path, monkeypatch,
+                                                  capsys) -> None:
+        cases_path = tmp_path / "mcp.jsonl"
+        with open(cases_path, "w") as fh:
+            fh.write(json.dumps({
+                "id": "mcp-1", "query": "q", "corpus": "django",
+                "expect": {"top_k_contains": {"k": 3, "symbol": "Foo"}},
+            }) + "\n")
+
+        monkeypatch.setattr(run_acceptance, "_CASES_PATH", cases_path)
+        monkeypatch.setattr(run_acceptance, "_get", _fake_get_status)
+        monkeypatch.setattr(run_acceptance, "_post", _fake_post_pass)
+        monkeypatch.setattr(run_acceptance, "mcp_initialize",
+                             _fake_mcp_initialize)
+        # mcp_call is monkeypatched at module level so the mocked mcp_call
+        # in the main flow does the same as REST (FakePost always returns
+        # one result). The point of the test is the session-id plumbing,
+        # not the MCP→REST routing.
+        monkeypatch.setattr(run_acceptance, "mcp_call",
+                             lambda base, sid, tool, args: {
+                                 "content": [{"type": "text",
+                                              "text": "stub"}],
+                                 "isError": False,
+                             })
+
+        exit_code = main(["--port", "9999", "--surface", "mcp"])
+        out = capsys.readouterr().out
+        assert "Surface: mcp" in out
+        # The harness prints the session id truncated to 8 chars plus an
+        # ellipsis, so the full 32-char fake id never appears literally.
+        assert "[session: deadbeef...]" in out
+        # We do NOT assert exit_code == 0 here: the stub mcp_call above
+        # returns a text body that doesn't match the case's top_k_contains
+        # expectation, so the case fails by design. This test is only
+        # pinning the surface-flag wiring + session-id plumbing, not the
+        # assertion logic.
+
+    def test_mcp_initialize_failure_exits_nonzero(self, monkeypatch) -> None:
+        """A daemon that fails the MCP handshake must fail the run loudly,
+        not silently fall back to REST — that would mask a daemon regression
+        on the same surface the real caller uses."""
+        def boom(base):
+            raise RuntimeError("no Mcp-Session-Id header")
+        monkeypatch.setattr(run_acceptance, "mcp_initialize", boom)
+        monkeypatch.setattr(run_acceptance, "_get", _fake_get_status)
+        # Capture stderr from the print statement in main()
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            exit_code = main(["--port", "9999", "--surface", "mcp"])
+        assert exit_code == 1
+        assert "MCP initialize failed" in buf.getvalue()
