@@ -3651,36 +3651,37 @@ def _memory_db_dir(workspace: str) -> str:
 
 
 def cmd_memory(args: argparse.Namespace) -> None:
-    """`vectr memory export` / `vectr memory edit` — read-only markdown
-    mirror and transactional check-out/check-in editing of a workspace's
-    working memory (UPG-MEMORY-LEGIBLE-FILE-PROJECTION parts (a) and (b)).
+    """`vectr memory export` / `vectr memory edit` / `vectr memory import`
+    — the three surfaces on the same `vectr memory` command group.
 
-    Both operate directly on the workspace's SQLite database, the same "no
-    running server required" pattern as `cmd_forget --all`/`cmd_cache
-    prune` — WAL mode lets this read (and, for `edit`, write) safely even
-    while a daemon has the same file open.
+    `export` / `edit` see the UPG-MEMORY-LEGIBLE-FILE-PROJECTION
+    docstring they have always had; `import` (UPG-MEMORY-IMPORT) is the
+    one-way-in path that was missing: it brings existing on-disk memory
+    files (`MEMORY.md`, `CLAUDE.md`, `AGENTS.md`, `.cursorrules`,
+    `.github/copilot-instructions.md`, or any file passed via
+    `--path`) into the store, and a file that was previously exported
+    via `vectr memory export` is recognized and round-tripped through
+    the SAME `parse_edit_buffer()` grammar `_memory_edit` uses, so its
+    blocks recover as notes with their declared kind/priority/tags
+    carried forward.
 
-    `export`: after the first successful export, the target path is
-    recorded in `.vectr/memory_export_path` so subsequent note writes
-    (through a running daemon) keep the mirror current via a debounced
-    post-write hook; this command itself always renders synchronously so
-    the file is current the moment it returns. `--disable` (UPG-MEMORY-
-    EXPORT-DISABLE) reverses that opt-in by removing the marker, without
-    touching the previously exported file.
-
-    `edit`: renders ACTIVE notes only to a temp file, opens `$EDITOR` on
-    it, and on save translates the diff into note writes (see
-    agent/working_context_store/_memory_edit.py for the exact mapping and
-    the conflict-detection contract). Exits non-zero and writes nothing if
-    a note the buffer touches drifted concurrently.
+    Both `export` / `edit` and `import` operate directly on the
+    workspace's SQLite database, the same "no running server required"
+    pattern as `cmd_forget --all`/`cmd_cache prune` — WAL mode lets this
+    read (and, for `edit` and `import`, write) safely even while a
+    daemon has the same file open.
     """
     action = getattr(args, "memory_command", None)
     if action == "edit":
         _cmd_memory_edit(args)
         return
+    if action == "import":
+        _cmd_memory_import(args)
+        return
     if action != "export":
         print("usage: vectr memory export [--path FILE] [--workspace DIR] [--disable]", file=sys.stderr)
         print("       vectr memory edit [--workspace DIR]", file=sys.stderr)
+        print("       vectr memory import [--path FILE]... [--workspace DIR] [--dry-run]", file=sys.stderr)
         return
 
     from agent.working_context_store._export import remove_export_target
@@ -3742,6 +3743,124 @@ def _cmd_memory_edit(args: argparse.Namespace) -> None:
         print(f"Revoked #{note_id} (reversible with vectr_reinstate)")
     for note_id in result.forgets:
         print(f"Permanently deleted #{note_id}")
+
+
+def _cmd_memory_import(args: argparse.Namespace) -> None:
+    """`vectr memory import` (UPG-MEMORY-IMPORT) — bring on-disk memory
+    files into the working-memory store.
+
+    Discovery order: every `--path` argument (relative paths resolved
+    against `--workspace`, absolute paths taken as-is, directories walked
+    recursively for *.md/*.mdc up to depth 8) is tried first in the
+    order given, then the configured default candidate list at the
+    workspace root. The default list lives in
+    `agent.config.MEMORY_IMPORT_CANDIDATE_FILES` and the closed default
+    is the common on-disk memory files a user already has before
+    adopting vectr — `MEMORY.md`, `CLAUDE.md`, `AGENTS.md`,
+    `.cursorrules`, `.github/copilot-instructions.md`.
+
+    Idempotency: every imported note carries a `src:` / `src-sha:` /
+    `src-lines:` tag triple on it; a re-run against the same file body
+    recognizes the existing tag and skips that block. A re-run against
+    a file whose body has been edited creates a new note for the new
+    body — the original is left untouched, since deleting the user's
+    prior import behind their back is the exact silent-loss the design
+    defends against on the export side.
+
+    `--dry-run` is the path of first resort: it prints exactly what
+    would be created (kind, title, source file, source-line range,
+    provenance) and changes nothing. Memory is the one resource the
+    user cannot easily reconstruct, so dry run must always be reachable
+    without the user having to dig through the help output to find it.
+    """
+
+    from agent.working_context_store import WorkingContextStore
+    from agent.working_context_store._import import (
+        execute_import,
+        plan_import,
+        _walk_directory_for_markdown,
+    )
+
+    workspace = str(Path(args.workspace).resolve())
+    workspace_path = Path(workspace)
+
+    # Build the explicit-path list. Each --path is taken as either a
+    # file (read directly) or a directory (walked for *.md/*.mdc).
+    # Repeated --path flags accumulate.
+    extra_paths: list[Path] = []
+    for raw in getattr(args, "paths", []) or []:
+        p = Path(raw)
+        if not p.is_absolute():
+            p = workspace_path / p
+        p = p.resolve()
+        if p.is_dir():
+            extra_paths.extend(_walk_directory_for_markdown(p))
+        else:
+            extra_paths.append(p)
+
+    store = WorkingContextStore(_memory_db_dir(workspace))
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    # Dry run with a `None` store: skip the idempotency check so the
+    # user sees what a first-time import would do, even when the
+    # store already has the same notes from a prior run.
+    plan_store = None if dry_run else store
+    plan = plan_import(workspace_path, extra_paths, plan_store)
+
+    # Discovery report: which files we considered, which were found,
+    # which were skipped because they don't exist (the common case
+    # for a workspace that never had a particular file).
+    candidates_seen: set[Path] = set()
+    from agent.config import MEMORY_IMPORT_CANDIDATE_FILES
+    for rel in MEMORY_IMPORT_CANDIDATE_FILES:
+        candidates_seen.add((workspace_path / rel).resolve())
+    for p in extra_paths:
+        candidates_seen.add(p)
+    found = sorted(p for p in candidates_seen if p.exists())
+    missing = sorted(p for p in candidates_seen if not p.exists())
+
+    print(f"vectr memory import: workspace = {workspace}")
+    if found:
+        print(f"  Found {len(found)} source file(s):")
+        for p in found:
+            rel = p.relative_to(workspace_path) if p.is_relative_to(workspace_path) else p
+            print(f"    {rel}")
+    if missing:
+        print(f"  Skipped {len(missing)} non-existent default(s) (no --path supplied):")
+        for p in missing:
+            rel = p.relative_to(workspace_path) if p.is_relative_to(workspace_path) else p
+            print(f"    {rel}")
+    if not found:
+        print("  Nothing to import: no source files exist at the workspace root.")
+        return
+
+    if dry_run:
+        print(f"\nDRY RUN — would create {len(plan.planned)} note(s), "
+              f"skip {len(plan.skipped_existing)} already-imported, "
+              f"skip {len(plan.skipped_too_short)} too-short, "
+              f"{len(plan.parse_errors)} parse error(s).")
+        for n in plan.planned:
+            rel = n.source_path.name
+            print(f"  + [{n.kind}/{n.provenance}] {n.title!r}  ({rel}:{n.source_start_line}-{n.source_end_line})")
+        for path, line, preview in plan.skipped_existing:
+            print(f"  = {path.name}:{line} already imported ({preview!r})")
+        for path, line, preview in plan.skipped_too_short:
+            print(f"  - {path.name}:{line} too short ({preview!r})")
+        for path, line, reason in plan.parse_errors:
+            print(f"  ! {path.name}:{line} {reason}", file=sys.stderr)
+        return
+
+    result = execute_import(store, workspace, plan)
+    print(f"Imported {len(result.written)} note(s) into {workspace}.")
+    for note, new_id in result.written:
+        rel = note.source_path.name
+        print(f"  + #{new_id} [{note.kind}/{note.provenance}] {note.title!r}  ({rel}:{note.source_start_line}-{note.source_end_line})")
+    if result.skipped_existing:
+        print(f"  Skipped {result.skipped_existing} block(s) already imported (idempotent re-run).")
+    if result.skipped_too_short:
+        print(f"  Skipped {result.skipped_too_short} block(s) under the {8}-char body floor.")
+    if result.parse_errors:
+        print(f"  {result.parse_errors} parse error(s); see the import module's audit log.", file=sys.stderr)
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -4489,7 +4608,7 @@ def main() -> None:
 
     p_memory = sub.add_parser(
         "memory",
-        help="Render or edit working memory as markdown",
+        help="Render, edit, or import working memory as markdown",
         description=(
             "UPG-MEMORY-LEGIBLE-FILE-PROJECTION. `vectr memory export` renders "
             "this workspace's notes to a deterministic, read-only markdown "
@@ -4498,7 +4617,10 @@ def main() -> None:
             "database stays the source of truth. `vectr memory edit` opens the "
             "same buffer grammar in $EDITOR for a real check-out/check-in "
             "round trip: on save, changes are translated into note writes "
-            "(body edits become supersedes, never in-place mutations)."
+            "(body edits become supersedes, never in-place mutations). "
+            "`vectr memory import` is the one-way-in path: it brings existing "
+            "on-disk memory files into the store, idempotently on content, "
+            "with `--dry-run` as the path of first resort."
         ),
     )
     memory_sub = p_memory.add_subparsers(dest="memory_command")
@@ -4539,6 +4661,47 @@ def main() -> None:
     p_memory_edit.add_argument(
         "--workspace", default=_default_path,
         help="Workspace whose notes to edit (default: $VECTR_WORKSPACE or cwd)",
+    )
+
+    p_memory_import = memory_sub.add_parser(
+        "import",
+        help="Import on-disk memory files into the working-memory store (idempotent)",
+        description=(
+            "UPG-MEMORY-IMPORT. Bring existing memory files into vectr's "
+            "working-memory store. With no --path, walks the closed list "
+            "of default candidate files at the workspace root "
+            "(MEMORY.md, CLAUDE.md, AGENTS.md, .cursorrules, "
+            ".github/copilot-instructions.md). A file that is itself a "
+            "vectr export (recognized by the header comment) is parsed "
+            "through the same block grammar `vectr memory edit` consumes, "
+            "and its notes are recovered with their kind/priority/tags "
+            "carried forward. Imported notes carry `imported` / "
+            "`src:<filename>` / `src-sha:<hash>` / `src-lines:a-b` tags, "
+            "so a re-run against the same body creates no duplicates "
+            "(idempotent on content). Provenance is `auto` for every "
+            "imported note; a heading-prefix-imperative short block is "
+            "promoted to kind=directive and provenance=agent so the "
+            "store's auto+directive write-time guard does not reject it. "
+            "--dry-run prints what would be created without writing."
+        ),
+    )
+    p_memory_import.add_argument(
+        "--path", dest="paths", action="append", default=[],
+        help="Path to a file or directory to import (may be repeated; "
+             "directories are walked recursively for *.md/*.mdc up to "
+             "depth 8). Relative paths resolve against --workspace. "
+             "When omitted, walks the default candidate list at the "
+             "workspace root.",
+    )
+    p_memory_import.add_argument(
+        "--workspace", default=_default_path,
+        help="Workspace to import into (default: $VECTR_WORKSPACE or cwd)",
+    )
+    p_memory_import.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Print exactly what would be created and change nothing. "
+             "Use this first: it writes to the one store the user cannot "
+             "easily reconstruct.",
     )
 
     p_connect = sub.add_parser(
