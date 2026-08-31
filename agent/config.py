@@ -1465,6 +1465,17 @@ MEMORY_HYGIENE_STALE_TASK_WARN_AGE_DAYS: int = int(_hygiene_cfg["stale_task_warn
 _memory_export_cfg: dict[str, Any] = _cfg["memory_export"]
 MEMORY_EXPORT_DEBOUNCE_SECONDS: float = float(_memory_export_cfg["debounce_seconds"])
 
+# UPG-MEMORY-IMPORT: closed list of workspace-relative paths the import
+# command's default-discovery path walks when --path is not given. Closed
+# (same reasoning as VALID_KINDS / SCOPE_VALUES / etc. — a fixed protocol
+# vocabulary rather than a tunable threshold), lives here as a plain
+# constant rather than in config.yaml's operator-tunable section. Mirrors
+# `memory_import.candidate_files` in config.yaml, but reading the
+# constant form from the same dict makes the value the importer sees
+# match the documented default if a test does not override it.
+_memory_import_cfg: dict[str, Any] = _cfg["memory_import"]
+MEMORY_IMPORT_CANDIDATE_FILES: tuple[str, ...] = tuple(_memory_import_cfg["candidate_files"])
+
 # ---------------------------------------------------------------------------
 # UPG-MEMORY-DECAY-KIND-SCOPED: per-kind decay half-life (decay_old_notes(),
 # ranking-only) and TTL (purge_expired_notes(), visibility-only — a

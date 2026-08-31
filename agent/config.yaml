@@ -1208,6 +1208,27 @@ memory_export:
   # terminal, long enough to coalesce a realistic same-turn burst.
   debounce_seconds: 3.0
 
+memory_import:
+  # UPG-MEMORY-IMPORT: `vectr memory import` walks this list of workspace-
+  # relative paths in order when no --path is given, then imports every
+  # existing one through the structural section split (heading boundaries)
+  # or the export-grammar recovery path (when the file carries the export
+  # header comment). The defaults cover the common on-disk memory files a
+  # user already has before adopting vectr. Editors that store their rules
+  # in a subdirectory (e.g. `.cursor/rules/*.mdc`) are reachable through
+  # repeated --path arguments — the closed list here is the WORKSPACE-ROOT
+  # discovery set only, and adding a new filename to it is a config-only
+  # change. Filenames are data, not product copy: matching
+  # `.github/copilot-instructions.md` is the discovery surface, and saying
+  # so is honest, the same way the init command names files it writes.
+
+  candidate_files:
+    - MEMORY.md
+    - CLAUDE.md
+    - AGENTS.md
+    - .cursorrules
+    - .github/copilot-instructions.md
+
 memory_recall_for_path:
   # UPG-PROXY-SUBSTRING-ANCHOR: recall_for_path() answers "which notes are
   # relevant to this file path" for the PreToolUse hook and the proactive
