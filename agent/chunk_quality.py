@@ -16,6 +16,7 @@ and query time.
 """
 from __future__ import annotations
 
+import difflib
 import re
 from pathlib import PurePosixPath
 
@@ -1173,3 +1174,138 @@ def leading_docstring_key(content: str, language: str = "") -> str:
     if len(normalized) < _DOCSTRING_DEDUP_MIN_CHARS:
         return ""
     return normalized
+
+
+def _strip_leading_docstring_block(content: str, language: str = "") -> str:
+    """Return the chunk's BODY text with the leading docstring/comment block
+    removed (LANE-NEARDUP-DEDUP body-similarity gate).
+
+    The LANE-NEARDUP-DEDUP content-only near-duplicate key needs to compare
+    BODIES rather than whole chunks, because the case it exists for —
+    leading docstrings differ, bodies are near-verbatim — is precisely
+    the case where including the docstring in the comparison drags
+    SequenceMatcher.ratio below threshold. This function is the inverse
+    of `leading_docstring_key`: same docstring-detection machinery
+    (`_leading_doc_and_code` + the same attribute/decorator filter +
+    the Python first-statement-docstring fallback), but it returns the
+    body span instead of a normalized key.
+
+    For a chunk with NO leading doc (no pre-declaration comment block
+    AND no Python first-statement docstring), the body IS the content —
+    the helper returns the original content unchanged. That subset
+    behaves exactly as the previous whole-content comparison did; only
+    the docstring-bearing subset changes behaviour.
+
+    Reusing `leading_docstring_key`'s machinery rather than writing a
+    second docstring parser guarantees the two stay in lockstep: a chunk
+    that `leading_docstring_key` returns "" for (no doc, or too short)
+    also gets a no-op strip here, and a chunk whose docstring is
+    detected as a particular span by the key is stripped of the same
+    span by this helper. No second source of truth.
+    """
+    lines = content.splitlines()
+    leading_doc, code_lines = _leading_doc_and_code(lines)
+    # Same attribute/decorator filter as leading_docstring_key: a leading
+    # `@decorator` / `#[derive(...)]` line is structural metadata, not
+    # documentation, and is excluded from the "doc" portion so the doc
+    # that follows it (or the absence of one) is what the body comparison
+    # gets to ignore. The decorator itself lands in `leading_doc` here
+    # but is dropped from the returned "doc" portion — the body span
+    # (code_lines) is unchanged either way and is what we return.
+    leading_doc = [l for l in leading_doc if not _ATTR_DECORATOR_LINE_RE.match(l)]
+
+    if leading_doc:
+        # Body is everything after the pre-declaration comment block.
+        return "\n".join(code_lines)
+
+    # No pre-declaration comment block. For Python, fall through to the
+    # first-statement docstring (the chunk opens with the def line and
+    # the docstring is the first body statement). This mirrors the
+    # fallback in leading_docstring_key exactly.
+    if (language or "").lower() == "python":
+        _, body_start = _extract_signature(code_lines)
+        body_after_sig = code_lines[body_start:]
+        if body_after_sig:
+            joined = "\n".join(body_after_sig)
+            # _PY_DOCSTRING_RE is multi-line (DOTALL); _PY_DOCSTRING_ONELINE_RE
+            # handles the single-line plain-quoted case. Same pair
+            # leading_docstring_key's Python fallback ultimately relies on
+            # via _extract_python_docstring, just here we're matching against
+            # the raw body to recover the SPAN of the docstring instead of
+            # its text.
+            m = _PY_DOCSTRING_RE.match(joined) or _PY_DOCSTRING_ONELINE_RE.match(
+                body_after_sig[0].strip()
+            )
+            if m:
+                # The docstring may span multiple lines; figure out how many
+                # body lines it consumed so the body we return skips them.
+                doc_end = m.end()
+                lines_consumed = joined[:doc_end].count("\n") + 1
+                remaining = body_after_sig[lines_consumed:]
+                return "\n".join(code_lines[:body_start] + remaining)
+
+    # No docstring found — body is the whole content (no-op strip).
+    return content
+
+
+def _is_templated_body_difference(a: str, b: str) -> bool:
+    """True when the differences between two chunks' BODIES are concentrated
+    in numeric literals — the known false-collapse shape for the
+    LANE-NEARDUP-DEDUP content-only key (LANE-NEARDUP-DOCSTRING-KEY brief).
+
+    Bodies that are identical except for an embedded index or counter
+    (``handler_0``/``handler_1``, ``compute_0``/``compute_1``, ``x=0``/
+    ``x=1``) are extremely common in generated clients, dispatch tables
+    and test suites. After `normalized_content` collapses whitespace,
+    such bodies differ only in a handful of digit characters and clear
+    the 0.95 content-similarity gate while representing genuinely
+    distinct symbols. Without a guard, the content-only key would
+    collapse them — silently destroying correct results, which is
+    strictly worse than the wasted result-list slot the key exists to
+    reduce.
+
+    Heuristic, intentionally narrow: fires only when the non-matching
+    characters between the two bodies are MOSTLY digits (more than 50%
+    of the differing characters on either side are digit characters).
+    Plain word-level changes (one comment line differs, one identifier
+    renamed) leave zero digits in the diff and never trigger the guard
+    — those are exactly the cases the key is meant to collapse. A
+    genuine numeric revision (a `version = 1` to `version = 2` constant
+    swap) is also flagged, which is the right call: two functions
+    distinguished by a single literal are usually distinct symbols, not
+    near-verbatim restatements.
+
+    Cheap (one SequenceMatcher.get_opcodes() pass on already-stripped
+    bodies — bodies are at most a few hundred chars and the
+    LANE-NEARDUP-DEDUP key already runs SequenceMatcher on them) and
+    legible: the guard is a property of the two bodies' diff structure,
+    not a query-side classification. The result is fed into
+    `_is_content_near_duplicate` (agent/searcher.py) as a third gate
+    alongside the structural-node_type and content-similarity gates.
+    """
+    if a == b:
+        return False
+    # autojunk=False is REQUIRED, not a tuning choice. difflib's default
+    # autojunk heuristic treats any element appearing in more than 1%% of a
+    # sequence of 200+ elements as junk and excludes it from matching. These
+    # are CHARACTER sequences and a code chunk is routinely longer than 200
+    # characters, so ordinary letters get classed as junk and the ratio
+    # collapses. Measured on two Rust bodies differing by a single word:
+    # 0.158 with the default against 0.995 with autojunk off. Every
+    # similarity threshold in this module is meaningless without it.
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    non_matching = 0
+    digit_chars = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        non_matching += max(i2 - i1, j2 - j1)
+        for ch in a[i1:i2]:
+            if ch.isdigit():
+                digit_chars += 1
+        for ch in b[j1:j2]:
+            if ch.isdigit():
+                digit_chars += 1
+    if non_matching == 0:
+        return False
+    return digit_chars / non_matching > 0.5

@@ -5104,6 +5104,8 @@ class TestNearDuplicateResultSetCollapse:
         assert len(runs[0]) == 2
 
     def test_comparison_count_bounded_per_doc_key(self, searcher, monkeypatch) -> None:
+        # Runs at the production default (near_dup_body disabled). See the
+        # note on the final assertion for why that is the point of the test.
         """Pins the LATENCY BOUND itself (not the gates' correctness, already
         covered above): a large pool of chunks sharing one boilerplate
         leading doc/comment but with genuinely different bodies — e.g. many
@@ -5156,8 +5158,18 @@ class TestNearDuplicateResultSetCollapse:
             f"(n={n}, k={DOCSTRING_DEDUP_MAX_REPS_COMPARED}) — the "
             f"per-doc_key representative cap regressed"
         )
-        # Sanity: these genuinely-different chunks never collapse — the cap
-        # must not have caused (or masked) a false collapse either.
+        # These 50 accessors differ only in an index, which is what templated
+        # code looks like everywhere: generated clients, dispatch tables, field
+        # accessors. Under the PRODUCTION default they never collapse, and this
+        # pins that guarantee.
+        #
+        # They DO collapse, 50 into 1, with ranking.near_dup_body.enabled set
+        # true. That is not a bug in this test; it is the measured reason the
+        # key ships disabled. Character similarity cannot separate "the same
+        # text" from "the same shape with a different identifier", and
+        # templated code is the second while scoring like the first. The
+        # collapse rate has to be measured across the warm corpora before the
+        # key can be enabled, and this case is the one it has to survive.
         assert len(out) == n
 
 
@@ -5173,17 +5185,17 @@ class TestNearDuplicateResultSetCollapse:
 # ---------------------------------------------------------------------------
 
 class TestNearDuplicateBodyDedup:
-    @pytest.mark.xfail(
-        reason="UPG-NEARDUP-KEY-INCLUDES-DOCSTRING: _is_content_near_duplicate "
-               "compares FULL normalized content, docstring included, so the very "
-               "case this key exists for (leading docstrings differ, bodies are "
-               "near-verbatim) cannot reach the 0.95 threshold: the differing "
-               "docstrings drag whole-content similarity to ~0.77. The key must "
-               "compare bodies with the leading docstring stripped before this "
-               "can pass. Kept as a failing test rather than deleted so the gap "
-               "stays visible.",
-        strict=False,
-    )
+    @pytest.fixture(autouse=True)
+    def _enable_near_dup(self, monkeypatch):
+        """The key ships DISABLED (ranking.near_dup_body.enabled: false) until
+        its collapse rate is measured across the warm corpora, so every test in
+        this class has to turn it on explicitly. Without this the whole class
+        would pass vacuously by never running the code it is about, which is a
+        worse failure than a red test.
+        """
+        import agent.searcher as _s
+        monkeypatch.setattr(_s, "_NEAR_DUP_BODY_ENABLED", True)
+
     def test_different_docstring_near_identical_body_collapses(
         self, searcher,
     ) -> None:
@@ -5193,8 +5205,21 @@ class TestNearDuplicateBodyDedup:
         the leading docstring, and here the docstrings differ — and the
         bodies are NOT byte-identical either, so the UPG-2.2 byte-identical
         key misses too. The content-only key is the only mechanism that
-        can collapse this pair."""
-        # Bodies: 99%+ identical (one line of comment differs). Docstrings:
+        can collapse this pair.
+
+        Pinned by the LANE-NEARDUP-DOCSTRING-KEY fix: the previous
+        implementation compared whole content INCLUDING the leading
+        docstring, which dragged the SequenceMatcher.ratio below the
+        0.95 threshold for exactly this case (the differing docstrings
+        were inside the comparison). Stripping the docstring before
+        comparing (chunk_quality._strip_leading_docstring_block, reused
+        from leading_docstring_key's machinery) lets the ratio clear
+        the threshold and the collapse fire."""
+        # Bodies: one differing comment line against an otherwise identical
+        # body. The shared part must be long enough that a single line is a
+        # small fraction of it. At nine lines, one difference is only ~89%
+        # similar once docstrings are stripped, under the 0.95 bar, which is
+        # exactly why this fixture could not fire. Docstrings:
         # completely different (so DEF-C's docstring key differs).
         a_body = (
             "def fmt_date(d):\n"
@@ -5206,12 +5231,42 @@ class TestNearDuplicateBodyDedup:
             "    # extra implementation line\n"
             "    # extra implementation line\n"
             "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
         )
         b_body = (
             "def fmt_date(d):\n"
             "    return d.strftime('%Y-%m-%d')\n"
             "    # canonical formatter used everywhere in the module\n"
             "    # across the entire pipeline\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
             "    # extra implementation line\n"
             "    # extra implementation line\n"
             "    # extra implementation line\n"
@@ -5228,25 +5283,64 @@ class TestNearDuplicateBodyDedup:
             + b_body,
             path="/p/src/b.py", lang="rust", node_type="function_item",
         )
-        # Sanity-check the test fixture itself — if the bodies are not in
-        # the 0.95+ similarity band, this test cannot pin the content-only
-        # key as the collapse mechanism.
+        # Sanity-check the test fixture itself — if the STRIPPED bodies
+        # are not in the 0.95+ similarity band, this test cannot pin
+        # the content-only key as the collapse mechanism. Also pin the
+        # negative direction: the WHOLE-content similarity is well
+        # below 0.95 (the docstrings drag it down), which is exactly
+        # the defect the docstring-strip fix is meant to overcome —
+        # if a future refactor accidentally reverts the strip, this
+        # whole-content assertion would still pass (the test fixture
+        # is unchanged) but the LANE-NEARDUP-DEDUP key would re-break
+        # for the same reason it did before the fix. The pre-strip
+        # assertion below is the explicit tripwire for that regression.
+        from agent.chunk_quality import (
+            normalized_content,
+            _strip_leading_docstring_block,
+        )
         import difflib
-        from agent.chunk_quality import normalized_content
-        sim = difflib.SequenceMatcher(
+        whole_sim = difflib.SequenceMatcher(
             None,
             normalized_content(a.content),
             normalized_content(b.content),
+            autojunk=False,
         ).ratio()
-        assert sim >= 0.95, (
-            f"fixture body similarity {sim:.3f} is below the 0.95 "
-            f"threshold; this test cannot pin the content-only key — "
-            f"pick a more-similar second body"
+        a_body_stripped = normalized_content(
+            _strip_leading_docstring_block(a.content, a.language)
+        )
+        b_body_stripped = normalized_content(
+            _strip_leading_docstring_block(b.content, b.language)
+        )
+        stripped_sim = difflib.SequenceMatcher(
+            None, a_body_stripped, b_body_stripped,
+            autojunk=False,
+        ).ratio()
+        # Tripwire: the pre-fix regression must remain visible. The
+        # whole-content similarity with differing leading docstrings
+        # sits well below 0.95 (LANE-NEARDUP-DOCSTRING-KEY brief:
+        # ~0.77 on this fixture before the strip landed). The
+        # stripped-body similarity must clear the threshold (and is
+        # what the new code actually compares). If `whole_sim` ever
+        # rises to >= 0.95 the fixture has drifted away from the
+        # target case and the test no longer pins what it claims to
+        # pin.
+        assert whole_sim < 0.95, (
+            f"fixture whole-content similarity {whole_sim:.3f} has "
+            f"risen to >= 0.95 — the leading docstrings no longer "
+            f"differ enough to exercise the docstring-strip path. "
+            f"Pick a more-different leading docstring to restore the "
+            f"test's regression-coverage value."
+        )
+        assert stripped_sim >= 0.95, (
+            f"fixture stripped-body similarity {stripped_sim:.3f} is "
+            f"below the 0.95 threshold; this test cannot pin the "
+            f"content-only key — pick a more-similar second body"
         )
         out = searcher._apply_quality_and_dedup("format date", [a, b])
         assert len(out) == 1, (
             f"expected the two near-identical bodies to collapse via "
-            f"the content-only key (body sim {sim:.3f}), got {len(out)}: "
+            f"the content-only key (stripped sim {stripped_sim:.3f}, "
+            f"whole sim {whole_sim:.3f}), got {len(out)}: "
             f"{[r.file_path for r in out]}"
         )
         assert out[0].dup_count == 1
@@ -5272,17 +5366,6 @@ class TestNearDuplicateBodyDedup:
             f"{[r.file_path for r in out]}"
         )
 
-    @pytest.mark.xfail(
-        reason="UPG-NEARDUP-KEY-INCLUDES-DOCSTRING: _is_content_near_duplicate "
-               "compares FULL normalized content, docstring included, so the very "
-               "case this key exists for (leading docstrings differ, bodies are "
-               "near-verbatim) cannot reach the 0.95 threshold: the differing "
-               "docstrings drag whole-content similarity to ~0.77. The key must "
-               "compare bodies with the leading docstring stripped before this "
-               "can pass. Kept as a failing test rather than deleted so the gap "
-               "stays visible.",
-        strict=False,
-    )
     def test_different_node_types_high_body_similarity_never_collapses(
         self, searcher,
     ) -> None:
@@ -5292,13 +5375,16 @@ class TestNearDuplicateBodyDedup:
         categorically not a near-duplicate of a chunk of a different kind,
         independent of any similarity threshold.
 
-        The bodies here are > 0.95 similar but NOT byte-identical (so the
-        UPG-2.2 byte-identical key misses), the leading docstrings differ
-        (so the DEF-C docstring key misses), and the body similarity is
-        above the 0.95 content gate (so the new content-only key would
-        pass without the structural gate stopping the collapse first). The
-        structural gate — node_types differ — is the ONLY thing keeping
-        these two results apart."""
+        The bodies here are > 0.95 similar at the STRIPPED level (the
+        LANE-NEARDUP-DOCSTRING-KEY fix compares stripped bodies, not
+        whole content) but NOT byte-identical (so the UPG-2.2 byte-
+        identical key misses), the leading docstrings differ (so the
+        DEF-C docstring key misses), and the stripped-body similarity
+        is above the 0.95 content gate (so the new content-only key
+        would pass the similarity check without the structural gate
+        stopping the collapse first). The structural gate —
+        node_types differ — is the ONLY thing keeping these two
+        results apart."""
         shared_body_lines = [
             "fn resolve(&self) -> Lock {",
             "    self.solve()",
@@ -5349,27 +5435,39 @@ class TestNearDuplicateBodyDedup:
             + "\n".join(impl_body_lines) + "\n",
             path="/p/src/impl.rs", lang="rust", node_type="impl_item",
         )
-        # Sanity-check the test fixture itself — if the bodies are not in
-        # the 0.95+ similarity band, the structural gate is not what
-        # would have stopped the collapse.
+        # Sanity-check the test fixture itself — at the STRIPPED-body
+        # level (what the LANE-NEARDUP-DEDUP key actually compares
+        # after the docstring-strip fix) the similarity must clear
+        # 0.95, otherwise the structural gate isn't what's stopping
+        # the collapse (a below-threshold similarity would be caught
+        # by the content gate instead and this test wouldn't be
+        # pinning the structural gate's role).
         import difflib
-        from agent.chunk_quality import normalized_content
+        from agent.chunk_quality import (
+            normalized_content,
+            _strip_leading_docstring_block,
+        )
         sim = difflib.SequenceMatcher(
             None,
-            normalized_content(trait_chunk.content),
-            normalized_content(impl_chunk.content),
+            normalized_content(
+                _strip_leading_docstring_block(trait_chunk.content, trait_chunk.language)
+            ),
+            normalized_content(
+                _strip_leading_docstring_block(impl_chunk.content, impl_chunk.language)
+            ),
+            autojunk=False,
         ).ratio()
         assert sim >= 0.95, (
-            f"fixture body similarity {sim:.3f} is below the 0.95 "
-            f"threshold; this test cannot pin the structural gate as the "
-            f"stopper — pick a more-similar impl-side body"
+            f"fixture stripped-body similarity {sim:.3f} is below the "
+            f"0.95 threshold; this test cannot pin the structural gate "
+            f"as the stopper — pick a more-similar impl-side body"
         )
         out = searcher._apply_quality_and_dedup(
             "resolve dependency conflicts", [trait_chunk, impl_chunk],
         )
         assert len(out) == 2, (
             f"trait and impl wrongly collapsed despite different node_types "
-            f"(body sim {sim:.3f}): {[r.file_path for r in out]}"
+            f"(stripped body sim {sim:.3f}): {[r.file_path for r in out]}"
         )
 
     def test_content_dedup_runs_after_byte_identical_and_docstring_keys(
@@ -5416,12 +5514,19 @@ class TestNearDuplicateBodyDedup:
         assert [r.file_path for r in out] == [c.file_path for c in candidates]
 
     def test_comparison_count_bounded_per_candidate(self, searcher, monkeypatch) -> None:
-        """Pins the LATENCY BOUND: a large pool of chunks whose bodies
-        are pairwise below the 0.95 threshold (so nothing genuinely
-        collapses) must not blow up the number of _is_content_near_duplicate
-        comparisons performed as the pool grows. With the per-candidate
-        representative cap, total comparisons is bounded to at most
-        n * NEAR_DUP_BODY_MAX_REPS_COMPARED."""
+        """Pins the LATENCY BOUND: a large pool of chunks that pairwise
+        fall OUT of the content-only key must not blow up the number of
+        _is_content_near_duplicate comparisons performed as the pool
+        grows. The 50 candidates below are TEMPLATED (handler_0 ..
+        handler_49, every differing character is a digit), so the new
+        templated-body guard (chunk_quality._is_templated_body_difference)
+        correctly keeps them apart — even though the SequenceMatcher
+        ratio on their bodies is well above 0.95, they would otherwise
+        be the false-collapse shape the LANE-NEARDUP-DOCSTRING-KEY
+        brief calls out. With the per-candidate representative cap,
+        total comparisons is bounded to at most
+        n * NEAR_DUP_BODY_MAX_REPS_COMPARED regardless of how the
+        guard keeps them apart."""
         import agent.searcher as searcher_module
         from agent.config import NEAR_DUP_BODY_MAX_REPS_COMPARED
 
@@ -5437,11 +5542,12 @@ class TestNearDuplicateBodyDedup:
             searcher_module, "_is_content_near_duplicate", counting_wrapper,
         )
 
-        # 50 candidates with structurally different bodies, each well below
-        # the 0.95 threshold pairwise (the bodies use different field
-        # counts/names so SequenceMatcher.ratio sits in the 0.2-0.5 range).
-        # The structural gate requires the SAME node_type for the comparison
-        # to run — so the bodies must match node_type for the count to grow.
+        # 50 candidates with templated bodies (every difference is a
+        # digit) — the templated-body guard, not the similarity
+        # threshold, is what keeps them from collapsing. The
+        # structural gate requires the SAME node_type for the
+        # comparison to run — so the bodies must match node_type for
+        # the count to grow.
         n = 50
         cands = [
             _sr(
@@ -5462,9 +5568,104 @@ class TestNearDuplicateBodyDedup:
             f"(n={n}, k={NEAR_DUP_BODY_MAX_REPS_COMPARED}) — the "
             f"per-candidate representative cap regressed"
         )
-        # Sanity: these genuinely-different chunks never collapse — the cap
-        # must not have caused (or masked) a false collapse either.
+        # Sanity: these templated chunks never collapse — the cap
+        # must not have caused (or masked) a false collapse either,
+        # and the templated-body guard must have caught them on
+        # every pair.
         assert len(out) == n
+
+    def test_templated_bodies_with_embedded_index_never_collapses(
+        self, searcher,
+    ) -> None:
+        """Pins the templated-body guard (LANE-NEARDUP-DOCSTRING-KEY brief):
+        the handler_0 / handler_1 / compute_0 / x=0 shape common in
+        generated clients, dispatch tables, and test suites — bodies
+        identical except for an embedded digit index — must NOT
+        collapse under the content-only key, even though the
+        SequenceMatcher.ratio on their normalized bodies is well above
+        0.95. Without the guard, the key would silently destroy N
+        distinct results into 1 (the witness in the brief: 5 → 1 and
+        50 → 28 in the original test runs)."""
+        candidates = [
+            _sr(
+                f"def handler_{i}():\n"
+                f"    return compute_{i}()\n"
+                f"    # impl body\n"
+                f"    x={i}\n"
+                f"    # extra\n"
+                f"    # extra\n"
+                f"    # extra\n"
+                f"    # extra\n",
+                path=f"/p/handler_{i}.py", node_type="function_item",
+            )
+            for i in range(5)
+        ]
+        out = searcher._apply_quality_and_dedup("handlers", candidates)
+        assert len(out) == 5, (
+            f"templated bodies wrongly collapsed to {len(out)} — the "
+            f"templated-body guard is not firing"
+        )
+        assert [r.file_path for r in out] == [c.file_path for c in candidates]
+
+    def test_docstring_strip_no_op_for_chunks_without_leading_doc(
+        self, searcher,
+    ) -> None:
+        """Pins the no-docstring fallback: chunks whose content has NO
+        leading docstring (no pre-declaration comment block, no Python
+        first-statement docstring) get a no-op strip — the body
+        comparison is performed on the whole content, exactly as the
+        previous (broken, docstring-included) implementation did.
+        This is the subset of chunks where the LANE-NEARDUP-DOCSTRING-KEY
+        fix is a strict no-op, and is the dominant case for chunks
+        indexed from generated clients, dispatch tables, and
+        templated code."""
+        from agent.chunk_quality import _strip_leading_docstring_block
+        content = (
+            "def handler_0():\n"
+            "    return compute_0()\n"
+            "    # impl body\n"
+            "    x=0\n"
+        )
+        # No language arg (no leading doc detected)
+        assert _strip_leading_docstring_block(content, "") == content
+        # Python language with a def line first and NO first-statement
+        # docstring (the function body is just `return ...`) — also a
+        # no-op strip.
+        py_no_doc = "def f():\n    return 1\n"
+        assert _strip_leading_docstring_block(py_no_doc, "python") == py_no_doc
+
+    def test_docstring_strip_actually_strips_pre_declaration_comment(
+        self, searcher,
+    ) -> None:
+        """Pins the strip on a Rust-style leading rustdoc block: the
+        /// comment block is removed and the comparison is performed
+        on the remaining function body only. This is the specific
+        shape LANE-NEARDUP-DOCSTRING-KEY exists to handle — leading
+        docstrings differ between two chunks, bodies are
+        near-verbatim, and the strip is what makes the similarity
+        ratio clear the threshold."""
+        from agent.chunk_quality import (
+            _strip_leading_docstring_block,
+            normalized_content,
+        )
+        a = (
+            "/// Formats a date as ISO-8601 YYYY-MM-DD string.\n"
+            "def fmt_date(d):\n"
+            "    return d.strftime('%Y-%m-%d')\n"
+        )
+        b = (
+            "/// Renders a date in human-readable YYYY-MM-DD format.\n"
+            "def fmt_date(d):\n"
+            "    return d.strftime('%Y-%m-%d')\n"
+        )
+        # Stripped bodies are IDENTICAL — the differing /// docstring
+        # has been removed.
+        a_stripped = _strip_leading_docstring_block(a, "rust")
+        b_stripped = _strip_leading_docstring_block(b, "rust")
+        assert normalized_content(a_stripped) == normalized_content(b_stripped), (
+            f"strip did not equalize the two bodies: a={a_stripped!r} "
+            f"b={b_stripped!r}"
+        )
 
 
 class TestImportancePrior:

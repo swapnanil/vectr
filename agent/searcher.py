@@ -19,6 +19,8 @@ from agent.chunk_quality import (
     is_type_definition_chunk,
     is_module_level_function_chunk,
     leading_docstring_key,
+    _strip_leading_docstring_block,
+    _is_templated_body_difference,
 )
 from agent.config import (
     RERANK_MODEL as _RERANK_MODEL,
@@ -343,6 +345,22 @@ def _is_near_duplicate_body(a: SearchResult, b: SearchResult) -> bool:
     """
     if a.node_type and b.node_type and a.node_type != b.node_type:
         return False
+    # UPG-DEDUP-AUTOJUNK-DEFC: this call KNOWINGLY keeps difflib's default
+    # autojunk, which is wrong and understates similarity. difflib treats any
+    # element appearing in more than 1 percent of a 200+ element sequence as
+    # junk; these are CHARACTER sequences and a code chunk routinely exceeds
+    # 200 characters, so ordinary letters get classed as junk. Two Rust bodies
+    # differing by a single word measure 0.158 here against 0.995 with
+    # autojunk off.
+    #
+    # It is not corrected in place because DEF-C SHIPS ENABLED and its 0.75
+    # threshold was calibrated through this same distorted metric. Fixing the
+    # metric alone makes a live feature far more aggressive with no evidence
+    # behind the new behaviour: measured, 50 templated accessors differing
+    # only in an index collapse from 50 results to 1. The correct fix pairs
+    # autojunk=False with a threshold recalibrated against the corpora, in one
+    # change. The disabled near_dup_body key below already uses the correct
+    # parameter, because changing it there ships no behaviour.
     ratio = difflib.SequenceMatcher(
         None, normalized_content(a.content), normalized_content(b.content),
     ).ratio()
@@ -360,10 +378,9 @@ def _is_content_near_duplicate(a: SearchResult, b: SearchResult) -> bool:
     essentially the same implementation; two thin wrapper modules whose
     headers share no token yet whose bodies are byte-near-identical).
 
-    The comparison is on full normalized bodies only — never on the query,
-    never on the leading docstring, never via embedding. Two content-only
-    gates run before a candidate is allowed to collapse into an existing
-    representative:
+    Three content-only gates run before a candidate is allowed to collapse
+    into an existing representative — all pure chunk PROPERTIES, never the
+    query:
 
     Gate 1 — structural: when both chunks carry a recorded ``node_type`` and
     the two differ (e.g. ``trait_item`` vs ``impl_item``), never collapse —
@@ -373,20 +390,49 @@ def _is_content_near_duplicate(a: SearchResult, b: SearchResult) -> bool:
     (nothing to categorically compare). This is the SAME structural gate
     DEF-C applies, kept here so the two mechanisms behave consistently.
 
-    Gate 2 — content: require the two chunks' full normalized bodies
-    (difflib.SequenceMatcher ratio) to be at least
-    ``_NEAR_DUP_BODY_SIMILARITY_MIN`` alike. The threshold is set well above
-    the trait/impl + overload body similarity measured for DEF-C
+    Gate 2 — templated-body guard: bodies that are identical except for
+    embedded digit literals (the ``handler_0``/``handler_1``,
+    ``compute_0``/``compute_1`` shape common in generated clients,
+    dispatch tables and test suites) clear the SequenceMatcher.ratio
+    threshold while representing genuinely distinct symbols. Reusing
+    ``_is_templated_body_difference`` from chunk_quality to detect that
+    shape (the diff is mostly digits) keeps them apart. A no-op for
+    bodies that differ in non-digit content — those are the cases the
+    key is meant to collapse.
+
+    Gate 3 — content: require the two chunks' STRIPPED bodies
+    (leading docstring/comment block removed via
+    ``_strip_leading_docstring_block``, the inverse of
+    ``leading_docstring_key``'s docstring detection) to be at least
+    ``_NEAR_DUP_BODY_SIMILARITY_MIN`` alike per
+    difflib.SequenceMatcher.ratio. The previous implementation compared
+    whole content INCLUDING the leading docstring, which dragged the
+    ratio below the threshold for the very case this key exists for
+    (chunks with different docstrings, near-verbatim bodies): the
+    differing docstrings were inside the comparison. With the docstring
+    stripped, every comparison gets more similar (the most-varying
+    part of the text is gone), but the key is now actually able to
+    fire on its target case. The 0.95 threshold is set well above the
+    trait/impl + overload body similarity measured for DEF-C
     (~0.857, ~0.53) so this lane is for the OPPOSITE failure mode
     (truly-near-identical content) and stays out of DEF-C's territory.
-    A chunk at 0.94 with an already-kept representative is left as its own
-    result — the wasted slot is the pre-existing defect this lane exists to
-    reduce, never a false collapse.
+    A chunk at 0.94 stripped with an already-kept representative is
+    left as its own result — the wasted slot is the pre-existing
+    defect this lane exists to reduce, never a false collapse.
     """
     if a.node_type and b.node_type and a.node_type != b.node_type:
         return False
+    a_body = _strip_leading_docstring_block(a.content, a.language)
+    b_body = _strip_leading_docstring_block(b.content, b.language)
+    if _is_templated_body_difference(a_body, b_body):
+        return False
+    # autojunk=False for the same reason as the whole-content site above:
+    # difflib's default treats common characters in a 200+ element sequence as
+    # junk, which collapses the ratio on ordinary code. 0.158 against 0.995 on
+    # two bodies differing by one word.
     ratio = difflib.SequenceMatcher(
-        None, normalized_content(a.content), normalized_content(b.content),
+        None, normalized_content(a_body), normalized_content(b_body),
+        autojunk=False,
     ).ratio()
     return ratio >= _NEAR_DUP_BODY_SIMILARITY_MIN
 
