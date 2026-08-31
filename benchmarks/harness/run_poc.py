@@ -85,6 +85,99 @@ CLAUDE_BIN = _CLAUDE_DEFAULT if os.path.exists(_CLAUDE_DEFAULT) else "claude"
 # Cursor/Composer is out of scope for these benchmarks.
 MODEL = os.getenv("POC_MODEL", "")
 
+# ---------------------------------------------------------------------------
+# Route / ccr driver (POC-CCR-ROUTE)
+# ---------------------------------------------------------------------------
+# Add an opt-in routing mode so the benchmark can run through a local router
+# (`ccr <profile> cli -- ...`) instead of invoking the Claude binary directly.
+# The existing CLAUDE_BIN path remains the default — no current invocation
+# changes meaning. Set via --route / --route-profile / --route-bin on the CLI,
+# or POC_ROUTE / POC_ROUTE_PROFILE / POC_ROUTE_BIN env. Empty route = the
+# original claude path.
+ROUTE         = os.getenv("POC_ROUTE", "")            # "" (default) | "ccr"
+ROUTE_PROFILE = os.getenv("POC_ROUTE_PROFILE", "")    # router profile name
+ROUTE_BIN     = os.getenv("POC_ROUTE_BIN", "ccr")     # router binary
+
+# A routed model envelope is shaped like the Claude Code envelope but the
+# upstream may omit fields (iterations, total_cost_usd). Track per-metric
+# presence so a missing field is distinguishable from a measured zero.
+METRIC_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "base_input_tokens",
+    "cache_creation_tokens",
+    "cache_read_tokens",
+    "turns",
+    "cost_usd",
+)
+
+
+def _metric_presence_from_usage(usage: dict | None) -> dict[str, bool]:
+    """Inspect a Claude-Code-shaped `usage` dict and report which of the
+    metrics we look for are present in the envelope. `present=True` even if
+    the value is 0 (a measured zero). `False` = the field was absent."""
+    if not usage:
+        return {f: False for f in METRIC_FIELDS}
+    iterations = usage.get("iterations")
+    sample = iterations[0] if isinstance(iterations, list) and iterations else usage
+    return {
+        "input_tokens":          "input_tokens"          in sample,
+        "output_tokens":         "output_tokens"         in sample,
+        "base_input_tokens":     "input_tokens"          in sample,  # collapses to base
+        "cache_creation_tokens": "cache_creation_input_tokens" in sample,
+        "cache_read_tokens":     "cache_read_input_tokens"      in sample,
+        "turns":                 "num_turns"              in usage,
+        "cost_usd":              "total_cost_usd"         in usage,
+    }
+
+
+# Vector-CCB-001: a routed run can fail mid-sprint on an upstream 402/429.
+# We surface the failure against the task, keep partial results, and never
+# retry silently. `attempts` records the raw number of times this task was
+# invoked (always 1 from the harness — no internal loop).
+def _attempts_and_error_class(error: str | None, returncode: int | None) -> dict:
+    if error is None and returncode in (0, None):
+        return {"attempts": 1, "error_class": "none"}
+    if returncode is not None and returncode != 0:
+        return {"attempts": 1, "error_class": f"exit_{returncode}"}
+    # string-classify common upstream errors so a published number can be
+    # filtered out without re-reading stderr.
+    e = (error or "").lower()
+    for tag in ("402", "429", "401", "timeout", "404", "400"):
+        if tag in e:
+            return {"attempts": 1, "error_class": tag}
+    return {"attempts": 1, "error_class": "other"}
+
+
+def _vectr_git_sha() -> str:
+    """Resolve the running vectr repo's git SHA. Empty if not a git checkout.
+    Resolved once at import time and re-resolved on each call (cheap; used
+    only for the scope stamp)."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True,
+            stderr=subprocess.DEVNULL, timeout=5,
+        ).strip()
+    except Exception:
+        return ""
+
+
+def _scope_stamp() -> dict:
+    """Snapshot of what produced this run. Embedded into every saved JSON
+    result and printed in the report header. A number without this stamp is
+    exactly how the README got into a state where published figures could
+    not be reproduced."""
+    from datetime import datetime, timezone
+    return {
+        "model":           MODEL,
+        "route":           ROUTE,
+        "route_profile":   ROUTE_PROFILE,
+        "route_bin":       ROUTE_BIN,
+        "utc_date":        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "vectr_git_sha":   _vectr_git_sha(),
+        "claude_bin":      CLAUDE_BIN,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Data model (POC v2)
@@ -505,8 +598,9 @@ def _run_claude_streaming(
         allowed = ["Write", "Edit"] + _VECTR_TOOLS
     else:
         allowed = _STANDARD_TOOLS + (_VECTR_TOOLS if use_vectr else [])
-    cmd = [
-        CLAUDE_BIN,
+    # Inner args — identical regardless of route, so a default run is unchanged.
+    # The ccr wrapper takes the inner args after `--` and forwards them to claude.
+    inner_args = [
         "-p", prompt,
         "--output-format", "stream-json",
         "--max-turns", str(max_turns),
@@ -514,8 +608,20 @@ def _run_claude_streaming(
         "--allowedTools", ",".join(allowed),
     ]
     if MODEL:
-        cmd += ["--model", MODEL]
-    env = {**os.environ}
+        inner_args += ["--model", MODEL]
+
+    if ROUTE:
+        # Routed path: `ccr <profile> cli -- <inner_args>`. ENABLE_TOOL_SEARCH=false
+        # must reach the child — without it the request carries deferred tool
+        # definitions, a non-Anthropic endpoint rejects the call with
+        # `400 All target providers failed`, and the error names providers so it
+        # reads like an upstream outage rather than a client-side flag.
+        cmd = [ROUTE_BIN, ROUTE_PROFILE, "cli", "--"] + inner_args
+        env = {**os.environ, "ENABLE_TOOL_SEARCH": "false"}
+    else:
+        # Default path — byte-identical to the pre-ccr invocation.
+        cmd = [CLAUDE_BIN] + inner_args
+        env = {**os.environ}
 
     timeline: list[ToolEvent] = []
     final: dict = {}
@@ -534,6 +640,8 @@ def _run_claude_streaming(
             env=env,
         )
     except FileNotFoundError:
+        if ROUTE:
+            return {"error": f"{ROUTE_BIN} not found — is the router installed?"}, []
         return {"error": "claude CLI not found — is Claude Code installed?"}, []
 
     deadline = time.time() + timeout_s
@@ -614,7 +722,8 @@ def _run_claude_streaming(
 
     if proc.returncode != 0 and not final:
         stderr = proc.stderr.read().strip()[:500]
-        return {"error": f"claude exited {proc.returncode}: {stderr}"}, timeline
+        binary = ROUTE_BIN if ROUTE else CLAUDE_BIN
+        return {"error": f"{binary} exited {proc.returncode}: {stderr}"}, timeline
 
     return final, timeline
 
@@ -1417,7 +1526,38 @@ def main() -> None:
                         help="Driver model for the agent session: alias ('opus', 'sonnet') "
                              "or full id ('claude-opus-4-8', 'claude-sonnet-4-6'). "
                              "Default: Claude Code's default model. Claude Code only.")
+    parser.add_argument("--route", default=None, choices=["ccr"],
+                        help="Drive the session through a local router instead of "
+                             "invoking the Claude binary directly. Omit for the "
+                             "default path, which is unchanged. Env: POC_ROUTE.")
+    parser.add_argument("--route-profile", default=None,
+                        help="Router profile name, required with --route. The profile "
+                             "selects the router config; --model still selects the "
+                             "upstream model. Env: POC_ROUTE_PROFILE.")
+    parser.add_argument("--route-bin", default=None,
+                        help="Router binary (default 'ccr'). Env: POC_ROUTE_BIN.")
     args = parser.parse_args()
+
+    # Routing is opt-in and the default path must stay byte-identical, so
+    # these only assign when the flag was actually passed.
+    if args.route:
+        global ROUTE
+        ROUTE = args.route
+        os.environ["POC_ROUTE"] = args.route
+    if args.route_profile:
+        global ROUTE_PROFILE
+        ROUTE_PROFILE = args.route_profile
+        os.environ["POC_ROUTE_PROFILE"] = args.route_profile
+    if args.route_bin:
+        global ROUTE_BIN
+        ROUTE_BIN = args.route_bin
+        os.environ["POC_ROUTE_BIN"] = args.route_bin
+    if ROUTE and not ROUTE_PROFILE:
+        # Failing here beats failing 40 minutes into a sprint: `ccr "" cli`
+        # is not a usable command and the router's error would not say why.
+        parser.error("--route requires --route-profile (or POC_ROUTE_PROFILE)")
+    if ROUTE:
+        logger.info("Route: %s profile=%r bin=%s", ROUTE, ROUTE_PROFILE, ROUTE_BIN)
 
     if args.output_dir:
         os.environ["POC_OUTPUT_DIR"] = args.output_dir
