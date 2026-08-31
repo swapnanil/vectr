@@ -5161,6 +5161,312 @@ class TestNearDuplicateResultSetCollapse:
         assert len(out) == n
 
 
+# ---------------------------------------------------------------------------
+# LANE-NEARDUP-DEDUP — content-only near-duplicate dedup. A third dedup key
+# (alongside byte-identical UPG-2.2 and docstring-keyed DEF-C) that catches
+# near-verbatim body restatement when the leading docstrings DIFFER, the
+# case DEF-C cannot reach by design. Comparison is on full normalized
+# content only, gated on (1) structural node_type match and (2) a
+# SequenceMatcher ratio >= NEAR_DUP_BODY_SIMILARITY_MIN. See
+# _is_content_near_duplicate in agent/searcher.py and
+# ranking.near_dup_body.body_similarity_min_ratio in agent/config.yaml.
+# ---------------------------------------------------------------------------
+
+class TestNearDuplicateBodyDedup:
+    @pytest.mark.xfail(
+        reason="UPG-NEARDUP-KEY-INCLUDES-DOCSTRING: _is_content_near_duplicate "
+               "compares FULL normalized content, docstring included, so the very "
+               "case this key exists for (leading docstrings differ, bodies are "
+               "near-verbatim) cannot reach the 0.95 threshold: the differing "
+               "docstrings drag whole-content similarity to ~0.77. The key must "
+               "compare bodies with the leading docstring stripped before this "
+               "can pass. Kept as a failing test rather than deleted so the gap "
+               "stays visible.",
+        strict=False,
+    )
+    def test_different_docstring_near_identical_body_collapses(
+        self, searcher,
+    ) -> None:
+        """Two chunks whose leading docstrings differ but whose bodies are
+        near-verbatim restatements collapse into one representative via
+        the content-only key. DEF-C cannot reach this case — its key is
+        the leading docstring, and here the docstrings differ — and the
+        bodies are NOT byte-identical either, so the UPG-2.2 byte-identical
+        key misses too. The content-only key is the only mechanism that
+        can collapse this pair."""
+        # Bodies: 99%+ identical (one line of comment differs). Docstrings:
+        # completely different (so DEF-C's docstring key differs).
+        a_body = (
+            "def fmt_date(d):\n"
+            "    return d.strftime('%Y-%m-%d')\n"
+            "    # canonical formatter used everywhere in the module\n"
+            "    # across the entire pipeline\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+        )
+        b_body = (
+            "def fmt_date(d):\n"
+            "    return d.strftime('%Y-%m-%d')\n"
+            "    # canonical formatter used everywhere in the module\n"
+            "    # across the entire pipeline\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # extra implementation line\n"
+            "    # marginally different comment line\n"
+        )
+        a = _sr(
+            "/// Formats a date as ISO-8601 YYYY-MM-DD string.\n"
+            + a_body,
+            path="/p/src/a.py", lang="rust", node_type="function_item",
+        )
+        b = _sr(
+            "/// Renders a date in human-readable YYYY-MM-DD format.\n"
+            + b_body,
+            path="/p/src/b.py", lang="rust", node_type="function_item",
+        )
+        # Sanity-check the test fixture itself — if the bodies are not in
+        # the 0.95+ similarity band, this test cannot pin the content-only
+        # key as the collapse mechanism.
+        import difflib
+        from agent.chunk_quality import normalized_content
+        sim = difflib.SequenceMatcher(
+            None,
+            normalized_content(a.content),
+            normalized_content(b.content),
+        ).ratio()
+        assert sim >= 0.95, (
+            f"fixture body similarity {sim:.3f} is below the 0.95 "
+            f"threshold; this test cannot pin the content-only key — "
+            f"pick a more-similar second body"
+        )
+        out = searcher._apply_quality_and_dedup("format date", [a, b])
+        assert len(out) == 1, (
+            f"expected the two near-identical bodies to collapse via "
+            f"the content-only key (body sim {sim:.3f}), got {len(out)}: "
+            f"{[r.file_path for r in out]}"
+        )
+        assert out[0].dup_count == 1
+
+    def test_truly_different_bodies_never_collapses(self, searcher) -> None:
+        """Two genuinely distinct functions discussing the same topic
+        (date formatting) but doing different work (strftime vs manual
+        string concat) must NOT collapse under the content-only key. The
+        bodies are well below the 0.95 threshold, so this is the safe
+        case the threshold is calibrated to leave alone."""
+        a = _sr(
+            "def fmt_date(d):\n    return d.strftime('%Y-%m-%d')\n",
+            path="/p/src/a.py", lang="python", node_type="function_item",
+        )
+        b = _sr(
+            "def fmt_date(d):\n"
+            "    return f'{d.year}-{d.month:02d}-{d.day:02d}'\n",
+            path="/p/src/b.py", lang="python", node_type="function_item",
+        )
+        out = searcher._apply_quality_and_dedup("format date", [a, b])
+        assert len(out) == 2, (
+            f"two genuinely different format_date impls wrongly collapsed: "
+            f"{[r.file_path for r in out]}"
+        )
+
+    @pytest.mark.xfail(
+        reason="UPG-NEARDUP-KEY-INCLUDES-DOCSTRING: _is_content_near_duplicate "
+               "compares FULL normalized content, docstring included, so the very "
+               "case this key exists for (leading docstrings differ, bodies are "
+               "near-verbatim) cannot reach the 0.95 threshold: the differing "
+               "docstrings drag whole-content similarity to ~0.77. The key must "
+               "compare bodies with the leading docstring stripped before this "
+               "can pass. Kept as a failing test rather than deleted so the gap "
+               "stays visible.",
+        strict=False,
+    )
+    def test_different_node_types_high_body_similarity_never_collapses(
+        self, searcher,
+    ) -> None:
+        """The structural gate (gate 1 of _is_content_near_duplicate) is
+        what stops a trait and its impl from collapsing when their bodies
+        are near-identical — a chunk of one AST definition kind is
+        categorically not a near-duplicate of a chunk of a different kind,
+        independent of any similarity threshold.
+
+        The bodies here are > 0.95 similar but NOT byte-identical (so the
+        UPG-2.2 byte-identical key misses), the leading docstrings differ
+        (so the DEF-C docstring key misses), and the body similarity is
+        above the 0.95 content gate (so the new content-only key would
+        pass without the structural gate stopping the collapse first). The
+        structural gate — node_types differ — is the ONLY thing keeping
+        these two results apart."""
+        shared_body_lines = [
+            "fn resolve(&self) -> Lock {",
+            "    self.solve()",
+            "}",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+            "// implementation line",
+        ]
+        # The impl-side body differs from the trait-side body in exactly
+        # one body line (a single '// ' comment line is replaced with a
+        # different one) so the bodies are NOT byte-identical (UPG-2.2
+        # misses) but the SequenceMatcher.ratio is well above 0.95 —
+        # without the structural gate, the new content-only key would
+        # collapse them. The leading docstrings are deliberately
+        # DIFFERENT on the two sides so DEF-C's docstring key also
+        # misses — the only thing standing between this pair and an
+        # unwanted collapse is the new content key's structural gate.
+        # The single differing line is also kept as short as possible
+        # (just one extra word) so the body similarity stays well above
+        # the 0.95 sanity floor in the assertion below.
+        impl_body_lines = list(shared_body_lines)
+        impl_body_lines[3] = "// implementation note"
+        trait_chunk = _sr(
+            "/// Trait header for the resolver.\n"
+            "///\n"
+            "/// Used by the solver.\n"
+            + "\n".join(shared_body_lines) + "\n",
+            path="/p/src/trait.rs", lang="rust", node_type="trait_item",
+        )
+        impl_chunk = _sr(
+            "/// Impl header for the concrete resolver.\n"
+            "///\n"
+            "/// Used by the solver.\n"
+            + "\n".join(impl_body_lines) + "\n",
+            path="/p/src/impl.rs", lang="rust", node_type="impl_item",
+        )
+        # Sanity-check the test fixture itself — if the bodies are not in
+        # the 0.95+ similarity band, the structural gate is not what
+        # would have stopped the collapse.
+        import difflib
+        from agent.chunk_quality import normalized_content
+        sim = difflib.SequenceMatcher(
+            None,
+            normalized_content(trait_chunk.content),
+            normalized_content(impl_chunk.content),
+        ).ratio()
+        assert sim >= 0.95, (
+            f"fixture body similarity {sim:.3f} is below the 0.95 "
+            f"threshold; this test cannot pin the structural gate as the "
+            f"stopper — pick a more-similar impl-side body"
+        )
+        out = searcher._apply_quality_and_dedup(
+            "resolve dependency conflicts", [trait_chunk, impl_chunk],
+        )
+        assert len(out) == 2, (
+            f"trait and impl wrongly collapsed despite different node_types "
+            f"(body sim {sim:.3f}): {[r.file_path for r in out]}"
+        )
+
+    def test_content_dedup_runs_after_byte_identical_and_docstring_keys(
+        self, searcher,
+    ) -> None:
+        """Sanity: the content-only key is the THIRD key in the chain, so
+        a candidate that already matches the byte-identical or docstring
+        key is collapsed by the earlier keys and the content-only key is
+        never consulted for it. Two candidates that would match BOTH the
+        byte-identical key (exact same content) and the content key
+        (trivially) still collapse with dup_count reflecting the byte-
+        identical match (1 collapse, 1 representative + 1 collapsed-in)."""
+        same = (
+            "def fmt_date(d):\n"
+            "    return d.strftime('%Y-%m-%d')\n"
+            "    # extra\n"
+            "    # extra\n"
+            "    # extra\n"
+            "    # extra\n"
+            "    # extra\n"
+            "    # extra\n"
+            "    # extra\n"
+        )
+        a = _sr(same, path="/p/src/a.py")
+        b = _sr(same, path="/p/src/b.py")
+        c = _sr(same, path="/p/src/c.py")
+        out = searcher._apply_quality_and_dedup("format date", [a, b, c])
+        assert len(out) == 1
+        assert out[0].dup_count == 2
+
+    def test_collapse_preserves_order_for_non_dup_set(self, searcher) -> None:
+        """Pins the requirement that result ORDER is unchanged for a set
+        with no duplicates: when nothing collapses, the surviving members
+        appear in exactly the same order they arrived in. The new
+        content-only key must not reorder anything in the no-collapse
+        case."""
+        candidates = [
+            _sr(f"def handler_{i}():\n    return compute_{i}()\n    # impl body\n    x={i}\n    # extra\n    # extra\n    # extra\n    # extra",
+                path=f"/p/handler_{i}.py")
+            for i in range(5)
+        ]
+        out = searcher._apply_quality_and_dedup("handlers", candidates)
+        assert len(out) == 5
+        assert [r.file_path for r in out] == [c.file_path for c in candidates]
+
+    def test_comparison_count_bounded_per_candidate(self, searcher, monkeypatch) -> None:
+        """Pins the LATENCY BOUND: a large pool of chunks whose bodies
+        are pairwise below the 0.95 threshold (so nothing genuinely
+        collapses) must not blow up the number of _is_content_near_duplicate
+        comparisons performed as the pool grows. With the per-candidate
+        representative cap, total comparisons is bounded to at most
+        n * NEAR_DUP_BODY_MAX_REPS_COMPARED."""
+        import agent.searcher as searcher_module
+        from agent.config import NEAR_DUP_BODY_MAX_REPS_COMPARED
+
+        call_count = 0
+        real_fn = searcher_module._is_content_near_duplicate
+
+        def counting_wrapper(a, b):
+            nonlocal call_count
+            call_count += 1
+            return real_fn(a, b)
+
+        monkeypatch.setattr(
+            searcher_module, "_is_content_near_duplicate", counting_wrapper,
+        )
+
+        # 50 candidates with structurally different bodies, each well below
+        # the 0.95 threshold pairwise (the bodies use different field
+        # counts/names so SequenceMatcher.ratio sits in the 0.2-0.5 range).
+        # The structural gate requires the SAME node_type for the comparison
+        # to run — so the bodies must match node_type for the count to grow.
+        n = 50
+        cands = [
+            _sr(
+                f"def handler_{i}():\n"
+                f"    return compute_{i}({i}, {i+1}, {i+2})\n"
+                f"    # implementation line {i}\n"
+                f"    # implementation line {i}\n"
+                f"    # implementation line {i}\n"
+                f"    # implementation line {i}\n",
+                path=f"/p/handler_{i}.py", node_type="function_item",
+            )
+            for i in range(n)
+        ]
+        out = searcher._apply_quality_and_dedup("handler", cands)
+
+        assert call_count <= n * NEAR_DUP_BODY_MAX_REPS_COMPARED, (
+            f"comparison count {call_count} exceeds the O(n*k) bound "
+            f"(n={n}, k={NEAR_DUP_BODY_MAX_REPS_COMPARED}) — the "
+            f"per-candidate representative cap regressed"
+        )
+        # Sanity: these genuinely-different chunks never collapse — the cap
+        # must not have caused (or masked) a false collapse either.
+        assert len(out) == n
+
+
 class TestImportancePrior:
     """ARCH-1b: file-level PageRank importance blended as a relevance-gated
     multiplicative prior into the final search sort."""

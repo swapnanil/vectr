@@ -347,6 +347,61 @@ ranking:
     # via config.DOCSTRING_DEDUP_MAX_REPS_COMPARED.
     max_reps_compared: 3
 
+  near_dup_body:
+    # DISABLED BY DEFAULT pending measurement (sentinel + user, 2026-08-31).
+    # The 0.95 threshold's safety margin was calibrated against ONE witness
+    # pair (trait/impl bodies at ~0.857 similarity), and that argument does
+    # not survive contact with templated code. Bodies that differ only in an
+    # index -- `handler_0`/`compute_0`/`x=0` against `handler_1` and so on --
+    # are extremely common in generated clients, dispatch tables and test
+    # suites, and they cross 0.95 on character similarity while being
+    # genuinely distinct symbols. A lane test that meant to build five
+    # NON-duplicates built exactly that shape, and this key collapsed 5
+    # results to 1, and 50 to 28, in another.
+    #
+    # Collapsing a real answer out of a result set is silent: the caller
+    # cannot tell a deduped set from a set that never had the answer. That
+    # is strictly worse than the wasted-slot defect this key fixes, so it
+    # stays off until the collapse rate is measured across the warm corpora.
+    # Flip to true only with that evidence.
+    enabled: false
+    # LANE-NEARDUP-DEDUP: a third, independent dedup key (alongside
+    # `seen_content` byte-identical UPG-2.2 and `seen_docstring` DEF-C) that
+    # catches near-duplicate FULL CONTENT (chunk body, not just leading
+    # docstring) for the case DEF-C cannot reach: chunks whose leading
+    # docstrings differ but whose bodies are still near-verbatim restatements
+    # of each other (a function pair that copy-pasted one boilerplate prose
+    # header each, but landed on essentially the same implementation; two
+    # thin wrapper modules whose one-liner headers don't share a token yet
+    # whose bodies are byte-near-identical). DEF-C keys on a shared leading
+    # docstring, so it can never match those — they need a key that looks at
+    # the content directly.
+    #
+    # The threshold here is much higher than DEF-C's 0.75: DEF-C catches
+    # "boilerplate header over genuinely different bodies" (the
+    # near-duplicate-docstring case), so its 0.75 has to leave headroom for
+    # the trait/impl + overload false-collapse guard. This lane is for the
+    # OPPOSITE failure mode (truly-near-identical content), so the threshold
+    # sits well above the trait/impl body similarity measured for DEF-C
+    # (~0.857): 0.95 keeps a wide margin above any plausible "two genuinely
+    # different functions discussing the same subject" case. 0.95 catches
+    # verbatim or nearly-verbatim text (one or two rephrased tokens, the rest
+    # identical) and skips everything below it.
+    #
+    # Fails in the SAFE direction: a chunk whose body is at similarity
+    # 0.94 with an already-kept representative is left as its own result, the
+    # wasted slot is the pre-existing defect this lane exists to reduce
+    # (never a false collapse).
+    body_similarity_min_ratio: 0.95
+    # Latency bound: a chunk's content is compared against at most this many
+    # already-kept representatives (the earliest/best-ranked ones) instead of
+    # the full, unboundedly-growing list. O(n*k) instead of O(n^2) in the
+    # pathological case (many chunks that are pairwise-similar to within
+    # 0.94 of each other but never genuinely collapse). Same shape and
+    # same safe-failure direction as DEF-C's max_reps_compared above. Read
+    # via config.NEAR_DUP_BODY_MAX_REPS_COMPARED.
+    max_reps_compared: 3
+
   locate_ranking:
     # UPG-15.10: scope-depth + line-span signals for locate ranking.
     # These penalise class/function definitions that are buried inside function

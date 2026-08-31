@@ -243,6 +243,24 @@ DOCSTRING_DEDUP_MAX_REPS_COMPARED : int
     Fails in the safe direction only — a candidate past this bound is never
     falsely collapsed, only left as an extra separate result.
 
+NEAR_DUP_BODY_ENABLED : bool
+NEAR_DUP_BODY_SIMILARITY_MIN : float
+    Minimum difflib.SequenceMatcher ratio between two chunks' full normalized
+    bodies required to collapse a candidate into an already-kept
+    representative under the LANE-NEARDUP-DEDUP content-only key. Higher than
+    DOCSTRING_DEDUP_BODY_SIMILARITY_MIN (0.75) — this lane is for the
+    truly-near-identical-content case (verbatim or nearly-verbatim
+    restatement), not the boilerplate-header case DEF-C catches. Two
+    genuinely different functions discussing the same subject sit well below
+    this threshold; only near-verbatim copy-pasted bodies clear it.
+
+NEAR_DUP_BODY_MAX_REPS_COMPARED : int
+    Max already-kept representatives compared per new candidate under the
+    LANE-NEARDUP-DEDUP content-only key before the candidate stops being
+    compared and becomes its own representative. Same shape and
+    safe-failure direction as DOCSTRING_DEDUP_MAX_REPS_COMPARED above;
+    separate knob so the two mechanisms can be tuned independently.
+
 INDEXING_FLOW_SCAN_HEAD_BYTES : int
     Bytes scanned from the start of a `.js` file when detecting Flow type syntax
     (UPG-JSFLOW-SYMBOLS). A header scan, not a full-file walk.
@@ -837,6 +855,28 @@ DOCSTRING_DEDUP_LINES: int = int(_ddd_cfg["lines"])
 DOCSTRING_DEDUP_MIN_CHARS: int = int(_ddd_cfg["min_chars"])
 DOCSTRING_DEDUP_BODY_SIMILARITY_MIN: float = float(_ddd_cfg["body_similarity_min_ratio"])
 DOCSTRING_DEDUP_MAX_REPS_COMPARED: int = int(_ddd_cfg["max_reps_compared"])
+
+# ---------------------------------------------------------------------------
+# Content-based near-duplicate dedup (LANE-NEARDUP-DEDUP)
+# ---------------------------------------------------------------------------
+
+_ndb_cfg: dict[str, Any] = _cfg["ranking"]["near_dup_body"]
+
+# Minimum difflib.SequenceMatcher ratio between two chunks' full normalized
+# bodies required to collapse a candidate into an already-kept representative
+# under the near-dup-body key. Much higher than DOCSTRING_DEDUP_BODY_SIMILARITY_MIN
+# (0.75) — this lane is for the truly-near-identical-content case, not the
+# boilerplate-header case. Read via
+# config.NEAR_DUP_BODY_SIMILARITY_MIN.
+NEAR_DUP_BODY_ENABLED: bool = bool(_ndb_cfg.get("enabled", False))
+NEAR_DUP_BODY_SIMILARITY_MIN: float = float(_ndb_cfg["body_similarity_min_ratio"])
+# Max already-kept representatives compared per new candidate before the
+# candidate stops being compared and becomes its own representative — same
+# latency bound as DOCSTRING_DEDUP_MAX_REPS_COMPARED, separate config knob so
+# the two mechanisms can be tuned independently. Fails in the safe direction
+# only (a candidate past the cap is never falsely collapsed, only left as an
+# extra separate result). Read via config.NEAR_DUP_BODY_MAX_REPS_COMPARED.
+NEAR_DUP_BODY_MAX_REPS_COMPARED: int = int(_ndb_cfg["max_reps_compared"])
 
 # ---------------------------------------------------------------------------
 # Rerank pool sizes (UPG-12.1) + reranker model

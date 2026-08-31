@@ -47,6 +47,9 @@ from agent.config import (
     RESULT_FLOOR_MIN_RELEVANCE as _RESULT_FLOOR_MIN_RELEVANCE,
     DOCSTRING_DEDUP_BODY_SIMILARITY_MIN as _DOCSTRING_DEDUP_BODY_SIMILARITY_MIN,
     DOCSTRING_DEDUP_MAX_REPS_COMPARED as _DOCSTRING_DEDUP_MAX_REPS_COMPARED,
+    NEAR_DUP_BODY_ENABLED as _NEAR_DUP_BODY_ENABLED,
+    NEAR_DUP_BODY_SIMILARITY_MIN as _NEAR_DUP_BODY_SIMILARITY_MIN,
+    NEAR_DUP_BODY_MAX_REPS_COMPARED as _NEAR_DUP_BODY_MAX_REPS_COMPARED,
     vectr_cache_root as _vectr_cache_root,
 )
 from agent.indexer import CodeIndexer
@@ -344,6 +347,48 @@ def _is_near_duplicate_body(a: SearchResult, b: SearchResult) -> bool:
         None, normalized_content(a.content), normalized_content(b.content),
     ).ratio()
     return ratio >= _DOCSTRING_DEDUP_BODY_SIMILARITY_MIN
+
+
+def _is_content_near_duplicate(a: SearchResult, b: SearchResult) -> bool:
+    """True near-duplicate-content guard for the LANE-NEARDUP-DEDUP third
+    dedup key (alongside the byte-identical content key UPG-2.2 and the
+    docstring-keyed near-duplicate key DEF-C). DEF-C requires a SHARED
+    leading docstring before it will check body similarity; this helper
+    catches the case DEF-C cannot reach — chunks whose leading docstrings
+    differ but whose bodies are still near-verbatim restatements of each
+    other (two functions with different one-liner summaries that landed on
+    essentially the same implementation; two thin wrapper modules whose
+    headers share no token yet whose bodies are byte-near-identical).
+
+    The comparison is on full normalized bodies only — never on the query,
+    never on the leading docstring, never via embedding. Two content-only
+    gates run before a candidate is allowed to collapse into an existing
+    representative:
+
+    Gate 1 — structural: when both chunks carry a recorded ``node_type`` and
+    the two differ (e.g. ``trait_item`` vs ``impl_item``), never collapse —
+    a chunk of one AST definition kind is categorically not a near-duplicate
+    of a chunk of a different kind, independent of any similarity
+    threshold. A no-op when either side's node_type is unknown/empty
+    (nothing to categorically compare). This is the SAME structural gate
+    DEF-C applies, kept here so the two mechanisms behave consistently.
+
+    Gate 2 — content: require the two chunks' full normalized bodies
+    (difflib.SequenceMatcher ratio) to be at least
+    ``_NEAR_DUP_BODY_SIMILARITY_MIN`` alike. The threshold is set well above
+    the trait/impl + overload body similarity measured for DEF-C
+    (~0.857, ~0.53) so this lane is for the OPPOSITE failure mode
+    (truly-near-identical content) and stays out of DEF-C's territory.
+    A chunk at 0.94 with an already-kept representative is left as its own
+    result — the wasted slot is the pre-existing defect this lane exists to
+    reduce, never a false collapse.
+    """
+    if a.node_type and b.node_type and a.node_type != b.node_type:
+        return False
+    ratio = difflib.SequenceMatcher(
+        None, normalized_content(a.content), normalized_content(b.content),
+    ).ratio()
+    return ratio >= _NEAR_DUP_BODY_SIMILARITY_MIN
 
 
 # ---------------------------------------------------------------------------
@@ -888,11 +933,16 @@ class CodeSearcher:
 
         Relevance is taken from the candidates' current (post-rerank) order; a
         per-chunk quality prior then demotes trivial / navigational / generated /
-        heading-only / test chunks (UPG-2.1, 2.3). Byte-identical chunks collapse
-        to a single representative with a duplicate count so boilerplate can't flood
-        the top-N (UPG-2.2); a second collapse key on the normalized leading
-        docstring/comment block catches near-duplicate boilerplate headers that
-        the byte-identical key misses (UPG-RUST-DEF-EVICTION / DEF-C).
+        heading-only / test chunks (UPG-2.1, 2.3). Three independent dedup keys
+        then collapse redundant copies from the surviving result list — the
+        byte-identical full-content key (UPG-2.2), the docstring-keyed near-
+        duplicate key (UPG-RUST-DEF-EVICTION / DEF-C, catches the
+        shared-leading-docstring case), and the LANE-NEARDUP-DEDUP content-only
+        near-duplicate key (catches near-verbatim full-content restatements
+        whose leading docstrings differ — the case DEF-C cannot reach by
+        design). Each surviving representative keeps a dup_count of how many
+        later candidates collapsed into it, so the caller can see that a slot
+        was freed by dedup rather than a retrieval miss.
 
         UPG-SCORE-DISPLAY-FLAT: `final_score` (the composite above) is an
         ORDERING KEY ONLY — it decides sort order and dedup precedence and is
@@ -1075,6 +1125,26 @@ class CodeSearcher:
                 reps = seen_docstring.get(doc_key, [])
                 for rep_idx in reps[:_DOCSTRING_DEDUP_MAX_REPS_COMPARED]:
                     if _is_near_duplicate_body(r, out[rep_idx]):
+                        existing_idx = rep_idx
+                        break
+            # LANE-NEARDUP-DEDUP: third, independent dedup key — content-only
+            # near-duplicate (no docstring key required). DEF-C above only
+            # fires when a docstring key matches; this catches the case
+            # DEF-C cannot reach, where leading docstrings differ but bodies
+            # are still near-verbatim restatements. Compared only against
+            # the first NEAR_DUP_BODY_MAX_REPS_COMPARED already-kept
+            # representatives (the best-ranked, since `out` is built in
+            # `scored`'s deterministic best-first order) — O(n*k) instead of
+            # O(n^2) SequenceMatcher calls in the pathological case. Same
+            # safe-failure direction as DEF-C's max_reps_compared: a
+            # candidate past the cap is never falsely collapsed, only left
+            # as an extra separate result. Only runs when the two prior keys
+            # have NOT already collapsed this candidate (a duplicate caught
+            # by the byte-identical content key is already accounted for;
+            # checking content-similarity on top would be wasted work).
+            if existing_idx is None and _NEAR_DUP_BODY_ENABLED:
+                for rep_idx in range(min(_NEAR_DUP_BODY_MAX_REPS_COMPARED, len(out))):
+                    if _is_content_near_duplicate(r, out[rep_idx]):
                         existing_idx = rep_idx
                         break
             if existing_idx is not None:
