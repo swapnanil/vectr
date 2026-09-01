@@ -346,12 +346,20 @@ def _is_near_duplicate_body(a: SearchResult, b: SearchResult) -> bool:
     if a.node_type and b.node_type and a.node_type != b.node_type:
         return False
     # UPG-DEDUP-AUTOJUNK-DEFC: this call KNOWINGLY keeps difflib's default
-    # autojunk, which is wrong and understates similarity. difflib treats any
-    # element appearing in more than 1 percent of a 200+ element sequence as
-    # junk; these are CHARACTER sequences and a code chunk routinely exceeds
-    # 200 characters, so ordinary letters get classed as junk. Two Rust bodies
-    # differing by a single word measure 0.158 here against 0.995 with
-    # autojunk off.
+    # autojunk, which understates similarity on some content. The trigger needs
+    # BOTH conditions, not just length: autojunk engages at 200+ elements AND
+    # only bites when specific elements repeat heavily. Measured:
+    #     repetitive body, 392 chars   0.166 default   0.995 corrected
+    #     varied body,      251 chars   0.996 default   0.996 corrected
+    #     repetitive,       150 chars   0.993 default   0.993 corrected
+    # So on ordinary varied code it changes nothing, and on heavily repetitive
+    # code it is catastrophic.
+    #
+    # That distribution is the whole problem. The content it distorts is
+    # repetitive text, which is exactly templated code, which is also this
+    # key's false-collapse hazard. The broken metric has therefore been acting
+    # as an ACCIDENTAL templated-code guard, and removing it without a real
+    # guard is what produces the measured 50-results-to-1 collapse.
     #
     # It is not corrected in place because DEF-C SHIPS ENABLED and its 0.75
     # threshold was calibrated through this same distorted metric. Fixing the
