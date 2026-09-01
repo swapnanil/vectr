@@ -51,7 +51,7 @@ Per the brief:
 | `benchmarks/defc_autojunk/README.md` | Why these fixture pairs, what shape families they cover, where the predicate comes from. |
 | `benchmarks/defc_autojunk/templated_analysis.py` | Offline script: per-pair classification + threshold sweep, no daemon. |
 | `benchmarks/defc_autojunk/queries.jsonl` | 15 query rows for the real-dedup replay. |
-| `benchmarks/defc_autojunk/harness.py` | Live harness: talks to a vectr daemon at `/v1/search`, replays the dedup pair-extraction locally, emits per-pair rows + threshold sweep. |
+| `benchmarks/defc_autojunk/defc_harness.py` | Live harness: talks to a vectr daemon at `/v1/search`, replays the dedup pair-extraction locally, emits per-pair rows + threshold sweep. |
 | `benchmarks/defc_autojunk/LANE-REPORT.md` | This file. |
 | `tests/test_defc_autojunk_harness.py` | Unit tests for the harness's own correctness. |
 
@@ -83,7 +83,7 @@ vectr start --workspace-root <django-checkout>
 vectr status  # confirms the daemon is up
 
 # From the repo root:
-python3 benchmarks/defc_autojunk/harness.py \
+python3 benchmarks/defc_autojunk/defc_harness.py \
     --corpus django \
     --queries-file benchmarks/defc_autojunk/queries.jsonl
 ```
@@ -93,7 +93,7 @@ The harness:
 1. Calls `GET /v1/status` (and exits with code 1 if unreachable).
 2. For each query in `--queries-file`, calls `POST /v1/search` with
    `n_results=200` (the safe upper bound matching
-   `pre-rerank pre-filter-fetch_k` — see harness.py:N_RESULTS).
+   `pre-rerank pre-filter-fetch_k` — see defc_harness.py:N_RESULTS).
 3. Locally replays the dedup pair-extraction on each returned
    candidate pool (see "Why a local replay" below).
 4. Emits a per-run JSON + ASCII report under
@@ -401,10 +401,10 @@ shifted the band.
    separate change. This lane's deliverable is the evidence, not
    the patch.
 
-3. **`harness.py` lazy-imports `agent.chunk_quality`.** The script
+3. **`defc_harness.py` lazy-imports `agent.chunk_quality`.** The script
    runs `from agent.chunk_quality import leading_docstring_key`
    inside `extract_pairs_from_pool`, not at module top. This is
-   what lets `python3 harness.py --help` work without the agent
+   what lets `python3 defc_harness.py --help` work without the agent
    package on sys.path. A future refactor that moves the import
    back to module top would break `--help` from outside the repo
    root.
@@ -417,7 +417,7 @@ shifted the band.
 5. **The `benchmarks/__init__.py` and `benchmarks/defc_autojunk/__init__.py`
    files are present.** They are empty (the docstrings explain
    themselves) and were added so the cross-module imports in
-   `harness.py` / `templated_analysis.py` resolve cleanly. No
+   `defc_harness.py` / `templated_analysis.py` resolve cleanly. No
    other benchmark in the repo has an `__init__.py` because they
    don't need one; this lane does because it splits its work
    across sibling modules. The empty files are inert (no
@@ -433,7 +433,7 @@ shifted the band.
    `agent.chunk_quality` to be importable. The test suite adds
    the repo root to sys.path via pytest's normal rootdir
    discovery, so this resolves under `pytest`. The standalone
-   scripts (`harness.py`, `templated_analysis.py`) add the
+   scripts (`defc_harness.py`, `templated_analysis.py`) add the
    sibling dir to sys.path at the top; if they're invoked from
    outside the repo root, the operator must have `agent` on
    `PYTHONPATH` (or be in a venv where it's installed). The

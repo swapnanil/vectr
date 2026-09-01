@@ -3,7 +3,7 @@ harness.
 
 This module is small and dependency-free (only `difflib` and the
 chunk_quality helpers) so a reviewer can read it end to end and
-verify the math. The harness script (`harness.py`) imports these
+verify the math. The harness script (`defc_harness.py`) imports these
 helpers; the offline templated-fixture analysis
 (`templated_analysis.py`) imports them too; the unit tests
 (`tests/test_similarity.py`) test them directly.

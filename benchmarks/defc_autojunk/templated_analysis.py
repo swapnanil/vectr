@@ -10,7 +10,7 @@ committed fixture of such pairs; keep it honest and say how you
 chose them" — see README.md next to the JSONL). The numbers this
 script emits are the canonical "what does the corrected metric
 actually say about templated bodies" measurement; the real-dedup
-replay (`harness.py`) reports its templated subset in the same
+replay (`defc_harness.py`) reports its templated subset in the same
 per-pair shape so a reviewer can compare rows directly.
 
 Run:

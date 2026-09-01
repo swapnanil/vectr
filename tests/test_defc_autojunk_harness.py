@@ -388,7 +388,7 @@ class TestHarnessCLIShape:
         result = subprocess.run(
             [
                 sys.executable,
-                str(REPO_ROOT / "benchmarks" / "defc_autojunk" / "harness.py"),
+                str(REPO_ROOT / "benchmarks" / "defc_autojunk" / "defc_harness.py"),
                 "--help",
             ],
             capture_output=True, text=True, timeout=15,
@@ -400,7 +400,7 @@ class TestHarnessCLIShape:
             cwd=str(REPO_ROOT),
         )
         assert result.returncode == 0, (
-            f"harness.py --help failed: rc={result.returncode} "
+            f"defc_harness.py --help failed: rc={result.returncode} "
             f"stdout={result.stdout!r} stderr={result.stderr!r}"
         )
         out = result.stdout + result.stderr
@@ -433,7 +433,7 @@ class TestExtractPairsFromPool:
         b = self._make(
             "/// Resolves dependency conflicts using the solver core algorithm.\n/// Called by the resolver on every candidate set it produces.\nfn b() { let y = 2; }\n", language="rust"
         )
-        from harness import extract_pairs_from_pool
+        from defc_harness import extract_pairs_from_pool
         pairs, rep_count = extract_pairs_from_pool([a, b])
         assert len(pairs) == 1
         # The pair is (b, a) — b is the candidate, a is the
@@ -449,7 +449,7 @@ class TestExtractPairsFromPool:
         b = self._make(
             "/// Second docstring\nfn b() { let y = 2; }\n", language="rust"
         )
-        from harness import extract_pairs_from_pool
+        from defc_harness import extract_pairs_from_pool
         pairs, rep_count = extract_pairs_from_pool([a, b])
         # Different docstring keys -> no pair.
         assert len(pairs) == 0
@@ -460,7 +460,7 @@ class TestExtractPairsFromPool:
     def test_no_pair_when_no_leading_docstring(self) -> None:
         a = self._make("fn a() { let x = 1; }", language="rust")
         b = self._make("fn b() { let y = 2; }", language="rust")
-        from harness import extract_pairs_from_pool
+        from defc_harness import extract_pairs_from_pool
         pairs, rep_count = extract_pairs_from_pool([a, b])
         # No leading docstring -> leading_docstring_key returns
         # "" -> the dedup key never matches -> no pair.
@@ -479,7 +479,7 @@ class TestExtractPairsFromPool:
         a = self._make("/// Resolves dependency conflicts using the solver core algorithm.\n/// Called by the resolver on every candidate set it produces.\nfn a() { let x = 1; }", language="rust")
         b = self._make("/// Resolves dependency conflicts using the solver core algorithm.\n/// Called by the resolver on every candidate set it produces.\nfn b() { let y = 2; }", language="rust")
         c = self._make("/// Resolves dependency conflicts using the solver core algorithm.\n/// Called by the resolver on every candidate set it produces.\nfn c() { let z = 3; }", language="rust")
-        from harness import extract_pairs_from_pool
+        from defc_harness import extract_pairs_from_pool
         pairs, rep_count = extract_pairs_from_pool([a, b, c])
         assert len(pairs) == 2
         # The representative in both pairs is `a`.
