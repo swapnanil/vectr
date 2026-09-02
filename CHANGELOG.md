@@ -1,5 +1,149 @@
 # Changelog
 
+## 1.12.0 - 2026-09-03
+
+Memory gains an inbound path: `vectr memory import` reads existing on-disk
+memory files into the store, so adopting vectr no longer starts with retyping
+what you had already written down. `vectr_unanchor` completes the anchor pair
+and brings the MCP surface to 23 tools. The rest of the release is retrieval
+work, most of it the result of measuring things that had been asserted:
+a similarity metric that was reading almost the inverse of the truth on
+repetitive code, a dedup key that could not fire on the case it was built for,
+and a guard whose rule only worked on same-length renames.
+
+### Working memory
+
+- `vectr memory import` brings existing memory files into the store. vectr
+  could write memory out and never read it back: `vectr memory export` renders
+  notes to markdown and nothing parsed that file back, and there was no path in
+  from anywhere else, so a user arriving with a `MEMORY.md`, `CLAUDE.md`,
+  `AGENTS.md`, `.cursorrules` or copilot-instructions had to retype all of it
+  one call at a time before the tool had earned any trust. Import discovers
+  those files, parses at Markdown heading granularity, and writes notes.
+  `--dry-run` prints the plan and changes nothing. Re-importing an unchanged
+  file creates zero notes; an edited section creates a new note without
+  deleting the old.
+- Provenance on import is the load-bearing decision, not a detail.
+  `remember()` rejects `provenance='auto'` on `kind='directive'`, since an
+  unreviewed standing rule is a contradiction in terms, and an imported rule is
+  exactly that pair. Foreign imports therefore land as `auto`, except imperative
+  rules classified as directives, which land as `agent`: the lightest class that
+  clears the guard without claiming an endorsement nobody gave. The user
+  promotes after review. Re-importing a file vectr itself exported is a separate
+  path that preserves the provenance the export recorded.
+- `vectr_unanchor` removes anchor paths from an existing note, the inverse of
+  attach, across REST, MCP dispatch and schemas, and the CLI. It is a plain
+  update plus one audit call rather than a lifecycle event, because anchors are
+  delivery-shaping metadata and staleness is re-derived from live hashes on
+  every check. Idempotent, exact-string match on the path to mirror attach,
+  `ValueError` on empty anchors, `None` for an unknown note, and an empty list
+  rather than null when the last anchor goes.
+- Kind-filtered recall no longer under-fills silently. `_semantic_recall`
+  applied the kind filter after a fixed `limit * 3` fetch, so a selective kind
+  could return fewer than `limit` with no signal that the shortfall was a pool
+  artifact rather than an absence of matching notes. The pool widens when `kind`
+  is set, and a metadata-only prefetch backstops the relevance branch, its
+  survivors appended after the ranked pool.
+- `sort_by` is one shared vocabulary rather than four. Dead states no longer
+  count toward the stale-task total.
+
+### Retrieval and ranking
+
+- Near-duplicate dedup compares bodies with the leading docstring stripped. The
+  `near_dup_body` key existed for the case where two chunks carry different
+  docstrings over near-verbatim bodies, and it could not reach that case at all:
+  it compared whole chunks, so the differing docstrings were inside the
+  comparison and dragged the ratio below the threshold. On the feature's own
+  witness this moves similarity from 0.765 to 0.958.
+- A similarity defect was found underneath that, and it is the more important
+  finding. Every ratio in this area was computed with difflib's default
+  `autojunk`, which excludes any element appearing in more than one percent of a
+  200-element-or-longer sequence. These are character sequences. Measured:
+
+      repetitive body, 392 chars    0.166 default    0.995 corrected
+      varied body,     251 chars    0.996 default    0.996 corrected
+      repetitive body, 150 chars    0.993 default    0.993 corrected
+
+  So it needs both length and heavy repetition, and on ordinary varied code it
+  changes nothing. The content it distorts is repetitive text, which is
+  templated code, which is also the false-collapse hazard for these keys, so the
+  broken metric had been acting as an accidental guard.
+- `autojunk=False` is therefore applied only where it ships no behaviour: the
+  disabled `near_dup_body` key and its guard. The enabled docstring key keeps
+  the wrong parameter deliberately, recorded at the call site, because its 0.75
+  threshold was calibrated through the same distortion and correcting the metric
+  alone collapses 50 templated accessors into 1 result.
+- `ranking.near_dup_body` ships disabled pending measurement. The threshold's
+  safety margin was argued from a single witness pair and does not survive
+  templated code, where bodies differing only in an index cross it while being
+  genuinely distinct symbols.
+- The templated-body guard is now alignment-independent. The previous rule
+  walked SequenceMatcher opcodes and rejected any pure insert or delete, so it
+  only ever worked for same-length renames: `name` against `phone` is four
+  characters against five, forcing an insert, and the rule rejected the very
+  shape it existed to catch. It now masks identifier-like tokens and bare
+  numbers to one placeholder and compares the masked forms.
+- Wiring that guard into the enabled docstring key was tried and reverted,
+  which settles an open question. That key exists because three scripts sharing
+  a copied docstring crowded out a canonical struct definition, and those three
+  differ only in an identifier, exactly like the accessor family that must never
+  collapse. The must-collapse witness and the must-not-collapse hazard are the
+  same shape, so no rule reading the characters of two bodies separates them.
+  Correcting `autojunk` there needs a signal this layer does not have.
+- A relative-cliff sub-signal for the low-confidence banner ships behind a
+  switch that defaults off, with a distribution harness to calibrate it. The
+  existing absolute floor was tuned against the previous cross-encoder, so the
+  swap left the constant stale, and neither raising it nor replacing it with a
+  rank-1-to-rank-2 test is safe on the evidence that exists.
+
+### Symbol graph
+
+- Method-override edges are recorded at index time. A method whose class's base
+  declares the same name now emits an `overrides` edge, reusing the existing
+  edge type so no schema migration was needed. Only simple-identifier bases
+  resolve; an attribute-lookup base is skipped rather than guessed, because a
+  wrong override edge would later push the wrong symbol up. `overrides_of` and
+  `overridden_by` read it back.
+- JavaScript and TypeScript produced zero override edges because the extractor
+  looked up `class_heritage` as a field when it is a child node type, so the
+  lookup always returned nothing. Traversal now scans children, reads the
+  identifier directly under it for JavaScript, descends through
+  `extends_clause` for TypeScript, and skips `implements_clause`, since an
+  interface method has no body to override.
+- Java enum constants and fields are indexed. The impl error check is scoped.
+
+### CLI and editor integration
+
+- Command normalisation keeps escaped separators unsplit, pads glued single
+  pipes, and handles a backgrounding single ampersand.
+- The README's MCP tool count was wrong in three places including the section
+  heading whose anchor the badge links to, so the badge pointed at a heading
+  that no longer existed.
+
+### Benchmarks and internals
+
+- The acceptance corpus can run over the MCP surface. It drove REST only, so it
+  was structurally blind to the two things that decide whether a caller receives
+  an answer: the low-confidence banner and pointer mode. A case could be scored
+  passing with the expected symbol at rank 1 while the caller was told to go
+  grep. `low_confidence_absent` and `body_present` assertions are meaningful
+  only on MCP and emit an explicit skip notice under REST rather than passing
+  silently. `--strict-status` compares each case's recorded label against the
+  observed outcome and fails on drift, which is how four labels had drifted
+  unnoticed.
+- The six-task sprint harness can drive a routed model, so its numbers can be
+  re-measured on something other than the model they were first taken from.
+  Results carry a scope stamp naming the model, route, date and revision, an
+  unparseable metric is recorded as absent rather than zero, and upstream
+  failures are recorded per task rather than retried away.
+- New harnesses for the banner threshold distribution and the docstring-key
+  similarity threshold, plus an inventory of every measurable README claim with
+  its source and method.
+- Test isolation fixes: the instance registry is isolated, the dummy embedder is
+  deterministic rather than salted by hash seed, and a benchmark module rename
+  ends a `sys.modules` collision where two test files imported a bare `harness`
+  from different directories and whichever was collected first won.
+
 ## 1.11.0 - 2026-08-27
 
 A stored note can be retired after the fact without the false "proven wrong"
