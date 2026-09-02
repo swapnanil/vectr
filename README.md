@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
 [![Version 1.11.0](https://img.shields.io/badge/version-1.11.0-blue.svg)](CHANGELOG.md)
-[![MCP: 22 tools](https://img.shields.io/badge/MCP-22%20tools-blue.svg)](#22-mcp-tools)
+[![MCP: 23 tools](https://img.shields.io/badge/MCP-23%20tools-blue.svg)](#23-mcp-tools)
 
 Version 1.11.0 · Last updated 2026-08-27 · [CHANGELOG](CHANGELOG.md)
 
@@ -223,11 +223,11 @@ No port, no daemon: a single foreground process framed as newline-delimited JSON
 4. **Symbol graph.** Call edges, import chains, and HTTP routes (Flask, FastAPI, Express, Spring) are extracted and stored. `vectr_locate` resolves a name through a 6-strategy cascade: exact match, suffix, same-module, import-chain, substring, then fuzzy. A fuzzy answer is always rendered as explicitly inexact rather than presented as a confident match, because a confident wrong symbol is worse than a not-found.
 5. **Working memory.** `vectr_remember` stores structured notes to SQLite and ChromaDB. `vectr_recall` runs semantic search over notes rather than a SQL LIKE, so multi-word queries still find the relevant context.
 6. **Trigger evaluation.** Each note's conditions are checked deterministically by the daemon at lifecycle moments, with a per-session fire ledger and injection budgets, so a note resurfaces exactly when it applies and never twice in the same window.
-7. **MCP protocol.** 22 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
+7. **MCP protocol.** 23 tools served over HTTP. Any MCP-compatible AI code editor connects without plugins.
 
 ---
 
-## 22 MCP tools
+## 23 MCP tools
 
 `vectr start` writes a guidance file into your workspace with this table, so your AI code editor knows which tool to reach for without being prompted.
 
@@ -251,6 +251,7 @@ No port, no daemon: a single foreground process framed as newline-delimited JSON
 | One note must survive every recall regardless of the query | `vectr_pin(note_id=N)`, which places it in Tier 0 so it is injected on every `vectr_recall(query=...)` call. Bounded, so pin sparingly. `vectr_remember(..., pin=true)` does the same at write time |
 | You found something worth preserving | `vectr_remember(content, tags, priority, kind, title, agent)`. `kind` controls delivery: `directive` fires unconditionally every session, `task` carries current-work state, `gotcha` resurfaces when its file is touched, `operational` covers build and environment facts, `finding` (the default) is relevance-ranked, `reference` is a pointer, and `decision` is an architectural decision recallable as a chronological ADR-style timeline via `vectr_recall(kind="decision", sort_by="chronological")`. `title` labels the note in index output, and `agent` attributes it to a subagent or orchestrator |
 | A stored note turns out to be about a file you did not declare | `vectr_anchor(note_id=N, anchors=[...])`, attaching file anchors to an existing note without re-storing it. Idempotent, hashed at write time, and it emits no lifecycle event, so the note's history stays clean (also `vectr anchor --id N PATH...` on the CLI) |
+| A stored note was anchored to the wrong file, or the anchored file's relevance is gone | `vectr_unanchor(note_id=N, anchors=[...])`, the inverse of `vectr_anchor`. Removes file paths from a note's anchor set; a removed anchor simply stops being a staleness candidate, never a claim that the note is wrong. Idempotent, paths the note was never anchored to are reported back rather than treated as failures |
 | Starting a session, want to pick up where you left off | `vectr_resume()`, returning the most recent task note, the latest snapshot, and open gotchas with their file anchors in one call (also `vectr resume` on the CLI) |
 | Context is filling up | `vectr_evict_hint()`, which identifies chunks vectr can re-retrieve, with the exact re-fetch ids |
 | A chunk shown earlier has left your context | `vectr_fetch(ids=[...])`, a deterministic byte-verbatim re-fetch by id, with no re-search and no file re-read. Flags a truncation warning if the index itself stored a capped chunk |
@@ -300,11 +301,39 @@ vectr resume                          # most recent task note, latest snapshot, 
 vectr init --path .                   # write guidance file + MCP config without starting
 vectr init --exclude vendor           # exclude directories from indexing
 vectr forget --path .                 # delete all working-memory notes
+vectr memory export                   # render the working-memory store as a greppable, git-diffable markdown file (default MEMORY.md)
+vectr memory export --path notes.md   # write the export to a specific file
+vectr memory export --disable         # stop the auto-refresh that keeps the export file in sync
+vectr memory edit                     # open the working-memory store in your $EDITOR, one block per note
+vectr memory import                   # bring existing on-disk memory files into the working-memory store (see below)
+vectr memory import --path NOTES.md   # import a specific file instead of the default discovery list
+vectr memory import --dry-run         # preview what would be created (kind, title, source file, line range), change nothing
 vectr cache prune                     # remove empty per-workspace cache dirs (live instances skipped)
 vectr cache prune --dry-run           # preview what would be removed, delete nothing
 vectr proxy                           # experimental: localhost API proxy (see below)
 vectr mcp-stdio                       # foreground stdio MCP transport, no port or daemon (see above)
 ```
+
+### Importing existing memory
+
+`vectr memory export` and `vectr memory edit` are the one-way-out and check-out/check-in paths. `vectr memory import` is the one-way-in: it brings existing on-disk memory into the working-memory store without re-entering it by hand. This is the on-ramp for a new user who already has memory written down.
+
+**Discovery.** With no `--path`, the importer walks a closed list of default candidate files at the workspace root: `MEMORY.md`, `CLAUDE.md`, `AGENTS.md`, `.cursorrules`, and `.github/copilot-instructions.md`. Pass `--path` (repeatable) to point at any other file or directory; a directory is walked recursively for `*.md` and `*.mdc` files. Files that don't exist are reported but never raised on, since most workspaces will not have every default file.
+
+**Granularity.** A source file is not one note and not one note per line. It is split at Markdown heading boundaries (`^#{1,6}\s+`), the same way a human skims a `MEMORY.md`. A heading-less file becomes one note. Headings inside fenced code blocks and HTML comment blocks are skipped, so a code example or the export-file header comment does not become a section boundary. A file previously exported by `vectr memory export` is detected by its `<!-- Generated by ... -->` header and parsed through the same block grammar `vectr memory edit` uses, recovering each original block as a note with its declared `kind`, `priority`, `tags`, and `provenance` carried forward.
+
+**Dry run.** `--dry-run` prints exactly what would be created (kind, title, source file, source-line range, provenance) and changes nothing. Memory is the one resource the user cannot easily reconstruct, so dry run is the path of first resort:
+
+```bash
+vectr memory import --dry-run
+# + [finding/auto] 'Project conventions'  (MEMORY.md:12-34)
+# + [operational/agent] 'Test runner'  (CLAUDE.md:5-9)
+# DRY RUN: would create 2 note(s), skip 0 already-imported, ...
+```
+
+**Idempotency.** Every imported note carries a `src:`, `src-sha:`, and `src-lines:` tag triple. A re-run of `vectr memory import` against an unchanged source file recognizes those tags and creates zero new notes. Editing a section of the source file produces a new body whose hash does not match the stored one, so it becomes a new note, and the old one is left untouched, since silently deleting a prior import behind the user's back is exactly the silent loss the design defends against on the export side.
+
+**Provenance.** Imported notes carry a source-file tag (`imported` and `src:FILENAME`, where FILENAME is the basename of the source file), so a recall that lists a note carrying `imported` is telling the user "this came from a file, not from this session's observations." The note's `provenance` defaults to `auto`, the class machine-captured facts with no reviewing judgment already carry, since a hand-written `MEMORY.md` is structurally indistinguishable from a generator's output to a parser. The exception is narrow and structural, not semantic: a note whose body contains imperative-rule markers (the closed keyword set `MUST`, `MUST NOT`, `NEVER`, `ALWAYS`, `DO NOT`, `DON'T`, `REQUIRED`, `FORBIDDEN`) is classified as `kind="directive"` and upgraded to `provenance="agent"`. The reason is the `auto + directive` write-time guard in `remember()`: an unreviewed standing rule is a contradiction in terms, and an imported rule is exactly that pair. Promoting to `agent` is the smallest possible deviation from `auto`, exactly enough to satisfy the guard, and the user promotes further with `vectr_promote` after review.
 
 ---
 
