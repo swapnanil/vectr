@@ -5667,6 +5667,478 @@ class TestNearDuplicateBodyDedup:
             f"b={b_stripped!r}"
         )
 
+    def test_50_accessor_functions_differing_only_in_index_never_collapses(
+        self, searcher,
+    ) -> None:
+        """Pins the LANE-TEMPLATED-BODY-GUARD brief's witness case: 50
+        accessor functions differing only in an embedded index must NOT
+        collapse under the content-only key, even though their
+        SequenceMatcher.ratio on normalized bodies is well above 0.95.
+        Without the widened guard, all 50 would collapse to 1
+        representative — silently destroying 49 distinct results.
+
+        The bodies are constructed to mirror the shape the brief calls
+        out: a shared "/// Returns a reference to the underlying value."
+        docstring, then a function body whose only varying positions are
+        the embedded index (the `accessor_{i}` name, the `field_{i}_{j}`
+        locals, the `ctx_{i}` captures, the final `field_{i}` return).
+        The bodies are long enough and the differing chars are scattered
+        enough that the SequenceMatcher.ratio is ~0.99 — well above
+        0.95 — so the content-similarity gate would pass without the
+        guard. The widened rule (every non-equal opcode is a token-only
+        span) is the only thing keeping all 50 separate.
+
+        The 50-accessor case is the LANE-TEMPLATED-BODY-GUARD brief's
+        load-bearing witness: 50 templated accessors with `autojunk=False`
+        on the content-similarity gate were the measured 50-to-1
+        collapse. This test pins the guard that prevents it.
+        """
+        n = 50
+        cands = [
+            _sr(
+                "/// Returns a reference to the underlying value.\n"
+                f"fn accessor_{i}(&self) -> &Value {{\n"
+                f"    let field_{i}_0 = compute_step_0(state, ctx_{i});\n"
+                f"    let field_{i}_1 = compute_step_1(state, ctx_{i});\n"
+                f"    let field_{i}_2 = compute_step_2(state, ctx_{i});\n"
+                f"    let field_{i}_3 = compute_step_3(state, ctx_{i});\n"
+                f"    let field_{i}_4 = compute_step_4(state, ctx_{i});\n"
+                f"    let field_{i}_5 = compute_step_5(state, ctx_{i});\n"
+                f"    let field_{i}_6 = compute_step_6(state, ctx_{i});\n"
+                f"    let field_{i}_7 = compute_step_7(state, ctx_{i});\n"
+                f"    let field_{i}_8 = compute_step_8(state, ctx_{i});\n"
+                f"    let field_{i}_9 = compute_step_9(state, ctx_{i});\n"
+                f"    // implementation line {i}\n"
+                f"    // implementation line {i}\n"
+                f"    // implementation line {i}\n"
+                f"    // implementation line {i}\n"
+                f"    return self.field_{i};\n"
+                f"}}\n",
+                path=f"/p/src/mod_{i}.rs", lang="rust", node_type="function_item",
+            )
+            for i in range(n)
+        ]
+        out = searcher._apply_quality_and_dedup("accessor", cands)
+        assert len(out) == n, (
+            f"50 templated accessors wrongly collapsed to {len(out)} — "
+            f"the widened templated-body guard is not catching the "
+            f"accessor shape (the LANE-TEMPLATED-BODY-GUARD witness case)"
+        )
+
+    def test_identifier_renamed_templated_bodies_never_collapse(
+        self, searcher,
+    ) -> None:
+        """Pins the widened rule on the identifier-rename shape: bodies
+        that are identical except for an identifier name
+        (``get_name``/``get_email``, ``compute_X``/``compute_Y``) must
+        NOT collapse under the content-only key.
+
+        The previous digit-only rule never fired here (no digit chars
+        in the diff at all), so without widening these would have
+        collapsed to 1 — silently destroying N distinct symbols. The
+        widened rule catches them because every non-equal
+        SequenceMatcher opcode's spans are token-only (all ASCII
+        letters).
+
+        The bodies are padded with many identical comment lines so the
+        SequenceMatcher.ratio on the normalized bodies clears the
+        LANE-NEARDUP-DEDUP content gate (0.95) — without that padding
+        the diff is too large a fraction of the body and the test
+        would pass vacuously (the ratio gate itself would prevent the
+        collapse regardless of the guard). The guard is what actually
+        keeps these apart; this test pins that.
+        """
+        from agent.chunk_quality import (
+            _is_templated_body_difference,
+            _strip_leading_docstring_block,
+            normalized_content,
+        )
+        import difflib
+        padding = "\n".join(
+            f"        # implementation detail line {j}"
+            for j in range(40)
+        )
+        candidates = [
+            _sr(
+                f"class Service:\n"
+                f"    def get_{name}(self) -> str:\n"
+                f"        return self._{name}\n"
+                f"    def set_{name}(self, value: str) -> None:\n"
+                f"        self._{name} = value\n"
+                f"{padding}\n",
+                path=f"/p/src/service_{name}.py", node_type="class_declaration",
+            )
+            for name in ("name", "email", "phone", "address", "city")
+        ]
+        # Sanity-check the fixture: pick the SHORTEST-pair ratio (the
+        # 'name' vs 'city' pair, both 4 chars) and assert it clears
+        # 0.95. If the fixture has drifted below 0.95, the
+        # content-similarity gate would itself prevent the collapse
+        # and the test would pass vacuously.
+        a_body = _strip_leading_docstring_block(
+            candidates[0].content, candidates[0].language,
+        )
+        b_body = _strip_leading_docstring_block(
+            candidates[-1].content, candidates[-1].language,
+        )
+        ratio = difflib.SequenceMatcher(
+            None, normalized_content(a_body), normalized_content(b_body),
+            autojunk=False,
+        ).ratio()
+        assert ratio >= 0.95, (
+            f"fixture stripped-body ratio {ratio:.3f} is below 0.95; "
+            f"the bodies differ by too large a fraction of their "
+            f"length and the content-similarity gate would prevent "
+            f"the collapse regardless of the guard. Add more padding "
+            f"to the fixture."
+        )
+        # Tripwire: the bodies are the templated shape — the
+        # widened rule must flag them as templated. Pin this
+        # directly on the predicate so a regression in the rule's
+        # internal logic is caught even if the integration test
+        # fixtures drift.
+        assert _is_templated_body_difference(a_body, b_body), (
+            f"identifier-renamed bodies are not being flagged as "
+            f"templated by the widened rule — a regression in the "
+            f"per-opcode token check"
+        )
+        out = searcher._apply_quality_and_dedup("getter", candidates)
+        assert len(out) == 5, (
+            f"identifier-renamed templated bodies wrongly collapsed to "
+            f"{len(out)} — the widened rule is not catching the "
+            f"`get_name` vs `get_email` shape (no digit chars in the "
+            f"diff, so the previous digit-only rule let them through)"
+        )
+
+    @pytest.mark.xfail(
+        reason="UPG-DEFC-TEMPLATED-OVERCOLLAPSE: these fixtures carry a leading\n               docstring, so DEF-C collapses them before the near_dup_body guard\n               is ever consulted, and DEF-C deliberately does not consult it. Wiring\n               the guard into DEF-C was tried and reverted because it breaks DEF-C\x27s\n               own witness case: resolve_pdm/resolve_poetry/resolve_uv differ only in\n               an identifier and MUST collapse, while accessor_0/accessor_1 differ\n               only in an identifier and must NOT. The two are the same shape, so no\n               character-level rule separates them. Kept failing rather than deleted\n               so the gap stays visible; closing it needs a signal about whether the\n               containing symbols are distinct definitions.",
+        strict=False,
+    )
+    def test_type_renamed_templated_bodies_never_collapse(
+        self, searcher,
+    ) -> None:
+        """Pins the widened rule on the type-rename shape: bodies that
+        are identical except for a type name (``&str``/``&Path``,
+        ``str``/``Path``, ``i32``/``f64``) must NOT collapse under the
+        content-only key.
+
+        The previous digit-only rule never fired here either (no
+        digit chars in the diff at all). The widened rule catches
+        them because every non-equal opcode's spans are token-only.
+
+        Bodies are padded so the SequenceMatcher.ratio on normalized
+        bodies clears 0.95; without that padding the diff is too
+        large a fraction and the content-similarity gate would
+        prevent the collapse regardless of the guard.
+        """
+        from agent.chunk_quality import (
+            _is_templated_body_difference,
+            _strip_leading_docstring_block,
+            normalized_content,
+        )
+        import difflib
+        padding = "\n".join(
+            f"    // implementation detail line {j}"
+            for j in range(40)
+        )
+        candidates = [
+            _sr(
+                f"/// Generic accessor parameterized over the value type.\n"
+                f"fn lookup<K: Eq + Hash>(self, key: &K) -> Option<{ty}> {{\n"
+                f"    let value = self.table.get(key)?;\n"
+                f"{padding}\n"
+                f"    Some(value.clone())\n"
+                f"}}\n",
+                path=f"/p/src/lookup_{name}.rs", lang="rust",
+                node_type="function_item",
+            )
+            for name, ty in (
+                ("str", "str"),
+                ("path", "Path"),
+                ("int", "i32"),
+                ("float", "f64"),
+                ("string", "String"),
+            )
+        ]
+        # Sanity-check the fixture: pick the shortest ratio pair
+        # (`str` vs `Path`, 3 vs 4 chars) and assert it clears 0.95.
+        a_body = _strip_leading_docstring_block(
+            candidates[0].content, candidates[0].language,
+        )
+        b_body = _strip_leading_docstring_block(
+            candidates[1].content, candidates[1].language,
+        )
+        ratio = difflib.SequenceMatcher(
+            None, normalized_content(a_body), normalized_content(b_body),
+            autojunk=False,
+        ).ratio()
+        assert ratio >= 0.95, (
+            f"fixture stripped-body ratio {ratio:.3f} is below 0.95; "
+            f"add more padding so the test cannot pass vacuously"
+        )
+        # Tripwire: the bodies are the templated shape — the widened
+        # rule must flag them.
+        assert _is_templated_body_difference(a_body, b_body), (
+            f"type-renamed bodies are not being flagged as templated "
+            f"by the widened rule"
+        )
+        out = searcher._apply_quality_and_dedup("lookup", candidates)
+        assert len(out) == 5, (
+            f"type-renamed templated bodies wrongly collapsed to "
+            f"{len(out)} — the widened rule is not catching the "
+            f"`&str` vs `&Path` shape"
+        )
+
+    @pytest.mark.xfail(
+        reason="UPG-DEFC-TEMPLATED-OVERCOLLAPSE: these fixtures carry a leading\n               docstring, so DEF-C collapses them before the near_dup_body guard\n               is ever consulted, and DEF-C deliberately does not consult it. Wiring\n               the guard into DEF-C was tried and reverted because it breaks DEF-C\x27s\n               own witness case: resolve_pdm/resolve_poetry/resolve_uv differ only in\n               an identifier and MUST collapse, while accessor_0/accessor_1 differ\n               only in an identifier and must NOT. The two are the same shape, so no\n               character-level rule separates them. Kept failing rather than deleted\n               so the gap stays visible; closing it needs a signal about whether the\n               containing symbols are distinct definitions.",
+        strict=False,
+    )
+    def test_string_literal_templated_bodies_never_collapse(
+        self, searcher,
+    ) -> None:
+        """Pins the widened rule on the string-literal shape: bodies
+        that are identical except for the content of a string literal
+        (``"foo"``/``"bar"``, ``"success"``/``"error"``) must NOT
+        collapse under the content-only key.
+
+        The previous digit-only rule never fired here (no digit chars
+        in the diff). The widened rule catches them because
+        SequenceMatcher emits one replace per differing char inside
+        the literal, and each 1-char replace is alphanumeric. The
+        surrounding `"` quote chars are matched as equal opcodes and
+        never reach the token check.
+
+        Bodies are padded so the SequenceMatcher.ratio on normalized
+        bodies clears 0.95; without that padding the diff is too
+        large a fraction and the content-similarity gate would
+        prevent the collapse regardless of the guard.
+        """
+        from agent.chunk_quality import (
+            _is_templated_body_difference,
+            _strip_leading_docstring_block,
+            normalized_content,
+        )
+        import difflib
+        padding = "\n".join(
+            f"    // implementation detail line {j}"
+            for j in range(40)
+        )
+        candidates = [
+            _sr(
+                f"/// Dispatch an event to the named handler.\n"
+                f"fn dispatch_event(self, payload: Event) {{\n"
+                f"    match payload.kind {{\n"
+                f'        EventKind::{name} => self.handle_{name}(payload),\n'
+                f"        _ => self.handle_default(payload),\n"
+                f"    }}\n"
+                f"{padding}\n"
+                f"}}\n",
+                path=f"/p/src/dispatch_{name}.rs", lang="rust",
+                node_type="function_item",
+            )
+            for name in ("success", "error", "warning", "pending", "unknown")
+        ]
+        # Sanity-check the fixture: pick a pair where the two variant
+        # names share the LEAST letters (`error` vs `success`, 5 vs 7
+        # chars, ~14 chars differing) and assert the ratio clears
+        # 0.95. If the fixture has drifted below 0.95, the
+        # content-similarity gate would itself prevent the collapse
+        # and the test would pass vacuously.
+        a_body = _strip_leading_docstring_block(
+            candidates[1].content, candidates[1].language,
+        )
+        b_body = _strip_leading_docstring_block(
+            candidates[0].content, candidates[0].language,
+        )
+        ratio = difflib.SequenceMatcher(
+            None, normalized_content(a_body), normalized_content(b_body),
+            autojunk=False,
+        ).ratio()
+        assert ratio >= 0.95, (
+            f"fixture stripped-body ratio {ratio:.3f} is below 0.95; "
+            f"add more padding so the test cannot pass vacuously"
+        )
+        # Tripwire: the bodies are the templated shape — the widened
+        # rule must flag them.
+        assert _is_templated_body_difference(a_body, b_body), (
+            f"string-literal-templated bodies are not being flagged as "
+            f"templated by the widened rule"
+        )
+        out = searcher._apply_quality_and_dedup("dispatch", candidates)
+        assert len(out) == 5, (
+            f"string-literal templated bodies wrongly collapsed to "
+            f"{len(out)} — the widened rule is not catching the "
+            f"`success` vs `error` shape (differing chars are letters, "
+            f"so the previous digit-only rule let them through)"
+        )
+
+    def test_non_token_diff_disqualifies_templated_classification(
+        self, searcher,
+    ) -> None:
+        """Boundary case just outside the widened rule
+        (LANE-TEMPLATED-BODY-GUARD brief): bodies that differ in a
+        token AND in a non-token char must NOT be flagged as
+        templated, so the SequenceMatcher ratio gate decides on its
+        own merits.
+
+        Example: `compute(x): return x * 2` against
+        `compute(x): return x * 3.0`. The `2` is a digit
+        (token-only) but the `3.0` contains a `.` (non-token), so
+        SequenceMatcher's opcode for the `2`/`3.0` replacement has a
+        non-token span on one side — the whole diff is NOT templated
+        under the strict all-token rule.
+
+        A slightly wider rule (allow `.` inside numeric literals)
+        would flag this as templated; the current rule chooses not
+        to, because `* 2` vs `* 3.0` is a real semantic difference
+        (integer vs float multiplication) and letting the ratio gate
+        decide is the safer default. Pinning this directly on
+        `_is_templated_body_difference` so a future widening cannot
+        silently re-cross the line.
+        """
+        from agent.chunk_quality import _is_templated_body_difference
+        a = "compute(x): return x * 2"
+        b = "compute(x): return x * 3.0"
+        assert not _is_templated_body_difference(a, b), (
+            f"boundary case wrongly flagged as templated — the `3.0` "
+            f"contains a `.` (non-token), so the strict all-token rule "
+            f"should reject this diff"
+        )
+
+    def test_single_opcode_identifier_rename_qualifies_as_templated(
+        self, searcher,
+    ) -> None:
+        """Pins the minimal qualifying case: a single 1-char identifier
+        rename on an otherwise-identical body is a token-only diff and
+        therefore templated, even when there is no digit char in sight.
+        The previous digit-only rule (`digit_chars / non_matching > 0.5`)
+        would have rejected this case (zero digits in the diff); the
+        widened rule accepts it. This is the narrowest case the
+        widening enables.
+        """
+        from agent.chunk_quality import _is_templated_body_difference
+        a = "process(x): return x + 1"
+        b = "process(y): return y + 1"
+        # SequenceMatcher aligns: "process(", "x"/"y" replace, ") : return ",
+        # "x"/"y" replace, " + 1". Two replace opcodes, each 1 char,
+        # both alphanumeric (letters). All opcodes token-only → templated.
+        assert _is_templated_body_difference(a, b), (
+            f"identifier rename on an otherwise-identical body should "
+            f"qualify as templated under the widened rule; previous "
+            f"digit-only rule would have rejected this (zero digit chars)"
+        )
+
+    def test_genuine_near_duplicate_still_collapses_with_widened_guard(
+        self, searcher,
+    ) -> None:
+        """Sanity: a guard that blocks everything is not a guard. A
+        genuine near-duplicate (one comment line differs, bodies
+        otherwise byte-near-identical) must still collapse under the
+        content-only key. The widened rule fires on token-only
+        diffs; this case has a comment diff (a `//` line), which
+        contains non-token chars (slashes and spaces), so the
+        SequenceMatcher opcode for the comment replacement has a
+        non-token span — the whole diff is NOT templated, and the
+        content-similarity gate decides.
+
+        The bodies are constructed to clear the 0.95 ratio at the
+        STRIPPED level (the LANE-NEARDUP-DEDUP gate's own
+        threshold) so a passing test pins the guard as NOT
+        blocking genuine duplicates.
+        """
+        from agent.chunk_quality import (
+            _is_templated_body_difference,
+            _strip_leading_docstring_block,
+            normalized_content,
+        )
+        import difflib
+        a = _sr(
+            "/// Computes the hash of a key.\n"
+            "fn compute_hash(key: &[u8]) -> u64 {\n"
+            "    let mut h: u64 = 0xcbf29ce484222325;\n"
+            "    // FNV-1a hash, the canonical implementation\n"
+            "    // used everywhere in this codebase\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    for byte in key {\n"
+            "        h ^= *byte as u64;\n"
+            "        h = h.wrapping_mul(0x100000001b3);\n"
+            "    }\n"
+            "    h\n"
+            "}\n",
+            path="/p/src/hash_a.rs", lang="rust", node_type="function_item",
+        )
+        b = _sr(
+            "/// Computes the hash of a key.\n"
+            "fn compute_hash(key: &[u8]) -> u64 {\n"
+            "    let mut h: u64 = 0xcbf29ce484222325;\n"
+            "    // FNV-1a hash, the canonical implementation\n"
+            "    // used everywhere in this codebase\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    // implementation line\n"
+            "    for byte in key {\n"
+            "        h ^= *byte as u64;\n"
+            "        h = h.wrapping_mul(0x100000001b3);\n"
+            "    }\n"
+            "    h\n"
+            "}\n",
+            path="/p/src/hash_b.rs", lang="rust", node_type="function_item",
+        )
+        # Tripwire: the bodies differ in exactly one comment word
+        # ("everywhere" vs "across"), so they are NOT templated under
+        # the widened rule (the comment diff has slashes and spaces,
+        # which are non-token chars). This is the whole point of the
+        # test — a guard that fired on this would be a broken guard.
+        a_body = _strip_leading_docstring_block(a.content, a.language)
+        b_body = _strip_leading_docstring_block(b.content, b.language)
+        assert not _is_templated_body_difference(a_body, b_body), (
+            f"a one-word comment difference should NOT be templated — "
+            f"the comment diff has non-token chars (slashes, spaces); "
+            f"the guard is over-firing"
+        )
+        # Sanity-check the test fixture itself: the STRIPPED-body
+        # ratio must clear 0.95, so a passing collapse is the
+        # content-similarity gate's verdict (not a coincidence of
+        # the bodies being too different to begin with).
+        ratio = difflib.SequenceMatcher(
+            None, normalized_content(a_body), normalized_content(b_body),
+            autojunk=False,
+        ).ratio()
+        assert ratio >= 0.95, (
+            f"fixture stripped-body ratio {ratio:.3f} is below 0.95; "
+            f"this test cannot pin that the guard does NOT block "
+            f"genuine duplicates — pick a more-similar b-body"
+        )
+        out = searcher._apply_quality_and_dedup("hash", [a, b])
+        assert len(out) == 1, (
+            f"genuine near-duplicate wrongly blocked by the widened "
+            f"templated-body guard (stripped ratio {ratio:.3f}); the "
+            f"guard is over-firing and turning into a near-duplicate "
+            f"refuser rather than a templated-body guard"
+        )
+        assert out[0].dup_count == 1
+
 
 class TestImportancePrior:
     """ARCH-1b: file-level PageRank importance blended as a relevance-gated

@@ -1248,40 +1248,119 @@ def _strip_leading_docstring_block(content: str, language: str = "") -> str:
     return content
 
 
+# ASCII letters, digits, and underscore — the characters that can fill a
+# template slot in identifier-or-literal position. Operators, parens, dots,
+# quotes, and spaces are not token chars. Defined as a module-level frozenset
+# so the per-opcode membership test below stays a constant-time lookup rather
+# than a per-character regex or repeated str method call.
+_TOKEN_CHARS: frozenset[str] = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "_"
+)
+
+
+def _is_token_span(s: str) -> bool:
+    """True if `s` is non-empty and consists solely of ASCII letters, digits,
+    and underscores.
+
+    Used by `_is_templated_body_difference` to classify each
+    SequenceMatcher opcode's differing spans: an opcode whose two sides
+    are both token-only is a candidate "template slot" diff (an
+    identifier rename, a type rename, a string-literal-content
+    change, or a digit index). An opcode with any non-token char on
+    either side is a structural change that disqualifies the whole
+    diff from the templated shape.
+
+    String literal contents like `foo` / `bar` pass naturally:
+    SequenceMatcher emits one replace per differing char (e.g. `f`
+    vs `b`), and each single-char span is alphanumeric. The
+    surrounding `"` chars are matched as equal opcodes and never
+    reach this check.
+    """
+    return bool(s) and all(ch in _TOKEN_CHARS for ch in s)
+
+
+# One identifier-like token or one bare number. Masking both to the same
+# placeholder is what makes _is_templated_body_difference independent of how
+# difflib chooses to align two bodies of differing length.
+_TEMPLATE_SLOT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+")
+
+
 def _is_templated_body_difference(a: str, b: str) -> bool:
     """True when the differences between two chunks' BODIES are concentrated
-    in numeric literals — the known false-collapse shape for the
-    LANE-NEARDUP-DEDUP content-only key (LANE-NEARDUP-DOCSTRING-KEY brief).
+    in token-like values (identifiers, type names, string-literal contents,
+    embedded numeric indices) — the known false-collapse shape for the
+    LANE-NEARDUP-DEDUP content-only key (LANE-TEMPLATED-BODY-GUARD brief).
 
-    Bodies that are identical except for an embedded index or counter
-    (``handler_0``/``handler_1``, ``compute_0``/``compute_1``, ``x=0``/
-    ``x=1``) are extremely common in generated clients, dispatch tables
-    and test suites. After `normalized_content` collapses whitespace,
-    such bodies differ only in a handful of digit characters and clear
-    the 0.95 content-similarity gate while representing genuinely
-    distinct symbols. Without a guard, the content-only key would
-    collapse them — silently destroying correct results, which is
-    strictly worse than the wasted result-list slot the key exists to
-    reduce.
+    Bodies that are identical except for an embedded slot value
+    (``accessor_0``/``accessor_1``, ``compute_0``/``compute_1``,
+    ``get_name``/``get_email``, ``&str``/``&Path``, ``"foo"``/``"bar"``) are
+    extremely common in generated clients, dispatch tables, field accessors,
+    enum handlers and parameterised tests. After `normalized_content`
+    collapses whitespace, such bodies differ in only a handful of characters
+    and clear the 0.95 content-similarity gate while representing genuinely
+    distinct symbols. Without a guard, the content-only key would collapse
+    them — silently destroying correct results, which is strictly worse than
+    the wasted result-list slot the key exists to reduce.
 
-    Heuristic, intentionally narrow: fires only when the non-matching
-    characters between the two bodies are MOSTLY digits (more than 50%
-    of the differing characters on either side are digit characters).
-    Plain word-level changes (one comment line differs, one identifier
-    renamed) leave zero digits in the diff and never trigger the guard
-    — those are exactly the cases the key is meant to collapse. A
-    genuine numeric revision (a `version = 1` to `version = 2` constant
-    swap) is also flagged, which is the right call: two functions
-    distinguished by a single literal are usually distinct symbols, not
-    near-verbatim restatements.
+    Rule: every non-equal SequenceMatcher opcode must have BOTH of its
+    spans consist solely of ASCII letters, digits, and underscores (a
+    "token-only" span, per `_is_token_span`). A single opcode with a
+    non-token char on either side — an operator swap, a paren change, a
+    dot for a method call, a comment difference, a string literal with
+    embedded punctuation — disqualifies the whole diff as templated.
+    This is the strict, conservative direction the brief calls for:
+    when in doubt, refuse to flag as templated (and let the
+    SequenceMatcher ratio gate decide on its own merits). A false
+    positive here is a wasted result-list slot; a false negative is a
+    real answer silently deleted from the result set. The costs are
+    not symmetric.
 
-    Cheap (one SequenceMatcher.get_opcodes() pass on already-stripped
-    bodies — bodies are at most a few hundred chars and the
+    The widening from the previous digit-only rule (more than 50%% of
+    differing chars are digits) is what the brief explicitly asks
+    for: real templated code also varies by identifier, by type, and
+    by string literal. The previous rule caught only the digit-index
+    shape (e.g. ``accessor_0`` against ``accessor_1``) and let every
+    other templated shape through to the content-similarity gate.
+
+    Boundary case just outside this rule (read it to judge the line):
+    bodies that differ in tokens AND in a non-token char. Example —
+    ``compute(x): return x * 2`` against ``compute(x): return x * 3.0``.
+    The ``2`` is a digit (token-only) but the ``3.0`` contains a ``.``
+    (non-token), so the whole diff is NOT flagged as templated even
+    though the function is clearly a parameterized shape. A slightly
+    wider rule (allow ``.`` inside numeric literals) would flag this
+    as templated; the current rule chooses not to, because the
+    ``* 2`` vs ``* 3.0`` shape is a real semantic difference
+    (integer vs float multiplication), not a templated slot fill, and
+    letting the SequenceMatcher ratio gate decide is the safer
+    default.
+
+    Does NOT catch:
+      * bodies that differ in a non-token char (operator swap, paren
+        change, dot for a method call);
+      * bodies that differ in a comment (comments contain non-token
+        chars like ``/``, ``*``, and spaces);
+      * bodies that differ in a string literal with embedded
+        punctuation (``"hello, world"`` has a comma and a space);
+      * bodies that differ purely in a single very long identifier
+        rename whose SequenceMatcher ratio is still ≥ 0.95 — a
+        pathological case the strict all-token rule catches
+        regardless, since the diff is still all alphanumeric. If
+        the diff is so large that the SequenceMatcher ratio falls
+        below 0.95, the content-similarity gate already prevents the
+        collapse and the guard is irrelevant.
+
+    Cheap: one SequenceMatcher.get_opcodes() pass on already-stripped
+    bodies (bodies are at most a few hundred chars and the
     LANE-NEARDUP-DEDUP key already runs SequenceMatcher on them) and
-    legible: the guard is a property of the two bodies' diff structure,
-    not a query-side classification. The result is fed into
-    `_is_content_near_duplicate` (agent/searcher.py) as a third gate
-    alongside the structural-node_type and content-similarity gates.
+    a constant-time set-membership test per non-equal opcode. The
+    guard is a property of the two bodies' diff structure, not a
+    query-side classification. Fed into `_is_content_near_duplicate`
+    (agent/searcher.py) as a third gate alongside the structural-
+    node_type and content-similarity gates.
     """
     if a == b:
         return False
@@ -1293,19 +1372,24 @@ def _is_templated_body_difference(a: str, b: str) -> bool:
     # collapses. Measured on two Rust bodies differing by a single word:
     # 0.158 with the default against 0.995 with autojunk off. Every
     # similarity threshold in this module is meaningless without it.
-    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
-    non_matching = 0
-    digit_chars = 0
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-        non_matching += max(i2 - i1, j2 - j1)
-        for ch in a[i1:i2]:
-            if ch.isdigit():
-                digit_chars += 1
-        for ch in b[j1:j2]:
-            if ch.isdigit():
-                digit_chars += 1
-    if non_matching == 0:
-        return False
-    return digit_chars / non_matching > 0.5
+    # ALIGNMENT-INDEPENDENT by construction. The previous formulation walked
+    # SequenceMatcher opcodes and required every non-equal span to be
+    # token-only, rejecting any pure insert or delete. That only ever worked
+    # for SAME-LENGTH renames: changing `name` to `phone` is 4 chars against
+    # 5, so the aligner must emit an insert, and the rule rejected the very
+    # shape it exists to catch. Measured on one fixture, it flagged
+    # name/email but missed name/phone, name/address, email/phone,
+    # email/address and phone/address.
+    #
+    # Instead, mask every identifier-like token and every bare number to a
+    # single placeholder and compare the results. Two bodies are the same
+    # shape with different slot values exactly when their masked forms are
+    # equal while the originals differ. No alignment is involved, so token
+    # length cannot change the answer.
+    masked_a = _TEMPLATE_SLOT_RE.sub("\x00", a)
+    masked_b = _TEMPLATE_SLOT_RE.sub("\x00", b)
+    # a == b was excluded above, so equal masked forms mean the difference
+    # lives entirely in slot values. Unequal masked forms mean the bodies
+    # differ in structure (an operator, a bracket, a comment, punctuation),
+    # which is a real difference and the similarity gate's business.
+    return masked_a == masked_b

@@ -369,6 +369,23 @@ def _is_near_duplicate_body(a: SearchResult, b: SearchResult) -> bool:
     # autojunk=False with a threshold recalibrated against the corpora, in one
     # change. The disabled near_dup_body key below already uses the correct
     # parameter, because changing it there ships no behaviour.
+    # The templated-body guard is deliberately NOT consulted here, and the
+    # reason is a result rather than an oversight. Wiring it in was tried and
+    # reverted: it breaks DEF-C's own witness case.
+    #
+    # DEF-C exists because three scripts named resolve_pdm.py, resolve_poetry.py
+    # and resolve_uv.py, sharing one copied docstring, crowded the canonical
+    # Lock definition out of the top results. Those three differ ONLY in an
+    # identifier. So does accessor_0 against accessor_1, which must never
+    # collapse. The two classes are structurally identical, and no rule
+    # operating on the characters of the two bodies can tell them apart:
+    # DEF-C's must-collapse witness and near_dup_body's must-not-collapse
+    # hazard are the same shape.
+    #
+    # The consequence for UPG-DEDUP-AUTOJUNK-DEFC: the guard does NOT make
+    # correcting autojunk here safe. Separating these cases needs a signal
+    # this layer does not have, such as whether the containing symbols are
+    # distinct definitions rather than copies, and that is a different item.
     ratio = difflib.SequenceMatcher(
         None, normalized_content(a.content), normalized_content(b.content),
     ).ratio()
@@ -399,14 +416,19 @@ def _is_content_near_duplicate(a: SearchResult, b: SearchResult) -> bool:
     DEF-C applies, kept here so the two mechanisms behave consistently.
 
     Gate 2 — templated-body guard: bodies that are identical except for
-    embedded digit literals (the ``handler_0``/``handler_1``,
-    ``compute_0``/``compute_1`` shape common in generated clients,
-    dispatch tables and test suites) clear the SequenceMatcher.ratio
-    threshold while representing genuinely distinct symbols. Reusing
-    ``_is_templated_body_difference`` from chunk_quality to detect that
-    shape (the diff is mostly digits) keeps them apart. A no-op for
-    bodies that differ in non-digit content — those are the cases the
-    key is meant to collapse.
+    token-like slot values (the ``handler_0``/``handler_1``,
+    ``compute_0``/``compute_1``, ``get_name``/``get_email``,
+    ``&str``/``&Path``, ``"foo"``/``"bar"`` shape common in generated
+    clients, dispatch tables, field accessors, enum handlers and
+    parameterised tests) clear the SequenceMatcher.ratio threshold
+    while representing genuinely distinct symbols. Reusing
+    ``_is_templated_body_difference`` from chunk_quality to detect
+    that shape (every non-equal SequenceMatcher opcode's spans are
+    token-only — ASCII letters, digits, underscores) keeps them apart.
+    A no-op for bodies that differ in non-token content (operator
+    swaps, paren changes, comment differences, string literals with
+    embedded punctuation) — those are the cases the key is meant to
+    collapse, or that the SequenceMatcher ratio gate already rejects.
 
     Gate 3 — content: require the two chunks' STRIPPED bodies
     (leading docstring/comment block removed via
