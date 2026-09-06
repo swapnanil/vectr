@@ -60,6 +60,10 @@ logger = logging.getLogger("run_poc")
 VANILLA_DIR = os.getenv("POC_VANILLA_DIR", "/tmp/poc-django-vanilla")
 VECTR_DIR   = os.getenv("POC_VECTR_DIR",   "/tmp/poc-django-vectr")
 
+# The benchmark's OWN vectr daemon. Never assume a port: 8765 is a common
+# default for a developer's live editor session, and clearing it destroys
+# working memory the benchmark does not own (this happened, 869 notes).
+VECTR_PORT = int(os.getenv("POC_VECTR_PORT", "8765"))
 VANILLA_DIR_RUN3 = os.getenv("POC_VANILLA_DIR_RUN3", "/tmp/poc-cpython-vanilla")
 VECTR_DIR_RUN3   = os.getenv("POC_VECTR_DIR_RUN3",   "/tmp/poc-cpython-vectr")
 
@@ -1054,8 +1058,43 @@ def _git_diff(working_dir: str, head_before: str) -> str:
 # Vectr helpers
 # ---------------------------------------------------------------------------
 
-def _clear_vectr_memory(port: int = 8765) -> None:
+def _assert_benchmark_daemon(port: int, expected_workspace: str) -> None:
+    """Refuse to touch a daemon that is not serving the benchmark workspace.
+
+    A port number is not an identity. This harness used to clear memory on a
+    hardcoded 8765 with no way to point it elsewhere, and on 2026-09-06 that
+    deleted 869 notes belonging to a live editor session that happened to be
+    on that port. The workspace root is the identity; check it before every
+    destructive call and fail loudly rather than wiping a stranger's memory.
+    """
     import urllib.request
+    want = os.path.realpath(os.path.expanduser(expected_workspace))
+    try:
+        with urllib.request.urlopen(
+            f"http://localhost:{port}/v1/status", timeout=5
+        ) as resp:
+            got_raw = json.loads(resp.read()).get("workspace_root", "")
+    except Exception as e:
+        raise SystemExit(
+            f"cannot reach a vectr daemon on port {port} to verify it before "
+            f"clearing its memory: {e}"
+        )
+    got = os.path.realpath(os.path.expanduser(got_raw))
+    if got != want:
+        raise SystemExit(
+            f"REFUSING to clear vectr memory on port {port}.\n"
+            f"  that daemon serves : {got}\n"
+            f"  benchmark workspace: {want}\n"
+            f"Point the benchmark at its own daemon with --vectr-port "
+            f"(or POC_VECTR_PORT). Clearing the wrong daemon destroys "
+            f"working memory that is not yours to delete."
+        )
+
+
+def _clear_vectr_memory(port: int = 8765, expected_workspace: str | None = None) -> None:
+    import urllib.request
+    if expected_workspace:
+        _assert_benchmark_daemon(port, expected_workspace)
     try:
         req = urllib.request.Request(
             f"http://localhost:{port}/v1/memory/clear",
@@ -1224,7 +1263,7 @@ def run_agent_on_task(
     prompt_variant: str = "additive",
 ) -> TwoPhaseResult:
     if agent_type == "vectr":
-        _clear_vectr_memory()
+        _clear_vectr_memory(port=VECTR_PORT, expected_workspace=VECTR_DIR_RUN3)
     phase1 = run_phase(task, phase=1, agent_type=agent_type, max_turns=max_turns_p1,
                        prompt_variant=prompt_variant)
     phase2 = run_phase(task, phase=2, agent_type=agent_type, max_turns=max_turns_p2,
@@ -1252,7 +1291,7 @@ def run_benchmark3(
 
     vectr_index: dict = {}
     if use_vectr:
-        _clear_vectr_memory()
+        _clear_vectr_memory(port=VECTR_PORT, expected_workspace=VECTR_DIR_RUN3)
         vectr_index = _get_vectr_index_info()
         logger.info("Vectr index: %s", vectr_index)
 
@@ -1576,9 +1615,14 @@ def main() -> None:
         # vectr impl(task N) → vanilla impl(task N) for each task in order.
         # Incremental JSON written after every research phase and every individual
         # impl session — a kill loses at most the one impl currently running.
+        # A literal "/path/to/..." placeholder used to sit here as the default,
+        # so an unset POC_OUTPUT_DIR made the first snapshot try to mkdir /path
+        # at the filesystem root: OSError Errno 30, read-only file system, after
+        # the research phases had already been paid for. Default to the real
+        # in-repo results directory instead.
         os.environ.setdefault(
             "POC_OUTPUT_DIR",
-            "/path/to/vectr/benchmarks/cpython",
+            str(Path(__file__).resolve().parents[1] / "cpython"),
         )
         task_filter = args.task
         tasks = CPYTHON_TASKS
@@ -1656,7 +1700,7 @@ def main() -> None:
 
         # ── Phase 1: research sessions — both agents run in parallel ─────────
         if "vectr" in agents_to_run and vectr_research is None:
-            _clear_vectr_memory()
+            _clear_vectr_memory(port=VECTR_PORT, expected_workspace=VECTR_DIR_RUN3)
             vectr_index = _get_vectr_index_info()
             logger.info("Vectr index: %s", vectr_index)
         elif "vectr" in agents_to_run:
@@ -1788,7 +1832,7 @@ def main() -> None:
         )
 
         # Clear vectr notes once at the very start
-        _clear_vectr_memory()
+        _clear_vectr_memory(port=VECTR_PORT, expected_workspace=VECTR_DIR_RUN3)
         vectr_index = _get_vectr_index_info()
         logger.info("Vectr index: %s", vectr_index)
 
