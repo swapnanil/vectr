@@ -113,6 +113,21 @@ class TestIsTrivialChunk:
     def test_not_trivial(self, content):
         assert is_trivial_chunk(content) is False
 
+    @pytest.mark.parametrize("content", [None, "", "   "])
+    def test_absent_content_is_trivial_not_a_crash(self, content):
+        """A chunk id can reach the trivial filter with no stored document text.
+
+        The vector store returns None (not a missing key) for such a row, so
+        the searcher's `id_to_doc.get(cid, "")` passes the None straight
+        through: dict.get's default only fires on a MISSING key, never on a
+        key whose value is None. Before the guard this raised
+        AttributeError: 'NoneType' object has no attribute 'splitlines'
+        out of the middle of a search, and every vectr_search against a
+        workspace with populated dual-vector purpose chunks returned
+        HTTP 500. Absent text is empty text, which is trivial.
+        """
+        assert is_trivial_chunk(content) is True
+
 
 class TestTwoLineStubChunks:
     """UPG-15.1 (F15): two-line declaration+stub chunks must be filtered as trivial.

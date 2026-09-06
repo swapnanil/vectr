@@ -229,6 +229,14 @@ def is_trivial_chunk(content: str, language: str = "") -> bool:
     natural-language queries.  Multi-line .txt/.rst documentation (a framework's
     docs/howto/*.txt, docs/topics/*.txt) has many more lines and is unaffected.
     """
+    # A chunk id can reach here with no stored document text: the vector
+    # store returns None (not a missing key) for such a row, so the callers'
+    # `id_to_doc.get(cid, "")` hands the None straight through, since the
+    # default only fires on a MISSING key. Treat absent text as empty, which
+    # is trivial by definition, rather than raising AttributeError out of a
+    # search request.
+    if not content:
+        return True
     raw_nonblank = [l for l in content.splitlines() if l.strip()]
     if not raw_nonblank:
         return True
