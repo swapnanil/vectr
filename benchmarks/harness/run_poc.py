@@ -32,6 +32,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -831,6 +832,12 @@ def run_phase(
         " [cost includes sub-agents; tokens=parent-only]" if subagent_calls else "",
     )
 
+    upstream_err = _upstream_failure(answer)
+    if upstream_err and not error:
+        error = f"upstream request failed: {upstream_err}"
+        logger.error("[%s/%s] phase %d UPSTREAM FAILURE: %s",
+                     task.id, agent_type, phase, upstream_err)
+
     return PhaseResult(
         task_id=task.id, agent_type=agent_type, phase=phase,
         answer=answer,
@@ -921,6 +928,12 @@ def run_research_phase(
         " [cost includes sub-agents; tokens=parent-only]" if subagent_calls else "",
     )
 
+    upstream_err = _upstream_failure(answer)
+    if upstream_err and not error:
+        error = f"upstream request failed: {upstream_err}"
+        logger.error("[%s] phase %d UPSTREAM FAILURE: %s",
+                     agent_type, 1, upstream_err)
+
     return PhaseResult(
         task_id="research", agent_type=agent_type, phase=1,
         answer=answer,
@@ -1008,6 +1021,12 @@ def run_impl_phase(
         " [cost includes sub-agents; tokens=parent-only]" if subagent_calls else "",
     )
 
+    upstream_err = _upstream_failure(answer)
+    if upstream_err and not error:
+        error = f"upstream request failed: {upstream_err}"
+        logger.error("[%s] phase %d UPSTREAM FAILURE: %s",
+                     agent_type, 2, upstream_err)
+
     return PhaseResult(
         task_id=task.id, agent_type=agent_type, phase=2,
         answer=answer,
@@ -1052,6 +1071,47 @@ def _git_diff(working_dir: str, head_before: str) -> str:
         )
     except Exception:
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Upstream-failure detection
+# ---------------------------------------------------------------------------
+
+_LEADING_FAILURE_RE = re.compile(
+    r"\s*(?:API Error|All target providers failed|Error:\s*(?:empty or malformed|rate)|"
+    r"\d{3}\s+(?:Unauthorized|Too Many Requests))",
+    re.I,
+)
+
+_UPSTREAM_FAILURE_RE = re.compile(
+    r"API Error|All target providers failed|\b(?:401|429|50[0234])\b"
+    r"|rate.?limit|quota exceeded|unauthorized|empty or malformed response",
+    re.I,
+)
+
+
+def _upstream_failure(answer: str) -> str | None:
+    """Return the upstream error if this 'answer' is really a failed request.
+
+    A routed session that gets rejected still returns a string, and the harness
+    used to store it as the answer with error=None. On 2026-09-06 all 14
+    sessions of a run3 came back "API Error: Request rejected (429) - All
+    target providers failed", and the run exited 0 and printed a Grand Totals
+    table of $0.0000 and "0.0% savings" as though vectr and vanilla had tied.
+    An outage must not be able to render as a measurement.
+    """
+    if not answer:
+        return None
+    text = answer.strip()
+    # An upstream rejection IS the whole response and leads with the error.
+    # A real answer to one of these tasks is long prose that may legitimately
+    # mention a status code, so length is what separates them: match only a
+    # leading marker, or a short body that is nothing but the error.
+    if _LEADING_FAILURE_RE.match(text):
+        return text.replace("\n", " ")[:200]
+    if len(text) < 600 and _UPSTREAM_FAILURE_RE.search(text[:400]):
+        return text.replace("\n", " ")[:200]
+    return None
 
 
 # ---------------------------------------------------------------------------
