@@ -78,15 +78,25 @@ from similarity import (  # noqa: E402
 
 # How many results to ask the daemon for. The dedup pair-extraction
 # runs on the candidate pool; the daemon truncates to `n_results` AFTER
-# dedup. Asking for a much larger n_results than the rerank pool
-# ceiling (~200 unfiltered, ~40 language-filtered) gives us the
-# full post-dedup set regardless of how many collapses happened.
-# The `seen_docstring` map built inside `_apply_quality_and_dedup`
-# (agent/searcher.py:1163-1214) is bounded by the candidate pool,
-# not the final n_results — so a small n_results here loses pair
-# data. 200 is the safe upper bound matching the pre-rerank
-# pre-filter-fetch_k.
-N_RESULTS = 200
+# dedup. The `seen_docstring` map built inside `_apply_quality_and_dedup`
+# is bounded by the candidate pool, not the final n_results — so a small
+# n_results here loses pair data.
+#
+# MEASURED 2026-09-06, and the reason this is 50 and not 200: /v1/search
+# validates `n_results` with le=50, so every request at 200 came back
+# HTTP 422 and the whole run recorded zero pairs. 50 is the API maximum.
+#
+# The fidelity limit this leaves, stated so no reader over-reads the
+# output: for an unfiltered query the internal pool is
+# RERANK_PRE_FILTER_FETCH_K = 200 candidates, trimmed to
+# RERANK_TOP_K_UNFILTERED = 40 before the cross-encoder, and for a
+# language-filtered query it is RERANK_TOP_K = 40. Those are CONSTANTS
+# in agent/searcher.py:599-606; they do not scale with the caller's
+# n_results. So over REST this harness observes at most 50 of a pool
+# up to 200, and every pair count it reports is a LOWER BOUND on what
+# DEF-C actually compares. Closing that gap means driving the searcher
+# in-process rather than over HTTP.
+N_RESULTS = 50
 
 # Output layout. Same `results/<name>/<vectr-sha>/` convention
 # banner_calibration uses, so a reviewer browsing `results/`
@@ -533,6 +543,23 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  wrote: {report_path}")
     print()
     print(report_text)
+
+    # A run where every query failed is not a result, it is an outage.
+    # This previously exited 0 and printed a full threshold sweep of
+    # zeros, which reads exactly like "no pairs collapse at any
+    # threshold" — the opposite of what a 15/15 HTTP 422 means.
+    if n_error == len(queries) and queries:
+        print(
+            f"ERROR: all {n_error} queries failed; the sweep above is "
+            f"empty because nothing was measured, not because nothing "
+            f"collapsed. First error: "
+            f"{per_query[0].get('error') if per_query else 'unknown'}",
+            file=sys.stderr,
+        )
+        return 2
+    if n_error:
+        print(f"WARNING: {n_error}/{len(queries)} queries failed; "
+              f"pair counts are incomplete.", file=sys.stderr)
     return 0
 
 

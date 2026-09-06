@@ -134,16 +134,51 @@ def measure_recall(base: str, sid: str, reps: int) -> dict:
                      "should be read against p50 and p95, not against the minimum")}
 
 
+# Directories vectr never indexes, so grep must not walk them either.
+# `tmp` is in the repo's own .vectrignore (it holds multi-GB benchmark
+# clones); the rest are VCS/build/output trees no index covers.
+_GREP_EXCLUDE_DIRS = ("tmp", ".git", ".venv", "results", ".claude", "node_modules")
+
+
 def measure_grep_baseline(repo: Path, patterns: list[str]) -> dict:
-    """C10's grep half: the baseline vectr is being compared against."""
-    ms = []
-    for pat in patterns:
-        t0 = time.perf_counter()
-        subprocess.run(["grep", "-rn", "--include=*.py", pat, str(repo)],
-                       capture_output=True, text=True)
-        ms.append((time.perf_counter() - t0) * 1000.0)
-    return {"id": "C10-grep", "claimed_ms": 28, "latency_ms": _stats(ms),
-            "note": "grep over the same repo, same patterns as the search queries"}
+    """C10's grep half: the baseline vectr is being compared against.
+
+    MEASURED 2026-09-06, and the reason the excludes exist: greping the
+    bare repo path walked 7.0 GB here, because /Users/.../dev/vectr
+    contains tmp/ with the django, cpython and uv benchmark clones plus
+    .claude/worktrees copies. vectr's index covered 611 files. The
+    unexcluded baseline came out at 4727ms p50 against 118ms for the
+    same patterns over the tree vectr actually indexes, a 40x
+    difference that says nothing about grep and everything about which
+    bytes were walked. A baseline has to scan the same corpus as the
+    thing it is a baseline for.
+
+    Both numbers are reported: `latency_ms` is the comparable one,
+    `latency_ms_whole_tree` is what an unscoped grep costs, kept so the
+    gap stays visible rather than being quietly tuned away.
+    """
+    def _time(cmd_for_pattern) -> list[float]:
+        out = []
+        for pat in patterns:
+            t0 = time.perf_counter()
+            subprocess.run(cmd_for_pattern(pat), capture_output=True, text=True)
+            out.append((time.perf_counter() - t0) * 1000.0)
+        return out
+
+    scoped = _time(lambda pat: [
+        "grep", "-rn", "--include=*.py",
+        *(f"--exclude-dir={d}" for d in _GREP_EXCLUDE_DIRS),
+        pat, str(repo),
+    ])
+    whole = _time(lambda pat: ["grep", "-rn", "--include=*.py", pat, str(repo)])
+
+    return {"id": "C10-grep", "claimed_ms": 28,
+            "latency_ms": _stats(scoped),
+            "latency_ms_whole_tree": _stats(whole),
+            "excluded_dirs": list(_GREP_EXCLUDE_DIRS),
+            "note": "grep over the same scope vectr indexes, same patterns as "
+                    "the search queries; latency_ms_whole_tree is the unscoped "
+                    "walk, reported so the scoping is auditable"}
 
 
 def main(argv: list[str] | None = None) -> int:
