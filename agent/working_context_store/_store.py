@@ -3864,6 +3864,42 @@ class WorkingContextStore:
         oldest = min(live, key=lambda r: (r["created_at"], r["note_id"]))
         return len(live), oldest["note_id"]
 
+    def _backup_before_bulk_delete(self, workspace: str, reason: str) -> Path | None:
+        """Snapshot the store to disk before a bulk delete, and return its path.
+
+        A mass delete is the one operation with no undo, and on 2026-09-06 a
+        benchmark harness pointed at the wrong port erased 869 notes belonging
+        to a live session. Those notes were recovered only by luck: the main
+        SQLite file had not been checkpointed for a day, so the pre-delete
+        state still sat there and the deletions lived only in the -wal. That
+        is not a safety property, it is an accident of WAL timing, and it
+        disappears the moment a checkpoint lands.
+
+        So take a real backup instead. sqlite3's backup API produces a
+        consistent, self-contained copy (WAL content included) without
+        requiring the caller to stop writing. Failure to back up is not
+        allowed to block the delete the caller asked for, but it is logged
+        loudly, because a silent failure here is exactly what leaves someone
+        with nothing.
+        """
+        try:
+            backup_dir = self._db_path.parent / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            dest = backup_dir / f"working_context.pre-{reason}.{stamp}.sqlite"
+            with sqlite3.connect(str(self._db_path)) as src, \
+                 sqlite3.connect(str(dest)) as dst:
+                src.backup(dst)
+            audit("BULK_DELETE_BACKUP", workspace=workspace, path=str(dest))
+            logger.info("Backed up working memory to %s before %s", dest, reason)
+            return dest
+        except Exception as exc:
+            logger.error(
+                "COULD NOT BACK UP working memory before %s (%s): %s",
+                reason, workspace, exc,
+            )
+            return None
+
     def forget_all(self, workspace: str) -> int:
         """Clear all notes AND snapshots for a workspace.
 
@@ -3871,6 +3907,7 @@ class WorkingContextStore:
         deleted only the notes table would silently keep every note's text
         alive in `snapshots` — "delete everything" must mean everything,
         including the note embedding vectors in the Chroma collection."""
+        self._backup_before_bulk_delete(workspace, "forget_all")
         with self._conn() as conn:
             deleted = conn.execute(
                 "DELETE FROM notes WHERE workspace = ?", (workspace,)

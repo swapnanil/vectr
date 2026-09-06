@@ -4747,3 +4747,68 @@ class TestAttachEmbedder:
         store = WorkingContextStore(str(tmp_path))
         store.remember("/repo", "a note with no embedder at all")
         assert store.backfill_missing_vectors() == 0
+
+
+class TestBulkDeleteBackup:
+    """forget_all is the one operation with no undo.
+
+    On 2026-09-06 a benchmark harness pointed at the wrong port erased 869
+    notes belonging to a live session. They were recovered only because the
+    main SQLite file happened not to have been checkpointed for a day, so the
+    pre-delete state still sat in it and the deletions lived only in the -wal.
+    That is an accident of WAL timing, not a safety property, and it vanishes
+    the moment a checkpoint lands. So forget_all takes a real backup first.
+    """
+
+    def test_forget_all_writes_a_backup_containing_the_deleted_notes(self, tmp_path) -> None:
+        import sqlite3
+        store = _store(tmp_path)
+        ws = "/repo"
+        for i in range(12):
+            store.remember(ws, f"note number {i} with real content")
+
+        assert store.forget_all(ws) == 12
+
+        backups = list((tmp_path / "backups").glob("working_context.pre-forget_all.*.sqlite"))
+        assert len(backups) == 1, f"expected exactly one backup, got {backups}"
+
+        con = sqlite3.connect(f"file:{backups[0]}?mode=ro", uri=True)
+        try:
+            surviving = con.execute(
+                "SELECT COUNT(*) FROM notes WHERE workspace = ?", (ws,)
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert surviving == 12, "the backup must hold the notes forget_all destroyed"
+
+    def test_backup_failure_is_logged_and_does_not_block_the_delete(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A backup that cannot be written is logged, never fatal.
+
+        Refusing to delete because the backup failed would leave the caller
+        unable to clear memory at all, and the delete is what they asked for.
+        The failure has to be loud in the log, because a silent one is exactly
+        what leaves someone with nothing.
+        """
+        import sqlite3 as _sqlite3
+        store = _store(tmp_path)
+        ws = "/repo"
+        store.remember(ws, "a note")
+
+        real_connect = _sqlite3.connect
+
+        def _explode(target, *a, **kw):
+            if "backups" in str(target):
+                raise OSError("disk full")
+            return real_connect(target, *a, **kw)
+
+        monkeypatch.setattr(
+            "agent.working_context_store._store.sqlite3.connect", _explode
+        )
+
+        # The delete still happens, and nothing propagates to the caller.
+        assert store.forget_all(ws) == 1
+        assert not list((tmp_path / "backups").glob("*.sqlite")), (
+            "the backup was made to fail, so none should exist"
+        )
